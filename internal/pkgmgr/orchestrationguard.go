@@ -38,6 +38,17 @@ const (
 // rejects it at load; install rejects it first for a clearer author error.
 const reservedGapParam = "expectedRevision"
 
+// optionalReadsAction is the only §10.8 action whose OptionalReads the
+// engine's own dispatch leaves entirely to the playbook. Every other action's
+// ContextHint.OptionalReads is the engine's OWN to set at dispatch (buildPlan's
+// assignTask arm already builds one from the stable task dedup key + the
+// assignee availability aspect), so a package-declared value on that same
+// action would collide with it. The engine's validateTarget rejects the
+// collision at load (registry.go's validateOptionalReadsScope); install
+// rejects it first for a clearer author error, on the same "reject it here
+// too" posture as reservedGapParam above.
+const optionalReadsAction = actionDirectOp
+
 // Loom step kinds (Contract #10 §10.5). Re-stated here so the installer
 // validates patterns without importing internal/loom (the installer must not
 // depend on an engine).
@@ -160,6 +171,10 @@ func (def Definition) validateWeaverTargets() error {
 			if _, reserved := ga.Params[reservedGapParam]; reserved {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q is reserved (the engine writes the OCC revision-condition under that payload field)",
 					idx, t.TargetID, col, reservedGapParam)
+			}
+			if len(ga.OptionalReads) > 0 && ga.Action != optionalReadsAction {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q declares optionalReads, but optionalReads is only meaningful for %s — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it",
+					idx, t.TargetID, col, ga.Action, optionalReadsAction)
 			}
 			// A goal-authored gap (R1) legitimately declares no top-level
 			// Action — dispatch comes entirely from the Actions catalog via

@@ -458,6 +458,15 @@ type GapActionSpec struct {
 	// belongs here — declaring such a key as a required Read fails the whole
 	// dispatch the first time it is legitimately absent. Never for a key the
 	// script requires.
+	//
+	// Declaring a key here changes what the Processor does with it, not merely
+	// where its value comes from: the key is served from the step-4 hydration
+	// snapshot — present, or KnownAbsent with no live kv.Read — instead of a
+	// live on-demand read, so it costs nothing against the live-read budget,
+	// and a `create` conditioned on the key's observed absence resolves as a
+	// CreateOnly assertion whose conflict the commit path re-probes and
+	// absorbs with an in-process retry, where an undeclared create's collision
+	// on the same key would simply surface.
 	OptionalReads []string
 	// Enumerations are the dispatched op's ContextHint.Enumerations — the
 	// Contract #2 §2.5 class-(e) kv.Links walks its script runs, declared onto
@@ -540,10 +549,12 @@ type ActionCatalogEntrySpec struct {
 	Params    map[string]string
 	Reads     []string
 	// OptionalReads are the entry's declared absence-tolerant reads, same
-	// grammar and same purpose as GapActionSpec.OptionalReads: a chosen entry
-	// dispatches through the engine's ordinary action contract, so a
-	// declaration it cannot carry here is one silently dropped from the
-	// envelope for every planner-synthesized dispatch.
+	// grammar, same dispatch-time semantics, and same purpose as
+	// GapActionSpec.OptionalReads (see that field's doc for what declaring one
+	// changes at the Processor): a chosen entry dispatches through the
+	// engine's ordinary action contract, so a declaration it cannot carry here
+	// is one silently dropped from the envelope for every planner-synthesized
+	// dispatch.
 	OptionalReads []string
 	// Enumerations are the entry's declared kv.Links walks, same grammar and
 	// same purpose as GapActionSpec.Enumerations: a chosen entry dispatches

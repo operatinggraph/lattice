@@ -2,6 +2,7 @@ package pkgmgr
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -102,4 +103,135 @@ func TestGapActionBody_OptionalReadsRoundTripsIntoWeaverRegistry(t *testing.T) {
 	require.Len(t, ga.Actions, 1)
 	require.Equal(t, []string{"row.entityKey"}, ga.Actions[0].OptionalReads,
 		"the emitted catalog entry body must deserialize its optionalReads onto weaver.ActionCatalogEntry")
+}
+
+// TestValidateWeaverTargets_OptionalReadsRejectedOnNonDirectOp mirrors
+// TestValidateWeaverTargets_ReservedExpectedRevisionParamRejected's shape for
+// the second engine-owned-field collision: an assignTask (or any non-directOp)
+// gap declaring OptionalReads collides with buildPlan's own assignTask
+// closure (the stable task dedup key + assignee availability aspect), so
+// install refuses it first — the same "install rejects it first for a
+// clearer author error" posture reservedGapParam documents — rather than let
+// the package install cleanly and have the WHOLE target die later at the
+// engine's own validateTarget.
+func TestValidateWeaverTargets_OptionalReadsRejectedOnNonDirectOp(t *testing.T) {
+	// Positive control: a directOp gap declaring OptionalReads installs clean.
+	ok := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "leaseSigning",
+		Gaps: map[string]GapActionSpec{
+			"missing_signature": {Action: "directOp", Operation: "SignLease", OptionalReads: []string{"row.lease"}},
+		},
+	}}}
+	if err := ok.validateWeaverTargets(); err != nil {
+		t.Fatalf("a directOp gap declaring OptionalReads must install clean, got: %v", err)
+	}
+
+	// Omission vector: a gap declaring nothing installs clean (the reserved
+	// field's absence is not itself a finding).
+	none := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "leaseSigning",
+		Gaps:     map[string]GapActionSpec{"missing_signature": {Action: "assignTask", Operation: "SignLease", Assignee: "row.tenant", Target: "row.lease"}},
+	}}}
+	if err := none.validateWeaverTargets(); err != nil {
+		t.Fatalf("a gap declaring no OptionalReads must install clean, got: %v", err)
+	}
+
+	// Negative: assignTask.
+	assignTaskBad := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "leaseSigning",
+		Gaps: map[string]GapActionSpec{
+			"missing_signature": {
+				Action: "assignTask", Operation: "SignLease", Assignee: "row.tenant", Target: "row.lease",
+				OptionalReads: []string{"row.lease"},
+			},
+		},
+	}}}
+	err := assignTaskBad.validateWeaverTargets()
+	if err == nil || !strings.Contains(err.Error(), "optionalReads") {
+		t.Fatalf("expected an optionalReads-collision error for an assignTask gap, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "assignTask") {
+		t.Fatalf("error must name the offending action, got %v", err)
+	}
+
+	// Negative: every non-directOp arm is in scope, not just assignTask.
+	triggerLoomBad := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "leaseSigning",
+		Gaps: map[string]GapActionSpec{
+			"missing_signature": {
+				Action: "triggerLoom", Pattern: "leaseSigning", Subject: "row.lease",
+				OptionalReads: []string{"row.lease"},
+			},
+		},
+	}}}
+	if err := triggerLoomBad.validateWeaverTargets(); err == nil || !strings.Contains(err.Error(), "optionalReads") {
+		t.Fatalf("expected an optionalReads-collision error for a triggerLoom gap, got %v", err)
+	}
+}
+
+// TestValidateWeaverTargets_ActionsCatalogOptionalReadsRejectedOnNonDirectOp
+// is the catalog-entry-level mirror of the check above: a goal-authored
+// gap's Actions catalog carries the same collision surface, since an entry
+// dispatches through the identical buildPlan an explicit gap does.
+func TestValidateWeaverTargets_ActionsCatalogOptionalReadsRejectedOnNonDirectOp(t *testing.T) {
+	// Positive control: a directOp catalog entry declaring OptionalReads
+	// installs clean.
+	ok := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "identityErasureComplete",
+		Gaps: map[string]GapActionSpec{
+			"missing_residue": {
+				Goal: json.RawMessage(`{"present":"subject.data.clear"}`),
+				Actions: []ActionCatalogEntrySpec{{
+					Ref: "sweep", Action: "directOp", Operation: "Sweep",
+					OptionalReads: []string{"row.entityKey"},
+					Effects:       []json.RawMessage{json.RawMessage(`{"present":"subject.data.clear"}`)},
+				}},
+			},
+		},
+	}}}
+	if err := ok.validateWeaverTargets(); err != nil {
+		t.Fatalf("a directOp catalog entry declaring OptionalReads must install clean, got: %v", err)
+	}
+
+	// Omission vector: a catalog entry declaring nothing installs clean.
+	none := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "identityErasureComplete",
+		Gaps: map[string]GapActionSpec{
+			"missing_residue": {
+				Goal: json.RawMessage(`{"present":"subject.data.clear"}`),
+				Actions: []ActionCatalogEntrySpec{{
+					Ref: "sweep", Action: "directOp", Operation: "Sweep",
+					Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.clear"}`)},
+				}},
+			},
+		},
+	}}}
+	if err := none.validateWeaverTargets(); err != nil {
+		t.Fatalf("a catalog entry declaring no OptionalReads must install clean, got: %v", err)
+	}
+
+	// Negative: a catalog entry whose Action is assignTask hits the same
+	// collision. The whole target must be rejected, not just the offending
+	// entry silently dropped.
+	bad := Definition{WeaverTargets: []WeaverTargetSpec{{
+		TargetID: "identityErasureComplete",
+		Gaps: map[string]GapActionSpec{
+			"missing_residue": {
+				Goal: json.RawMessage(`{"present":"subject.data.done"}`),
+				Actions: []ActionCatalogEntrySpec{{
+					Ref: "assign", Action: "assignTask", Operation: "ApproveX",
+					Assignee: "row.assignee", Target: "row.entityKey",
+					OptionalReads: []string{"row.entityKey"},
+					Effects:       []json.RawMessage{json.RawMessage(`{"present":"subject.data.done"}`)},
+				}},
+			},
+		},
+	}}}
+	err := bad.validateWeaverTargets()
+	if err == nil || !strings.Contains(err.Error(), "optionalReads") {
+		t.Fatalf("expected an optionalReads-collision error for an assignTask catalog entry, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "actions[0]") {
+		t.Fatalf("error must name the offending catalog entry, got %v", err)
+	}
 }

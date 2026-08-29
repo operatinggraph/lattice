@@ -103,9 +103,12 @@ type GapAction struct {
 	Reads []string `json:"reads,omitempty"`
 	// OptionalReads are the dispatched op's ContextHint.OptionalReads (Contract
 	// #2 §2.5) — the absence-tolerant half of the declared read posture, same
-	// template grammar as Reads. Valid only on a directOp: every other action's
-	// optionalReads is the engine's own to set (e.g. assignTask's stable task
-	// dedup key + assignee availability aspect), and validateTarget refuses a
+	// template grammar as Reads, and the same dispatch-time semantics
+	// pkgmgr.GapActionSpec.OptionalReads documents (a step-4 snapshot serve
+	// with no live read, and a CreateOnly-conditioned create on the key's
+	// absence). Valid only on a directOp: every other action's optionalReads
+	// is the engine's own to set (e.g. assignTask's stable task dedup key +
+	// assignee availability aspect), and validateTarget refuses a
 	// non-directOp gap that declares this field rather than let the two
 	// writers collide.
 	OptionalReads []string `json:"optionalReads,omitempty"`
@@ -265,8 +268,9 @@ type ActionCatalogEntry struct {
 	// carried for the same reason Reads is: a synthesized plan's step
 	// dispatches through the same buildPlan as an explicit GapAction, so
 	// anything the action contract can declare it must be able to declare
-	// too. Valid only on an entry whose Action is directOp — the same
-	// install-time refusal GapAction.OptionalReads carries applies here.
+	// too — same dispatch-time semantics GapAction.OptionalReads documents.
+	// Valid only on an entry whose Action is directOp — the same install-time
+	// refusal GapAction.OptionalReads carries applies here.
 	OptionalReads []string `json:"optionalReads,omitempty"`
 	// Enumerations are the chosen entry's declared kv.Links walks, carried for
 	// the same reason Reads is: a synthesized plan's step dispatches through
