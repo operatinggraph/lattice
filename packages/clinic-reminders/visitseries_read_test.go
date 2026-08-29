@@ -13,6 +13,8 @@ package clinicreminders
 // the cypher's anchor derivation is proven here.
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -318,4 +320,115 @@ func TestVisitSeriesRead_NoWithProviderLinkDoesNotLeakAnUnrelatedBuilding(t *tes
 	require.Equal(t, []any{f.ids["alice"]}, byID[f.ids["orphan"]],
 		"a provider-less series must anchor to its patient alone, never an unrelated series' building")
 	require.Equal(t, []any{f.ids["bob"], f.ids["riverside"]}, byID[f.ids["series"]])
+}
+
+// seedSitedVisitSeries is seedVisitSeries plus the two-building world the
+// atSite-fallback vectors need: the provider practises at BOTH buildings, and
+// the series' own atSite link names only the FIRST. Two buildings, not one, is
+// what stops a fallback assertion from passing by accident — were the
+// practicesAt walk still reaching a tombstoned provider, the second building
+// would show up too.
+func (f *remFixture) seedSitedVisitSeries(t *testing.T, seriesName, patientName, providerName, atSiteName, otherSiteName string) {
+	t.Helper()
+	f.seedVisitSeries(t, seriesName, patientName, providerName)
+	f.vtx(t, atSiteName, "building")
+	f.vtx(t, otherSiteName, "building")
+	f.edge(t, "practicesAt", providerName, atSiteName)
+	f.edge(t, "practicesAt", providerName, otherSiteName)
+	f.edge(t, "atSite", seriesName, atSiteName)
+}
+
+// tombstoneVertex soft-deletes a seeded vertex by rewriting its body with
+// isDeleted: true and leaving every link it carries live — the exact shape
+// clinic-domain's TombstoneProvider leaves behind, which cascades to neither
+// practicesAt nor withProvider. Contract #1 filters such a vertex out of every
+// graph walk (internal/refractor/ruleengine/full/executor.go's fetchNode), so a
+// lens that reached a building THROUGH it now reaches nothing — which is what
+// makes the atSite arm of the anchor expression load-bearing.
+func (f *remFixture) tombstoneVertex(t *testing.T, name string) {
+	t.Helper()
+	id := f.ids[name]
+	key := "vtx." + f.types[id] + "." + id
+	raw, err := json.Marshal(map[string]any{
+		"key": key, "class": f.types[id], "isDeleted": true, "data": map[string]any{},
+	})
+	require.NoError(t, err)
+	_, err = f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
+// TestVisitSeriesRead_TombstonedProviderFallsBackToAtSiteAnchor — the headline
+// of the atSite arm, and the defect this closes. TombstoneProvider cascades to
+// neither withProvider nor practicesAt, but Contract #1 filters the dead
+// provider out of every walk, so the practicesAt comprehension yields [] and the
+// row would keep only its patient self-anchor — dropping a live standing cadence
+// out of every front-desk world, readable then only by the reserved
+// WildcardAnchor holder. The series' own atSite link carries it instead.
+func TestVisitSeriesRead_TombstonedProviderFallsBackToAtSiteAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.seedSitedVisitSeries(t, "series", "alice", "drsam", "riverside", "downtown")
+	f.tombstoneVertex(t, "drsam")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1, "a tombstoned provider costs the row visibility, never existence")
+	v := rows[0].Values
+	require.Nil(t, v["provider_key"], "the tombstoned provider is filtered out of the walk, so its display columns are null")
+
+	anchors, ok := v["authz_anchors"].([]any)
+	require.True(t, ok, "authz_anchors must project as a list")
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["riverside"]}, anchors,
+		"the series' own atSite building must anchor the row once the provider's practicesAt walk yields nothing")
+	require.NotContains(t, anchors, f.ids["downtown"],
+		"only the series' OWN site falls back — a tombstoned provider must not keep conferring every building it practised at")
+}
+
+// TestVisitSeriesRead_UnassignedLiveProviderFallsBackToAtSiteAnchor — the
+// tombstone is not the only way the practicesAt walk empties out. A LIVE
+// provider whose sites were all withdrawn by RemoveProviderSite reaches no
+// building either, and the CASE gates on the WALK rather than on the provider's
+// liveness precisely so this shape falls back too. The site the series was set
+// to was a legitimate one when it was validated, and withdrawing the provider
+// from it afterwards does not move where the visits happen.
+func TestVisitSeriesRead_UnassignedLiveProviderFallsBackToAtSiteAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.seedVisitSeries(t, "series", "alice", "drsam")
+	f.vtx(t, "riverside", "building")
+	// The provider is alive and its profile still projects; it simply practises
+	// nowhere — no practicesAt link at all, which is what RemoveProviderSite
+	// leaves behind once the last one is withdrawn.
+	f.edge(t, "atSite", "series", "riverside")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.provider."+f.ids["drsam"], v["provider_key"], "the provider is LIVE — this is not the tombstone vector")
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["riverside"]}, v["authz_anchors"],
+		"a live provider that practises nowhere empties the walk exactly as a tombstoned one does, so the atSite arm carries the row")
+}
+
+// TestVisitSeriesRead_LiveProviderAtSiteIsNotUnioned — the security-relevant
+// non-regression. The anchor is a FALLBACK, never a union: while the provider's
+// practicesAt walk yields anything, the series' own atSite building must NOT be
+// folded in on top of it, and the site it IS held at must not be counted twice.
+func TestVisitSeriesRead_LiveProviderAtSiteIsNotUnioned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.seedSitedVisitSeries(t, "series", "alice", "drsam", "riverside", "downtown")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	anchors, ok := rows[0].Values["authz_anchors"].([]any)
+	require.True(t, ok)
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
+		"a live provider anchors the row on every building it practises at")
+	require.Len(t, anchors, 3,
+		"the atSite building must not be counted a second time alongside the practicesAt walk")
 }

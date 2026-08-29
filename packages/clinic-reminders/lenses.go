@@ -9,7 +9,10 @@ const AppointmentRemindersTarget = "appointmentReminders"
 // Lenses returns the package's weaver-target convergence lenses: appointmentReminders
 // (the ~24h-ahead appointment reminder), followUpReminders (the at-the-date
 // follow-up reminder, followups.go), visitSeriesDue (the rolling recurring
-// visit-series deadline, visitseries.go), and pastDueAppointments (the auto
+// visit-series deadline, visitseries.go), visitSeriesSiteBackfill (the series'
+// missing atSite link, visitseries_site.go — the one gap here that is not
+// deadline-driven at all: it converges a MISSING RELATIONSHIP, the
+// clinicSiteBackfill idiom), and pastDueAppointments (the auto
 // no-show closer, pastdue.go). The first two invert lease-signing's
 // freshness re-open — where lease projects freshUntil to RE-OPEN a converged gap at
 // a deadline, these project freshUntil = the deadline to OPEN the reminder gap when
@@ -39,6 +42,7 @@ func Lenses() []pkgmgr.LensSpec {
 		},
 		followUpRemindersLens(),
 		visitSeriesDueLens(),
+		visitSeriesSiteBackfillLens(),
 		visitSeriesReadLens(),
 		pastDueAppointmentsLens(),
 	}

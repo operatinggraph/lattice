@@ -39,6 +39,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		followUpRemindersTarget(),
 		visitSeriesDueTarget(),
+		visitSeriesSiteBackfillTarget(),
 		pastDueAppointmentsTarget(),
 	}
 }
