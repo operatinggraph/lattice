@@ -118,7 +118,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"wellnessClassPriceSettlement":      {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
 	"wellnessIdentitiesRead":            {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessInstructors":               {"g1/o1!no-aggregating-item", 0, 1},
-	"wellnessLedgerHistory":             {"g1/o2!no-aggregating-item", 0, 1},
+	"wellnessLedgerHistory":             {"g3/o3!no-aggregating-item", 0, 3},
 	"wellnessMemberAccounts":            {"g0/o0!no-aggregating-item g1/o1!no-aggregating-item", 0, 1},
 	"wellnessMembers":                   {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessNoShowSettlement":          {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
@@ -164,7 +164,7 @@ var decomposingCorpusLenses = []string{
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
 // holding two or more SIBLING branch groups in one stage. The design said
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
-// thirty-two clause-counted literals; the analysis derives TWENTY-FIVE.
+// thirty-two clause-counted literals; the analysis derives TWENTY-SIX.
 var siblingBranchGroupLenses = []string{
 	"appointmentReminders",
 	"cafeTabSettlement",
@@ -190,6 +190,7 @@ var siblingBranchGroupLenses = []string{
 	"wellnessBookingReminders",
 	"wellnessBookings",
 	"wellnessClassPriceSettlement",
+	"wellnessLedgerHistory",
 	"wellnessNoShowSettlement",
 	"wellnessSessions",
 }
