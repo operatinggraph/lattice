@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // TestOpDispatchBody_EmitsDeclaredEnumerations locks the installer's half of the
@@ -228,16 +230,6 @@ func TestValidateOpDispatchTemplates_EnumerationsHeldToTheEnvelopeShape(t *testi
 			EnumerationSpec{Hub: "{actor}", Relation: "holdsRole", Direction: ""}, "Direction must be",
 		},
 		{
-			"a hub outside the read-template vocabulary is rejected",
-			EnumerationSpec{Hub: "{bogus}", Relation: "holdsRole", Direction: "out"},
-			"outside the closed read-template vocabulary",
-		},
-		{
-			"a hub carrying a ContextParams-only placeholder is rejected",
-			EnumerationSpec{Hub: "{entity.orderKey}", Relation: "placedBy", Direction: "in"},
-			"ContextParams-only vocabulary",
-		},
-		{
 			"a hub with an unterminated brace is rejected",
 			EnumerationSpec{Hub: "{actor", Relation: "holdsRole", Direction: "out"},
 			"unterminated '{' never closes",
@@ -303,6 +295,204 @@ func TestValidateOpDispatchTemplates_EnumerationHubRefusesClientOnlyPlaceholder(
 	// And the placeholder stays legal where it belongs.
 	require.NoError(t, dispatchDef(nil, []string{"{me.instructor:id}"}).ValidateOpDispatchTemplates(),
 		"OptionalReads is the list a client-only placeholder is written for")
+}
+
+// enumerationDef builds a single-op Definition whose Dispatch declares the
+// given walks, the fixture shape the hub tests below drive the rule with.
+func enumerationDef(opType string, ens ...EnumerationSpec) Definition {
+	return Definition{
+		Name: "testpkg",
+		OpMetas: []OpMetaSpec{{
+			OperationType: opType,
+			Dispatch:      &OpDispatchSpec{Enumerations: ens},
+		}},
+	}
+}
+
+// TestValidateOpDispatchTemplates_EnumerationHubVocabularyIsWhatClientsResolve
+// pins the hub vocabulary to the forms every shipped descriptor-driven client
+// resolves into a whole vertex key. A hub outside it installs a walk that is
+// declared on paper and undeclared in fact: internal/descriptorform/form.mjs
+// throws "unrecognized read template" on {scopedTo}/{service} — escaping
+// submit() and taking the whole op down for every descriptorform app — while
+// cmd/facet/web/app.js resolves them, and `:id` truncates the hub to a bare
+// NanoID that resolves, passes wholeKey, reaches the envelope and matches
+// nothing the kv.Links walk enumerates from.
+//
+// The positive controls run first so every refusal below is attributable to the
+// hub's own text and not to the walk, the op or the fixture.
+func TestValidateOpDispatchTemplates_EnumerationHubVocabularyIsWhatClientsResolve(t *testing.T) {
+	t.Parallel()
+
+	for _, hub := range []string{
+		"{actor}",
+		"{payload.orderKey}",
+		"vtx.identity.AAidentityHJKMNPQRST",
+		"vtx.identity.{payload.identityId}",
+	} {
+		t.Run("admitted "+hub, func(t *testing.T) {
+			t.Parallel()
+			require.NoError(t,
+				enumerationDef("TestOp", EnumerationSpec{Hub: hub, Relation: "holdsRole", Direction: "out"}).ValidateOpDispatchTemplates(),
+				"a hub every descriptor-driven client resolves into a whole vertex key must install")
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		hub      string
+		wantErrs []string
+	}{
+		{
+			"{scopedTo} is refused — form.mjs throws on it",
+			"{scopedTo}",
+			[]string{"outside the enumeration-hub vocabulary", "{actor}, {payload.<field>}, or a literal key",
+				"form.mjs", "declared on paper and undeclared in fact"},
+		},
+		{
+			"{service} is refused — form.mjs throws on it",
+			"{service}",
+			[]string{"outside the enumeration-hub vocabulary", "form.mjs", "unsubmittable"},
+		},
+		{
+			"the :id modifier is refused — a hub is a whole vertex key",
+			"{actor:id}",
+			[]string{"carries the `:id` modifier", "a hub is a WHOLE vertex key", "kv.Links walks from one",
+				"drop the `:id` and name the whole key"},
+		},
+		{
+			"a mid-segment hub placeholder is refused",
+			"bkr{actor}",
+			[]string{"does not occupy a whole dot-delimited segment of the hub",
+				"a hub is a whole vertex key, not a fragment assembled into one"},
+		},
+		{
+			"a placeholder outside the vocabulary altogether is refused",
+			"{bogus}",
+			[]string{"outside the enumeration-hub vocabulary", "never reaches an envelope"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := enumerationDef("TestOp", EnumerationSpec{Hub: tc.hub, Relation: "holdsRole", Direction: "out"}).ValidateOpDispatchTemplates()
+			require.Error(t, err)
+			for _, want := range tc.wantErrs {
+				require.ErrorContains(t, err, want)
+			}
+			require.ErrorContains(t, err, "Enumerations[0].Hub", "the refusal must name the offending hub")
+			require.ErrorContains(t, err, tc.hub, "the refusal must quote the offending template")
+		})
+	}
+
+	// {scopedTo} and {service} stay legal where the client vocabularies do
+	// agree, so the refusals above are about the HUB and not about the
+	// placeholders themselves.
+	require.NoError(t, dispatchDef([]string{"{scopedTo}", "{service}", "{actor:id}"}, nil).ValidateOpDispatchTemplates(),
+		"the Reads vocabulary is unchanged by the hub's narrowing")
+}
+
+// TestValidateOpDispatchTemplates_EnumerationHubRemediesExistOnThatDeclaration
+// pins every remedy an enumeration author can be shown to a move
+// Dispatch.Enumerations actually has. The hub and the Reads lists share one
+// classifier, and its refusal tails were written for Reads: "declare it under
+// Dispatch.ContextParams instead" and "file this key under
+// Dispatch.OptionalReads unmarked" both name fields that do not exist on an
+// enumeration, and the second is verbatim the advice the client-only rule
+// already exists to keep away from a hub author. Asserting each list's own tail
+// AND the other's absence is what stops the two from re-merging into one
+// sentence that is wrong for one caller.
+func TestValidateOpDispatchTemplates_EnumerationHubRemediesExistOnThatDeclaration(t *testing.T) {
+	t.Parallel()
+
+	entityErr := enumerationDef("TestOp",
+		EnumerationSpec{Hub: "{entity.orderKey}", Relation: "placedBy", Direction: "in"}).ValidateOpDispatchTemplates()
+	require.ErrorContains(t, entityErr, "ContextParams-only vocabulary")
+	require.ErrorContains(t, entityErr, "caller-dependent",
+		"the hub's reason is the static read posture, not a read template's wholeKey")
+	require.ErrorContains(t, entityErr, "fill a payload field from a Dispatch.ContextParams entry and name the hub {payload.<field>}",
+		"the hub remedy must route the row value through a field the dispatch surface has")
+	require.NotContains(t, entityErr.Error(), "declare it under Dispatch.ContextParams instead",
+		"a hub is not declarable under Dispatch.ContextParams — that entry fills a payload field, it is not a read")
+
+	markerErr := enumerationDef("TestOp",
+		EnumerationSpec{Hub: "{actor?}", Relation: "holdsRole", Direction: "out"}).ValidateOpDispatchTemplates()
+	require.ErrorContains(t, markerErr, "`?` OPTIONAL marker")
+	require.ErrorContains(t, markerErr, "Dispatch.Enumerations has no absence-tolerant half")
+	require.ErrorContains(t, markerErr, "drop the marker")
+	require.NotContains(t, markerErr.Error(), "file this key under Dispatch.OptionalReads unmarked",
+		"Dispatch.Enumerations has no optional half — pointing a hub author there produces a spec field that does not exist")
+
+	// The Reads and OptionalReads lists keep their own tails verbatim, so the
+	// split cannot close from the other direction either.
+	readsEntityErr := dispatchDef([]string{"{entity.orderKey}"}, nil).ValidateOpDispatchTemplates()
+	require.ErrorContains(t, readsEntityErr,
+		"a read template's client wholeKey silently drops it, so declare it under Dispatch.ContextParams instead, or drop it if the read does not need it")
+
+	readsMarkerErr := dispatchDef(nil, []string{"{me.leaseapp:id?}"}).ValidateOpDispatchTemplates()
+	require.ErrorContains(t, readsMarkerErr,
+		"a read template's client wholeKey silently drops a ?-marked entry, so file this key under Dispatch.OptionalReads unmarked instead of marking it optional inline")
+}
+
+// TestValidateDispatchEnumerations_NFRS6OperationsDeclareNoWalk refuses at
+// install a walk declared on an operation whose rejections NFR-S6 equalizes.
+// The Processor closes those operations' declared read set and refuses EVERY
+// contextHint enumeration (refuseUndeclaredContextHint), so such a declaration
+// would ship onto the `.dispatch` aspect, be substituted onto every envelope a
+// descriptor-driven client submits, and fault the operation terminally on
+// arrival — collapsed to the generic ClaimKeyInvalid with nil details, i.e. a
+// total outage of identity claiming with no cause visible to the caller or the
+// dispatcher, reproduced identically on every redelivery.
+//
+// The non-member control is what keeps the refusal from being a blanket ban on
+// declaring walks, and the membership assertion pins the premise: the set is
+// read from the Processor's own predicate, never copied here.
+func TestValidateDispatchEnumerations_NFRS6OperationsDeclareNoWalk(t *testing.T) {
+	t.Parallel()
+
+	walk := EnumerationSpec{Hub: "{actor}", Relation: "holdsRole", Direction: "out"}
+
+	for _, op := range []string{"ClaimIdentity", "CompleteCredentialLink"} {
+		t.Run(op, func(t *testing.T) {
+			t.Parallel()
+			require.True(t, processor.IsNFRS6Operation(op),
+				"premise: %s is an NFR-S6 equalized operation", op)
+
+			err := enumerationDef(op, walk).ValidateOpDispatchTemplates()
+			require.Error(t, err, "an NFR-S6 operation declaring a walk must not install")
+			require.ErrorContains(t, err, op, "the refusal must name the operation")
+			require.ErrorContains(t, err, "NFR-S6")
+			require.ErrorContains(t, err, "ClaimKeyInvalid",
+				"the refusal must state the outage it prevents, not just the rule")
+		})
+	}
+
+	// Positive control: the identical declaration on an operation outside the
+	// set installs clean.
+	require.False(t, processor.IsNFRS6Operation("PlaceCafeOrder"))
+	require.NoError(t, enumerationDef("PlaceCafeOrder", walk).ValidateOpDispatchTemplates(),
+		"an ordinary operation's walk declaration is what this channel exists for")
+
+	// Driven through validateAll, not the rule: the delivering line is what a
+	// package install actually travels, and a rule covered only by direct calls
+	// can be unwired from validateAll without failing anything
+	// (docs/components/pkgmgr.md's dossier).
+	bad := sampleDef("0.1.0")
+	bad.OpMetas = []OpMetaSpec{{
+		OperationType: "ClaimIdentity",
+		Dispatch:      &OpDispatchSpec{Enumerations: []EnumerationSpec{walk}},
+	}}
+	allErr := bad.validateAll()
+	require.Error(t, allErr, "validateAll must refuse the declaration the Processor would fault on")
+	require.ErrorContains(t, allErr, "ClaimIdentity")
+	require.ErrorContains(t, allErr, "NFR-S6")
+
+	ok := sampleDef("0.1.0")
+	ok.OpMetas = []OpMetaSpec{{
+		OperationType: "SampleOp",
+		Dispatch:      &OpDispatchSpec{Enumerations: []EnumerationSpec{walk}},
+	}}
+	require.NoError(t, ok.validateAll(),
+		"the same fixture with a non-member op must pass, so the refusal above is the enumeration rule and not the fixture")
 }
 
 // TestValidateOpDispatchTemplates_EnumerationsWiredIntoValidateAll pins that the

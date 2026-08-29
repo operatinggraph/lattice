@@ -461,10 +461,21 @@ func (r *descriptorFloorResolver) admittedCount() int {
 //     (internal/pkgmgr/definition.go), so no descriptor can name one and the
 //     admitted egress set is empty by construction — which is also what keeps
 //     the tombstone-dependent egress refusal above unreachable here.
-//   - EVERY `enumerations` entry, for the same structural reason. An
-//     enumeration is metadata: the Processor shape-validates it at parse and
-//     never hydrates it (Contract #2 §2.5 class (e)), so it buys no work at all.
-//     It is refused because the rule is CLOSED, not because it costs anything.
+//   - EVERY `enumerations` entry — not for egressReads' structural reason,
+//     which does not hold here: OpDispatchSpec DOES carry an Enumerations
+//     field (internal/pkgmgr/definition.go), and an ordinary operation's
+//     descriptor declares its class-(e) walks through it. The reason is the
+//     closure itself. The admitted set these operations are equalized over is
+//     compiled from the descriptor's read templates alone (resolveAdmitted),
+//     so an enumeration has no descriptor-side counterpart to be equalized
+//     against — the equalization has no subject for it, exactly as it has none
+//     for a read key the descriptor does not name. An enumeration is metadata:
+//     the Processor shape-validates it at parse and never hydrates it
+//     (Contract #2 §2.5 class (e)), so it is refused because the rule is
+//     CLOSED, not because it costs anything. Install refuses the declaration
+//     on these operations for the same reason (pkgmgr's
+//     validateDispatchEnumerations calls IsNFRS6Operation), so no package can
+//     ship a descriptor whose every submission faults here.
 //
 // Repetition is not this rule's subject: MaxDeclaredReads still admits 1000
 // copies of an admitted key, each costing one map lookup, and distinctKeys

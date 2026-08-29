@@ -573,7 +573,9 @@ type GapActionSpec struct {
 // literals; Hub's template grammar belongs to the surface carrying it — a gap's
 // enumeration resolves it against the violation row (`row.<column>`), a loom
 // step's against the instance subject (`subject`, `subject.<aspect>`), each the
-// same grammar that surface's Reads use.
+// same grammar that surface's Reads use, and an op dispatch's against the
+// submitting client's context in a NARROWED subset of that surface's Reads
+// grammar (OpDispatchSpec.Enumerations names what it excludes and why).
 type EnumerationSpec struct {
 	Hub       string `json:"hub"`
 	Relation  string `json:"relation"`
@@ -925,20 +927,31 @@ type OpDispatchSpec struct {
 	// Enumerations are the dispatched op's ContextHint.Enumerations — the
 	// Contract #2 §2.5 class-(e) `kv.Links` walks the op's script runs,
 	// declared so a descriptor-driven client puts them on the envelope it
-	// submits. Each Hub carries the same template grammar Reads does
-	// ({actor}, {service}, {scopedTo}, {payload.<field>}, each optionally
-	// suffixed `:id`, or a literal key), substituted by the same client
-	// resolver; Relation and Direction are always literals.
+	// submits. Relation and Direction are always literals; each Hub is a
+	// WHOLE vertex key written as `{actor}`, `{payload.<field>}` (each
+	// occupying a whole dot-delimited segment, with no `:id` modifier), or a
+	// literal key — substituted by the same client resolver Reads uses, and
+	// held to that narrower vocabulary at install
+	// (ValidateOpDispatchTemplates).
 	//
-	// A hub must be SERVER-RESOLVABLE — the client-only {me.<type>} form
-	// Reads admits on its optional side is refused here
-	// (ValidateOpDispatchTemplates). What Contract #2 §2.5 buys with a
-	// declaration is a static read posture for the op, and {me.<type>}
-	// resolves only for a caller whose context supplies that type: the same
-	// op would declare the walk for some callers and omit it for others,
-	// leaving the walk running undeclared for exactly the callers the
-	// declaration was meant to cover. A server-resolvable hub declares the
-	// same walk for every caller, or the package does not install.
+	// The vocabulary is narrower than Reads' because a hub has two properties
+	// Reads entries do not need. It must be resolvable by EVERY shipped
+	// descriptor-driven client, since a hub one of them cannot resolve is
+	// dropped or throws, and the walk then runs undeclared for the callers
+	// that client serves — {scopedTo}, {service} and {entity.<column>} are
+	// out on that ground, and the client-only {me.<type>} form Reads admits
+	// on its optional side is out on the sharper version of it: what Contract
+	// #2 §2.5 buys with a declaration is a STATIC read posture for the op,
+	// and a hub that resolves only for callers whose context supplies the
+	// value makes that posture caller-dependent. And it must be a whole
+	// vertex key, since `kv.Links` walks from one — which is why `:id`, which
+	// truncates the value to a bare NanoID, and a mid-segment placeholder are
+	// both refused.
+	//
+	// An NFR-S6 operation (processor.IsNFRS6Operation) declares none: the
+	// Processor closes those operations' declared read set and refuses every
+	// contextHint enumeration, so a declaration here would fault every
+	// submission of the op. Install refuses it.
 	//
 	// Metadata, not a hydration directive: declaring a walk does not change
 	// how the script runs it — it stays a bounded, paged live read inside the

@@ -62,11 +62,12 @@ without would make the envelope's declared posture caller-dependent — the walk
 for exactly the callers the declaration was meant to cover.
 
 *Client-resolvable only, and a whole key.* Close review established two further gaps the general grammar
-would have admitted. `{scopedTo}` and `{service}` pass the Reads vocabulary but **no shipped
-descriptor-driven renderer resolves them**: `internal/descriptorform/form.mjs` throws
-`unrecognized read template` (aborting the whole submission with a developer string in front of a user) and
-`cmd/facet/web/app.js` silently drops the entry. A hub no client can resolve is a declaration that can never
-reach an envelope — declared on paper, undeclared in fact — so install refuses it. And the `:id` modifier,
+would have admitted. `{scopedTo}` and `{service}` pass the Reads vocabulary, and **the two shipped
+descriptor-driven renderers disagree on them**: `cmd/facet/web/app.js` resolves both, while
+`internal/descriptorform/form.mjs` throws `unrecognized read template` — a throw that escapes `submit()`, so
+the op becomes unsubmittable from every descriptorform staff app, with a developer string in front of a
+person. One descriptor, two meanings, is exactly what a declared read posture cannot be, so install refuses
+the hub. And the `:id` modifier,
 though documented and accepted by the general grammar, is *inert-but-wrong* on a hub: `{actor:id}` resolves
 to a bare NanoID, passes the whole-key check, and lands on the envelope, but `kv.Links` walks from a full
 vertex key, so the declaration can never match the walk it names and retiring its baseline row would redden
@@ -278,7 +279,7 @@ finding below was fixed in this run — none was filed.
 |---|---|---|---|---|
 | 1 | **brief-gap** | edge / facet | **BLOCKING** — both enqueue hosts dropped `enumerations`: the JS producer and the Go consumer are separate hops and neither decoder rejects unknown keys. The brief's touch-list named `cmd/facet/web/app.js` and neither host. Live once the cafe ops declared. | `TestBuildEnqueueEnvelope_ForwardsEnumerations` + browser twin; envelope construction extracted so the hop is testable |
 | 2 | **design-gap** | pkgmgr / processor | An NFR-S6 op declaring an enumeration installs clean and then faults every submission terminally, collapsed to a details-less `ClaimKeyInvalid`. Found by two reviewers independently. | install refuses it (`processor.IsNFRS6Operation`), with a non-member positive control |
-| 3 | **design-gap** | pkgmgr / descriptorform | `{scopedTo}`/`{service}` hubs installed clean but no shipped renderer resolves them — `form.mjs` throws (aborting the submit), `app.js` drops silently. The new refusal text *recommended* them. | hub grammar narrowed to `{actor}`/`{payload.<field>}`/literal (D1), each refusal executed |
+| 3 | **design-gap** | pkgmgr / descriptorform | `{scopedTo}`/`{service}` hubs installed clean and the two shipped renderers disagree on them — `app.js` resolves both, `form.mjs` throws and aborts the submit. The new refusal text *recommended* them. | hub grammar narrowed to `{actor}`/`{payload.<field>}`/literal (D1), each refusal executed |
 | 4 | **implementation-bug** | pkgmgr | `{actor:id}` on a hub installs, resolves to a bare NanoID, and can never match the walk it declares — a row retired against it would redden with no visible cause. | `:id` and mid-segment placeholders refused on a hub |
 | 5 | **convention** | pkgmgr | Two further refusal tails in the shared validator stayed Reads-shaped and now fired for hubs, sending an author to `Dispatch.OptionalReads`/`ContextParams` — fields a hub declaration does not have. A new test *pinned* one of them. | each tail list-aware; tests assert the hub-shaped remedy and the Reads tails unchanged |
 | 6 | **brief-gap** | edge-manifest / processor | Doc obligations missed: `edge-manifest.md` is the normative as-built row shape (no `dispatchEnumerations`), and `processor.md` asserted an `OpDispatchSpec` can name no enumeration. | both rewritten; the brief's touch-list carried no `docs/components/` row |

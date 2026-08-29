@@ -850,7 +850,7 @@ func TestRefuseUndeclaredContextHint(t *testing.T) {
 			wantRefused: true,
 		},
 		{
-			name: "an enumeration, which no descriptor can name either",
+			name: "an enumeration entry, refused whatever the descriptor names",
 			op:   "ClaimIdentity", templates: claimDescriptor,
 			hint: &ContextHint{
 				OptionalReads: shippedClaimHint(floorTarget).OptionalReads,
