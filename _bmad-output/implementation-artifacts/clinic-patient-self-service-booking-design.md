@@ -114,11 +114,15 @@ primitive.
 - **The precedent to mirror is in the SAME file, not loftspace's**: `clinicAppointmentsReadSpec`
   (lines 917-947, D1.5, already shipped and live for "My Appointments") anchors on
   `nanoIdFromKey(p.key)` — the **patient vertex's own bare NanoID**, not a walk to its
-  `identifiedBy` identity. RLS's `lattice.actor_id` for a patient self-service session therefore
-  matches the `patient` vertex key directly; confirmed by `queryMyEncounters`
-  (`cmd/clinic-app/encounters.go:66-101`) reusing the identical `set_config`/RLS shape
-  `queryMyProviderSchedule`/`queryMySchedule` already use successfully for the patient's own
-  appointments today. No `identifiedBy` walk needed in the anchor arm.
+  `identifiedBy` identity inline in this lens's own cypher. **Correction (post-review,
+  2026-08-28): `lattice.actor_id` itself is the login identity's NanoID, never the patient
+  vertex's** (`cmd/clinic-app/readauth.go:57`, `encounters.go:73`) — the hop from identity to
+  patient anchor is a separate grant-table lens, `patientIdentityReadGrants`
+  (`packages/clinic-domain/lenses.go:1113-1118`), which projects `(actor_id=identity NanoID,
+  anchor_id=patient NanoID)` rows RLS's `unnest(authz_anchors)` join matches against. `p.key` in
+  `authz_anchors` is still the right value — the grant-table lens is what makes it resolve to the
+  signed-in identity — but no `identifiedBy` walk belongs INSIDE `clinicEncountersReadSpec`
+  itself either way, which is the operative conclusion this row's touch-list drew.
 - **Comprehension, not a bare element** — `clinicPatientsSpec`'s `buildingAnchors` comment
   (lines 910-916) is load-bearing here too: `p` is bound by an `OPTIONAL MATCH`, so a bare
   `[nanoIdFromKey(p.key)]` would carry a `NULL` array element (rejected by
