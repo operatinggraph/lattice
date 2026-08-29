@@ -99,10 +99,10 @@ func seedVisitSeriesSiteTopology(t *testing.T, ctx context.Context, conn *substr
 func startSitelessSeries(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, label, providerKey string) string {
 	t.Helper()
-	id := crSubmit(t, ctx, conn, cp, cons, label, "StartVisitSeries", "visitseries",
+	id := crSubmitOpt(t, ctx, conn, cp, cons, label, "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+vsPatientKey+`","providerKey":"`+providerKey+
 			`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{vsPatientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{vsPatientKey, providerKey}, []string{crActiveVisitSeriesKey(vsPatientKey, providerKey)}, processor.OutcomeAccepted)
 	return "vtx.visitseries." + id
 }
 

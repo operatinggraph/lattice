@@ -163,8 +163,11 @@ func seedEscalation(t *testing.T, ctx context.Context, conn *substrate.Conn) (ta
 // createClaimEnv builds the reasoning instanceOp Weaver submits as a directOp,
 // which mints the claim vertex write-ahead with the trusted gap context. Weaver's
 // directOp resolves a FLAT params map from the lens row, so every field arrives at
-// the top-level payload (Option F — no nested params object). The instanceOp
-// validates its link endpoints via kv.Read, so no ContextHint.Reads is needed.
+// the top-level payload (Option F — no nested params object). Weaver's own
+// dispatcher (augurEscalation, internal/weaver/strategist.go) declares the
+// no-orphan candidate + target endpoints as belt-and-suspenders Reads
+// alongside the instanceOp's own kv.Read alive checks, so this fixture mirrors
+// that Reads set rather than leaving it undeclared.
 //
 // The actor is Weaver's primordial key because the script pins op.actor to
 // `primordialActor["weaver"]`: any other actor is denied before the branch's
@@ -189,12 +192,15 @@ func createClaimEnv(reqID, handle, targetKey, entityKey string) *processor.Opera
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{entityKey, targetKey}},
 	}
 }
 
 // recordReplyEnv builds the bridge replyOp — the {externalRef, status, result}
-// shape the bridge actually posts (no ContextHint.Reads; the op reads the claim's
-// .gap aspect via kv.Read).
+// shape the bridge actually posts. The bridge's own dispatcher
+// (internal/bridge/dispatch.go's replyOpReads) declares the claim's .gap
+// aspect it reconstructs the trusted context from, so this fixture mirrors
+// that Reads set.
 func recordReplyEnv(reqID, handle, status, result string) *processor.OperationEnvelope {
 	payload := map[string]any{"externalRef": handle, "status": status}
 	if result != "" {
@@ -209,6 +215,7 @@ func recordReplyEnv(reqID, handle, status, result string) *processor.OperationEn
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.augurproposal." + handle + ".gap"}},
 	}
 }
 
@@ -352,6 +359,7 @@ func TestAugur_ClaimStoresModelOverride(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{entityKey, targetKey}},
 	}
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -830,6 +838,7 @@ func dispatchEnv(reqID, handle, outcome, reason string) *processor.OperationEnve
 		payload["reason"] = reason
 	}
 	b, _ := json.Marshal(payload)
+	proposalKey := "vtx.augurproposal." + handle
 	return &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -838,6 +847,7 @@ func dispatchEnv(reqID, handle, outcome, reason string) *processor.OperationEnve
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{proposalKey, proposalKey + ".review"}},
 	}
 }
 

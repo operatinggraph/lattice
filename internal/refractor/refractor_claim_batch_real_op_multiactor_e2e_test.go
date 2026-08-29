@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,19 @@ func TestRefractor_CapabilityLens_TwoActorClaimCeremony_MultiActorRace_E2E(t *te
 		SubmittedAt:   "2026-07-30T10:00:01Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"targetActorKey":"` + deviceKey + `","consumerRoleKey":"` + consumerRoleKey + `"}`),
+		// The dispositions the `lattice identity provision` CLI submits
+		// (cmd/lattice/identity/provision.go): the role vertex is a pinned,
+		// always-live key whose absence is a wiring fault, so it is a required
+		// read; the target actor and its grant link are the keys this call
+		// exists to create, so their absence is the ordinary case.
+		ContextHint: &processor.ContextHint{
+			Reads: []string{consumerRoleKey},
+			OptionalReads: []string{
+				deviceKey,
+				"lnk.identity." + strings.TrimPrefix(deviceKey, "vtx.identity.") +
+					".holdsRole.role." + strings.TrimPrefix(consumerRoleKey, "vtx.role."),
+			},
+		},
 	}
 
 	// D's own scope=self ClaimIdentity permission is seeded directly (like

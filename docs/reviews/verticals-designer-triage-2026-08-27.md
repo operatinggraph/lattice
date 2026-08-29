@@ -703,3 +703,32 @@ only because the provider-standing branch is rarely exercised, not because it is
 The dominant undeclared walk, `vtx.identity.<id> holdsRole out`, is the shared
 `actor_holds_operator()` role check inside the `worksAt_covers` / `require_workplace` helpers pinned
 across 8-11 packages — one helper, not 50 independent decisions.
+
+### Close (2026-08-29) — what shipped, and what the classification turned out to be worth
+
+Shipped `20a4fc6` (recorder) + `f50ec44` (guard armed) + `5699325` (cold-review fix round) +
+`00bfadd` (fixture declarations), all CI-green on `main`.
+
+**The cold pass found one BLOCKING hole in the guard's own admission rule**, and it is the lesson worth
+keeping: `kv.Links`'s subject filter pins the hub to one end of every link it returns, so recording both
+endpoints made "a walk surfaced this vertex" true of the hub *for free*. Since the guard admits any read
+whose vertex root a walk surfaced, every operation carrying the standard `holdsRole` confinement walk —
+15+ of them — got a free pass on every subsequent read of the actor vertex, `.piiKey` included. The
+walked-set was 1,331 of 1,619 walks wide. Fixed in the recorder (far endpoint only) so every consumer of
+the record inherits it. Filed to the Processor dossier as: *an admission rule keyed on "this execution
+surfaced X" must exclude what the caller already named.*
+
+**The T/P classification paid for itself.** Acting on it closed 42 read shapes and both MergeIdentity walk
+shapes as **test-fixture** fixes — no script changed, no manifest version moved — and the baseline fell
+**103 → 61 read rows, 139 → 137 walk rows**. Had the header's original "one debt pile" framing stood, that
+work would have been mis-scoped as a corpus-wide script sweep.
+
+What remains in the baseline is the honest residue: class-(c) config reads and chained
+declare-time-unknowable reads that nothing should ever declare, and walks that no descriptor-dispatched op
+has a field to declare — filed as its own board row (`OpDispatchSpec` carries `Reads`/`OptionalReads` but
+no `Enumerations`; Loom `StepSpec` and Weaver `GapActionSpec` are the pattern to mirror).
+
+Two corrections to earlier claims in this document, made where they stand rather than appended: **four**
+operations declare `contextHint.enumerations`, not one; and **four** channels populate that field — Loom
+`StepSpec`, Weaver `GapActionSpec`, a hand-built envelope (`cmd/lattice/candidates`), and client
+pass-through via the Gateway — not two.

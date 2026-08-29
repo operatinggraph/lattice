@@ -144,15 +144,7 @@ func TestProvisionConsumerIdentity_FreshActor_Success(t *testing.T) {
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-success")
 	roleKey := consumerRoleKey(t)
 
-	env := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("PCISuccess"),
-		Lane:          processor.LaneDefault,
-		OperationType: "ProvisionConsumerIdentity",
-		Actor:         gatewayActorKey,
-		SubmittedAt:   "2026-07-06T10:00:00Z",
-		Class:         "identity",
-		Payload:       provisionPayload(t, freshActorKey, roleKey),
-	}
+	env := provisionEnvelope(t, testutil.GenReqID("PCISuccess"), freshActorKey, roleKey, "2026-07-06T10:00:00Z")
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -438,6 +430,10 @@ func TestProvisionConsumerIdentity_WithIdpProvenance_WritesIdpBindingAspect(t *t
 		SubmittedAt:   "2026-07-10T10:00:00Z",
 		Class:         "identity",
 		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{roleKey},
+			OptionalReads: []string{freshActorKey, consumerGrantLink(freshActorKey, roleKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -476,6 +472,10 @@ func TestProvisionConsumerIdentity_MismatchedIdpFields_Rejected(t *testing.T) {
 		SubmittedAt:   "2026-07-10T10:00:00Z",
 		Class:         "identity",
 		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{roleKey},
+			OptionalReads: []string{freshActorKey, consumerGrantLink(freshActorKey, roleKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)

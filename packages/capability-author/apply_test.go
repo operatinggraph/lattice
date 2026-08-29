@@ -65,15 +65,18 @@ const (
 )
 
 // applyEnv builds the MarkCapabilityProposalApplied op the operator submits
-// after separately running the real F-004 apply.
-func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor.OperationEnvelope {
+// after separately running the real F-004 apply. reads is whatever
+// ContextHint.Reads the case's own KV state supports declaring — nil where a
+// key the script would touch does not yet exist (a declared miss on a
+// REQUIRED read is a HydrationMiss, not the script's own live-read rejection).
+func applyEnv(reqID, proposalID, packageKey, installRequestID string, reads []string) *processor.OperationEnvelope {
 	payload := map[string]any{
 		"proposalId":       proposalID,
 		"packageKey":       packageKey,
 		"installRequestId": installRequestID,
 	}
 	b, _ := json.Marshal(payload)
-	return &processor.OperationEnvelope{
+	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "MarkCapabilityProposalApplied",
@@ -82,6 +85,10 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
 	}
+	if len(reads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads}
+	}
+	return env
 }
 
 // recordEnvForApplyTarget mirrors recordEnv (proposal_test.go) but attaches a
@@ -124,6 +131,7 @@ func recordEnvForApplyTarget(t *testing.T, reqID, handle, kind string, target ma
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityauthorclaim." + handle + ".target"}},
 	}
 }
 
@@ -163,6 +171,7 @@ func recordEnvForGrant(t *testing.T, reqID, handle, packageName string, content 
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityauthorclaim." + handle + ".target"}},
 	}
 }
 
@@ -237,7 +246,8 @@ func TestCapAuthor_Apply_GrantKind_ClosesLoop(t *testing.T) {
 	}
 
 	installRequestID := "install:" + applyResult.PackageName + "@" + applyResult.ToVersion
-	driveApply(t, ctx, conn, cp, cons, "grant", capIDApplyGrant, applyResult.PackageKey, installRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "grant", capIDApplyGrant, applyResult.PackageKey, installRequestID,
+		applyCloseReads(capIDApplyGrant, applyResult.PackageKey), processor.OutcomeAccepted)
 
 	if got := reviewState(t, ctx, conn, proposalKey); got != "applied" {
 		t.Fatalf("review.state = %q, want applied", got)
@@ -349,7 +359,8 @@ func TestCapAuthor_Apply_ClosesLoop(t *testing.T) {
 	}
 
 	installRequestID := "install:" + applyResult.PackageName + "@" + applyResult.ToVersion
-	driveApply(t, ctx, conn, cp, cons, "loop", capIDApply, applyResult.PackageKey, installRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "loop", capIDApply, applyResult.PackageKey, installRequestID,
+		applyCloseReads(capIDApply, applyResult.PackageKey), processor.OutcomeAccepted)
 
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("review.state = %q, want applied", got)
@@ -389,7 +400,10 @@ func TestCapAuthor_Apply_NonApproved_Rejected(t *testing.T) {
 	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-pending")
 
 	drivePendingProposal(t, ctx, conn, cp, cons, "applypend", capIDApplyPending, capHandleApplyPend)
-	driveApply(t, ctx, conn, cp, cons, "pend", capIDApplyPending, capFakePackageKey, "install:fake@0.1.0", processor.OutcomeRejected)
+	// The state guard fires right after .review — .target and the package are
+	// never reached for a non-approved proposal.
+	driveApply(t, ctx, conn, cp, cons, "pend", capIDApplyPending, capFakePackageKey, "install:fake@0.1.0",
+		[]string{"vtx.capabilityproposal." + capIDApplyPending + ".review"}, processor.OutcomeRejected)
 }
 
 // TestCapAuthor_Apply_UnknownPackage_Rejected: an APPROVED proposal citing a
@@ -403,7 +417,12 @@ func TestCapAuthor_Apply_UnknownPackage_Rejected(t *testing.T) {
 	pk := drivePendingProposalForApply(t, ctx, conn, cp, cons, "unkpkg", capIDApplyUnknownPkg, capHandleApplyUnkPkg, "ai-lens-unknownpkg")
 	driveReview(t, ctx, conn, cp, cons, "unkpkg", capIDApplyUnknownPkg, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
 
-	driveApply(t, ctx, conn, cp, cons, "unkpkg", capIDApplyUnknownPkg, capFakePackageKey, "install:fake@0.1.0", processor.OutcomeRejected)
+	// capFakePackageKey does not exist; the dispatcher still declares it (a
+	// declared-but-absent Reads key hydrates RequiredAbsent, not a hard
+	// HydrationMiss failure — the script's own alive() check is still what
+	// answers UnknownPackage).
+	driveApply(t, ctx, conn, cp, cons, "unkpkg", capIDApplyUnknownPkg, capFakePackageKey, "install:fake@0.1.0",
+		applyCloseReads(capIDApplyUnknownPkg, capFakePackageKey), processor.OutcomeRejected)
 	if got := reviewState(t, ctx, conn, pk); got != "approved" {
 		t.Fatalf("review.state = %q, want approved (unchanged by the rejected apply against an unknown package)", got)
 	}
@@ -425,7 +444,8 @@ func TestCapAuthor_Apply_PackageNameMismatch_Rejected(t *testing.T) {
 	applyResultB := applyRealPackage(t, ctx, conn, pkB)
 
 	// Proposal A cites proposal B's real, live package — a different name.
-	driveApply(t, ctx, conn, cp, cons, "mmA", capIDApplyMismatchA, applyResultB.PackageKey, "install:cross@0.1.0", processor.OutcomeRejected)
+	driveApply(t, ctx, conn, cp, cons, "mmA", capIDApplyMismatchA, applyResultB.PackageKey, "install:cross@0.1.0",
+		applyCloseReads(capIDApplyMismatchA, applyResultB.PackageKey), processor.OutcomeRejected)
 	if got := reviewState(t, ctx, conn, pkA); got != "approved" {
 		t.Fatalf("review.state = %q, want approved (unchanged by the rejected cross-proposal apply)", got)
 	}
@@ -513,7 +533,8 @@ func TestCapAuthor_Apply_DoubleApply_Rejected(t *testing.T) {
 
 	applyResult := applyRealPackage(t, ctx, conn, pk)
 	installRequestID := "install:" + applyResult.PackageName + "@" + applyResult.ToVersion
-	driveApply(t, ctx, conn, cp, cons, "double1", capIDApplyTwice, applyResult.PackageKey, installRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "double1", capIDApplyTwice, applyResult.PackageKey, installRequestID,
+		applyCloseReads(capIDApplyTwice, applyResult.PackageKey), processor.OutcomeAccepted)
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("precondition: review.state = %q, want applied", got)
 	}
@@ -522,7 +543,10 @@ func TestCapAuthor_Apply_DoubleApply_Rejected(t *testing.T) {
 	// MarkCapabilityProposalApplied finds the proposal already applied (not
 	// approved) and is rejected (InvalidApplyTransition), not a Contract #4
 	// tracker collapse.
-	driveApply(t, ctx, conn, cp, cons, "double2", capIDApplyTwice, applyResult.PackageKey, installRequestID, processor.OutcomeRejected)
+	// The state guard fires right after .review — now "applied", not
+	// "approved" — so .target and the package are never reached.
+	driveApply(t, ctx, conn, cp, cons, "double2", capIDApplyTwice, applyResult.PackageKey, installRequestID,
+		[]string{pk + ".review"}, processor.OutcomeRejected)
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("review.state = %q, want applied (unchanged by the rejected re-apply)", got)
 	}
@@ -532,11 +556,19 @@ func TestCapAuthor_Apply_DoubleApply_Rejected(t *testing.T) {
 // wanted outcome. tag distinguishes the requestId (Contract #4 dedup is
 // per-requestId, not per-proposal) so a genuine SECOND apply attempt against
 // the same proposal is a fresh op, not a redelivery collapse.
-func driveApply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, packageKey, installRequestID string, want processor.MessageOutcome) {
+func driveApply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, packageKey, installRequestID string, reads []string, want processor.MessageOutcome) {
 	t.Helper()
-	env := applyEnv(testutil.GenReqID("CAApply"+tag), proposalID, packageKey, installRequestID)
+	env := applyEnv(testutil.GenReqID("CAApply"+tag), proposalID, packageKey, installRequestID, reads)
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// applyCloseReads mirrors capability-author's own MarkCapabilityProposalApplied
+// read posture (ddls.go): the same four keys RecordCapabilityInstallReceipt
+// requires (rcptCloseReads, receipt_test.go) — review, target, package root,
+// package manifest.
+func applyCloseReads(proposalID, packageKey string) []string {
+	return rcptCloseReads("vtx.capabilityproposal."+proposalID, packageKey)
 }
 
 // patchTargetPackageName rewrites a live proposal's .target aspect's
@@ -631,7 +663,8 @@ func TestCapAuthor_Apply_ForeignTargetPackageName_Rejected(t *testing.T) {
 	installRequestID := "install:" + res.PackageName + "@" + res.ToVersion
 
 	patchTargetPackageName(t, ctx, conn, pk, "a-totally-different-package-name")
-	env := applyEnv(testutil.GenReqID("CAApplypadM"), capIDApplyPadMismatch, res.PackageKey, installRequestID)
+	env := applyEnv(testutil.GenReqID("CAApplypadM"), capIDApplyPadMismatch, res.PackageKey, installRequestID,
+		applyCloseReads(capIDApplyPadMismatch, res.PackageKey))
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("foreign name: outcome = %q, want rejected", outcome)
@@ -645,7 +678,8 @@ func TestCapAuthor_Apply_ForeignTargetPackageName_Rejected(t *testing.T) {
 
 	// The positive vector: only the name corrected, everything else identical.
 	patchTargetPackageName(t, ctx, conn, pk, res.PackageName)
-	driveApply(t, ctx, conn, cp, cons, "padMok", capIDApplyPadMismatch, res.PackageKey, installRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "padMok", capIDApplyPadMismatch, res.PackageKey, installRequestID,
+		applyCloseReads(capIDApplyPadMismatch, res.PackageKey), processor.OutcomeAccepted)
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("corrected name: review.state = %q, want applied", got)
 	}
@@ -957,7 +991,8 @@ func TestCapAuthor_Apply_EditExistingTarget_UpgradesInPlace(t *testing.T) {
 
 	// The proposal's own lifecycle closes exactly as a fresh install's does.
 	installRequestID := "upgrade:" + res.PackageName + "@" + res.ToVersion
-	driveApply(t, ctx, conn, cp, cons, "edit", capIDApplyEdit, res.PackageKey, installRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "edit", capIDApplyEdit, res.PackageKey, installRequestID,
+		applyCloseReads(capIDApplyEdit, res.PackageKey), processor.OutcomeAccepted)
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("review.state = %q, want applied", got)
 	}

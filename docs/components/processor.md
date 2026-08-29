@@ -693,9 +693,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   to ask before reaching for a bigger constant is whether the difference can be removed where it is made
   instead. The closed declared-read set survives the deletion, but on a different footing: it is what keeps the
   equalized set fixed, not what bounds a window.
-- **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
-  default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
-  package-authoring debugging. Check: none yet.
+- **An admission rule keyed on "this execution surfaced X" must exclude what the caller already NAMED** —
+  `kv.Links`'s subject filter pins the hub to one end of every link it returns (`out` filters on the hub as
+  source, `in` as target), so recording both endpoints made "a walk surfaced this vertex" true of the hub for
+  free. The read-drift guard admits any read whose vertex root a walk surfaced, so every operation carrying
+  the standard `holdsRole` confinement walk got a free pass on every later read of the actor — `.piiKey`
+  included — and the one regression the guard exists to catch was the one it could not see. Minted:
+  read-drift ratchet, cold review; the walked-set was 1,331 of 1,619 walks wide. Check: for any
+  "discovered by" / "reached via" / "already covered" set, name in one sentence what the CALLER supplied to
+  build it, and prove the set excludes that — with a test that reads the named thing itself and expects the
+  control to fire. A set derived from an input the subject chose is not evidence about the subject.
 - **A gate's negative test must first prove its positive vector reaches the gate** — two taxonomy gates
   shipped with tests that passed by planting keys the Processor itself refuses upstream (vacuous pass).
   Minted: dynamic-type-taxonomy items 1 + 5; **seen a third time at B1** in a new shape — five packages'

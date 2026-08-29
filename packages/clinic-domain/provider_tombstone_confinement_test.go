@@ -141,7 +141,7 @@ func submitSetStatusAsKey(t *testing.T, ctx context.Context, conn *substrate.Con
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{apptKey + ".status"}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	failure := ""

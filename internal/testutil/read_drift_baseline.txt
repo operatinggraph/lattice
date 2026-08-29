@@ -69,24 +69,13 @@ read	CreateAppointment	lnk.identity.<id>.worksAt.building.<id>
 read	CreateAppointment	lnk.patient.<id>.identifiedBy.identity.<id>
 read	CreateAppointment	vtx.provider.<id>.hours
 read	CreateAppointment	vtx.provider.<id>.timeOff
-read	CreateAugurReasoningClaim	vtx.leaseapp.<id>
-read	CreateAugurReasoningClaim	vtx.meta.<id>
-read	CreateAuthoringClaim	vtx.capabilityproposal.<id>
-read	CreateAuthoringClaim	vtx.capabilityproposal.<id>.request
 read	CreateBooking	lnk.identity.<id>.worksAt.building.<id>
-read	CreateBooking	vtx.identity.<id>.slot<t>
-read	CreateBooking	vtx.session.<id>.schedule
-read	CreateBooking	vtx.session.<id>.seat1
-read	CreateLeaseApplication	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	CreateLeaseDocInstance	vtx.leaseapp.<id>.signature
 read	CreateLeaseDocInstance	vtx.leaseapp.<id>.terms
 read	CreateMenuItem	lnk.identity.<id>.worksAt.building.<id>
-read	CreatePatient	vtx.identity.<id>.patientClaim
 read	CreateSession	lnk.identity.<id>.worksAt.building.<id>
 read	CreateStudio	lnk.identity.<id>.worksAt.building.<id>
 read	CreateStudio	lnk.identity.<id>.worksAt.unit.<id>
-read	CreateTask	vtx.identity.<id>.availability
-read	CreateTask	vtx.task.<id>
 read	CreateUnclaimedIdentity	vtx.identity.<id>.erasureRequested
 read	CreateUnclaimedIdentity	vtx.identity.<id>.piiKey
 read	CreditAccount	lnk.leaseapp.<id>.applicationFor.identity.<id>
@@ -98,63 +87,35 @@ read	DecideLeaseApplication	lnk.identity.<id>.manages.unit.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.building.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.unit.<id>
 read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
-read	JoinWaitlist	vtx.identity.<id>.slot<t>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.building.<id>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.unit.<id>
-read	MarkCapabilityProposalApplied	vtx.capabilityproposal.<id>.review
-read	MarkCapabilityProposalApplied	vtx.capabilityproposal.<id>.target
-read	MarkCapabilityProposalApplied	vtx.package.<id>
-read	MarkCapabilityProposalApplied	vtx.package.<id>.manifest
 read	MergeIdentity	lnk.identityindex.<id>.indexes.identity.<id>
 read	MergeIdentity	vtx.credentialindex.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.building.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.unit.<id>
 read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
-read	ProvisionConsumerIdentity	vtx.identity.<id>
-read	ProvisionConsumerIdentity	vtx.role.<id>
-read	ReassignSession	lnk.session.<id>.atStudio.studio.<id>
-read	ReassignSession	lnk.session.<id>.ledBy.instructor.<id>
-read	ReassignSession	vtx.instructor.<id>.slot<t>
-read	ReassignSession	vtx.studio.<id>.slot<t>
-read	RecordCapabilityInstallReceipt	vtx.capabilityproposal.<id>.review
-read	RecordCapabilityInstallReceipt	vtx.capabilityproposal.<id>.target
-read	RecordCapabilityInstallReceipt	vtx.package.<id>
-read	RecordCapabilityInstallReceipt	vtx.package.<id>.manifest
-read	RecordCapabilityProposal	vtx.capabilityauthorclaim.<id>.target
+# internal/refractor's own E2E fixture (real-op multiactor race) under-declares
+# the same shape identity-domain's fixtures already fix; internal/refractor is
+# off-limits for this sweep.
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
-read	RecordProposal	vtx.augurproposal.<id>.gap
-read	RecordProposal	vtx.augurproposal.BBaugurNoclHJKMNPQRS.gap
-read	RecordProposalDispatch	vtx.augurproposal.<id>.review
 read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
 read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
 read	ReportIssue	lnk.identity.<id>.worksAt.building.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.unit.<id>
-read	RescheduleAppointment	lnk.appointment.<id>.forPatient.patient.<id>
-read	RescheduleAppointment	lnk.appointment.<id>.withProvider.provider.<id>
-read	RescheduleAppointment	vtx.appointment.<id>.schedule
 read	RescheduleAppointment	vtx.provider.<id>.hours
 read	RescheduleAppointment	vtx.provider.<id>.timeOff
 read	ResolveWorkOrder	lnk.identity.<id>.worksAt.building.<id>
 read	ResolveWorkOrder	lnk.identity.<id>.worksAt.unit.<id>
 read	ResumeVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	RetireMenuItem	lnk.identity.<id>.worksAt.building.<id>
-read	ReviewCapabilityProposal	vtx.capabilityproposal.<id>.review
 read	SetAppointmentSite	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentSite	lnk.provider.<id>.identifiedBy.identity.<id>
-read	SetAppointmentSite	lnk.provider.<id>.practicesAt.building.<id>
-read	SetAppointmentSite	vtx.building.<id>
-read	SetAppointmentStatus	lnk.appointment.<id>.forPatient.patient.<id>
-read	SetAppointmentStatus	lnk.appointment.<id>.withProvider.provider.<id>
 read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
-read	SetAppointmentStatus	vtx.appointment.<id>.schedule
-read	SetAppointmentStatus	vtx.appointment.<id>.status
 read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
 read	SetVisitSeriesSite	lnk.identity.<id>.worksAt.building.<id>
 read	Settle	vtx.leaseapp.<id>
-read	ShredIdentityKey	vtx.identity.<id>.piiKey
 read	StartVisitSeries	lnk.identity.<id>.worksAt.building.<id>
-read	StartVisitSeries	vtx.patient.<id>.activeVisitSeriesWith<id>
 read	StartVisitSeries	vtx.visitseries.<id>.paused
 read	StartVisitSeries	vtx.visitseries.<id>.series
 read	TombstoneAppointment	lnk.appointment.<id>.forPatient.patient.<id>
@@ -232,8 +193,6 @@ walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out
 walk	MarkPastDueNoShow	vtx.appointment.<id> forPatient out
 walk	MarkPastDueNoShow	vtx.appointment.<id> withProvider out
-walk	MergeIdentity	vtx.identity.<id> assignedTo in
-walk	MergeIdentity	vtx.identity.<id> indexes in
 walk	OpenTab	vtx.building.<id> containedIn out
 walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
 walk	OpenTab	vtx.unit.<id> containedIn out

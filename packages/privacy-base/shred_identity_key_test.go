@@ -150,7 +150,10 @@ func submitShred(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{identityKey},
+			OptionalReads: []string{identityKey + ".piiKey"},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
@@ -243,7 +246,7 @@ func TestShredIdentityKey_MarksExistingPiiKeyShredded(t *testing.T) {
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeAccepted)
@@ -290,7 +293,7 @@ func TestShredIdentityKey_NoPiiKeyYet_WritesDurablePlaceholder(t *testing.T) {
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeAccepted)
@@ -382,7 +385,7 @@ func TestShredIdentityKey_NonOperatorActor_Denied(t *testing.T) {
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeRejected)
@@ -441,7 +444,7 @@ func TestShredIdentityKey_EndToEnd_VaultDecryptFails(t *testing.T) {
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeAccepted)
@@ -686,7 +689,7 @@ func TestShredIdentityKey_Reshred_Idempotent(t *testing.T) {
 		SubmittedAt:   secondSubmittedAt,
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	})
 	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeAccepted)
 
@@ -860,7 +863,7 @@ func submitShredPayload(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-08-07T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, OptionalReads: []string{identityKey + ".piiKey"}},
 	})
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
 }

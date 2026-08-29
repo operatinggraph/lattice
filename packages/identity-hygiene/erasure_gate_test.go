@@ -67,8 +67,16 @@ func erasureMergeEnv(reqID, primaryKey, secondaryKey string) *processor.Operatio
 		Payload:       mergePayload(primaryKey, secondaryKey, []string{}),
 		// Reads only. The erasure markers are NOT declared here — this DDL's
 		// own derive_reads supplies them, and a test that named them by hand
-		// would stay green with that derivation deleted.
-		ContextHint: &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, []string{})},
+		// would stay green with that derivation deleted. The two open-task /
+		// indexes-repoint walks run unconditionally past the erasure gate, so
+		// every unsealed (Accepted) run in this file needs them declared too.
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, []string{}),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 }
 

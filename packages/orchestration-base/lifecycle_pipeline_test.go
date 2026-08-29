@@ -44,7 +44,10 @@ func seedTask(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		Class:         "task",
 		Payload: json.RawMessage(`{"assignee":"` + assigneeKey + `","forOperation":"` + opKey +
 			`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{assigneeKey, opKey, targetKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{assigneeKey, opKey, targetKey},
+			OptionalReads: []string{taskKey, assigneeKey + ".availability"},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

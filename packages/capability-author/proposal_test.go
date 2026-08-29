@@ -237,6 +237,11 @@ func claimEnv(reqID, handle, proposalKey string) *processor.OperationEnvelope {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityauthorclaim",
 		Payload:       json.RawMessage(b),
+		// Loom's own read inference (inferExternalTaskReads,
+		// internal/loom/externaltask_params.go): the subject root is a
+		// required Read, and every subject.<aspect>.data.<field> template
+		// contributes the aspect key to EgressReads, never Reads.
+		ContextHint: &processor.ContextHint{Reads: []string{proposalKey}, EgressReads: []string{proposalKey + ".request"}},
 	}
 }
 
@@ -311,6 +316,7 @@ func recordEnv(t *testing.T, reqID, handle, kind string, content json.RawMessage
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityauthorclaim." + handle + ".target"}},
 	}
 }
 
@@ -336,6 +342,7 @@ func failedRecordEnv(reqID, handle, resultDetail string) *processor.OperationEnv
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityauthorclaim." + handle + ".target"}},
 	}
 }
 
@@ -857,6 +864,7 @@ func TestCapAuthor_GrantExceedsRequesterScope_Invalid(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityauthorclaim." + capHandleGrantOverscope + ".target"}},
 	}
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

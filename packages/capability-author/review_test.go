@@ -64,6 +64,7 @@ func reviewEnv(reqID, proposalID, verdict string, validation map[string]any) *pr
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityproposal." + proposalID + ".review"}},
 	}
 }
 
@@ -81,6 +82,7 @@ func reviewEnvRawValidation(reqID, proposalID, verdict string, validation any) *
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.capabilityproposal." + proposalID + ".review"}},
 	}
 }
 

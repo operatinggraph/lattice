@@ -334,7 +334,10 @@ func createApplication(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{applicantKey, unitKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1069,7 +1072,10 @@ func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12,"requestedRent":2400}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{applicantKey, unitKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1144,8 +1150,11 @@ func TestCreateLeaseApplication_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{applicantKey, unitKey}},
-		AuthContext:   &processor.AuthContext{Target: applicantKey},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+		},
+		AuthContext: &processor.AuthContext{Target: applicantKey},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1174,8 +1183,11 @@ func TestCreateLeaseApplication_ConsumerNamesDifferentApplicant_Rejected(t *test
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"applicant":"` + victimKey + `","unit":"` + unitKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{victimKey, unitKey}},
-		AuthContext:   &processor.AuthContext{Target: consumerKey},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{victimKey, unitKey},
+			OptionalReads: []string{guardLinkKey(victimKey, unitKey)},
+		},
+		AuthContext: &processor.AuthContext{Target: consumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
