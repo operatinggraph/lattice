@@ -105,6 +105,61 @@ func TestBuildPlan_DirectOp_ReadsRowColumnAspectSuffix(t *testing.T) {
 	}
 }
 
+// TestBuildPlan_DirectOp_ResolvesOptionalReads pins the declaration side of
+// Contract #2 §2.5's absence-tolerant read set: a directOp gap's OptionalReads
+// resolves through the SAME
+// resolver as Reads (a literal passes through verbatim, a row.<column>
+// template substitutes from the violation row) and reaches
+// plan.optionalReads(claimID) — the closure fire()/planOptionalReads consult
+// to build the dispatched op's ContextHint.OptionalReads.
+func TestBuildPlan_DirectOp_ResolvesOptionalReads(t *testing.T) {
+	t.Parallel()
+	ga := GapAction{
+		Action:        "directOp",
+		Operation:     "TombstoneObject",
+		Params:        map[string]string{"objectKey": "row.entityKey"},
+		OptionalReads: []string{"vtx.config.residueGuard", "row.entityKey"},
+	}
+	row := map[string]any{"entityKey": "vtx.object.AAobjHJKMNPQRSTUVWX"}
+	pl, perr := buildPlan(nil, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	if pl.optionalReads == nil {
+		t.Fatalf("plan declares OptionalReads in the playbook but pl.optionalReads is nil")
+	}
+	got := pl.optionalReads("anyClaimId")
+	want := []string{"vtx.config.residueGuard", "vtx.object.AAobjHJKMNPQRSTUVWX"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("optionalReads = %v want %v (literal passed through, row.<column> resolved)", got, want)
+	}
+}
+
+// TestBuildPlan_DirectOp_NoOptionalReadsLeavesPlanFieldNil proves the omission
+// path: a directOp gap that declares no OptionalReads at all leaves
+// pl.optionalReads NIL, so nothing downstream allocates or consults a closure
+// for a declaration the playbook never made. Nil and an empty slice publish
+// the same envelope — the actuator attaches a contextHint only when some list
+// is non-empty — so this pins the shape, and every fixture that always
+// supplies an optional input pins only the supplied case; this is the vector
+// that covers the absent one.
+func TestBuildPlan_DirectOp_NoOptionalReadsLeavesPlanFieldNil(t *testing.T) {
+	t.Parallel()
+	ga := GapAction{
+		Action:    "directOp",
+		Operation: "TombstoneObject",
+		Params:    map[string]string{"objectKey": "row.entityKey"},
+	}
+	row := map[string]any{"entityKey": "vtx.object.AAobjHJKMNPQRSTUVWX"}
+	pl, perr := buildPlan(nil, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	if pl.optionalReads != nil {
+		t.Fatalf("plan declares no OptionalReads in the playbook but pl.optionalReads is non-nil: %v", pl.optionalReads("x"))
+	}
+}
+
 // TestBuildPlan_AssignTask_OptionalReadsMatchPayload pins the Contract #2 §2.5
 // optionalReads set an assignTask dispatch declares: exactly the stable task
 // dedup key and the assignee's `.availability` routing aspect — and, load-

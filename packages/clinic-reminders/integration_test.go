@@ -44,6 +44,7 @@ var crOps = []string{
 	"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder",
 	"RecordAppointmentReminderNotification", "RecordFollowUpReminderNotification",
 	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "EndVisitSeries", "AdvanceVisitSeries",
+	"BackfillVisitSeriesSite", "SetVisitSeriesSite",
 }
 
 func crStaffCapDoc() *processor.CapabilityDoc {

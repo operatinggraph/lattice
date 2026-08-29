@@ -132,7 +132,11 @@ generated producer's `EmptyBehavior` + realness filter.
 Vocabulary additions riding the op rows: `ceremonyMintedSecretHashField` / `ceremonyRevealTitle` /
 `ceremonyRevealHelp` (all nullable) declare a MINT-AND-REVEAL ceremony — the named field carries the
 sha256 of a secret the client mints, submits, and shows to a person once; a client that cannot
-perform the ceremony must not offer the op at all. `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
+perform the ceremony must not offer the op at all. The reveal is gated on an AFFIRMATIVE confirmation
+that the write committed — Contract #2 §2.4's `status: "accepted"`, never the weaker "not rejected",
+which both a `duplicate` (an earlier submission claimed that requestId, so the envelope carrying this
+secret's hash never landed) and the Gateway's status-less reply-timeout `202` satisfy without the write
+being confirmed. `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
 OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
 that previously forced clients to branch by op name. `manifest.ent` rows (and both session-typed hat
 lenses) carry `typeLabel`, the per-type display word the renderer's label ladder consumes instead of
@@ -162,7 +166,9 @@ rather than sending an empty key for one that cannot be resolved. `context.row` 
 (loftspace's renewal row, for `SignRenewal`/`VerifyGuarantor`'s `leaseApp`/`applicant`).
 `scripts/lint-facet-renderer-drift.go` holds it to the same descriptor vocabulary as
 `cmd/facet/web/app.js` and `FacetManifestKit/DescriptorForm.swift` — three renderers, one marker-parity
-gate, covering the six field kinds plus `contextParams`.
+gate, covering the six field kinds, `contextParams`, `ceremony`, and the `{me.<type>}`/`{entity.<column>}`
+read-template pair (the latter Swift-exempt: its `DescriptorContext` carries no viewed-row field, so no
+caller can ever thread one in).
 
 ## Server panes
 

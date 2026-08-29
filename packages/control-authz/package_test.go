@@ -59,8 +59,8 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 	}
 }
 
-// TestPackage_EveryControlOpHasExpectedGrantees pins the full 22-permission
-// ctrl.<component>.<verb> surface (6 weaver + 4 loom + 12 refractor —
+// TestPackage_EveryControlOpHasExpectedGrantees pins the full 23-permission
+// ctrl.<component>.<verb> surface (7 weaver + 4 loom + 12 refractor —
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps): every op grants
 // scope=any, and every op grants to control-operator ALONE except the five
 // identity-bound Personal Lens ops
@@ -76,7 +76,7 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 	wantSoleControlOperator := []string{
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
-		"ctrl.weaver.resetConfidence", "ctrl.weaver.resetBudget",
+		"ctrl.weaver.resetConfidence", "ctrl.weaver.resetBudget", "ctrl.weaver.replayTarget",
 		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume", "ctrl.loom.redrive",
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
 		"ctrl.refractor.delete", "ctrl.refractor.reproject", "ctrl.refractor.requesthydration",

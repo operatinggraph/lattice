@@ -175,6 +175,7 @@ func (i *Installer) taskIsOpenReferent(linkEntry, taskEntry *substrate.KVEntry, 
 func (i *Installer) submitCancelTask(ctx context.Context, taskKey string) error {
 	requestID := deterministicNanoID(taskKey, "", "opmeta-retire-cancel")
 	payload := map[string]any{"taskKey": taskKey}
+	// op-name: (submits) the installer submits this during op-meta retirement to cancel an open task that still points at a dropped operationType, before the tombstone lands
 	reply, err := i.submitDirectOp(ctx, processor.LaneDefault, "CancelTask", "task", requestID, payload,
 		&processor.ContextHint{Reads: []string{taskKey}})
 	if err != nil {

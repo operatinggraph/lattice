@@ -537,6 +537,43 @@ func TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace(t *testing.T) {
 	}
 }
 
+// TestHandleMenu_NoLeaseAppKey_RoleLessWorksAt_StillConfined: handleMenu's
+// no-leaseAppKey branch gates confinement on isStaff (workplace alone), NOT
+// isFrontDesk — unlike every PII/write surface, there is no refusal branch
+// here at all, so narrowing the filter condition would have DROPPED the
+// confinement instead of tightening it (admit==nil reads as "unfiltered",
+// computeMenu). fakeGatewayActor auto-grants frontOfHouse to every staff
+// subject, which would mask that regression, so this uses
+// fakeGatewayActorRoles directly to prove a worksAt caller with NO role at
+// all still gets the workplace-confined view, not the whole catalog.
+func TestHandleMenu_NoLeaseAppKey_RoleLessWorksAt_StillConfined(t *testing.T) {
+	staff := "AAAAAAAAAAAAAAAAAAAA"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorRoles(t,
+		map[string][]string{staff: {staffWorkplace}}, nil, nil))
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.covered", map[string]any{
+		"menuItemKey": "vtx.menuitem.covered", "name": "Latte", "priceCents": 450,
+		"servedAt": staffWorkplace, "coveringLocations": []string{staffWorkplace},
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.elsewhere", map[string]any{
+		"menuItemKey": "vtx.menuitem.elsewhere", "name": "Croissant", "priceCents": 350,
+		"servedAt": otherWorkplace, "coveringLocations": []string{otherWorkplace},
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 1 || body.Menu[0].MenuItemKey != "vtx.menuitem.covered" {
+		t.Fatalf("menu = %+v, want exactly the item this staffer's workplace covers (not the whole catalog)", body.Menu)
+	}
+}
+
 // TestHandleMenu_NoLeaseAppKey_OperatorSeesEveryItem proves the operator
 // exemption: break-glass admin (the write side's actor_holds_operator
 // exemption from require_workplace, ddls.go) can also see the whole catalog
@@ -867,13 +904,16 @@ func TestOperator_ReadsEveryLease(t *testing.T) {
 	}
 }
 
-// TestNonOperatorRole_IsNotExempt is the discriminating sibling of
-// TestOperator_ReadsEveryLease: a staffer carrying a REAL non-operator role
-// key is still confined to their workplace. Without a genuine second role key
-// in the fixture, a boundary that exempted anyone holding any role at all
-// would pass both tests — and the caller must also hold a workplace, or the
-// 403 could be the resident branch answering rather than the role term.
-func TestNonOperatorRole_IsNotExempt(t *testing.T) {
+// TestNonFrontOfHouseRole_IsNotExempt: a worksAt caller holding some OTHER
+// role — neither the primordial operator nor frontOfHouse — reaches the
+// front desk at NEITHER lease, including the one at their own workplace.
+// Before isFrontDesk (readauth.go), a bare worksAt anchor was sufficient
+// regardless of role, which is exactly the gap
+// verticals-designer-triage-2026-08-27.md §7 closes: the write side has
+// always required `GrantsTo: [operator, frontOfHouse]`, so a worksAt-only
+// or arbitrary-role staffer held zero POS grants already — this proves the
+// read side now agrees.
+func TestNonFrontOfHouseRole_IsNotExempt(t *testing.T) {
 	const other, res = "EEEEEEEEEEEEEEEEEEEE", "BBBBBBBBBBBBBBBBBBBB"
 	s, cookieFor := devSessionServer(t, fakeGatewayActorRoles(t,
 		map[string][]string{other: {staffWorkplace}},
@@ -884,15 +924,34 @@ func TestNonOperatorRole_IsNotExempt(t *testing.T) {
 
 	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.theirs", cookieFor(other))
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (a role that is not the primordial operator confers no exemption); body=%s",
+		t.Fatalf("status = %d, want 403 (a role that is not frontOfHouse confers no exemption); body=%s",
 			rec.Code, rec.Body.String())
 	}
-	// The positive half: the same caller, same role, a lease at their own
-	// workplace. Without it the 403 above could be a blanket denial.
+	// Same caller, same role, a lease at their OWN workplace: without
+	// frontOfHouse this is refused too — worksAt alone is topology, not
+	// authority (permissions.go).
 	ok := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.mine", cookieFor(other))
-	if ok.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (the role is irrelevant; the workplace is what admits); body=%s",
+	if ok.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (worksAt without frontOfHouse admits nothing, even at their own workplace); body=%s",
 			ok.Code, ok.Body.String())
+	}
+}
+
+// TestRoleLessWorksAt_IsNotFrontDesk is the exact shape
+// verticals-designer-triage-2026-08-27.md §7 named: a `worksAt` caller with
+// NO role at all (the 3-of-10 seeded identities the row calls "plausibly
+// intentional backOfHouse personas") reaches the front desk at nobody's
+// lease, including their own workplace's.
+func TestRoleLessWorksAt_IsNotFrontDesk(t *testing.T) {
+	const other, res = "GGGGGGGGGGGGGGGGGGGG", "HHHHHHHHHHHHHHHHHHHH"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorRoles(t,
+		map[string][]string{other: {staffWorkplace}}, nil, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.mine", res, staffWorkplace)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.mine", cookieFor(other))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (worksAt with no role at all is not front-desk staff); body=%s",
+			rec.Code, rec.Body.String())
 	}
 }
 

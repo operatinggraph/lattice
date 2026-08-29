@@ -18,6 +18,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	  .paused   = {value: bool}                                  (optional lifecycle toggle)
 //	lnk.visitseries.<id>.forPatient.patient.<id>       (series → patient, later-arriving source)
 //	lnk.visitseries.<id>.withProvider.provider.<id>    (series → provider, later-arriving source)
+//	lnk.visitseries.<id>.atSite.building.<id>          (series → building, later-arriving source;
+//	  the site the visits happen at — visitseries_site.go, the staff-visibility anchor that
+//	  survives its provider being tombstoned)
 //	vtx.patient.<id>.activeVisitSeriesWith<providerId>  (class visitSeriesGuard) = {seriesKey, activeUntil?}
 //	  per-(patient,provider) uniqueness guard, StartVisitSeries-only (create or, once its
 //	  denormalized activeUntil has passed, OCC-revive) — a paused series still holds the
@@ -31,6 +34,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	  "clean termination" activeUntil StartVisitSeries can seed up front, now reachable
 //	  after the fact so a series need not be given an end date at booking time to ever get one
 //	op AdvanceVisitSeries{seriesKey, dueFor, intervalDays, occurrenceCount?}  (the directOp the playbook dispatches)
+//	op BackfillVisitSeriesSite{seriesKey} / SetVisitSeriesSite{seriesKey, site}  (the atSite link — visitseries_site.go)
 //	lens visitSeriesDue (weaver-target, full)   (freshUntil = .progress.nextDueAt; rolls forward on each advance)
 //	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
 //
@@ -59,8 +63,8 @@ const (
 	VisitSeriesDueTarget = "visitSeriesDue"
 )
 
-// visitSeriesDDLs returns the visit-series vertex type (one script owning all four
-// operationTypes, mirroring clinic-domain's appointment DDL) + its three aspect-type
+// visitSeriesDDLs returns the visit-series vertex type (one script owning every
+// operationType, mirroring clinic-domain's appointment DDL) + its aspect-type
 // write gates.
 func visitSeriesDDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
@@ -69,6 +73,7 @@ func visitSeriesDDLs() []pkgmgr.DDLSpec {
 		visitSeriesProgressAspectTypeDDL(),
 		visitSeriesPausedAspectTypeDDL(),
 		visitSeriesGuardAspectTypeDDL(),
+		visitSeriesSiteAssignmentAspectTypeDDL(),
 	}
 }
 
@@ -78,6 +83,7 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 		Class:         "meta.ddl.vertexType",
 		PermittedCommands: []string{
 			startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, endVisitSeriesOp, advanceVisitSeriesOp,
+			backfillVisitSeriesSiteOp, setVisitSeriesSiteOp,
 		},
 		Description: "Clinic recurring visit series DDL. Vertex shape: vtx.visitseries.<NanoID>, class=visitseries, " +
 			"root data = {} (minimal, D5). StartVisitSeries validates patientKey/providerKey are alive + correctly " +
@@ -93,8 +99,33 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"AdvanceVisitSeries is the directOp the visitSeriesDue §10.8 " +
 			"playbook dispatches when missing_series_advance opens: it rolls .progress forward — lastOccurrenceAt = dueFor (the " +
 			"deadline just serviced, NOT $now — keeps the cadence on a fixed grid), nextDueAt = dueFor + " +
-			"intervalDays·days, occurrenceCount + 1 — re-arming the next occurrence. Reads [seriesKey] to " +
-			"liveness-guard the parent for all five commands.",
+			"intervalDays·days, occurrenceCount + 1 — re-arming the next occurrence. " +
+			"BackfillVisitSeriesSite{seriesKey} is the orchestration-internal auto-remediation that fills in the " +
+			"series' atSite link (visitseries → building), dispatched by the visitSeriesSiteBackfill Weaver " +
+			"target's missing_series_site gap for a LIVE series carrying none — the corpus started before the " +
+			"link existed, plus any series whose provider had no single site at the time. A no-op (empty " +
+			"mutations/events) if the series already carries a live atSite link (another dispatch already won, " +
+			"or a redelivery). Otherwise it resolves the series' own provider LIVE off its withProvider link " +
+			"(series_provider) and looks up that provider's LIVE practicesAt sites (sites_for_provider — a " +
+			"DECOMMISSIONED building is not one: an atSite link to a tombstoned site confers no staff " +
+			"visibility, since every read walk drops a tombstoned vertex, yet still reads as \"already sited\" " +
+			"to both site ops and to this gap, stranding the series unrecoverably): when EXACTLY " +
+			"ONE comes back it writes the atSite link, plus the same CreateOnly .siteAssignment guard aspect " +
+			"SetVisitSeriesSite writes (the two ops can otherwise race two different links onto one series when " +
+			"the provider gains a second site between their reads); when ZERO or TWO-OR-MORE do, which site this series " +
+			"belongs to is ambiguous and the op never guesses — it no-ops cleanly, and the series stays " +
+			"missing_series_site forever, harmlessly (the gap is idempotently re-dispatched and cleanly no-ops " +
+			"every time). SetVisitSeriesSite{seriesKey, site} is the human-facing manual counterpart, letting a " +
+			"person CHOOSE among a provider's live sites when the exactly-one-site rule can't (two-or-more). It " +
+			"is not a way to invent a practicesAt relationship that doesn't exist: site must be one of the " +
+			"series' own provider's live practicesAt sites (ProviderNotAtSite otherwise), so a provider at ZERO " +
+			"sites, or now tombstoned, still needs AssignProviderSite run first. Confinement is the same " +
+			"operator-exempt-only enforce_workplace guard Pause/Resume/EndVisitSeries carry. A no-op if the " +
+			"series already carries a live atSite link — reassigning an already-set site is out of scope. It " +
+			"writes the same atSite link + CreateOnly .siteAssignment guard-aspect batch as " +
+			"BackfillVisitSeriesSite (visitSeriesSiteAssignmentAspectTypeDDL), so two concurrent " +
+			"callers landing on different sites can't both commit — the loser's whole batch rejects. " +
+			"Reads [seriesKey] to liveness-guard the parent for every command.",
 		Script: visitSeriesScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> the series is for (StartVisitSeries; required, validated alive). The caller MUST list it in ContextHint.Reads."},` +
@@ -102,7 +133,8 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			`"intervalDays":{"type":"integer","description":"Days between occurrences (StartVisitSeries; required, positive)."},` +
 			`"startAt":{"type":"string","description":"RFC3339 instant of the first occurrence (StartVisitSeries; required)."},` +
 			`"activeUntil":{"type":"string","description":"RFC3339 instant the series stops re-arming past (StartVisitSeries; optional — absent means no end)."},` +
-			`"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> of an existing series (PauseVisitSeries/ResumeVisitSeries/AdvanceVisitSeries; required, validated alive). The caller MUST list it in ContextHint.Reads."},` +
+			`"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> of an existing series (PauseVisitSeries/ResumeVisitSeries/EndVisitSeries/AdvanceVisitSeries/BackfillVisitSeriesSite/SetVisitSeriesSite; required, validated alive). The caller MUST list it in ContextHint.Reads."},` +
+			`"site":{"type":"string","description":"vtx.building.<NanoID> clinic site the series' visits happen at (SetVisitSeriesSite; required). Must be one of the series' own provider's live practicesAt sites — a building that is not assigned to that provider, or has since been decommissioned, is REJECTED (ProviderNotAtSite), never a silent fall-through. Writes an atSite link (visitseries→building). A no-op if the series already carries one."},` +
 			`"dueFor":{"type":"string","description":"The .progress.nextDueAt deadline this advance is servicing (AdvanceVisitSeries; the playbook supplies row.nextDueAt)."},` +
 			`"occurrenceCount":{"type":"integer","description":"The series' current occurrence count before this advance (AdvanceVisitSeries; the playbook supplies row.occurrenceCount; defaults 0 if omitted)."}},` +
 			`"required":[]}`,
@@ -115,6 +147,7 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"startAt":         "RFC3339 instant of the first occurrence. Seeds .progress.nextDueAt (the first deadline anchors on startAt, not an interval offset).",
 			"activeUntil":     "Optional RFC3339 instant past which the series stops re-arming (clean termination — no cancel op needed). Absent means the series never ends on its own.",
 			"seriesKey":       "Full vtx.visitseries.<NanoID> key of an existing series.",
+			"site":            "Full vtx.building.<NanoID> clinic site key (SetVisitSeriesSite; required, and only there — BackfillVisitSeriesSite resolves the site itself). Validated to be one of the series' own provider's LIVE practicesAt sites (ProviderNotAtSite otherwise), so it names a real, still-operating site the provider actually works at. Writes an atSite link (visitseries→building), which is what keeps the series inside its front desk's world once the provider is tombstoned.",
 			"dueFor":          "The .progress.nextDueAt deadline this AdvanceVisitSeries is servicing. Stored as the new .progress.lastOccurrenceAt and used as the base the next nextDueAt rolls forward from (fixed-grid cadence, immune to dispatch latency).",
 			"occurrenceCount": "The series' occurrence count going into this advance (the visitSeriesDue playbook supplies row.occurrenceCount). Stored back incremented by one; purely informational (not gate-affecting).",
 		},
@@ -155,6 +188,31 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the series is alive, then writes .progress {lastOccurrenceAt: dueFor, " +
 					"nextDueAt: dueFor + 30 days, occurrenceCount:1}. Re-runs cleanly (idempotent in effect — the " +
 					"MarkExpired / reminder-marker idiom).",
+			},
+			{
+				Name:    "BackfillVisitSeriesSite — backfill a missing atSite link (orchestration-internal)",
+				Payload: map[string]any{"seriesKey": "vtx.visitseries.<NanoID>"},
+				ExpectedOutcome: "Validates the series is alive. No-ops cleanly (empty mutations/events) if it " +
+					"already carries a live atSite link. Otherwise resolves its provider LIVE off the withProvider " +
+					"link and looks up that provider's LIVE practicesAt sites (a decommissioned building is " +
+					"skipped): when exactly one comes back, writes the atSite link + the CreateOnly " +
+					".siteAssignment guard aspect, and returns primaryKey as that LINK key (the " +
+					"AssignProviderSite convention — the op's mutations carry no vertex root of their own beyond " +
+					"the series itself); when zero or two-or-more come back, no-ops cleanly rather than guess. " +
+					"Submitted under Weaver's service-actor authority " +
+					"only (the visitSeriesSiteBackfill target); no human/consumer caller.",
+			},
+			{
+				Name:    "SetVisitSeriesSite — a staffer supplies the site BackfillVisitSeriesSite couldn't resolve",
+				Payload: map[string]any{"seriesKey": "vtx.visitseries.<NanoID>", "site": "vtx.building.<NanoID>"},
+				ExpectedOutcome: "Validates the series is alive and (for a non-operator caller) that the actor " +
+					"worksAt a building covering one of the series' provider's LIVE sites. No-ops cleanly if the series " +
+					"already carries a live atSite link — reassigning an already-set site is out of scope. " +
+					"Otherwise validates site is one of that provider's live practicesAt sites (ProviderNotAtSite " +
+					"if not — a decommissioned building is not one), writes the atSite link plus a CreateOnly " +
+					".siteAssignment guard aspect in one atomic " +
+					"batch, and returns primaryKey as that LINK key. Submitted by the operator or front-of-house " +
+					"staff.",
 			},
 		},
 	}
@@ -582,12 +640,15 @@ def vertex_live(key):
     return node != None and not node.isDeleted
 
 def sites_for_provider(provider):
-    # A provider's practicesAt sites — the buildings clinicAppointmentsRead
-    # anchors its workplace read token on, so write confinement and read
-    # confinement resolve through exactly the same edge. provider may be None
-    # (a series whose withProvider link is absent), which yields []. ALL sites
-    # are returned: staff at any one of a provider's buildings are equally
-    # entitled to that provider's series.
+    # A provider's LIVE practicesAt sites — the buildings visitSeriesRead anchors
+    # its workplace read token on, so write confinement and read confinement
+    # resolve through exactly the same edge, and now with exactly the same
+    # liveness. provider may be None (a series whose withProvider link is
+    # absent), which yields []. ALL live sites are returned: staff at any one of
+    # a provider's buildings are equally entitled to that provider's series.
+    #
+    # Three things are screened, and each catches what the others cannot.
+    #
     # The provider VERTEX, not just a non-None key: TombstoneProvider
     # soft-deletes it with no cascade onto practicesAt, so a dead provider would
     # otherwise still hand back the sites it no longer practises at.
@@ -601,8 +662,36 @@ def sites_for_provider(provider):
     spage, _ = kv.Links(provider, "practicesAt", "out")
     sites = []
     for lk in spage:
-        if not lk.isDeleted:
-            sites.append(lk.targetVertex)
+        # The LINK: RemoveProviderSite tombstones it rather than deleting it, so
+        # a withdrawn assignment must be skipped explicitly.
+        if lk.isDeleted:
+            continue
+        # The link's TARGET BUILDING, which is where this diverges from
+        # clinic-domain's same-named helper — deliberately, and it is the tighter
+        # side of the divergence its own doc records ("this walk additionally
+        # drops a tombstoned BUILDING, which sites_for_provider does not").
+        # TombstoneLocation soft-deletes a building with no cascade onto
+        # practicesAt, so a decommissioned site otherwise stays in this list.
+        #
+        # It is load-bearing here in a way it is not for a pure confinement
+        # helper, because this list is ALSO the whitelist SetVisitSeriesSite
+        # validates its caller-chosen site against and the candidate set
+        # BackfillVisitSeriesSite picks its exactly-one site from. A dead
+        # building left in it would be settable — and an atSite link pointing at
+        # a tombstoned building is worse than none at all: the read model's own
+        # atSite comprehension drops a tombstoned vertex, so the link confers NO
+        # workplace anchor (the exact stranding this whole mechanism exists to
+        # prevent), while series_site() sees a LIVE LINK and makes both site ops
+        # permanently no-op, and the missing_series_site gap cannot re-open
+        # either, since its own OPTIONAL MATCH drops the dead target the same
+        # way. Unrecoverable, from one write. So the read happens here, once, in
+        # the single place both ops derive their sites from.
+        #
+        # Bounded: one vertex_live read per surviving link, off an enumeration
+        # already bounded to a provider's handful of sites.
+        if not vertex_live(lk.targetVertex):
+            continue
+        sites.append(lk.targetVertex)
     return sites
 
 def series_provider(series_key):
@@ -617,6 +706,24 @@ def series_provider(series_key):
         if not lk.isDeleted:
             provider = lk.targetVertex
     return provider
+
+def series_site(series_key):
+    # The site the series' visits happen at, resolved from its OWN atSite link,
+    # or None when it carries none. The presence test both site ops branch on:
+    # neither ever reassigns an already-set site, so a live link means "already
+    # done" and both no-op cleanly on it.
+    # Unlike series_provider this returns on the FIRST live link rather than the
+    # last: at most one is ever written (both writers refuse when one is already
+    # present), so the two are the same answer, and returning early keeps the
+    # walk a single bounded read.
+    # read-posture: (e) relation=atSite epoch=none — a series carries at most one
+    # atSite link, so this is a single bounded enumeration off the series key the
+    # caller has already proven alive, never a keyspace scan.
+    apage, _ = kv.Links(series_key, "atSite", "out")
+    for lk in apage:
+        if not lk.isDeleted:
+            return lk.targetVertex
+    return None
 
 def enforce_workplace(location_keys, what):
     # require_workplace minus the validated-target exemption, for a
@@ -807,6 +914,128 @@ def execute(state, op):
                    "data": {"seriesKey": series_key, "occurredFor": due_for, "nextDueAt": next_due}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": series_key}}
 
+    if ot == "BackfillVisitSeriesSite":
+        # Orchestration-internal: the visitSeriesSiteBackfill target's
+        # missing_series_site gap (visitseries_site.go) dispatches this for a LIVE
+        # series carrying no atSite link. Mirrors clinic-domain's
+        # BackfillAppointmentSite exactly, over this package's own series shape.
+        # No workplace confinement: Weaver's service actor is the only caller
+        # (permissions.go grants it operator-only), and there is no human whose
+        # reach it could exceed.
+        series_key = required_string(p, "seriesKey")
+        _, series_id = parts_of(series_key, "seriesKey", "visitseries")
+        if not vertex_alive(state, series_key):
+            fail("UnknownVisitSeries: " + series_key + " is absent or tombstoned")
+
+        # Already sited — another dispatch already won, or this is a redelivery.
+        # No-op cleanly rather than reject.
+        if series_site(series_key) != None:
+            return {"mutations": [], "events": [], "response": {}}
+
+        sites = sites_for_provider(series_provider(series_key))
+        if len(sites) != 1:
+            # Zero sites (no provider link, or an unassigned/dead one) or
+            # two-or-more (which site this series belongs to is genuinely
+            # ambiguous) — never guess. The series stays missing_series_site
+            # forever, which is harmless: the gap is idempotently re-dispatched
+            # and cleanly no-ops every time. SetVisitSeriesSite is the human
+            # escape hatch for the two-or-more case.
+            return {"mutations": [], "events": [], "response": {}}
+
+        site_key = sites[0]
+        _, site_id = parts_of(site_key, "site", "building")
+        at_site_lnk = "lnk.visitseries." + series_id + ".atSite.building." + site_id
+        mutations = [
+            make_link(at_site_lnk, series_key, site_key, "atSite", "atSite", {}),
+            # The SAME CreateOnly .siteAssignment guard SetVisitSeriesSite
+            # writes, for the same reason. This op is not self-serializing just
+            # because it never chooses between candidates: a provider's site
+            # count can go 1 -> 2 (AssignProviderSite) between this dispatch's
+            # sites_for_provider read and a concurrent SetVisitSeriesSite's, and
+            # then both see no live atSite link and commit DIFFERENT,
+            # non-colliding link keys — two atSite links on one series, breaking
+            # the at-most-one invariant series_site()'s early return and the read
+            # spec's either/or CASE both rest on. The guard's key does not vary
+            # with the chosen site, so CreateOnly on it lets exactly one of the
+            # two batches land. Never a conflict on the ordinary path: this line
+            # is only reached when no live atSite link exists, and the guard is
+            # only ever written alongside one.
+            make_aspect(series_key, "siteAssignment", "visitSeriesSiteAssignment", {}),
+        ]
+        events = [{"class": "clinic.visitSeriesSiteBackfilled", "data": {"seriesKey": series_key, "site": site_key}}]
+        # primaryKey names the LINK key itself (the AssignProviderSite idiom):
+        # the write-footprint reply constraint accepts a mutation's own key or its
+        # 3-segment vertex root, and this op's only mutation is a link, which has
+        # no vertex root of its own.
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": at_site_lnk}}
+
+    if ot == "SetVisitSeriesSite":
+        # The STAFF manual counterpart to BackfillVisitSeriesSite. It closes the
+        # "2+ sites" ambiguity directly (a human picks the right one); a provider
+        # at ZERO sites, or now tombstoned, still needs AssignProviderSite run
+        # first, since the chosen site is hard-validated against that provider's
+        # live practicesAt set below — this is a manual override for CHOOSING
+        # among a provider's live sites, never a way to invent a practicesAt
+        # relationship that doesn't exist.
+        series_key = required_string(p, "seriesKey")
+        _, series_id = parts_of(series_key, "seriesKey", "visitseries")
+        if not vertex_alive(state, series_key):
+            fail("UnknownVisitSeries: " + series_key + " is absent or tombstoned")
+
+        # The provider's live sites do double duty: the confining set, and the
+        # membership whitelist the chosen site must be in. ONE enumeration, so
+        # the site a caller may pick can never be one the guard did not consider.
+        sites = sites_for_provider(series_provider(series_key))
+
+        # Staff-standing workplace confinement, identical to Pause/Resume/End:
+        # operator-exempt only, resolved off the series' OWN withProvider link
+        # (this op carries no provider payload). Run BEFORE any other branch so
+        # an unauthorized caller cannot distinguish an already-sited series from
+        # a site-less one.
+        enforce_workplace(sites, "cannot set the site on visit series " + series_key)
+
+        # Already sited — reassignment is out of scope (the gap this closes is
+        # "the series names no site at all", never "the site is wrong"); no-op
+        # cleanly rather than reject.
+        if series_site(series_key) != None:
+            return {"mutations": [], "events": [], "response": {}}
+
+        site_key = required_string(p, "site")
+        if site_key not in sites:
+            # Membership in the provider's live practicesAt set is the WHOLE
+            # check, and it is sufficient because sites_for_provider screens that
+            # set three ways as it builds it: the provider VERTEX is alive, each
+            # practicesAt LINK is alive, and each target BUILDING is alive. Class
+            # is settled upstream — AssignProviderSite is the only writer of a
+            # practicesAt link and validates its target is a location-domain
+            # building carrying a building class — so every surviving key names a
+            # real, still-operating site. Re-deriving any of that here would add
+            # a second, independently-drifting definition of the same thing, and
+            # the one property a write-time re-derivation could contribute
+            # (liveness NOW rather than at assignment time) is precisely the one
+            # sites_for_provider already reads live.
+            fail("ProviderNotAtSite: site: " + site_key + " is not one of the live sites the provider of " +
+                 series_key + " practicesAt; assign the provider to that site first")
+
+        _, site_id = parts_of(site_key, "site", "building")
+        at_site_lnk = "lnk.visitseries." + series_id + ".atSite.building." + site_id
+        # Two concurrent calls choosing DIFFERENT sites for the same still-
+        # site-less series both pass the no-live-atSite check above and would both
+        # commit a DIFFERENT, non-colliding link key (the target segment varies
+        # with the chosen site) — CreateOnly on the link alone cannot be the lock.
+        # The .siteAssignment aspect exists exactly for this: its key is the SAME
+        # regardless of chosen site, so CreateOnly on it, in the SAME atomic batch
+        # as the link, makes the loser's whole commit reject.
+        mutations = [
+            make_link(at_site_lnk, series_key, site_key, "atSite", "atSite", {}),
+            make_aspect(series_key, "siteAssignment", "visitSeriesSiteAssignment", {}),
+        ]
+        events = [{"class": "clinic.visitSeriesSiteSet", "data": {"seriesKey": series_key, "site": site_key}}]
+        # primaryKey names the LINK key itself, mirroring BackfillVisitSeriesSite.
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": at_site_lnk}}
+
     fail("visitseries DDL: unknown operationType: " + ot)
 `
 
@@ -888,13 +1117,34 @@ RETURN
 // (facet-staff-worlds-design.md §3.5's staffReadGrants).
 //
 // authz_anchors carries the patient's own NanoID plus the WORKPLACE token — the
-// building the series' provider practises at — mirroring
-// clinicAppointmentsReadSpec exactly (clinic-domain/lenses.go): front-desk
-// staff working that building read the row through service-location's
-// staffReadGrants. The workplace half is a pattern COMPREHENSION, not a second
-// array element — a walk that finds no building yields [] rather than a NULL
-// element, which ProtectedAdapter.toStringSlice would reject and fail the
-// whole row's upsert, hiding the series from its own patient too.
+// building the series is seen at — mirroring clinicAppointmentsReadSpec exactly
+// (clinic-domain/lenses.go): front-desk staff working that building read the row
+// through service-location's staffReadGrants.
+//
+// The workplace half has TWO arms, and the CASE picks one or the other, never
+// both. The first is the series' provider's practicesAt sites — the same edge
+// enforce_workplace resolves for the WRITE side, so read and write confinement
+// agree. The second is the series' OWN atSite building (visitseries_site.go),
+// and it is what carries a series whose provider was later tombstoned, or
+// unassigned from every site by RemoveProviderSite: Contract #1 filters a
+// tombstoned vertex out of every graph walk, so pr binds null and the
+// practicesAt comprehension yields nothing — with no fallback the row would keep
+// only its patient self-anchor and drop out of every front-desk world, leaving a
+// live standing cadence readable by the reserved WildcardAnchor holder alone.
+// atSite is trustworthy on its own account: BackfillVisitSeriesSite and
+// SetVisitSeriesSite each write it only after checking the building is one of
+// the provider's live practicesAt sites at write time, so it names a real site
+// independent of the provider's current status. Because the arms are exclusive,
+// a series whose live provider practises at the very site it is held at carries
+// that building's token once, not twice.
+//
+// Each arm is a pattern COMPREHENSION, not a bare array element, and the
+// difference is load-bearing: a walk that finds no building yields a NULL
+// element, which ProtectedAdapter.toStringSlice rejects — failing the whole
+// row's upsert, so a series reaching neither a practicesAt site nor an atSite
+// building would vanish for its own patient too. A comprehension yields []
+// instead. A missing building must cost a row its staff visibility, never its
+// existence.
 //
 // forPatient is a REQUIRED match (the anchor walk) so a series with no
 // patient link projects NO row — fail-closed, mirroring
@@ -989,7 +1239,10 @@ RETURN
   END AS series_status,
   NOT ((s.paused.data.value <> true) AND (s.series.data.activeUntil <> null) AND (s.progress.data.nextDueAt > s.series.data.activeUntil))
                                  AS series_endable,
-  [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+  [nanoIdFromKey(p.key)]
+    + (CASE WHEN (pr)-[:practicesAt]->(pb:building)
+            THEN [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+            ELSE [(s)-[:atSite]->(sb:building) | nanoIdFromKey(sb.key)] END)
                                  AS authz_anchors
 `
 
@@ -1019,21 +1272,39 @@ func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 	}
 }
 
-// visitSeriesPermissions grants the five visit-series ops at scope=any.
+// visitSeriesPermissions grants the seven visit-series ops at scope=any.
 // StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / EndVisitSeries — the
 // four ops the front-desk Follow-ups tab submits (cmd/clinic-app/web/app.js) —
-// also grant `frontOfHouse`: the script's standing workplace guard confines a non-operator
+// plus SetVisitSeriesSite also grant `frontOfHouse`: the script's standing workplace guard confines a non-operator
 // caller to a series whose provider practises at a building it worksAt (mirrors
 // clinic-domain's CreateAppointment / RescheduleAppointment). Unlike those, the
 // guard here is OPERATOR-EXEMPT ONLY — these ops carry no consumer/scope=self
 // grant and no identifiedBy ownership backstop, so a forged authContextTarget ==
 // actor cannot be exempted (see enforce_workplace in visitSeriesScript).
-// AdvanceVisitSeries stays operator-only — it is Weaver's directOp, dispatched
-// under the operator service-actor (the reminder-op idiom), never a front-desk
-// action.
+// SetVisitSeriesSite takes no consumer/patient scope either: the clinic site is a
+// staff correction, not a patient-editable field (clinic-domain's own
+// SetAppointmentSite grant makes the same call). It stops short of that op's
+// third `provider` binder because this package has no provider-self machinery at
+// all — every staff op here is operator-or-workplace, and adding a lone
+// provider-bound leg for the site correction would be a new authority shape, not
+// a mirror.
+// AdvanceVisitSeries and BackfillVisitSeriesSite stay operator-only — both are
+// Weaver's directOps, dispatched under the operator service-actor (the
+// reminder-op idiom), never a front-desk action.
 func visitSeriesPermissions() []pkgmgr.PermissionSpec {
-	frontDeskOps := map[string]bool{startVisitSeriesOp: true, pauseVisitSeriesOp: true, resumeVisitSeriesOp: true, endVisitSeriesOp: true}
-	ops := []string{startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, endVisitSeriesOp, advanceVisitSeriesOp}
+	frontDeskOps := map[string]bool{
+		startVisitSeriesOp: true, pauseVisitSeriesOp: true, resumeVisitSeriesOp: true,
+		endVisitSeriesOp: true, setVisitSeriesSiteOp: true,
+	}
+	operatorNotes := map[string]string{
+		backfillVisitSeriesSiteOp: "Grants the operator the right to submit BackfillVisitSeriesSite operations " +
+			"(orchestration-internal: this package's own visitSeriesSiteBackfill directOp playbook, dispatched by " +
+			"Weaver's service actor for a live series carrying no atSite link — the AdvanceVisitSeries grant idiom).",
+	}
+	ops := []string{
+		startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, endVisitSeriesOp,
+		setVisitSeriesSiteOp, advanceVisitSeriesOp, backfillVisitSeriesSiteOp,
+	}
 	perms := make([]pkgmgr.PermissionSpec, 0, len(ops))
 	for _, op := range ops {
 		if frontDeskOps[op] {
@@ -1047,18 +1318,22 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 			})
 			continue
 		}
+		note, ok := operatorNotes[op]
+		if !ok {
+			note = "Grants the operator the right to submit " + op + " operations (clinic recurring visit series)."
+		}
 		perms = append(perms, pkgmgr.PermissionSpec{
 			OperationType: op,
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit " + op + " operations (clinic recurring visit series).",
+			Note:          note,
 			GrantsTo:      []string{"operator"},
 		})
 	}
 	return perms
 }
 
-// visitSeriesOpMetas makes the five visit-series ops forOperation-resolvable and
-// gives the four a human triggers a full descriptor — the form, the field help,
+// visitSeriesOpMetas makes the seven visit-series ops forOperation-resolvable and
+// gives the five a human triggers a full descriptor — the form, the field help,
 // and the submission recipe (edge-showcase-app-design.md §3.3).
 //
 // Complete metadata is not the same as a rendered button: a client also has to
@@ -1069,7 +1344,7 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // (cmd/facet/staff.go's /api/staff/worklist, reading visitSeriesRead below),
 // never from a manifest.ent row.
 //
-// All four are AuthContext "standing": permissions.go grants them scope=any to
+// All five are AuthContext "standing": permissions.go grants them scope=any to
 // operator + frontOfHouse, so the caller's authority is a standing role rather
 // than a relationship to the target, and the client sends no authContext object
 // at all (OpDispatchSpec.AuthContext's fourth case). Idiom: clinic-domain's
@@ -1094,10 +1369,14 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // caller cannot know in advance, which is why the read posture sanctions it
 // live rather than declared. The one guard key a caller CAN derive, the
 // per-(patient, provider) dedup pointer, is declared optional: it is absent on a
-// first series, so requiring it would fail the common case.
+// first series, so requiring it would fail the common case. SetVisitSeriesSite
+// declares the series vertex alone — its `site` is validated by membership in a
+// class-(e) walk, not by a read of the building itself, so unlike clinic-domain's
+// SetAppointmentSite it has no second key to declare.
 //
-// AdvanceVisitSeries stays a bare meta. Weaver re-arms a due series through it;
-// no human triggers it, so it owes no descriptor.
+// AdvanceVisitSeries and BackfillVisitSeriesSite stay bare metas. Weaver re-arms
+// a due series through the first and backfills a missing site through the second;
+// no human triggers either, so neither owes a descriptor.
 func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -1211,6 +1490,41 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_endable", Equals: true},
 			},
 		},
+		{
+			OperationType: setVisitSeriesSiteOp,
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set visit series site",
+				Description: "Record which clinic site a recurring visit series is seen at.",
+				Icon:        "map-pin",
+				Tone:        "primary",
+				SubmitLabel: "Set site",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> to site — auto-filled from the series being viewed."},` +
+				`"site":{"type":"string","title":"Site","x-entityRef":"building","description":"vtx.building.<NanoID> clinic site this series is seen at."}},` +
+				`"required":["seriesKey","site"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The series being sited — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered.",
+				"site":      "The clinic site these visits happen at. Must be a site the series' provider practises at. No-op if the series already has a site; the site cannot be changed afterwards.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       visitSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  visitSeriesVertexDDL,
+				// The series vertex alone. Unlike clinic-domain's
+				// SetAppointmentSite, `site` is NOT declared: this op validates
+				// it by membership in the provider's live practicesAt set — a
+				// class-(e) walk off a data-derived hub — rather than by a
+				// direct read of the building document, so there is no
+				// site-keyed read to declare.
+				Reads: []string{"{payload.seriesKey}"},
+			},
+		},
 		{OperationType: advanceVisitSeriesOp},
+		// Weaver's own site-backfill directOp. Bare, exactly like
+		// AdvanceVisitSeries above: no human triggers it, so it owes no
+		// descriptor — only forOperation resolvability.
+		{OperationType: backfillVisitSeriesSiteOp},
 	}
 }

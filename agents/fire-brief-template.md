@@ -50,8 +50,15 @@ stops being walked). The builder walks it before the first edit; the reviewers w
 1. **New state needs a LIFETIME, not a data structure** — before building any registry / cache / latch /
    watch / accumulated set, write its state table: created / reset / carried / ordered at every boundary
    (crash, replay, reconnect, tombstone, upgrade). "Track it as we go" names a mechanism where a rule belongs.
-2. **Every census is a premise** — re-run any stated count live before relying on it, and write predicates
-   over the enumerated state table, never one clause over a multi-shape set.
+2. **Every census is a premise — and so is every CITATION, especially a negative one.** Re-run any stated
+   count live before relying on it, and write predicates over the enumerated state table, never one clause
+   over a multi-shape set. A design's grounding-ledger row citing vendor source is a premise too: read the
+   cited lines *and their callers* in the pinned version before building on them. A ledger row asserting
+   something does NOT happen is the dangerous shape — it is proved by an absence, and an absence is
+   exactly what a citation list can miss (2026-08-28: a row claimed a NATS restart strands a Nak'd
+   population because the redelivery timer is never re-armed; its citations missed the arming site one
+   call earlier in the same function, a cold reviewer then escalated the false premise into a false
+   deadlock, and only a build-time measurement against the pinned server caught it).
 3. **A negative test needs its positive vector proven first**, and every fix is proven by reverting it and
    watching its test fail — a test that passes with the mechanism disabled pins nothing.
 4. **Removal needs a transport AND an observer, and a demoted mechanism needs EVERY obligation

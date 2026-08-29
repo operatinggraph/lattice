@@ -2440,8 +2440,8 @@ def claim_cell(hub, cellcode, cls, conflict_code, who):
     # key with revision 0 commits exactly once — the loser's whole batch rejects
     # (RevisionConflict), the Processor retries, and the retry's kv.Read now sees the
     # winner's live cell and fails closed.
-    # read-posture: (d) declared in contextHint.optionalReads by CreateAppointment /
-    # RescheduleAppointment's dispatcher (cmd/clinic-app/web/app.js slotClaimKeys)
+    # read-posture: (d) optionalReads — derived server-side by this script's
+    # own derive_reads(op) for CreateAppointment/RescheduleAppointment.
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
         fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
@@ -2498,6 +2498,57 @@ def release_cells_mutations(provider, patient, sched):
         out.append(make_tombstone(provider + ".slot" + cc))
         out.append(make_tombstone(patient + ".slot" + cc))
     return out
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g). CreateAppointment/RescheduleAppointment's
+    # providerSlotClaim/patientSlotClaim cells are entirely a function of the
+    # payload (provider/patient/startsAt/endsAt — both required on both ops,
+    # unlike wellness's ReassignSession, which this pattern deliberately does
+    # NOT extend to: see wellness-domain/ddls.go's derive_reads doc comment),
+    # so the caller no longer has to declare them (cmd/clinic-app/web/app.js's
+    # book-submit and reschedule-submit paths stop computing them in the same
+    # change — slotClaimKeys/slotCells/slotCellCode themselves stay, still used
+    # by the unrelated cross-app CreateBooking submit). Mirrors this script's
+    # own slot_cells/slot_cellcode exactly.
+    #
+    # RescheduleAppointment's OLD cells need no declaration at all: the script
+    # releases them via an unconditioned tombstone (release_cells_mutations
+    # above), never a kv.Read, and its required .schedule read (already
+    # declared statically) is what lets execute() recompute them server-side.
+    # Only the NEW span's cells ever reach claim_cell's kv.Read, so declaring
+    # the full new-span set (a superset of to_claim) is exact, not merely safe.
+    ot = op.operationType
+    if ot != "CreateAppointment" and ot != "RescheduleAppointment":
+        return {}
+    p = op.payload
+    # optional_string, never required_string: a malformed/empty/whitespace-only
+    # field derives nothing rather than faulting the pre-pass — execute()'s own
+    # required_string still raises the real InvalidArgument (objects-base's
+    # derive_reads sets this precedent).
+    provider = optional_string(p, "provider")
+    patient = optional_string(p, "patient")
+    starts_at_raw = optional_string(p, "startsAt")
+    ends_at_raw = optional_string(p, "endsAt")
+    if provider == None or patient == None or starts_at_raw == None or ends_at_raw == None:
+        return {}
+    starts_at = time.rfc3339_utc(starts_at_raw)
+    ends_at = time.rfc3339_utc(ends_at_raw)
+    if not (starts_at < ends_at):
+        return {}
+    # slot_cells fails (AppointmentTooLong) past MAX_SLOT_CELLS -- bounding by
+    # the identical 24h ceiling and returning {} defers that rejection to
+    # execute()'s own clean error, mirroring wellness-domain's derive_reads.
+    if ends_at > time.rfc3339_add(starts_at, "24h"):
+        return {}
+    cells = slot_cells(starts_at, ends_at)
+    keys = []
+    for c in cells:
+        cc = slot_cellcode(c)
+        keys.append(provider + ".slot" + cc)
+        keys.append(patient + ".slot" + cc)
+    if len(keys) == 0:
+        return {}
+    return {"optionalReads": keys}
 
 def execute(state, op):
     ot = op.operationType
@@ -2995,7 +3046,7 @@ def execute(state, op):
         # read-posture: (a) declared in contextHint.reads — unlike
         # SetAppointmentStatus's human dispatcher, this op's only caller (the
         # pastDueAppointments playbook) always needs this read, so it is required,
-        # not optional (Weaver's directOp carries no OptionalReads channel).
+        # not optional: absence here is a correctness error, not a branch.
         cur_status = kv.Read(appt_key + ".status")
         if cur_status != None and not cur_status.isDeleted:
             cur_val = cur_status.data.get("value")

@@ -81,7 +81,9 @@ const (
 	// because each validates its own subject's vertex type and carries its own
 	// step vocabulary — the identity plane finalizes a row-nullify, the class
 	// plane a lens rebuild.
-	opRecordShredFinalization               = "RecordShredFinalization"
+	// op-name: (submits) the worker submits this after destroying an identity's Vault key, recording the vaultKeyDestroyed step
+	opRecordShredFinalization = "RecordShredFinalization"
+	// op-name: (submits) the worker submits this after destroying a retention class's Vault key, recording the vaultKeyDestroyed step
 	opRecordRetentionClassShredFinalization = "RecordRetentionClassShredFinalization"
 
 	defaultRedeliveryDelay = 5 * time.Second

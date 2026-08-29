@@ -509,6 +509,45 @@ function loadDescriptorform() {
   return descriptorformPromise;
 }
 
+// revealCeremonySecret narrates, in this app's toast vocabulary, whatever the
+// module's own revealCeremonySecret did with a minted plaintext. The DECISION
+// — descriptorform's ceremony rule 3, an affirmative `status === "accepted"`
+// and never the weaker "not rejected" — is the module's, so all four staff
+// apps enforce one implementation of it rather than four re-derivations of
+// "does this reply confirm the write landed?". Two of them do not: a
+// `duplicate` reply says an earlier submission claimed this requestId, and a
+// Processor reply timeout answers a status-less HTTP 202, and neither
+// confirms the envelope carrying this secret's hash committed.
+//
+// It reads the already-resolved descriptorformModule rather than awaiting
+// loadDescriptorform() again. Holding a reveal means a form rendered, which
+// means the module is loaded — so the await would buy nothing, and could only
+// invent a way to lose the single copy of the secret in the window between
+// the write landing and its display.
+function revealCeremonySecret(reveal, reply) {
+  // Nothing was minted for an ordinary op, so the module is never reached for
+  // one — its absence must not surface as a lost-secret warning.
+  if (!reveal) return;
+  let outcome;
+  try {
+    outcome = descriptorformModule.revealCeremonySecret(reveal, reply);
+  } catch (e) {
+    // Contained, and reported as a landed write, because the only thing that
+    // can throw in there is the display, which the module reaches only on a
+    // confirmed commit. Every caller runs this inside the same try whose catch
+    // reports the submission as failed, so an uncaught throw would tell the
+    // person the opposite of what happened and hide the fact that matters —
+    // the target is armed with a secret nobody now holds, which is only
+    // fixable by issuing a fresh one.
+    console.error("ceremony reveal failed", e);
+    toast("The write landed but its one-time secret could not be shown — issue a fresh one.", "err");
+    return;
+  }
+  if (outcome === "withheld") {
+    toast("The write was not confirmed, so its one-time secret was not shown — check whether it landed, and issue a fresh one.", "err");
+  }
+}
+
 // submitCatalogOp posts the envelope a descriptorform handle's submit()
 // returns — {operationType, class, payload, reads, optionalReads,
 // authContext} — unchanged, browser-direct to the Gateway's POST
@@ -1074,9 +1113,9 @@ async function submitAssignProviderSite() {
   const btn = $("#assign-site-submit");
   btn.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), "err");
       return;
@@ -1087,6 +1126,7 @@ async function submitAssignProviderSite() {
       toast("Could not assign provider to site — " + msg, "err");
       return;
     }
+    revealCeremonySecret(reveal, reply);
     toast("Provider assigned to site.", "ok");
     renderAssignSiteForm();
     setTimeout(loadSites, 700);
@@ -1187,9 +1227,9 @@ async function saveProviderEdit() {
   const btn = $("#edit-prov-save");
   btn.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), "err");
       return;
@@ -1200,6 +1240,7 @@ async function saveProviderEdit() {
       toast("Could not save provider details — " + msg, "err");
       return;
     }
+    revealCeremonySecret(reveal, reply);
     toast("Provider details saved.", "ok");
     // Refresh the roster so the picker label (name · specialty) reflects the
     // edit; the selection is preserved, so renderProviderEditForm keeps the
@@ -1358,9 +1399,9 @@ async function submitAddProvider() {
   const btn = $("#add-provider-submit");
   btn.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), "err");
       return;
@@ -1371,6 +1412,7 @@ async function submitAddProvider() {
       toast("Could not add provider — " + msg, "err");
       return;
     }
+    revealCeremonySecret(reveal, reply);
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     $("#add-provider").open = false;
     toast("Provider added.", "ok");
@@ -2305,13 +2347,11 @@ async function submitBook(ev) {
   try {
     // The op claims a deterministic slot-claim aspect per covered 15-minute grid
     // cell on both the provider and patient hubs — the write-path key collision at
-    // commit IS the double-book lock (SlotConflict / PatientDoubleBook), so no
-    // per-hub OCC epoch needs to be declared here. Each covered cell's slot-claim
-    // key is (d)-declared optionalReads (claim_cell, ddls.go — absence is the
-    // common no-existing-booking case; script-read-posture-design.md §13).
-    const optionalReads = slotClaimKeys(provider, startsAt, endsAt).concat(
-      slotClaimKeys(state.patient, startsAt, endsAt),
-    );
+    // commit IS the double-book lock (SlotConflict / PatientDoubleBook). Those
+    // cell keys are no longer declared here: the DDL's own derive_reads(op)
+    // (packages/clinic-domain/ddls.go) computes them server-side from this same
+    // payload (Contract #2 §2.5 class (g)).
+    const optionalReads = [];
     // Site membership (Increment 2): both reads require_site_membership makes
     // are (d)-declared optionalReads — the site is itself optional, so neither
     // can be a required contextHint.reads entry.
@@ -3031,10 +3071,11 @@ async function submitLedgerEntry(opType, what, reason) {
     }
     const handle = renderOpForm(row, context, document.createElement("div"));
     if (!handle) throw new Error("this action is unavailable");
-    const envelope = handle.submit();
+    const { envelope, reveal } = await handle.submit();
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) throw new Error(msg);
+    revealCeremonySecret(reveal, reply);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
     amountInput.value = "";
     memoInput.value = "";
@@ -3364,9 +3405,9 @@ async function submitStartSeries() {
   const submit = $("#series-start-submit");
   submit.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), "err");
       return;
@@ -3377,6 +3418,7 @@ async function submitStartSeries() {
       toast(msg, "err");
       return;
     }
+    revealCeremonySecret(reveal, reply);
     toast("Recurring visit series started.", "ok");
     $("#start-series").open = false;
     state.startSeriesPatient = undefined; // force a fresh draft on next render
@@ -3877,16 +3919,18 @@ function renderApptCard(a, opts) {
 
   // The clinical note itself, when the signed-in actor is entitled to read it
   // back (state.myEncounters, populated by loadMyEncounters from the
-  // PROTECTED, provider-self-or-WildcardAnchor /api/my-encounters). Gated on
-  // a.documentedAt && !opts.asSelf — a patient's own self-service card
-  // (opts.asSelf) never shows clinical content, only the "documented"
-  // presence signal above; the Document-visit button below is gated
-  // separately (opts.cancelable && !opts.asSelf && status === completed). An
-  // appointment this reader is not granted for simply has no entry in the
-  // map, which renders as nothing here — never an error, since RLS's silence
-  // is not a failure.
+  // PROTECTED, provider-self-or-patient-self-or-WildcardAnchor
+  // /api/my-encounters). The patient's own self-service card (opts.asSelf)
+  // renders the note the same way the provider's card does — the backend's
+  // authz_anchors already scopes state.myEncounters to what this actor may
+  // see (clinicEncountersReadSpec, packages/clinic-domain/lenses.go), so no
+  // separate FE suppression is needed. The Document-visit button below is
+  // still gated separately (opts.cancelable && !opts.asSelf && status ===
+  // completed). An appointment this reader is not granted for simply has no
+  // entry in the map, which renders as nothing here — never an error, since
+  // RLS's silence is not a failure.
   let noteBlock = null;
-  const note = a.documentedAt && !opts.asSelf ? state.myEncounters[a.appointmentKey] : null;
+  const note = a.documentedAt ? state.myEncounters[a.appointmentKey] : null;
   if (note) {
     // A crypto-shredded record (ShredRetentionClassKey on the clinicalRecord
     // retention class) still projects a row — documentedAt survives, but
@@ -4190,12 +4234,9 @@ async function submitReschedule(ev) {
     // read-posture (a): the appointment's current .schedule (required to compute
     // released/claimed cells) + the withProvider/forPatient endpoint-validation
     // links (require_matching_provider/patient, ddls.go) — script-read-posture-
-    // design.md §13. The new interval's slot-claim keys are (d) optionalReads
-    // (claim_cell; an over-declare of cells already held across the move is
-    // harmless — the script only reads what claim_cell actually calls kv.Read on).
-    const optionalReads = slotClaimKeys(a.providerKey, startsAt, endsAt).concat(
-      slotClaimKeys(a.patientKey, startsAt, endsAt),
-    );
+    // design.md §13. The new interval's slot-claim keys are no longer declared
+    // here: the DDL's own derive_reads(op) (packages/clinic-domain/ddls.go)
+    // computes them server-side from this same payload (Contract #2 §2.5 class (g)).
     const reply = await submitOp(
       "RescheduleAppointment",
       "appointment",
@@ -4206,7 +4247,7 @@ async function submitReschedule(ev) {
         "lnk.appointment." + bareId(a.appointmentKey) + ".withProvider.provider." + bareId(a.providerKey),
         "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
       ],
-      { optionalReads, asSelf },
+      { asSelf },
     );
     const msg = rejectionMessage(reply);
     if (msg) {

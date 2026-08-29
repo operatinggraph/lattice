@@ -32,6 +32,11 @@
 //	lens visitSeriesDue (weaver-target, full)  (freshUntil = .progress.nextDueAt; re-arms forward on every advance, never converges to a permanent close)
 //	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
 //
+//	lnk.visitseries.<id>.atSite.building.<id>  (the site the visits happen at — visitseries_site.go)
+//	op BackfillVisitSeriesSite{seriesKey} / SetVisitSeriesSite{seriesKey, site}
+//	lens visitSeriesSiteBackfill (weaver-target, full)  (missing_series_site — a MISSING RELATIONSHIP, not a deadline)
+//	playbook missing_series_site → directOp(BackfillVisitSeriesSite, seriesKey: row.entityKey)
+//
 //	op MarkPastDueNoShow{appointmentKey}  (clinic-domain — this package's ONLY caller; writes .status{noShow} + releases cells)
 //	lens pastDueAppointments (weaver-target, full)  (freshUntil = .schedule.endsAt DIRECTLY; status non-terminal AND endsAt <= $now gate; pastdue.go)
 //	playbook missing_noshow_transition → directOp(MarkPastDueNoShow, appointmentKey: row.entityKey)
@@ -70,7 +75,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.10.3",
+	Version: "0.10.4",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
@@ -80,7 +85,12 @@ var Package = pkgmgr.Definition{
 		"to a permanent close); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +
 		"clinic-domain's .schedule.endsAt (no derived deadline) and dispatches clinic-domain's MarkPastDueNoShow " +
 		"once a non-terminal appointment's endsAt passes with no staff status update — the §10.8 playbooks dispatch " +
-		"each gap's directOp. Inverts lease-signing's freshness re-open. Both reminder ops also fire " +
+		"each gap's directOp. Inverts lease-signing's freshness re-open. A series also records the clinic site " +
+		"it is seen at as an atSite link (visitseries→building) — the staff-visibility anchor visitSeriesRead " +
+		"falls back to once the series' provider is tombstoned and the practicesAt walk yields nothing — " +
+		"backfilled by the visitSeriesSiteBackfill convergence lens's BackfillVisitSeriesSite directOp when the " +
+		"provider practises at exactly one site, and set by hand with SetVisitSeriesSite when it does not. Both " +
+		"reminder ops also fire " +
 		"external.notification off their own outbox to the bridge's \"notification\" adapter; " +
 		"RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record the outcome. Depends " +
 		"clinic-domain + orchestration-base.",

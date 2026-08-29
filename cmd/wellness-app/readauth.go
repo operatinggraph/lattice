@@ -13,6 +13,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // Every wellness lens but one is plain NATS-KV (P5) — the read boundary for
@@ -45,6 +46,13 @@ const instructorKeyPrefix = "vtx.instructor."
 // substituted literal.
 func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
 
+// frontOfHouseRoleKey is identity-domain's `frontOfHouse` role's VERTEX
+// KEY — a pure, install-independent derivation, mirroring cmd/cafe-app's
+// own frontOfHouseRoleKey.
+func frontOfHouseRoleKey() string {
+	return "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
+}
+
 // errNoSession marks the caller having no usable session, as distinct from
 // this app being unable to resolve one. The two must not be conflated at the
 // handler: a 401 tells the FE the session is over and it navigates to /login
@@ -72,12 +80,13 @@ func (s *server) authenticateRead(r *http.Request) (string, error) {
 }
 
 // subjectHats is the caller's read-boundary role, resolved from the signed-in
-// session. workplaces holds the location keys the caller `worksAt` — a staffer
-// reads the rosters those locations cover and no others; instructorKey is the
-// vtx.instructor entity an `identifiedBy` anchor binds this login to, empty for
-// everyone else — an instructor sees the roster of the sessions they lead and
-// no others. Neither is set for a plain member, who is scoped to their own
-// bookings.
+// session. workplaces holds the location keys the caller `worksAt` — a
+// front-desk staffer reads the rosters those locations cover and no others,
+// the workplace being one half of isFrontDesk rather than the whole answer;
+// instructorKey is the vtx.instructor entity an `identifiedBy` anchor binds
+// this login to, empty for everyone else — an instructor sees the roster of
+// the sessions they lead and no others. Neither is set for a plain member, who
+// is scoped to their own bookings.
 type subjectHats struct {
 	identityID    string
 	workplaces    []string
@@ -87,12 +96,28 @@ type subjectHats struct {
 	// ddls.go), so the read side does too: break-glass admin that can schedule
 	// a class at any building must be able to see who is in it.
 	isOperator bool
+	// frontOfHouse marks the `frontOfHouse` role, the conjunct isFrontDesk
+	// composes with a workplace — see isFrontDesk's own comment. Orthogonal
+	// to instructorKey: an instructor's own-class roster access needs no
+	// front-desk role at all.
+	frontOfHouse bool
 }
 
-// isStaff reports whether the caller carries any workplace at all. It answers
-// "is this a staff surface" — NOT "may this staffer read this row", which is
-// covers()'s question. A staff surface still has to name which rows.
+// isStaff reports whether the caller carries any workplace at all — a
+// structural fact, NOT an authorization answer; every front-desk-only
+// surface (roster, member directory, another member's ledger) gates on
+// isFrontDesk, below, OR'd with instructorKey where a bound instructor also
+// has standing access to their own sessions.
 func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
+
+// isFrontDesk reports whether the caller may use wellness-app's front-desk
+// surfaces — the app-side mirror of the write side's own definition
+// (wellness-domain/permissions.go's `GrantsTo: [operator, frontOfHouse]`
+// rows and service-location's `cap-read.staff` grant lens, both requiring
+// `worksAt` AND `holdsRole frontOfHouse`): a worksAt-only caller with no
+// frontOfHouse role holds neither an op grant nor a PII-read grant
+// (verticals-designer-triage-2026-08-27.md §7).
+func (h subjectHats) isFrontDesk() bool { return h.isStaff() && h.frontOfHouse }
 
 // covers reports whether any location the caller works at appears in a row's
 // projected covering set — the read-side mirror of wellness-domain's
@@ -102,6 +127,14 @@ func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
 // set intersection. Fails CLOSED on both empty sides: a caller with no
 // workplace covers nothing, and a row whose topology is unwired is covered by
 // nobody — the denial require_workplace gives an empty location list.
+//
+// Necessary, never sufficient. Like isStaff it is a structural fact, not an
+// authorization answer: reach at a workplace is the FRONT DESK's, so every
+// surface that answers workplace-wide — the roster (mayReadRoster,
+// bookings.go), its picker (computeRosterSessions, sessions.go), the member
+// directory and another member's ledger — conjoins this with isFrontDesk. A
+// caller admitted to those surfaces on the instructor hat instead is scoped by
+// their instructor-key match, whatever workplace they may separately hold.
 func (h subjectHats) covers(coveringLocations []string) bool {
 	for _, loc := range coveringLocations {
 		// Compare the TRIMMED value, not merely test it for emptiness: the
@@ -156,6 +189,13 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		for _, role := range actor.Roles {
 			if strings.TrimSpace(role) == opKey {
 				hats.isOperator = true
+			}
+		}
+	}
+	if fohKey := frontOfHouseRoleKey(); fohKey != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == fohKey {
+				hats.frontOfHouse = true
 			}
 		}
 	}

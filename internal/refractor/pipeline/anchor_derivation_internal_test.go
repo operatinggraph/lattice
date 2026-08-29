@@ -162,11 +162,11 @@ func TestDeriveAnchors_IncompleteIndexRefuses(t *testing.T) {
 	f.vertex("l1", "location")
 	f.edge("residesIn", "alice", "l1")
 
-	// The shipped capabilityServiceAccess shape: containedIn*0.. makes the
-	// index incomplete, so every arm falls back.
+	// An untyped hop cannot be indexed by relation name, so the index is
+	// incomplete and every arm falls back.
 	p := derivationPipeline(t, adjKV, `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc:service)
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[]->(loc)<-[:availableAt]-(svc:service)
 RETURN identity.key AS actorKey, svc.key AS s
 `)
 	rs := p.ruleState()
@@ -246,7 +246,7 @@ func TestShadow_SamplingAndDeclineAreBothCounted(t *testing.T) {
 	f.vertex("alice", "identity")
 	p := derivationPipeline(t, adjKV, `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(l0)-[:containedIn*0..]->(l)
+OPTIONAL MATCH (identity)-[:residesIn]->(l0)-[]->(l)
 RETURN identity.key AS actorKey, l.key AS lk
 `)
 	p.SetAnchorDerivationSampling(1)

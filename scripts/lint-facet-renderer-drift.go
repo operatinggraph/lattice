@@ -121,6 +121,39 @@ var vocabulary = []vocabMember{
 		descriptorSwift: {`!contextParamKeys.contains($0)`, `for (field, template) in contextParams`},
 		formJS:          {`!(name in contextParams)`, `Object.entries(contextParams)`},
 	}},
+	// ceremony: the mint-and-reveal client contract (OpCeremonySpec,
+	// internal/pkgmgr/definition.go) — a runtime that can't perform it must
+	// REFUSE to offer the op rather than fall back to rendering the raw hash
+	// field. Swift is EXEMPT: the facet-swiftui-spike is a shelved macOS-proxy
+	// build with no ceremony-bearing op reachable from its manifest, and
+	// implementing mint/hash/reveal there is unbuilt scope, not a gap this
+	// gate should flag as drift.
+	{name: "ceremony", markers: map[string][]string{
+		appJS:  {`ceremonySupported`},
+		formJS: {`ceremonySupported`},
+	}, exempt: []string{descriptorSwift}},
+	// selfAnchor: the `{me.<type>}` read/contextParams template — the
+	// submitting identity's own vertex of that type, resolved off the
+	// caller's declared selfAnchors. All three renderers carry the case.
+	{name: "selfAnchor", markers: map[string][]string{
+		appJS:           {`expr.startsWith("me.")`},
+		descriptorSwift: {`expr.hasPrefix("me.")`},
+		formJS:          {`expr.startsWith("me.")`},
+	}},
+	// entityColumn: the `{entity.<column>}` template (form.mjs also accepts
+	// the `{context.<field>}` spelling as an alias, same resolution) — a
+	// projected column of the row the form was opened from. Swift is
+	// EXEMPT: `DescriptorContext` (DescriptorForm.swift) carries no row/
+	// entity field at all, and its one production call site
+	// (DescriptorFormSheet.swift) constructs it with only
+	// `actorIdentityKey` — no caller anywhere threads a viewed row in, so
+	// the template could never resolve there regardless of whether a case
+	// existed for it. Unbuilt scope in the shelved macOS-proxy spike, not
+	// new drift.
+	{name: "entityColumn", markers: map[string][]string{
+		appJS:  {`expr.startsWith("entity.")`},
+		formJS: {`expr.startsWith("context.")`, `expr.startsWith("entity.")`},
+	}, exempt: []string{descriptorSwift}},
 }
 
 func main() {

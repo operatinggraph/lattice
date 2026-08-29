@@ -144,11 +144,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab to correct — auto-filled from the tab being viewed."},` +
-				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount to take back off the tab, in whole cents."}},` +
-				`"required":["tabKey","amountCents"]}`,
+				`"lineId":{"type":"string","description":"id of one entry in the tab's own .status.lines to void; its amount is derived from that line, never from amountCents. Leave absent for the legacy amount-only form."},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount to take back off the tab, in whole cents. Ignored when lineId is present; required when it is absent."}},` +
+				`"required":["tabKey"]}`,
 			FieldDescriptions: map[string]string{
 				"tabKey":      "The tab being corrected — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
-				"amountCents": "How much to take back off the tab, entered in dollars — e.g. 4.50. A void larger than the running total clamps the tab to zero rather than failing.",
+				"lineId":      "The id of the specific charge line to void, from the tab's own .status.lines — its amount is derived from that line, ignoring amountCents. Omit to fall back to the legacy amount-only void.",
+				"amountCents": "How much to take back off the tab, entered in dollars — e.g. 4.50. Required only when lineId is absent. A void larger than the running total clamps the tab to zero rather than failing.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "tab",

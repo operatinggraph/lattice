@@ -175,8 +175,8 @@ type ConsumerSpec struct {
 	// NakWithDelay. Zero falls back to DefaultRedeliveryDelay.
 	RedeliveryDelay time.Duration
 	// LongRedeliveryDelay is the floor applied when the handler returns
-	// NakWithLongDelay. Zero falls back to DefaultLongRedeliveryDelay, floored
-	// at the effective RedeliveryDelay.
+	// NakWithLongDelay. Zero falls back to DefaultLongRedeliveryDelay; a
+	// configured value below DefaultRedeliveryDelay is raised to it.
 	LongRedeliveryDelay time.Duration
 	// ProbeInterval is the delay between Probe attempts during an infra pause.
 	// Zero falls back to DefaultProbeInterval.

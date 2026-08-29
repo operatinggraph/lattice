@@ -244,6 +244,7 @@ func orderSubmittingActorLast(ops []internalbootstrap.RevocationOp, actor string
 }
 
 func isSelfRevokeRole(op internalbootstrap.RevocationOp, actor string) bool {
+	// op-name: (policy) the verb whose self-targeted instance orderSubmittingActorLast defers to the end of the run, so revoking the submitter's own edge never cuts off its authorization mid-batch pin=TestIsSelfRevokeRole
 	if op.OperationType != "RevokeRole" {
 		return false
 	}
@@ -329,6 +330,7 @@ func linkIsLive(ctx context.Context, kv jetstream.KeyValue, key string) (bool, e
 // nothing here: only grants have a declaring package to recommend
 // reinstalling.
 func recordIfGrant(op internalbootstrap.RevocationOp, revokedPermKeys *[]string) {
+	// op-name: (policy) the verb that carries a permKey resolving to an owning package, so only its revocations reach printReinstallRecommendations — a RevokeRole has no package to recommend pin=TestRecordIfGrant
 	if op.OperationType != "RevokePermission" {
 		return
 	}

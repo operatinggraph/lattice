@@ -377,15 +377,18 @@ func Lenses() []pkgmgr.LensSpec {
 			// declaring the destroyed holder's type and rebuilds it, which is why
 			// HolderTypes is the load-bearing declaration and not documentation.
 			//
-			// PROVIDER-anchored, mirroring providerAppointmentsRead exactly:
-			// withProvider is the REQUIRED anchor walk (an appointment with no
-			// provider projects no row — fail-closed, never a null authz_anchor) and
-			// authz_anchors carries the provider's own bare NanoID, which
-			// clinicProviderReadGrants already produces. No workplace token: unlike
-			// the appointment schedule, the clinical note is not front-desk material,
-			// so the row reaches the treating provider and a WildcardAnchor holder
-			// only. forPatient stays OPTIONAL and contributes patient_key alone —
-			// the patient's NAME is deliberately absent, so the plaintext note does
+			// PROVIDER-and-PATIENT-anchored: withProvider is the REQUIRED anchor
+			// walk (an appointment with no provider projects no row — fail-closed,
+			// never a null authz_anchor) and authz_anchors carries the provider's
+			// own bare NanoID, which clinicProviderReadGrants already produces, OR
+			// the appointment's own patient self-anchor — mirroring
+			// clinicAppointmentsReadSpec's patient self-anchor precedent (same
+			// file), not providerAppointmentsRead, which stays provider-only. No
+			// workplace token: unlike the appointment schedule, the clinical note
+			// is not front-desk material, so the row reaches the treating
+			// provider, the patient themselves, and a WildcardAnchor holder only.
+			// forPatient stays OPTIONAL and contributes patient_key alone — the
+			// patient's NAME is deliberately absent, so the plaintext note does
 			// not sit beside an identifier in a second table; a reader that needs it
 			// joins read_provider_appointments on appointment_id.
 			//
@@ -983,11 +986,20 @@ RETURN
   [nanoIdFromKey(pr.key)]                AS authz_anchors
 `
 
-// clinicEncountersReadSpec is the PROVIDER-anchored protected Postgres read
-// model's cypher for the clinical record itself — the only projection of
-// .encounter's content anywhere. withProvider is REQUIRED (the anchor walk),
-// forPatient is OPTIONAL and display-only, exactly as providerAppointmentsRead
-// splits them.
+// clinicEncountersReadSpec is the PROVIDER-and-PATIENT-anchored protected
+// Postgres read model's cypher for the clinical record itself — the only
+// projection of .encounter's content anywhere. withProvider stays the
+// REQUIRED anchor walk (an appointment with no provider projects no row,
+// fail-closed), exactly as providerAppointmentsRead splits it. forPatient
+// stays an OPTIONAL MATCH feeding the display column patient_key, but
+// authz_anchors now ALSO walks forPatient via its own pattern comprehension,
+// so a patient can read their own note without that walk needing to have
+// populated the display column any particular way. The comprehension form
+// (not a bare `[nanoIdFromKey(p.key)]` off the OPTIONAL-MATCH-bound p) is
+// load-bearing: forPatient is optional, so a bare element would carry a NULL
+// for a patient-less appointment and fail the whole row's upsert
+// (ProtectedAdapter.toStringSlice), whereas a comprehension degrades to []
+// and only costs that row its patient anchor, never its existence.
 //
 // The three PHI columns all RETURN the SAME expression, a.encounter.data — the
 // whole ciphertext envelope ({ct, nonce, keyId}) — three times under three
@@ -1013,7 +1025,8 @@ RETURN
   a.encounter.data                  AS summary,
   a.encounter.data                  AS assessment,
   a.encounter.data                  AS plan,
-  [nanoIdFromKey(pr.key)]           AS authz_anchors
+  [nanoIdFromKey(pr.key)]
+    + [(a)-[:forPatient]->(p2:patient) | nanoIdFromKey(p2.key)] AS authz_anchors
 `
 
 // clinicIdentitiesReadSpec projects one row per NAMED identity — the roster

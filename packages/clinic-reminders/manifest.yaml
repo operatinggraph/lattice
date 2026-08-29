@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.10.3
+version: 0.10.4
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -58,6 +58,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: visitSeriesGuard
       class: meta.ddl.aspectType
+    - canonicalName: visitSeriesSiteAssignment
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: appointmentReminders
       adapter: nats-kv
@@ -68,6 +70,10 @@ declares:
       bucket: weaver-targets
       engine: full
     - canonicalName: visitSeriesDue
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: visitSeriesSiteBackfill
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -103,7 +109,13 @@ declares:
     - operationType: EndVisitSeries
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: SetVisitSeriesSite
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: AdvanceVisitSeries
+      scope: any
+      grantsTo: [operator]
+    - operationType: BackfillVisitSeriesSite
       scope: any
       grantsTo: [operator]
   weaverTargets:
@@ -113,6 +125,8 @@ declares:
       lensRef: followUpReminders
     - targetId: visitSeriesDue
       lensRef: visitSeriesDue
+    - targetId: visitSeriesSiteBackfill
+      lensRef: visitSeriesSiteBackfill
     - targetId: pastDueAppointments
       lensRef: pastDueAppointments
   opMetas:
@@ -124,4 +138,6 @@ declares:
     - operationType: PauseVisitSeries
     - operationType: ResumeVisitSeries
     - operationType: EndVisitSeries
+    - operationType: SetVisitSeriesSite
     - operationType: AdvanceVisitSeries
+    - operationType: BackfillVisitSeriesSite

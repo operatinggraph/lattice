@@ -156,6 +156,16 @@ range through `StepsFrom`, and the reverse reading (`h.To == pos`) carries the s
 direction already flipped by `edgeDirFor` — a bounded reachability relation is symmetric, so *"nodes
 reaching Y in ≤k forward steps"* is exactly *"nodes reachable from Y in ≤k reverse steps."*
 
+> **Amended at build time, 2026-08-28.** A ranged hop whose **lower bound exceeds one hop** is refused
+> outright, and the limit is in the SEEDING rather than in the walk. `AnchorSideSeeds` seeds the two
+> endpoints of the changed link; on a ranged hop that link is an *intermediate* edge of the expansion, so
+> the nodes really bound at the From position are every node reaching it within `Max-1` steps. Those are
+> recovered only by the walk bouncing back across the hop, covering From-offsets `[1-Max, 1-Min]`, which
+> together with the direct seed at offset 0 covers the required `[1-Max, 0]` only while `Min <= 2`. A cold
+> reviewer's sweep over ranges, chain lengths and cut positions found **thirteen** graphs where a higher
+> lower bound returned `ok == true` having dropped an anchor. Every shipped ranged hop is `*0..`, `*1..` or
+> `*0..7`, so the refusal costs the corpus nothing; §6's payoff table is unaffected.
+
 **The open range keeps the executor's clamp, applied per hop, never globally.** `Max < 0` or
 `Max > maxVarLengthHops` clamps to `maxVarLengthHops`, matching `rel_traverse.go:14-16` exactly. This
 is the soundness argument and it must be stated precisely: **the derivation is complete with respect
@@ -192,6 +202,17 @@ instead of a single edge move. Standing on `cur.id` at `cur.pos`, for a step wit
    by `(pos, id)`. The derivation is therefore a **superset** in reachability, which is what the
    invariant needs (`anchor_derivation.go:9-13`). The design claims the superset, not equivalence.
 
+> **Amended at build time, 2026-08-28.** *"No new budget"* did not survive measurement, and the paragraph
+> below is kept only as the reasoning that led there. The read cap bounds **I/O, not work**: `edgesOf`
+> memoises, so a walk that re-enters the closure once per admitted node re-iterates cached edge lists at no
+> read cost at all. Measured by a cold reviewer: **4,092 expansions and 86,050 edge visits to derive one
+> anchor** on a 1,023-vertex containment tree — *twelve times* the cost of the BFS this replaces — and
+> seconds of CPU at 40% of the read cap, and above the cap the walk pays in full *and then* falls back. The
+> closure therefore carries a **work budget** (`DerivationRangedWorkFactor` × the read cap, so one operator
+> knob still moves the whole envelope) on exactly the read cap's terms: a breach raises the same sentinel,
+> so it can only ever cause MORE fallback, never a narrower answer. The "no truncation" half stands
+> unchanged and is what makes adding the budget safe.
+
 **No new budget.** Every read in the closure goes through `edgesOf`, so `DefaultDerivationReadCap`
 governs it and a breach returns `ok == false` ⇒ the BFS (ledger row 5). That is the correct failure
 mode and it is already shipped and doc-commented: a walk that gets too wide degrades to today's
@@ -202,10 +223,19 @@ fan-out is the descendant set rather than the ~1 ancestor chain.
 ### 4.3 `Dist`
 
 A ranged hop's distance is an interval, so it must not make either endpoint appear **provably nearer**
-— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position
-reachable only across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
+— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position the
+anchor can reach across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
 branch seeds **both** endpoints and is documented as the safe, widening direction (ledger row 9).
 `Dist` has one production consumer, so the blast radius is that one call site.
+
+> **Amended at build time, 2026-08-28** (§17.6 (a)). This paragraph read *"a position reachable **only**
+> across a ranged binding hop"*, and that rule leaves a hole: a position holding **both** a fixed binding
+> path of length L **and** a ranged path whose true length may be shorter would keep the finite L, which
+> **over-states** its distance — and `consider` drops the endpoint whose distance is the larger, so an
+> over-stated distance drops a seed. That is the under-approximating direction this unit exists to refuse.
+> The shipped rule is therefore the wider one stated above: exact distances over the **fixed** binding hops,
+> then the sentinel for every non-anchor position the anchor reaches over binding hops **via at least one
+> ranged hop** (a two-state BFS over `(position, usedRanged)`). Over-poisoning only seeds both endpoints.
 
 Two things the increment owes because of it, neither optional: the sentinel currently means *"no
 binding path to the anchor"* (`hopindex.go:59-65`), so **the field doc must distinguish the two
@@ -213,6 +243,11 @@ meanings** or the next reader misreads a genuine non-binding position; and
 `hopindex_test.go:513`'s `Dist[s.Pos] >= 0` assertion for every seeded position has to move. A ranged
 hop written inside a `WHERE` or a comprehension is `Binding: false` and already contributes no
 distance, so only ranged hops in a `MATCH` are affected.
+
+> **Amended at build time, 2026-08-28** (§17.6 (b)). The second obligation does not exist: that
+> assertion's fixture carries no ranged hop, so no position in it is poisoned and it holds verbatim.
+> It stays where it is, and a ranged-hop equivalent is added beside it instead. The first obligation —
+> splitting the field doc — stands and shipped.
 
 ---
 
@@ -328,7 +363,9 @@ a later cypher edit cannot arm it silently.
 ### 7.1 The budget, and why no new one is added
 
 The ranged closure reads through `edgesOf`, so `DefaultDerivationReadCap = 2_000` bounds it and a
-breach is `ok == false` ⇒ BFS. The design adds **no** cap, no depth budget and no truncation. This
+breach is `ok == false` ⇒ BFS. The design adds no depth budget and **no truncation** — but it does add a
+**work budget** for the ranged closures, for the reason recorded at §4.2's amendment: the read cap governs
+documents read, and the closure's cost is edge entries iterated, which memoisation decouples from it. This
 matters because the corpus's expensive direction is real: `(work)<-[:containedIn*0..]-(place)` walks
 *down* a containment tree. On a deep or wide tree the read cap, not the pattern, decides fallback —
 and falling back is today's behaviour, so the worst case is "no better than now," never "wrong."
@@ -624,3 +661,199 @@ From `docs/components/refractor.md` § *Review keeps catching*:
   requires an argument per moved row, per those harnesses' own instruction.
 - *A two-layer seam can be green at each layer and broken across it.* → T12 runs the real intervening
   sequence end to end rather than asserting at each layer.
+
+---
+
+## 17. Increment 1 fire brief (build note, 2026-08-28)
+
+Compiled at selection by two read-only scouts (`haiku`) + the lead's own Phase-0 census run. Branch:
+`claude/great-lamport-kxa2su`.
+
+### 17.0 Phase 0 — census C3, RUN, expectation HOLDS
+
+C1 baseline green at head (`TestCorpusAnchorHopIndex_PinnedConjuncts`, `TestScanRootCorpusCensus`).
+C3 probe: the varlength arm (`hopindex.go:622-627`) replaced by the hop append, both harnesses re-run
+through a throwaway probe that prints every corpus lens's declining conjunct. Measured, against §12 C3's
+stated expectation:
+
+| Expected by §12 C3 | Measured |
+|---|---|
+| `edgeManifestReadGrants` → `hopWithDropped` | ✅ "a WITH dropped \`container\` and a later clause re-references it" |
+| `edgeManifestStaffReadGrants` → `hopWithDropped` | ✅ "a WITH dropped \`role\` and a later clause re-references it" |
+| `capabilityServiceAccess` → `hopIndexed` | ✅ indexed |
+| the six plain rows → indexed | ✅ `cafeIdentitiesRead`, `cafeLeaseWorkplaces`, `menuCatalog`, `wellnessIdentitiesRead`, `wellnessMembers`, `wellnessSessions` all indexed |
+
+The seven anchored rows §12 C3 does not name — the five Personal lenses and the two multi-walk ones —
+also move to `hopIndexed`, which §6.1 already predicts and explains: the census pins the **index's**
+conjunct, while what holds those seven is a *downstream* conjunct (`patternClosedOutput` /
+`sweeper != nil` / `len(branches) <= 1`) that no cypher edit and no index change reaches. Their census
+rows therefore move while their behaviour does not, and that is the argument each moved row carries.
+No new row moves anywhere else in either census, and no row moves in the unexpected direction.
+
+**Gate verdict: the expectation holds; §6's payoff table stands; the increment split is unchanged.**
+
+### 17.1 Scope sentence (verbatim, §13)
+
+> **Increment 1 — the ranged step** (engine; converts `capabilityServiceAccess` + 4 plain lenses).
+> `PatternHop`/`PatternStep` gain the range; the varlength `rejectOnce` becomes a hop append;
+> `walkToAnchors` gains the bounded closure with the zero-hop admission, the closure-local cycle guard,
+> and **no intermediate label prune**; the clamp is shared with `rel_traverse.go` via one constant;
+> `Dist` takes the incomparable sentinel across a ranged binding hop. The `lint-lens-anchors` rule from
+> §7.2 ships here. Metrics: the existing `recordDerivationFellBack` counter, plus a ranged-closure read
+> count. Tests T1–T8, T11, T13.
+
+### 17.2 Verified touch-list (`file:line` re-checked live at compile time)
+
+| File | Anchor | What changes |
+|---|---|---|
+| `ruleengine/full/hopindex.go` | `:616-630` `addPattern`'s rel switch | the varlength `rejectOnce` becomes a clamped hop append |
+| " | `:38-51` `PatternHop` | `Min`, `Max` fields (clamped at build; `Max >= Min >= 0`) |
+| " | `:900-915` `PatternStep` | `Min`, `Max` carried through |
+| " | `:869-895` `StepsFrom` | `step()` carries the range, direction already flipped by `edgeDirFor` |
+| " | `:59-66` `Dist` field doc | the sentinel's two meanings split |
+| " | `:451-483` `distances()` | ranged binding hops contribute no distance; see 17.6 (a) |
+| `ruleengine/full/executor.go` | `:26-29` `maxVarLengthHops = 10` | the one clamp constant, now read by the builder too |
+| `ruleengine/full/rel_traverse.go` | `:12-19` | unchanged — it is the precedent, not a touch site |
+| `pipeline/anchor_derivation.go` | `:214-276` `walkToAnchors` step loop | the bounded ranged closure |
+| `pipeline/anchor_derivation_shadow.go` | `:267-302` | `RangedReads` tally + its log attr |
+| `scripts/lint-lens-anchors.go` | `:72-100` `main`, `checkPackage` | the §7.2 negated-narrowing-bound rule |
+| `internal/refractor/anchor_hopindex_corpus_census_test.go` | `:90-113` pin table | 10 rows move off `hopVarLengthHop` |
+| `internal/refractor/plain_scanroot_corpus_census_test.go` | `:109-172` pin table | 6 rows move off `rootVarLengthHop` |
+| `docs/components/refractor.md` | Rule engine §; What's deferred; dossier | ranged-step walk, deferred line, §7.2 polarity entry |
+
+Citations that **rotted**: none. Every `file:line` in §2's ledger resolved to the quoted text.
+
+### 17.3 Precedents to mirror
+
+- The walk itself → `ruleengine/full/rel_traverse.go:11-123` (`traverseRel`): the clamp at `:14-16`, the
+  zero-hop admission at `:48-56`, `nodeMatches` **only at admission** at `:38-46`/`:100-116`.
+- Read budgeting → the existing `edgesOf` closure, `pipeline/anchor_derivation.go:198-212`; the fallback
+  translation at `:227-232`.
+- The tally → `recordDerivationActed` / `recordDerivationFellBack`,
+  `pipeline/anchor_derivation_shadow.go:267-287`, and `logActSummaryIfDue`'s conditional attr at `:289-302`.
+- The lint rule shape → `scripts/lint-lens-anchors.go`'s own `checkPackage` + `STRICT` exit gate.
+- Census pin moves → the two harnesses' own instruction text (a move TO indexed needs an argument).
+
+Nothing here is greenfield.
+
+### 17.4 Increment order, each with its runnable green check
+
+1. **Index** — `PatternHop`/`PatternStep` ranges, the clamped hop append, `StepsFrom`, `distances()`, the
+   `Dist` doc split. → `go test ./internal/refractor/ruleengine/full/ -count=1`
+2. **Walk** — the bounded ranged closure in `walkToAnchors`. → `go test ./internal/refractor/pipeline/ -count=1`
+3. **Tally** — `RangedReads`. → same as 2.
+4. **Lint** — the negated-narrowing-bound rule. → `STRICT=1 go run ./scripts/lint-lens-anchors.go`
+5. **Tests T1–T8, T11** + the census pin moves (T13). →
+   `go test ./internal/refractor/... -count=1`
+6. **Docs** — `docs/components/refractor.md`.
+
+Fire green bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `STRICT=1 go run ./scripts/lint-lens-anchors.go` ·
+`go test ./internal/refractor/... -count=1` · `go test ./... -p 4` **with `POSTGRES_TEST_DSN` set**
+(`agents/steward/REMOTE.md` §3 — without it the gated refractor corpus tests skip and the tree is falsely
+green) · `make test-lease-convergence` (the convergence job's refractor arm).
+
+### 17.5 In-scope gotchas + the standing checklist
+
+The design's own §16 dossier entries bind (polarity fail-open under negation; a soundness claim's stated
+REASON is load-bearing; no new state without a declared lifetime; check the probed artifact; a new per-lens
+analysis ships its corpus census; a two-layer seam green at each layer). Beyond them, for this fire:
+
+- **`labels.go:135-138` is NOT in scope.** `ReferencedLabels` keeps clearing `exhaustive` on a varlength
+  hop; that governs delivery narrowing, a different axis (§8).
+- **`relbinding.go:158,165-166`** already carries `varLength` + min/max for the executor's own binding — do
+  not re-derive it, and do not couple to it.
+- **No package/manifest version bump** — this fire edits no `packages/` content.
+- **Build-tagged harnesses:** this change adds no method to an engine/service interface, so the tagged
+  suites are not reached; the convergence targets still run because they exercise the refractor pipeline.
+- Standing checklist: (1) **no new state** — the closure's visited set is per-step and dies with the call,
+  and T11 pins it; (2) **every census is a premise** — C1 and C3 were re-run live above, not quoted;
+  (3) **a negative test needs its positive vector first** — T3 and T6 are mutation proofs, and the T3
+  mutation (adding the intermediate prune) is planted and restored in a scratch copy, never in the tree
+  the lead commits from; (4) removal/replacement — nothing is removed; (5) one writer — n/a;
+  (6) **precedent may carry debt** — `traverseRel`'s per-path `seen` differs deliberately from the walk's
+  global `visited`; the derivation claims a **superset**, not equivalence (§4.2).
+
+### 17.6 Deviations from the ratified body, decided at build time
+
+**(a) `Dist` — the sentinel is applied to every position a ranged hop can reach, not only to positions
+reachable *only* across one.** §4.3's literal rule ("a position reachable **only** across a ranged binding
+hop takes the sentinel") leaves a hole the build closes: a position with *both* a fixed binding path of
+length L and a ranged path whose true length may be shorter would keep the finite L, which **over-states**
+its distance — and `AnchorSideSeeds`' `consider` drops the endpoint whose distance is larger, so an
+over-stated distance can drop a seed. That is the under-approximating direction this whole unit refuses.
+`distances()` therefore computes exact distances over **fixed** binding hops and then returns the
+incomparable sentinel for every non-anchor position reachable from the anchor over binding hops **via at
+least one ranged hop**. Over-poisoning only seeds both endpoints, which ledger row 9 records as the safe,
+widening direction. §4.3's text is amended in place accordingly.
+
+**(b) `hopindex_test.go:513`'s `Dist[s.Pos] >= 0` assertion does not move.** §4.3 predicted it would have
+to. Measured: its fixture carries no ranged hop, so no position in it is poisoned and the assertion holds
+verbatim. A ranged-hop equivalent is added beside it instead of moving it.
+
+**(c) The clamp is applied at index-build time, in `full`.** §4.1 requires the derivation to share
+`rel_traverse.go`'s clamp. Clamping inside `addPattern` (so `PatternHop.Max` is always concrete and
+`Min >= 0`) puts the single constant read at one site in one package rather than exporting it to
+`pipeline`; the shared-constant test asserts an open range's stored `Max` equals what `traverseRel` clamps
+to. Same invariant, one reader.
+
+### 17.7 Adjacent finds
+
+None outside the fire's own mechanism at compile time. Anything the build or the reviews surface is fixed
+in this run per `agents/steward/SKILL.md` §4, not filed.
+
+### 17.8 Non-goals (the drift fence)
+
+Increment 2 (`withScopeReject`'s structural-identity whitelist) — **HELD at ratification**, revive trigger
+unmet. `ReferencedLabels`' exhaustiveness clear. The generator (`internal/pkgmgr/anchorwalk.go`). Any
+cypher edit in `packages/`. The five Personal lenses, the two multi-walk lenses and the two `SecureColumns`
+plain lenses (§13's named conjuncts — unreachable work, not deferred work).
+
+### 17.9 Build checkpoint (2026-08-28)
+
+Branch `claude/great-lamport-kxa2su`. Landed and pushed, in order:
+
+| Increment | Commit | State |
+|---|---|---|
+| 6 · component doc (ranged-step walk) | `eb14c25` | ✅ |
+| 4 · `lint-lens-anchors` negated-narrowing-bound rule | `9923554` | ✅ |
+| dossier · polarity entry's second sighting | `5659744` | ✅ |
+| 5a · the 16 census pin moves | `e7f7dfd` | ✅ |
+| 1 + 2 + 3 · index, walk, tally | `397786e` | ✅ |
+| 5b · T1–T8, T11 | `bd0d3f4` (with the fix round) | ✅ |
+| blocking-fix round · seeding limit, empty expansion, work budget | `bd0d3f4` | ✅ |
+| lint fail-open holes · case-folded NOT, unverifiable Spec warns | `b40aa1b` | ✅ |
+| **MERGED to main** | `77650a8` | ✅ CI run 1560 green |
+
+**C4 is NOT re-derived, and that is a REMOTE-environment limit, not an omission.** §12 C4 reads Health KV
+on a *running* stack for the capability pipeline's rebuild/suppression state and per-lens lag. This fire ran
+in an ephemeral remote container (`agents/steward/REMOTE.md` §3), where the only stack available is one this
+fire would bootstrap itself — with no accumulated lag and no suppression history, so any figure measured
+there would be a fabrication dressed as a measurement, not the live symptom. C4-after is in any case the
+**acceptance measurement for Increment 2**, whose revive trigger (§13) is "Increment 1 shipped **and observed
+live**". That trigger therefore remains **unmet** until someone re-reads Health KV against the real
+deployment after this ships. Increment 2 stays held; the Steward does not pull it on the strength of a green
+suite.
+
+**The deviations in §17.6 are amended into the body where they stand** — §4.3 carries both, dated. The fix
+round added two more, likewise amended in place: §4.2/§7.1's *"no new budget"* (the read cap counts
+documents, and `edgesOf` memoises, so it cannot see the closure's work) and §4.1's implication that any
+bounded range is indexable (a lower bound above one hop is refused on a seeding argument). The same refuted
+reason was struck in three sibling designs — the parent `auth-plane-projection-latency-design.md` §16.2's
+completeness predicate, `typed-relation-signatures-design.md` §6, and
+`plain-lens-neighbour-anchor-derivation-design.md`'s "can never be indexed" list and its ≤36 ceiling.
+
+**Review round: three cold adversarial passes (opus), each returning a BLOCKING finding proven by a probe
+rather than argued** — the ranged-hop seeding limit at `Min > 2` (13 counterexample graphs), the
+present-but-empty taxonomy expansion deriving nothing on `cap.svc.<actor>` (which §15 had predicted and §13
+never turned into a task), and the ranged closure's unbounded work (4,092 expansions / 86,050 edge visits
+for one anchor, 12× the BFS it replaces). All three closed in `bd0d3f4`, each pinned by a test proven
+against its own mutation. Two findings classified as second sightings of existing
+`docs/components/refractor.md` dossier classes, whose entries were extended and one of whose checks is now
+mechanized as a mandated test shape (`15d24ef`).
+
+**CI:** run 1560 green. Its first attempt failed one job on `TestLeaseConvergence_BgcheckFreshness_EagerReopen`
+— the `found=map[...]` partial-activation signature of the board's standing "suite reddens under parallel
+load" row (b), owned by the Whetstone, not this change: the lens that failed to activate is `hopIndexed`
+before and after this diff, the run's own tally shows `fellBack=0`, and the test passes 3/3 in isolation
+locally plus a full `make test-lease-convergence`. Green on the one sanctioned re-run.

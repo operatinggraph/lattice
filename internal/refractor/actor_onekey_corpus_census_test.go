@@ -136,6 +136,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"staleAssignedTasks":                oneKey,
 	"unroutedTasks":                     oneKey,
 	"visitSeriesDue":                    oneKey,
+	"visitSeriesSiteBackfill":           oneKey,
 	"wellnessBookingReminders":          oneKey,
 	"wellnessClassPriceSettlement":      oneKey,
 	"wellnessNoShowSettlement":          oneKey,

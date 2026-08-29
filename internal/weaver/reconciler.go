@@ -316,7 +316,7 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 			return
 		}
 	}
-	if open, _ := e.boolColumn(targetID, entityID, row, gapColumn); !open {
+	if !e.boolColumn(targetID, entityID, row, gapColumn) {
 		// The gap is closed (or the column is gone from the row): prompt
 		// level-reconciled clear, no lease wait.
 		s.deleteMark(ctx, key, entry.Revision, rec.Action, sweepReasonGapClosed,
@@ -579,7 +579,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 			return
 		}
 	}
-	if open, _ := e.boolColumn(targetID, entityID, row, gapColumn); !open {
+	if !e.boolColumn(targetID, entityID, row, gapColumn) {
 		// The gap is closed (or the column is gone from the row) and no mark
 		// exists to carry the level reconcile: this leg is the one that resets
 		// the budget and retires the standing issue.
@@ -622,7 +622,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// raises for exactly this column too — leave it alone (see arm (j)).
 		return
 	}
-	if violating, _ := e.boolColumn(targetID, entityID, row, "violating"); !violating {
+	if !e.boolColumn(targetID, entityID, row, "violating") {
 		return
 	}
 
@@ -702,9 +702,8 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// FR29: a surface gap dispatches nothing and holds no mark, so it has
 		// no episode to re-arm — its count can only be a leftover from a
 		// version of the playbook that dispatched this column. buildPlan has no
-		// case for it and would raise a PlaybookConfigError naming a
-		// contract-legal declaration — and decline the row on the long
-		// redelivery floor for as long as it stood. Leave the count to its TTL.
+		// case for it and would raise an `error` PlaybookConfigError naming a
+		// contract-legal declaration. Leave the count to its TTL.
 		return
 	}
 	// The action is read from the playbook rather than from planGap's resolved
@@ -739,7 +738,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	e.logger.Warn("weaver sweep: dispatching a markless open gap",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
 		"action", actionRef, "reason", sweepReasonBudgetReArm)
-	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
+	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
 		// Either the CAS-create failed outright (still markless — the next pass
 		// retries) or its op publish failed (the mark exists and its lease
 		// bounds the retry, like any other stuck episode). Bounded and retried
@@ -850,8 +849,8 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// (surfaceOnlyGap) — an episode that was genuinely in flight at the
 		// upgrade. Every path below dispatches: the leg-advance, the escalation
 		// and the reclaim itself all end in planGap, which has no case for
-		// `surface` and would alert PlaybookConfigError against a contract-legal
-		// playbook, once per sweep interval.
+		// `surface` and would alert PlaybookConfigError, at `error` severity,
+		// against a contract-legal playbook, once per sweep interval.
 		//
 		// Leave the mark rather than deleting it — the entityKey arm just below
 		// would otherwise treat this same pair as corrupt evidence and delete it.
@@ -900,7 +899,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
 			return
 		}
-		if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
+		if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
 			// its op publish failed (the mark exists; the lease/reclaim
@@ -912,7 +911,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
-	if violating, _ := e.boolColumn(targetID, entityID, row, "violating"); !violating {
+	if !e.boolColumn(targetID, entityID, row, "violating") {
 		// Mirrors lane-1's L1 gate (handleRow dispatches only violating rows):
 		// an open missing_* on a non-violating row must not be re-dispatched
 		// here when lane-1 never would fire it. Leave the mark to level
@@ -1123,11 +1122,15 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Fresh episode: the requestId derives from the replace revision (a real new
 	// dispatch attempt). claimID (preserved or freshly minted, above) seeds the
 	// dispatch identity. A publish failure here leaves the fresh mark holding a
-	// live lease, so the retry is real — the sweep re-attempts at that lease's
-	// expiry, and a lane-1 redelivery re-fires the same fresh requestId before
-	// then.
+	// live lease, so the retry is real: the sweep re-attempts at that lease's
+	// expiry. A lane-1 redelivery in the meantime finds that live mark and takes
+	// the anti-storm drop, so it neither duplicates the attempt nor brings it
+	// forward.
 	if e.fire(ctx, targetID, entityID, gapColumn, newRev, claimID, pl) != substrate.Ack {
-		e.logger.Warn("weaver sweep: reclaim re-dispatch did not publish; the fresh mark's lease bounds the retry",
+		// The failure is recorded in the republish set by fire itself, so the
+		// gap's next lane-1 delivery re-publishes this same fresh episode rather
+		// than dropping it; the fresh mark's lease bounds the retry either way.
+		e.logger.Warn("weaver sweep: reclaim re-dispatch did not publish; a lane-1 delivery or the fresh mark's lease bounds the retry",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 	}
 }
@@ -1309,4 +1312,14 @@ func splitMarkKey(key string) (targetID, entityID, gapColumn string, ok bool) {
 	return targetID, entityID, gapColumn, true
 }
 
+// issueKeySweep keys the CorruptMark issue for one weaver-state entry the sweep
+// deleted because it could not be read. The key is the deleted entry's own
+// weaver-state key, so the family spans every shape that bucket holds — a
+// `<targetId>.<entityId>.<gapColumn>` mark, its `…__count` retry budget, and a
+// `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window.
+//
+// It is built from issuePrefixSweep rather than a literal because
+// issueKeyTargetPrefixes retires the family by that same prefix on a target
+// teardown; sharing the constant is what stops the key shape and the prefix that
+// frees it from drifting apart.
 func issueKeySweep(markKey string) string { return issuePrefixSweep + markKey }

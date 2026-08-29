@@ -62,7 +62,7 @@ func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if !hats.isStaff() && !hats.isOperator {
+	if !hats.isFrontDesk() && !hats.isOperator {
 		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}
@@ -139,7 +139,7 @@ func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if !hats.isStaff() && !hats.isOperator {
+	if !hats.isFrontDesk() && !hats.isOperator {
 		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}
@@ -217,7 +217,7 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if !hats.isStaff() && !hats.isOperator {
+	if !hats.isFrontDesk() && !hats.isOperator {
 		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}

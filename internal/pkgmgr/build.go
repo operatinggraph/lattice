@@ -864,6 +864,13 @@ func gapActionBody(ga GapActionSpec) map[string]any {
 		}
 		body["reads"] = reads
 	}
+	if len(ga.OptionalReads) > 0 {
+		optional := make([]any, len(ga.OptionalReads))
+		for i, r := range ga.OptionalReads {
+			optional[i] = r
+		}
+		body["optionalReads"] = optional
+	}
 	if len(ga.Enumerations) > 0 {
 		body["enumerations"] = enumerationBodies(ga.Enumerations)
 	}
@@ -947,6 +954,13 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 			reads[i] = r
 		}
 		body["reads"] = reads
+	}
+	if len(e.OptionalReads) > 0 {
+		optional := make([]any, len(e.OptionalReads))
+		for i, r := range e.OptionalReads {
+			optional[i] = r
+		}
+		body["optionalReads"] = optional
 	}
 	if len(e.Enumerations) > 0 {
 		body["enumerations"] = enumerationBodies(e.Enumerations)

@@ -17,6 +17,37 @@ import (
 // laneConsumerPrefix prefixes a lane-1 durable name: weaver-target-<targetId>.
 const laneConsumerPrefix = "weaver-target-"
 
+// laneMaxAckPending caps how many un-acked rows one lane-1 durable holds.
+//
+// A row declined by a config-error class is Nak'd on the long redelivery floor,
+// and a delayed Nak holds its pending slot continuously until the row is acked
+// or its message is superseded — so the pending set is no longer just what is
+// momentarily in flight, it is the target's whole stuck population. The cap is
+// what that population may reach before NEW entities of the same target stall
+// (redeliveries are served ahead of the cap; only fresh deliveries stall), so it
+// is worth naming explicitly rather than inheriting the server's 1000 default.
+//
+// 1024 is chosen to sit on the near side of a server behaviour change, not for
+// headroom. The redelivery timer's walk of the pending map is unconditional at
+// every size (`for seq, p := range o.pending`, nats-server@v2.14.0
+// server/consumer.go:5915). What `len(o.pending) > 1024` gates is a BAIL: past
+// that size, if any ack/nak/+WPI is inbound while the walk is running, the timer
+// abandons the scan, discards the expiries it had already collected, and
+// reschedules 100 ms out. A consumer that is both large and continuously acking
+// can therefore keep re-entering that abandon-and-retry regime — and under the
+// server default of 1000 the branch is structurally unreachable, because
+// getNextMsg stalls new deliveries at `len(o.pending) >= o.maxp` (:4796) before
+// the pending set can exceed 1024. Setting the cap ABOVE 1024 would make lane 1
+// the only consumer in the deployment able to enter that regime, and it would do
+// so in a band where the operator signal below is still silent. At 1024 the
+// pending set can reach the cap exactly and never exceed it, so the bail stays
+// unreachable and the walk stays whole.
+//
+// The signal that the cap is wrong for a deployment — or that a target is wedged
+// — is a lane-1 durable whose ack-pending count sits AT the cap; the heartbeat
+// raises ConsumerSaturated for exactly that (health.go).
+const laneMaxAckPending = 1024
+
 // Config parameterizes the engine. Bucket/stream names default to the
 // platform-standard values; callers (cmd/weaver, tests) override only what
 // they need.
@@ -83,25 +114,28 @@ type Config struct {
 	// re-dispatch is the intended bounded retry). Values <= 0 default to
 	// MarkLease (the first repeat then paces at the same cadence as the lease).
 	ReclaimBackoffBase time.Duration
-	// RedeliveryDelay is lane-1's SHORT redelivery floor: the minimum wait
-	// before JetStream redelivers a row the handler declined transiently (an
-	// unresolved reference mid-convergence, a KV failure, missing metadata).
-	// Values <= 0 take substrate.DefaultRedeliveryDelay.
-	RedeliveryDelay time.Duration
-	// LongRedeliveryDelay is lane-1's LONG redelivery floor: the minimum wait
-	// before JetStream redelivers a row declined for a CONFIG error — no
-	// playbook entry for the gap, an unbuildable template, an un-dispatchable
-	// action. Such a fix arrives as a registry/package edit that produces no new
-	// row delivery, so this redelivery loop is the only automatic uptake path
-	// and this value is its cadence. Values <= 0 take
-	// substrate.DefaultLongRedeliveryDelay; values below RedeliveryDelay are
-	// clamped up to it (with a Warn) — a "long" floor shorter than the short one
-	// is a misconfiguration, not a faster loop.
-	LongRedeliveryDelay time.Duration
 	// ReclaimBackoffCap caps the reclaim backoff interval. Defaults to 24h — the
 	// Contract #4 §4.3 op-tracker TTL horizon, beyond which a duplicate re-dispatch
 	// would no longer collapse on the tracker anyway. Values <= 0 take the default.
 	ReclaimBackoffCap time.Duration
+	// LongRedeliveryDelay is the lane-1 redelivery floor for a row declined by a
+	// CONFIG-error class — no playbook entry for an open gap column, a template
+	// that resolves null against the row, an action the deployment cannot
+	// dispatch. Such a row is Nak'd rather than Acked, because its fix arrives
+	// as a package/target re-author that projects no new row: the redelivery IS
+	// the automatic uptake path, and the floor is that path's re-poll cadence.
+	// A DATA error takes no floor at all — it Acks with a standing Health issue,
+	// because its fix is necessarily a re-projection, which supersedes the row
+	// and delivers on its own.
+	//
+	// Sized against the cost of the whole stuck set expiring as one batch
+	// through a serial worker, not against fix latency (a re-projected fix is
+	// picked up immediately either way). Values <= 0 take the 5m
+	// substrate.DefaultLongRedeliveryDelay; a value below
+	// substrate.DefaultRedeliveryDelay is clamped up to it (with a Warn) — a
+	// "long" floor shorter than the transient one would turn a config error into
+	// a hot loop.
+	LongRedeliveryDelay time.Duration
 	// Instance distinguishes this engine process; it is one segment of the
 	// per-boot registry-source durable name (a separate per-boot nonce is
 	// what actually guarantees full-replay uniqueness — see registry.go — so
@@ -197,21 +231,6 @@ func (c *Config) withDefaults() {
 	if c.SweepOrphanWarmup < c.SweepInterval {
 		c.SweepOrphanWarmup = c.SweepInterval
 	}
-	if c.RedeliveryDelay <= 0 {
-		c.RedeliveryDelay = substrate.DefaultRedeliveryDelay
-	}
-	if c.LongRedeliveryDelay <= 0 {
-		c.LongRedeliveryDelay = substrate.DefaultLongRedeliveryDelay
-	}
-	if c.LongRedeliveryDelay < c.RedeliveryDelay {
-		// The substrate applies the same clamp when it resolves the floor, so a
-		// misconfigured pair is never honoured either way; resolving it here is
-		// what makes the value the operator reads back from the spec the value
-		// that will actually be used.
-		c.Logger.Warn("weaver: LongRedeliveryDelay is below RedeliveryDelay; clamping",
-			"longRedeliveryDelay", c.LongRedeliveryDelay, "redeliveryDelay", c.RedeliveryDelay)
-		c.LongRedeliveryDelay = c.RedeliveryDelay
-	}
 	if c.ReclaimBackoffBase <= 0 {
 		c.ReclaimBackoffBase = c.MarkLease
 	}
@@ -222,6 +241,17 @@ func (c *Config) withDefaults() {
 		// A cap below the base would invert the backoff (the first repeat would be
 		// clamped below the lease). Clamp the cap up so the floor is always >= base.
 		c.ReclaimBackoffCap = c.ReclaimBackoffBase
+	}
+	if c.LongRedeliveryDelay <= 0 {
+		c.LongRedeliveryDelay = substrate.DefaultLongRedeliveryDelay
+	}
+	if c.LongRedeliveryDelay < substrate.DefaultRedeliveryDelay {
+		// The long floor paces the config-error decline loop; below the
+		// transient floor it would re-poll a fault only a package re-author can
+		// fix faster than the substrate re-polls a fault the next retry fixes.
+		c.Logger.Warn("weaver: LongRedeliveryDelay is below the transient redelivery floor; clamping",
+			"longRedeliveryDelay", c.LongRedeliveryDelay, "floor", substrate.DefaultRedeliveryDelay)
+		c.LongRedeliveryDelay = substrate.DefaultRedeliveryDelay
 	}
 	if c.Instance == "" {
 		c.Instance = defaultInstance()
@@ -258,6 +288,7 @@ type Engine struct {
 	contraction      *contractionStats
 	oscillation      *oscillationStats
 	admission        *admissionScheduler
+	republish        *republishSet
 
 	mu sync.Mutex
 	// targets is the last-applied desired lane-1 consumer set (targetId →
@@ -350,6 +381,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		contraction:      newContractionStats(),
 		oscillation:      newOscillationStats(),
 		admission:        newAdmissionScheduler(),
+		republish:        newRepublishSet(),
 		targets:          make(map[string]specFingerprint),
 	}
 	e.budgets = e.marks
@@ -395,6 +427,7 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 
 	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, e.cfg.HeartbeatEvery,
 		e.states, e.issues, e.source, e.marks, e.sweep, e.temporal, e.shadow, e.contraction, e.admission, e.logger)
+	hb.SetAckStatsReader(e.supervisor)
 	go hb.run(ctx)
 	// A startup warm sweep runs once so a cold start does not wait a full
 	// interval; the recurring cadence is the durable @every sweep schedule
@@ -449,30 +482,12 @@ func (e *Engine) targetSpec(targetID string) substrate.ConsumerSpec {
 		FilterSubject:       e.rowSubjectPrefix + targetID + ".>",
 		DeliverPolicy:       substrate.DeliverLastPerSubject,
 		Handler:             supervisedHandler(e.handleRow),
-		Health:              healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
-		MaxAckPending:       laneOneMaxAckPending,
-		RedeliveryDelay:     e.cfg.RedeliveryDelay,
+		MaxAckPending:       laneMaxAckPending,
 		LongRedeliveryDelay: e.cfg.LongRedeliveryDelay,
+		Health:              healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
 		Logger:              e.logger,
 	}
 }
-
-// laneOneMaxAckPending caps the un-acked in-flight window of a lane-1 target
-// consumer. It is set explicitly rather than left at the server's
-// JsDefaultMaxAckPending because a declined row now STAYS pending: a config-error
-// decline is Nak'd on the long floor, so every simultaneously-stuck row of the
-// target holds a pending slot for as long as the config stays broken. The
-// starved class at the cap is new entities of a target already carrying that
-// many distinct stuck rows.
-//
-// The raise is deliberately modest rather than generous. Past roughly a thousand
-// pending messages the server's ack-pending timer walks the whole pending map per
-// fire and defers under ack load (nats-server v2.14.0 server/consumer.go:5916-5921,
-// :5964-5973), so a large window converts a broken target into steady server-side
-// work. Lane 1 is also deliberately serial (Workers unset), so each floor tick
-// redelivers the stuck set as a batch through one worker — the cap is sized
-// against that drain, not against the row count of the lens.
-const laneOneMaxAckPending = 2000
 
 // reconcileConsumers diffs the desired lane-1 consumer set (the registered
 // targets) against the last-applied set, driving the supervisor:
@@ -564,6 +579,9 @@ func (e *Engine) reconcileConsumers() {
 		for _, prefix := range issueKeyTargetPrefixes(id) {
 			e.issues.clearPrefix(prefix)
 		}
+		// Same reasoning for the in-memory republish obligations: no consumer
+		// means no delivery, so nothing could ever consult or retire them.
+		e.republish.clearTarget(id)
 		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states)
 		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("weaver target consumer health-state cleanup failed", "targetId", id, "durable", name, "err", err)
@@ -581,4 +599,4 @@ func (e *Engine) reconcileConsumers() {
 	}
 }
 
-func issueKeyConsumer(targetID string) string { return issuePrefixConsumer + targetID }
+func issueKeyConsumer(targetID string) string { return "consumer:" + targetID }

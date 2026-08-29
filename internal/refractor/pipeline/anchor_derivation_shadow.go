@@ -111,6 +111,20 @@ type DerivationShadowStats struct {
 	// redelivered and eventually succeeds, so without this a target's bad minute
 	// would leave no trace in the lens's own numbers.
 	PlainProbeUnreadable int64
+
+	// RangedClosureReads is the adjacency documents the walk's bounded ranged
+	// closures read, summed over every walk that ran one. It is an ACT-mode
+	// counter like PlainProbeUnreadable, tallied once per walk however that
+	// walk exits — the read-cap exit included.
+	//
+	// It is the one number that makes DefaultDerivationReadCap's firing rate
+	// legible. A ranged hop is the only shape whose cost is not a handful of
+	// reads per event: `(work)<-[:containedIn*0..]-(place)` walks DOWN a
+	// containment tree, so its read count is the descendant set rather than an
+	// ancestor chain. Read against FellBack, this says whether a lens is
+	// falling back because its ranged closures are wide, or for some other
+	// reason entirely.
+	RangedClosureReads int64
 }
 
 type derivationShadow struct {
@@ -286,6 +300,17 @@ func (p *Pipeline) recordDerivationFellBack() {
 	p.logActSummaryIfDue(snapshot)
 }
 
+// recordDerivationRangedReads adds one walk's ranged-closure adjacency reads to
+// the act-mode tally. It does not touch Acted/FellBack — the walk's outcome is
+// recorded by its own caller — so it does not move logActSummaryIfDue's
+// interval either; the count is simply there when the next acted or fell-back
+// event prints the line.
+func (p *Pipeline) recordDerivationRangedReads(n int) {
+	p.derivShadow.mu.Lock()
+	p.derivShadow.stats.RangedClosureReads += int64(n)
+	p.derivShadow.mu.Unlock()
+}
+
 func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats) {
 	total := st.Acted + st.FellBack
 	if total == 0 || total%derivationShadowSummaryEvery != 0 {
@@ -297,6 +322,12 @@ func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats) {
 	// never reach the plain probe — is not padded with a permanent zero.
 	if st.PlainProbeUnreadable > 0 {
 		attrs = append(attrs, "probeUnreadable", st.PlainProbeUnreadable)
+	}
+	// Likewise carried only once it has fired, so a lens whose pattern holds no
+	// ranged hop — the overwhelming majority — is not padded with a permanent
+	// zero.
+	if st.RangedClosureReads > 0 {
+		attrs = append(attrs, "rangedClosureReads", st.RangedClosureReads)
 	}
 	slog.Info("pipeline: anchor-derivation tally", attrs...)
 }

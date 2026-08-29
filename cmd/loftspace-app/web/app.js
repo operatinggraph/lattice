@@ -177,6 +177,45 @@ function loadDescriptorform() {
   return descriptorformPromise;
 }
 
+// revealCeremonySecret narrates, in this app's toast vocabulary, whatever the
+// module's own revealCeremonySecret did with a minted plaintext. The DECISION
+// — descriptorform's ceremony rule 3, an affirmative `status === "accepted"`
+// and never the weaker "not rejected" — is the module's, so all four staff
+// apps enforce one implementation of it rather than four re-derivations of
+// "does this reply confirm the write landed?". Two of them do not: a
+// `duplicate` reply says an earlier submission claimed this requestId, and a
+// Processor reply timeout answers a status-less HTTP 202, and neither
+// confirms the envelope carrying this secret's hash committed.
+//
+// It reads the already-resolved descriptorformModule rather than awaiting
+// loadDescriptorform() again. Holding a reveal means a form rendered, which
+// means the module is loaded — so the await would buy nothing, and could only
+// invent a way to lose the single copy of the secret in the window between
+// the write landing and its display.
+function revealCeremonySecret(reveal, reply) {
+  // Nothing was minted for an ordinary op, so the module is never reached for
+  // one — its absence must not surface as a lost-secret warning.
+  if (!reveal) return;
+  let outcome;
+  try {
+    outcome = descriptorformModule.revealCeremonySecret(reveal, reply);
+  } catch (e) {
+    // Contained, and reported as a landed write, because the only thing that
+    // can throw in there is the display, which the module reaches only on a
+    // confirmed commit. Every caller runs this inside the same try whose catch
+    // reports the submission as failed, so an uncaught throw would tell the
+    // person the opposite of what happened and hide the fact that matters —
+    // the target is armed with a secret nobody now holds, which is only
+    // fixable by issuing a fresh one.
+    console.error("ceremony reveal failed", e);
+    toast("The write landed but its one-time secret could not be shown — issue a fresh one.", "err");
+    return;
+  }
+  if (outcome === "withheld") {
+    toast("The write was not confirmed, so its one-time secret was not shown — check whether it landed, and issue a fresh one.", "err");
+  }
+}
+
 // loadDescriptorformQuiet mirrors loadOpCatalogQuiet: a load failure leaves
 // descriptorformModule null, which canRenderCatalogRow reads as "not
 // completable YET" (fail closed) rather than throwing into a render pass.
@@ -1930,9 +1969,11 @@ function renderTaskCard(t) {
   desc.className = "addr-sub";
   desc.textContent = t.operationDescription || "";
 
+  const expired = t.expiresAt && new Date(t.expiresAt).getTime() < Date.now();
+
   const meta = document.createElement("div");
   meta.className = "meta";
-  if (t.expiresAt) meta.textContent = "due " + fmtDate(t.expiresAt);
+  if (t.expiresAt) meta.textContent = (expired ? "expired " : "due ") + fmtDate(t.expiresAt);
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -1947,7 +1988,8 @@ function renderTaskCard(t) {
     btn.textContent = "Claim";
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
-    badge.textContent = "open";
+    badge.textContent = expired ? "expired" : "open";
+    if (expired) badge.className = "badge expired";
     const canComplete = canCompleteOp(t.operationName);
     btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
     btn.disabled = !canComplete;
@@ -2176,9 +2218,9 @@ async function submitCatalogComplete(task, desc) {
   const submit = $("#complete-submit");
   submit.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), "err");
       return;
@@ -2189,6 +2231,7 @@ async function submitCatalogComplete(task, desc) {
       toast("Could not complete — " + msg, "err");
       return;
     }
+    revealCeremonySecret(reveal, reply);
     // A task-voice op's §10.7 ephemeral grant already closed the task on the
     // same commit (Contract #10 §10.6 auto-complete); every other leg submits
     // under the signed-in identity's own standing grant, so it is retired
@@ -2624,9 +2667,35 @@ function renderStatementPanel(leaseAppKey) {
   return wrap;
 }
 
+// groupOneBillEntriesByPeriod buckets statement entries by calendar month
+// (each entry's own postedAt, chronological within a period) and sums each
+// period's net (debit minus credit), newest period first.
+function groupOneBillEntriesByPeriod(entries) {
+  const byKey = new Map();
+  for (const e of entries) {
+    const d = new Date(e.postedAt);
+    const key = isNaN(d.getTime())
+      ? "unknown"
+      : d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+    if (!byKey.has(key)) byKey.set(key, { key, entries: [], netCents: 0 });
+    const g = byKey.get(key);
+    g.entries.push(e);
+    g.netCents += e.type === "debit" ? e.amountCents : -e.amountCents;
+  }
+  return Array.from(byKey.values()).sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+}
+
+// fmtOneBillPeriodLabel renders a "YYYY-MM" grouping key as "Month YYYY".
+function fmtOneBillPeriodLabel(key) {
+  if (key === "unknown") return "Undated";
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
 // refreshStatementBody loads and renders the combined statement: the running
-// balance across both ledgers and the transaction list (oldest first), each
-// entry tagged by its source ledger.
+// balance across all four ledgers, then the transaction list grouped by
+// month (newest first) with a per-month subtotal, each entry tagged by its
+// source ledger.
 async function refreshStatementBody(body, leaseAppKey) {
   body.textContent = "Loading…";
   let data;
@@ -2653,19 +2722,32 @@ async function refreshStatementBody(body, leaseAppKey) {
     none.textContent = "No charges or payments recorded yet.";
     body.append(none);
   } else {
-    const list = document.createElement("ul");
-    list.className = "ledger-list";
-    for (const e of entries) {
-      const li = document.createElement("li");
-      li.className = "ledger-entry " + e.type;
-      const sign = e.type === "debit" ? "+" : "−";
-      const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
-      li.textContent =
-        fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
-        (e.memo ? " — " + e.memo : "");
-      list.append(li);
+    for (const g of groupOneBillEntriesByPeriod(entries)) {
+      const period = document.createElement("div");
+      period.className = "ledger-period";
+
+      const header = document.createElement("div");
+      header.className = "ledger-period-header";
+      const netSign = g.netCents > 0 ? "+" : g.netCents < 0 ? "−" : "";
+      const netAbs = moneyAmount(Math.abs(g.netCents) / 100);
+      header.textContent = fmtOneBillPeriodLabel(g.key) + " · " + netSign + netAbs;
+      period.append(header);
+
+      const list = document.createElement("ul");
+      list.className = "ledger-list";
+      for (const e of g.entries) {
+        const li = document.createElement("li");
+        li.className = "ledger-entry " + e.type;
+        const sign = e.type === "debit" ? "+" : "−";
+        const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
+        li.textContent =
+          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
+          (e.memo ? " — " + e.memo : "");
+        list.append(li);
+      }
+      period.append(list);
+      body.append(period);
     }
-    body.append(list);
   }
 }
 

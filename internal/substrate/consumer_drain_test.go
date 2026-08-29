@@ -26,7 +26,6 @@ type bufferedMsg struct {
 
 	mu        sync.Mutex
 	decisions []string
-	delays    []time.Duration
 }
 
 func (m *bufferedMsg) Metadata() (*jetstream.MsgMetadata, error) {
@@ -43,16 +42,11 @@ func (m *bufferedMsg) Ack() error           { return m.record("ack") }
 func (m *bufferedMsg) DoubleAck(context.Context) error {
 	return m.record("ack")
 }
-func (m *bufferedMsg) Nak() error { return m.record("nak") }
-func (m *bufferedMsg) NakWithDelay(d time.Duration) error {
-	m.mu.Lock()
-	m.delays = append(m.delays, d)
-	m.mu.Unlock()
-	return m.record("nakdelay")
-}
-func (m *bufferedMsg) InProgress() error           { return m.record("progress") }
-func (m *bufferedMsg) Term() error                 { return m.record("term") }
-func (m *bufferedMsg) TermWithReason(string) error { return m.record("term") }
+func (m *bufferedMsg) Nak() error                       { return m.record("nak") }
+func (m *bufferedMsg) NakWithDelay(time.Duration) error { return m.record("nak") }
+func (m *bufferedMsg) InProgress() error                { return m.record("progress") }
+func (m *bufferedMsg) Term() error                      { return m.record("term") }
+func (m *bufferedMsg) TermWithReason(string) error      { return m.record("term") }
 
 func (m *bufferedMsg) record(d string) error {
 	m.mu.Lock()
@@ -65,13 +59,6 @@ func (m *bufferedMsg) decided() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.decisions...)
-}
-
-// nakDelays returns the delay argument of every NakWithDelay call, in order.
-func (m *bufferedMsg) nakDelays() []time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]time.Duration(nil), m.delays...)
 }
 
 // prefetchIterator is a jetstream.MessagesContext over a fixed prefetch buffer,

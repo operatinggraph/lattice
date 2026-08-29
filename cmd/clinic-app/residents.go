@@ -114,7 +114,7 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		return entry.Value, true
 	}
 	rows := computeResidents(keys, get)
-	if hats.isOperator || hats.isStaff() {
+	if hats.isOperator || hats.isFrontDesk() {
 		s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
 		return
 	}

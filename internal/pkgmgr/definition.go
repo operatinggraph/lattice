@@ -416,7 +416,9 @@ type AugurAutoApplySpec struct {
 // GapActionSpec mirrors the engine's GapAction (Contract #10 §10.8 action
 // table) field-for-field so the emitted body deserializes cleanly into the
 // runtime target. Action selects the contract; the remaining fields carry the
-// per-action params, each a literal or a `row.<column>` template token.
+// per-action params, each a literal or a `row.<column>` template token (the
+// Params bag additionally admits the `json:<literal>` typed-literal token —
+// see that field for the full grammar).
 // `Pattern` (triggerLoom) and `Operation` (assignTask/directOp) are
 // shipped verbatim and resolve live in the engine registry — the installer
 // does not rewrite them to NanoIDs.
@@ -428,7 +430,49 @@ type GapActionSpec struct {
 	Operation string
 	Assignee  string
 	Target    string
-	Params    map[string]string
+	// Params are the dispatched op's payload fields. Each value is written in
+	// a three-arm grammar, checked in this order:
+	//
+	//   row.<column>   — substituted from the violation row, delivering that
+	//                    column's own type (an int64 column arrives as an
+	//                    int64, not its decimal spelling). A column that is
+	//                    null or absent fails the dispatch rather than firing
+	//                    a malformed remediation. The substituted value is
+	//                    never re-read as a token: a row column literally
+	//                    holding "json:5" dispatches as that string.
+	//   json:<literal> — the value encoding/json decodes the suffix into, so a
+	//                    map[string]string bag can still hand an op a number,
+	//                    a bool, an array or an object. `json:5` dispatches as
+	//                    5, `json:true` as a bool. A string that must itself
+	//                    begin with the token is written as its own JSON
+	//                    string: `json:"json:foo"` dispatches as the string
+	//                    json:foo.
+	//   anything else  — a plain string literal, dispatched byte-for-byte.
+	//
+	// A json: suffix is refused — at INSTALL and again at the engine's own
+	// load, never quietly demoted to a plain string — when it is not valid
+	// JSON; when it is null or the empty string, each indistinguishable at the
+	// receiving op from a param that was never declared; or when it is an
+	// integer float64 cannot hold exactly (9007199254740993, a nanosecond
+	// timestamp), which would dispatch a different number than the one
+	// written. Every refusal is permanent by construction: whether a suffix
+	// decodes depends on the authored value alone, so a gap carrying one could
+	// never dispatch for any row.
+	//
+	// The token is confined to THIS bag. Every other field of a gap — Subject,
+	// Pattern, Operation, Assignee, Target, and each entry of Reads,
+	// OptionalReads and Enumerations — is a key, an operationType or a pattern
+	// ref, always a string, and carrying the token there is refused at install
+	// and at load. Those fields are compared as RAW authored strings by the
+	// gates that bound an authored target's dispatch authority
+	// (authored_dispatch_scope.go), so a value that decoded later at dispatch
+	// would be one no gate ever saw.
+	//
+	// Nothing type-checks the resolved value against the op's InputSchema on
+	// the submit path, so an op declaring `"type":"number"` and a playbook
+	// declaring a plain "5" disagree silently — the typed literal is how the
+	// playbook states the type it means.
+	Params map[string]string
 	// Class pins the dispatched op's DDL canonical name (Contract #2 §2.1
 	// operationType→class reverse index). Required whenever Operation is
 	// admitted by more than one installed vertexType DDL — the Processor's
@@ -444,6 +488,39 @@ type GapActionSpec struct {
 	// the candidate vertex it must read). Used by directOp; the candidate id is
 	// already in the target lens row, so this just routes it into the op's reads.
 	Reads []string
+	// OptionalReads are the dispatched op's ContextHint.OptionalReads — the
+	// absence-tolerant half of Contract #2 §2.5's declared read posture. Same
+	// template grammar as Reads (a literal or a row.<column> template resolved
+	// from the violation row), for a key whose absence is a normal branch in
+	// the script rather than a correctness error — a per-entity uniqueness
+	// guard whose prior claim was released, a link that simply may not exist
+	// yet. Used by directOp only.
+	//
+	// The split is semantic, not stylistic, and mis-filing it breaks the op in
+	// opposite directions: a key the script REQUIRES belongs in Reads (absence
+	// is a correctness error), while a key whose absence the script branches on
+	// belongs here — declaring such a key as a required Read fails the whole
+	// dispatch the first time it is legitimately absent. Never for a key the
+	// script requires.
+	//
+	// An entry whose row.<column> template resolves null or absent for a given
+	// row is DROPPED from that dispatch, not an error — the natural way to
+	// declare an absence-tolerant read is a nullable lens column, and the rows
+	// where it is null are exactly the rows the declaration was written for.
+	// The dropped key degrades to what the script did before it was declared:
+	// a live undeclared read. A config error (the typed-literal token, any
+	// permanently undispatchable shape) still fails the gap, since no row can
+	// fix it.
+	//
+	// Declaring a key here changes what the Processor does with it, not merely
+	// where its value comes from: the key is served from the step-4 hydration
+	// snapshot — present, or KnownAbsent with no live kv.Read — instead of a
+	// live on-demand read, so it costs nothing against the live-read budget,
+	// and a `create` conditioned on the key's observed absence resolves as a
+	// CreateOnly assertion whose conflict the commit path re-probes and
+	// absorbs with an in-process retry, where an undeclared create's collision
+	// on the same key would simply surface.
+	OptionalReads []string
 	// Enumerations are the dispatched op's ContextHint.Enumerations — the
 	// Contract #2 §2.5 class-(e) kv.Links walks its script runs, declared onto
 	// the envelope as metadata. Used by directOp. Each Hub is a literal or a
@@ -522,8 +599,21 @@ type ActionCatalogEntrySpec struct {
 	Operation string
 	Assignee  string
 	Target    string
-	Params    map[string]string
-	Reads     []string
+	// Params are the entry's op payload fields, in the same value grammar
+	// GapActionSpec.Params documents (row.<column>, json:<literal>, or a plain
+	// string) and under the same install-time refusal of a malformed typed
+	// literal: a chosen entry dispatches through the engine's ordinary action
+	// contract.
+	Params map[string]string
+	Reads  []string
+	// OptionalReads are the entry's declared absence-tolerant reads, same
+	// grammar, same dispatch-time semantics, and same purpose as
+	// GapActionSpec.OptionalReads (see that field's doc for what declaring one
+	// changes at the Processor): a chosen entry dispatches through the
+	// engine's ordinary action contract, so a declaration it cannot carry here
+	// is one silently dropped from the envelope for every planner-synthesized
+	// dispatch.
+	OptionalReads []string
 	// Enumerations are the entry's declared kv.Links walks, same grammar and
 	// same purpose as GapActionSpec.Enumerations: a chosen entry dispatches
 	// through the engine's ordinary action contract, so a walk it cannot

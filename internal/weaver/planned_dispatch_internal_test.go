@@ -201,7 +201,7 @@ func TestPlannedMode_AbsentModeByteIdentical(t *testing.T) {
 
 	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 1))
 	if dec != substrate.NakWithLongDelay {
-		t.Fatalf("a mode-absent candidates-only gap is a config error: it must decline on the long floor, got %v", dec)
+		t.Fatalf("a mode-absent candidates-only gap is a config error and must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if !hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {

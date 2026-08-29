@@ -762,16 +762,6 @@ def location_covers(candidate_key, target_key):
         frontier = parents
     return False
 
-def workplace_exempt():
-    # The cheap half of require_workplace, callable BEFORE a domain resolver
-    # runs. Starlark evaluates arguments eagerly, so
-    # require_workplace(resolve(x), ...) would walk the target's topology even
-    # for root -- wasted reads, and worse, a malformed key anywhere in that walk
-    # raises where the op previously succeeded. Call sites therefore gate on
-    # this; require_workplace re-checks it anyway, so a site that forgets the
-    # gate is still CORRECT, only slower.
-    return op.authTargetValidated or actor_holds_operator(op.actor)
-
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants, which
     # authorize via scope=any and so carry no target the platform has checked.
@@ -785,6 +775,16 @@ def require_workplace(location_keys, what):
     # non-empty: the raw target is a client-supplied hint that any scope=any
     # holder can set, so exempting on its presence would let any staff member
     # opt out of confinement.
+    #
+    # Call sites gate on op.authTargetValidated directly rather than a
+    # workplace_exempt()-style pre-check that also asks actor_holds_operator:
+    # every call site here passes a cheap, non-raising resolver (a single
+    # kv.Links hop or a bare literal), so the only real cost is
+    # actor_holds_operator's role walk, and gating on it twice (once to decide
+    # whether to call this function, once again inside it) was strictly wasted
+    # NATS round trips on the confined-staff path -- exactly the path that
+    # actually blows the 250ms Starlark wall. Only a call site with a genuinely
+    # expensive or raising resolver should reintroduce that pre-check.
     if op.authTargetValidated:
         return
     enforce_workplace(location_keys, what)
@@ -973,7 +973,7 @@ def execute(state, op):
         # resident-self path, which the applicationFor probe below binds instead.
         # workplace-exempt: (ownership-bound) the applicationFor probe below
         # requires the target to be this lease's own applicant.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([leaseapp_unit(lease_key)], "cannot open a tab for lease " + lease_key)
 
         # Resident-self (consumer's scope=self grant only): step 3 authorizes
@@ -1112,7 +1112,7 @@ def execute(state, op):
         # forged. Earliest point the location is derivable.
         # workplace-exempt: (ownership-bound) the applicationFor probe below
         # requires the target to be the applicant on this tab's own lease.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot charge tab " + tab_key)
 
@@ -1203,7 +1203,7 @@ def execute(state, op):
         # workplace-exempt: (no-validated-path) VoidCharge is granted scope=any
         # to operator + frontOfHouse only (permissions.go) and no task mints it,
         # so nothing but the operator escape reaches the exemption.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot void a charge on tab " + tab_key)
 
@@ -1248,7 +1248,7 @@ def execute(state, op):
         # from the tab's own .status aspect, so the workplace cannot be forged.
         # workplace-exempt: (ownership-bound) the applicationFor probe below
         # requires the target to be the applicant on this tab's own lease.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([leaseapp_unit(lease_key)], "cannot settle tab " + tab_key)
 
         # Resident-self (consumer's scope=self grant only): same closure as
@@ -1650,10 +1650,12 @@ def worksAt_covers(actor_id, location_key):
         frontier = parents
     return False
 
-def workplace_exempt():
-    return op.authTargetValidated or actor_holds_operator(op.actor)
-
 def require_workplace(location_keys, what):
+    # See the tab script's require_workplace above for why call sites gate on
+    # op.authTargetValidated directly rather than a workplace_exempt()-style
+    # pre-check: every resolver here is a bare literal or a single kv.Links
+    # hop, so the pre-check's extra actor_holds_operator call was pure waste
+    # on the confined-staff path.
     if op.authTargetValidated:
         return
     enforce_workplace(location_keys, what)
@@ -1705,7 +1707,7 @@ def execute(state, op):
         # scope=any to operator + frontOfHouse only (permissions.go) and no
         # task mints it, so op.authTargetValidated is never legitimately true
         # and only the operator escape reaches the exemption.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([location_key], "cannot create a menu item at " + location_key)
 
         item_id = bare_nanoid_or_mint(p, "menuItemId")
@@ -1743,7 +1745,7 @@ def execute(state, op):
         # scope=any to operator + frontOfHouse only (permissions.go) and no
         # task mints it, so op.authTargetValidated is never legitimately true
         # and only the operator escape reaches the exemption.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([menu_item_served_at(item_key)], "cannot retire menu item " + item_key)
 
         mutations = [
@@ -1778,7 +1780,7 @@ def execute(state, op):
         # and no task mints it, so op.authTargetValidated is never
         # legitimately true and only the operator escape reaches the
         # exemption.
-        if not workplace_exempt():
+        if not op.authTargetValidated:
             require_workplace([new_location], "cannot serve menu item " + item_key + " at " + new_location)
 
         mutations = []

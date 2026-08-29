@@ -429,17 +429,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// so it is optional on both counts. The studio comes free with
 				// the targetField fallback.
 				//
-				// The per-cell slot claims are NOT declared, and cannot be: the
-				// script reads one guard key per 15-minute cell the class covers
-				// (up to 96), each derived from startsAt/endsAt by arithmetic
-				// the template vocabulary has no form for — it substitutes
-				// values, it does not compute a set. The hand-written dispatcher
-				// enumerates them (cmd/wellness-app/web/app.js); a
-				// descriptor-driven caller leaves them to the script's own
-				// read, so a conflict surfaces as the commit-time
-				// RevisionConflict rather than the script's StudioConflict. It
-				// fails closed either way, and the ceiling stays the same
-				// CreateOnly conditioning; what is lost is the better error.
+				// The per-cell slot claims are NOT declared here, and this
+				// Dispatch.OptionalReads template vocabulary still has no form
+				// for them: the script reads one guard key per 15-minute cell
+				// the class covers (up to 96), each derived from startsAt/
+				// endsAt by arithmetic the template substitutes values but
+				// never computes. That no longer matters for EITHER caller
+				// shape, though: ddls.go's own derive_reads(op) computes the
+				// full set server-side from this same payload (Contract #2
+				// §2.5 class (g)), unconditionally, before any caller's
+				// declaration is even consulted — so every caller gets the
+				// script's own StudioConflict/InstructorConflict on collision,
+				// never a bare commit-time RevisionConflict.
 				OptionalReads: []string{"{payload.instructor}"},
 			},
 		},
@@ -477,15 +478,15 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "studio",
 				TargetType:  studioVertexDDL,
-				// Same undeclarable-read shape as CreateSession's own op-meta,
-				// multiplied by occurrenceCount: the per-cell slot claims of
-				// EVERY occurrence are data-derived from startsAt/endsAt/
-				// intervalDays by arithmetic the template vocabulary has no
-				// form for. The hand-written dispatcher (cmd/wellness-app/web/
-				// app.js) enumerates them all; a descriptor-driven caller
-				// leaves them to the script's own read (RevisionConflict
-				// instead of StudioConflict on collision — fails closed
-				// either way).
+				// Same undeclarable-template shape as CreateSession's own
+				// op-meta, multiplied by occurrenceCount: the per-cell slot
+				// claims of EVERY occurrence are data-derived from startsAt/
+				// endsAt/intervalDays by arithmetic this Dispatch.OptionalReads
+				// template vocabulary has no form for. ddls.go's own
+				// derive_reads(op) computes the whole per-occurrence set
+				// server-side instead, for every caller shape alike (Contract
+				// #2 §2.5 class (g)) — see CreateSession's op-meta comment
+				// above.
 				OptionalReads: []string{"{payload.instructor}"},
 			},
 		},

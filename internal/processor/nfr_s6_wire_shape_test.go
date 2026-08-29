@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -324,4 +325,137 @@ func TestNFRS6_NonCollapsedClassesKeepTheirRealCodes(t *testing.T) {
 				reply.Error, ErrCodeEnvelopeMalformed)
 		}
 	})
+}
+
+// recordingClaimEmitter captures the outcome words the commit path records, so
+// a test can assert the counter's content rather than only its wire reply.
+type recordingClaimEmitter struct {
+	mu       sync.Mutex
+	outcomes []string
+}
+
+func (r *recordingClaimEmitter) RecordClaimAttempt(_ context.Context, outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
+}
+
+func (r *recordingClaimEmitter) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.outcomes...)
+}
+
+// TestNFRS6_EveryCollapsedRejectionIsAccounted pins that a rejection hidden
+// behind the generic wire shape is never also hidden from the operator.
+//
+// The two are the same act. replyRejection is where an NFR-S6 cause stops being
+// visible to the caller, so it is where the cause has to become visible to
+// Health KV instead — Contract #9 §9.3 moves specifics to the counter, it does
+// not delete them. A rejection that collapses the reply and records nothing is
+// invisible on every channel at once: the caller is told a fixed sentence, and
+// the operator sees neither a success nor a failure, so the documented
+// brute-force signature (a climbing invalid-key against a flat success) reads
+// exactly as it does when nothing is wrong.
+//
+// The arms cover both kinds of cause. A script refusal carries its own
+// adjudicated word. A platform refusal — the operation never reached the script,
+// or lost a commit race after it — has no such word and is counted as
+// platform-refused rather than not at all.
+func TestNFRS6_EveryCollapsedRejectionIsAccounted(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+
+	arms := []struct {
+		name    string
+		op      string
+		opts    rejectPipelineOpts
+		want    string
+		wantAny bool
+	}{
+		{
+			name: "a script refusal is counted under the word the script adjudicated",
+			op:   "ClaimIdentity",
+			opts: rejectPipelineOpts{executeErr: claimKeyInvalidErr("fixture", "wrong-state")},
+			want: "wrong-state",
+		},
+		{
+			name: "the same holds for the set's other member, not just ClaimIdentity",
+			op:   "CompleteCredentialLink",
+			opts: rejectPipelineOpts{executeErr: claimKeyInvalidErr("fixture", "invalid-key")},
+			want: "invalid-key",
+		},
+		{
+			name: "a fault the script never reached is counted as an internal fault",
+			op:   "ClaimIdentity",
+			opts: rejectPipelineOpts{hydrateErr: errors.New("step4: decrypt: vault: decrypt failed")},
+			want: claimOutcomeInternalFault,
+		},
+	}
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			rec := &recordingClaimEmitter{}
+			cp := rejectPipeline(t, conn, arm.opts)
+			cp.deps.ClaimEmitter = rec
+
+			outcome, reply := dispatchAndReply(t, ctx, conn, cp, nfrS6Envelope(t, arm.op))
+			if outcome != OutcomeRejected {
+				t.Fatalf("outcome = %q, want Rejected — this arm must reach the collapse to mean anything", outcome)
+			}
+			// The positive vector: the reply really did collapse, so the counter
+			// is genuinely the only remaining channel for the cause.
+			if reply.Error == nil || reply.Error.Code != ErrCodeClaimKeyInvalid {
+				t.Fatalf("reply code = %+v, want the collapsed %s — the arm did not exercise the NFR-S6 path",
+					reply.Error, ErrCodeClaimKeyInvalid)
+			}
+
+			seen := rec.seen()
+			if len(seen) != 1 {
+				t.Fatalf("recorded %v to claim-attempts, want exactly one outcome: a collapsed rejection "+
+					"that records nothing is invisible to the caller AND the operator, and one that "+
+					"records twice double-counts the plane an operator reads for a brute-force signature", seen)
+			}
+			if seen[0] != arm.want {
+				t.Errorf("recorded outcome %q, want %q", seen[0], arm.want)
+			}
+		})
+	}
+}
+
+// TestNFRS6_PlatformRefusalIsCounted pins the leg with no script word of its own.
+//
+// A DDL violation, protected-key or package-scope refusal, an oversized batch or
+// an exhausted revision conflict all collapse to the same generic reply as a
+// wrong claim key, and none of them carries an adjudicated outcome. Without a
+// bucket they vanish: a conflict storm on the claim plane would move no number
+// at all while every counter an operator watches stayed flat.
+func TestNFRS6_PlatformRefusalIsCounted(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+
+	rec := &recordingClaimEmitter{}
+	cp := rejectPipeline(t, conn, rejectPipelineOpts{})
+	cp.deps.ClaimEmitter = rec
+
+	env := nfrS6Envelope(t, "ClaimIdentity")
+	msg := messageFromEnvelope(t, env)
+	cp.replyRejection(ctx, msg, env, ErrCodeRevisionConflict, "conflict on a hot key", nil, "")
+
+	seen := rec.seen()
+	if len(seen) != 1 || seen[0] != claimOutcomePlatformRefused {
+		t.Fatalf("recorded %v, want exactly [%q]: a platform refusal of an NFR-S6 operation is "+
+			"collapsed on the wire like every other cause, so leaving it out of the counter hides "+
+			"it from the operator too", seen, claimOutcomePlatformRefused)
+	}
+
+	// A non-NFR-S6 operation keeps its real code and is not a claim attempt, so
+	// it must not touch this counter at all.
+	rec2 := &recordingClaimEmitter{}
+	cp.deps.ClaimEmitter = rec2
+	other := nfrS6Envelope(t, "CreateVertex")
+	cp.replyRejection(ctx, messageFromEnvelope(t, other), other, ErrCodeRevisionConflict, "conflict", nil, "")
+	if got := rec2.seen(); len(got) != 0 {
+		t.Errorf("recorded %v for a non-NFR-S6 operation, want nothing — the counter is the claim "+
+			"plane's, and padding it with unrelated rejections destroys the ratio it exists for", got)
+	}
 }

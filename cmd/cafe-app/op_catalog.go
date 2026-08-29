@@ -56,11 +56,26 @@ type opCatalogProjection struct {
 	// when the row's Field column equals Equals"). Dropping it here would not
 	// degrade the FE, it would make it fail OPEN — an op the package says to
 	// hide in this state would be offered in every state. It is threaded
-	// through unevaluated: no evaluator is built here, and the FE
-	// treats a row that carries one as not-offerable, which is the same
-	// fail-closed answer the descriptor's own contract gives a client
-	// evaluating it against a row that lacks the named column.
+	// through unevaluated: this projection builds no evaluator itself — the
+	// shared internal/descriptorform module does, checking it against
+	// context.row (strict JSON scalar equality) and failing closed the same
+	// way when the row is absent or lacks the named column.
 	DispatchVisibleWhen *opVisibleWhen `json:"dispatchVisibleWhen"`
+
+	// CeremonyMintedSecretHashField names the schema field carrying the
+	// lowercase-hex sha256 of a secret the CLIENT mints and Lattice must never
+	// learn, and CeremonyRevealTitle/CeremonyRevealHelp are the copy for the
+	// one-time display of the plaintext once the write lands
+	// (pkgmgr.OpCeremonySpec). Dropping these here would not degrade the FE, it
+	// would hand it an op it cannot tell apart from an ordinary one: the hash
+	// field would render as a text box asking a person to type a 64-char digest
+	// whose preimage nobody holds, and an accepted submission would arm a secret
+	// no one can ever present. The contract the column carries is fail-closed at
+	// the FE — a client that cannot perform the ceremony must decline to OFFER
+	// the op at all, never fall back to rendering the field.
+	CeremonyMintedSecretHashField string `json:"ceremonyMintedSecretHashField"`
+	CeremonyRevealTitle           string `json:"ceremonyRevealTitle"`
+	CeremonyRevealHelp            string `json:"ceremonyRevealHelp"`
 
 	Sensitive      bool     `json:"sensitive"`
 	GrantedToRoles []string `json:"grantedToRoles"`
@@ -85,8 +100,19 @@ type opDescriptor struct {
 	InputSchema       string            `json:"inputSchema,omitempty"`
 	FieldDescriptions map[string]string `json:"fieldDescriptions,omitempty"`
 	Dispatch          *opDispatch       `json:"dispatch,omitempty"`
+	Ceremony          *opCeremony       `json:"ceremony,omitempty"`
 	Sensitive         bool              `json:"sensitive,omitempty"`
 	GrantedToRoles    []string          `json:"grantedToRoles"`
+}
+
+// opCeremony is pkgmgr.OpCeremonySpec's projected form. It sits at the TOP
+// level beside Dispatch rather than inside it: a ceremony is a property of the
+// operation itself — what the client must DO before it can submit at all —
+// not of how the submission is routed.
+type opCeremony struct {
+	MintedSecretHashField string `json:"mintedSecretHashField"`
+	RevealTitle           string `json:"revealTitle,omitempty"`
+	RevealHelp            string `json:"revealHelp,omitempty"`
 }
 
 type opDispatch struct {
@@ -170,6 +196,19 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 			Reads:         p.DispatchReads,
 			OptionalReads: p.DispatchOptionalReads,
 			VisibleWhen:   p.DispatchVisibleWhen,
+		}
+	}
+
+	// MintedSecretHashField is what makes a ceremony a ceremony — the reveal
+	// copy alone describes nothing to perform — so the whole object is omitted
+	// unless it is set, the same way the dispatch object above is omitted when
+	// nothing about it is set. An op with no ceremony must be indistinguishable
+	// from one whose package never declared the vocabulary at all.
+	if p.CeremonyMintedSecretHashField != "" {
+		d.Ceremony = &opCeremony{
+			MintedSecretHashField: p.CeremonyMintedSecretHashField,
+			RevealTitle:           p.CeremonyRevealTitle,
+			RevealHelp:            p.CeremonyRevealHelp,
 		}
 	}
 	return d

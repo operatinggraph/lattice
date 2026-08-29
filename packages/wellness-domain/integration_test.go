@@ -79,6 +79,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateStudio", Scope: "any"},
 			{OperationType: "TombstoneStudio", Scope: "any"},
 			{OperationType: "CreateSession", Scope: "any"},
+			{OperationType: "CreateSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
@@ -898,6 +899,135 @@ func TestCreateSession_RejectsStudioDoubleBook(t *testing.T) {
 	_, second := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000003", studioKey, "Power Sculpt", "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z", 20)
 	if second != processor.OutcomeRejected {
 		t.Fatalf("overlapping CreateSession outcome = %v, want Rejected (StudioConflict)", second)
+	}
+}
+
+// TestCreateSession_DeriveReadsClaimsCellsWithNoClientDeclaration proves the
+// DDL's own derive_reads(op) (Contract #2 §2.5 class (g)) — not the caller —
+// is what makes the studioSlotClaim cells hydrated and conflict-checked: the
+// envelope here declares NO optionalReads at all, unlike every other
+// CreateSession test in this file via the createSession() helper.
+func TestCreateSession_DeriveReadsClaimsCellsWithNoClientDeclaration(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "deriveclaimcells")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdderivestudio000001", "Flow Room")
+	reqID := testutil.GenReqID("wdderivesessio000001")
+	payload, _ := json.Marshal(map[string]any{
+		"studio": studioKey, "name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20,
+	})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "session",
+		Payload:       payload,
+		ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession (no declared optionalReads) outcome = %v, want Accepted", outcome)
+	}
+	for _, cc := range []string{"20260708t090000z", "20260708t091500z"} {
+		if !keyExists(t, ctx, conn, studioKey+".slot"+cc) {
+			t.Fatalf("expected studioSlotClaim at %s (derived, not client-declared)", cc)
+		}
+	}
+}
+
+// TestCreateSession_DeriveReadsCatchesStudioDoubleBookWithNoClientDeclaration
+// is the collision twin of the above: with no optionalReads on either
+// submission, the SECOND overlapping CreateSession must still see the FIRST
+// session's claim via derive_reads alone and reject (StudioConflict) — never
+// a bare commit-time RevisionConflict, which would be indistinguishable at
+// the OutcomeRejected level but is exactly the degraded error the DDL's own
+// derive_reads doc comment (and this package's opmetas.go) says is now
+// eliminated for every caller shape.
+func TestCreateSession_DeriveReadsCatchesStudioDoubleBookWithNoClientDeclaration(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "deriveclaimconflict")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdderivestudio000002", "Flow Room")
+	submit := func(label, name, startsAt, endsAt string) processor.MessageOutcome {
+		reqID := testutil.GenReqID(label)
+		payload, _ := json.Marshal(map[string]any{
+			"studio": studioKey, "name": name, "startsAt": startsAt, "endsAt": endsAt, "capacity": 20,
+		})
+		env := &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateSession",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "session",
+			Payload:       payload,
+			ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+		}
+		testutil.PublishOp(t, conn, env)
+		return testutil.DriveOne(t, ctx, cp, cons, "")
+	}
+	if first := submit("wdderivesessio000002", "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"); first != processor.OutcomeAccepted {
+		t.Fatalf("first CreateSession outcome = %v, want Accepted", first)
+	}
+	if second := submit("wdderivesessio000003", "Power Sculpt", "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z"); second != processor.OutcomeRejected {
+		t.Fatalf("overlapping CreateSession outcome = %v, want Rejected (StudioConflict, via derive_reads alone)", second)
+	}
+}
+
+// TestCreateSessionSeries_DeriveReadsClaimsCellsForEveryOccurrence exercises
+// CreateSessionSeries's occurrence loop and derive_reads' matching loop
+// together. Three weekly occurrences, no client-declared optionalReads:
+// every occurrence's studioSlotClaim cells must be derived and claimed, not
+// just the first.
+func TestCreateSessionSeries_DeriveReadsClaimsCellsForEveryOccurrence(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "deriveseriescells")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdderiveseries000001", "Flow Room")
+	reqID := testutil.GenReqID("wdderiveseries000002")
+	payload, _ := json.Marshal(map[string]any{
+		"studio": studioKey, "name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z",
+		"capacity": 20, "intervalDays": 7, "occurrenceCount": 3,
+	})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSessionSeries",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "sessionseries",
+		Payload:       payload,
+		ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries (no declared optionalReads) outcome = %v, want Accepted", outcome)
+	}
+
+	// Three occurrences, 7 days apart, each covering the same [09:00, 09:30)
+	// span (2 cells) — mirrors the script's own occ_starts/occ_ends offset
+	// loop (ddls.go) independently of session/series id, which nanoid.new()
+	// mints and this test cannot predict.
+	occurrenceStarts := []string{"2026-07-08T09:00:00Z", "2026-07-15T09:00:00Z", "2026-07-22T09:00:00Z"}
+	occurrenceEnds := []string{"2026-07-08T09:30:00Z", "2026-07-15T09:30:00Z", "2026-07-22T09:30:00Z"}
+	for i := range occurrenceStarts {
+		for _, key := range wdSlotClaimKeys(t, studioKey, occurrenceStarts[i], occurrenceEnds[i]) {
+			if !keyExists(t, ctx, conn, key) {
+				t.Fatalf("occurrence %d: expected studioSlotClaim at %s (derived, not client-declared)", i, key)
+			}
+		}
+	}
+
+	// A fourth, independent CreateSession overlapping the SECOND occurrence
+	// must still collide — proving the series' derived claims are real
+	// conflict-checked cells, not merely keys this test computed in parallel.
+	_, collision := createSession(t, ctx, conn, cp, cons, "wdderiveseries000003", studioKey, "Power Sculpt", "2026-07-15T09:15:00Z", "2026-07-15T09:45:00Z", 20)
+	if collision != processor.OutcomeRejected {
+		t.Fatalf("CreateSession overlapping series occurrence 1 outcome = %v, want Rejected (StudioConflict)", collision)
 	}
 }
 

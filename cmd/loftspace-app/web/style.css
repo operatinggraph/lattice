@@ -155,6 +155,7 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .badge.open { color: var(--yellow); border-color: var(--yellow); }
 .badge.complete { color: var(--green); border-color: var(--green); }
 .badge.cancelled { color: var(--text-dim); border-color: var(--border); }
+.badge.expired { color: var(--red); border-color: var(--red); }
 
 .empty {
   color: var(--text-dim);
@@ -420,6 +421,13 @@ button.ghost.danger:hover { background: var(--red); color: #fff; }
 .ledger-record-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ledger-record-form input { flex: 1; min-width: 100px; }
 .ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }
+.ledger-period + .ledger-period { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ledger-period-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
 
 /* Wider modal + 3-up field rows (post-listing form) */
 .modal-wide { max-width: 540px; }

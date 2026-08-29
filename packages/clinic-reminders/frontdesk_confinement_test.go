@@ -74,6 +74,7 @@ func fdrCapDoc() *processor.CapabilityDoc {
 			{OperationType: "PauseVisitSeries", Scope: "any"},
 			{OperationType: "ResumeVisitSeries", Scope: "any"},
 			{OperationType: "EndVisitSeries", Scope: "any"},
+			{OperationType: "SetVisitSeriesSite", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -284,5 +285,43 @@ func TestFrontDesk_VisitSeries_EndConfined(t *testing.T) {
 	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrendB1", "EndVisitSeries", "",
 		`{"seriesKey":"`+seriesBKey+`"}`, fdrActorKey, "", []string{seriesBKey, seriesBKey + ".series"}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk EndVisitSeries on a building-B series = %v, want Rejected — the multi-org gate", got)
+	}
+}
+
+// TestFrontDesk_VisitSeries_SetSiteConfined extends the same guarantee to
+// SetVisitSeriesSite, the one site op a human submits: a front-desk actor may
+// site a series whose provider practises at its workplace and is rejected for
+// one that does not. The op resolves its confining set and its site whitelist
+// from the SAME sites_for_provider walk, so a site the guard would not have
+// admitted can never be a site the caller may choose.
+func TestFrontDesk_VisitSeries_SetSiteConfined(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, fdrCapDoc())
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fdrsite", Instance: "cr-fdrsite"})
+	seedRemFrontDeskTopology(t, ctx, conn)
+
+	// Operator (unconfined) starts both series so the site vectors have targets.
+	seriesAID := crSubmit(t, ctx, conn, cp, cons, "fdrsseedA", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, processor.OutcomeAccepted)
+	seriesAKey := "vtx.visitseries." + seriesAID
+	seriesBID := crSubmit(t, ctx, conn, cp, cons, "fdrsseedB", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, processor.OutcomeAccepted)
+	seriesBKey := "vtx.visitseries." + seriesBID
+
+	// Front-desk may site the building-A series (its workplace)...
+	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrsiteA1", "SetVisitSeriesSite", "",
+		`{"seriesKey":"`+seriesAKey+`","site":"`+fdrBuildingAKey+`"}`, fdrActorKey, "", []string{seriesAKey}); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk SetVisitSeriesSite on a building-A series = %v, want Accepted", got)
+	}
+	// ...but not the building-B series, even naming B's own legitimate site.
+	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrsiteB1", "SetVisitSeriesSite", "",
+		`{"seriesKey":"`+seriesBKey+`","site":"`+fdrBuildingBKey+`"}`, fdrActorKey, "", []string{seriesBKey}); got != processor.OutcomeRejected {
+		t.Fatalf("front-desk SetVisitSeriesSite on a building-B series = %v, want Rejected — the multi-org gate", got)
+	}
+	// A forged target==actor buys nothing here either: these ops are
+	// operator-exempt only.
+	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrsiteB2", "SetVisitSeriesSite", "",
+		`{"seriesKey":"`+seriesBKey+`","site":"`+fdrBuildingBKey+`"}`, fdrActorKey, fdrActorKey, []string{seriesBKey}); got != processor.OutcomeRejected {
+		t.Fatalf("front-desk SetVisitSeriesSite cross-building with a forged target==actor = %v, want Rejected", got)
 	}
 }

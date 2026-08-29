@@ -32,6 +32,20 @@ import (
 // 10_000.
 const DefaultDerivationReadCap = 2_000
 
+// DerivationRangedWorkFactor multiplies the read cap into the ranged closures'
+// work budget: the adjacency ENTRIES they may iterate, as against the documents
+// they may read. The two differ because edgesOf memoises, so a re-entered
+// closure re-walks cached edge lists at no read cost at all.
+//
+// It is a multiple rather than its own constant so one operator knob still
+// governs the walk's whole cost envelope: SetAnchorDerivationReadCap moves both
+// together. The factor is the average degree above which iterating is no longer
+// cheap relative to the read that fetched the list — generous against the
+// shapes the derivation is built for (a containment chain's handful of edges
+// per vertex) and far below the measured pathology (86,050 entries for 1,023
+// reads on a binary containment tree).
+const DerivationRangedWorkFactor = 16
+
 // SetAnchorDerivationReadCap overrides the per-walk adjacency read budget.
 // n <= 0 restores the default. It exists so an operator can bound the
 // derivation's cost on a live lens without a redeploy, and so a test can reach
@@ -211,6 +225,139 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 		return edges, nil
 	}
 
+	// admit is the single entry point into the walk's frontier, so the global
+	// (position, vertex) guard is applied identically by the fixed-hop move and
+	// by the ranged closure.
+	admit := func(n seededNode) {
+		if _, seen := visited[n]; seen {
+			return
+		}
+		visited[n] = struct{}{}
+		queue = append(queue, n)
+	}
+
+	// rangedReads is the adjacency documents the ranged closures below read,
+	// tallied for the whole walk and reported once however the walk exits —
+	// including the read-cap exit, which is the firing rate worth seeing.
+	// work counts the adjacency entries the ranged closures iterate, which is
+	// what the memoising read cap cannot see (its doc above).
+	work := 0
+	workBudget := readCap * DerivationRangedWorkFactor
+	rangedReads := 0
+	defer func() {
+		if rangedReads > 0 {
+			p.recordDerivationRangedReads(rangedReads)
+		}
+	}()
+
+	// expandRanged walks one ranged step's bounded frontier and returns the
+	// adjacency documents it read. Standing on cur.id at cur.pos, it admits at
+	// step.ToPos every node the executor's own frontier (full.traverseRel)
+	// could reach across step.Rel/step.EdgeDir in between step.Min and
+	// step.Max hops, plus cur.id itself when step.Min is 0.
+	//
+	// Three properties are load-bearing, each because its opposite would
+	// UNDER-approximate — the one direction this unit refuses:
+	//
+	//   - The far-end label prune runs at ADMISSION ONLY. Intermediates extend
+	//     the frontier on the relation and direction filter alone, exactly as
+	//     traverseRel's nodeMatches runs only where it admits. A ranged hop's
+	//     intermediates bind arbitrary types, so pruning them by the TERMINAL
+	//     position's label drops paths the executor walks, i.e. drops anchors,
+	//     i.e. drops a revocation.
+	//   - The bound is step.Max, which the index already clamped PER RANGED HOP
+	//     to the executor's own maxVarLengthHops. There is no whole-walk depth
+	//     budget: a pattern chaining a fixed hop, a ten-hop range and another
+	//     fixed hop is twelve graph hops, and a global depth cap would
+	//     under-approximate it.
+	//   - It reads only through edgesOf, so DefaultDerivationReadCap governs its
+	//     I/O, and a breach returns errDerivationTooWide, which the caller turns
+	//     into ok == false and the enumerator BFS. Never a truncation.
+	//
+	// The read cap bounds I/O and NOT work, and the difference is measurable:
+	// edgesOf memoises, so a walk that re-enters this closure once per admitted
+	// node re-iterates cached edge lists for free as far as the read cap is
+	// concerned. On a 1,023-vertex containment tree that is 4,092 expansions and
+	// 86,050 edge visits to derive one anchor — twelve times what the BFS this
+	// replaces costs — and on a wide layered graph it reaches seconds of CPU at
+	// 40% of the read cap. workBudget therefore bounds the edge entries the
+	// ranged closures may iterate, and it is a FALLBACK trigger on exactly the
+	// read cap's terms: a breach raises errDerivationTooWide, so the walk
+	// degrades to the enumerator rather than returning a smaller set. It can
+	// only ever cause MORE fallback, never a narrower answer.
+	//
+	// This closure is NOT equivalent to traverseRel and does not try to be.
+	// traverseRel carries a per-path `seen` and enumerates paths; this walk
+	// carries a global `visited` keyed by (position, vertex) and enumerates
+	// reachability, so what it derives is a SUPERSET of the anchors the
+	// executor's paths can reach. The superset is what the invariant needs.
+	//
+	// The frontier's own guard is keyed by (vertex, hop) and dies with the
+	// call — no state outlives the walk. The hop belongs in the key only where
+	// a step's lower bound exceeds one: such a step can reach a node both below
+	// Min and at or above it, and a guard keyed by vertex alone would let the
+	// first sighting suppress the admissible one. At Min <= 1 — every shape
+	// AnchorHopIndex admits, since it refuses a higher lower bound — admission
+	// precedes the guard and the two keys produce the same set, so the hop is
+	// dropped and the guard costs one entry per vertex instead of Max.
+	type frontierNode struct {
+		id  string
+		hop int
+	}
+	expandRanged := func(cur seededNode, step full.PatternStep) (int, error) {
+		readsBefore := reads
+		// A step with no hop to take crosses no edge. StepsFrom never builds
+		// one, but this closure also serves a caller assembling a HopIndex
+		// directly, where silently admitting only the standing node would be an
+		// under-approximation rather than a no-op.
+		if step.Max < 1 {
+			return 0, nil
+		}
+		hopInKey := step.Min > 1
+		// The zero-hop admission: `*0..` binds the far position to the
+		// standing node itself, crossing no edge (rel_traverse.go's minHops ==
+		// 0 arm). No adjacency entry names this node's type, so the far-end
+		// prune sees an unknown type and keeps it — "cannot confirm the label"
+		// widens the set, never narrows it.
+		if step.Min == 0 && stepAdmitsFarEnd(step, "") {
+			admit(seededNode{pos: step.ToPos, id: cur.id})
+		}
+		seen := map[frontierNode]struct{}{{id: cur.id}: {}}
+		frontier := []string{cur.id}
+		for hop := 1; hop <= step.Max && len(frontier) > 0; hop++ {
+			var next []string
+			for _, id := range frontier {
+				edges, err := edgesOf(id)
+				if err != nil {
+					return reads - readsBefore, err
+				}
+				work += len(edges)
+				if work > workBudget {
+					return reads - readsBefore, errDerivationTooWide
+				}
+				for _, e := range edges {
+					if !edgeTakesStep(step, e) {
+						continue
+					}
+					if hop >= step.Min && stepAdmitsFarEnd(step, e.OtherType) {
+						admit(seededNode{pos: step.ToPos, id: e.OtherNodeID})
+					}
+					fn := frontierNode{id: e.OtherNodeID}
+					if hopInKey {
+						fn.hop = hop
+					}
+					if _, dup := seen[fn]; dup {
+						continue
+					}
+					seen[fn] = struct{}{}
+					next = append(next, e.OtherNodeID)
+				}
+			}
+			frontier = next
+		}
+		return reads - readsBefore, nil
+	}
+
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -232,42 +379,22 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 			return nil, false, err
 		}
 		for _, step := range steps {
-			for _, e := range edges {
-				if e.Name != step.Rel || !adjacency.DirectionMatches(e.Direction, step.EdgeDir) {
-					continue
-				}
-				// An edge entry with no OtherType is a legacy typeless edge:
-				// the far end's type is unknown, so the pattern's label cannot
-				// rule it out and the walk keeps it. A `*` far end prunes by
-				// set membership against its taxonomy-resolved downward
-				// closure instead of string equality.
-				//
-				// An unresolved expansion (step.ToExpanded == nil) prunes
-				// here, and pruning is the UNSOUND direction for this walk —
-				// which is why derivationIndex declines an index carrying such
-				// a position before the walk ever starts, leaving this arm
-				// unreachable from the pipeline. It stays as written for a
-				// caller that builds a HopIndex directly, where pruning is
-				// still better than falling back to ToLabel's bare (and
-				// possibly abstract, so meaningless as a key type) string.
-				if step.ToLabelExpand {
-					if e.OtherType != "" {
-						if step.ToExpanded == nil {
-							continue
-						}
-						if _, hit := step.ToExpanded[e.OtherType]; !hit {
-							continue
-						}
+			if step.Min == 1 && step.Max == 1 {
+				for _, e := range edges {
+					if !edgeTakesStep(step, e) || !stepAdmitsFarEnd(step, e.OtherType) {
+						continue
 					}
-				} else if step.ToLabel != "" && e.OtherType != "" && e.OtherType != step.ToLabel {
-					continue
+					admit(seededNode{pos: step.ToPos, id: e.OtherNodeID})
 				}
-				next := seededNode{pos: step.ToPos, id: e.OtherNodeID}
-				if _, seen := visited[next]; seen {
-					continue
+				continue
+			}
+			n, err := expandRanged(cur, step)
+			rangedReads += n
+			if err != nil {
+				if err == errDerivationTooWide {
+					return nil, false, nil
 				}
-				visited[next] = struct{}{}
-				queue = append(queue, next)
+				return nil, false, err
 			}
 		}
 	}
@@ -277,6 +404,48 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 		out = append(out, k)
 	}
 	return out, true, nil
+}
+
+// edgeTakesStep reports whether an adjacency entry is the relationship this
+// step moves along: the pattern's relation name, read in the direction
+// edgeDirFor resolved for the end the walk is standing on.
+func edgeTakesStep(step full.PatternStep, e adjacency.EdgeEntry) bool {
+	return e.Name == step.Rel && adjacency.DirectionMatches(e.Direction, step.EdgeDir)
+}
+
+// stepAdmitsFarEnd applies the pattern's own evidence about the node being
+// admitted at step.ToPos: otherType is that node's vertex KEY TYPE as the
+// adjacency entry recorded it, or "" where nothing recorded it.
+//
+// An empty otherType is a legacy typeless edge (or the zero-hop admission,
+// which crosses no edge at all): the type is unknown, so the pattern's label
+// cannot rule the node out and the walk keeps it. "Cannot confirm the label"
+// must widen the set, not narrow it.
+//
+// A `*` far end prunes by membership in its taxonomy-resolved downward closure
+// instead of by string equality. An unresolved expansion (ToExpanded == nil)
+// prunes, and pruning is the UNSOUND direction for this walk — which is why
+// derivationIndex declines an index carrying such a position before the walk
+// ever starts, leaving that arm unreachable from the pipeline. It stays as
+// written for a caller that builds a HopIndex directly, where pruning is still
+// better than falling back to ToLabel's bare (and possibly abstract, so
+// meaningless as a key type) string.
+//
+// Both the fixed single-hop move and the ranged closure's ADMISSION read this
+// one function. The prune is written once deliberately: two copies drift, and
+// the copy that drifts toward pruning more is the copy that drops an anchor.
+func stepAdmitsFarEnd(step full.PatternStep, otherType string) bool {
+	if step.ToLabelExpand {
+		if otherType == "" {
+			return true
+		}
+		if step.ToExpanded == nil {
+			return false
+		}
+		_, hit := step.ToExpanded[otherType]
+		return hit
+	}
+	return step.ToLabel == "" || otherType == "" || otherType == step.ToLabel
 }
 
 // errDerivationTooWide is the sentinel for the read cap. It never escapes

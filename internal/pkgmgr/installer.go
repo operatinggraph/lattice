@@ -1190,7 +1190,9 @@ func (i *Installer) readDeclaredKeyOccupants(ctx context.Context, declared []str
 // each declared keys — so a remedy naming only the mint hands the operator a
 // success reply and no grant.
 const (
-	restoreMintVerb  = "CreatePermission"
+	// op-name: (policy) the verb that re-mints a permission vertex — named in the remedy the OPERATOR submits, and matched against a declared permission's own operationType to classify it as a grantor verb pin=TestClassifyRestorePermissions
+	restoreMintVerb = "CreatePermission"
+	// op-name: (policy) the verb that re-attaches the grantedBy edge carrying authority — named in the remedy the OPERATOR submits, and matched against a declared permission's own operationType to classify it as a grantor verb pin=TestClassifyRestorePermissions
 	restoreGrantVerb = "GrantPermission"
 )
 

@@ -512,16 +512,19 @@ const (
 // has no vertex-type-from-key function, and the type is a declaration of
 // what the walk means, not a derivation from what it returned. One
 // OPTIONAL MATCH per anchor type; adding a type is one more walk plus one
-// more collect entry. Five types ship: `leaseapp` (a resident's own lease
+// more collect entry. Six types ship: `leaseapp` (a resident's own lease
 // application), `workplace` (a staff actor's worksAt location — the
 // anchor a standing staff op like ReportIssue fills its `location` from, so
-// the form asks only for what is genuinely typed), and the three
+// the form asks only for what is genuinely typed), the three
 // provider-archetype bindings (persona-worlds-design.md Fire W0) —
 // `provider` (clinic), `instructor` (wellness), `serviceprovider`
 // (service-domain) — each an inbound `identifiedBy` walk exactly mirroring
 // the leaseapp shape (the provider entity is the later-arriving source of
 // `identifiedBy`, so the walk into the pre-existing identity runs
-// backwards). Contract #1 direction: `worksAt` runs forwards off
+// backwards), and `patient` (clinic), the same inbound `identifiedBy` shape
+// as the three provider archetypes rather than a fourth one of those —
+// `CreateAppointment`'s `{me.patient}` ContextParams entry is what addresses
+// it. Contract #1 direction: `worksAt` runs forwards off
 // the identity and is matched once for the `anchors` grouping already. A degenerate {key:null} entry when
 // the identity holds none of these bindings is the same expected shape
 // roles/anchors carry and is dropped client-side.
@@ -744,6 +747,9 @@ RETURN
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
   op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
+  op.ceremony.data.mintedSecretHashField AS ceremonyMintedSecretHashField,
+  op.ceremony.data.revealTitle AS ceremonyRevealTitle,
+  op.ceremony.data.revealHelp AS ceremonyRevealHelp,
   collect(DISTINCT role.canonicalName.data.value) AS grantedToRoles
 `
 

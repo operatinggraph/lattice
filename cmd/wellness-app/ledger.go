@@ -170,7 +170,7 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 			s.writeAuthError(w, err)
 			return
 		}
-		if !hats.isStaff() && !hats.isOperator {
+		if !hats.isFrontDesk() && !hats.isOperator {
 			s.writeError(w, http.StatusForbidden,
 				"another member's ledger is a staff surface for the place you work at")
 			return

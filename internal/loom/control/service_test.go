@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -303,6 +304,32 @@ func TestControl_Inspect_TypedErrors(t *testing.T) {
 			assert.Nil(t, resp.Instance)
 		})
 	}
+}
+
+// An error WRAPPING loom.ErrInstanceNotFound is rendered as the operator-facing
+// "no instance by that id was ever created", while a read failure against the
+// same endpoint is passed through verbatim. The pair is the point: matching on
+// the sentinel rather than on message text is what keeps "there is no such
+// instance" distinguishable from "the store could not answer". The rows above
+// carry a look-alike message that does NOT wrap the sentinel, so without this
+// test the branch could be deleted with every test still green.
+func TestControl_Inspect_NotFoundSentinelVsReadFailure(t *testing.T) {
+	nc := startTestServer(t)
+	eng := newFakeEngine()
+	eng.errOn["inspect:gone"] = fmt.Errorf("loom: instance %q: %w", "gone", loom.ErrInstanceNotFound)
+	eng.errOn["inspect:unreadable"] = errors.New("loom: read instance: substrate: KV get loom-state: nats: connection closed")
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
+
+	resp := sendRequest(t, nc, control.NameSubject("gone", "inspect"))
+	assert.Contains(t, resp.Error, "no instance by that id was ever created")
+	assert.Contains(t, resp.Error, "gone", "the reply still names the instance")
+	assert.Nil(t, resp.Instance)
+
+	resp = sendRequest(t, nc, control.NameSubject("unreadable", "inspect"))
+	assert.Contains(t, resp.Error, "connection closed", "a read failure is surfaced as itself")
+	assert.NotContains(t, resp.Error, "never created",
+		"a read failure must never be rendered as an absent instance")
+	assert.Nil(t, resp.Instance)
 }
 
 // --- pause / resume ---------------------------------------------------------

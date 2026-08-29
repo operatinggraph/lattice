@@ -79,15 +79,34 @@ Source package: `internal/processor/`
 | `health.processor.<instance>` | ≥ 10s heartbeat | `internal/processor/health.go` | `HealthHeartbeater.emit()` | Category A — `interval×10`, re-armed |
 | `health.processor.<instance>.step3-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitCapabilityAuthSignals()` | Category A — same TTL, lock-step with the heartbeat |
 | `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — fixed 1h default, not re-armed |
-| `health.processor.<instance>.claim-attempts.<outcome>` | per `ClaimIdentity` call | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
+| `health.processor.<instance>.claim-attempts.<outcome>` | per NFR-S6 operation call (`ClaimIdentity`, `CompleteCredentialLink`) | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.commit-conflicts` | per same-key commit conflict | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordCommitConflict()` | Category B — 1h default, re-armed each write |
 | `health.alerts.security.<alertCode>` | on security event | `internal/processor/health_alerts.go` | `HealthAlertEmitter.EmitAlert()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.auth-trace.<requestId>` | per auth denial | `internal/processor/step3_auth_trace.go` | `AuthTraceEmitter.Emit()` | fixed 1h |
 
 **`<instance>`** follows the convention `proc-<NanoID>` (Contract #5 §5.1).
 
-**`<outcome>` enum** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
-`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`.
+**`<outcome>` values** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
+`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`,
+`internal-fault`, `platform-refused`.
+
+The counter spans the whole **NFR-S6 equalized set** (`internal/processor`'s `nfrS6Operations`), not
+`ClaimIdentity` alone. Both legs key on `isNFRS6Operation`: the success leg at `commit_path.go`'s
+post-commit emission, and the rejection leg inside `replyRejection`, which is the single point every
+collapsed rejection passes through. That is deliberate and load-bearing: those operations answer
+every caller with one fixed wire shape, so this counter is an operator's **only** view of what they
+actually did. An operation whose failures are counted but whose successes are not reads as a
+totally-failing flow, and a real failure spike is then invisible against that baseline — which is
+also why `platform-refused` exists rather than the platform's own refusals going uncounted.
+
+**This list is the values emitted TODAY, not a closed enum, and the difference matters
+operationally.** `success`, `internal-fault` and `platform-refused` are minted in Go. The rest are
+`ScriptError.Detail`, parsed out of a Starlark `fail("ClaimKeyInvalid: <detail>")` message and used
+verbatim as the key's last segment — so the vocabulary belongs to the *scripts*, and any package
+shipping a script that fails with that prefix mints new keys here. Today `identity-domain` is the
+only such package and the values above are exactly what its `fail_claim` / `fail_link` /
+`first_outcome` produce. An operator seeing an outcome word not on this list is looking at a package
+that added one, not at corruption; a dashboard enumerating these keys should tolerate that.
 
 `credential-not-provisioned` means the SUBMITTING credential has no live identity vertex — either
 never provisioned, or tombstoned (revoked). The claim emits a `boundTo` edge whose source is that
@@ -118,7 +137,7 @@ refused at step 3 — Contract #6 §6.1).
 completeness test):
 - `health.processor.<instance>.auth-trace.<requestId>` — per denial only
 - `health.processor.<instance>.malformed-operation.<requestId>` — per malformed envelope only
-- `health.processor.<instance>.claim-attempts.<outcome>` — per ClaimIdentity call only
+- `health.processor.<instance>.claim-attempts.<outcome>` — per NFR-S6 operation call only
 - `health.processor.<instance>.commit-conflicts` — per same-key commit conflict only
 - `health.alerts.security.<alertCode>` — on event only
 
@@ -263,7 +282,9 @@ Source package: `internal/loom/`
 **`<instance>`** follows the convention `loom-<NanoID>` (`cmd/loom/main.go`; overridable via `LOOM_INSTANCE`).
 
 The heartbeat `metrics` carry: `consumers` (map of consumer name → state) and `runningInstances` (count of
-loom-state `instance.<id>` records with status `running`, scanned on the heartbeat cadence). `issues[]` carry
+loom-state `instance.<id>.pattern` pin keys — the pin is written with the instance and deleted only in its
+terminal batch, so the pin-key count IS the running-instance count, with no per-instance body read — under a
+per-heartbeat-tick deadline). `issues[]` carry
 a `ConsumerPaused` warning for each `pausedStructural` consumer.
 
 ### Bridge
@@ -890,7 +911,8 @@ never installed, which is the monitoring equivalent of reporting healthy.
     "sweepReArms": <int>,
     "sweepLastRunAt": "<RFC3339>",
     "timersScheduled": <int>,
-    "timersFired": <int>
+    "timersFired": <int>,
+    "laneAckPending": {"<targetId>": <int>}
   },
   "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>", "since": "<RFC3339>"}]
 }
@@ -898,6 +920,19 @@ never installed, which is the monitoring equivalent of reporting healthy.
 
 `metrics` keys are present only when their subsystem has data (e.g. `marksInFlight` is omitted if
 the scan failed; `timers*` only when the temporal lane is wired).
+
+**`laneAckPending`** lists, per target, how many rows that target's lane-1 durable has delivered and
+not yet acked — omitted entirely when every lane-1 durable is at zero. It is the gradient behind the
+`ConsumerSaturated` issue below: a declined row holds its slot until it is fixed or re-projected, so
+this number IS the target's stuck population. A target whose count reaches the consumer's
+`MaxAckPending` cap (1024) is wedged — the server stops delivering NEW rows for it, so entities that
+appear from then on are never evaluated — and raises an `error`-severity `ConsumerSaturated` issue
+naming the target. That is deliberately louder than the `warning` its usual *cause* carries
+(`GapWithoutPlaybook` and friends describe a target that is degraded but still evaluated and
+self-healing; this one describes a target whose deliveries have stopped). Neither `ConsumerPaused`
+nor `ConsumerSaturated` is latched in the issue cache: both are rebuilt in full from live consumer
+state on every heartbeat, so a consumer that drains — or a target that leaves — simply stops being
+listed, and neither can consume one of the per-row cache slots described below.
 
 #### Issue scope: per-entity vs per-target
 
@@ -907,13 +942,29 @@ decides whose close retires the issue. The key never appears on the wire — it 
 
 | Key shape | Scope | Codes |
 |---|---|---|
-| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
-| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
-| `data:<targetId>.<entityId>.<body>` | one ROW's whole body | `RowDataError` for a value that is not readable JSON at all — no column name can be recovered from it, so the family's column segment is the synthetic literal `<body>`. The angle brackets are what make it safe to share the family's key space: a lens column name is a Cypher identifier and can carry none, so it can never collide with a real column. Sharing the family is what gives it the family's teardowns; it is retired by the next body that parses, at the same read |
+| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted`; `GapEscalatedToAugur` |
+| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` — all three `warning` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo, a row body that does not parse as JSON) |
+| `data:<targetId>.__capped` | the target's per-ROW issue budget | `RowIssuesCapped` |
+| *(not latched — rebuilt from live consumer state each heartbeat)* | one lane-1 consumer | `ConsumerPaused`, `ConsumerSaturated` |
 | `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
-| `capped:<targetId>` | one target's per-row issue CACHE | `IssueCacheCapped` — synthetic, rendered by the cache rather than raised (below) |
+
+`GapBudgetExhausted` and `GapEscalatedToAugur` are the two mutually-exclusive outcomes of one spent
+retry budget, and they share that latch deliberately. A gap whose budget is spent with no augur
+policy for `exhausted` raises the first (`warning`: a loud stop, never a silent park). One whose
+target does escalate raises the second (`warning` too — the row is on the reasoning tier because
+conventional remediation ran out, which is degraded service for that row while every other row still
+remediates). Both retire on the same event, the gap actually ending, so a fresh exhaustion afterwards
+raises whichever branch applies again.
+
+`GapEscalatedToAugur` is a **record, and nothing gates on it.** What stops a re-derivation of the same
+exhaustion — a decline-floor redelivery, a sweep pass, one row of an operator `replayTarget` — from
+minting a second reasoning episode is the escalation's own mark: while its lease is live the episode
+is in flight and the derivation costs one mark read. Once that lease expires the episode is presumed
+dead and IS re-fired, because a reasoning claim that never converges has no other recovery, and each
+re-fire mints a fresh live mark, which paces the re-fires to one per lease. A suppression keyed on
+this latch instead would be permanent and would retire that recovery.
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
@@ -944,9 +995,67 @@ entity, so no sweep leg retires it.
 never reads the column. An entity whose only remaining open gap is a `surface` one therefore *does*
 retire its priority entry — the entry describes a column nothing will read again.
 
+One member of the family names no projected column at all. A row whose **body does not parse as
+JSON** raises `RowDataError` at the synthetic column `__body` — the fault is about the whole body, so
+it needs a segment that cannot collide with a projected one. What guarantees that is not the name:
+Refractor accepts any non-blank `bodyColumns` entry, so a lens may legally project a column called
+`__body`. It is that a column segment only reaches this family by being *passed to a reader*, and
+every call site passes either an engine constant (`violating`, `entityKey`, `freshUntil`, `priority`,
+`inflight_<g>`, `maxretries_<g>`) or a gap column — and a gap column is either one of the row's own
+`missing_*` keys or a playbook `gaps` key, which install-time validation rejects unless it matches
+the same `missing_<gap>` convention. A lens-authored name therefore reaches this family only when it
+starts with `missing_`. Its retirement is not a read either: the next revision of
+that row that *does* parse clears it, and the entity and target teardowns cover a row that ends
+without ever parsing again. Read an entry at `__body` as "this row's last projected value was not
+JSON", so N such rows are N entries.
+
 Without a retirement that does not depend on a further read, these entries would stand one per
-`(row, column)` for the process's lifetime. The listing cap below bounds the *document*, never the
-cache behind it.
+`(row, column)` for the process's lifetime. Two separate bounds apply, and they bound different
+things. The listing cap below bounds the **document**. The **cache** behind it is bounded per target:
+at most 500 per-row entries are tracked for one target, after which further raises for rows outside
+that set are refused and counted into one entry at `data:<targetId>.__capped`:
+
+Membership in that budget is decided by key SHAPE — an entity segment AND a column segment below the
+target — because that shape is exactly what makes a family grow with the subject count. All three
+per-row families qualify: `gap:`, `data:` and `template:`. A target-scoped fact (`gapConfig:`, the
+overflow entry itself, `consumer:`, `effect:`) never consumes a slot, or a flood of row faults would
+start refusing the very entries that explain them.
+
+```json
+{"severity": "<the worst severity among the raises it refused — warning or error>",
+ "code": "RowIssuesCapped",
+ "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> further raises for rows outside the tracked set were not recorded, and are not re-derivable until those rows project again",
+ "since": "<RFC3339 — when the cap was first reached>"}
+```
+
+`severity` is **not** fixed at `warning`, and that is the entry's whole point: it carries the worst
+severity of the raises it turned away, so a refused `error` still escalates the document's `status`
+(see below). A sample showing `warning` would read as the only value it takes.
+
+The tracked set is a **sample, not a ranking** — whichever rows raised first hold the slots. Slots are
+freed as their entries retire (a repaired row, an entity tombstone, a target teardown), and admission
+resumes as soon as the target is back under the cap.
+
+The `RowIssuesCapped` entry itself retires only once the target holds **no** per-row entries at all,
+not merely when it drops back under the cap. A refused raise is not re-derivable on demand: the
+`data:` exits all Ack, and lane 1 delivers the last revision per subject from a stable durable, so a
+row that was refused is never delivered again until something writes its key. (A refused `gap:` raise
+IS re-derived — its row keeps being delivered — but it is re-derived only into the same full budget,
+so the entry stays honest for it too.) Retiring the entry at the boundary would delete the only
+surviving record that those rows are broken.
+
+Two properties the cap must not cost, and does not. Its `severity` is the **worst severity among the
+raises it refused**, so a refused `error` still escalates the document (`status` is aggregated over
+every entry the cache holds, and a refused raise reaches it only through this entry). And it is
+pinned into the listed set ahead of the ordinary warnings — otherwise the one entry saying "N further
+rows are broken and are not tracked" would sort among the hundreds of warnings that caused it and be
+truncated away.
+
+The log-pacing clock behind the paced codes carries the same per-target bound, for the same reason:
+a per-row fault re-derived on the long redelivery floor refreshes its pace entry faster than the
+staleness prune can drop it, so without a budget that map would be sized by the consumer's
+`MaxAckPending` instead. A refused pace key logs at `debug` rather than at its severity; the Health
+entry is unaffected.
 
 `template:` is a separate family for the same reason those retirements are separate. A gap's plan
 whose template references resolve null is a different fact from that gap column carrying a non-bool
@@ -971,7 +1080,6 @@ not — so a repaired row retires its own entry. Read each entry as "this row pr
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |
 | `pendingSpec:` | nothing — **not target-keyed** | keyed by the meta-vertex id, and `Revoke` does not touch the vertex or its spec; it clears when the spec drains or is evicted |
-| `capped:` | **with the entries it counts** | derived state, never a raised fact: the prefix clear that removes a target's per-row entries takes its overflow record with it, so a target that has left cannot go on reporting a suppression |
 | `oscillation:` | **nothing — KNOWN STRANDED** | see below |
 
 Each prefix carries its trailing `.` separator, so revoking `t1` does not touch `t10`.
@@ -999,26 +1107,13 @@ When more are open, one extra synthetic entry closes the list:
  "since": "<RFC3339 — the oldest unlisted issue's first-arose stamp>"}
 ```
 
-**Which 50 are listed is decided by severity first, then by family scope**, with the deterministic
-key order breaking the remaining ties.
-
-That ordering is the point of the cap. The families that grow without bound are the **per-entity**
-ones — `gap:`, `data:`, `template:`, `sweep:`, one entry per violating subject — and in key order
-they sort *ahead* of the entries that explain them: a `gapConfig:` `PlaybookConfigError`, a
-`consumer:` or `timer:` failure, a paused consumer, a `target:` rejection. Selecting by key alone
-would let sixty unrouted tasks evict the one entry naming the cause, leaving a document that lists
-fifty identical warnings and explains none of them. So the cut ranks the **bounded, target-scoped
-families ahead of the unbounded per-entity ones** — a rule about SCOPE, stated directly rather than
-inferred from severity.
-
-Severity remains the first key, so an `error` is never displaced by a warning whatever family either
-is in; it is dropped only once more than 50 errors are open at once. What severity no longer does is
-carry the scope rule on its back: the config codes this ordering protects (`GapWithoutPlaybook`,
-`PlaybookConfigError`) are `warning`s — each self-heals on a package edit while Weaver goes on
-dispatching every other target — and `UnresolvedReference` always was one. Every family Weaver
-raises is classified explicitly in `internal/weaver/health.go`'s `familyRank`; a family it does not
-recognise ranks with the unbounded ones, so a new family can never displace an explanation by
-default.
+**Which 50 are listed is decided by severity first**, ties broken on the deterministic key order.
+That ordering is the point of the cap: the unbounded families are all `warning`s, and in key order
+they sort *ahead* of the entries that explain a fault — a `gapConfig:` `PlaybookConfigError`, a
+`timer:` failure, a paused consumer. Selecting by key alone would let sixty unrouted tasks evict the
+one `error` naming the cause, leaving a document that reports `unhealthy` while listing fifty
+identical warnings. With severity-first selection an `error` is dropped only once more than 50
+errors are open at once.
 
 The marker names the distinct **codes** that went unlisted, with counts, most-numerous first — an
 operator who cannot see every instance can still see what kind of thing is missing. That code list
@@ -1028,42 +1123,6 @@ package-declared and the vocabulary is open-ended.
 Its `severity` is the worst among the issues it stands for, so an `error` among the unlisted is
 never presented as a warning. `status` is aggregated over **every** open issue, not over the listed
 sample, so §5.3's issues-empty-iff-healthy invariant holds against the full set.
-
-#### `IssueCacheCapped`
-
-`IssuesTruncated` bounds the DOCUMENT; this bounds the CACHE behind it. The two per-row families
-(`data:` and `template:`) are O(rows of the target), so one systemically broken lens over a
-100k-row projection would grow the in-memory map — and the per-heartbeat sort over it — without
-limit, for one repeated fault. Each target may therefore hold at most **500** per-row entries at
-once, counted across both families together.
-
-```json
-{"severity": "warning", "code": "IssueCacheCapped",
- "message": "target <targetId>: per-row issue cache is at its 500-entry cap; <n> further per-row raises for this target have been suppressed since (raise attempts, not distinct rows — the suppressed keys are exactly what is not tracked)",
- "since": "<RFC3339 — when the cap engaged>"}
-```
-
-Read it as three facts:
-
-- **Insertion past the cap is refused, never evicting.** An entry already standing is a fact with an
-  age (§5.5), and dropping one to admit an identical newer one would restamp the fault as young. The
-  entries an operator can see are therefore the OLDEST, not the newest.
-- **`<n>` counts raise ATTEMPTS, not distinct rows.** The refused keys are exactly what the cache
-  does not track, so the number says how loud the suppression is, not how many subjects are behind
-  it. Everything refused is level-driven and re-arrives on the next delivery.
-- **`since` is the age of the suppression, and it survives turnover.** The record retires when a
-  heartbeat observes that nothing was refused since the previous one and the target is back under
-  its cap — a level, not the count dipping under the cap for an instant. A live population turns
-  entries over constantly, and each freed slot is retaken by the next refusal, so an edge-driven
-  retirement would re-mint the record every few seconds and report a suppression running for days as
-  one raise, moments old.
-
-The cap sits far above the document's 50, on purpose: for any target an operator can actually read,
-the visible truncation must stay `IssuesTruncated`'s, with this one engaging only where the
-population is already past anything a heartbeat could list. The same 500 bounds Weaver's log-pacing
-memory for those families, whose entries outlive their issues (a cleared issue is not evidence the
-fault ended, so the pace clock deliberately survives the clear); a raise refused there is logged at
-`debug` rather than dropped, because a bound on a flood must never make it louder.
 
 ### `health.loom.<instance>` — Loom heartbeat
 

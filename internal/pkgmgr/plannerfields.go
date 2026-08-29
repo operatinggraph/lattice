@@ -136,6 +136,20 @@ func validateActionsCatalogSpec(targetIdx int, targetID, col string, ga GapActio
 		if err := validateGapEnumerations(targetIdx, targetID, col, fmt.Sprintf("actions[%s]", entry.Ref), entry.Enumerations); err != nil {
 			return err
 		}
+		if len(entry.OptionalReads) > 0 && entry.Action != optionalReadsAction {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) action %q declares optionalReads, but optionalReads is only meaningful for %s — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it",
+				targetIdx, targetID, col, i, entry.Ref, entry.Action, optionalReadsAction)
+		}
+		if name, err := malformedTypedLiteral(entry.Params); err != nil {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) param %q: %w",
+				targetIdx, targetID, col, i, entry.Ref, name, err)
+		}
+		if f, found := typedLiteralInStringField(dispatchStringFields(
+			entry.Subject, entry.Pattern, entry.Operation, entry.Assignee, entry.Target,
+			entry.Reads, entry.OptionalReads, entry.Enumerations)); found {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q): %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
+				targetIdx, targetID, col, i, entry.Ref, f.name, f.value, typedLiteralPrefix)
+		}
 		if len(entry.Pre) > 0 {
 			g, err := guardgrammar.Parse(entry.Pre)
 			if err != nil {

@@ -2,6 +2,19 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-26 · `70fc2d88` · A wellness member with no ledger account is charged, not stranded — missing_account gap mirrors clinic-ledger's. Live: 1 account opened, 14 charges posted. Also `8071e7d9` loftspace-domain RLS fix.
+- 2026-08-26 · `ba1c6773` · Repaired the lease-signing convergence test left red on main by `b9cc8558` — its fixture predated the new `unitKey <> null` gap terms.
+- 2026-08-26 · `6165434e` · A tombstoned provider no longer strands its appointments/patients from front-desk view — anchors fall back to the appointment's own `atSite` link. clinic-domain 0.34.7
+- 2026-08-26 · `b9cc8558` · A lease application on a tombstoned unit stops nagging forever — the four applicant gaps gain a `unitKey <> null` term mirroring missing_listingLeased/missing_manager. lease-signing 0.31.8
+- 2026-08-26 · `97d4dd77` · 7 clinical notes are readable by their provider again — backfilled the missing .documentation sibling aspect. Follow-up reminders still can't arm (no real followUpDate to backfill).
+- 2026-08-26 · `bec4ce01` · Every browsable unit gets a landlord — backfillUnownedListings converges the 5 owner-less available listings onto a manages link so DecideLeaseApplication reaches a landlord, not just an operator.
+- 2026-08-25 · (live-stack op run) · 40 auto-charged no-show fees waived, $1,000 credited reason:waiver as the current admin — census corrected from the filed 45 (7 no-show fees are staff/seed-written, legitimate, untouched)
+- 2026-08-25 · `14581239` · A verify-fire lease no longer litters the café front-desk roster — reapLeasesByApplicant generalizes reapGhostLeases past the fixed admin-applicant case.
+- 2026-08-25 · `0b1a60ab` · A recurring visit series can finally be ended after the fact — `EndVisitSeries` mirrors Pause/Resume's confinement. clinic-reminders 0.10.2, edge-manifest 0.17.3
+- 2026-08-25 · `54a5fedc` · A café resident's front-desk class + visit badge finally renders — backfillCafeFrontDeskBadges converges on a tenanted lease + linked patient, booking + appointment now live in front-desk-bookings/front-desk-visits.
+- 2026-08-25 · `5aa287b0` · `MarkPastDueNoShow` stops billing the automated no-show sweep — only staff-observed no-shows charge now. clinic-domain 0.34.6
+- 2026-08-23 · `aa04a7a5` · [location-domain] `CreateLocation` gets a full descriptor via a new `Dispatch.ClassChoices` field — location-domain 0.4.0, edge-manifest 0.17.0; `AttachObject`/`DetachObject` stay open debt
+- 2026-08-23 · `fee0621b` · Clinic /api/sites + roster stop advertising verify artifacts — reapNonCanonicalSites/Patients allowlist by pinned id (name-marker missed some); reaped 10 patients + 5 buildings live.
 - 2026-08-23 · `533f639e` · The wellness class schedule stops advertising agent-verify litter — reapVerifyLitter reaps "Verify"/"Discovery"-named studios/sessions (5 sessions + 3 studios reaped live).
 - 2026-08-23 · `d46dd59f` · The applicant storefront stops going permanently empty — seed-classic-demo's backfillBareListings gives every live listing-less unit an available listing (0→5 live), mirroring the file's own reap helpers.
 - 2026-08-23 · `c7a8e222` · A losing rival on a leased unit stops being dispatched RecordIdentityPII/SignLease — the applicant gaps gain the `unitStatus <> 'leased'` term missing_listingLeased already used. lease-signing 0.31.7

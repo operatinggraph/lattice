@@ -23,27 +23,28 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the thirteen DDLs — the appointment-reminder pair
+// TestPackage_DDLs pins the fourteen DDLs — the appointment-reminder pair
 // (appointmentReminderOp vertexType + appointmentReminder aspectType), the
 // follow-up-reminder pair (followUpReminderOp + followUpReminder), the two
 // notification-outcome replyOp pairs (appointmentReminderNotificationOp +
 // appointmentReminderNotification, followUpReminderNotificationOp +
 // followUpReminderNotification), and the visit-series group (visitseries
-// vertexType + its four aspectType gates: definition, progress, paused, and the
-// per-patient+provider active-series guard). Each op vertexType owns its
+// vertexType + its five aspectType gates: definition, progress, paused, the
+// per-patient+provider active-series guard, and the site-assignment guard that
+// serializes concurrent SetVisitSeriesSite callers). Each op vertexType owns its
 // Record*/Start*/Advance* script; each aspectType is the step-6 write gate and
 // MUST be NON-sensitive (a timestamp / cadence / guard pointer on an
 // appointment/visitseries/patient, not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 13 {
-		t.Fatalf("expected 13 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 14 {
+		t.Fatalf("expected 14 DDLs, got %d", got)
 	}
-	// Nine op-metas: the four visit-series ops a human triggers carry a full
+	// Eleven op-metas: the five visit-series ops a human triggers carry a full
 	// descriptor, the rest stay bare for forOperation resolution alone. A
 	// dropped meta would surface only as an op that quietly stops being
 	// offerable, so the count is what catches it.
-	if got := len(Package.OpMetas); got != 9 {
-		t.Fatalf("expected 9 opMetas, got %d", got)
+	if got := len(Package.OpMetas); got != 11 {
+		t.Fatalf("expected 11 opMetas, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -90,7 +91,11 @@ func TestPackage_DDLs(t *testing.T) {
 	if series.Class != "meta.ddl.vertexType" {
 		t.Fatalf("visitseries class = %q, want meta.ddl.vertexType", series.Class)
 	}
-	wantCmds := map[string]bool{"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "EndVisitSeries": false, "AdvanceVisitSeries": false}
+	wantCmds := map[string]bool{
+		"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false,
+		"EndVisitSeries": false, "AdvanceVisitSeries": false,
+		"BackfillVisitSeriesSite": false, "SetVisitSeriesSite": false,
+	}
 	if len(series.PermittedCommands) != len(wantCmds) {
 		t.Fatalf("visitseries permittedCommands = %v, want %d entries", series.PermittedCommands, len(wantCmds))
 	}
@@ -111,6 +116,7 @@ func TestPackage_DDLs(t *testing.T) {
 		{"visitSeriesProgress", "StartVisitSeries"},
 		{"visitSeriesPaused", "PauseVisitSeries"},
 		{"visitSeriesGuard", "StartVisitSeries"},
+		{"visitSeriesSiteAssignment", "SetVisitSeriesSite"},
 	}
 	for _, sa := range seriesAspects {
 		asp, ok := byName[sa.name]
@@ -156,10 +162,11 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the nine ops at scope=any. Five are operator-only;
-// the four front-desk Follow-ups-tab ops (Start/Pause/Resume/EndVisitSeries) grant
-// {operator, frontOfHouse} — the script's workplace guard confines the front-desk
-// leg. AdvanceVisitSeries stays operator-only (Weaver's directOp).
+// TestPackage_Permissions pins the eleven ops at scope=any. Six are operator-only;
+// the four front-desk Follow-ups-tab ops (Start/Pause/Resume/EndVisitSeries) plus
+// SetVisitSeriesSite grant {operator, frontOfHouse} — the script's workplace guard
+// confines the front-desk leg. AdvanceVisitSeries and BackfillVisitSeriesSite stay
+// operator-only (both are Weaver's directOps).
 func TestPackage_Permissions(t *testing.T) {
 	// operationType -> the exact GrantsTo set expected.
 	want := map[string][]string{
@@ -172,6 +179,8 @@ func TestPackage_Permissions(t *testing.T) {
 		"ResumeVisitSeries":                     {"operator", "frontOfHouse"},
 		"EndVisitSeries":                        {"operator", "frontOfHouse"},
 		"AdvanceVisitSeries":                    {"operator"},
+		"SetVisitSeriesSite":                    {"operator", "frontOfHouse"},
+		"BackfillVisitSeriesSite":               {"operator"},
 	}
 	seen := map[string]bool{}
 	if len(Package.Permissions) != len(want) {
@@ -232,8 +241,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 	for _, l := range Package.Lenses {
 		lensByName[l.CanonicalName] = l
 	}
-	if len(Package.WeaverTargets) != 4 {
-		t.Fatalf("expected 4 weaverTargets, got %d", len(Package.WeaverTargets))
+	if len(Package.WeaverTargets) != 5 {
+		t.Fatalf("expected 5 weaverTargets, got %d", len(Package.WeaverTargets))
 	}
 	for _, wt := range Package.WeaverTargets {
 		lens, ok := lensByName[wt.LensRef]

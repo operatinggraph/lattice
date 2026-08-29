@@ -43,14 +43,24 @@ func instanceKey(instanceID string) string { return instancePrefix + instanceID 
 // isInstanceRecordKey reports whether k is an instance.<id> cursor record (not an
 // instance.<id>.pattern pin sub-key). The instanceId is a NanoID (dot-free by
 // construction), so a key under the instance. prefix whose remainder contains a
-// '.' is a sub-key (the .pattern pin), never an instance record. Shared by every
-// instance.* scan (the heartbeat counter and the control-plane list) so the
-// filter discipline cannot diverge across copies.
+// '.' is a sub-key (the .pattern pin), never an instance record. Used by
+// listInstances, the control-plane's instance.* scan.
 func isInstanceRecordKey(k string) bool {
 	if !strings.HasPrefix(k, instancePrefix) {
 		return false
 	}
 	return !strings.ContainsRune(k[len(instancePrefix):], '.')
+}
+
+// isPatternPinKey reports whether k is an instance.<id>.pattern pin sub-key —
+// the counterpart of isInstanceRecordKey, kept beside it so the two filters
+// over the instance.* keyspace cannot drift apart. The pin is written in the
+// same AtomicBatch that creates instance.<id> and deleted only in the
+// terminal batch (transition, pinnedDomains' own doc comment), so the set of
+// keys this reports true for is exactly the set of running instances —
+// runningInstanceCounter (health.go) counts them directly, with no body read.
+func isPatternPinKey(k string) bool {
+	return strings.HasPrefix(k, instancePrefix) && strings.HasSuffix(k, patternPinSuffix)
 }
 
 func patternPinKey(instanceID string) string {
@@ -147,18 +157,26 @@ func newStateStore(conn *substrate.Conn, bucket string) *stateStore {
 // getInstance reads the instance record for instanceID. Returns (nil, nil) when
 // the key is absent.
 func (s *stateStore) getInstance(ctx context.Context, instanceID string) (*Instance, error) {
+	inst, _, err := s.getInstanceAtRevision(ctx, instanceID)
+	return inst, err
+}
+
+// getInstanceAtRevision reads the instance record together with the KV revision
+// it was read at, for a caller that writes it back under a compare-and-set (the
+// redrive race guard). Returns (nil, 0, nil) when the key is absent.
+func (s *stateStore) getInstanceAtRevision(ctx context.Context, instanceID string) (*Instance, uint64, error) {
 	entry, err := s.conn.KVGet(ctx, s.bucket, instanceKey(instanceID))
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, fmt.Errorf("loom: read instance %q: %w", instanceID, err)
+		return nil, 0, fmt.Errorf("loom: read instance %q: %w", instanceID, err)
 	}
 	var inst Instance
 	if err := json.Unmarshal(entry.Value, &inst); err != nil {
-		return nil, fmt.Errorf("loom: unmarshal instance %q: %w", instanceID, err)
+		return nil, 0, fmt.Errorf("loom: unmarshal instance %q: %w", instanceID, err)
 	}
-	return &inst, nil
+	return &inst, entry.Revision, nil
 }
 
 // listInstances reads every instance.<id> cursor record in loom-state (running
@@ -168,8 +186,7 @@ func (s *stateStore) getInstance(ctx context.Context, instanceID string) (*Insta
 // absent from the response (deleted between the list and the batched read) is
 // skipped, and a per-key unmarshal failure SKIPS that record (logged) rather
 // than failing the whole list — one poisoned record must not blind the
-// operator to every other instance (mirrors the heartbeat counter's
-// skip-on-unmarshal-error posture). A genuine KVGetMulti failure, in
+// operator to every other instance. A genuine KVGetMulti failure, in
 // contrast, fails the whole call: unlike a single poisoned record, it means
 // this read cannot answer for ANY instance, so returning a partial or empty
 // list would be silently wrong rather than degraded — the same fail-closed
@@ -242,6 +259,14 @@ func (s *stateStore) resolveToken(ctx context.Context, token string) (instanceID
 // rides the same batch, a live running instance ALWAYS has a pin — a missing
 // pin is an invariant break, never a fallback case. No token is written yet —
 // step 0's submission write-aheads its token via transition.
+//
+// The pin keeps its CreateOnly write even though redrive's cannot. The two are
+// not the same situation: a terminal batch deletes the pin and that DEL marker
+// is permanent, so the subject never accepts a CreateOnly write again. Redrive
+// must succeed against exactly that state, so its guard moved to a CAS on the
+// cursor. createInstance runs only when no cursor exists at all, which for a
+// live instanceId means it never ran — so the pin subject is genuinely empty
+// and CreateOnly is both correct and the tighter guard.
 func (s *stateStore) createInstance(ctx context.Context, inst *Instance, pattern *Pattern) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
@@ -308,7 +333,7 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 	}
 	var pinKeys []string
 	for _, k := range keys {
-		if strings.HasPrefix(k, instancePrefix) && strings.HasSuffix(k, patternPinSuffix) {
+		if isPatternPinKey(k) {
 			pinKeys = append(pinKeys, k)
 		}
 	}
@@ -350,7 +375,12 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 //   - deadlineTTL > 0 arms (PUT, fresh TTL) deadline.<instanceId> (re-arm on
 //     each step); deadlineTTL <= 0 deletes it (terminal).
 //   - inst.Status != running (terminal) also deletes the instance's pattern pin
-//     (instance.<id>.pattern) in the same batch.
+//     (instance.<id>.pattern) in the same batch. The cursor record itself
+//     persists: its presence is the dedup guard that collapses a re-emitted
+//     trigger for the same instanceId onto the instance that already ran
+//     (Contract #10 §10.9, and the triggerLoom clause of
+//     docs/contracts/10-orchestration-substrate.md), and Weaver re-dispatches a
+//     stable claimId-seeded instanceId for as long as its gap stays open.
 //
 // The write-ahead invariant (§10.6 invariant 1) holds by construction: the op
 // record is persisted in this batch and the relay's publish is the only side
@@ -365,10 +395,12 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	}
 	if inst.Status != StatusRunning {
 		// Terminal (complete/failed): delete the pattern pin in the SAME batch
-		// that flips the status. The terminal instance record itself stays; the
-		// pin's removal is what lets the reconcile union drain — a domain kept
-		// alive only by this instance's pinned pattern is torn down on the next
-		// reconcile.
+		// that flips the status. The pin's removal is what lets the reconcile
+		// union drain — a domain kept alive only by this instance's pinned
+		// pattern is torn down on the next reconcile. The cursor record itself
+		// is kept, expiring on the retention TTL stamped above (if any) rather
+		// than being deleted here, so it can still answer a redelivered trigger
+		// and an operator's inspect/redrive.
 		ops = append(ops, substrate.BatchOp{
 			Bucket: s.bucket,
 			Key:    patternPinKey(inst.InstanceID),
@@ -443,14 +475,19 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 
 // redrive re-pins pattern and flips inst.Status back to running in one
 // AtomicBatch, for a manual operator redrive of a failed instance
-// (Engine.RedriveInstance). The pin — deleted in the terminal batch that
-// recorded the failure — is recreated CreateOnly: that doubles as the race
-// guard for two concurrent redrives of the same instance (the loser's batch is
-// rejected here), mirroring how createInstance's CreateOnly pin/instance pair
-// guards concurrent triggers. The instance PUT itself carries no
-// expectedRevision check, same as transition() — the pin's CreateOnly is the
-// sole concurrency guard, consistent with the rest of this store.
-func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern) error {
+// (Engine.RedriveInstance). expectedRevision is the revision the caller read the
+// instance record at (getInstanceAtRevision).
+//
+// The race guard for two concurrent redrives of one instance is that CAS on the
+// instance record: both readers see revision R, the winner's batch bumps it, and
+// the loser's expected-R batch is rejected whole — so only one redrive can
+// re-pin and re-submit. It rides the instance key rather than the pin because
+// the instance record is never deleted, while the pin is: the terminal batch's
+// pin DELETE leaves a delete marker on that subject, and a marker makes the
+// subject non-empty, so a CreateOnly re-pin (expected-last-subject-sequence 0)
+// could never commit for an instance that genuinely reached terminal. The pin is
+// therefore written as an ordinary put, guarded by the same batch's CAS.
+func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -460,8 +497,8 @@ func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Patte
 		return fmt.Errorf("loom: marshal pattern pin %q: %w", inst.InstanceID, err)
 	}
 	ops := []substrate.BatchOp{
-		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
-		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody, CreateOnly: true},
+		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body, HasRevision: true, Revision: expectedRevision},
+		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody},
 	}
 	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
 		return fmt.Errorf("loom: redrive instance %q: %w", inst.InstanceID, err)

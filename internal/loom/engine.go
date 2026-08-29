@@ -21,10 +21,11 @@ import (
 // (Contract #10 §10.9). The trigger op (StartLoomPattern) is submitted by the
 // caller, never by the engine.
 const (
-	opCompletePattern = "CompletePattern"
-	opFailPattern     = "FailPattern"
+	opCompletePattern = "CompletePattern" // op-name: (submits) the engine submits this lifecycle event-only op when a pattern instance's steps all complete
+	opFailPattern     = "FailPattern"     // op-name: (submits) the engine submits this lifecycle event-only op when a pattern instance fails
 	// opCreateTask is the op a userTask step submits to assign its bound op to
 	// the instance subject (Contract #10 §10.5).
+	// op-name: (submits) the engine submits this when a userTask step assigns its bound op to the human subject
 	opCreateTask = "CreateTask"
 )
 

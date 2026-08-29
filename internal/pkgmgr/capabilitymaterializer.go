@@ -139,10 +139,17 @@ type GrantArtifactContent struct {
 }
 
 // GapActionArtifact is the JSON shape of one entry in a "weaverTarget"-kind
-// artifact's `gaps` map — a field-for-field mirror of pkgmgr.GapActionSpec
-// (§10.8's action table), reused verbatim so an AI-authored gap action can
-// never carry a shape the engine wouldn't already accept from a hand-authored
-// package.
+// artifact's `gaps` map — the subset of pkgmgr.GapActionSpec (§10.8's action
+// table) the authoring surface exposes, shaped so an AI-authored gap action
+// can never carry a shape the engine wouldn't already accept from a
+// hand-authored package.
+//
+// One field is deliberately NOT exposed: OptionalReads. Declaring a key there
+// changes the Processor's commit semantics for it (a step-4 snapshot serve, a
+// CreateOnly-conditioned create on its observed absence — see
+// GapActionSpec.OptionalReads), and the authoring surface stays minimal until
+// a real authored consumer needs that power. StepArtifact below does carry
+// the field, because Loom's authored steps have one.
 type GapActionArtifact struct {
 	Action        string            `json:"action"`
 	Pattern       string            `json:"pattern,omitempty"`

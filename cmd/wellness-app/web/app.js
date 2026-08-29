@@ -575,6 +575,45 @@ function loadDescriptorform() {
   return descriptorformPromise;
 }
 
+// revealCeremonySecret narrates, in this app's toast vocabulary, whatever the
+// module's own revealCeremonySecret did with a minted plaintext. The DECISION
+// — descriptorform's ceremony rule 3, an affirmative `status === "accepted"`
+// and never the weaker "not rejected" — is the module's, so all four staff
+// apps enforce one implementation of it rather than four re-derivations of
+// "does this reply confirm the write landed?". Two of them do not: a
+// `duplicate` reply says an earlier submission claimed this requestId, and a
+// Processor reply timeout answers a status-less HTTP 202, and neither
+// confirms the envelope carrying this secret's hash committed.
+//
+// It reads the already-resolved descriptorformModule rather than awaiting
+// loadDescriptorform() again. Holding a reveal means a form rendered, which
+// means the module is loaded — so the await would buy nothing, and could only
+// invent a way to lose the single copy of the secret in the window between
+// the write landing and its display.
+function revealCeremonySecret(reveal, reply) {
+  // Nothing was minted for an ordinary op, so the module is never reached for
+  // one — its absence must not surface as a lost-secret warning.
+  if (!reveal) return;
+  let outcome;
+  try {
+    outcome = descriptorformModule.revealCeremonySecret(reveal, reply);
+  } catch (e) {
+    // Contained, and reported as a landed write, because the only thing that
+    // can throw in there is the display, which the module reaches only on a
+    // confirmed commit. Every caller runs this inside the same try whose catch
+    // reports the submission as failed, so an uncaught throw would tell the
+    // person the opposite of what happened and hide the fact that matters —
+    // the target is armed with a secret nobody now holds, which is only
+    // fixable by issuing a fresh one.
+    console.error("ceremony reveal failed", e);
+    toast("The write landed but its one-time secret could not be shown — issue a fresh one.", false);
+    return;
+  }
+  if (outcome === "withheld") {
+    toast("The write was not confirmed, so its one-time secret was not shown — check whether it landed, and issue a fresh one.", false);
+  }
+}
+
 // isTransientAuthLag reports whether a rejected reply is the known,
 // architecturally-expected async-projection race — the Capability Lens or
 // the credential-bindings materializer (both eventually-consistent CDC
@@ -1099,7 +1138,8 @@ async function loadRoster() {
       for (const se of sessions) {
         const opt = document.createElement("option");
         opt.value = se.sessionKey;
-        opt.textContent = (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
+        opt.textContent =
+          (se.missingInstructor ? "[no instructor] " : "") + (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
         select.appendChild(opt);
       }
       if (prev && sessions.some((se) => se.sessionKey === prev)) select.value = prev;
@@ -1164,6 +1204,9 @@ async function renderRoster() {
     : '<div class="empty">No one has booked this session yet.</div>';
   if (isLeader && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
+  }
+  if (isStaff() && se && se.missingInstructor) {
+    summary.textContent += " — no instructor assigned; use Reassign to enable attendance";
   }
   if (isLeader && started) bindAttendance(sessionKey, mine);
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey, se);
@@ -1994,8 +2037,9 @@ async function submitBillingEntry(opType, what, reason) {
     const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined, reason } };
     const handle = renderOpForm(row, context, document.createElement("div"));
     if (!handle) throw new Error("this action is unavailable");
-    const envelope = handle.submit();
-    await submitCatalogOp(envelope, what);
+    const { envelope, reveal } = await handle.submit();
+    const reply = await submitCatalogOp(envelope, what);
+    revealCeremonySecret(reveal, reply);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", true);
     amountInput.value = "";
     memoInput.value = "";
@@ -2283,14 +2327,15 @@ async function createInstructor() {
   const submit = document.getElementById("instructor-new-create");
   submit.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), false);
       return;
     }
-    await submitCatalogOp(envelope, "add the instructor");
+    const reply = await submitCatalogOp(envelope, "add the instructor");
+    revealCeremonySecret(reveal, reply);
     toast("Instructor added.", true);
     document.getElementById("instructor-new-form").hidden = true;
     instructorsCache = null;
@@ -2407,14 +2452,15 @@ async function wireInstructorCard(i) {
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     try {
-      let envelope;
+      let envelope, reveal;
       try {
-        envelope = handle.submit();
+        ({ envelope, reveal } = await handle.submit());
       } catch (e) {
         toast(e.message || String(e), false);
         return;
       }
-      await submitCatalogOp(envelope, "update the instructor");
+      const reply = await submitCatalogOp(envelope, "update the instructor");
+      revealCeremonySecret(reveal, reply);
       toast("Instructor updated.", true);
       form.hidden = true;
       instructorsCache = null;
@@ -2425,25 +2471,6 @@ async function wireInstructorCard(i) {
       saveBtn.disabled = false;
     }
   });
-}
-
-// occurrenceCellKeys mirrors slotCellKeys across a CreateSessionSeries batch
-// — one occurrence's worth of cells per i in [0, occurrenceCount), each
-// offset by i*intervalDays days from the first occurrence's span. Kept
-// separate from slotCellKeys rather than parameterizing it: the two shapes
-// (single span vs. a batch of offset spans) diverge enough that threading
-// one through the other would obscure both.
-function occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, occurrenceCount) {
-  const stepMs = intervalDays * 24 * 60 * 60 * 1000;
-  const start = Date.parse(startsAt);
-  const end = Date.parse(endsAt);
-  const keys = [];
-  for (let i = 0; i < occurrenceCount; i++) {
-    const occStart = new Date(start + i * stepMs).toISOString().slice(0, 19) + "Z";
-    const occEnd = new Date(end + i * stepMs).toISOString().slice(0, 19) + "Z";
-    keys.push(...slotCellKeys(studioKey, occStart, occEnd));
-  }
-  return keys;
 }
 
 async function createSession(studioKey, els) {
@@ -2499,24 +2526,15 @@ async function createSession(studioKey, els) {
       payload.instructor = instructor;
       reads.push(instructor);
     }
-    let optionalReads;
     if (isSeries) {
       payload.intervalDays = intervalDays;
       payload.occurrenceCount = repeatCount;
-      optionalReads = occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, repeatCount);
-    } else {
-      optionalReads = slotCellKeys(studioKey, startsAt, endsAt);
     }
-    // Instructor cells mirror the studio's own (instructorSlotClaim,
-    // ddls.go) — claimed only when an instructor is named, same condition
-    // as the required read above.
-    if (instructor) {
-      optionalReads = optionalReads.concat(
-        isSeries
-          ? occurrenceCellKeys(instructor, startsAt, endsAt, intervalDays, repeatCount)
-          : slotCellKeys(instructor, startsAt, endsAt),
-      );
-    }
+    // studioSlotClaim/instructorSlotClaim cells are no longer declared here —
+    // the DDL's own derive_reads(op) (packages/wellness-domain/ddls.go)
+    // computes them server-side from this same payload (Contract #2 §2.5
+    // class (g)).
+    //
     // A staff submit carries NO authContext.target: CreateSession's and
     // CreateSessionSeries's frontOfHouse grant is scope=any, confined
     // in-script by the caller's own worksAt walk rather than by a
@@ -2526,7 +2544,6 @@ async function createSession(studioKey, els) {
         operationType: isSeries ? "CreateSessionSeries" : "CreateSession",
         class: isSeries ? "sessionseries" : "session",
         reads,
-        optionalReads,
         payload,
       },
       isSeries ? "schedule the class series" : "schedule the class",

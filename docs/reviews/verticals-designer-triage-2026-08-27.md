@@ -304,3 +304,202 @@ Lesson captured (memory + this doc §1): a `no-pattern:` tag names the census so
 build-fire altitude, against that instant's tree — the designer pass re-runs it against today's
 tree before designing anything, because this codebase ships the missing pattern at a rate that
 outruns its own board.
+
+## 10. Build note — item 6, ceremony plumbing (2026-08-28)
+
+Fire brief for §2 work-list item 6. Scope sentence: *the shared descriptorform module and the four
+staff apps' op-catalog proxy carry an op's mint-and-reveal ceremony end to end, so a catalog-driven
+`CreateUnclaimedIdentity`/`RotateClaimKey` form no longer needs a hand-built client.*
+
+**Verified touch-list:**
+
+- `packages/edge-manifest/lenses.go:671-673` — **premise corrected during the build**: those lines are
+  `edgeCatalogTail`'s RETURN, not `opCatalogSpec`'s. `opCatalogSpec` (the lens the four staff apps
+  actually read) began at line 721 and carried none of the three ceremony columns — `7bd18e4a` is an
+  unrelated `CreateLocation`/`ClassChoices` fix; the ceremony columns landed on `edgeCatalogTail` alone
+  in `0e4911d8`. Layer 1 of the triage's "three layers" was **not** already done. Fixed as part of this
+  item: 3 columns added to `opCatalogSpec`'s RETURN, `edge-manifest` version-bumped 0.17.4→0.17.5, a
+  mutation-checked assertion added to `lens_cypher_test.go`.
+- `cmd/{cafe,clinic,loftspace,wellness}-app/op_catalog.go` — `opCatalogProjection` carries no
+  ceremony fields today (checked all four; two are byte-identical, the other two differ only in
+  doc-comment wording and a local KV-get helper). Add 3 fields + a `Ceremony *opCeremony` on
+  `opDescriptor`, mirroring the existing `DispatchContextParams` plumbing (same optionality: omit
+  the whole object when `MintedSecretHashField == ""`).
+- `internal/descriptorform/form.mjs` — no ceremony support at all today. Needs: a
+  `ceremonySupported()` gate mirroring `cmd/facet/web/app.js:1991` (refuse to OFFER the op when the
+  runtime lacks `crypto.subtle`, per `OpCeremonySpec`'s Go doc contract — never fall back to
+  rendering the hash field); mint+hash mirroring `app.js:1998-2012` (32 CSPRNG bytes → hex
+  plaintext, sha256 hex digest — `attachments.mjs` is the module's existing precedent that crypto
+  belongs here, though its own `deriveNanoID` is a different primitive and not reused directly);
+  exclude the hash field from the rendered field list (same filter `targetField`/`contextParams`
+  fields already get); `submit()` becomes async and returns the envelope plus a pending reveal
+  (`{title, help, plaintext}` or none) rather than the envelope alone — a **caller-visible contract
+  change**, not additive, because every existing caller destructures the return today.
+- 12 `handle.submit()` call sites across the four apps' `web/app.js` (cafe ×3, clinic ×5, loftspace
+  ×1, wellness ×3) all need `await` plus a reveal check gated on an **affirmative**
+  `reply.status === "accepted"` — the cold adversarial review at admit caught a first pass that gated
+  on the weaker "not rejected" (see Outcome below). loftspace already has a claim-secret modal
+  (`#claim-overlay`); the other three have none. Rather than four divergent hand-rolled modals, the
+  module exports one self-contained `showCeremonyReveal(title, help, plaintext)` plus a
+  `revealCeremonySecret(reveal, reply)` that decides and performs the reveal in one place for all
+  four apps — its own DOM/inline-style overlay appended to `document.body`, no dependency on a host
+  app's modal markup (the same self-containment `attachments.mjs` already follows) — so the 12 call
+  sites stay mechanical.
+
+**In-scope gotchas:** `submit()`'s return-shape change is a real breaking change to every existing
+caller, not a purely additive one — every call site must be updated in the same commit or the build
+fails; there is no partial-adoption state. The reveal must never show for anything short of a
+confirmed commit (mirrors Facet's own ceremony). Ceremony-unsupported runtimes must refuse to OFFER,
+not degrade to a raw hash textbox (`OpCeremonySpec`'s normative contract,
+`internal/pkgmgr/definition.go:676-699`).
+
+**Non-goals:** migrating loftspace's existing hand-built `submitNewApplicant` ceremony onto the
+catalog-driven path — that stays hand-built (its own form UI, name/email/phone fields the schema
+doesn't map 1:1); this item only unblocks the catalog-driven surface (a future task-based
+`CreateUnclaimedIdentity`/`RotateClaimKey` completion, and §3's guest-create form) from having to
+hand-roll ceremony support again. No change to `packages/identity-domain` — its `OpCeremonySpec`
+declarations are already correct and unchanged.
+
+**Outcome (shipped `<pending-sha>`):** built as scoped, plus the lens-premise fix above. A cold
+adversarial security review at admit found the first pass gated the reveal on `status !== "rejected"`
+— which a Gateway reply-timeout (HTTP 202, no `status` field — `internal/gateway/gateway.go:535-545`)
+and a `duplicate` reply both satisfy without the write being confirmed, so either could have shown a
+person a secret for a write that never landed. Fixed to gate on `status === "accepted"` exclusively,
+centralized in the module's new `revealCeremonySecret` so no host app re-derives the check; 9
+mutation-proven regression vectors added (reverting the gate to the weaker check fails 6 of them).
+Also added: a `ceremony` member to `scripts/lint-facet-renderer-drift.go`'s vocabulary table (the
+gate had no coverage for this vocabulary at all — Swift is exempt, the shelved macOS-proxy spike
+reaches no ceremony-bearing op). Two residuals surfaced and were NOT built here — both pre-existing,
+neither introduced by this change: (a) Refractor's live-Core-KV re-evaluation assumes read-after-write
+monotonicity that a clustered (R>1) `core-kv` stream's direct-get could violate — the current
+deployment is R=1 so this doesn't bite today, but nothing pins it; a Lattice-lane design question if
+the platform ever clusters that stream. (b) a lens's aspect-column read order in its RETURN clause is
+memoized first-read, so a same-batch op-meta *upgrade* that reorders which aspect a script reads first
+could in principle produce a torn intermediate — shared with the pre-existing `sensitive` column, no
+test pins the order today. Neither blocks this item; noting them here rather than filing a row for
+each, since both are cross-cutting platform observations, not vertical-app demand.
+
+**Review depth:** security-plane change (client-side secret minting/reveal) — full 3-layer
+adversarial at admit regardless of size, per §4 of the Steward routine.
+
+## 11. Build note — item 7, typed self-anchor `{me.<type>}` (2026-08-28)
+
+Fire brief for §2 work-list item 7. Scope sentence: *`internal/descriptorform/form.mjs`'s
+`substituteTemplate` stops throwing on `{me.<type>}` and adopts the `?` OPTIONAL marker, mirroring
+Facet's own `selfAnchorKey`/`templateIsOptional` and `internal/pkgmgr/definition.go:722-781`'s
+normative contract for both.*
+
+**Verified touch-list:** `internal/descriptorform/form.mjs` — `substituteTemplate` gains an
+`expr.startsWith("me.")` branch resolving against a new `selfAnchorKey(context, type)` helper
+(filters `context.selfAnchors`, a `{type,key}` array, to the single match — zero or several
+resolves to `undefined`, never a guess); the contextParams loop gains `templateIsOptional`/
+`stripOptionalMarkers` (mirroring Facet's `app.js:2288-2296`) so an optional param that doesn't
+resolve is omitted from the payload rather than throwing. `internal/descriptorform/form.test.mjs`
+— the now-false `"an unadopted \`?\` optional marker refuses"` test replaced with the real silent-
+omit behavior; four new tests added (resolve-to-single-match, refuse-on-0-or-2+ for a required
+template, omit-on-0-or-2+/fill-on-1 for an optional one, `:id` composition).
+
+**Ground check:** `context.selfAnchors`'s shape (`{type,key}`, degenerate `{key:null}` dropped
+client-side) verified live against `packages/edge-manifest/lenses.go:508-571`'s `edgeIdentitySpec`
+— found its own doc comment stale (said "five types ship", omitting the already-shipped `patient`
+type `CreateAppointment`'s `{me.patient}` addresses); corrected in the same commit.
+
+**Non-goal, deliberately:** wiring `selfAnchors` into any of the four apps' `/api/whoami` and
+migrating a live op (OpenTab, CreateBooking/JoinWaitlist/ReassignSession/SetBookingAttendance,
+CreateAppointment — all of which already declare `{me.<type>}`/`{me.<type>?}` ContextParams per a
+live grep of `packages/*/opmetas.go`) onto `renderOpForm`. Checked live: every one of those ops is
+still rendered by hand-built app code today (`cafe-app`'s `OpenTab` submit, `wellness-app`'s
+`bookMemberIn`/`SetBookingAttendance` handlers, `clinic-app`'s `CreateAppointment` submit) — none is
+broken by form.mjs's prior gap, since none goes through form.mjs yet. Wiring whoami plumbing with no
+caller would be exactly the premature-abstraction CLAUDE.md rules against; this item closes the
+module-side gap so a *future* per-op migration (§2 item 9's drift-gate convergence, or a vertical PO
+row asking for one of these forms to gain the module's other benefits — ceremony, conditional
+visibility, etc.) is unblocked without inventing unused code now. Revive trigger: the first PO/build
+item that proposes migrating one of the six named ops onto `renderOpForm`.
+
+**Outcome (shipped `634cf8d4`):** built and tested exactly as scoped; `node --test
+internal/descriptorform/*.test.mjs` 78/78 green (was 74 before this item — the replaced test still
+counts once). `go build ./...`, `make vet`, `STRICT=1 lint-conventions`, `golangci-lint run ./...`,
+`make verify-kernel` all clean. Non-security, non-capability-plane, mechanical + fully precedented
+against Facet's shipped implementation and the Go-side contract doc — lead review at admit (XS/S
+per §4), not full 3-layer.
+
+**Item 7 is CLOSED.** §2's remaining work-list items: 8 (`derive_reads` adoption) and 9 (template-
+grammar convergence note / drift-gate vocabulary entry, which can now cite items 4 and 7 both closed).
+
+## 12. Build note — item 8, `derive_reads` adoption (2026-08-28)
+
+Fire brief for §2 work-list item 8. Scope sentence, as re-grounded during the build: *wellness-domain's
+`CreateSession`/`CreateSessionSeries` and clinic-domain's `CreateAppointment`/`RescheduleAppointment`
+declare their studioSlotClaim/instructorSlotClaim/providerSlotClaim/patientSlotClaim cells via the DDL's
+own `derive_reads(op)`, so the four hand-built app.js dispatchers stop computing them.*
+
+**Scope correction found during the build: `ReassignSession` is excluded, not adopted.** `derive_reads`
+runs pre-hydration with `kv`/`state`/`ddl` hard-stubbed to fail on any access (Contract #2 §2.5) — a pure
+function of `{operationType, actor, payload}` only. `ReassignSession`'s "edit only what's supplied, carry
+the rest forward unchanged" semantics mean a studio-only move, an instructor-only swap, or a time-move
+that doesn't touch the instructor all need the session's CURRENT studio/instructor/schedule to compute
+which cells to claim — state genuinely absent from the payload in each of those shapes (verified against
+every branch of `ReassignSession`'s `execute()`, not assumed). No payload shape makes the op fully
+derivable. The FE (`cmd/wellness-app/web/app.js`) keeps declaring its optionalReads for this one op;
+`slotCellKeys` stays in place (still used there and by three other call sites). `CreateAppointment` and
+`RescheduleAppointment` have no such "carry forward unchanged" branches — both required fields the cells
+key on (`provider`/`patient`/`startsAt`/`endsAt`) are always present in payload — so both migrate cleanly.
+
+**Cold adversarial review (opus, independent of the implementer) verified the derived read-sets are exact
+supersets of every `kv.Read` the scripts' `claim_cell` actually calls** — RFC3339 normalization parity,
+the `CreateSessionSeries` occurrence-offset loop byte-matched against `execute()`'s own, bounds mirroring
+`required_int`'s `[2,52]`/`[1,365]`, and the `ReassignSession` exclusion's premise (it also found the
+exclusion was slightly *under*-stated: even a call supplying both `newStudio` and an explicit
+`startsAt`/`endsAt` still resolves its FINAL instructor from a KV-read `old_instructor` fallback when the
+instructor itself isn't also named — folded into the doc comment). Two real findings, both fixed in the
+same commit: raw `getattr` where the scripts' own `optional_string` trims + type-checks (a
+malformed/whitespace payload would otherwise `DeriveReadsInvalid` an operation `execute()` would have
+accepted — objects-base's own `derive_reads` sets the `optional_string` precedent, now followed here too);
+and `derive_reads` calling the `fail()`-raising `slot_cells` past the 24h/96-cell ceiling instead of
+bounding and deferring to `execute()`'s own clean `SessionTooLong`/`AppointmentTooLong`. Also swept four
+now-stale doc comments (two in `wellness-domain/opmetas.go`, one each in the two packages'
+`claim_cell` functions) that asserted the old "a descriptor-driven caller falls to the commit-time
+RevisionConflict" behavior — no longer true for any caller shape.
+
+**Coverage gap closed in the same fire:** `CreateSessionSeries` had no execution test anywhere in the
+suite (only permission-table/opmeta references) — its 3-occurrence offset loop had never actually run.
+Added its first execution test plus two tests proving `derive_reads` alone (zero client-declared
+optionalReads) is sufficient for both the accept and the `StudioConflict`-reject paths. (Also had to add
+`CreateSessionSeries` to the test fixture's own granted-permissions list — the op had never been submitted
+in this suite before, so nothing had surfaced its absence.)
+
+**Outcome (shipped `883e2875`):** `go build ./...`, `make vet`, `STRICT=1 lint-conventions`,
+`golangci-lint run ./...`, `lint-package-version` (wellness-domain 0.22.8→0.22.9, clinic-domain
+0.34.9→0.34.10), `make verify-kernel` all clean; `go test` on wellness-domain, clinic-domain,
+clinic-reminders, clinic-ledger, wellness-ledger all green. Non-security, non-capability-plane (Contract
+#2 §2.5 hygiene, not a new enforcement point) — lead review at admit plus the one cold adversarial pass
+above, not a full 3-layer panel.
+
+**Item 8 is CLOSED for `CreateSession`/`CreateSessionSeries`/`CreateAppointment`/`RescheduleAppointment`.**
+`ReassignSession` stays client-declared, by design, per the exclusion above. §2's remaining work-list item:
+9 (template-grammar convergence note / drift-gate vocabulary entry for `{me.<type>}`/`{entity.*}`/
+`{service}`/`{scopedTo}`, which can now cite items 4, 7, and this one).
+
+## 13. Build note — item 9, drift-gate vocabulary entry (2026-08-28)
+
+Scope, re-grounded: only `{me.<type>}` (item 7) and `{entity.<column>}`/`{context.<field>}` (item 4) are
+live in any staff-plane descriptor — a census of every `packages/*/opmetas.go`/`ddls.go` found no
+`{service}` or `{scopedTo}` template on the form.mjs side, so those two forms had nothing to pin. Added
+both as `vocabMember`s in `scripts/lint-facet-renderer-drift.go`. `entityColumn` is Swift-exempt:
+`DescriptorForm.swift`'s `DescriptorContext` carries no row/entity field, and its one production call
+site (`DescriptorFormSheet.swift:175`) constructs it with only `actorIdentityKey` — no caller anywhere
+threads a viewed row in, so the template can never resolve there regardless of source support (unbuilt
+scope in the shelved macOS-proxy spike, same class as the existing `ceremony` exemption). `selfAnchor`
+needed no exemption — all three renderers carry the case. Also corrected `docs/components/edge-manifest.md`'s
+stale "six field kinds plus contextParams" line (already undercounting `textarea`/`ceremony` before this
+fire).
+
+**Outcome (shipped `ec63ae71`):** `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 lint-conventions`, `STRICT=1 lint-facet-renderer-drift` all clean. No package/DDL touched (no
+version bump). Lead review only — mechanical marker-parity addition to an existing gate, no new
+enforcement point.
+
+**§2's work-list (items 1–9) is now CLOSED.** The two specced-but-unconsumed field kinds (per-field
+conditional visibility beyond `RecordEncounter`, array-of-objects) stay build-ready with no open row
+demanding them — revive when a consumer needs one.

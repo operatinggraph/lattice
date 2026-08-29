@@ -12,96 +12,104 @@ import (
 	"github.com/operatinggraph/lattice/internal/weaver"
 )
 
-// The decline-retry e2e suite (design weaver-decline-retry-substrate-native-design.md
-// §3.2/§3.3/§6). A config-error decline is Nak'd on a long redelivery floor, so
-// the row stands as an owed, pending message that re-evaluates against CURRENT
-// config until the config is fixed. These tests drive that through a live
-// embedded server, because the two claims it rests on — the pending set and
-// per-subject compaction — are the substrate's behaviour, not the handler's.
-
-// declineFloors configures a lane-1 engine with redelivery floors short enough
-// to run a decline loop inside a test. Both floors are configured: the substrate
-// clamps the long floor UP to the effective short one, so lowering only the long
-// floor would leave the loop pinned at the 5s short default.
-func declineFloors(short, long time.Duration) func(*weaver.Config) {
-	return func(c *weaver.Config) {
-		c.RedeliveryDelay = short
-		c.LongRedeliveryDelay = long
-	}
-}
-
-// laneConsumerInfo reads the live JetStream state of one target's lane-1 durable.
-func laneConsumerInfo(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID string) *jetstream.ConsumerInfo {
+// laneConsumerInfo reads the live lane-1 durable's server-side state.
+func laneConsumerInfo(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string) *jetstream.ConsumerInfo {
 	t.Helper()
-	cons, err := conn.JetStream().Consumer(ctx, "KV_"+weaverTargetsBucket, "weaver-target-"+targetID)
+	cons, err := conn.JetStream().Consumer(ctx, "KV_"+weaverTargetsBucket, durable)
 	require.NoError(t, err)
 	info, err := cons.Info(ctx)
 	require.NoError(t, err)
 	return info
 }
 
-// waitAckPending polls one target's lane-1 durable until its un-acked in-flight
-// count reaches want.
-func waitAckPending(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID string, want int, why string) {
+// waitConsumerState polls the lane-1 durable until cond holds, failing with the
+// last observed state rather than a bare timeout.
+func waitConsumerState(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string,
+	timeout time.Duration, what string, cond func(*jetstream.ConsumerInfo) bool) *jetstream.ConsumerInfo {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	var got int
+	deadline := time.Now().Add(timeout)
+	var last *jetstream.ConsumerInfo
 	for time.Now().Before(deadline) {
-		got = laneConsumerInfo(t, ctx, conn, targetID).NumAckPending
-		if got == want {
-			return
+		last = laneConsumerInfo(t, ctx, conn, durable)
+		if cond(last) {
+			return last
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("lane-1 durable for %q: num_ack_pending = %d, want %d — %s", targetID, got, want, why)
+	t.Fatalf("durable %q never reached %s; last state: numAckPending=%d numRedelivered=%d deliveredStream=%d",
+		durable, what, last.NumAckPending, last.NumRedelivered, last.Delivered.Stream)
+	return nil
 }
 
-// installDeclineTarget installs a target whose single gap resolves its Loom
-// subject through the row column named by subjectRef. A row that does not carry
-// that column takes §3.2 row 10's TemplateDataError dead-end: the plan cannot be
-// built, and one of its fix paths is a template edit that produces no new
-// delivery, so the row declines on the LONG floor and stands pending.
+// waitPlaybookGap polls the engine's own registry view until targetID's playbook
+// carries gapColumn, and is the precondition every "the fix lands" step in this
+// file needs.
 //
-// Row 10, not row 8's orphaned column: an orphaned column Acks (its fix may
-// never come, so a Nak would park it forever), which is a different test.
-//
-// It returns the meta-vertex id, so a later spec re-install can correct the
-// template on the SAME vertex.
-func installDeclineTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID, patternRef, subjectRef string) string {
+// declineTarget writes the target's meta-vertex spec; the engine picks that up
+// asynchronously through its registry consumer. A row projected before the pickup
+// is evaluated against the OLD playbook, declines, and is Nak'd onto the long
+// floor — after which no assertion with a timeout shorter than that floor can
+// pass. Waiting on the engine's own view of the playbook removes the race
+// instead of relying on the write winning it.
+func waitPlaybookGap(t *testing.T, ctx context.Context, engine *weaver.Engine, targetID, gapColumn string) {
 	t.Helper()
-	vtx := mustNanoID(t)
-	installWeaverTarget(t, ctx, conn, vtx, map[string]any{
-		"targetId": targetID,
-		"lensRef":  mustNanoID(t),
-		"gaps": map[string]any{
-			"missing_known": map[string]any{
-				"action": "triggerLoom", "pattern": patternRef, "subject": subjectRef,
-			},
-		},
-	})
-	return vtx
+	deadline := time.Now().Add(20 * time.Second)
+	var last []string
+	for time.Now().Before(deadline) {
+		targets, err := engine.ListTargets(ctx)
+		require.NoError(t, err)
+		for _, tgt := range targets {
+			if tgt.TargetID != targetID {
+				continue
+			}
+			last = tgt.Gaps
+			for _, col := range tgt.Gaps {
+				if col == gapColumn {
+					return
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the engine's registry never picked up %s.%s within the wait; last gaps = %v",
+		targetID, gapColumn, last)
 }
 
-// TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded pins the two
-// substrate facts the standing decline loop rests on (design §2 V1, V3, V7).
+// declineTarget installs a weaverTarget whose playbook does NOT name gapColumn,
+// so a violating row carrying that column takes the GapWithoutPlaybook decline.
+func declineTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexID, targetID string, gaps map[string]any) {
+	t.Helper()
+	spec := map[string]any{"targetId": targetID, "lensRef": mustNanoID(t)}
+	if gaps != nil {
+		spec["gaps"] = gaps
+	} else {
+		// A playbook that names a DIFFERENT column: the target is valid, and the
+		// row's own column still has no entry.
+		spec["gaps"] = map[string]any{
+			"missing_other": map[string]any{"action": "surface"},
+		}
+	}
+	installWeaverTarget(t, ctx, conn, vertexID, spec)
+}
+
+// TestWeaverE2E_DeclinedRowStaysPendingAndIsSupersededByItsOverwrite is T4: the
+// substrate keystone the whole decline loop rests on, pinned end to end against
+// a real server.
 //
-//   - A config-error decline is Nak'd, so the message stays in the consumer's
-//     PENDING set — the substrate's only "owed" tracking — and re-delivers on the
-//     long floor for as long as the fault holds. An Ack here would retire the
-//     row's only claim on the handler's attention, and nothing else enumerates it.
-//   - Overwriting the row's KV key frees that slot eagerly: weaver-targets keeps
-//     history 1, so the new revision compacts the old message out of the backing
-//     stream and JetStream terminates its pending delivery rather than waiting
-//     out the floor. The fresh revision then delivers and dispatches on its own.
+//   - A config-error decline is Nak'd, and a delayed Nak keeps the message in the
+//     consumer's pending set — the slot is held continuously, which is what makes
+//     the row owed rather than dropped.
+//   - Overwriting the row's KV key removes the pending revision from the stream,
+//     and the server Terms it EAGERLY: the slot is freed rather than accumulating
+//     a stale revision beside the fresh one.
+//   - The fresh revision delivers normally and, once the playbook covers the gap,
+//     dispatches — with no rebuild of the durable.
 //
-// The history-1 pin those two facts rest on is asserted where it can actually
-// red against Lattice's own provisioning —
-// internal/bootstrap/weaver_targets_bucket_test.go's TestWeaverTargetsBucket_Provisioned,
-// which reads the bucket the seeder created and carries the revive-the-fallback
-// failure message. Asserting it here as well would pin nothing: this test's own
-// provision() creates the bucket a few lines earlier, so the value read back
-// would be the jetstream client's default, not the platform's decision.
-func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) {
+// The eager Term holds only while `weaver-targets` keeps KV history 1 (per-subject
+// compaction on every overwrite). That pin is asserted here, Weaver-owned: at
+// history >= 2 an overwrite no longer compacts, a Nak'd stale revision keeps
+// redelivering beside the fresh one, and this design's premise fails.
+func TestWeaverE2E_DeclinedRowStaysPendingAndIsSupersededByItsOverwrite(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -115,71 +123,100 @@ func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) 
 	provision(t, ctx, conn)
 	ops := subscribeOps(t, nc)
 
+	kv, err := conn.JetStream().KeyValue(ctx, weaverTargetsBucket)
+	require.NoError(t, err)
+	status, err := kv.Status(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), status.History(),
+		"weaver-targets must keep KV history 1: the decline loop's correctness rests on an overwrite "+
+			"compacting the previous revision away and eagerly Term'ing its pending delivery. At history >= 2 "+
+			"a Nak'd stale revision keeps redelivering beside the fresh one — this assertion reddening is the "+
+			"trigger to revive the shelved row-sweep fallback (weaver-sweep-declared-work-enumeration-design.md)")
+
 	patternVtx := mustNanoID(t)
 	installLoomPattern(t, ctx, conn, patternVtx, "onboarding")
 
-	targetID := "declinePending"
-	installDeclineTarget(t, ctx, conn, targetID, "onboarding", "row.applicant")
+	targetID := "fixtureDeclinePending"
+	targetVtx := mustNanoID(t)
+	declineTarget(t, ctx, conn, targetVtx, targetID, nil)
 
-	engine := newEngine(conn, "e2e-decline-"+mustNanoID(t), declineFloors(200*time.Millisecond, 500*time.Millisecond))
+	// The long floor stays at its 5m production default: the row must still be
+	// pending when the overwrite arrives, not redelivered out from under it.
+	engine := newEngine(conn, "e2e-decline-pending-"+mustNanoID(t))
 	engCtx, engCancel := context.WithCancel(ctx)
 	defer engCancel()
 	go func() { _ = engine.Start(engCtx) }()
-	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
 
-	// §6: lane 1 declares its own in-flight window, because a declined row now
-	// holds a pending slot for as long as the config stays broken.
-	require.Equal(t, 2000, laneConsumerInfo(t, ctx, conn, targetID).Config.MaxAckPending,
-		"lane-1 must declare its in-flight window explicitly rather than inherit the server default")
+	durable := "weaver-target-" + targetID
+	waitConsumer(t, ctx, conn, durable)
 
 	entityID := mustNanoID(t)
-	applicant := "vtx.identity." + mustNanoID(t)
-	// The row opens the gap but carries no `applicant` column, so the gap's
-	// subject template resolves null and no episode can be built.
-	putRow(t, ctx, conn, targetID, entityID, map[string]any{
-		"entityKey":     "vtx.leaseApp." + entityID,
-		"violating":     true,
-		"missing_known": true,
-	})
+	entityKey := "vtx.leaseApp." + entityID
+	row := map[string]any{
+		"entityKey":          entityKey,
+		"violating":          true,
+		"missing_onboarding": true,
+	}
+	putRow(t, ctx, conn, targetID, entityID, row)
 
-	requireNoOp(t, ops, 2*time.Second)
-	waitAckPending(t, ctx, conn, targetID, 1,
-		"a config-error decline must stand as an owed, pending message, not be acked away")
+	declined := waitConsumerState(t, ctx, conn, durable, 20*time.Second,
+		"a Nak'd-pending declined row", func(i *jetstream.ConsumerInfo) bool {
+			return i.NumAckPending == 1
+		})
+	requireNoOp(t, ops, time.Second)
+	firstDelivered := declined.Delivered.Stream
 
-	// The lens re-projects the row WITH the column the template reads. The new
-	// revision compacts the declined one out, so the pending slot is released
-	// without waiting out the floor, and the fresh row dispatches.
-	putRow(t, ctx, conn, targetID, entityID, map[string]any{
-		"entityKey":     "vtx.leaseApp." + entityID,
-		"violating":     true,
-		"missing_known": true,
-		"applicant":     applicant,
+	// The overwrite: a new revision of the SAME key, still declining. The old
+	// pending revision is compacted out of the stream and Term'd eagerly, so the
+	// pending set holds the fresh revision and nothing else.
+	//
+	// The count is part of the POLL condition, not an assertion after it. The
+	// server Terms the compacted revision on its own goroutine, unordered against
+	// the new revision's delivery, so a snapshot taken the instant the new
+	// delivery lands can legitimately still show the old one pending. What must
+	// hold is that the pending set SETTLES at one; a wait that timed out here
+	// would be the real V3 failure, and the message says so.
+	putRow(t, ctx, conn, targetID, entityID, row)
+	waitConsumerState(t, ctx, conn, durable, 20*time.Second,
+		"the overwriting revision delivered with a pending set of exactly 1 "+
+			"(a set of 2 means the compacted revision was never Term'd and a stale revision is still owed)",
+		func(i *jetstream.ConsumerInfo) bool {
+			return i.Delivered.Stream > firstDelivered && i.NumAckPending == 1
+		})
+
+	// Once the playbook covers the gap, the fresh revision dispatches through the
+	// unchanged ladder and the slot is released.
+	declineTarget(t, ctx, conn, targetVtx, targetID, map[string]any{
+		"missing_onboarding": map[string]any{
+			"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
+		},
 	})
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
+	putRow(t, ctx, conn, targetID, entityID, row)
 
 	op := nextOp(t, ops, 20*time.Second)
 	require.Equal(t, "StartLoomPattern", op.OperationType)
-	require.Equal(t, applicant, op.Payload["subjectKey"])
-	waitAckPending(t, ctx, conn, targetID, 0,
-		"the superseding revision must free the declined row's pending slot and then be acked itself")
+	waitConsumerState(t, ctx, conn, durable, 20*time.Second,
+		"an empty pending set after the dispatch", func(i *jetstream.ConsumerInfo) bool {
+			return i.NumAckPending == 0
+		})
 }
 
-// TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop is §3.2's fix-uptake claim,
-// pinned: a row declined for a config-class error re-evaluates against the
-// CURRENT registry on its next redelivery, so correcting the gap's template
-// dispatches the already-declined row automatically — with no durable rebuild
-// and no re-projection of the row.
+// TestWeaverE2E_DeclinedRowTakesTheFixWithinOneFloor is T5: the claim that makes
+// the Nak loop sufficient on its own. A row declined for a config error is
+// re-evaluated against the CURRENT playbook on every redelivery, so adding the
+// missing gaps entry is picked up automatically within one long floor — with no
+// durable rebuild and no re-projection of the row.
 //
-// Both negatives are asserted, not assumed. The lane-1 durable's creation
-// timestamp must be unchanged (a rebuild is a delete-then-create, which mints a
-// new one), and the row's KV revision must be unchanged (a re-projection is a
-// new revision). Without those, a test that merely saw the op fire could not
-// tell the redelivery loop from either of the mechanisms this design removed.
-func TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop(t *testing.T) {
+// The floor is shortened for the test but stays well clear of the transient
+// (5 s) one, and the elapsed-time assertion is what proves the row rode the LONG
+// floor: a row Nak'd on the transient floor would have dispatched at ~5 s.
+func TestWeaverE2E_DeclinedRowTakesTheFixWithinOneFloor(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	nc := startNATS(t)
@@ -191,61 +228,81 @@ func TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop(t *testing.T) {
 	patternVtx := mustNanoID(t)
 	installLoomPattern(t, ctx, conn, patternVtx, "onboarding")
 
-	targetID := "declineFixUp"
-	targetVtx := installDeclineTarget(t, ctx, conn, targetID, "onboarding", "row.applicant")
+	targetID := "fixtureDecUptake"
+	targetVtx := mustNanoID(t)
+	declineTarget(t, ctx, conn, targetVtx, targetID, nil)
 
-	const longFloor = time.Second
-	engine := newEngine(conn, "e2e-fixup-"+mustNanoID(t), declineFloors(200*time.Millisecond, longFloor))
+	// Sized against the discrimination below rather than for speed, and no
+	// larger. The clock starts when the fix lands, so the measured wait is the
+	// floor MINUS however long the preamble took to get there; the floor has to
+	// stand clear of the 2 × transient threshold by more than any plausible
+	// preamble, or a slow host fails a correct implementation. It also has to
+	// stay modest: this test runs in parallel with the rest of the package's
+	// embedded-NATS e2e set, and a floor bought purely for margin is wall-clock
+	// every one of those neighbours competes with.
+	const longFloor = 20 * time.Second
+	engine := newEngine(conn, "e2e-decline-uptake-"+mustNanoID(t), func(c *weaver.Config) {
+		c.LongRedeliveryDelay = longFloor
+	})
 	engCtx, engCancel := context.WithCancel(ctx)
 	defer engCancel()
 	go func() { _ = engine.Start(engCtx) }()
-	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
+
+	durable := "weaver-target-" + targetID
+	waitConsumer(t, ctx, conn, durable)
+	created := laneConsumerInfo(t, ctx, conn, durable).Created
 
 	entityID := mustNanoID(t)
-	// No `applicant` column: the gap's subject template resolves null, so the
-	// plan cannot be built and the row declines on the long floor.
-	putRow(t, ctx, conn, targetID, entityID, map[string]any{
-		"entityKey":     "vtx.leaseApp." + entityID,
-		"violating":     true,
-		"missing_known": true,
-	})
+	row := map[string]any{
+		"entityKey":          "vtx.leaseApp." + entityID,
+		"violating":          true,
+		"missing_onboarding": true,
+	}
+	putRow(t, ctx, conn, targetID, entityID, row)
 
-	requireNoOp(t, ops, 2*time.Second)
-	waitAckPending(t, ctx, conn, targetID, 1, "the declined row must stand pending while the template is unbuildable")
-
-	before := laneConsumerInfo(t, ctx, conn, targetID)
+	waitConsumerState(t, ctx, conn, durable, 20*time.Second,
+		"a Nak'd-pending declined row", func(i *jetstream.ConsumerInfo) bool {
+			return i.NumAckPending == 1
+		})
+	requireNoOp(t, ops, time.Second)
 	rowKey := targetID + "." + entityID
-	rowBefore, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
+	declinedRev, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
 	require.NoError(t, err)
 
-	// The package is re-authored: the SAME target vertex now reads a column the
-	// row actually carries. Nothing touches the row.
-	fixedAt := time.Now()
-	installWeaverTarget(t, ctx, conn, targetVtx, map[string]any{
-		"targetId": targetID,
-		"lensRef":  mustNanoID(t),
-		"gaps": map[string]any{
-			"missing_known": map[string]any{
-				"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
-			},
+	// The fix: the package adds the gaps entry. Nothing re-projects the row, and
+	// nothing rebuilds the durable.
+	declineTarget(t, ctx, conn, targetVtx, targetID, map[string]any{
+		"missing_onboarding": map[string]any{
+			"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
 		},
 	})
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
+	// The clock starts at the FIX, not at the projection. Measured from the
+	// projection, the elapsed time also contains however long the preamble and
+	// the first decline took, so on a loaded host a row riding the SHORT floor
+	// could accumulate enough of that to clear a projection-anchored threshold —
+	// the test would then pass while asserting nothing. From the fix, the only
+	// thing between here and the dispatch is the wait for the next redelivery,
+	// which is exactly the floor under test.
+	fixedAt := time.Now()
 
-	op := nextOp(t, ops, 20*time.Second)
+	op := nextOp(t, ops, 2*longFloor)
 	elapsed := time.Since(fixedAt)
 	require.Equal(t, "StartLoomPattern", op.OperationType)
-	require.Equal(t, "vtx.leaseApp."+entityID, op.Payload["subjectKey"])
-	require.Less(t, elapsed, 10*longFloor,
-		"the fix must be taken up on the decline loop's own cadence (one long floor), not eventually")
+	// Discriminated against the TRANSIENT floor by name, with room on both sides:
+	// a decline that rode substrate.DefaultRedeliveryDelay would dispatch within
+	// about one of those, so anything past a comfortable multiple of it can only
+	// have waited out the long one.
+	require.Greater(t, elapsed, 2*substrate.DefaultRedeliveryDelay,
+		"the dispatch arrived %v after the playbook was fixed — a decline on the %v transient floor would "+
+			"have redelivered inside that, so this row did not ride the %v long floor",
+		elapsed, substrate.DefaultRedeliveryDelay, longFloor)
 
-	after := laneConsumerInfo(t, ctx, conn, targetID)
-	require.Equal(t, before.Created, after.Created,
-		"the fix must be taken up with NO durable rebuild — a rebuild is a delete-then-create, "+
-			"which mints a fresh creation timestamp")
-
-	rowAfter, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
+	after, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
 	require.NoError(t, err)
-	require.Equal(t, rowBefore.Revision, rowAfter.Revision,
-		"the fix must be taken up with NO re-projection — the redelivered message is the row that "+
-			"was already declined, re-evaluated against the current registry")
+	require.Equal(t, declinedRev.Revision, after.Revision,
+		"the fix must be taken up with NO re-projection: the row's revision moved, so the redelivery is "+
+			"not what carried the fix")
+	require.Equal(t, created, laneConsumerInfo(t, ctx, conn, durable).Created,
+		"the fix must be taken up with NO rebuild: the lane-1 durable was delete-and-recreated")
 }

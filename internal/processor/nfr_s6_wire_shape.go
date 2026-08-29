@@ -30,8 +30,8 @@ package processor
 // a submitter free to add keys of its own would price work the equalization has
 // no subject for.
 var nfrS6Operations = map[string]struct{}{
-	"ClaimIdentity":          {},
-	"CompleteCredentialLink": {},
+	"ClaimIdentity":          {}, // op-name: (policy) member of the equalized rejection set, which must cover every op the Gateway submits under a raw credential pin=TestRawCredentialCarveOutIsNFRS6Equalized
+	"CompleteCredentialLink": {}, // op-name: (policy) member of the equalized rejection set, which must cover every op the Gateway submits under a raw credential pin=TestRawCredentialCarveOutIsNFRS6Equalized
 }
 
 // isNFRS6Operation reports whether this operationType's rejections must be
@@ -40,6 +40,22 @@ var nfrS6Operations = map[string]struct{}{
 func isNFRS6Operation(operationType string) bool {
 	_, ok := nfrS6Operations[operationType]
 	return ok
+}
+
+// IsNFRS6Operation reports whether operationType's rejections are equalized to
+// the generic NFR-S6 wire shape.
+//
+// It is the predicate another package asserts containment against. Membership
+// means every rejection of the operation reached after authorization answers
+// ErrCodeClaimKeyInvalid with nil details and one fixed message, whatever
+// actually failed — so nothing a caller can observe distinguishes one cause
+// from another. A component that submits an operation under a RAW credential,
+// where the script hashes that credential into an index key, therefore depends
+// on this being true of the operation: without the collapse, its rejections
+// separate a bound credential from an unbound one, and the pair becomes an
+// enumeration oracle.
+func IsNFRS6Operation(operationType string) bool {
+	return isNFRS6Operation(operationType)
 }
 
 // claimRejectionMessage is the single message every NFR-S6 rejection carries.
@@ -56,3 +72,21 @@ const claimRejectionMessage = "claim key invalid"
 // an ordinary refusal, by construction, so this counter is the only place it
 // becomes visible as something an operator should look at.
 const claimOutcomeInternalFault = "internal-fault"
+
+// claimOutcomePlatformRefused is the Health-KV claim-attempts outcome recorded
+// when the platform refuses an NFR-S6 operation without the script ever
+// adjudicating it — a DDL violation, a protected-key or package-scope refusal,
+// an oversized batch, or a revision conflict that outlived its retry budget.
+//
+// It exists so the counter's buckets ADD UP. Every one of those refusals is
+// collapsed to the same generic reply as a wrong claim key, so without a bucket
+// of its own it is invisible on every channel at once: the caller cannot see
+// it, and the operator reading claim-attempts sees neither a success nor a
+// failure. A conflict storm on the claim plane then moves no number, while the
+// documented brute-force signature — a climbing invalid-key against a flat
+// success — reads exactly as it does when nothing is wrong.
+//
+// It is deliberately one word rather than one per ErrorCode: the code is in the
+// Processor log beside it, and a per-code bucket set would make the counter's
+// cardinality track an internal enum an operator does not have.
+const claimOutcomePlatformRefused = "platform-refused"

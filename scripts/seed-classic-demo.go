@@ -261,6 +261,7 @@ func main() {
 	fmt.Printf("==> appointment:     %s (%s)\n", apptKey, startsAt.Format(time.RFC3339))
 	backfillClinicForwardSchedule(ctx, conn, adminKey, patientKey, providerKey)
 	reapClinicVerifyLitterAppointments(ctx, conn, adminKey)
+	backfillClinicProviderSiteLive(ctx, conn, adminKey, providerKey)
 
 	// --- Café: tab opened against the same lease ------------------------------
 
@@ -454,19 +455,61 @@ func servedAtIsLive(ctx context.Context, conn *substrate.Conn, menuItemKey strin
 	return false
 }
 
-// reapDuplicateProviders tombstones every live "Dr. Classic Demo" provider
-// other than the checked-in canonical one (keep) — adbf2571 pinned the
-// seed's provider id going forward but never reaped the pre-pin duplicates,
-// so the patient booking picker still offers all of them, none carrying
-// hours or a practicesAt site (verticals.md). Name-filtered only (no
-// location join at CreateProvider time to filter on, unlike menu items) —
-// safe because only this script ever mints a provider with this exact
-// fullName (seed-showcase.go's own provider uses a different name/id).
+// reapableProviderNames is the exact set of provider fullNames this seed
+// tombstones on sight: "Dr. Classic Demo" for the pre-pin duplicate clones
+// (only this script ever mints a provider with that fullName — seed-showcase.go's
+// own provider uses a different name/id) and "Dr Proof" for a live-injected
+// sentinel outside any seed script's control.
+var reapableProviderNames = map[string]bool{
+	"Dr. Classic Demo": true,
+	"Dr Proof":         true,
+}
+
+// reapProviderLitterAppointments tombstones every live appointment linked to
+// providerKey via withProvider, whether or not providerKey's own vertex is
+// still alive — TombstoneAppointment's require_matching_provider check reads
+// only the withProvider link's liveness, never the target provider vertex's,
+// so a provider already tombstoned by an earlier run still leaves its
+// appointments reapable (and otherwise permanently dangling, since nothing
+// else ever visits them).
+func reapProviderLitterAppointments(ctx context.Context, conn *substrate.Conn, adminKey, providerKey string) {
+	providerID := strings.TrimPrefix(providerKey, "vtx.provider.")
+	withProviderSuffix := ".withProvider.provider." + providerID
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.appointment.")
+	must(err, "list vtx.appointment. keys")
+	for _, apptKey := range keys {
+		if strings.Count(apptKey, ".") != 2 || !alive(ctx, conn, apptKey) {
+			continue
+		}
+		withProviderKey := "lnk." + strings.TrimPrefix(apptKey, "vtx.") + withProviderSuffix
+		if !alive(ctx, conn, withProviderKey) {
+			continue
+		}
+		patientKey, providerKeyResolved, found := findAppointmentPatientProvider(ctx, conn, apptKey)
+		if !found {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneAppointment", "appointment",
+			map[string]any{"appointmentKey": apptKey, "patient": patientKey, "provider": providerKeyResolved},
+			&processor.ContextHint{Reads: []string{apptKey, patientKey, providerKeyResolved}})
+		fmt.Printf("==> reaped provider's litter appointment: %s\n", apptKey)
+	}
+}
+
+// reapDuplicateProviders tombstones every provider whose fullName is in
+// reapableProviderNames, other than the checked-in canonical one (keep) —
+// adbf2571 pinned the seed's provider id going forward but never reaped the
+// pre-pin duplicates, so the patient booking picker still offers all of
+// them, none carrying hours or a practicesAt site (verticals.md). A
+// reapable provider's litter appointments are cleaned up (see
+// reapProviderLitterAppointments) even when the provider vertex is already
+// tombstoned from an earlier run — TombstoneProvider itself only runs when
+// the vertex is still alive, so this converges whichever half already ran.
 func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
 	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.provider.")
 	must(err, "list vtx.provider. keys")
 	for _, key := range keys {
-		if key == keep || !alive(ctx, conn, key) {
+		if key == keep {
 			continue
 		}
 		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".profile")
@@ -482,7 +525,11 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
 			continue
 		}
-		if aspect.Data.FullName != "Dr. Classic Demo" {
+		if !reapableProviderNames[aspect.Data.FullName] {
+			continue
+		}
+		reapProviderLitterAppointments(ctx, conn, adminKey, key)
+		if !alive(ctx, conn, key) {
 			continue
 		}
 		submitOp(ctx, conn, adminKey, "TombstoneProvider", "provider",
@@ -569,6 +616,64 @@ func reapClinicVerifyLitterAppointments(ctx context.Context, conn *substrate.Con
 			map[string]any{"appointmentKey": key, "patient": patientKey, "provider": providerKey},
 			&processor.ContextHint{Reads: []string{key, patientKey, providerKey}})
 		fmt.Printf("==> reaped verify-litter appointment: %s (%s)\n", key, reason)
+	}
+}
+
+// backfillClinicProviderSiteLive assigns the canonical provider to
+// seed-showcase.go's Riverside Building and stamps every one of the
+// provider's live appointments with that same site (verticals.md "the
+// clinic's whole forward schedule is invisible to the front desk": a
+// front-desk staffer is anchored via worksAt on a building, and
+// clinicAppointmentsRead's workplace CASE (packages/clinic-domain/lenses.go)
+// derives each appointment's authz_anchors as the patient's key PLUS either
+// every building the provider practicesAt, or — only when the provider
+// practices at NO site at all — the appointment's own atSite building.
+// providerKey here starts and stays at zero practicesAt links (this file's
+// CreateProvider above wires none), so every one of its appointments' own
+// atSite is also empty — no code path ever populates it — and the derived
+// anchor array is permanently `[]`, unreadable by any front-desk staffer no
+// matter how it's anchored. clinicSiteBackfill (Weaver-dispatched) cannot
+// close this on its own: it only backfills an appointment's atSite when its
+// provider practicesAt EXACTLY ONE site, so it cleanly no-ops forever at
+// zero. AssignProviderSite (site.go) gives the provider that one site,
+// after which every existing appointment still needs its own atSite
+// (clinicSiteBackfill only fires for a NEWLY practicesAt'd provider going
+// forward, per its own directOp trigger, not this file's already-live rows)
+// — SetAppointmentSite (opmetas.go) closes that per-appointment gap. Both
+// ops are idempotent (create/revive/no-op), so this converges on rerun.
+//
+// Best-effort, mirroring the unit's riversideBuildingKey wiring above: a
+// standalone run of this seed with no Riverside world present leaves the
+// provider siteless, same as today.
+func backfillClinicProviderSiteLive(ctx context.Context, conn *substrate.Conn, adminKey, providerKey string) {
+	riversideBuildingKey := "vtx.building." + riversideBuildingID
+	if !alive(ctx, conn, riversideBuildingKey) {
+		return
+	}
+
+	if !alive(ctx, conn, linkKey(providerKey, "practicesAt", riversideBuildingKey)) {
+		submitOp(ctx, conn, adminKey, "AssignProviderSite", "clinicSiteAssignment",
+			map[string]any{"provider": providerKey, "building": riversideBuildingKey},
+			&processor.ContextHint{Reads: []string{providerKey, riversideBuildingKey}})
+		fmt.Printf("==> assigned site:   %s practicesAt %s\n", providerKey, riversideBuildingKey)
+	}
+
+	providerID := strings.TrimPrefix(providerKey, "vtx.provider.")
+	withProviderSuffix := ".withProvider.provider." + providerID
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.appointment.")
+	must(err, "list vtx.appointment. keys")
+	for _, apptKey := range keys {
+		if strings.Count(apptKey, ".") != 2 || !alive(ctx, conn, apptKey) {
+			continue
+		}
+		withProviderKey := "lnk." + strings.TrimPrefix(apptKey, "vtx.") + withProviderSuffix
+		if !alive(ctx, conn, withProviderKey) || alive(ctx, conn, linkKey(apptKey, "atSite", riversideBuildingKey)) {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "SetAppointmentSite", "appointment",
+			map[string]any{"appointmentKey": apptKey, "site": riversideBuildingKey},
+			&processor.ContextHint{Reads: []string{apptKey, riversideBuildingKey}})
+		fmt.Printf("==> set site:        %s atSite %s\n", apptKey, riversideBuildingKey)
 	}
 }
 

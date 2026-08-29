@@ -84,11 +84,11 @@ func (ev externalEvent) externalRefValue() string {
 // on-demand — unchanged behavior, not a regression.
 func replyOpReads(replyOp, externalRef string) []string {
 	switch replyOp {
-	case "RecordProposal":
+	case "RecordProposal": // op-name: (submits) the augur reply op the Bridge posts after the model call returns; this switch only supplies the contextHint.reads it carries
 		// augur/ddls.go: RecordProposal reconstructs the TRUSTED gap context
 		// from the claim vertex CreateAugurReasoningClaim minted write-ahead.
 		return []string{"vtx.augurproposal." + externalRef + ".gap"}
-	case "RecordCapabilityProposal":
+	case "RecordCapabilityProposal": // op-name: (submits) the capability-author reply op the Bridge posts after the model call returns; this switch only supplies the contextHint.reads it carries
 		// capability-author/ddls.go: RecordCapabilityProposal resolves the real
 		// proposal vertex via the correlation claim's .target aspect.
 		return []string{"vtx.capabilityauthorclaim." + externalRef + ".target"}

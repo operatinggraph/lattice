@@ -213,15 +213,12 @@ func TestFlagEffectMismatches_SetThenClearOnRecovery(t *testing.T) {
 // document is a single Health-KV value.
 //
 // What the cap must never do is evict the entry that explains the fault. The
-// per-entity families grow one entry per violating subject and, in raw key
-// order, sort AHEAD of the target-scoped families that explain them, so
-// selection has two keys: SEVERITY first (an error is never displaced by a
-// warning, whatever family either is in), then FAMILY SCOPE (a bounded,
-// target-scoped family ahead of an unbounded per-entity one), with the incoming
-// key order breaking the remaining ties. The bounded list must also never read
-// as the whole set — the synthetic entry names the unlisted count, the true
-// total, the distinct codes that went unlisted, and the worst severity among
-// them.
+// unbounded families are all warnings and they sort ahead of the config faults
+// in key order, so selection is by SEVERITY first (ties on key order): a
+// document is truncated to fifty instances of one warning only after every
+// error has been listed. The bounded list must also never read as the whole
+// set — the synthetic entry names the unlisted count, the true total, the
+// distinct codes that went unlisted, and the worst severity among them.
 func TestBoundIssues(t *testing.T) {
 	t.Parallel()
 	mk := func(n int, sev string) []healthIssue {
@@ -273,21 +270,15 @@ func TestBoundIssues(t *testing.T) {
 	})
 
 	t.Run("an error is never evicted by warnings", func(t *testing.T) {
-		// Severity is the FIRST key, so it must win even against the family
-		// rank: the error here is in an UNBOUNDED per-entity family (a corrupt
-		// mark is one per stuck mark) while every warning ahead of it is in a
-		// bounded target-scoped one, and it arrives last in key order.
+		// The error sorts LAST in key order — exactly where the per-entity
+		// families put a config fault once fifty subjects are violating.
 		in := mk(12, "warning")
-		for i := range in {
-			in[i].key = issueKeyGapConfig("t", "missing_"+strconv.Itoa(i))
-		}
-		in[11].Severity, in[11].Code = "error", "CorruptMark"
-		in[11].key = issueKeySweep("t.entityStuck.missing_x")
+		in[11].Severity, in[11].Code = "error", "PlaybookConfigError"
 		got := boundIssues(in, 5)
-		if got[0].Code != "CorruptMark" {
+		if got[0].Code != "PlaybookConfigError" {
 			t.Fatalf("the error must be selected first, got %+v", got[:5])
 		}
-		if !hasIssueCode(got[:5], "CorruptMark") {
+		if !hasIssueCode(got[:5], "PlaybookConfigError") {
 			t.Fatalf("an error must never be evicted while warnings are listed, listed = %+v", got[:5])
 		}
 		if sev := got[len(got)-1].Severity; sev != "warning" {
@@ -298,31 +289,6 @@ func TestBoundIssues(t *testing.T) {
 			if is.Code != "C"+strconv.Itoa(i) {
 				t.Fatalf("listed entry %d = %+v, want the head of the deterministic order", i+1, is)
 			}
-		}
-	})
-
-	t.Run("a bounded family outranks an unbounded flood at equal severity", func(t *testing.T) {
-		// The shipped shape after the config codes were demoted to `warning`:
-		// the entry that EXPLAINS a fault now shares a severity with the
-		// per-row flood it explains, and `data:` sorts ahead of `gapConfig:` in
-		// key order — so without the family rank the explanation is the first
-		// thing evicted, by its own symptoms.
-		const flood = 12
-		in := make([]healthIssue, 0, flood+1)
-		for i := 0; i < flood; i++ {
-			in = append(in, healthIssue{
-				key:      issueKeyDataEntity("t", fmt.Sprintf("entity%03d", i), "violating"),
-				Severity: "warning", Code: "RowDataError",
-			})
-		}
-		in = append(in, healthIssue{
-			key:      issueKeyGapConfig("t", "missing_x"),
-			Severity: "warning", Code: "PlaybookConfigError",
-		})
-		got := boundIssues(in, 5)
-		if got[0].Code != "PlaybookConfigError" {
-			t.Fatalf("a bounded, target-scoped family must be listed ahead of the unbounded per-entity "+
-				"families it explains, even at the same severity; listed = %+v", got[:5])
 		}
 	})
 
@@ -409,61 +375,19 @@ func TestBoundIssues(t *testing.T) {
 	})
 }
 
-// TestBoundIssues_ConfigFaultSurvivesItsOwnPerRowFlood is the acceptance vector
-// for the family rank, at the real cap and through the real snapshot.
-//
-// A broken template on a busy target raises one `template:` entry per stuck row
-// and one `data:` entry per malformed one, all `warning`s, against a single
-// `gapConfig:` entry that names the cause — also a `warning` since the demotion.
-// The flood outnumbers the listing cap many times over and its keys sort ahead
-// of `gapConfig:`, so on key order alone the one entry an operator needs is the
-// first evicted, by its own symptoms. It must survive the cut.
-func TestBoundIssues_ConfigFaultSurvivesItsOwnPerRowFlood(t *testing.T) {
-	t.Parallel()
-	c := newIssueCache()
-	const targetID = "floodTarget"
-
-	for i := 0; i < maxHeartbeatIssues; i++ {
-		entity := fmt.Sprintf("entity%03d", i)
-		c.set(issueKeyDataEntity(targetID, entity, "violating"), "warning", "RowDataError", "malformed row")
-		c.set(issueKeyTemplateEntity(targetID, entity, "missing_x"), "warning", "TemplateDataError", "template resolves null")
-	}
-	c.set(issueKeyGapConfig(targetID, "missing_x"), "warning", "PlaybookConfigError",
-		"target "+targetID+" gap missing_x: the action is not dispatchable")
-
-	snap := c.snapshot()
-	if len(snap) <= maxHeartbeatIssues {
-		t.Fatalf("setup: the flood (%d entries) must exceed the listing cap (%d)", len(snap), maxHeartbeatIssues)
-	}
-	doc := boundIssues(snap, maxHeartbeatIssues)
-	if !hasIssueCode(doc, "PlaybookConfigError") {
-		t.Fatalf("the per-row flood evicted the one entry that EXPLAINS it — the config fault shares "+
-			"the flood's severity and loses the key-order tiebreak to it, so the listing must rank "+
-			"the bounded target-scoped families ahead of the unbounded per-entity ones; listed codes = %v",
-			listedCodes(doc))
-	}
-	if doc[0].Code != "PlaybookConfigError" {
-		t.Fatalf("the explanation must LEAD the listing, got %+v", doc[0])
-	}
-}
-
 // A truncated heartbeat must still let an operator SEE the cause, not just the
-// verdict. Sixty violating subjects plus one config fault is the shape the
-// per-entity families make routine: in key order the config entry sorts behind
-// every `gap:` entry and would be the first thing evicted, leaving a document
-// that lists fifty identical warnings and names nothing that explains them. It
-// must be listed, and the marker must name what went unlisted.
-//
-// The config fault is seeded at the severity it actually SHIPS with — `warning`,
-// since GapWithoutPlaybook and PlaybookConfigError were demoted — so this
-// exercises the family rank rather than resting on a severity the raise sites no
-// longer use. A seeded `error` here would green whatever the family rank does.
+// verdict. Sixty violating subjects plus one PlaybookConfigError is the shape
+// the per-entity families make routine: in key order the config error sorts
+// behind every `gap:` entry and would be the first thing evicted, leaving a
+// document that reports unhealthy while listing fifty identical warnings and
+// naming nothing that explains it. The error must be listed, and the marker
+// must name what went unlisted.
 //
 // This test makes no claim about the ORDER of aggregation and truncation in
 // emit — see aggregateStatus's own test. Those two orders are provably
-// equivalent (the cut cannot evict an entry a lower-ranked one displaced, and
-// the marker carries the worst omitted severity besides), so no test can
-// distinguish them.
+// equivalent (severity-first selection cannot evict an error while warnings are
+// listed, and the marker carries the worst omitted severity besides), so no
+// test can distinguish them.
 func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -492,13 +416,13 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 		logger:                logger,
 	}
 
-	// One warning per violating subject, plus a single config fault whose key
+	// One warning per violating subject, plus a single config error whose key
 	// sorts behind every one of them — well past the cap.
 	const total = maxHeartbeatIssues + 10
 	for i := 0; i < total-1; i++ {
 		cache.set(fmt.Sprintf("gap:t.%020d.missing_claim", i), "warning", "UnroutedTasks", "row column missing_claim is true")
 	}
-	cache.set(issueKeyGapConfig("t", "missing_claim"), "warning", "PlaybookConfigError", "the playbook does not resolve")
+	cache.set(issueKeyGapConfig("t", "missing_claim"), "error", "PlaybookConfigError", "the playbook does not resolve")
 
 	h.emit(ctx, "healthy")
 
@@ -521,8 +445,7 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 			listedCodes(doc.Issues))
 	}
 	if doc.Issues[0].Code != "PlaybookConfigError" {
-		t.Fatalf("the bounded, target-scoped entry must be selected ahead of the per-entity flood it "+
-			"explains, got %+v", doc.Issues[0])
+		t.Fatalf("the error must be selected ahead of the warnings, got %+v", doc.Issues[0])
 	}
 	last := doc.Issues[len(doc.Issues)-1]
 	if last.Code != issuesTruncatedCode {
@@ -534,9 +457,8 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	if !strings.Contains(last.Message, "UnroutedTasks ×") {
 		t.Fatalf("truncation message must name the unlisted codes, got %q", last.Message)
 	}
-	if doc.Status != "degraded" {
-		t.Fatalf("status = %q, want degraded: every open issue here is a warning, and §5.3 reserves "+
-			"unhealthy for an `error`", doc.Status)
+	if doc.Status != "unhealthy" {
+		t.Fatalf("status = %q, want unhealthy", doc.Status)
 	}
 }
 

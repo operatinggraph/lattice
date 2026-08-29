@@ -90,7 +90,7 @@ func PlanStrandedEpochRetirement(epoch StrandedOperatorEpoch) ([]RevocationOp, e
 		}
 		linkKey := substrate.LinkKey("permission", permID, "grantedBy", "role", roleID)
 		ops = append(ops, RevocationOp{
-			OperationType: "RevokePermission",
+			OperationType: "RevokePermission", // op-name: (submits) the stranded-grant revocation tool submits this per orphaned permission grant, unlinking it from the retired role epoch
 			Payload:       map[string]any{"permKey": permKey, "roleKey": epoch.RoleKey},
 			LinkKey:       linkKey,
 		})
@@ -101,7 +101,7 @@ func PlanStrandedEpochRetirement(epoch StrandedOperatorEpoch) ([]RevocationOp, e
 
 func revokeRoleOp(actorKey, actorType, actorID, roleKey, roleID string) RevocationOp {
 	return RevocationOp{
-		OperationType: "RevokeRole",
+		OperationType: "RevokeRole", // op-name: (submits) the stranded-grant revocation tool submits this per stranded holder, dropping their holdsRole link to the retired role
 		Payload:       map[string]any{"actorKey": actorKey, "roleKey": roleKey},
 		LinkKey:       substrate.LinkKey(actorType, actorID, "holdsRole", "role", roleID),
 	}

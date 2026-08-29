@@ -357,6 +357,30 @@ validation. The full openCypher engine is the only rule engine Refractor runs.
 - **Canonical engine for new lenses.** The bootstrap-seeded Capability Lens uses `engine: "full"`.
 - **Wiring**: `cmd/refractor/main.go` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+#### The pattern graph steps a ranged hop
+
+`AnchorHopIndex`/`ScanRootHopIndex` (`hopindex.go`) index a **variable-length** relationship
+rather than refusing it: `PatternHop`/`PatternStep` carry the hop's `[Min, Max]` range, clamped at
+index-build time by the same `maxVarLengthHops` the executor's own `traverseRel` applies
+(`executor.go`, `rel_traverse.go`). The derivation walk
+(`pipeline.walkToAnchors`) answers such a step with a bounded frontier expansion — the zero-hop
+admission when `Min == 0`, a closure-local cycle guard, and the far-end label prune applied **only at
+admission**, never to intermediates, because the executor filters intermediates by nothing either.
+Every read still goes through the walk's one `edgesOf` closure, so `DefaultDerivationReadCap` bounds
+it and a breach returns `ok == false` and runs the shipped `ActorEnumerator` BFS: no new budget, no
+truncation.
+
+The soundness statement is narrower than it looks and is what makes the shared clamp load-bearing:
+**the derivation is complete with respect to what the executor will evaluate, not with respect to the
+graph.** An anchor whose path crosses more than `maxVarLengthHops` of a ranged hop cannot produce a
+row, because the executor's walk stops there too.
+
+A ranged hop's distance is an interval, so it contributes no `HopIndex.Dist`. `Dist` is computed over
+binding hops, and any position the anchor can reach across a ranged **binding** hop takes the
+incomparable `-1` sentinel — `AnchorSideSeeds` then seeds **both** endpoints, which only widens the
+derived set. An over-stated distance would be the unsound direction: `consider` drops the endpoint
+whose distance is larger.
+
 #### `OPTIONAL MATCH … WHERE` null-restore semantics
 
 When an `OPTIONAL MATCH` pattern matches real neighbors but a `WHERE` then excludes
@@ -1213,14 +1237,31 @@ rows.
   by a later fire (§9.6 defers a generalization whose reads do reach Core KV). Minted: grouping-key close pass,
   found by the capability-plane reviewer, not the author. Check: for any "don't do X or Y breaks" constraint,
   read Y's consumer and state which DIRECTION the failure runs; if removing X makes a check pass more readily
-  rather than fail, say so.
+  rather than fail, say so. **Second sighting, and it is the mirror image: refuting a refusal's REASON does
+  not establish that the whole refusal was wrong.** `AnchorHopIndex` refused every variable-length hop
+  because "the intermediate nodes cannot be stepped hop-by-hop" — refutable, and refuted, by the engine's own
+  `traverseRel`. But the shape had a *real* boundary nobody had derived: `AnchorSideSeeds` seeds the changed
+  link's two endpoints, which is exact only while that link binds its pattern positions, and across a ranged
+  hop the changed link is an intermediate edge, so a lower bound above two drops anchors (thirteen graphs,
+  found by a cold reviewer's sweep, not by the design). The refuted reason had been standing in for a
+  correct one. Check: when you lift a refusal, do not stop at falsifying its stated reason — re-derive the
+  boundary from the CONSUMERS the refusal was protecting, and expect the true limit to sit somewhere inside
+  the old one. Corollary from the same fire: a refuted reason lives in more documents than the one you are
+  building, so grep it — this one was normative text in three sibling designs, one of them the parent.
 - **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
   opposite directions. Minted: dynamic-type-taxonomy B1 (`capabilityServiceAccess`'s `exLoc`, which mints
-  `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
-  (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
-  second sighting.
+  `cap.svc.<actor>`; reproduced as a failing test before removal). **Second sighting: the RANGE BOUND, one
+  level up from the label** — once the pattern graph steps a bounded ranged hop, "bound your `*0..` to gain
+  indexing" is an attractive package edit that is fail-closed on a positive arm (a too-shallow bound drops a
+  service) and fail-OPEN on a negated one (it drops an exclusion, granting access). Same edit, opposite
+  directions. Check: that half is **MECHANIZED** — `scripts/lint-lens-anchors.go` refuses a finite upper
+  bound below the engine's own `maxVarLengthHops` clamp inside a negated extent, and runs its own
+  positive-and-negative vectors on every invocation because the corpus ships no violating lens for it to
+  catch. The **sigil** half still has only the per-lens string pin (`service-location/package_test.go`) — the
+  entry retires when that one is mechanized too. Generalize before writing either: ask which direction the
+  edit fails in on each arm, not whether it is "tighter".
 - **A two-layer seam can be green at each layer and broken across it — the interposed step is where it dies**
   — a restored structural pause's diagnosis was stashed by the health sink and read back at the announcement,
   and both halves had passing tests: the substrate side drove `Load → probe → announce`, the Refractor side
@@ -1257,7 +1298,19 @@ rows.
   left the writer no-oping every rebuild and the reader returning an EMPTY edge set as authoritative, with no
   error and no log line. Minted: adjacency Shape B close review (the state table had named the boundary and
   answered it with an environmental assertion). Check: a cache of durable state is consulted for PRESENCE
-  only, never to conclude absence — or it is deleted, which is what shipped.
+  only, never to conclude absence — or it is deleted, which is what shipped. **Second sighting, in memory
+  rather than across a cache boundary: a present-but-EMPTY set and a missing one are the same answer, and two
+  readers disagreed about that.** `HopIndex.Expanded` is consulted by `admitsType` per edge (an empty set
+  admits no type, which PRUNES) and gated once per rule state by `UnresolvedExpansionPosition` (which tested
+  `== nil`, so an empty set read as *resolved*). A `*` label resolving to nothing is a real, warned-about
+  state, so the derivation accepted the index, built zero seeds, and returned an empty derived set with
+  `ok == true` — read by the caller as "no anchor changes" on the lens that mints `cap.svc.<actor>`. Minted:
+  varlength-anchor-derivation Inc 1, found by a cold reviewer; the design's own risk table had predicted it
+  and the decomposition never turned that row into a task. Check — **MECHANIZED as a mandated test shape**:
+  every absence gate over a resolved-set field asserts BOTH vectors, resolved and empty, against the same
+  index (`TestAnchorHopIndex_EmptyExpansionIsUnresolved`), and the empty one is proven by reverting the
+  predicate. Standing rule for the reader: `len(x) == 0`, not `x == nil`, wherever "no answer" and "the
+  answer is nothing" must behave alike.
 - **An authoring gate and its runtime resolver must agree, or the gate is advisory.** A parse-time refusal
   named the projectable surface of a relationship binding while `resolveProperty`'s arm resolved *whatever
   reached it*, so any shape the parse walk did not model served the value anyway: `WITH coalesce(r, r) AS rr`

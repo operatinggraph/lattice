@@ -242,8 +242,9 @@ func submitReconcile(ctx context.Context, conn *substrate.Conn, actor, cred, own
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 	env := &processor.OperationEnvelope{
-		RequestID:     requestID,
-		Lane:          processor.LaneDefault,
+		RequestID: requestID,
+		Lane:      processor.LaneDefault,
+		// op-name: (submits) the "identity reconcile-bindings" CLI command submits this once per credential found with a live credentialindex vertex and no boundTo edge, converging pre-boundTo-era credentials onto the edge type their lens now projects.
 		OperationType: "ReconcileCredentialBinding",
 		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

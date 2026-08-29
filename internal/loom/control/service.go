@@ -11,6 +11,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -293,6 +294,16 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	case opInspect:
 		detail, err := s.engine.InspectInstance(ctx, name)
 		if err != nil {
+			if errors.Is(err, loom.ErrInstanceNotFound) {
+				// An ordinary answer, not a failure: loom-state holds a cursor for
+				// every instance that ever ran, so an absent one means no instance
+				// by that id was ever created. Matched on the sentinel rather than
+				// the message text, which is what keeps this distinguishable from a
+				// KV read failure — that stays a plain error below.
+				s.respondMicro(req, ControlResponse{Error: fmt.Sprintf(
+					"loom: instance %q not found — no instance by that id was ever created", name)})
+				return
+			}
 			s.respondMicro(req, ControlResponse{Error: err.Error()})
 			return
 		}

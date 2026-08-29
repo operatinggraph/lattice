@@ -98,3 +98,67 @@ substitute for declaring a predictable key.
   size it as its own fire via `fe-engineer` + UX (Sally), not folded into this one.
 - Row stays `verticals.md` (not filed to `lattice.md`) — no new platform primitive was needed;
   the write-authorization half is genuinely done, the FE half is the named remaining consumer.
+
+## Fire — patient can't read their own encounter note (2026-08-28)
+
+**Scope sentence:** widen `clinicEncountersReadSpec`'s `authz_anchors` to admit the patient
+alongside the treating provider, then drop the FE's own `asSelf` suppression, so
+`GET /api/my-encounters` returns — and the patient card renders — the same clinical note the
+provider already sees for that appointment. No write-side change, no new link, no new platform
+primitive.
+
+**Ground (verified live in this repo, not assumed):**
+- `packages/clinic-domain/lenses.go:1003-1017` (`clinicEncountersReadSpec`) is PROVIDER-only
+  today: `authz_anchors = [nanoIdFromKey(pr.key)]`. `forPatient` is already an `OPTIONAL MATCH`
+  (line 1006) projecting `patient_key` for display, never as an anchor.
+- **The precedent to mirror is in the SAME file, not loftspace's**: `clinicAppointmentsReadSpec`
+  (lines 917-947, D1.5, already shipped and live for "My Appointments") anchors on
+  `nanoIdFromKey(p.key)` — the **patient vertex's own bare NanoID**, not a walk to its
+  `identifiedBy` identity inline in this lens's own cypher. **Correction (post-review,
+  2026-08-28): `lattice.actor_id` itself is the login identity's NanoID, never the patient
+  vertex's** (`cmd/clinic-app/readauth.go:57`, `encounters.go:73`) — the hop from identity to
+  patient anchor is a separate grant-table lens, `patientIdentityReadGrants`
+  (`packages/clinic-domain/lenses.go:1113-1118`), which projects `(actor_id=identity NanoID,
+  anchor_id=patient NanoID)` rows RLS's `unnest(authz_anchors)` join matches against. `p.key` in
+  `authz_anchors` is still the right value — the grant-table lens is what makes it resolve to the
+  signed-in identity — but no `identifiedBy` walk belongs INSIDE `clinicEncountersReadSpec`
+  itself either way, which is the operative conclusion this row's touch-list drew.
+- **Comprehension, not a bare element** — `clinicPatientsSpec`'s `buildingAnchors` comment
+  (lines 910-916) is load-bearing here too: `p` is bound by an `OPTIONAL MATCH`, so a bare
+  `[nanoIdFromKey(p.key)]` would carry a `NULL` array element (rejected by
+  `ProtectedAdapter.toStringSlice`, failing the WHOLE row's upsert) whenever an appointment has
+  no `forPatient` link. The fix uses a fresh pattern comprehension
+  `[(a)-[:forPatient]->(p2:patient) | nanoIdFromKey(p2.key)]`, which degrades to `[]`, not
+  `[null]`, exactly the rule `clinicAppointmentsReadSpec`'s own comment documents.
+- **Decrypt-side needs no separate change** — `internal/refractor/pipeline/secure.go:208-225` and
+  `docs/contracts/03-mutation-batch-event-list.md` §3.10 confirm custody ("can this be
+  decrypted") is keyed off the ciphertext's own `keyId` → `HolderTypes` (`["retentionclass"]`,
+  unchanged), independent of which actor's NanoID is in `authz_anchors`. Widening the anchor
+  widens who can see + decrypt the row in one change; `applicantRosterRead`
+  (`packages/loftspace-domain/lenses.go:81-82,257-258`) is the existing precedent for a
+  multi-arm Secure Lens working this way.
+- FE gate: `cmd/clinic-app/web/app.js:3931` — `a.documentedAt && !opts.asSelf` — the ONLY thing
+  suppressing display once the backend row exists; `opts.asSelf` cards call the same
+  `state.myEncounters` map providers already read (populated by `loadMyEncounters`,
+  `app.js:2607-2637`), so no new fetch or state is needed.
+
+**Touch-list:**
+1. `packages/clinic-domain/lenses.go` — widen `authz_anchors` (comprehension form above); rewrite
+   the two stale comment blocks that assert provider-only anchoring (lines 359-395 lens
+   declaration doc, lines 986-990 spec doc — CLAUDE.md: comments describe the code as it is now).
+2. `packages/clinic-domain/manifest.yaml` + `packages/clinic-domain/package.go` — version bump
+   (content-changing package edit; CLAUDE.md package-version-bump rule).
+3. `cmd/clinic-app/web/app.js:3931` (+ the comment above it, lines 3920-3929) — drop
+   `&& !opts.asSelf` so the patient's own card renders the note through the same path the
+   provider's card already uses.
+
+**Non-goals:** no `identifiedBy` walk (ground above shows it's unnecessary and would be wrong —
+`p.key`, not the identity vertex, is what RLS matches); no change to `SecureColumns`/HolderTypes;
+no FE data-fetch change (`loadMyEncounters` already runs unconditionally); front-desk gets no new
+anchor (workplace token deliberately absent from this lens, per the existing lens-declaration
+comment, and stays that way — the clinical note is not front-desk material).
+
+**Increment order:** one increment — package lens + version bump, then FE gate removal; run
+`go test ./packages/clinic-domain/...` and `node --check cmd/clinic-app/web/app.js`, `go build
+./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`.
