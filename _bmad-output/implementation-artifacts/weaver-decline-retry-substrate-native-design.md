@@ -1198,3 +1198,114 @@ is a Loupe item, not this fire's.
 **3. `weaver.md` never carried the false "surfaced in Loupe" sentence.** That claim lives in this
 design and in the fire brief, not the component doc. Corrected here; the component doc gained the
 accurate per-surface paragraph instead.
+
+---
+
+## Row-8 orphan-column closure — fire brief (build note, 2026-08-29)
+
+Compiled at selection (Phase 0, `agents/fire-brief-template.md`). Closes the §3.2 row-8 finding
+recorded above: a `missing_*` column a package projects deliberately with no `gaps` entry rides the
+long redelivery floor forever.
+
+**1. Scope sentence (verbatim, §3.2 row 8's closing paragraph).** *"Weaver cannot distinguish a
+deliberate orphan column from a genuinely missing entry, so the fix is to make the deliberate case
+**declarable** — the sanctioned form already exists (a `surface` gap, which Acks with its own standing
+issue) — plus a gate asserting lens-projected `missing_*` ⊆ declared gaps. Only then is row 8's Long
+sound."* Green bar: `lease-signing`'s two orphan columns Ack through the `surface` arm instead of
+`NakWithLongDelay`, and a CI gate fails any weaver-target-bound lens that projects a `missing_*`
+column its target does not declare.
+
+**2. Verified touch-list** (every anchor re-checked live at `f7f58ea`; the design's own citations
+`lenses.go:810/:812/:815` and `targets.go:91-102` all still resolve):
+
+| File | Anchor | Edit |
+|---|---|---|
+| `packages/lease-signing/targets.go:91-102` | the `leaseApplicationComplete` `Gaps` map | add two `Action: "surface"` entries |
+| `packages/lease-signing/targets.go:62-63` | the "Every gap key is a column the lens projects" doc clause | amend — the converse now holds too |
+| `packages/lease-signing/package.go:85` | `Version: "0.31.10"` | bump (the only version site; `lint-package-version`) |
+| `packages/lease-signing/manifest.yaml` | `version:` | bump in lockstep |
+| `scripts/lint-gap-column-declaration.go` | new | the gate |
+| `Makefile` (beside `lint-capability-kv-readers`, `:2231`) | new target | local invocation |
+| `.github/workflows/ci.yml` (`lint-build`, beside `:245`) | new step | `STRICT=1 go run ...` |
+| `docs/components/lint-gates.md` | the gate table | one row |
+
+**3. Precedents to mirror.**
+
+- The `surface` declaration: `packages/orchestration-base/targets.go:44,54` (`{Action: "surface",
+  IssueCode: …, IssueSeverity: "warning"}`) and `packages/privacy-base/targets.go:194,199`. Engine arm:
+  `internal/weaver/evaluator.go:316-334` — no mark, no OCC, no episode, a per-`(target,entity,column)`
+  issue, `substrate.Ack`. Install/load validation: `internal/weaver/registry.go:737` (`issueSeverity`
+  is `warning` or `error` only).
+- The gate's *source of truth*: `internal/pkgregistry.Names()`/`Lookup` over compiled `Definition`s,
+  as `scripts/lint-package-standard.go:222-224` does — the Go compiler resolves every constant and
+  `fmt.Sprintf` composition, so the derived set cannot rot the way a cypher regex would
+  (checklist #2's indirection lesson; `lint-lens-anchors.go` takes the regex route and is the shape
+  NOT to copy here).
+- Script skeleton / `STRICT` convention / exit codes: `scripts/lint-capability-kv-readers.go`.
+
+**4. Increment order.**
+
+- **Inc 1 — declare the two orphans.** `targets.go` + version bump + doc-comment amendment + a
+  package-local pin (every `missing_*` BodyColumn of a weaver-target-bound lens has a `Gaps` key) and
+  a weaver-side test proving a `surface` gap Acks where an undeclared one returns `NakWithLongDelay`.
+  Green: `go test ./packages/lease-signing/... ./internal/weaver/...`;
+  `DIFF_BASE=origin/main go run ./scripts/lint-package-version.go`.
+- **Inc 2 — the gate.** `scripts/lint-gap-column-declaration.go` + Makefile + CI step + doc row.
+  Green: `STRICT=1 go run ./scripts/lint-gap-column-declaration.go` clean at head, and red when
+  Inc 1's two entries are removed (the revert-proof).
+
+Inc 1 precedes Inc 2 deliberately: the gate is red at `main` until the declaration lands, so the two
+merge together.
+
+**5. In-scope gotchas.**
+
+- **The gate keys on `Output.BodyColumns`, not on the cypher.** `internal/refractor/projection/
+  driver.go:70-72` builds the projected document by iterating `BodyColumns`, so that list *is* the
+  row Weaver's `openGapColumns` (`evaluator.go:1718-1730`, prefix `missing_`,
+  `state.go:17`) enumerates. The cypher is a proxy for it, and the lint-gates dossier's first entry is
+  precisely about keying on the hazard rather than a proxy. Over-declaration in `BodyColumns` fails
+  safe (a needless declaration); under-declaration cannot reach Weaver at all.
+- **Only lenses a `WeaverTargetSpec.LensRef` binds are in scope.** `lease-signing`'s two protected
+  read models (`leaseApplicationsReadSpec:886`, `landlordLeaseApplicationsReadSpec:1026`) project
+  `missing_*` columns and have no target; they are Postgres read models, never Weaver rows. A gate
+  that scanned lenses instead of targets would flag them.
+- **An unresolvable `LensRef` is reported, never skipped.** `internal/pkgmgr/build.go:587-597` admits
+  a bare NanoID naming an already-installed lens; that form is statically unresolvable, and the
+  lint-gates dossier's "resolved, not counted" entry says a check that silently passes such a case
+  admits a value naming nothing. No target uses that form today — the gate says so out loud if one
+  appears.
+- **The `unplannable` escape is real.** `evaluator.go:274-282` routes an undeclared column to the
+  Augur tier when `Augur.Escalate` contains `unplannable` (`registry.go:51`), and only the
+  non-escalated arm long-Naks. A target carrying that trigger legitimately declares no gaps entry, so
+  it is exempt. `lease-signing` escalates `exhausted` only (`targets.go:89`).
+- `packages/` content edits bump the manifest version **and** its mirror (CLAUDE.md); here they are
+  the same file pair, `package.go:85` + `manifest.yaml`.
+- Weaver dossier entries this fire trips: *a Health issue key is a LATCH* (the `surface` arm's key is
+  already per-entity and cleared by `clearClosedMarks`; this fire adds no raise/clear leg) and *a
+  per-entity Health issue is unbounded* — see the trade-off recorded below.
+
+**Adjudication (Winston) — `missing_decision` gets `surface` too, and the degraded posture is
+accepted, not overlooked.** `aggregateStatus` (`health.go:1099-1113`) maps any issue to at least
+`degraded`, and `registry.go:737` admits only `warning`/`error`, so declaring an ordinary
+awaiting-landlord-decision row `surface` leaves Weaver `degraded` while any application awaits a
+decision. Two alternatives were weighed and rejected: renaming the column out of the `missing_`
+namespace (it would fix this instance while teaching the next author to dodge the gate by renaming —
+the gate's authority is exactly that `missing_*` means "a gap, with a declared action"), and
+`assignTask`-ing the landlord (the honest remediation, but the row carries no landlord key, so it is
+a lens + product change, out of this fire's scope). `warning` keeps Weaver out of `unhealthy`, which
+is the line Contract #5 §5.2 draws, and the issue self-clears the moment the decision lands
+(`clearClosedMarks`). `missing_manager` is the standing case: `lens_cypher_test.go:609-619` pins that
+it closes only when a `manages` link lands — an operator action, never a Weaver dispatch — which is
+what a standing Health warning is for.
+
+**6. Adjacent finds.** The scout census flagged `semantic-contracts`' `ClauseSatisfactionTarget` as
+projecting an undeclared `missing_account`. **Re-verified and refuted:** `lenses.go:128` sits inside
+`leaseRentSettlementSpec` (`:113`), which binds `LeaseRentSettlementTarget` — and that target does
+declare `missing_account` (`targets.go:85`). `clauseSatisfactionSpec` (`:203`) projects only
+`missing_charge`/`missing_inspection`, both declared. The census's cypher-to-lens attribution was the
+error, and it is the same error the BodyColumns keying above avoids. No row filed. `maxretries_*`,
+`inflight_*` and `declined_*` columns are outside `openGapColumns`' prefix and outside this gate.
+
+**7. Non-goals.** No change to the row-8 decision itself (the Long stays, and is now sound); no
+reverse check (a declared gap whose lens projects no such column); no change to `violating`, to the
+protected read models, or to any other package's declarations.
