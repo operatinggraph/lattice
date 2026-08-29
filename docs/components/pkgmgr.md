@@ -32,9 +32,17 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   conflating the label namespace with either one is wrong a third way). Minted: dynamic-type-taxonomy
   §17.9 — it both retired ratified check A3-1 and left the flip guard's divergent-type gap. Check: none
   yet (the board row's fix).
-- **RETIRED (the model of a retired entry):** two writers of one deterministic key — a create-only writer
-  bricks the second — now carried by the fire-brief standing checklist (#5), which every brief copies in,
-  so it reaches a builder without a dossier slot.
+- **A new field on a descriptor must be checked against every downstream REFUSAL keyed on that field, not
+  only against what consumes it.** Install validated the new `Dispatch.Enumerations` for shape and vocabulary
+  and stopped there, while `descriptor_floor.go` refuses *every* enumeration for the NFR-S6 equalized set —
+  a refusal whose written justification was that no descriptor could name one, which the new field
+  falsified. A declaration on `ClaimIdentity` would therefore install clean and take identity claiming down
+  completely and un-attributably, since NFR-S6 collapses the fault to a details-less `ClaimKeyInvalid` on
+  every redelivery. The general shape: adding a declarable field turns some downstream "unreachable by
+  construction" branch into a reachable one, and its comment is the thing that tells you it was unreachable.
+  Grep the new field's name and its wire spelling across refusal sites before shipping it. Minted: the
+  descriptor-declared-enumerations item, found independently by two cold reviews. Check:
+  `TestValidateOpDispatchTemplates_*NFRS6*` (install refuses it, with a non-member positive control).
 - **An injected dependency held in a nil-able field silently disables the gate it feeds** — the compiler
   enforces the interface and sees nothing at the injection site, so a fixture that builds the struct by hand
   runs the gate as a no-op and reports green on code the real entry point refuses. Minted:

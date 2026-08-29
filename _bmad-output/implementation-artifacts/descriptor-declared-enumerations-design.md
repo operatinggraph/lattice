@@ -3,7 +3,7 @@
 **Status: ✅ Winston-ratified — build-ready** (2026-08-29). Every open question here is an implementation
 call (`agents/steward/SKILL.md` §0); none touches a frozen contract or an architectural fork. Contract #2
 §2.5 already specifies `contextHint.enumerations` and does **not** enumerate which surfaces may populate it,
-so adding a third populating surface builds *to* the frozen contract rather than changing it.
+so adding a fourth populating surface builds *to* the frozen contract rather than changing it.
 
 Board row: `[Pkgmgr] A descriptor-dispatched op cannot declare a kv.Links walk`
 (`backlog/lattice.md`, Component maintenance).
@@ -267,3 +267,38 @@ Gateway's or `opwire`'s already-correct acceptance of `enumerations`.
 The link-discovered-hub class (§5.6) is the honest remainder: this fire gives the descriptor surface the same
 reach Loom's and Weaver's have, and no more. A walk whose hub is unknown until the script reads something is
 undeclarable on *every* surface — that is a platform-wide absent pattern, not a pkgmgr gap.
+
+## 7. Close pass — what the reviews found, classified
+
+Three cold adversarial reviewers (security / capability-plane, end-to-end correctness, conventions +
+architecture) ran over the channel's whole diff, independently. One BLOCKING, four MAJOR, six MINOR. Every
+finding below was fixed in this run — none was filed.
+
+| # | class | component | finding | the check that now catches it |
+|---|---|---|---|---|
+| 1 | **brief-gap** | edge / facet | **BLOCKING** — both enqueue hosts dropped `enumerations`: the JS producer and the Go consumer are separate hops and neither decoder rejects unknown keys. The brief's touch-list named `cmd/facet/web/app.js` and neither host. Live once the cafe ops declared. | `TestBuildEnqueueEnvelope_ForwardsEnumerations` + browser twin; envelope construction extracted so the hop is testable |
+| 2 | **design-gap** | pkgmgr / processor | An NFR-S6 op declaring an enumeration installs clean and then faults every submission terminally, collapsed to a details-less `ClaimKeyInvalid`. Found by two reviewers independently. | install refuses it (`processor.IsNFRS6Operation`), with a non-member positive control |
+| 3 | **design-gap** | pkgmgr / descriptorform | `{scopedTo}`/`{service}` hubs installed clean but no shipped renderer resolves them — `form.mjs` throws (aborting the submit), `app.js` drops silently. The new refusal text *recommended* them. | hub grammar narrowed to `{actor}`/`{payload.<field>}`/literal (D1), each refusal executed |
+| 4 | **implementation-bug** | pkgmgr | `{actor:id}` on a hub installs, resolves to a bare NanoID, and can never match the walk it declares — a row retired against it would redden with no visible cause. | `:id` and mid-segment placeholders refused on a hub |
+| 5 | **convention** | pkgmgr | Two further refusal tails in the shared validator stayed Reads-shaped and now fired for hubs, sending an author to `Dispatch.OptionalReads`/`ContextParams` — fields a hub declaration does not have. A new test *pinned* one of them. | each tail list-aware; tests assert the hub-shaped remedy and the Reads tails unchanged |
+| 6 | **brief-gap** | edge-manifest / processor | Doc obligations missed: `edge-manifest.md` is the normative as-built row shape (no `dispatchEnumerations`), and `processor.md` asserted an `OpDispatchSpec` can name no enumeration. | both rewritten; the brief's touch-list carried no `docs/components/` row |
+| 7 | **brief-gap** | apps | The `toDescriptor` presence-guard clause had no revert-proof though both sibling clauses did, and three of four apps had no `op_catalog` test at all. | one test per app, plus the enumerations-only guard twin |
+| 8 | **review-over-reach** | — | A reviewer held that declaring a walk admits its follow-up reads past the drift guard. It does not: the guard builds that allowance from `record.EnumeratedVertices`, what the script observably walked, never from the declaration. D7's wording was tightened to "no production authority" anyway. | — |
+
+Minor, accepted rather than changed, each with its reason: `unknownOpMetaFields` scans one level into
+`dispatch`, so an extra key inside an `enumerations` element is dropped rather than refused (inert —
+`EnumerationSpec` has exactly three fields and `enumerationBodies` writes exactly three keys); the Gateway's
+`cleanKeys` trims and dedupes reads but not enumerations (pre-existing, and install now refuses the empty hub
+a descriptor could contribute); `form.mjs` emits the key only when non-empty while `app.js` always emits it
+(each matches its own file's convention, and the Gateway gates on `len > 0`).
+
+**Two lessons routed to dossiers.** `docs/components/edge.md` gains the enqueue-hop class (#1).
+`docs/components/pkgmgr.md` gains the downstream-refusal class (#2), displacing the entry that had already
+recorded itself as retired into the fire-brief standing checklist. **`pkgmgr.md`'s dossier stands at 15
+against its cap of 12** — that is pre-existing and this fire did not worsen it, but it is over, and a
+curation pass retiring the entries whose gates have since landed is genuine owed work.
+
+The recurring shape across #1, #6 and #7 is one brief-quality defect, not three: **the touch-list was
+compiled from the code that produces a value and not from the code that consumes it.** A brief for a fire
+that threads a new field should be built by walking the chain from the far end backwards — from the wire
+format that must carry it, back through every host, doc and pin that names its siblings.

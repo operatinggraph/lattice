@@ -278,3 +278,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   bounded retry, and a fail-fast class (a permissions denial) must stay fail-fast. Minted: cold-sign-in
   Fire 3 review (`942f78df`). Check: `shell.test.mjs`'s delete timeout-then-success and
   bounded-give-up vectors.
+- **A field the renderer puts on an enqueue request is DROPPED unless both hosts' `enqueueRequest` structs
+  carry it, and nothing anywhere says so** — neither `cmd/facet/server.go` nor `internal/edge/browser/host.go`
+  decodes with `DisallowUnknownFields`, so the JS producer and the Go consumer are two independent hops and
+  an unmatched key vanishes silently. The JS-side test is the trap: it stubs the write seam in-process, so it
+  asserts a value that crosses no boundary and stays green while the field reaches nothing. Minted: the
+  descriptor-declared-enumerations item — `dispatch.enumerations` reached `app.js`, both hosts dropped it,
+  and both downstream submitters already forwarded it, so only the construction hop was missing. Check:
+  `TestBuildEnqueueEnvelope_ForwardsEnumerations` (+ the browser twin) — envelope construction is extracted
+  from the HTTP handler in both hosts precisely so this hop is reachable from a test.
