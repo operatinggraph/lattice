@@ -142,7 +142,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2231,6 +2231,24 @@ lint-doc-orphan:
 lint-capability-kv-readers:
 	@echo "==> Linting Capability-KV single-read-path..."
 	go run ./scripts/lint-capability-kv-readers.go
+
+## lint-gap-column-declaration — every missing_* column a weaver-target-bound lens
+## projects is declared in that target's gaps map (Contract #10 §10.8). Weaver's
+## dispatchGap holds an undeclared open gap column on the 5-minute long redelivery
+## floor indefinitely — it occupies a MaxAckPending slot and re-runs the whole
+## clearClosedMarks preamble every floor, forever — because the engine cannot tell
+## an authoring omission from a column a package projects deliberately with no
+## remediation. The deliberate case is declarable (a `surface` gap, which raises a
+## standing Health issue and Acks), so this gate asserts the resulting invariant.
+## Keyed on the lens's Output.BodyColumns (the row Weaver actually evaluates), read
+## from the COMPILED pkgregistry Definitions, and looped over targets so unbound
+## read-model lenses are out of scope. One exemption: a target whose Augur policy
+## escalates `unplannable` routes an undeclared column to the reasoning tier.
+## An unresolvable LensRef is reported, never silently passed.
+## Advisory by default; STRICT=1 exits non-zero.
+lint-gap-column-declaration:
+	@echo "==> Linting weaver gap-column declarations..."
+	go run ./scripts/lint-gap-column-declaration.go
 
 ## install-skills — Symlink the canonical agentic-ops role-skills from agents/
 ## into the (gitignored) .claude/skills/ where the harness discovers them. A

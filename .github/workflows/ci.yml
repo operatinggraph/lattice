@@ -244,6 +244,21 @@ jobs:
         # seed/verify tooling) are named in the gate with a stated reason.
         run: STRICT=1 go run ./scripts/lint-capability-kv-readers.go
 
+      - name: Weaver gap-column declaration lint (projected missing_* ⊆ declared gaps)
+        # A `missing_*` column a weaver-target-bound lens projects but the
+        # target's gaps map does not declare is held by dispatchGap on the
+        # 5-minute long redelivery floor indefinitely: the row occupies a
+        # MaxAckPending slot and re-runs the whole clearClosedMarks preamble
+        # every floor, forever. The engine cannot tell that authoring omission
+        # from a column a package projects deliberately with no remediation, so
+        # the deliberate case is made declarable (a `surface` gap, which raises a
+        # standing Health issue and Acks) and this gate asserts the invariant.
+        # Keyed on the lens's Output.BodyColumns — the row Weaver evaluates, not
+        # the cypher proxy — read from the compiled pkgregistry Definitions, and
+        # looped over targets so unbound read-model lenses stay out of scope.
+        # One exemption: a target escalating `unplannable` to the Augur tier.
+        run: STRICT=1 go run ./scripts/lint-gap-column-declaration.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a
