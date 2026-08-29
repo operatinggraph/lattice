@@ -282,7 +282,9 @@ Source package: `internal/loom/`
 **`<instance>`** follows the convention `loom-<NanoID>` (`cmd/loom/main.go`; overridable via `LOOM_INSTANCE`).
 
 The heartbeat `metrics` carry: `consumers` (map of consumer name → state) and `runningInstances` (count of
-loom-state `instance.<id>` records with status `running`, scanned on the heartbeat cadence). `issues[]` carry
+loom-state `instance.<id>.pattern` pin keys — the pin is written with the instance and deleted only in its
+terminal batch, so the pin-key count IS the running-instance count, with no per-instance body read — under a
+per-heartbeat-tick deadline). `issues[]` carry
 a `ConsumerPaused` warning for each `pausedStructural` consumer.
 
 ### Bridge

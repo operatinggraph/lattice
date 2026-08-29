@@ -272,7 +272,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 |--------|--------|-------|
 | Step operations | Processor via `core-operations` | Submitted via the **command outbox**: written as `outbox.<token>` in the transition batch, fire-and-forget published by the relay (no dual write, no request-reply) |
 | `loom.patternStarted` / `Completed` / `Failed` | **lifecycle** ops (`StartLoomPattern`/`CompletePattern`/`FailPattern`) → outbox → `core-events` | Lifecycle on the first-class `loom` domain; no Core-KV business vertex (events ride the standard `vtx.op.<requestId>.events` outbox aspect); drives nesting + Weaver re-projection |
-| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
+| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor (permanent — a terminal flips `status` in place; its presence is the re-trigger dedup guard, see below) + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
 | Tasks | **Core KV** (via Processor) | Business state — queryable, UI-rendered, audited, read by Weaver target Lens |
 
 ---
@@ -291,6 +291,17 @@ prior `token.<oldToken>`, **writes the `outbox.<token>` op record, and arms `dea
 Because the op-to-submit lives in the same batch (the **command outbox**), submission is no longer a dual
 write: the relay publishes it fire-and-forget and deletes the record on publish-ack (re-publish idempotent
 via the chosen `requestId` + the Contract #4 tracker). Write-ahead therefore holds by construction.
+
+**The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
+recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
+not an oversight: the record's presence is the dedup guard that collapses a re-emitted trigger for the same
+`instanceId` onto the instance that already ran. Two independent producers rely on it. `loom-trigger` is
+`DeliverAll`, so a rebuilt consumer replays every `patternStarted` the events stream still holds; and Weaver's
+`triggerLoom` re-dispatch **re-publishes** a new `patternStarted` carrying a stable `claimId`-seeded
+`instanceId` for as long as its gap column stays open (`docs/contracts/10-orchestration-substrate.md`, the
+`triggerLoom` clause). The second horizon is unbounded, which is why `loom-state` cannot simply age its
+cursors out: bounding the bucket needs durable dedup evidence that outlives the record, which does not exist
+yet. See `_bmad-output/implementation-artifacts/loom-terminal-instance-retention-design.md` §0.
 
 Correlation on a completion is a **direct `token.<token>` GET** — durable, domain-independent, and
 **multi-instance-safe**: any engine replica resolves any token via the bucket (no in-memory index, no
@@ -368,8 +379,10 @@ domain.
 ### Health surface (Contract #5)
 
 - **Heartbeat** — Loom writes a Contract #5 §5.2 document to `health.loom.<instance>` (bucket
-  `health-kv`) every 10s. `metrics` carries `runningInstances` (a heartbeat-cadence scan of
-  `instance.<id>` entries with `status=running`, never per-message) and `consumers` (a map of consumer
+  `health-kv`) every 10s. `metrics` carries `runningInstances` (a count of `instance.<id>.pattern` pin
+  keys — the pin is written with the instance and deleted only at terminal, so the pin-key count IS the
+  running-instance count with no per-instance body read, bounded by a per-tick deadline derived from the
+  heartbeat interval) and `consumers` (a map of consumer
   name → state: `running` | `pausedInfra` | `pausedStructural` | `pausedManual`). The consumer states
   come from a Loom-side cache fed by the per-consumer `HealthSink` writes — the supervisor persists
   through the sink but exposes no read-back, so Loom caches each transition. `issues` is empty unless a
@@ -446,3 +459,39 @@ the declarative grammar can't express.
   operator-facing control API (`lattice.ctrl.loom.*`: list / consumers / inspect / pause / resume /
   redrive) ships today; a Refractor lens over the `loom.*` event stream for a queryable historical
   read model is future work.
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A `CreateOnly` write against a key that was ever DELETED can never commit again.** A KV delete leaves a
+  marker on the subject, and `CreateOnly` is `Nats-Expected-Last-Subject-Sequence: 0` ("subject must be
+  empty"), so the whole atomic batch is refused with `err_code=10071`. `redrive` re-created the
+  `instance.<id>.pattern` pin this way and was therefore broken in production for every instance that
+  genuinely reached terminal. Minted: the 2026-08-29 retention fire. Check:
+  `TestRedriveInstance_HappyPath_ResumesAtCursor` + `TestStateStore_Redrive_ConcurrentCASRejectsLoser`, both
+  now seeding through a real terminal batch.
+- **A fixture that hand-seeds `loom-state` cannot reach the states a real transition leaves behind.**
+  `putInstance` produces a pin subject that was *never written*; production leaves one carrying a delete
+  marker. The redrive happy-path test asserted it reproduced "pin already deleted, as production leaves it at
+  terminal" and did not — so it passed for months against a broken path. Seed through
+  `createInstance` + `transition`, and assert the precondition (`errPatternPinMissing`) rather than claiming
+  it in a comment. Minted: the same fire. Check: the precondition assertions in those two tests.
+- **Before removing anything the `instance.<id>` cursor's PRESENCE discharges, enumerate every obligation —
+  there are at least two, and they have different horizons.** A retention design bounded stream
+  *redelivery* (`core-events` `MaxAge`) and shipped past the one that matters: Weaver's `triggerLoom`
+  re-dispatch **re-publishes** a new `patternStarted` with a stable `claimId`-seeded `instanceId` for as long
+  as its gap column stays open — an unbounded horizon, and a frozen guarantee
+  (`docs/contracts/10-orchestration-substrate.md`, the `triggerLoom` clause). Minted: the same fire (design
+  withdrawn at review). Check: none yet — the board row carries the open designer gate.
+- **`loom-state` lifetimes are specified in `10-orchestration-substrate.md`, not `10-orchestration-loom.md`.**
+  Grounding that reads only the latter will miss the keyspace lifetime block, the redrive-guard clause and
+  the `triggerLoom` dedup clause — all three were contradicted by a change whose author had read "the Loom
+  contract". Minted: the same fire. Check: none yet.
+- **`require`/`assert` inside a `require.Eventually`/`Never` predicate fails a passing test from a non-test
+  goroutine.** testify runs the predicate on its own goroutine which can outlive the test body, and
+  `t.Cleanup` has by then cancelled the fixture context — so the read fails with `context canceled` and the
+  verdict is reported as a blank assertion failure. Predicates must return a bool and treat a read error as
+  "cannot conclude". Minted: the same fire. Check: `instanceRecordGone`'s shape in the loom tests.

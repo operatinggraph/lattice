@@ -127,8 +127,27 @@ key:  deadline.<instanceId>           value: { setAt }   with a per-key TTL = th
   re-execute every step the failed run already committed. Because the pin was already deleted in the
   failure's terminal batch, redrive re-pins `instance.<id>.pattern` from the **CURRENT** live pattern
   (not the one the instance originally ran against) in the same `AtomicBatch` that flips `status` back
-  to `running` — the pin's `CreateOnly` write is both the re-pin and the concurrency guard for two
-  racing redrives of the same instance. If the current definition's step count no longer covers the
+  to `running` — the pin is re-written **unconditionally**, and the concurrency guard for two racing
+  redrives of the same instance is a **compare-and-set on `instance.<id>`** (the batch asserts the
+  revision the redrive read, so the loser's batch is rejected whole).
+  <!-- 📐 PROPOSED — UNRATIFIED (Winston, 2026-08-29). Ratify = merge branch
+  claude/great-lamport-zbgpqq; reject = drop this hunk.
+  WHY: the prior text ("the pin's `CreateOnly` write is both the re-pin and the concurrency guard")
+  specifies a write that CAN NEVER COMMIT. The terminal batch DELETES the pin, and a KV delete leaves a
+  delete marker, so the pin's subject is not empty; `CreateOnly` asserts expected-last-subject-sequence
+  0, which that subject can never satisfy again. Every redrive of an instance that genuinely reached
+  terminal was therefore rejected whole (`err_code=10071 wrong last sequence`) — the operator's only
+  recovery path for a failed flow failed closed, in production, for exactly the instances it exists to
+  recover. This document already names the mechanism at the `taskId`/tombstone bullet above
+  ("`CreateOnly` asserts revision 0, which a previously-written key can never satisfy again"); this
+  clause simply missed it. The guard is not dropped — it MOVES to `instance.<id>`, which is never
+  deleted and so can express a revision CAS; the guarantee (only one of two concurrent redrives
+  re-pins and re-submits) is unchanged. Shipped in `internal/loom/state.go` (`redrive`), covered by
+  TestRedriveInstance_HappyPath_ResumesAtCursor (now driving a REAL terminal batch) and
+  TestStateStore_Redrive_ConcurrentCASRejectsLoser.
+  CONSUMERS: `internal/loom` only — `stateStore.redrive` is unexported and the control-plane surface
+  (`lattice.ctrl.loom.<id>.redrive`) is unchanged in shape, arguments and errors. -->
+  If the current definition's step count no longer covers the
   recorded `cursor` (the pattern was edited since the failure), redrive refuses rather than resume
   against a misindexed step.
 - The `pendingToken → instance` correlation is a **durable co-located reverse index** (the `token.`
