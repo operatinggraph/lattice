@@ -65,7 +65,7 @@ const actorFetchTimeout = 10 * time.Second
 // same anchor clinic-domain's write-side confinement keys on
 // (worksAt_covers, packages/clinic-domain/ddls.go) — and isOperator marks the
 // primordial root role, exempted the same way CreateAppointment's own
-// enforce_workplace call-site gate exempts it.
+// confinement check exempts it.
 type subjectHats struct {
 	identityID string
 	workplaces []string

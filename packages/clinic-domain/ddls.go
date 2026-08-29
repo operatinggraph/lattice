@@ -1603,7 +1603,7 @@ def execute(state, op):
         # Standing binder: operator passes unconditionally; otherwise the
         # actor must be identifiedBy-bound to THIS provider (a provider sets
         # only their OWN hours). Two binders, complementary, mirroring the
-        # appointment DDL's actor_holds_operator/enforce_workplace framing.
+        # appointment DDL's actor_holds_operator/require_workplace framing.
         if not actor_holds_operator(op.actor):
             if not actor_bound_to_provider(op.actor, prkey):
                 fail("AuthDenied: " + op.actor + " may not set hours for provider " + prkey)
@@ -1642,7 +1642,7 @@ def execute(state, op):
         # Standing binder: operator passes unconditionally; otherwise the
         # actor must be identifiedBy-bound to THIS provider (a provider sets
         # only their OWN time off). Two binders, complementary, mirroring the
-        # appointment DDL's actor_holds_operator/enforce_workplace framing.
+        # appointment DDL's actor_holds_operator/require_workplace framing.
         if not actor_holds_operator(op.actor):
             if not actor_bound_to_provider(op.actor, prkey):
                 fail("AuthDenied: " + op.actor + " may not set time off for provider " + prkey)
@@ -2030,28 +2030,92 @@ def worksAt_covers(actor_id, location_key):
         frontier = parents
     return False
 
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE a domain resolver
+    # runs. Starlark evaluates arguments eagerly, so
+    # require_workplace(resolve(x), ...) would walk the target's topology even
+    # for root -- wasted reads, and worse, a malformed key anywhere in that walk
+    # raises where the op previously succeeded. Call sites therefore gate on
+    # this; require_workplace re-checks it anyway, so a site that forgets the
+    # gate is still CORRECT, only slower.
+    #
+    # The self-service exemption keys on op.authTargetValidated -- the platform
+    # bit that is true only where step 3 CHECKED authContext.target, which for
+    # this package's ops means the consumer's scope=self grant (step 3 denies
+    # scope=self unless target == actor). Nothing a caller sends can set it.
+    # A caller-visible predicate cannot stand in for it: step 3 authorizes a
+    # scope=ANY grant WITHOUT inspecting authContext.target
+    # (step3_auth_capability.go: the "any" case returns Authorized immediately)
+    # and the Gateway forwards the client's authContext verbatim, so a staff
+    # caller holding scope=any can attach any target it likes -- including its
+    # own actor key, which satisfies an equality test and skips workplace
+    # confinement entirely.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only -- operator and staff role grants. A scope=self
+    # caller is bound instead by its own op's ownership probe (the applicationFor /
+    # identifiedBy indirection): a resident legitimately holds no worksAt link,
+    # and confining them by a rule written for staff would deny every
+    # self-service write. The two guards are complementary, not alternatives --
+    # each binds the path the other cannot see.
+    #
+    # The self-service exemption keys on op.authTargetValidated, mirroring
+    # workplace_exempt -- the cheap pre-gate this function deliberately
+    # re-checks, so a call site that skips it is still correct, only slower.
+    if op.authTargetValidated:
+        return
+    enforce_workplace(location_keys, what)
+
 def enforce_workplace(location_keys, what):
-    # Confined-staff enforcement only. A call site gates on
-    # (op.authTargetValidated or actor_holds_operator(op.actor)) BEFORE
-    # reaching this function -- Starlark evaluates arguments eagerly, so an
-    # unguarded enforce_workplace(resolve(x), ...) would walk the target's
-    # topology even for an operator (wasted reads, and worse, a malformed key
-    # anywhere in that walk raises where the op previously succeeded). The
-    # "or" short-circuits, so a target-validated self-service caller never
-    # reaches actor_holds_operator at all. This function is therefore
-    # reachable ONLY on the confined path (neither validated nor operator)
-    # and does not re-derive that itself: actor_holds_operator's role-walk is
-    # a paginated NATS round trip, and re-running it here on top of the call
-    # site's own check would pay it twice on exactly the path most likely to
-    # blow the Starlark wall -- worksAt_covers's own multi-hop containment
-    # walk already spends most of the 250ms budget on a confined write.
+    # require_workplace minus the validated-target exemption, for a
+    # resource-scoped op that has already checked for itself that the validated
+    # target names the resource being acted on. Past that check the caller is an
+    # ordinary staff member and must clear the worksAt walk like any other.
     #
     # location_keys is a LIST of candidate locations, and covering ANY ONE of
     # them authorizes the write: a target can legitimately sit at several places
     # at once (a provider practises at two buildings), and staff at either one
     # are equally entitled to it. An empty list -- a target whose location
-    # cannot be resolved at all -- is a DENIAL, so an unwired topology fails
-    # closed rather than falling open.
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def enforce_workplace_confined(location_keys, what):
+    # clinic-domain-specific variant of enforce_workplace (deliberately a
+    # DIFFERENT name, not a divergent body under the pinned one -- S10 pins
+    # require_workplace/enforce_workplace/workplace_exempt corpus-wide, and
+    # this function carries package-specific policy those may not: it drops
+    # the actor_holds_operator recheck enforce_workplace itself performs.
+    #
+    # Every call site below computes
+    # op.authTargetValidated or actor_holds_operator(op.actor) inline, once,
+    # BEFORE deciding whether to reach this function at all -- same gate
+    # workplace_exempt() computes, same short-circuit (a target-validated
+    # self-service caller never reaches actor_holds_operator), same
+    # protection against evaluating an expensive location_keys resolver
+    # (sites_for_provider / appointment_sites, real multi-hop kv.Links work
+    # in this package, unlike cafe-domain's b997ff2a precedent) for an
+    # operator or validated caller. This function is therefore reachable
+    # ONLY on the confined path (neither validated nor operator) and does
+    # not re-derive that: actor_holds_operator's role-walk is a paginated
+    # NATS round trip, and the workplace_exempt()+enforce_workplace() pair
+    # pays it TWICE per confined write -- a fully redundant round trip on
+    # exactly the path most likely to blow the Starlark wall (live:
+    # CreateAppointment/SetAppointmentStatus at 198-375ms against the 250ms
+    # budget, clinic-domain 2026-08-29, front-desk verticals triage).
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write, mirroring enforce_workplace exactly minus
+    # the operator recheck; an empty list is a DENIAL, so an unwired
+    # topology fails closed.
     _, actor_id = parts_of(op.actor, "actor", "identity")
     for loc in location_keys:
         if loc != None and worksAt_covers(actor_id, loc):
@@ -2167,7 +2231,7 @@ def appointment_sites(appt_id):
     return []
 
 def actor_bound_to_appointment_provider(actor_key, provider):
-    # The THIRD standing binder (beside operator/workplace, enforce_workplace's
+    # The THIRD standing binder (beside operator/workplace, require_workplace's
     # own doc frames those two as complementary): a provider-role actor may
     # accept/reschedule/set-status on the SPECIFIC appointment its own
     # identifiedBy binding covers, independent of any worksAt/workplace link.
@@ -2179,7 +2243,7 @@ def actor_bound_to_appointment_provider(actor_key, provider):
     _, provider_id = parts_of(provider, "provider", "provider")
     # read-posture: (d) declared in contextHint.optionalReads by the standing
     # caller's dispatcher (probing whether ITS OWN actor is this appointment's
-    # bound provider; absent -> falls through to enforce_workplace, never a
+    # bound provider; absent -> falls through to require_workplace, never a
     # hard failure)
     lnk = kv.Read("lnk.provider." + provider_id + ".identifiedBy.identity." + actor_id)
     return lnk != None and not lnk.isDeleted
@@ -2547,7 +2611,7 @@ def execute(state, op):
         # workplace-exempt: (ownership-bound) the identifiedBy probe below
         # requires the target to be this patient's own linked identity.
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
-            enforce_workplace(sites_for_provider(provider), "cannot book an appointment with provider " + provider)
+            enforce_workplace_confined(sites_for_provider(provider), "cannot book an appointment with provider " + provider)
 
         # Patient-self (consumer's scope=self grant only): step 3 authorizes
         # scope=self by checking authContext.target == actor (Contract #6), but
@@ -2745,7 +2809,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace(appointment_sites(appt_id), "cannot reschedule appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id), "cannot reschedule appointment " + appt_key)
 
         # The appointment's provider / patient — required so the move is conflict-
         # checked against each book exactly as CreateAppointment is, and so the OLD
@@ -2890,7 +2954,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace(appointment_sites(appt_id), "cannot set status on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id), "cannot set status on appointment " + appt_key)
 
         status = required_status(p)
 
@@ -3131,7 +3195,7 @@ def execute(state, op):
         # RescheduleAppointment's block above being the scope=self exception.
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             if not actor_bound_to_appointment_provider(op.actor, provider):
-                enforce_workplace(appointment_sites(appt_id), "cannot set site on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id), "cannot set site on appointment " + appt_key)
 
         # Already has a live atSite link — reassignment is out of scope (the
         # gap this closes is "27 appointments carry NO site", never "the site
@@ -3192,7 +3256,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace(appointment_sites(appt_id), "cannot record encounter on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id), "cannot record encounter on appointment " + appt_key)
 
         # The post-visit record splits across two aspects along the sensitivity
         # boundary: .encounter carries the raw clinical content (SENSITIVE, DEK
