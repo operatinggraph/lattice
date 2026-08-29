@@ -219,7 +219,12 @@ var appOpCeilings = map[string]int{
 	// list item 2) — its intervalDays/startAt/activeUntil now render from the
 	// op catalog; providerKey fills from dispatch.contextParams instead of a
 	// schema-rendered entity-ref, since this app has no entity-ref picker yet.
-	"cmd/clinic-app": 15,
+	// 16: SetVisitSeriesSite gained an FE trigger, reusing the existing
+	// hand-built "Set site" modal (openSetSiteFor/submitSetSite) that already
+	// hardcodes SetAppointmentSite — the same site-picker ceremony serving a
+	// second op, not a new descriptor-catalog gap. verticals.md "A staffer
+	// can't tell or set which clinic site a recurring visit series is seen at".
+	"cmd/clinic-app": 16,
 	// 18: AttachObject/DetachObject moved off this app's own hardcoded
 	// literals onto internal/descriptorform/attachments.mjs (design §22) —
 	// the shared ceremony module lives outside this gate's cmd/*-app scan
