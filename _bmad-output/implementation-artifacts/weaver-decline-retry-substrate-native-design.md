@@ -1309,3 +1309,60 @@ error, and it is the same error the BodyColumns keying above avoids. No row file
 **7. Non-goals.** No change to the row-8 decision itself (the Long stays, and is now sound); no
 reverse check (a declared gap whose lens projects no such column); no change to `violating`, to the
 protected read models, or to any other package's declarations.
+
+### Row-8 closure — what shipped (2026-08-29)
+
+Two increments, one merge. `e00a326` declares `lease-signing`'s `missing_decision` and
+`missing_manager` `Action: "surface"`; `248abfa`+`3c2e21c` add `scripts/lint-gap-column-declaration.go`
+(CI's `lint-build` job, `make lint-gap-column-declaration`, `docs/components/lint-gates.md`);
+`db45b84` reworks the package-local pin. Row 8's Long is now sound: an undeclared `missing_*` column
+means an authoring omission, because the deliberate case has a declaration and a gate that requires it.
+
+**§3.2 row 8's closing paragraph is answered as written, with one premise corrected.** That paragraph
+offers "flipping row 8 to Ack instead" as the smaller alternative; it is NOT taken — the Long stays.
+The paragraph's own preferred fix (declare `surface`, gate the invariant) is what shipped.
+
+**The adjudication in the fire brief above stands, and gained a cost the brief did not know.** The
+brief accepted that a `surface`-declared `missing_decision` leaves Weaver `degraded` while any
+application awaits its landlord decision. The cold review priced the rest: `rowIssueCapPerTarget`
+(`internal/weaver/health.go:62`) is **500 per TARGET, shared across the `gap:`/`data:`/`template:`/
+`sweep:` families** (`rowIssueTarget`, `evaluator.go:2075-2093`), admission-ordered, and released only
+when the target's per-row set reaches **zero** (`releaseRowIssueLocked`, `health.go:282-291`). So at
+500 concurrently-open surface issues on `leaseApplicationComplete`, a later `RowDataError` — whose exit
+Acks, and which `health.go:176-181` states is "not re-derivable until those rows project again" — is
+refused and permanently lost, and Contract #10 §10.8's "budget exhaustion raises a standing issue,
+never a silent park" is silently void for the one target that carries an exhaustion policy.
+
+**Shipped anyway, and the trade is stated rather than discovered later.** The defect being removed is
+worse in the same units: every qualified-undecided application held a lane-1 `MaxAckPending` slot
+against a ceiling of 1024 (`engine.go:485`), and an exhausted lane stops delivering **every** row for
+the target. Both costs are scale-dependent; the pending-slot one bites first and is total. The clean
+resolution — a per-row issue budget that admits by re-derivability rather than by arrival — is a
+policy decision with no ratified pattern to extend, and is filed as a designer row on
+`backlog/lattice.md`. Renaming `missing_decision` out of the gap namespace was weighed and is NOT
+available: `cmd/loftspace-app/applications_test.go:100` shows the applications view reads that column
+off the weaver row.
+
+**Two properties of the Ack class now apply to these two columns, and neither is new.** The surface
+issue is in-memory and does not survive a Weaver restart — the lane-1 durable is nonce-free
+(`engine.go:477-490`), so the acked rows are not redelivered and no sweep leg re-raises for a gap that
+mints no mark. This is the residual §3.2 already names for the data-error class ("lost at a Weaver
+restart and not re-derived for a quiet row until re-projection or `ReplayTarget`"), and `ReplayTarget`
+is its ratified remedy. The surface arm also writes no log line at any level, so after a restart there
+is no record in either channel until a replay; that is a property of the shipped `surface` arm for
+every package that uses it, not something this change introduced, and it is left alone. On a live
+upgrade, a pre-existing `GapWithoutPlaybook` at the target-scoped key retires only on a delivery of a
+row whose column reads false, so a quiet stack can hold a stale one until traffic or a replay clears
+it — self-healing, noted so the next reader is not surprised.
+
+**Review classification (the close pass).** Two cold reviewers, one per axis. Weaver axis: 2 MAJOR
+(both design-gap — the health-budget interaction and the restart-scoped signal), 3 MINOR (one
+implementation, two informational); no BLOCKING. Lint-gate axis: 1 BLOCKING + 3 MAJOR + 3 MINOR, all
+implementation-bug or brief-gap, all closed in `3c2e21c`. The BLOCKING one is the component-shaped
+lesson and is appended to `docs/components/lint-gates.md`'s dossier: the gate keyed on
+`Output.BodyColumns` while `internal/pkgmgr/orchestrationguard.go:434-441` — the sibling check 200
+lines from the type being gated — had already written down that the row body is the union with
+`StaticEmptyColumns`. The brief cited `driver.go:70-72` and stopped one leg short at `:125-130`; a
+partial read of the very function that defines the hazard is what a "keyed on the hazard, not a proxy"
+claim has to survive. Second lesson, same commit: `LensRef` was a proxy for the positional
+`<targetId>.` prefix binding, which `definition.go:336-338` states outright.
