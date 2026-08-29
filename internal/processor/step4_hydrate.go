@@ -446,6 +446,10 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			SensitiveReads:    tracker,
 			LiveReads:         &liveReadBudgetTracker{budget: DefaultLiveReadBudget},
 			DDLResolutionMemo: memo,
+			// Fresh per hydrate, so a commit-path retry (which re-enters
+			// Hydrate) records the attempt that ran rather than a union across
+			// attempts.
+			ReadRecorder: &scriptReadRecorder{},
 		},
 	}, nil
 }

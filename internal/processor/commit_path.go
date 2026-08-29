@@ -56,6 +56,14 @@ type Deps struct {
 	// lane-misassignment signal) to Health KV. Nil → no-op (defaulted in
 	// NewCommitPath).
 	ConflictEmitter CommitConflictEmitter
+	// ScriptReadObserver receives the ScriptReadRecord of every step-5
+	// execution — what the script actually read through the `kv` builtins,
+	// against the envelope whose contextHint declared what it would read. Nil
+	// in production: `contextHint` is submitter-supplied, so the record can
+	// only ever be a test-time drift detector over our own script corpus, never
+	// a gate (see scriptReadRecorder). Nil safe: a nil observer skips emission,
+	// and no observer may change the operation's outcome.
+	ScriptReadObserver ScriptReadObserver
 	// MaxCommitAttempts bounds the Processor-internal retry on a retryable
 	// revision conflict (re-hydrate → re-execute → re-commit). 0 → default (3).
 	MaxCommitAttempts int
@@ -348,6 +356,13 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		var result ScriptResult
 		if cp.deps.Executor != nil {
 			result, err = cp.deps.Executor.Execute(ctx, env, state)
+			// Surfaced ahead of the error branch: a script that aborted still
+			// performed the reads it performed, and a drift check that only saw
+			// successful executions would be blind to exactly the scripts whose
+			// declaration is most likely wrong.
+			if cp.deps.ScriptReadObserver != nil && state.Context.ReadRecorder != nil {
+				cp.deps.ScriptReadObserver.ObserveScriptReads(ctx, env, state.Context.ReadRecorder.record())
+			}
 			if err != nil {
 				return cp.handleStubFailure(ctx, msg, env, "execute", err)
 			}

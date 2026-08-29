@@ -89,6 +89,15 @@ type ScriptContext struct {
 	// Populated by step 4 (Hydrate); the runner defaults it if left nil
 	// (starlark_runner.go), the same trust posture as DeferredMiss.
 	LiveReads *liveReadBudgetTracker
+	// ReadRecorder accumulates what this execution's `kv` builtins actually
+	// read — the keys served from the step-4 snapshot, the keys served through
+	// kv.Read's lazy live fallthrough, and the kv.Links walks plus the endpoint
+	// vertices they yielded — so the execution can be compared against the
+	// operation's contextHint declaration. Populated by step 4 (Hydrate) and
+	// surfaced to Deps.ScriptReadObserver after step 5. Observation only, never
+	// a runtime control (see scriptReadRecorder); nil-safe, so a context built
+	// without one simply records nothing.
+	ReadRecorder *scriptReadRecorder
 	// DDLResolutionMemo caches, per execution, the LIVE-READ layer's answer
 	// to "what are vtxRoot's live instanceOf edges" (step6_resolve_ddl.go's
 	// governing-DDL walk, Contract #1 §1.5) — never the batch/working-set

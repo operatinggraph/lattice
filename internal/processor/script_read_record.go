@@ -1,0 +1,170 @@
+package processor
+
+import (
+	"cmp"
+	"context"
+	"slices"
+)
+
+// scriptReadRecorder records what one Starlark execution ACTUALLY read through
+// the `kv` builtins, so the record can be compared against what the operation's
+// `contextHint` DECLARED (Contract #2 §2.5 / §2.5.1).
+//
+// It separates the two dispositions structurally rather than by diffing sets:
+//   - declaredReads — keys kv.Read served out of the step-4 snapshot
+//     (`contextHint.reads` / `egressReads` present or absent, `optionalReads`
+//     present or absent). Reaching one of those branches IS the proof the key
+//     was declared;
+//   - liveReads — keys kv.Read served through the lazy on-demand fallthrough.
+//     That branch is reached only when the key is in none of Hydrated /
+//     RequiredAbsent / KnownAbsent, so every key recorded there is undeclared by
+//     construction;
+//   - enumerations / enumeratedVertices — the kv.Links walks the script actually
+//     performed and the endpoint vertex keys those walks yielded, the §2.5.1
+//     set-valued counterpart to a named key read.
+//
+// OBSERVATION ONLY — never a runtime control. `contextHint` is submitter-supplied
+// and step 3 authorizes without inspecting it, so a Processor that rejected an
+// undeclared read would only be enforcing a constraint the submitter writes for
+// itself: any caller drifting from its declaration can widen the declaration.
+// The record is therefore a TEST-TIME drift detector over our own corpus (the
+// `packages/` scripts and the ops that dispatch them), where both halves are
+// ours to keep honest — it must never gate an execution, decide a reply, or
+// change a commit outcome.
+//
+// Lifetime: one recorder per step-4 hydrate (step4_hydrate.go), which makes it
+// one recorder per commit ATTEMPT — the commit path's retry loop re-enters
+// Hydrate, so a re-executed operation records the attempt that ran, not a union
+// across attempts. It dies with the execution and is never persisted.
+//
+// Nil-safe throughout: a ScriptContext built without one (every harness that
+// does not care) records nothing and yields a zero record.
+type scriptReadRecorder struct {
+	declaredReads      map[string]struct{}
+	liveReads          map[string]struct{}
+	enumerations       map[ScriptEnumeration]struct{}
+	enumeratedVertices map[string]struct{}
+}
+
+// recordDeclaredRead records that the script read key and the step-4 snapshot
+// answered it — present, known-absent, or required-absent.
+func (r *scriptReadRecorder) recordDeclaredRead(key string) {
+	if r == nil {
+		return
+	}
+	if r.declaredReads == nil {
+		r.declaredReads = make(map[string]struct{})
+	}
+	r.declaredReads[key] = struct{}{}
+}
+
+// recordLiveRead records that the script read key through the lazy on-demand
+// Core KV fallthrough, which by construction the operation did not declare.
+func (r *scriptReadRecorder) recordLiveRead(key string) {
+	if r == nil {
+		return
+	}
+	if r.liveReads == nil {
+		r.liveReads = make(map[string]struct{})
+	}
+	r.liveReads[key] = struct{}{}
+}
+
+// recordEnumeration records one kv.Links walk the script completed, in the same
+// (hub, relation, direction) terms a contextHint enumeration declares it.
+func (r *scriptReadRecorder) recordEnumeration(hub, relation, direction string) {
+	if r == nil {
+		return
+	}
+	if r.enumerations == nil {
+		r.enumerations = make(map[ScriptEnumeration]struct{})
+	}
+	r.enumerations[ScriptEnumeration{Hub: hub, Relation: relation, Direction: direction}] = struct{}{}
+}
+
+// recordEnumeratedVertex records a vertex key an enumeration surfaced as a link
+// endpoint — the keys a walk exposed to the script without any of them being
+// named in a declaration.
+func (r *scriptReadRecorder) recordEnumeratedVertex(key string) {
+	if r == nil {
+		return
+	}
+	if r.enumeratedVertices == nil {
+		r.enumeratedVertices = make(map[string]struct{})
+	}
+	r.enumeratedVertices[key] = struct{}{}
+}
+
+// record returns the execution's accumulated reads in stable sorted order, so
+// two runs of the same script produce byte-identical records for an assertion
+// or a log line. A nil recorder yields the zero record.
+func (r *scriptReadRecorder) record() ScriptReadRecord {
+	if r == nil {
+		return ScriptReadRecord{}
+	}
+	enums := make([]ScriptEnumeration, 0, len(r.enumerations))
+	for e := range r.enumerations {
+		enums = append(enums, e)
+	}
+	slices.SortFunc(enums, func(a, b ScriptEnumeration) int {
+		if c := cmp.Compare(a.Hub, b.Hub); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Relation, b.Relation); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Direction, b.Direction)
+	})
+	return ScriptReadRecord{
+		DeclaredReads:      sortedKeySet(r.declaredReads),
+		LiveReads:          sortedKeySet(r.liveReads),
+		Enumerations:       enums,
+		EnumeratedVertices: sortedKeySet(r.enumeratedVertices),
+	}
+}
+
+// sortedKeySet flattens a key set into a sorted slice, nil for an empty set.
+func sortedKeySet(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ScriptEnumeration is one kv.Links walk a script performed, in the terms
+// opwire.EnumerationHint declares one: the hub vertex key, the link relation,
+// and the direction the hub sits in the link ("out" = hub is source, "in" = hub
+// is target). Field names mirror the hint so a drift check reads as a
+// set comparison rather than a translation.
+type ScriptEnumeration struct {
+	Hub       string
+	Relation  string
+	Direction string
+}
+
+// ScriptReadRecord is the sorted snapshot of one execution's `kv` builtin reads
+// (see scriptReadRecorder for what each field means and why the record is
+// observation only). Slices are sorted and nil when empty.
+type ScriptReadRecord struct {
+	DeclaredReads      []string
+	LiveReads          []string
+	Enumerations       []ScriptEnumeration
+	EnumeratedVertices []string
+}
+
+// ScriptReadObserver receives the ScriptReadRecord of every step-5 execution,
+// together with the envelope whose contextHint the record can be compared
+// against. Invoked once per execution, on the failure path as well as the
+// success path — a script that aborted still performed the reads it performed.
+//
+// Nil in production (commit_path.go): the record exists so a test harness can
+// detect a script drifting from its declaration, and an observer must never
+// influence the operation's outcome.
+type ScriptReadObserver interface {
+	ObserveScriptReads(ctx context.Context, env *OperationEnvelope, record ScriptReadRecord)
+}

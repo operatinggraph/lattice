@@ -85,6 +85,7 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 			// 6's external-egress guard keys on consumption, not on hydration
 			// (design sensitive-read-tracker-consumption §2).
 			sc.SensitiveReads.consume(key)
+			sc.ReadRecorder.recordDeclaredRead(key)
 			return vertexDocToStarlark(doc), nil
 		}
 		// Required-absent (§2.5 class (a)/(f)): the key was declared
@@ -99,6 +100,7 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		// serve None, softening a read the operation declared it depends on.
 		if _, required := sc.RequiredAbsent[key]; required {
 			sc.DeferredMiss.fault(key)
+			sc.ReadRecorder.recordDeclaredRead(key)
 			return nil, errBuiltin("kv.Read: declared read is absent: " + key)
 		}
 		// Known-absent (§2.5 optionalReads): the key was declared
@@ -109,6 +111,7 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		// reflect the same step-4 observation (a racing create surfaces as
 		// RevisionConflict → re-hydrate → now present → re-branch).
 		if _, absent := sc.KnownAbsent[key]; absent {
+			sc.ReadRecorder.recordDeclaredRead(key)
 			return starlarklib.None, nil
 		}
 
@@ -125,6 +128,11 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		}
 		if doc == nil {
 			// Absent or hard-tombstoned — the script branches on None.
+			//
+			// Recorded as a LIVE read: this path is reached only for a key in
+			// none of Hydrated / RequiredAbsent / KnownAbsent, so a key here is
+			// undeclared by construction — no set difference needed to know it.
+			sc.ReadRecorder.recordLiveRead(key)
 			return starlarklib.None, nil
 		}
 		// ReadVertex decrypted a sensitive doc under the same disposition rules as
@@ -133,6 +141,7 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		// (step6_resolve_ddl.go) and its Processor-internal reads must not flip the
 		// guard (design §2.3).
 		sc.SensitiveReads.consume(key)
+		sc.ReadRecorder.recordLiveRead(key)
 		return vertexDocToStarlark(*doc), nil
 	})
 
@@ -229,7 +238,12 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		page := starlarklib.NewList(nil)
 		for _, l := range links {
 			_ = page.Append(linkDocToStarlark(l))
+			sc.ReadRecorder.recordEnumeratedVertex(l.SourceVertex)
+			sc.ReadRecorder.recordEnumeratedVertex(l.TargetVertex)
 		}
+		// Recorded here, at the page the script receives, so a walk that failed
+		// upstream is never recorded as one the script performed.
+		sc.ReadRecorder.recordEnumeration(hubKey, relation, direction)
 		var nextCursorValue starlarklib.Value = starlarklib.None
 		if nextCursor != "" {
 			nextCursorValue = starlarklib.String(nextCursor)
