@@ -97,6 +97,14 @@ type UpgradeResult struct {
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
 	LeafBudgetWarnings []string
+
+	// InstallRequestID and OpTrackerKey are the Processor reply's own durable
+	// receipt (Contract #4) for the commit that produced this upgrade — the
+	// only record a caller can later use to prove THIS upgrade, and not some
+	// other write at the same name/version, is the one it holds a reference
+	// to. Empty on the Skipped arm, which committed nothing.
+	InstallRequestID string
+	OpTrackerKey     string
 }
 
 // Upgrade applies an in-place version upgrade of an already-installed package
@@ -191,9 +199,12 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 	}
 
 	// Step 5 — submit one UpgradePackage op.
-	if err := i.submitUpgradeOp(ctx, def, existing.Version, mutations); err != nil {
+	reply, err := i.submitUpgradeOp(ctx, def, existing.Version, mutations)
+	if err != nil {
 		return nil, err
 	}
+	res.InstallRequestID = reply.RequestID
+	res.OpTrackerKey = reply.OpTrackerKey
 	return res, nil
 }
 
@@ -244,11 +255,14 @@ func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installed
 	return mutations, sum, leafBudgetWarnings, err
 }
 
-// submitUpgradeOp submits one UpgradePackage op carrying the upgrade delta.
+// submitUpgradeOp submits one UpgradePackage op carrying the upgrade delta and
+// returns the Processor's reply — including its durable Contract #4 receipt
+// (RequestID, OpTrackerKey) — so a caller can bind its result to the commit
+// that actually produced it.
 // Deterministic requestId from name+from+to+content so a re-submit of the same
 // delta dedup-short-circuits while distinct (from,to) pairs — and distinct
 // same-version edits — stay independent (Contract #8 §8.2 pattern).
-func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVersion string, mutations []installMutation) error {
+func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVersion string, mutations []installMutation) (*processor.OperationReply, error) {
 	payload := map[string]any{
 		"name":        def.Name,
 		"fromVersion": fromVersion,
@@ -257,21 +271,21 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 	}
 	requestID, err := contentRequestID(def.Name, fromVersion+"->"+def.Version, "upgrade-op", mutations)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	reply, err := i.submitOp(ctx, "UpgradePackage", "UpgradePackage", requestID, payload)
 	if err != nil {
-		return fmt.Errorf("pkgmgr: submit UpgradePackage: %w", err)
+		return nil, fmt.Errorf("pkgmgr: submit UpgradePackage: %w", err)
 	}
 	switch reply.Status {
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
-		return nil
+		return reply, nil
 	default:
 		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
-			return fmt.Errorf("%w: %s (a concurrent write raced this upgrade — re-run)",
+			return nil, fmt.Errorf("%w: %s (a concurrent write raced this upgrade — re-run)",
 				ErrUpgradeConflict, replyError(reply))
 		}
-		return fmt.Errorf("pkgmgr: UpgradePackage rejected: %s", replyError(reply))
+		return nil, fmt.Errorf("pkgmgr: UpgradePackage rejected: %s", replyError(reply))
 	}
 }
 
