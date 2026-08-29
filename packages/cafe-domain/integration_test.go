@@ -182,7 +182,21 @@ func keyExists(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 	return true
 }
 
+// seedLease seeds a leaseapp already carrying an approved lease-signing
+// .decision aspect — OpenTab now rejects LeaseNotApproved otherwise, and
+// every fixture here stands in for an ordinary resident already cleared to
+// open a tab. seedUnapprovedLease is the one negative fixture that omits it.
 func seedLease(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
+	t.Helper()
+	key := "vtx.leaseapp." + id
+	seedVertex(t, ctx, conn, key, "leaseapp", map[string]any{})
+	seedAspect(t, ctx, conn, key, "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-07-01T12:00:00Z"})
+	return key
+}
+
+// seedUnapprovedLease seeds a leaseapp with NO lease-signing .decision aspect
+// — the ordinary not-yet-decided state OpenTab must reject.
+func seedUnapprovedLease(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
 	t.Helper()
 	key := "vtx.leaseapp." + id
 	seedVertex(t, ctx, conn, key, "leaseapp", map[string]any{})
@@ -267,13 +281,15 @@ func tombstoneLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key,
 	}
 }
 
-// seedLeaseWithApplicant seeds a leaseapp vertex + its applicationFor link
-// to applicantID — the residency check OpenTab/Settle's self-scope guard
-// reads (mirrors wellness-domain's seedLease(..., applicantID, ...)).
+// seedLeaseWithApplicant seeds a leaseapp vertex (already lease-signing
+// .decision-approved, see seedLease) + its applicationFor link to
+// applicantID — the residency check OpenTab/Settle's self-scope guard reads
+// (mirrors wellness-domain's seedLease(..., applicantID, ...)).
 func seedLeaseWithApplicant(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseID, applicantID string) string {
 	t.Helper()
 	key := "vtx.leaseapp." + leaseID
 	seedVertex(t, ctx, conn, key, "leaseapp", map[string]any{})
+	seedAspect(t, ctx, conn, key, "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-07-01T12:00:00Z"})
 	lnk := "lnk.leaseapp." + leaseID + ".applicationFor.identity." + applicantID
 	seedLink(t, ctx, conn, lnk, key, "vtx.identity."+applicantID, "applicationFor", "applicationFor")
 	return key
@@ -309,7 +325,7 @@ func openTabExpect(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseAppKey},
-			OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
+			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
 			},
@@ -378,6 +394,36 @@ func TestOpenTab_UnknownLease(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"leaseAppKey":"vtx.leaseapp.BBABSENTLEASEHJKMNPQ"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.leaseapp.BBABSENTLEASEHJKMNPQ"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestOpenTab_RejectsUnapprovedLease proves a lease with no landlord
+// decision yet — the ordinary state before DecideLeaseApplication runs —
+// cannot open a house tab: live, an unapproved lease posted a real charge
+// before this guard existed (verticals.md).
+func TestOpenTab_RejectsUnapprovedLease(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "unapprovedlease")
+
+	leaseKey := seedUnapprovedLease(t, ctx, conn, "BBCAFEDMNUNAPPRVDLHJ")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdopenunapproved0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "OpenTab",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{leaseKey},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -860,7 +906,7 @@ func TestVoidCharge_RejectsForConsumer(t *testing.T) {
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision"},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -1409,7 +1455,7 @@ func TestOpenTab_ConsumerSelfScope_Allowed(t *testing.T) {
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision"},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}

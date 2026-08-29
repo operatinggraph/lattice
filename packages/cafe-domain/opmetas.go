@@ -65,6 +65,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // probes. The link key is built with the `:id` template modifier, since a
 // Contract #1 link is 6 segments of bare ids rather than a vtx key.
 //
+// OpenTab also declares the lease's own lease-signing `.decision` aspect
+// (OptionalReads, not Reads — a lease with no landlord decision yet is the
+// ordinary not-yet-approved case, mirroring lease-signing's own SignLease
+// probe of the same key, scripts.go). Absent or not "approved" rejects
+// LeaseNotApproved: a house tab, and the charges it accrues, must never open
+// against a lease the landlord hasn't signed off on (a self-order against an
+// unapproved lease posted a live $4.50 charge before this guard existed).
+//
 // VoidCharge declares no ownership probe: it has no self grant at all (a POS
 // correction is a staff decision even when reversing a resident's own mis-tap),
 // so its only confinement is require_workplace, whose site walk is a class-(e)
@@ -94,6 +102,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"{payload.leaseAppKey}.cafeOpenTab",
 					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
+					"{payload.leaseAppKey}.decision",
 				},
 				// The operator-role confinement probe: require_workplace's
 				// workplace-exempt short-circuit walks the actor's own

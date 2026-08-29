@@ -565,25 +565,37 @@ async function loadLeases() {
   return leasesCache;
 }
 
-// loadLeasePickerContext resolves each lease to its resident's name
-// (/api/residents) and unit address (/api/frontdesk-lease-details) for the
-// staff-facing lease pickers (POS + front desk's resident-view picker) — the
-// same best-effort, degrade-to-lease-key join frontDeskCard already does.
+// loadLeasePickerContext resolves each lease to its resident's name +
+// landlord-approval status (/api/residents) and unit address
+// (/api/frontdesk-lease-details) for the staff-facing lease pickers (POS +
+// front desk's resident-view picker) — the same best-effort,
+// degrade-to-lease-key join frontDeskCard already does.
 async function loadLeasePickerContext() {
   let residentsByLease = {};
+  let approvedByLease = {};
   try {
     const rs = await appGet("/api/residents");
-    (rs.residents || []).forEach((r) => { residentsByLease[r.leaseAppKey] = r.bookerKey; });
+    (rs.residents || []).forEach((r) => {
+      residentsByLease[r.leaseAppKey] = r.bookerKey;
+      approvedByLease[r.leaseAppKey] = r.approved;
+    });
   } catch (_) { /* residents roster unreachable — picker falls back to the lease key */ }
   let leaseDetailsByLease = {};
   try {
     const ld = await appGet("/api/frontdesk-lease-details");
     (ld.leaseDetails || []).forEach((d) => { leaseDetailsByLease[d.leaseAppKey] = d; });
   } catch (_) { /* front-desk not installed / unreachable — unit address just doesn't show */ }
-  return { residentsByLease, leaseDetailsByLease };
+  return { residentsByLease, approvedByLease, leaseDetailsByLease };
 }
 
-function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease) {
+// fillLeaseSelect renders every pickable lease, disabling one the landlord
+// hasn't approved yet (approvedByLease[leaseAppKey] === false) — OpenTab
+// itself now rejects LeaseNotApproved, but a disabled, badged option tells
+// staff why before they even try, instead of a raw error toast. A lease
+// this app can't resolve approval for (roster unreachable, or a lease absent
+// from /api/residents entirely) stays selectable — this picker only blocks
+// on POSITIVE evidence of non-approval, never on its absence.
+function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease) {
   const prev = select.value;
   select.innerHTML = "";
   if (!leases.length) {
@@ -600,7 +612,13 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease) 
     const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(l.leaseAppKey);
     const detail = leaseDetailsByLease && leaseDetailsByLease[l.leaseAppKey];
     const unit = detail && detail.unitAddress ? " — " + detail.unitAddress : "";
-    opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
+    const approved = approvedByLease && approvedByLease[l.leaseAppKey];
+    if (approved === false) {
+      opt.disabled = true;
+      opt.textContent = who + unit + " (awaiting landlord approval)";
+    } else {
+      opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
+    }
     select.appendChild(opt);
   }
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
@@ -611,7 +629,7 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease) 
 async function loadPos() {
   const select = document.getElementById("pos-lease");
   const [leases, ctx] = await Promise.all([loadLeases(), loadLeasePickerContext()]);
-  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease);
+  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease);
   await renderPos();
 }
 
@@ -649,7 +667,7 @@ async function renderPos() {
             operationType: "OpenTab",
             class: "tab",
             reads: [leaseAppKey],
-            optionalReads: [leaseAppKey + ".cafeOpenTab"],
+            optionalReads: [leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision"],
             payload: { leaseAppKey },
           },
           "open the tab"
@@ -1103,7 +1121,7 @@ async function loadResident() {
     label.hidden = false;
     select.hidden = false;
     const ctx = await loadLeasePickerContext();
-    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease);
+    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease);
   } else {
     label.hidden = true;
     select.hidden = true;
@@ -1345,7 +1363,7 @@ async function renderResident() {
               operationType: "OpenTab",
               class: "tab",
               reads: [leaseAppKey],
-              optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey)],
+              optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey), leaseAppKey + ".decision"],
               payload: { leaseAppKey },
             },
             "open the tab",

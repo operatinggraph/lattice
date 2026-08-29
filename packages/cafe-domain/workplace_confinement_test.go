@@ -93,6 +93,9 @@ func seedWorkplaceTopology(t *testing.T, ctx context.Context, conn *substrate.Co
 
 		leaseKey := "vtx.leaseapp." + leaseID
 		seedVertex(t, ctx, conn, leaseKey, "leaseapp", map[string]any{})
+		// Approved (see seedLease's own comment) — these vectors probe
+		// workplace confinement, not lease approval.
+		seedAspect(t, ctx, conn, leaseKey, "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-07-01T12:00:00Z"})
 		testutil.SeedLink(t, ctx, conn,
 			"lnk.leaseapp."+leaseID+".appliesToUnit.unit."+unitID,
 			"appliesToUnit", leaseKey, unitKey)
@@ -137,7 +140,7 @@ func submitOpenTabAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab"},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
 			},

@@ -43,7 +43,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
-			"is alive, rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
+			"approved, rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -139,11 +140,11 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "OpenTab — start a house tab for a resident",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Validates the lease is alive. Mints vtx.tab.<NanoID> (root {}) + .status " +
+				ExpectedOutcome: "Validates the lease is alive and its lease-signing .decision reads approved. Mints vtx.tab.<NanoID> (root {}) + .status " +
 					"{value: open, totalCents: 0, itemsMemo: \"\", lines: [], openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
-					"if the lease is absent, or OpenTabAlreadyExists if the lease already has an open tab.",
+					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
@@ -998,6 +999,19 @@ def execute(state, op):
             application_for = kv.Read(application_for_lnk)
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only open a tab for their own lease")
+
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # caller — absent is the ordinary not-yet-decided case, mirroring
+        # lease-signing's own SignLease probe of the same key
+        # (packages/lease-signing/scripts.go). The lease must carry the
+        # landlord's approval before a house tab (and the charges it
+        # accrues) opens against it.
+        decision = kv.Read(lease_key + ".decision")
+        decision_value = None
+        if decision != None and not decision.isDeleted:
+            decision_value = decision.data.get("value")
+        if decision_value != "approved":
+            fail("LeaseNotApproved: lease " + lease_key + " has not been approved by its landlord")
 
         # One open tab per lease, guarded by a deterministic aspect on the
         # LEASEAPP (not the tab — the tab's own id is independent and
