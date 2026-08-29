@@ -751,11 +751,14 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"vtx.session.<s>.seat<n> for n in 1..capacity (SessionFull once every seat is claimed) — the SAME " +
 			"CreateOnly/expectedRevision write-path idiom studioSlotClaim uses, applied over an enumerated seat-" +
 			"index dimension instead of a time-cell dimension (Capability-KV §06). It then atomically mints the " +
-			"booking + the .status aspect {value: booked, rate, seat} + the forSession link (booking→session) + " +
-			"the bookedBy link (booking→identity). JoinWaitlist shares every one of those checks (factored into " +
-			"prepare_booking_common, ddls.go) but claims the SAME CreateOnly idiom over a SEPARATE " +
-			"vtx.session.<s>.wl<n> dimension instead (WaitlistFull once MAX_WAITLIST_SIZE=200 is exhausted) and " +
-			"mints .status {value: waitlisted, rate, waitlistSlot} — a caller may hold at most one LIVE claim per " +
+			"booking + the .status aspect {value: booked, rate, seat, className, classStartsAt} + the forSession " +
+			"link (booking→session) + the bookedBy link (booking→identity) — className/classStartsAt are a " +
+			"point-in-time snapshot of the session's own .schedule.name/.schedule.startsAt, taken here because the " +
+			"session can later be TombstoneSession'd (bookingStatusAspectTypeDDL above). JoinWaitlist shares every " +
+			"one of those checks (factored into prepare_booking_common, ddls.go) but claims the SAME CreateOnly " +
+			"idiom over a SEPARATE vtx.session.<s>.wl<n> dimension instead (WaitlistFull once " +
+			"MAX_WAITLIST_SIZE=200 is exhausted) and mints .status {value: waitlisted, rate, waitlistSlot, " +
+			"className, classStartsAt} — a caller may hold at most one LIVE claim per " +
 			"session regardless of which state it is in, since both ops claim the identical sessionBookerClaim " +
 			"guard (DoubleBooked either way). CancelBooking, beyond releasing the cancelling booking's own seat, " +
 			"now ALSO runs find_promotion_candidate — a bounded kv.Links walk over the session's inbound " +
@@ -786,8 +789,10 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"booking's own .status.seat (stored at create time — no stored " +
 			"back-reference needed to recompute it) and releases that seat cell and soft-deletes the booking. " +
 			"SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
-			"attended or noShow, carrying rate / seat / booker forward unchanged (an OCC upsert on the aspect's " +
-			"own revision) — those fields now only matter for ReleaseOrphanedBooking, since a marked booking is " +
+			"attended or noShow, carrying rate / seat / booker / session / className / classStartsAt forward " +
+			"unchanged (an OCC upsert on the aspect's own revision) — those fields now only matter for " +
+			"ReleaseOrphanedBooking (and, for className/classStartsAt, wellness-ledger's wellnessLedgerHistory " +
+			"lens), since a marked booking is " +
 			"no longer CancelBooking-eligible. Transitioning to noShow also stores a noShowFeeCents amount on " +
 			".status — caller-supplied or a 2500 default when omitted, the staff-observed default (the same idiom " +
 			"clinic-domain's SetAppointmentStatus uses). A caller-supplied 0 is the one exception: it means no fee " +
@@ -797,7 +802,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"positive, wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge " +
 			"against the booker's ledger account. It is re-markable — " +
 			"attended and noShow correct each other — and noShowFeeCents is NOT in the carry-forward field set " +
-			"(only rate/seat/booker/session are), so re-marking a noShow booking back to attended silently drops " +
+			"(only rate/seat/booker/session/className/classStartsAt are), so re-marking a noShow booking back to attended silently drops " +
 			"it; a charge already posted before that re-mark stands (the settles audit link makes it permanent " +
 			"history, never reversed by a later status correction). It also " +
 			"rejects a session that has not begun (SessionNotStarted, the mirror of CreateBooking's " +
@@ -840,7 +845,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"bookingKey":     "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":         "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
 			"instructor":     "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
-			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show; any other supplied value must be positive. Defaults to 2500 when omitted. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session are).",
+			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show; any other supplied value must be positive. Defaults to 2500 when omitted. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session/className/classStartsAt are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -848,7 +853,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Validates the session + booker are alive/typed, claims the first free seat " +
 					"(SessionFull if none), and commits vtx.booking.<NanoID> (root {}) + .status {value: booked, " +
-					"rate: standard, seat} + forSession + bookedBy links. Returns primaryKey.",
+					"rate: standard, seat, className, classStartsAt} + forSession + bookedBy links. Returns primaryKey.",
 			},
 			{
 				Name: "CreateBooking — resident rate",
@@ -867,7 +872,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same session/booker/rate validation as CreateBooking, but claims the first free " +
 					"vtx.session.<s>.wl<n> slot instead of a seat (WaitlistFull once MAX_WAITLIST_SIZE=200 is " +
 					"exhausted) and commits vtx.booking.<NanoID> (root {}) + .status {value: waitlisted, " +
-					"rate: standard, waitlistSlot} + forSession + bookedBy links. Rejected DoubleBooked if the " +
+					"rate: standard, waitlistSlot, className, classStartsAt} + forSession + bookedBy links. Rejected DoubleBooked if the " +
 					"booker already holds a live booking OR waitlist slot on this session. Returns primaryKey.",
 			},
 			{
@@ -884,7 +889,8 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 					"instructor": "vtx.instructor.<NanoID>",
 				},
 				ExpectedOutcome: "Requires the caller's identifiedBy binding to the named instructor and that instructor's " +
-					"ledBy link to the session, then moves .status.value to attended with rate / seat / booker unchanged. " +
+					"ledBy link to the session, then moves .status.value to attended with rate / seat / booker / session / " +
+					"className / classStartsAt unchanged. " +
 					"SessionNotStarted before the class begins; AuthDenied for any other instructor's class.",
 			},
 			{
@@ -996,33 +1002,39 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance"},
 		Description: "Booking status aspect (wellness). Stored as vtx.booking.<NanoID>.status (class " +
 			"bookingStatus) = {value: booked|waitlisted|attended|noShow, rate: standard|resident, seat?, " +
-			"waitlistSlot?, booker, session, noShowFeeCents?}. Non-sensitive. Written by CreateBooking " +
-			"(value=booked, seat), JoinWaitlist (value=waitlisted, waitlistSlot — the mirror-image write, sharing " +
-			"every other field with CreateBooking via prepare_booking_common, ddls.go), CancelBooking (an OCC " +
-			"upsert on a PROMOTED waitlisted booking ONLY: value flips waitlisted→booked, waitlistSlot is dropped, " +
-			"seat is set to the seat the cancelling booking just vacated — CancelBooking's own booking is " +
+			"waitlistSlot?, booker, session, className?, classStartsAt?, noShowFeeCents?}. Non-sensitive. Written " +
+			"by CreateBooking (value=booked, seat), JoinWaitlist (value=waitlisted, waitlistSlot — the mirror-image " +
+			"write, sharing every other field with CreateBooking via prepare_booking_common, ddls.go), CancelBooking " +
+			"(an OCC upsert on a PROMOTED waitlisted booking ONLY: value flips waitlisted→booked, waitlistSlot is " +
+			"dropped, seat is set to the seat the cancelling booking just vacated — CancelBooking's own booking is " +
 			"tombstoned outright, not upserted), and SetBookingAttendance (value=attended|noShow, an OCC upsert " +
-			"carrying rate / seat / booker / session forward untouched, and — only when transitioning to noShow — " +
-			"a noShowFeeCents amount: caller-supplied or a 2500 default) — the booking vertexType DDL owns all " +
-			"four scripts; this aspect-type DDL is the step-6 write gate. seat / waitlistSlot / booker / session " +
-			"are internal bookkeeping (the claimed seat or waitlist-slot index, the booker's identity key, the " +
-			"session key) CancelBooking (seat, booker, and — for its promotion target — waitlistSlot) and " +
-			"ReleaseOrphanedBooking (session, booker, and whichever of seat/waitlistSlot value names) read to " +
-			"recompute which vtx.session.<s>.seat<n> / vtx.session.<s>.wl<n> cell and vtx.session.<s>.bkr<b> " +
-			"double-book guard to release — a single anchor each, NOT a stored relationship-as-key-list (the " +
-			"booker relationship stays the bookedBy link, the session relationship stays the forSession link, " +
-			"Contract #1). A booking is never both booked and waitlisted at once — seat and waitlistSlot are " +
-			"mutually exclusive by construction (CreateBooking writes only the former, JoinWaitlist only the " +
-			"latter; a promotion upsert adds seat and drops waitlistSlot in the same write). session is what lets " +
-			"ReleaseOrphanedBooking find a booking's session AFTER TombstoneSession has killed it — the " +
-			"forSession link survives but the OPTIONAL MATCH lens walk to it would not (a tombstoned target simply " +
-			"drops from the join). noShowFeeCents is NOT in the carry-forward field set (only " +
-			"rate/seat/waitlistSlot/booker/session are), so re-marking a noShow booking to attended drops it — " +
-			"wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the " +
-			"booker's ledger account. Declaration-only: no op handler.",
+			"carrying rate / seat / booker / session / className / classStartsAt forward untouched, and — only " +
+			"when transitioning to noShow — a noShowFeeCents amount: caller-supplied or a 2500 default) — the " +
+			"booking vertexType DDL owns all four scripts; this aspect-type DDL is the step-6 write gate. seat / " +
+			"waitlistSlot / booker / session are internal bookkeeping (the claimed seat or waitlist-slot index, " +
+			"the booker's identity key, the session key) CancelBooking (seat, booker, and — for its promotion " +
+			"target — waitlistSlot) and ReleaseOrphanedBooking (session, booker, and whichever of " +
+			"seat/waitlistSlot value names) read to recompute which vtx.session.<s>.seat<n> / vtx.session.<s>.wl<n> " +
+			"cell and vtx.session.<s>.bkr<b> double-book guard to release — a single anchor each, NOT a stored " +
+			"relationship-as-key-list (the booker relationship stays the bookedBy link, the session relationship " +
+			"stays the forSession link, Contract #1). A booking is never both booked and waitlisted at once — seat " +
+			"and waitlistSlot are mutually exclusive by construction (CreateBooking writes only the former, " +
+			"JoinWaitlist only the latter; a promotion upsert adds seat and drops waitlistSlot in the same write). " +
+			"session is what lets ReleaseOrphanedBooking find a booking's session AFTER TombstoneSession has killed " +
+			"it — the forSession link survives but the OPTIONAL MATCH lens walk to it would not (a tombstoned " +
+			"target simply drops from the join). className/classStartsAt are the same survives-the-tombstone " +
+			"snapshot idiom applied to the session's own .schedule.name/.schedule.startsAt, taken once by " +
+			"CreateBooking/JoinWaitlist (mirrors clinic-reminders' atSite link precedent, commit 4da005a0) — " +
+			"wellness-ledger's wellnessLedgerHistory lens (lenses.go) reads them off THIS aspect (and off the " +
+			"wellnessrefund marker's own .detail snapshot for a refund row) instead of walking forSession→session, " +
+			"so a member's billing history still names the class after TombstoneSession kills the session vertex " +
+			"the charge or refund was for. noShowFeeCents is NOT in the carry-forward field set (only " +
+			"rate/seat/waitlistSlot/booker/session/className/classStartsAt are), so re-marking a noShow booking to " +
+			"attended drops it — wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount " +
+			"charge against the booker's ledger account. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked","waitlisted","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"waitlistSlot":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
+			`{"value":{"type":"string","enum":["booked","waitlisted","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"waitlistSlot":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":          "Booking status: booked at CreateBooking time, waitlisted at JoinWaitlist time; attended | noShow once SetBookingAttendance records who showed; a waitlisted booking transitions straight to booked if CancelBooking promotes it (never through attended/noShow).",
@@ -1031,17 +1043,19 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"waitlistSlot":   "The claimed waitlist-slot index on the session (internal bookkeeping; present once value is waitlisted, absent once booked). CancelBooking's promotion walk / ReleaseOrphanedBooking read it to release the correct vtx.session.<s>.wl<n> cell.",
 			"booker":         "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
 			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). ReleaseOrphanedBooking reads it to find and re-confirm the session's liveness after TombstoneSession has killed the vertex the forSession link points to. Not a relationship — the forSession link carries the relationship.",
+			"className":      "The session's .schedule.name at the moment this booking was created or waitlisted (a point-in-time snapshot, not a live relationship). Carried forward unchanged by CancelBooking's promotion upsert and SetBookingAttendance. wellness-ledger's wellnessLedgerHistory lens reads it so a member's billing history still names the class after TombstoneSession kills the session vertex.",
+			"classStartsAt":  "The session's .schedule.startsAt at the moment this booking was created or waitlisted, the same snapshot idiom as className, RFC3339 UTC. Carried forward and read by wellnessLedgerHistory alongside className.",
 			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "booking status aspect — booked",
-				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM"},
+				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CreateBooking.",
 			},
 			{
 				Name:            "booking status aspect — waitlisted",
-				Payload:         map[string]any{"value": "waitlisted", "rate": "standard", "waitlistSlot": 2, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM"},
+				Payload:         map[string]any{"value": "waitlisted", "rate": "standard", "waitlistSlot": 2, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by JoinWaitlist. Flips to booked (seat set, waitlistSlot dropped) if CancelBooking's promotion walk later picks this booking.",
 			},
 		},
@@ -1301,20 +1315,25 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 			"— a fresh one, not the booking. Carries the reverses link (wellnessrefund→wellnesstransaction, this " +
 			"refund is the later-arriving vertex — Contract #1 §1.1) to the original charge, which " +
 			"wellness-ledger's wellnessRefundSettlement lens (lenses.go) walks to converge the refund by " +
-			"dispatching WellnessCreditAccount{accountKey, amountCents, refundRef}.",
+			"dispatching WellnessCreditAccount{accountKey, amountCents, refundRef}. Also carries a className/" +
+			"classStartsAt snapshot, read off the cancelled booking's own .status (bookingStatusAspectTypeDDL " +
+			"above) at CancelBooking time — wellnessLedgerHistory reads them off THIS marker for a refund row, " +
+			"since by the time that lens runs the booking itself is already tombstoned.",
 		Script: refundDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"}}}`,
+			`{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "The wellnessaccount the class-price charge being reversed was posted to. Stored on the .detail aspect, not root data (D5).",
-			"amountCents": "The exact amountCents of the original charge (read off its .entry aspect at CancelBooking time, not re-derived from the session's current price — the refund must match what was actually charged).",
-			"bookingKey":  "The cancelled booking this refund traces back to. Internal bookkeeping context only — the reverses link, not this field, carries the relationship to the original charge transaction.",
+			"accountKey":    "The wellnessaccount the class-price charge being reversed was posted to. Stored on the .detail aspect, not root data (D5).",
+			"amountCents":   "The exact amountCents of the original charge (read off its .entry aspect at CancelBooking time, not re-derived from the session's current price — the refund must match what was actually charged).",
+			"bookingKey":    "The cancelled booking this refund traces back to. Internal bookkeeping context only — the reverses link, not this field, carries the relationship to the original charge transaction.",
+			"className":     "The cancelled booking's own .status.className at CancelBooking time (bookkeeping only, not a relationship). wellness-ledger's wellnessLedgerHistory lens reads it for a refund row since the booking itself is tombstoned by the time that lens runs.",
+			"classStartsAt": "The cancelled booking's own .status.classStartsAt at CancelBooking time, the same snapshot idiom as className.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "wellnessrefund — a class-price refund marker",
-				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>"},
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID> (root {}) + .detail aspect; minted by CancelBooking only when a settlesClassPrice charge already existed for the booking. wellness-ledger's wellnessRefundSettlement lens converges it into a WellnessCreditAccount.",
 			},
 		},
@@ -1327,21 +1346,26 @@ func refundDetailAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CancelBooking"},
 		Description: "Refund-marker detail aspect (wellness). Stored as vtx.wellnessrefund.<NanoID>.detail " +
-			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey}. Non-sensitive. Written once, " +
-			"atomically alongside the wellnessrefund vertex it belongs to, by CancelBooking (booking vertexType " +
-			"DDL, ddls.go) — never updated afterward. Declaration-only: no op handler of its own.",
+			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey, className?, classStartsAt?}. " +
+			"Non-sensitive. Written once, atomically alongside the wellnessrefund vertex it belongs to, by " +
+			"CancelBooking (booking vertexType DDL, ddls.go) — never updated afterward. className/classStartsAt " +
+			"are the cancelled booking's own .status snapshot at CancelBooking time, carried onto this marker " +
+			"because the booking itself is tombstoned in the same mutation batch. Declaration-only: no op handler " +
+			"of its own.",
 		Script:       refundDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"}}}`,
+		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "The wellnessaccount the original class-price charge posted to.",
-			"amountCents": "The exact amountCents of the original charge, read off its .entry aspect at CancelBooking time.",
-			"bookingKey":  "The cancelled booking this refund traces back to (bookkeeping only).",
+			"accountKey":    "The wellnessaccount the original class-price charge posted to.",
+			"amountCents":   "The exact amountCents of the original charge, read off its .entry aspect at CancelBooking time.",
+			"bookingKey":    "The cancelled booking this refund traces back to (bookkeeping only).",
+			"className":     "The cancelled booking's own .status.className at CancelBooking time (bookkeeping only).",
+			"classStartsAt": "The cancelled booking's own .status.classStartsAt at CancelBooking time (bookkeeping only).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "wellnessrefund detail aspect",
-				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>"},
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID>.detail; written once by CancelBooking alongside the wellnessrefund vertex it names.",
 			},
 		},
@@ -3605,7 +3629,7 @@ def execute(state, op):
 
         mutations = [
             make_vtx(book_key, "booking", {}),
-            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker, "session": session}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt")}),
             make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
             make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
             seat_mutation,
@@ -3639,7 +3663,7 @@ def execute(state, op):
 
         mutations = [
             make_vtx(book_key, "booking", {}),
-            make_aspect(book_key, "status", "bookingStatus", {"value": "waitlisted", "rate": rate, "waitlistSlot": slot_n, "booker": booker, "session": session}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "waitlisted", "rate": rate, "waitlistSlot": slot_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt")}),
             make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
             make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
             slot_mutation,
@@ -3756,7 +3780,7 @@ def execute(state, op):
             if promo_book_key != None:
                 mutations.append(make_tombstone(session + ".wl" + str(promo_slot)))
                 mutations.append(make_aspect_upsert_occ(promo_book_key, "status", "bookingStatus",
-                    {"value": "booked", "rate": promo_rate, "seat": seat_n, "booker": promo_booker, "session": session},
+                    {"value": "booked", "rate": promo_rate, "seat": seat_n, "booker": promo_booker, "session": session, "className": sched.data.get("name"), "classStartsAt": starts_at},
                     promo_revision))
                 events.append({"class": "wellness.waitlistPromoted", "data": {"bookingKey": promo_book_key, "session": session, "seat": seat_n}})
             else:
@@ -3820,7 +3844,7 @@ def execute(state, op):
             reverses_lnk = "lnk.wellnessrefund." + refund_id + ".reverses.wellnesstransaction." + charge_tx_id
             mutations.append(make_vtx(refund_key, "wellnessrefund", {}))
             mutations.append(make_aspect(refund_key, "detail", "wellnessRefundDetail",
-                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key}))
+                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key, "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
             mutations.append(make_link(reverses_lnk, refund_key, charge_tx_key, "reverses", "reverses", {}))
             events.append({"class": "wellness.classPriceRefundQueued", "data": {"bookingKey": book_key, "refundKey": refund_key, "accountKey": account_key, "amountCents": amount_cents}})
             break
@@ -3925,12 +3949,17 @@ def execute(state, op):
         # then fail to cancel and leak its guard, locking the booker out of
         # re-booking. .session is the same single-anchor idiom, carried forward
         # so ReleaseOrphanedBooking's convergence lens can still find it after
-        # the class is over.
+        # the class is over. .className/.classStartsAt are the same carry-forward
+        # idiom for the class-name snapshot CreateBooking/JoinWaitlist took off
+        # the session's .schedule at booking time — wellness-ledger's
+        # wellnessLedgerHistory lens reads them off THIS aspect (never the
+        # session) so a member's billing history still names the class after
+        # TombstoneSession kills the session vertex the booking was for.
         status = kv.Read(status_key)
         if status == None or status.isDeleted:
             fail("InvalidState: " + status_key + " is missing; cannot record attendance")
         merged = {"value": value}
-        for field in ["rate", "seat", "booker", "session"]:
+        for field in ["rate", "seat", "booker", "session", "className", "classStartsAt"]:
             carried = status.data.get(field)
             if carried != None:
                 merged[field] = carried

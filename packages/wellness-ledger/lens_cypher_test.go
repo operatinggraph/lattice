@@ -84,6 +84,19 @@ func (f *wlFixture) aspect(t *testing.T, ownerName, local, class string, data ma
 	require.NoError(t, err)
 }
 
+// tombstone marks a previously-seeded vertex isDeleted — the shape
+// TombstoneSession leaves the session vertex in, so a test can prove a
+// downstream read no longer needs to walk to it.
+func (f *wlFixture) tombstone(t *testing.T, name string) {
+	t.Helper()
+	typ := f.types[f.ids[name]]
+	key := "vtx." + typ + "." + f.ids[name]
+	body := map[string]any{"key": key, "class": typ, "isDeleted": true, "data": map[string]any{}}
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
 func (f *wlFixture) edge(t *testing.T, name, fromName, toName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -536,18 +549,21 @@ func (f *wlFixture) mkPostedTransaction(t *testing.T, prefix string, amountCents
 	})
 }
 
-func TestWellnessLedgerHistory_SettlesBooking_ProjectsClassName(t *testing.T) {
+// TestWellnessLedgerHistory_SettlesNoShow_ProjectsClassNameFromBookingStatus
+// proves the `settles` (no-show) branch reads className/classStartsAt off
+// the booking's OWN .status snapshot (bookingStatusAspectTypeDDL,
+// wellness-domain/ddls.go) — the field CreateBooking/JoinWaitlist stamp at
+// booking time — never by walking forSession to the session.
+func TestWellnessLedgerHistory_SettlesNoShow_ProjectsClassNameFromBookingStatus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
 	f.mkPostedTransaction(t, "noshow", 2500, "No-show fee")
 	f.vtx(t, "noshow_booking", "booking")
-	f.vtx(t, "noshow_session", "session")
-	f.aspect(t, "noshow_session", "schedule", "sessionSchedule", map[string]any{
-		"name": "Vinyasa Flow", "startsAt": "2026-08-19T09:00:00Z", "endsAt": "2026-08-19T10:00:00Z", "capacity": 20,
+	f.aspect(t, "noshow_booking", "status", "bookingStatus", map[string]any{
+		"value": "noShow", "className": "Vinyasa Flow", "classStartsAt": "2026-08-19T09:00:00Z",
 	})
-	f.edge(t, "forSession", "noshow_booking", "noshow_session")
 	f.edge(t, "settles", "noshow_tx", "noshow_booking")
 
 	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
@@ -555,6 +571,67 @@ func TestWellnessLedgerHistory_SettlesBooking_ProjectsClassName(t *testing.T) {
 	v := rows[0].Values
 	require.Equal(t, "vtx.booking."+f.ids["noshow_booking"], v["bookingKey"],
 		"the settles link ties this charge to the booking that caused it")
+	require.Equal(t, "Vinyasa Flow", v["className"])
+	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
+}
+
+// TestWellnessLedgerHistory_SettlesClassPrice_ClassNameSurvivesTombstonedSession
+// is the load-bearing regression proof: the session a class-price charge was
+// posted for is TombstoneSession'd (isDeleted=true) — Contract #1's isDeleted
+// read-filtering means a forSession->session walk would find nothing — yet
+// className/classStartsAt still resolve, because they come from the
+// settlesClassPrice-linked booking's own .status snapshot, not from the
+// (now-dead) session.
+func TestWellnessLedgerHistory_SettlesClassPrice_ClassNameSurvivesTombstonedSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "priced", 1500, "Class price")
+	f.vtx(t, "priced_booking", "booking")
+	f.aspect(t, "priced_booking", "status", "bookingStatus", map[string]any{
+		"value": "booked", "className": "Vinyasa Flow", "classStartsAt": "2026-08-19T09:00:00Z",
+	})
+	f.vtx(t, "priced_session", "session")
+	f.aspect(t, "priced_session", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-08-19T09:00:00Z", "endsAt": "2026-08-19T10:00:00Z", "capacity": 20,
+	})
+	f.edge(t, "forSession", "priced_booking", "priced_session")
+	f.tombstone(t, "priced_session")
+	f.edge(t, "settlesClassPrice", "priced_tx", "priced_booking")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.booking."+f.ids["priced_booking"], v["bookingKey"])
+	require.Equal(t, "Vinyasa Flow", v["className"],
+		"className must resolve off the booking's own .status snapshot even though the session it names is tombstoned")
+	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
+}
+
+// TestWellnessLedgerHistory_SettlesRefund_ProjectsClassNameFromRefundDetail
+// proves the `settlesRefund` branch reads className/classStartsAt off the
+// wellnessrefund marker's own .detail snapshot (refundDetailAspectTypeDDL,
+// wellness-domain/ddls.go) — the marker CancelBooking mints in the SAME
+// mutation batch it tombstones the booking, so this is the one branch where
+// no live booking vertex is even reachable.
+func TestWellnessLedgerHistory_SettlesRefund_ProjectsClassNameFromRefundDetail(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "refund", 1500, "Class price refund")
+	f.vtx(t, "refund_marker", "wellnessrefund")
+	f.aspect(t, "refund_marker", "detail", "wellnessRefundDetail", map[string]any{
+		"accountKey": "vtx.wellnessaccount.BBFAKEACCTHJKMNPQRST", "amountCents": 1500.0,
+		"bookingKey": "vtx.booking.BBFAKEBQQKJNGHJKMNPQ", "className": "Vinyasa Flow", "classStartsAt": "2026-08-19T09:00:00Z",
+	})
+	f.edge(t, "settlesRefund", "refund_tx", "refund_marker")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["bookingKey"], "a settlesRefund transaction anchors on the marker, not a live booking")
 	require.Equal(t, "Vinyasa Flow", v["className"])
 	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
 }

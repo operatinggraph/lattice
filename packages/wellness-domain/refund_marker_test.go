@@ -115,6 +115,12 @@ func TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T) {
 	if data["bookingKey"] != bookingKey {
 		t.Fatalf("refund detail bookingKey = %v, want %v", data["bookingKey"], bookingKey)
 	}
+	if data["className"] != "Priced Flow" {
+		t.Fatalf("refund detail className = %v, want Priced Flow (snapshotted off the cancelled booking's own .status)", data["className"])
+	}
+	if data["classStartsAt"] != "2026-07-08T09:00:00Z" {
+		t.Fatalf("refund detail classStartsAt = %v, want 2026-07-08T09:00:00Z", data["classStartsAt"])
+	}
 
 	_, refundID, _ := substrate.ParseVertexKey(refundKey)
 	reversesLnk := "lnk.wellnessrefund." + refundID + ".reverses.wellnesstransaction." + txID

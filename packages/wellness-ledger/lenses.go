@@ -344,25 +344,44 @@ RETURN
 // keyed by vtx.wellnesstransaction.<id>; transactionKey repeats it in the
 // body for the reader.
 //
-// The trailing settles/forSession pair is OPTIONAL — mirrors clinic-ledger's
-// clinicLedgerHistory (15f628f4): most transactions (a payment, a class-price
-// charge) settle no booking, so bk/sess simply stay unmatched; only a
-// WellnessDebitAccount{bookingRef} no-show charge writes the settles link
-// this OPTIONAL MATCH walks (targets.go, noShowSettlementSpec above — the
-// SAME link that lens's own missing_charge count() reads). Chaining a second
-// OPTIONAL MATCH off the first's optionally-bound `bk` is the established
-// idiom already used package-locally (wellness-domain's bookingsSpec,
-// forSession then atStudio) and cross-package (front-desk, wellness-reminders,
-// edge-manifest) — a null `bk` just leaves `sess` null too, not an error.
-// Projecting the session's own .schedule.data.name — not just a date, since
-// wellness has a real class name to give a reader (clinic's appointment has
-// none) — is what lets a member's billing history tell two otherwise
-// identical "No-show fee" lines apart by which class each one billed.
+// The trailing OPTIONAL MATCHes cover the THREE relations a transaction may
+// settle: `settles` (a no-show fee, noShowSettlementSpec above),
+// `settlesClassPrice` (a class-price charge, classPriceSettlementSpec above),
+// and `settlesRefund` (a class-price refund credit, refundSettlementSpec
+// above) — most transactions (a front-desk payment) settle none of the
+// three, so nsbk/cpbk/rf simply stay unmatched. At most one of the three is
+// ever bound for a given transaction (a wellnesstransaction carries exactly
+// one settlement relation, written once atomically at mint time by
+// WellnessDebitAccount/WellnessCreditAccount), so `coalesce` across the
+// three is never picking between competing live values, only skipping the
+// unmatched ones — the same composition primitive pkgmgr Walks uses to fold
+// several optionally-bound copies of one variable back to a single name
+// (internal/refractor/ruleengine/full/expr_eval.go).
+//
+// className/classStartsAt are read off the matched booking's own .status
+// snapshot (nsbk.status / cpbk.status — bookingStatusAspectTypeDDL,
+// wellness-domain/ddls.go) or the matched refund's own .detail snapshot
+// (rf.detail — refundDetailAspectTypeDDL, same file), never by walking
+// forSession to the session: CreateBooking/JoinWaitlist snapshot the
+// session's .schedule.name/.schedule.startsAt onto the booking at booking
+// time, and CancelBooking copies that same snapshot onto a refund marker it
+// mints, precisely because the session a charge or refund was for can later
+// be TombstoneSession'd — Contract #1's isDeleted read-filtering means a
+// forSession→session walk simply stops matching once that happens, dropping
+// the class name from every transaction it ever charged (mirrors
+// clinic-reminders' atSite link precedent, commit 4da005a0 — write the
+// snapshot once, at op time, onto state that survives the tombstone, instead
+// of re-deriving it from a vertex that might not). Projecting a real class
+// name — not just a date, since wellness has one to give a reader (clinic's
+// appointment has none) — is what lets a member's billing history tell two
+// otherwise identical "No-show fee" lines apart by which class each one
+// billed.
 const ledgerHistorySpec = `MATCH (t:wellnesstransaction)
 MATCH (t)-[:postedTo]->(a:wellnessaccount)
 MATCH (a)-[:heldFor]->(id:identity)
-OPTIONAL MATCH (t)-[:settles]->(bk:booking)
-OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
+OPTIONAL MATCH (t)-[:settles]->(nsbk:booking)
+OPTIONAL MATCH (t)-[:settlesClassPrice]->(cpbk:booking)
+OPTIONAL MATCH (t)-[:settlesRefund]->(rf:wellnessrefund)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -373,9 +392,9 @@ RETURN
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
   t.entry.data.reason AS reason,
-  bk.key AS bookingKey,
-  sess.schedule.data.name AS className,
-  sess.schedule.data.startsAt AS classStartsAt`
+  coalesce(nsbk.key, cpbk.key) AS bookingKey,
+  coalesce(nsbk.status.data.className, cpbk.status.data.className, rf.detail.data.className) AS className,
+  coalesce(nsbk.status.data.classStartsAt, cpbk.status.data.classStartsAt, rf.detail.data.classStartsAt) AS classStartsAt`
 
 // memberAccountsSpec projects one row per identity that has ever BOOKED
 // (walked via booking's bookedBy link, DISTINCT'd — a member with many

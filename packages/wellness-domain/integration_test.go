@@ -496,10 +496,16 @@ func TestSetBookingAttendance_CarriesFieldsForwardThenBlocksCancel(t *testing.T)
 	if got, _ := after["value"].(string); got != "attended" {
 		t.Fatalf("status.value = %q, want attended", got)
 	}
-	for _, field := range []string{"rate", "seat", "booker"} {
+	for _, field := range []string{"rate", "seat", "booker", "className", "classStartsAt"} {
 		if after[field] != before[field] {
 			t.Errorf("status.%s = %v after marking, want %v carried forward unchanged", field, after[field], before[field])
 		}
+	}
+	if got, _ := after["className"].(string); got != "Vinyasa Flow" {
+		t.Fatalf("status.className = %q after marking, want Vinyasa Flow (the field must survive SetBookingAttendance's carry-forward loop, not silently drop)", got)
+	}
+	if got, _ := after["classStartsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Fatalf("status.classStartsAt = %q after marking, want 2026-07-08T09:00:00Z", got)
 	}
 
 	// A marked booking cannot be cancelled; this pins the guard.
@@ -1102,6 +1108,12 @@ func TestCreateBooking_StandardRate(t *testing.T) {
 	}
 	if got, _ := statusData["seat"].(float64); got != 1 {
 		t.Fatalf("status.seat = %v, want 1 (first claimed seat)", got)
+	}
+	if got, _ := statusData["className"].(string); got != "Vinyasa Flow" {
+		t.Fatalf("status.className = %q, want Vinyasa Flow (snapshotted off the session's .schedule.name at booking time)", got)
+	}
+	if got, _ := statusData["classStartsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Fatalf("status.classStartsAt = %q, want 2026-07-08T09:00:00Z", got)
 	}
 	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
 		t.Fatalf("expected sessionSeatClaim at seat1")
@@ -2903,6 +2915,12 @@ func TestJoinWaitlist_ClaimsSlotWhenFull(t *testing.T) {
 	if got, _ := statusData["waitlistSlot"].(float64); got != 1 {
 		t.Fatalf("status.waitlistSlot = %v, want 1 (first claimed slot)", got)
 	}
+	if got, _ := statusData["className"].(string); got != "Intro Class" {
+		t.Fatalf("status.className = %q, want Intro Class (snapshotted off the session's .schedule.name at waitlist time)", got)
+	}
+	if got, _ := statusData["classStartsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Fatalf("status.classStartsAt = %q, want 2026-07-08T09:00:00Z", got)
+	}
 	if _, hasSeat := statusData["seat"]; hasSeat {
 		t.Fatalf("a waitlisted booking must not carry a seat field: %v", statusData)
 	}
@@ -2972,6 +2990,12 @@ func TestCancelBooking_PromotesEarliestWaitlistedBooking(t *testing.T) {
 	}
 	if got, _ := twoData["seat"].(float64); got != 1 {
 		t.Fatalf("bookerTwo status.seat = %v, want 1 (the freed seat)", got)
+	}
+	if got, _ := twoData["className"].(string); got != "Intro Class" {
+		t.Fatalf("bookerTwo status.className = %q after promotion, want Intro Class (must survive the promotion upsert)", got)
+	}
+	if got, _ := twoData["classStartsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Fatalf("bookerTwo status.classStartsAt = %q after promotion, want 2026-07-08T09:00:00Z", got)
 	}
 	if keyExists(t, ctx, conn, sessionKey+".wl1") {
 		t.Fatalf("wl1 must be released once bookerTwo is promoted")
