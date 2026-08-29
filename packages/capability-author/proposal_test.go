@@ -85,6 +85,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "RecordAuthoringDispatch", Scope: "any"},
 			{OperationType: "ReviewCapabilityProposal", Scope: "any"},
 			{OperationType: "MarkCapabilityProposalApplied", Scope: "any"},
+			{OperationType: "RecordCapabilityInstallReceipt", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

@@ -55,6 +55,13 @@ const (
 	capHandleApplyShrink = "CAHNDApShrinkHJKMNPQ"
 	capIDApplyRemedy     = "CAApprvRemedyHJKMNPQ"
 	capHandleApplyRemedy = "CAHNDApRemedyHJKMNPQ"
+
+	capIDApplyPadUnpadded     = "CAApprvPadAHJKMNPQRS"
+	capHandleApplyPadUnpadded = "CAHNDApPadAHJKMNPQRS"
+	capIDApplyPadPadded       = "CAApprvPadBHJKMNPQRS"
+	capHandleApplyPadPadded   = "CAHNDApPadBHJKMNPQRS"
+	capIDApplyPadMismatch     = "CAApprvPadCHJKMNPQRS"
+	capHandleApplyPadMismatch = "CAHNDApPadCHJKMNPQRS"
 )
 
 // applyEnv builds the MarkCapabilityProposalApplied op the operator submits
@@ -530,6 +537,118 @@ func driveApply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	env := applyEnv(testutil.GenReqID("CAApply"+tag), proposalID, packageKey, installRequestID)
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// patchTargetPackageName rewrites a live proposal's .target aspect's
+// packageName field directly in Core KV. Neither RecordCapabilityProposal nor
+// SubmitCapabilityProposal can write a packageName that is not already its own
+// stripped form — both route it through ddls.go's proposal_package_name before
+// the aspect reaches KV — so this is the only way to construct a .target whose
+// stored packageName differs from the one the proposal was authored with.
+func patchTargetPackageName(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalKey, packageName string) {
+	t.Helper()
+	key := proposalKey + ".target"
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s carries no data object", key)
+	}
+	data["packageName"] = packageName
+	doc["data"] = data
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", key, err)
+	}
+	if _, err := conn.KVUpdate(ctx, testutil.HarnessCoreBucket, key, raw, entry.Revision); err != nil {
+		t.Fatalf("KVUpdate %s: %v", key, err)
+	}
+}
+
+// TestCapAuthor_Target_PackageNameStrippedAtWrite pins where the whitespace
+// question is actually settled: at the two .target WRITERS, not at any reader.
+// Both SubmitCapabilityProposal and RecordCapabilityProposal fold packageName
+// through proposal_package_name before the aspect is ever stored, so a padded
+// authored name never becomes a stored one.
+//
+// That is what lets every downstream comparison stay byte-exact, matching
+// Installer.findInstalledPackage, whose own contract says matching is
+// deliberately NOT folded: a package name resolves a destructive target
+// (install/upgrade diff-apply into it, uninstall tombstones its declaredKeys),
+// so widening the match set would widen what gets mutated. The complementary
+// guarantee is Definition.validatePackageName, which refuses a non-normalized
+// Name at install time — so a live package whose recorded name is padded is
+// not a reachable state either, from either end.
+func TestCapAuthor_Target_PackageNameStrippedAtWrite(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-target-padname")
+
+	// SubmitCapabilityProposal — the human lane, one op, no claim.
+	subKey := "vtx.capabilityproposal." + capIDApplyPadUnpadded
+	sub := submitEnvRaw(testutil.GenReqID("CASubPadA"), map[string]any{
+		"proposalId": capIDApplyPadUnpadded,
+		"kind":       "lens",
+		"content":    string(validLensContent(t, "padNameSubmitLens")),
+		"target":     map[string]any{"mode": "newPackage", "packageName": "  ai-lens-padname-submit\t"},
+		"rationale":  "a padded target name must not survive the write",
+		"validation": map[string]any{"state": "valid"},
+	})
+	testutil.PublishOp(t, conn, sub)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := aspectValue(t, ctx, conn, subKey+".target", "packageName"); got != "ai-lens-padname-submit" {
+		t.Fatalf("SubmitCapabilityProposal stored .target.packageName = %q, want the stripped %q", got, "ai-lens-padname-submit")
+	}
+
+	// RecordCapabilityProposal — the AI lane, through the claim handle.
+	recKey := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "padR", capIDApplyPadPadded, capHandleApplyPadPadded,
+		"lens", map[string]any{"mode": "newPackage", "packageName": "  ai-lens-padname-record\t"},
+		validLensContent(t, "padNameRecordLens"))
+	if got := aspectValue(t, ctx, conn, recKey+".target", "packageName"); got != "ai-lens-padname-record" {
+		t.Fatalf("RecordCapabilityProposal stored .target.packageName = %q, want the stripped %q", got, "ai-lens-padname-record")
+	}
+}
+
+// TestCapAuthor_Apply_ForeignTargetPackageName_Rejected keeps the reader-side
+// negative the byte-exact comparison exists for: a .target.packageName that is
+// a genuinely different name from the installed package's own is refused
+// PackageMismatch, and correcting only that name admits the identical
+// submission. The patch is the only way to construct the divergence — both
+// write paths fold on the way in — so this is the reader guard under test, not
+// a writer that let something through.
+func TestCapAuthor_Apply_ForeignTargetPackageName_Rejected(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-foreignname")
+
+	pk := drivePendingProposalForApply(t, ctx, conn, cp, cons, "padM", capIDApplyPadMismatch, capHandleApplyPadMismatch, "ai-lens-padname-mismatch")
+	driveReview(t, ctx, conn, cp, cons, "padM", capIDApplyPadMismatch, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+	res := applyRealPackage(t, ctx, conn, pk)
+	installRequestID := "install:" + res.PackageName + "@" + res.ToVersion
+
+	patchTargetPackageName(t, ctx, conn, pk, "a-totally-different-package-name")
+	env := applyEnv(testutil.GenReqID("CAApplypadM"), capIDApplyPadMismatch, res.PackageKey, installRequestID)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("foreign name: outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "PackageMismatch") {
+		t.Fatalf("foreign name: error = %+v, want a PackageMismatch message", reply.Error)
+	}
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("foreign name: review.state = %q, want approved (unchanged by the rejected apply)", got)
+	}
+
+	// The positive vector: only the name corrected, everything else identical.
+	patchTargetPackageName(t, ctx, conn, pk, res.PackageName)
+	driveApply(t, ctx, conn, cp, cons, "padMok", capIDApplyPadMismatch, res.PackageKey, installRequestID, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "applied" {
+		t.Fatalf("corrected name: review.state = %q, want applied", got)
+	}
 }
 
 // readInstalledLensCanonicalName resolves the installed package's manifest

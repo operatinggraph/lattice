@@ -60,7 +60,14 @@ stops being walked). The builder walks it before the first edit; the reviewers w
    call earlier in the same function, a cold reviewer then escalated the false premise into a false
    deadlock, and only a build-time measurement against the pinned server caught it).
 3. **A negative test needs its positive vector proven first**, and every fix is proven by reverting it and
-   watching its test fail — a test that passes with the mechanism disabled pins nothing.
+   watching its test fail — a test that passes with the mechanism disabled pins nothing. **This binds
+   PLUMBING increments hardest, not least** — a field threaded through result structs looks too trivial to
+   revert-prove, and is exactly where the proof is skipped: downstream tests hand-build the struct and
+   upstream tests never assert the value is populated, so deleting the whole increment leaves every suite
+   green while the feature it feeds silently never runs (2026-08-29: deleting all four
+   `res.InstallRequestID = reply.RequestID` assignments kept `internal/pkgmgr`, `cmd/loupe`,
+   `cmd/lattice-pkg` and `packages/capability-author` green; both consumers early-out on the empty value).
+   Assert the threaded value equals its source at the producer, not merely that it is non-empty.
 4. **Removal needs a transport AND an observer, and a demoted mechanism needs EVERY obligation
    enumerated** — read what each consumer actually tests, at what granularity; an upsert-only writer
    retracts nothing whose key drops out. When a mechanism is *replaced* rather than deleted, list

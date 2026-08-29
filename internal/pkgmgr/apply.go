@@ -115,15 +115,18 @@ type ApplyResult struct {
 	// route through Apply rather than Install directly.
 	LeafBudgetWarnings []string
 
-	// InstallRequestID and OpTrackerKey are the Processor reply's own durable
-	// receipt (Contract #4) for the commit that actually produced this apply —
-	// the only record a caller can later use to prove THIS apply, and not some
-	// other write at the same name/version, is the one it holds a reference
-	// to. Populated only on an arm that committed (the fresh-install and
-	// in-place-upgrade arms); the skip and dry-run arms committed nothing and
-	// leave them zero-valued.
+	// InstallRequestID is the requestId this apply's install/upgrade op
+	// committed under, echoed back by the Processor (Contract #4). It is the
+	// caller's own content-derived id rather than a Processor-minted commit
+	// identity — contentRequestID hashes name+version+mutations, so two actors
+	// submitting identical content mint the same value and a Duplicate reply
+	// returns it for a commit this call did not make. It is an audit pointer,
+	// not a proof of authorship.
+	//
+	// Populated only on an arm that committed (the fresh-install and in-place-
+	// upgrade arms); the skip and dry-run arms committed nothing and leave it
+	// empty, which is what callers test to decide there is no receipt to record.
 	InstallRequestID string
-	OpTrackerKey     string
 }
 
 // Apply is the upgrade-aware entry point for `lattice-pkg install` / `upgrade`
@@ -286,7 +289,6 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		return nil, err
 	}
 	res.InstallRequestID = reply.RequestID
-	res.OpTrackerKey = reply.OpTrackerKey
 	return res, nil
 }
 
@@ -349,7 +351,6 @@ func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts 
 		DependencyWarnings: r.DependencyWarnings,
 		LeafBudgetWarnings: r.LeafBudgetWarnings,
 		InstallRequestID:   r.InstallRequestID,
-		OpTrackerKey:       r.OpTrackerKey,
 	}
 	// Defensive: a fresh-branch install should never skip (existing == nil),
 	// but mirror the reason if it ever does so the CLI reports it faithfully.

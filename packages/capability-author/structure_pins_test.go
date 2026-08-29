@@ -1,6 +1,10 @@
 package capabilityauthor
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // TestPackage_StructurePins pins every declared element by count and canonical
 // name (Vertical Package Standard S6, loftspace-domain/package_test.go idiom). A
@@ -23,10 +27,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 7; got != want {
+	if got, want := len(Package.Permissions), 8; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 7; got != want {
+	if got, want := len(Package.OpMetas), 8; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -63,6 +67,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"SubmitCapabilityProposal", "any"}, {"RecordCapabilityProposal", "any"},
 		{"RecordAuthoringDispatch", "any"},
 		{"ReviewCapabilityProposal", "any"}, {"MarkCapabilityProposalApplied", "any"},
+		{"RecordCapabilityInstallReceipt", "any"},
 	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
@@ -71,6 +76,54 @@ func TestPackage_StructurePins(t *testing.T) {
 		got := Package.Permissions[i]
 		if got.OperationType != want.op || got.Scope != want.scope {
 			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
+		}
+	}
+
+	// OpMetas and the capabilityproposal DDL's PermittedCommands are the two
+	// other places an op name must appear for it to be dispatchable at all: the
+	// op-meta vertex makes it forOperation-resolvable, PermittedCommands is what
+	// the step-6 write gate consults before letting the script touch a
+	// vtx.capabilityproposal.* key. Pinning them by name, not just by count,
+	// keeps a renamed or dropped op from reaching an install.
+	wantOpMetas := []string{
+		"RequestCapabilityAuthoring", "CreateAuthoringClaim", "SubmitCapabilityProposal",
+		"RecordCapabilityProposal", "RecordAuthoringDispatch", "ReviewCapabilityProposal",
+		"MarkCapabilityProposalApplied", "RecordCapabilityInstallReceipt",
+	}
+	for i, want := range wantOpMetas {
+		if i >= len(Package.OpMetas) {
+			break
+		}
+		if got := Package.OpMetas[i].OperationType; got != want {
+			t.Errorf("OpMetas[%d]: got %q, want %q", i, got, want)
+		}
+	}
+
+	// Resolved by CanonicalName, never by position, and never behind a
+	// length guard: a pin that can skip itself when the slice it indexes is
+	// empty or reordered reports green for exactly the shape it exists to
+	// catch.
+	wantPermitted := []string{
+		"RequestCapabilityAuthoring", "SubmitCapabilityProposal", "RecordCapabilityProposal",
+		"ReviewCapabilityProposal", "MarkCapabilityProposalApplied", "RecordCapabilityInstallReceipt",
+	}
+	var proposalDDL *pkgmgr.DDLSpec
+	for i := range Package.DDLs {
+		if Package.DDLs[i].CanonicalName == "capabilityproposal" {
+			proposalDDL = &Package.DDLs[i]
+			break
+		}
+	}
+	if proposalDDL == nil {
+		t.Fatal("no DDL with CanonicalName \"capabilityproposal\" — every capability-proposal op is undispatchable without it")
+	}
+	got := proposalDDL.PermittedCommands
+	if len(got) != len(wantPermitted) {
+		t.Fatalf("capabilityproposal PermittedCommands: got %v, want %v", got, wantPermitted)
+	}
+	for i, want := range wantPermitted {
+		if got[i] != want {
+			t.Errorf("capabilityproposal PermittedCommands[%d]: got %q, want %q", i, got[i], want)
 		}
 	}
 }

@@ -87,13 +87,56 @@ write once-only.
 `cmd/loupe` — Loupe is P5's named console-inspector exception, and the very same function already
 reads the `vtx.package.` subtree under that exception. No other `cmd/<app>` gains a Core KV read.
 
+## 2.5 The receipt alone does not close the row — the no-receipt refusal does
+
+**Added 2026-08-29, during the build, on a cold-review finding.** §2's three moves are the triage's
+ratified shape, and they are necessary but **not sufficient for the board row's own headline case.**
+The row is *"a `newPackage` proposal is closed over a same-named package it never wrote."* That state
+is by definition a proposal **whose own apply never ran** — so it has no receipt — so `targetInstall`
+takes the unchanged name+version fallback and produces the identical wrong close. The receipt is
+inert in precisely its own defect's scenario; what §2 actually buys is precision in the *post-apply
+recovery* window (install committed, mark-applied did not). Reachability is not exotic:
+`targetInstallVersion` defaults to `"0.1.0"` when a proposal declares no `newVersion`, colliding with
+the most common first version a hand-installed package carries.
+
+So the fire also lands the enforcement the title implies. The machinery already knew the right answer
+and said the opposite: `ApplyCapabilityPlan` refuses a `newPackage` whose name was claimed before the
+apply ran (`ErrPackageNameClaimed` — *"This proposal's artifact did NOT land: do not mark it
+applied"*), while the console's 409 pre-empted it with "close it with mark-applied", purely because
+it could not tell a half-commit from a foreign install. Now it can. **For `newPackage` only**: no
+receipt + a live package at the target name and version ⇒ mark-applied **refuses**, and the apply
+endpoint stops advertising `resumable`. `upgradeExisting` is untouched — its package is installed
+before the apply by definition, so a live same-named package carries no provenance signal there, and
+`ValidateCapabilityApplyTarget`'s version preconditions already own that mode.
+
+The cost is deliberate and fail-closed: a `newPackage` proposal that genuinely half-committed *before
+receipts existed* can no longer be closed from the console. The deliberate path remains — submitting
+`MarkCapabilityProposalApplied` via `lattice-pkg` with an explicit `packageKey`, an authorized act
+rather than a console guess. That is the right trade, because `review.state = applied` plus the
+`appliedAs` link is a **write-once, unrecoverable** transition: a wrong close cannot be undone, a
+refusal can.
+
 ## 3. Non-goals (the drift fence)
 
 - **No read-model / lens column** for the receipt. Loupe reads the aspect from Core KV under its P5
   exception; adding a `capability-proposals` lens column would widen the fire into DDL + refresh for
   a value only this one decision consumes.
-- **No change to `MarkCapabilityProposalApplied`'s own guards**, its `appliedAs` link, or its
-  `review.state` transition.
+- **No change to `MarkCapabilityProposalApplied`'s** `appliedAs` link or its `review.state`
+  transition. **Amended 2026-08-29, during the build:** this clause originally covered that op's
+  *guards* too, and the build falsified it. Mirroring its name cross-check into the receipt op
+  surfaced that mark-applied reads `target.packageName` **raw** while the installer folds the
+  declared name with `.strip()` (`proposal_package_name`'s own documented reason for existing). A
+  proposal whose target name carried surrounding whitespace would be installable but never
+  closable: the install records the folded spelling and the raw comparison always mismatches.
+  **Reachability, measured rather than asserted:** that state cannot be reached through the op path
+  at all — `RecordCapabilityProposal` and `SubmitCapabilityProposal` both fold `packageName` through
+  the same helper when they write `.target`, so the regression test has to patch Core KV directly to
+  construct it. The raw read was latent, not live: a guard that disagreed with every writer feeding
+  it. Building the receipt op to the raw form would have preserved this non-goal by propagating that
+  disagreement into new code; building it folded and leaving mark-applied alone would have shipped
+  two close-ops that differ on the same name. Both ops now use `proposal_package_name`. It grants no
+  new reach — an author who wants the folded name can always submit it directly — so it is a
+  narrowing of divergence, not a widening of the guard.
 - **No change to `upgradeExisting` apply semantics**, `findInstalledPackageByName`, or
   `CapabilityApplyPlanForProposal`'s `newPackage`-vs-live-catalog guard.
 - **`reply.Revisions` is NOT threaded.** The triage named it alongside `RequestID`/`OpTrackerKey`,
@@ -116,7 +159,10 @@ claim.
 
 **Green bar:** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
 `STRICT=1 go run ./scripts/lint-conventions.go` · `STRICT=1 go run ./scripts/lint-package-standard.go` ·
-`go run ./scripts/lint-package-version.go` · `go test ./internal/pkgmgr/... ./packages/capability-author/... ./cmd/loupe/... ./cmd/lattice-pkg/...` ·
+`DIFF_BASE=$(git merge-base main HEAD) go run ./scripts/lint-package-version.go` — **the bare
+invocation is falsely green for a whole class** (it diffs the working tree only, so it cannot see a
+committed increment; CI sets `DIFF_BASE` and compares the range, which is how `internal/pkgmgr/`
+changing obliges every package declaring `ReadGrantDomains` to bump) · `go test ./internal/pkgmgr/... ./packages/capability-author/... ./cmd/loupe/... ./cmd/lattice-pkg/...` ·
 full `go test ./... -p 4` with `POSTGRES_TEST_DSN` set · `make verify-kernel`.
 
 ### 4.2 Verified touch-list (`file:line` read live at head)
@@ -190,6 +236,16 @@ writer — the create-only conditioning is the arbitration; #6 precedent may car
 mark-applied guards were re-read against Contract #1/#3, not copied on trust.
 
 ### 4.6 Adjacent finds
+
+Both defects the build surfaced were fixed in this run (steward §4 — what a fire discovers, this run
+fixes); neither was filed.
+
+- **`MarkCapabilityProposalApplied` compared `target.packageName` raw** while the installer folds it.
+  Fixed, with the non-goal amended where it stood (§3) and a paired padded/unpadded regression test.
+- **`cmd/lattice-pkg`'s rejection-reporting line dereferenced `reply.Error` unguarded**, panicking
+  the CLI on the one path whose job is to report a failure. Fixed via the nil-safe accessors, tested
+  against nil reply / nil Error / empty Error plus a populated-Error positive vector.
+
 
 - `recoveredInstallRequestID`'s `"recovered:"` prefix (`review.go:846`) exists precisely because the
   reconstructed pointer is a fiction. With a real receipt the recovery path can now stamp the

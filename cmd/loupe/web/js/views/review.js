@@ -14,7 +14,7 @@ import { renderDoc, keyLinkEl } from "../render.js";
 import {
   kindGlyph, reviewStateClass, confidenceBand, hasConfidenceScore, agoFrom,
   proposalRows, proposalDisplayState, augurProposalRows, augurDisplayState,
-  applyOutcome, opRejected, errorText, sourceLabel, installTargetLabel,
+  applyOutcome, receiptNotice, opRejected, errorText, sourceLabel, installTargetLabel,
 } from "../logic/review.js";
 
 const TABS = ["capability", "augur"];
@@ -432,7 +432,8 @@ function applyRow(p, raw) {
     (installTargetLabel(p) || p.targetMode || "install") + ") and closes the proposal";
   const recover = demoHide(el("button", "ghost-btn", "Mark applied (recover)"));
   recover.title = "closes a proposal whose package install already committed but whose closing op did not; " +
-    "verifies that package is installed at this proposal's target version before submitting";
+    "verifies that package is installed at this proposal's target version, and — for a newPackage proposal — " +
+    "that an install receipt records this proposal as the one that produced it, before submitting";
 
   apply.addEventListener("click", async () => {
     if (!window.confirm(
@@ -465,6 +466,17 @@ function applyRow(p, raw) {
       recover.disabled = false;
       return;
     }
+    // The install and the close both committed, but the provenance receipt
+    // between them may not have. That is not a failure of the apply, so it is
+    // not an error path — it is a state only this response ever reports, and a
+    // toast that scrolls away is not where it belongs.
+    const receipt = receiptNotice(body);
+    if (receipt) {
+      setStatus("review-detail-status", receipt, true);
+      apply.disabled = true;
+      recover.disabled = true;
+      return;
+    }
     toast("artifact installed — proposal applied");
     loadDetail("capability", p.proposalId, raw);
   });
@@ -474,7 +486,9 @@ function applyRow(p, raw) {
     if (!window.confirm(
       "Mark this proposal applied against the installed package named “" + (p.targetPackageName || "?") + "”? " +
       "Use this only when a previous install committed but failed to close the proposal. Loupe verifies that " +
-      "package is installed at this proposal's target version before submitting, and installs nothing itself.")) return;
+      "package is installed at this proposal's target version before submitting, and for a newPackage proposal " +
+      "also that an install receipt names it as the one this proposal produced — a same-named package it did not " +
+      "write is refused. Loupe installs nothing itself.")) return;
     apply.disabled = true;
     recover.disabled = true;
     setStatus("review-detail-status", "verifying the install + submitting mark-applied…");

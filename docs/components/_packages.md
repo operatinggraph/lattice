@@ -541,6 +541,15 @@ mechanizes it (name the gate, strike the entry).
   three gaps; the design cited `boolColumn` and missed two consumers, one of them in the other dispatch
   leg. Check: before dropping a projected column, grep every reader for a presence test on that key, not
   just a value read.
+- **A new op granted to `operator` by its OWN package is not thereby callable from the console** —
+  `cmd/loupe` runs as the scoped `consoleOperator` (mechanism B, "never root"), whose grants live in a
+  DIFFERENT package (`console-operator`), and there is no wildcard: an op absent from that list is denied
+  at the CapabilityAuthorizer, so the feature no-ops while the endpoint still answers 200. Nothing fails —
+  every package-local pin, the corpus census and CI all stay green, because the grant gap is cross-package.
+  Minted: `RecordCapabilityInstallReceipt` (2026-08-29) shipped granted only to `operator`, so the receipt
+  would never have landed from the console. Check: for every new op a `cmd/loupe` handler submits, assert
+  it appears in `console-operator`'s grant list — and have the submitting handler surface its own failure
+  on the SUCCESS path, so a denial is visible instead of swallowed.
 
 ## Related contracts
 

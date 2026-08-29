@@ -562,16 +562,47 @@ func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Lo
 		return fmt.Errorf("apply %s: %w", plan.PackageName, err)
 	}
 	logApplyResult("apply-proposal", res, logger)
+	return closeApplyProposal(context.Background(), conn, adminActor, proposalID, res, logger)
+}
 
-	installRequestID := res.Action + ":" + res.PackageName + "@" + res.ToVersion
-	markCtx, markCancel := context.WithTimeout(context.Background(), 10*time.Second)
+// closeOpTimeout bounds each of the two ops that close apply-proposal
+// separately, so a receipt that stalls out cannot eat the budget
+// MarkCapabilityProposalApplied needs — the receipt is the optional half, and
+// spending the close's deadline on it would invert that.
+const closeOpTimeout = 10 * time.Second
+
+// closeApplyProposal submits the two ops that close apply-proposal, in order:
+// the install receipt that binds the proposal to the commit that just landed,
+// then MarkCapabilityProposalApplied.
+//
+// The order is load-bearing rather than incidental. The receipt op requires the
+// proposal to still be `approved`, and mark-applied is precisely what flips it
+// to `applied` — so a receipt submitted second is refused every time, and the
+// proposal is left permanently unbindable because .install is create-only.
+//
+// Only the mark-applied half can fail the command. A receipt failure is
+// reported by submitApplyReceipt and the close carries on: the package is live
+// and the proposal is still closable, which is the whole reason the receipt
+// never gates.
+func closeApplyProposal(ctx context.Context, conn *substrate.Conn, actor, proposalID string, res *pkgmgr.ApplyResult, logger *slog.Logger) error {
+	installRequestID := applyInstallRequestID(res)
+
+	receiptCtx, receiptCancel := context.WithTimeout(ctx, closeOpTimeout)
+	submitApplyReceipt(receiptCtx, conn, actor, proposalID, res, logger)
+	receiptCancel()
+
+	markCtx, markCancel := context.WithTimeout(ctx, closeOpTimeout)
 	defer markCancel()
-	reply, err := submitMarkApplied(markCtx, conn, adminActor, proposalID, res.PackageKey, installRequestID)
+	reply, err := submitMarkApplied(markCtx, conn, actor, proposalID, res.PackageKey, installRequestID)
 	if err != nil {
 		return fmt.Errorf("MarkCapabilityProposalApplied: %w (the package IS already applied — packageKey=%s, installRequestId=%s; retry MarkCapabilityProposalApplied alone rather than re-running apply-proposal)", err, res.PackageKey, installRequestID)
 	}
 	if reply.Status == processor.ReplyStatusRejected {
-		return fmt.Errorf("MarkCapabilityProposalApplied rejected: %s — %s", reply.Error.Code, reply.Error.Message)
+		// Read through the nil-safe accessors: a rejection is not obliged to
+		// carry an Error body, and this is the one line whose whole job is to
+		// report a failure — panicking here would replace the operator's
+		// diagnosis with a stack trace.
+		return fmt.Errorf("MarkCapabilityProposalApplied rejected: %s — %s", replyErrorCode(reply), replyErrorMessage(reply))
 	}
 	logger.Info("capability proposal applied",
 		"proposalId", proposalID,
@@ -599,15 +630,118 @@ func validateBareProposalID(id string) error {
 	return nil
 }
 
-// submitMarkApplied publishes MarkCapabilityProposalApplied via JetStream,
-// carrying the reply inbox in a header (mirrors cmd/lattice/output.SubmitOp
-// — a plain NATS Request() would receive only the JetStream publish-ack,
-// since ops.<lane> is consumed by JetStream pull consumers).
+// submitMarkApplied publishes MarkCapabilityProposalApplied, the op that closes
+// the two-commit apply-proposal flow.
 func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposalID, packageKey, installRequestID string) (*processor.OperationReply, error) {
+	payload, err := json.Marshal(map[string]any{
+		"proposalId":       proposalID,
+		"packageKey":       packageKey,
+		"installRequestId": installRequestID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
 	requestID, err := substrate.NewNanoID()
 	if err != nil {
 		return nil, fmt.Errorf("generate requestId: %w", err)
 	}
+	proposalKey := "vtx.capabilityproposal." + proposalID
+	env := capabilityCloseEnvelope(requestID,
+		// op-name: (submits) closes the two-commit apply-proposal flow — the lattice-pkg CLI submits this after runApplyProposal has installed/upgraded the package through the Apply dispatcher, recording that the review's approved proposal is now materialized.
+		"MarkCapabilityProposalApplied", actor, payload,
+		capabilityCloseReads(proposalKey, packageKey))
+	return publishOpAwaitReply(ctx, conn, env)
+}
+
+// applyInstallRequestID is the audit pointer an apply stamps as appliedByOp.
+//
+// The Processor reply's own InstallRequestID is preferred whenever the apply
+// committed one, because it names the actual commit: it tells this apply apart
+// from any other write landing at the same package name and version. The
+// composed "<action>:<name>@<version>" string is what a result carrying no
+// receipt has to offer — an arm that committed nothing (a skip, a dry run) —
+// and it cannot make that distinction, since name and version are all it holds.
+func applyInstallRequestID(res *pkgmgr.ApplyResult) string {
+	if res.InstallRequestID != "" {
+		return res.InstallRequestID
+	}
+	return res.Action + ":" + res.PackageName + "@" + res.ToVersion
+}
+
+// submitApplyReceipt stamps the Processor's own receipt for the install that
+// just committed onto the proposal's vertex, so a later reader can name the
+// package this proposal actually wrote rather than inferring it from a name and
+// a version.
+//
+// It is NON-FATAL by design: a failed receipt leaves the package live and the
+// proposal closable, and recovery falls back to resolving the install by
+// package name and version. So the failure is logged with what that costs and
+// the apply flow carries on to MarkCapabilityProposalApplied.
+//
+// A result carrying no observed InstallRequestID is skipped outright: that arm
+// committed nothing, so there is no install to bind, and a receipt written from
+// a reconstructed pointer would record a fiction.
+func submitApplyReceipt(ctx context.Context, conn *substrate.Conn, actor, proposalID string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
+	if res.InstallRequestID == "" {
+		return
+	}
+	const degraded = "the apply stands and the proposal is still closable, but unless a receipt is already recorded for it, a later recovery resolves this proposal's install by package name and version alone"
+	env, err := installReceiptEnvelope(actor, proposalID, res.PackageKey, res.InstallRequestID)
+	if err != nil {
+		logger.Warn("RecordCapabilityInstallReceipt could not be built — "+degraded, "error", err, "proposalId", proposalID)
+		return
+	}
+	reply, err := publishOpAwaitReply(ctx, conn, env)
+	switch {
+	case err != nil:
+		// The submission may have committed with the reply lost on the way
+		// back, so this reports an unconfirmed receipt rather than a missing
+		// one — a claim this side cannot make about a published message.
+		logger.Warn("RecordCapabilityInstallReceipt was not confirmed — "+degraded, "error", err, "proposalId", proposalID)
+	case reply.Status == processor.ReplyStatusAccepted, reply.Status == processor.ReplyStatusDuplicate:
+		logger.Info("capability install receipt recorded",
+			"proposalId", proposalID, "packageKey", res.PackageKey, "installRequestId", res.InstallRequestID)
+	case reply.Status == processor.ReplyStatusRejected:
+		logger.Warn("RecordCapabilityInstallReceipt rejected — "+degraded,
+			"proposalId", proposalID, "code", replyErrorCode(reply), "message", replyErrorMessage(reply))
+	default:
+		logger.Warn("RecordCapabilityInstallReceipt returned an unrecognized reply status — "+degraded,
+			"proposalId", proposalID, "status", string(reply.Status))
+	}
+}
+
+// replyErrorCode / replyErrorMessage read a rejection's detail without assuming
+// the Processor filled it in — a rejected reply carrying no Error is still a
+// rejection, and dereferencing it to say so would panic on the one path whose
+// whole job is to report a failure without becoming one.
+func replyErrorCode(reply *processor.OperationReply) string {
+	if reply == nil || reply.Error == nil {
+		return ""
+	}
+	return string(reply.Error.Code)
+}
+
+func replyErrorMessage(reply *processor.OperationReply) string {
+	if reply == nil || reply.Error == nil {
+		return ""
+	}
+	return reply.Error.Message
+}
+
+// installReceiptEnvelope builds the RecordCapabilityInstallReceipt submission
+// binding proposalID to the install the Processor recorded under
+// installRequestID.
+//
+// Its requestId is DERIVED, not minted, so an operator re-running apply-proposal
+// after a lost reply submits the identical requestId and the Contract #4 tracker
+// collapses it. A freshly minted one would instead reach the commit batch, where
+// .install's create-only conditioning refuses it — and the CLI would then log
+// "the receipt did not land" while a perfectly valid receipt sits in KV. The
+// derivation inputs are the receipt's whole content (the proposal is write-once
+// and binds to one package), so a receipt naming a DIFFERENT package derives a
+// different id and is left to create-only conditioning to refuse, which is the
+// arbitration that belongs there.
+func installReceiptEnvelope(actor, proposalID, packageKey, installRequestID string) (*processor.OperationEnvelope, error) {
 	payload, err := json.Marshal(map[string]any{
 		"proposalId":       proposalID,
 		"packageKey":       packageKey,
@@ -617,20 +751,57 @@ func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposa
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
 	proposalKey := "vtx.capabilityproposal." + proposalID
-	env := &processor.OperationEnvelope{
-		RequestID: requestID,
-		Lane:      processor.LaneDefault,
-		// op-name: (submits) closes the two-commit apply-proposal flow — the lattice-pkg CLI submits this after runApplyProposal has installed/upgraded the package through the Apply dispatcher, recording that the review's approved proposal is now materialized.
-		OperationType: "MarkCapabilityProposalApplied",
+	// derived-key: the receipt op's Contract #4 requestId, not a declared read —
+	// nothing is addressed by it, and the DDL never sees it (the Processor tracks
+	// the envelope by it before the script runs). It is derived rather than minted
+	// so a retry of the same close submits the same id and the tracker collapses
+	// it; a minted one would reach .install's create-only conditioning and be
+	// refused, which reads to the caller as "the receipt did not land".
+	requestID := substrate.SHA256NanoID("RecordCapabilityInstallReceipt:" + proposalKey + ":" + packageKey)
+	return capabilityCloseEnvelope(requestID,
+		// op-name: (submits) the lattice-pkg CLI submits this the moment runApplyProposal's Apply dispatcher commits and before the mark-applied close, binding the proposal to the exact install the Processor recorded.
+		"RecordCapabilityInstallReceipt", actor, payload,
+		capabilityCloseReads(proposalKey, packageKey)), nil
+}
+
+// capabilityCloseReads is the exact read set BOTH ops closing an apply declare
+// — the receipt and MarkCapabilityProposalApplied alike, which run the same
+// guards over the same four keys: the proposal's review state and target, and
+// the package root plus its manifest, both of which each op checks live before
+// binding the proposal to that package. Each op hydrates from these keys alone,
+// so a dispatcher declaring a different set fails the whole op on a hydration
+// miss — which is why the set is written once here rather than at each site.
+func capabilityCloseReads(proposalKey, packageKey string) []string {
+	return []string{
+		proposalKey + ".review",
+		proposalKey + ".target",
+		packageKey,
+		packageKey + ".manifest",
+	}
+}
+
+// capabilityCloseEnvelope builds one of the two ops apply-proposal submits after
+// the install commits, on the default lane with the caller's own requestId and
+// declared read set.
+func capabilityCloseEnvelope(requestID, operationType, actor string, payload []byte, reads []string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          processor.LaneDefault,
+		OperationType: operationType,
 		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Payload:       json.RawMessage(payload),
 		// read-posture class (a) — every key is derivable from the payload
 		// alone (script-read-posture-design §13).
-		ContextHint: &processor.ContextHint{Reads: []string{
-			proposalKey + ".review", proposalKey + ".target", packageKey + ".manifest",
-		}},
+		ContextHint: &processor.ContextHint{Reads: reads},
 	}
+}
+
+// publishOpAwaitReply publishes env via JetStream, carrying the reply inbox in
+// a header (mirrors cmd/lattice/output.SubmitOp — a plain NATS Request() would
+// receive only the JetStream publish-ack, since ops.<lane> is consumed by
+// JetStream pull consumers), and waits for the Processor's reply.
+func publishOpAwaitReply(ctx context.Context, conn *substrate.Conn, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
 	envBytes, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("marshal envelope: %w", err)

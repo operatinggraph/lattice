@@ -132,6 +132,7 @@ import (
 //	  .validation  { state, report, deltaPreview, checkedAt }     Record | SubmitCapabilityProposal
 //	  .provenance  { source, model, promptHash, catalogHash, reasonedAt } Record ('ai') | SubmitCapabilityProposal ('operator')
 //	  .review      { state, invalidReason, reviewedAt, appliedAt, appliedByOp }  RecordCapabilityProposal + ReviewCapabilityProposal (appliedAt/appliedByOp remain empty until the apply increment)
+//	  .install     { packageKey, installRequestId, recordedAt }                  RecordCapabilityInstallReceipt (create-only, write-once: the ONE install/upgrade commit that produced this proposal's package)
 //	lnk.capabilityproposal.<id>.requestedBy.<type>.<requesterId>  proposal requestedBy requester
 //	lnk.capabilityproposal.<id>.reviewedBy.<type>.<reviewerId>    proposal reviewedBy reviewer (ReviewCapabilityProposal)
 //
@@ -156,7 +157,7 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "capabilityproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"RequestCapabilityAuthoring", "SubmitCapabilityProposal", "RecordCapabilityProposal", "ReviewCapabilityProposal", "MarkCapabilityProposalApplied"},
+		PermittedCommands: []string{"RequestCapabilityAuthoring", "SubmitCapabilityProposal", "RecordCapabilityProposal", "ReviewCapabilityProposal", "MarkCapabilityProposalApplied", "RecordCapabilityInstallReceipt"},
 		Description: "AI-authored capability proposal DDL — Increment 1 (design §3.1/§3.3): the capture " +
 			"pair for one authoring episode. Vertex shape: vtx.capabilityproposal.<id>, class=capabilityproposal, " +
 			"root data = {} (D5); business data in aspects: .request {requesterId, intent, contextRef} (the " +
@@ -244,9 +245,31 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"install/upgrade committing and this op committing leaves a harmless, recoverable inconsistency " +
 			"(the package is live but the proposal still reads approved) — not a safety gap, since the §5 " +
 			"validation + human-approval invariant already held before either op ran; a redelivered " +
-			"MarkCapabilityProposalApplied is collapsed by the Contract #4 requestId tracker like any other op.",
+			"MarkCapabilityProposalApplied is collapsed by the Contract #4 requestId tracker like any other op. " +
+			"RecordCapabilityInstallReceipt is the provenance receipt that binds a proposal to the install " +
+			"that actually produced its package (capability-proposal-install-receipt-design.md §2): the same " +
+			"operator path submits it immediately AFTER the real F-004 install/upgrade commits and BEFORE " +
+			"MarkCapabilityProposalApplied, recording {packageKey, installRequestId, recordedAt} on the " +
+			"proposal's .install aspect. The binding that carries the weight is packageKey — the key the " +
+			"applying actor SAW its own apply produce; installRequestId is the caller's content-derived " +
+			"requestId for that install op, echoed back on commit and stored verbatim as an audit pointer " +
+			"(it is derived from the install's name+version+content, so two actors installing byte-identical " +
+			"content mint the same value and it proves nothing on its own). It re-runs " +
+			"MarkCapabilityProposalApplied's guards verbatim: only an APPROVED proposal's install may be " +
+			"receipted (InvalidReceiptTransition otherwise), packageKey must be a vtx.package.<NanoID> " +
+			"(InvalidArgument otherwise) naming a LIVE installed package — the vtx.package.<id> root AND its " +
+			".manifest aspect, neither tombstoned, the same two-key liveness the console's own reader applies " +
+			"(UnknownPackage otherwise) — whose recorded name byte-exactly matches THIS proposal's own " +
+			".target.packageName (PackageMismatch otherwise). The aspect is a CREATE and is never updated, so " +
+			"the commit batch's create-only conditioning (Contract #3 §3.2) rejects a second, DIFFERENT receipt " +
+			"for the same proposal wholesale — one proposal binds to exactly one install, permanently, and the " +
+			"binding is written by the party that observed the commit — while a redelivered IDENTICAL " +
+			"submission is collapsed earlier by the Contract #4 requestId tracker. It touches no review.state " +
+			"and stamps nothing on .review: recovery reads the receipt to learn WHICH package this proposal " +
+			"produced, rather than inferring it from a name+version match that any other installer's package " +
+			"satisfies equally well.",
 		Script: capabilityProposalDDLScript,
-		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | SubmitCapabilityProposal{proposalId,kind,content,target,rationale,validation,intent?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields; on a SubmitCapabilityProposal the equivalents ARE top-level fields (a human author has no adapter Detail to unwrap).","properties":` +
+		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | SubmitCapabilityProposal{proposalId,kind,content,target,rationale,validation,intent?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?} | MarkCapabilityProposalApplied{proposalId,packageKey,installRequestId} | RecordCapabilityInstallReceipt{proposalId,packageKey,installRequestId}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields; on a SubmitCapabilityProposal the equivalents ARE top-level fields (a human author has no adapter Detail to unwrap).","properties":` +
 			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring, SubmitCapabilityProposal or ReviewCapabilityProposal — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied."},` +
 			`"intent":{"type":"string","description":"RequestCapabilityAuthoring — the plain-language capability request, e.g. 'a lens listing active providers by specialty'. SubmitCapabilityProposal — optional; the queue's row label, defaulting to the rationale text when omitted."},` +
 			`"kind":{"type":"string","description":"SubmitCapabilityProposal only — the artifact kind: 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL' or 'opMeta'. Any other value records the proposal review.state=invalid (auditable, never a hard reject)."},` +
@@ -259,12 +282,12 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			`"result":{"type":"string","description":"RecordCapabilityProposal only — on status=completed, the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail; required. On status=failed, the adapter's own plain-text failure Detail (e.g. 'capabilityAuthor: the model declined to propose (refusal: <category>)' for a genuine refusal, or an unrelated honest cause otherwise) carried verbatim as BOTH .rationale.text and review.invalidReason — never a hardcoded refusal claim. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL', or 'opMeta'; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
 			`"verdict":{"type":"string","description":"ReviewCapabilityProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary via the fresh validation payload field, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field."},` +
 			`"validation":{"type":"object","description":"ReviewCapabilityProposal (approve verdict only) and SubmitCapabilityProposal — the §5 verdict {state,report?,deltaPreview?} the trusted caller computed by running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (the script has no parser/registry access of its own). state must be exactly 'valid': on an approve a missing/stale verdict fail-closes to invalid, and on a submit the proposal is recorded review.state=invalid. Ignored on a reject verdict."},` +
-			`"packageKey":{"type":"string","description":"MarkCapabilityProposalApplied only — the vtx.package.<id> the caller's separate F-004 Installer.Apply produced (pkgmgr.ApplyResult.PackageKey). Verified live (a .manifest aspect must exist) and its recorded name must match this proposal's own target.packageName before it is recorded as the appliedAs link target."},` +
-			`"installRequestId":{"type":"string","description":"MarkCapabilityProposalApplied only — a caller-supplied audit pointer to the install/upgrade op that applied the artifact (opaque to this DDL). Stored verbatim as appliedByOp."}},` +
+			`"packageKey":{"type":"string","description":"MarkCapabilityProposalApplied and RecordCapabilityInstallReceipt — the vtx.package.<id> the caller's separate F-004 Installer.Apply produced (pkgmgr.ApplyResult.PackageKey). Both ops verify it live (the vtx.package.<id> root AND its .manifest aspect, neither tombstoned) and require the manifest's recorded name to match this proposal's own target.packageName byte-exactly: mark-applied then records it as the appliedAs link target, the receipt as the proposal's permanent .install binding. This key, seen by the actor that ran the apply, is what makes the receipt evidence."},` +
+			`"installRequestId":{"type":"string","description":"MarkCapabilityProposalApplied and RecordCapabilityInstallReceipt — the caller's content-derived requestId for the install/upgrade op that applied the artifact, echoed back on commit; opaque to this DDL and stored verbatim as an audit pointer (appliedByOp on mark-applied, .install.installRequestId on the receipt). It is derived from the install's name, version and content, so two actors installing byte-identical content mint the same value: it is a trace pointer, never proof of which commit ran."}},` +
 			`"required":["proposalId"]}`,
 		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated/reviewed/applied proposal. The recorded review.state (pending|invalid|approved|rejected|applied) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"proposalId":       "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, SubmitCapabilityProposal, ReviewCapabilityProposal, MarkCapabilityProposalApplied).",
+			"proposalId":       "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, SubmitCapabilityProposal, ReviewCapabilityProposal, MarkCapabilityProposalApplied, RecordCapabilityInstallReceipt).",
 			"intent":           "The plain-language capability request (RequestCapabilityAuthoring); the optional queue row label defaulting to the rationale (SubmitCapabilityProposal).",
 			"kind":             "The artifact kind the operator composed: lens, grant, weaverTarget, loomPattern, vertexTypeDDL or opMeta (SubmitCapabilityProposal).",
 			"content":          "The artifact body the operator composed, same shape as the model's result.content for that kind (SubmitCapabilityProposal).",
@@ -275,8 +298,8 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"result":           "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
 			"verdict":          "The operator's verdict on a pending proposal: approve or reject (ReviewCapabilityProposal).",
 			"validation":       "The §5 verdict {state,report?} computed by the caller before submission; must be 'valid' for an approve to succeed (ReviewCapabilityProposal) or for a submitted proposal to enter pending (SubmitCapabilityProposal).",
-			"packageKey":       "The vtx.package.<id> the caller's separate F-004 apply produced; verified live + name-matched against target.packageName before being recorded as the appliedAs link target (MarkCapabilityProposalApplied).",
-			"installRequestId": "A caller-supplied audit pointer to the install/upgrade op that applied the artifact; stored verbatim as appliedByOp (MarkCapabilityProposalApplied).",
+			"packageKey":       "The vtx.package.<id> the caller's separate F-004 apply produced; its root and .manifest must both be live and the manifest's name must match target.packageName byte-exactly before it is recorded as the appliedAs link target (MarkCapabilityProposalApplied) or as the proposal's permanent .install binding (RecordCapabilityInstallReceipt).",
+			"installRequestId": "The caller's content-derived requestId for the install/upgrade op, echoed back on commit and stored verbatim as an audit pointer — appliedByOp (MarkCapabilityProposalApplied), .install.installRequestId (RecordCapabilityInstallReceipt). Byte-identical content at the same name and version mints the same value, so it traces a commit rather than proving one.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -360,6 +383,21 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "review.state: approved → applied; appliedAt + appliedByOp stamped on .review; an appliedAs " +
 					"link from the proposal to vtx.package.aiLensPkgHJKMNPQRST is created. Rejected (InvalidApplyTransition) " +
 					"if the proposal is not currently approved.",
+			},
+			{
+				Name: "RecordCapabilityInstallReceipt — the apply path binds the proposal to the commit it just observed",
+				Payload: map[string]any{
+					"proposalId":       "capPropOneHJKMNPQRST",
+					"packageKey":       "vtx.package.aiLensPkgHJKMNPQRST",
+					"installRequestId": "aiLensInstOpHJKMNPQR",
+				},
+				ExpectedOutcome: "Creates vtx.capabilityproposal.capPropOneHJKMNPQRST.install = {packageKey, installRequestId, " +
+					"recordedAt: op.submittedAt}; review.state is untouched (still approved). installRequestId is whatever the " +
+					"apply's own reply echoed back (pkgmgr.ApplyResult.InstallRequestID), stored verbatim. Rejected " +
+					"InvalidReceiptTransition if the proposal is not currently approved, UnknownPackage if packageKey's root or " +
+					"manifest is absent or tombstoned, PackageMismatch if that manifest's name is not the proposal's own " +
+					"target.packageName. A second, DIFFERENT receipt for the same proposal is rejected wholesale by the " +
+					"create-only conditioning — the binding is write-once.",
 			},
 		},
 	}
@@ -446,9 +484,14 @@ def proposal_string(d, name):
     return v
 
 # proposal_package_name reads target.packageName with the same trim
-# required_string applies to an authored identifier, so a proposal's declared
-# install target folds to the exact spelling Installer.findInstalledPackage
-# and IsPackageInstalled compare against. Every OTHER proposal_string field —
+# required_string applies to an authored identifier. It is a WRITE-time fold,
+# used only where a proposal's target is first recorded: the authored name is
+# normalized once, on the way in, so that every later comparison can stay
+# byte-exact. Installer.findInstalledPackage does NOT fold — its own doc
+# comment forbids adding a resolving fold there, because widening the match
+# set widens what an install, upgrade or uninstall would mutate — so a reader
+# that folds at match time is looser than the installer it claims to mirror.
+# Do not reach for this helper on a read path. Every OTHER proposal_string field —
 # target.mode, validation.state chief among them — is a fail-closed gate
 # tested against a literal expected value (e.g. "valid", "newPackage") and
 # must keep rejecting a value that carries stray whitespace; only the
@@ -891,6 +934,19 @@ def execute(state, op):
         if td != None and "packageName" in td:
             target_package_name = td["packageName"]
 
+        # Both halves of the comparison below are byte-exact, matching
+        # Installer.findInstalledPackage: a package name is a destructive
+        # resolution target, so a near-miss spelling must refuse rather than
+        # resolve. The two .target writers (SubmitCapabilityProposal,
+        # RecordCapabilityProposal) already fold the authored name on the way
+        # in, and Definition.validatePackageName refuses a non-normalized Name
+        # at install time, so a live package and a stored target that differ
+        # only by whitespace is not a reachable state.
+        # read-posture: (a) declared in contextHint.reads by the cmd/lattice-pkg
+        # submitMarkApplied dispatcher (see the .review note above)
+        package_doc = kv.Read(package_key)
+        if not alive(package_doc):
+            fail("UnknownPackage: " + package_key + " is not a live installed package")
         # read-posture: (a) declared in contextHint.reads by the cmd/lattice-pkg
         # submitMarkApplied dispatcher (see the .review note above)
         manifest_doc = kv.Read(package_key + ".manifest")
@@ -918,6 +974,100 @@ def execute(state, op):
         ]
         events = [
             {"class": "capabilityAuthor.proposalApplied",
+             "data": {"proposalKey": proposal_key, "packageKey": package_key, "installRequestId": install_request_id}},
+        ]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
+
+    if ot == "RecordCapabilityInstallReceipt":
+        # The provenance receipt (capability-proposal-install-receipt-design.md
+        # §2): the apply path submits this immediately after the real F-004
+        # install/upgrade commits and before MarkCapabilityProposalApplied, so
+        # the proposal names the package key its OWN apply wrote. Recovery then
+        # reads that key directly instead of inferring it from a name+version
+        # match, which any other installer's package satisfies equally well.
+        # The binding's strength is the packageKey, observed by the actor that
+        # ran the apply; installRequestId rides along as an audit pointer.
+        #
+        # The .install aspect is a CREATE and is never updated. That is the
+        # whole write-once mechanism: the commit batch's create-only
+        # conditioning (Contract #3 §3.2) rejects a second, DIFFERENT receipt
+        # for the same proposal wholesale, so one proposal binds to exactly one
+        # install, permanently — one deterministic key, one writer. A
+        # redelivered IDENTICAL submission never reaches here at all; the
+        # Contract #4 requestId tracker collapses it first. There is
+        # deliberately no read-before-create branch, and .install is NOT among
+        # the declared reads.
+        proposal_id = required_bare_id(p, "proposalId")
+        proposal_key = "vtx.capabilityproposal." + proposal_id
+        package_key = required_string(p, "packageKey")
+        install_request_id = required_string(p, "installRequestId")
+
+        # Only the type segment is load-bearing here: the receipt stores the
+        # whole packageKey, so unlike the appliedAs link there is no id segment
+        # to splice into a key of this op's own.
+        package_type, _ = parts_of(package_key, "packageKey", "")
+        if package_type != "package":
+            fail("InvalidArgument: packageKey: required vtx.package.<NanoID>; got " + package_key)
+
+        # read-posture: (a) declared in contextHint.reads by the cmd/loupe
+        # reviewCapabilityApply and cmd/lattice-pkg applyProposal dispatchers
+        review_doc = kv.Read(proposal_key + ".review")
+        if not alive(review_doc):
+            fail("UnknownCapabilityProposal: no recorded review for " + proposal_key)
+        rd = review_doc.data
+        cur_state = ""
+        if rd != None and "state" in rd:
+            cur_state = rd["state"]
+        if cur_state != "approved":
+            fail("InvalidReceiptTransition: proposal " + proposal_key + " is '" + cur_state + "', only an approved proposal's install may be receipted")
+
+        # packageKey is caller-supplied — never trust it blind. Bind it to a
+        # LIVE installed package — both the vtx.package.<id> root AND its
+        # .manifest aspect, the same two-key liveness cmd/loupe's own
+        # livePackageNamed reader checks, so the write gate is never looser
+        # than the read gate — AND cross-check that package's own recorded name
+        # against THIS proposal's own .target.packageName, the same cross-check
+        # MarkCapabilityProposalApplied runs: a syntactically valid but
+        # nonexistent, tombstoned or unrelated packageKey must never become the
+        # proposal's permanent binding.
+        # read-posture: (a) declared in contextHint.reads by the cmd/loupe
+        # reviewCapabilityApply and cmd/lattice-pkg applyProposal dispatchers
+        target_doc = kv.Read(proposal_key + ".target")
+        if not alive(target_doc):
+            fail("UnknownCapabilityProposal: no recorded target for " + proposal_key)
+        td = target_doc.data
+        target_package_name = ""
+        if td != None and "packageName" in td:
+            target_package_name = td["packageName"]
+
+        # read-posture: (a) declared in contextHint.reads by the cmd/loupe
+        # reviewCapabilityApply and cmd/lattice-pkg applyProposal dispatchers
+        package_doc = kv.Read(package_key)
+        if not alive(package_doc):
+            fail("UnknownPackage: " + package_key + " is not a live installed package")
+        # read-posture: (a) declared in contextHint.reads by the cmd/loupe
+        # reviewCapabilityApply and cmd/lattice-pkg applyProposal dispatchers
+        manifest_doc = kv.Read(package_key + ".manifest")
+        if not alive(manifest_doc):
+            fail("UnknownPackage: " + package_key + " is not a live installed package")
+        md = manifest_doc.data
+        manifest_package_name = ""
+        if md != None and "name" in md:
+            manifest_package_name = md["name"]
+
+        # Byte-exact, matching Installer.findInstalledPackage: a package name
+        # resolves a destructive target, so a near-miss spelling refuses rather
+        # than resolves.
+        if manifest_package_name == "" or manifest_package_name != target_package_name:
+            fail("PackageMismatch: " + package_key + " (installed name '" + manifest_package_name + "') does not match proposal " + proposal_key + "'s target.packageName '" + target_package_name + "'")
+
+        mutations = [
+            make_aspect(proposal_key, "install", "capabilityAuthor.install",
+                        {"packageKey": package_key, "installRequestId": install_request_id,
+                         "recordedAt": op.submittedAt}),
+        ]
+        events = [
+            {"class": "capabilityAuthor.installReceipted",
              "data": {"proposalKey": proposal_key, "packageKey": package_key, "installRequestId": install_request_id}},
         ]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
