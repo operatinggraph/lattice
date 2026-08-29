@@ -380,12 +380,14 @@
     </div>
   </div>
 
-  <!-- Set appointment site modal (SetAppointmentSite — fills a missing site; a
-       staffer or the appointment's own bound provider only, never a patient) -->
+  <!-- Set site modal (SetAppointmentSite / SetVisitSeriesSite — fills a missing
+       site on an appointment or a recurring visit series; a staffer or the
+       entity's own bound provider only, never a patient). Title + context text
+       are set at open-time in app.js (openSetSiteFor). -->
   <div id="set-site-overlay" class="overlay" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="set-site-title">
-      <h2 id="set-site-title">Set appointment site</h2>
-      <p class="lead" id="set-site-context">Pick the clinic site this appointment is at.</p>
+      <h2 id="set-site-title">Set site</h2>
+      <p class="lead" id="set-site-context">Pick the clinic site this is at.</p>
       <form id="set-site-form">
         <div class="field">
           <label for="ss-site">Site</label>

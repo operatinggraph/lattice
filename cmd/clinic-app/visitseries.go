@@ -26,6 +26,8 @@ type protectedVisitSeriesRow struct {
 	IntervalDays      int     `json:"intervalDays"`
 	NextDueAt         string  `json:"nextDueAt"`
 	OccurrenceCount   int     `json:"occurrenceCount"`
+	SiteKey           *string `json:"siteKey,omitempty"`
+	SiteName          *string `json:"siteName,omitempty"`
 	SeriesStatus      string  `json:"seriesStatus"`
 }
 
@@ -43,6 +45,7 @@ type protectedVisitSeriesRow struct {
 const selectMyVisitSeriesSQL = `
 SELECT entity_key, patient_key, COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        COALESCE(interval_days, 0), COALESCE(next_due_at, ''), COALESCE(occurrence_count, 0),
+       site_key, site_name,
        COALESCE(series_status, 'ended')
 FROM read_visit_series
 ORDER BY next_due_at, entity_key`
@@ -78,7 +81,9 @@ func queryMyVisitSeries(ctx context.Context, pool pgxBeginner, actorID string) (
 		var row protectedVisitSeriesRow
 		if err := rows.Scan(
 			&row.EntityKey, &row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
-			&row.IntervalDays, &row.NextDueAt, &row.OccurrenceCount, &row.SeriesStatus,
+			&row.IntervalDays, &row.NextDueAt, &row.OccurrenceCount,
+			&row.SiteKey, &row.SiteName,
+			&row.SeriesStatus,
 		); err != nil {
 			return nil, err
 		}

@@ -3177,6 +3177,10 @@ function renderSeriesCard(s) {
     : s.seriesStatus === "paused" ? "Paused"
     : "Ended";
 
+  const site = document.createElement("div");
+  site.className = "meta";
+  site.textContent = s.siteName ? "📍 " + s.siteName : "";
+
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
@@ -3199,12 +3203,25 @@ function renderSeriesCard(s) {
   book.textContent = "Book";
   book.addEventListener("click", () => bookSeriesOccurrence(s));
   btns.append(book);
+  // Missing-site correction (SetVisitSeriesSite) — front-desk staff only
+  // (this is the clinic-wide worklist card, not renderMySeriesCard's
+  // provider/patient self-service one). Only offered when the series
+  // carries no site at all; the op has no reassignment path, so once set
+  // this never reappears.
+  if (!s.siteKey) {
+    const setSite = document.createElement("button");
+    setSite.className = "ghost";
+    setSite.textContent = "Set site";
+    setSite.addEventListener("click", () => openSetSiteFor(s, "series", loadSeries));
+    btns.append(setSite);
+  }
   actions.append(btns);
 
   card.append(title);
   if (sub.textContent) card.append(sub);
   card.append(cadence);
   card.append(due);
+  if (site.textContent) card.append(site);
   card.append(actions);
   return card;
 }
@@ -4269,20 +4286,31 @@ async function submitReschedule(ev) {
   }
 }
 
-// ---- Set appointment site (SetAppointmentSite — fills a missing site; a
-// staffer or the appointment's own bound provider only). The picker offers
-// only the sites this appointment's OWN provider practicesAt — hard-validated
-// server-side either way (require_site_membership), same shape as the Book
-// form's site filter. No reassignment: the op no-ops on an appointment that
-// already carries a site, so the "Set site" button only ever appears when
-// a.siteName is absent. ----
+// ---- Set site (SetAppointmentSite / SetVisitSeriesSite — fills a missing
+// site; a staffer or the entity's own bound provider only). The same modal
+// serves both an appointment and a recurring visit series, distinguished by
+// state.settingSiteKind: the picker offers only the sites the entity's OWN
+// provider practicesAt — hard-validated server-side either way
+// (require_site_membership / SetVisitSeriesSite's own sites_for_provider
+// whitelist), same shape as the Book form's site filter. No reassignment:
+// both ops no-op on an entity that already carries a site, so the "Set site"
+// button only ever appears when the display column is absent. ----
 
-function openSetSite(a, onDone) {
-  state.settingSite = a;
+function openSetSiteFor(entity, kind, onDone) {
+  state.settingSite = entity;
+  state.settingSiteKind = kind;
   state.settingSiteOnDone = onDone || loadAppts;
-  const who = a.providerName || shortKey(a.providerKey);
-  $("#set-site-context").textContent = `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
-  const sites = state.providerSites.filter((ps) => ps.providerKey === a.providerKey);
+  if (kind === "series") {
+    const who = entity.patientName || shortKey(entity.patientKey);
+    $("#set-site-title").textContent = "Set visit series site";
+    $("#set-site-context").textContent =
+      who + " · Every " + entity.intervalDays + " day" + (entity.intervalDays === 1 ? "" : "s");
+  } else {
+    const who = entity.providerName || shortKey(entity.providerKey);
+    $("#set-site-title").textContent = "Set appointment site";
+    $("#set-site-context").textContent = `${who} · ${fmtWhen(entity.startsAt, entity.endsAt)}`;
+  }
+  const sites = state.providerSites.filter((ps) => ps.providerKey === entity.providerKey);
   const sel = $("#ss-site");
   sel.innerHTML = "";
   for (const ps of sites) {
@@ -4297,16 +4325,22 @@ function openSetSite(a, onDone) {
   if (sites.length > 0) sel.focus();
 }
 
+function openSetSite(a, onDone) {
+  openSetSiteFor(a, "appointment", onDone);
+}
+
 function closeSetSite() {
   $("#set-site-overlay").hidden = true;
   state.settingSite = null;
+  state.settingSiteKind = null;
   state.settingSiteOnDone = null;
 }
 
 async function submitSetSite(ev) {
   ev.preventDefault();
-  const a = state.settingSite;
-  if (!a) {
+  const entity = state.settingSite;
+  const kind = state.settingSiteKind;
+  if (!entity) {
     closeSetSite();
     return;
   }
@@ -4320,17 +4354,27 @@ async function submitSetSite(ev) {
   const submit = $("#set-site-submit");
   submit.disabled = true;
   try {
-    // read-posture (d): both require_site_membership reads are declared
-    // optionalReads, mirroring submitBook's own site-membership declaration —
-    // the site is a hard requirement once supplied, but the READ of it is
-    // still on-demand, never a required contextHint.reads entry.
-    const reply = await submitOp(
-      "SetAppointmentSite",
-      "appointment",
-      { appointmentKey: a.appointmentKey, site },
-      [a.appointmentKey],
-      { optionalReads: [site, practicesAtLinkKey(a.providerKey, site)] },
-    );
+    // read-posture (d): both require_site_membership / sites_for_provider
+    // reads are declared optionalReads, mirroring submitBook's own
+    // site-membership declaration — the site is a hard requirement once
+    // supplied, but the READ of it is still on-demand, never a required
+    // contextHint.reads entry.
+    const reply =
+      kind === "series"
+        ? await submitOp(
+            "SetVisitSeriesSite",
+            "visitseries",
+            { seriesKey: entity.entityKey, site },
+            [entity.entityKey],
+            { optionalReads: [site, practicesAtLinkKey(entity.providerKey, site)] },
+          )
+        : await submitOp(
+            "SetAppointmentSite",
+            "appointment",
+            { appointmentKey: entity.appointmentKey, site },
+            [entity.appointmentKey],
+            { optionalReads: [site, practicesAtLinkKey(entity.providerKey, site)] },
+          );
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not set site — " + friendlyBookingRejection(msg), "err");

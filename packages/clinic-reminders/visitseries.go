@@ -1176,6 +1176,8 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 			{Name: "interval_days", Type: "integer"},
 			{Name: "next_due_at", Type: "text"},
 			{Name: "occurrence_count", Type: "integer"},
+			{Name: "site_key", Type: "text"},
+			{Name: "site_name", Type: "text"},
 			{Name: "series_status", Type: "text"},
 			{Name: "series_endable", Type: "boolean"},
 		},
@@ -1219,6 +1221,7 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 const visitSeriesReadSpec = `MATCH (s:visitseries)
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (s)-[:atSite]->(site:building)
 OPTIONAL MATCH (p)-[:identifiedBy]->(pid:identity)
 RETURN
   nanoIdFromKey(s.key)          AS series_id,
@@ -1232,6 +1235,8 @@ RETURN
   s.series.data.intervalDays    AS interval_days,
   s.progress.data.nextDueAt     AS next_due_at,
   s.progress.data.occurrenceCount AS occurrence_count,
+  site.key                      AS site_key,
+  site.site.data.name           AS site_name,
   CASE
     WHEN (s.paused.data.value <> true) AND (s.series.data.activeUntil <> null) AND (s.progress.data.nextDueAt > s.series.data.activeUntil) THEN "ended"
     WHEN (s.paused.data.value <> true) THEN "active"

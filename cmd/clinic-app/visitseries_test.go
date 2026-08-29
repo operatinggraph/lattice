@@ -30,6 +30,8 @@ var visitSeriesColumns = []adapter.ColumnDef{
 	{Name: "interval_days", Type: "integer"},
 	{Name: "next_due_at", Type: "text"},
 	{Name: "occurrence_count", Type: "integer"},
+	{Name: "site_key", Type: "text"},
+	{Name: "site_name", Type: "text"},
 	{Name: "series_status", Type: "text"},
 }
 

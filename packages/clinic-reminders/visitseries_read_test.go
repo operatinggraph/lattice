@@ -67,6 +67,7 @@ func TestVisitSeriesRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, float64(30), v["interval_days"])
 	require.Equal(t, "2026-08-01T09:00:00Z", v["next_due_at"])
 	require.Equal(t, float64(2), v["occurrence_count"])
+	require.Nil(t, v["site_key"], "no atSite link on this fixture's series")
 	require.Equal(t, "active", v["series_status"])
 
 	anchors, ok := v["authz_anchors"].([]any)
@@ -376,6 +377,7 @@ func TestVisitSeriesRead_TombstonedProviderFallsBackToAtSiteAnchor(t *testing.T)
 	require.Len(t, rows, 1, "a tombstoned provider costs the row visibility, never existence")
 	v := rows[0].Values
 	require.Nil(t, v["provider_key"], "the tombstoned provider is filtered out of the walk, so its display columns are null")
+	require.Equal(t, "vtx.building."+f.ids["riverside"], v["site_key"], "the series' own site is unaffected by the provider's status")
 
 	anchors, ok := v["authz_anchors"].([]any)
 	require.True(t, ok, "authz_anchors must project as a list")
@@ -425,7 +427,9 @@ func TestVisitSeriesRead_LiveProviderAtSiteIsNotUnioned(t *testing.T) {
 
 	rows := f.project(t, visitSeriesReadSpec)
 	require.Len(t, rows, 1)
-	anchors, ok := rows[0].Values["authz_anchors"].([]any)
+	v := rows[0].Values
+	require.Equal(t, "vtx.building."+f.ids["riverside"], v["site_key"], "the display column still reports where the series is held")
+	anchors, ok := v["authz_anchors"].([]any)
 	require.True(t, ok)
 	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
 		"a live provider anchors the row on every building it practises at")
