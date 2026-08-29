@@ -42,41 +42,69 @@ type healthIssue struct {
 	Since    string `json:"since"`
 }
 
-// runningInstanceCounter reports how many loom-state instance.<id> entries are
-// status=running, scanned on a heartbeat cadence (never per-message).
+// countDeadlineDivisor and countDeadlineCap bound a single running-instance
+// count call to a fraction of the heartbeat interval (countDeadline below).
+// The count must finish (or fail) well inside one tick: the health document it
+// feeds carries a TTL of interval × ttlMultiplier, and a count that ran to the
+// full interval would leave emit no margin to still write before the NEXT
+// tick, let alone the TTL. Halving the interval leaves the rest of the tick
+// free for the KVPutWithTTL emit itself; the cap keeps a large configured
+// interval (e.g. minutes) from letting one stalled list run that long — 5s is
+// generous for a server-side prefix list that lists keys only, no bodies.
+const (
+	countDeadlineDivisor = 2
+	countDeadlineCap     = 5 * time.Second
+)
+
+// countDeadline derives the per-call deadline for runningInstanceCounter.count
+// from the heartbeat interval: interval/countDeadlineDivisor, capped at
+// countDeadlineCap. A non-positive interval (should not happen in production —
+// newHeartbeater defaults it — but reachable from a directly-constructed
+// counter) also resolves to the cap rather than a zero/negative deadline.
+func countDeadline(interval time.Duration) time.Duration {
+	d := interval / countDeadlineDivisor
+	if d <= 0 || d > countDeadlineCap {
+		d = countDeadlineCap
+	}
+	return d
+}
+
+// runningInstanceReader is the narrow substrate.Conn surface
+// runningInstanceCounter needs. Deliberately just the one list method: count
+// no longer reads any instance body, so typing the field to this interface
+// (rather than *substrate.Conn) makes a body fetch from this path a compile
+// error, not just an absent one — a test fake needs to implement only
+// KVListKeysPrefix to stand in for *substrate.Conn here.
+type runningInstanceReader interface {
+	KVListKeysPrefix(ctx context.Context, bucket, prefix string) ([]string, error)
+}
+
+// runningInstanceCounter reports the number of currently-running loom-state
+// instances by counting instance.<id>.pattern pin keys, not instance records.
+// The pin is written in the same AtomicBatch that creates instance.<id> and
+// deleted only in the terminal batch (state.go's isPatternPinKey / transition
+// doc comments), so the pin-key set IS the running-instance set — no record
+// body is ever fetched, so the NATS matched-subject fast-path gate (~1,024
+// keys, substrate/kv_multi.go) is unreachable on this path. Each call runs
+// under countDeadline(interval): KVListKeysPrefix surfaces a context expiry as
+// an error (substrate/kv.go), never a silent partial count, and emit already
+// treats a count error as "omit the metric, warn-log" rather than blocking.
 type runningInstanceCounter struct {
-	conn   *substrate.Conn
-	bucket string
-	logger *slog.Logger
+	conn     runningInstanceReader
+	bucket   string
+	interval time.Duration
 }
 
 func (r *runningInstanceCounter) count(ctx context.Context) (int, error) {
-	keys, err := r.conn.KVListKeys(ctx, r.bucket)
+	ctx, cancel := context.WithTimeout(ctx, countDeadline(r.interval))
+	defer cancel()
+	keys, err := r.conn.KVListKeysPrefix(ctx, r.bucket, instancePrefix)
 	if err != nil {
-		return 0, err
-	}
-	var recordKeys []string
-	for _, k := range keys {
-		if isInstanceRecordKey(k) {
-			recordKeys = append(recordKeys, k)
-		}
-	}
-	entries, err := r.conn.KVGetMulti(ctx, r.bucket, recordKeys)
-	if err != nil {
-		r.logger.Warn("loom heartbeat: instance get-multi failed", "count", len(recordKeys), "err", err)
 		return 0, err
 	}
 	running := 0
-	for _, k := range recordKeys {
-		entry, present := entries[k]
-		if !present {
-			continue
-		}
-		var inst Instance
-		if err := json.Unmarshal(entry.Value, &inst); err != nil {
-			continue
-		}
-		if inst.Status == StatusRunning {
+	for _, k := range keys {
+		if isPatternPinKey(k) {
 			running++
 		}
 	}
@@ -100,13 +128,6 @@ type heartbeater struct {
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL.
 	ttlMultiplier int
 
-	// staticIssues are startup-resolved conditions that hold for the whole life
-	// of the process (today: terminal-instance pruning disabled by the retention
-	// gate). Each is stamped with the moment it was resolved and re-emitted
-	// unchanged on every tick — nothing at runtime can clear one, so unlike the
-	// consumer-state issues they are not rebuilt per tick.
-	staticIssues []healthIssue
-
 	// pausedSince tracks each pausedStructural consumer's first-arose
 	// timestamp (Contract #5 §5.5), since the ConsumerPaused issue is built
 	// inline from live consumer state. Owned solely by emit (single heartbeat
@@ -129,7 +150,7 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance st
 		startedAt:     time.Now(),
 		interval:      every,
 		states:        states,
-		counter:       &runningInstanceCounter{conn: conn, bucket: stateBucket, logger: logger},
+		counter:       &runningInstanceCounter{conn: conn, bucket: stateBucket, interval: every},
 		logger:        logger,
 		ttlMultiplier: healthkv.DefaultTTLMultiplier,
 		pausedSince:   make(map[string]string),
@@ -145,13 +166,6 @@ func (h *heartbeater) SetTTLMultiplier(n int) {
 		n = 0
 	}
 	h.ttlMultiplier = n
-}
-
-// addStaticIssue registers a startup-resolved issue carried on every heartbeat
-// from now on. Must be called before run starts (the emit goroutine reads the
-// slice without a lock).
-func (h *heartbeater) addStaticIssue(issue healthIssue) {
-	h.staticIssues = append(h.staticIssues, issue)
 }
 
 // heartbeatTTL derives the current TTL from interval × ttlMultiplier
@@ -192,7 +206,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		h.logger.Warn("loom heartbeat: running-instance scan failed", "err", err)
 	}
 
-	issues := append(h.pausedIssues(states, now), h.staticIssues...)
+	issues := h.pausedIssues(states, now)
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Message < issues[j].Message })
 
 	doc := loomHealthDoc{

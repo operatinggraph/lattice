@@ -67,16 +67,6 @@ type Config struct {
 	// off-stream failed/rejected backstop, §10.6). Must be >= 1s (NATS per-key
 	// TTL floor). Default 60s.
 	StepTimeout time.Duration
-	// InstanceRetention is how long a TERMINAL instance.<id> cursor record is
-	// kept in loom-state before NATS expires it, bounding the bucket's growth at
-	// one retention window of throughput instead of forever. It is only applied
-	// when it strictly exceeds the events stream's configured MaxAge — the
-	// cursor's presence is Contract #10 §10.9's redelivery-dedup guard, so it
-	// must outlive every patternStarted event that could still be replayed
-	// against it (Engine.Start's retention gate; a window that does not clear
-	// MaxAge disables pruning and raises a health issue). Must be >= 1s (NATS
-	// per-key TTL floor). Default 8 days.
-	InstanceRetention time.Duration
 	// CreateTaskTimeout is the bounded creation-deadline a userTask or
 	// externalTask step arms while it waits for its dispatch op to commit — a
 	// userTask's CreateTask, or an externalTask's instanceOp (the §10.6
@@ -164,15 +154,6 @@ func (c *Config) withDefaults() {
 		// so a sub-second deadline would not arm a marker and the off-stream
 		// failed terminal would never fire. Clamp up rather than silently degrade.
 		c.StepTimeout = time.Second
-	}
-	if c.InstanceRetention <= 0 {
-		c.InstanceRetention = 8 * 24 * time.Hour
-	}
-	if c.InstanceRetention < time.Second {
-		// NATS per-key TTL floor: loom-state is provisioned LimitMarkerTTL >= 1s,
-		// so a sub-second retention would not stamp an expiry and the terminal
-		// cursor would never be pruned. Clamp up rather than silently degrade.
-		c.InstanceRetention = time.Second
 	}
 	if c.CreateTaskTimeout <= 0 {
 		c.CreateTaskTimeout = 60 * time.Second
@@ -272,11 +253,6 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 		}
 	}()
 
-	// Resolved before any consumer attaches, so the value the state store reads
-	// from its handler goroutines is written by this goroutine first.
-	retention, retentionIssue := e.resolveInstanceRetention(ctx)
-	e.state.instanceRetention = retention
-
 	for _, spec := range []substrate.ConsumerSpec{e.triggerSpec(), e.relaySpec(), e.deadlineSpec()} {
 		if err := e.supervisor.Add(ctx, spec); err != nil {
 			return fmt.Errorf("loom: add %s consumer: %w", spec.Name, err)
@@ -284,9 +260,6 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	}
 
 	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.LoomStateBucket, e.cfg.Instance, e.cfg.HeartbeatEvery, e.states, e.logger)
-	if retentionIssue != nil {
-		hb.addStaticIssue(*retentionIssue)
-	}
 	go hb.run(ctx)
 
 	e.source.setLoadCallback(func(p *Pattern) { e.reconcileConsumers() })
@@ -307,61 +280,6 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	<-ctx.Done()
 	e.supervisor.Stop()
 	return nil
-}
-
-// instanceRetentionDisabledCode is the Contract #5 §5.2 issue code Loom raises
-// while terminal-instance pruning is off: the retention window does not provably
-// outlive the events stream's replay horizon, so terminal cursors are kept
-// forever and loom-state grows without bound. Stable across the reasons pruning
-// can be off (the window is too short, the stream keeps events forever, or the
-// stream's config could not be read) — the operator's question is the same one
-// in every case.
-const instanceRetentionDisabledCode = "InstanceRetentionPruningDisabled"
-
-// resolveInstanceRetention decides whether terminal instance.<id> cursors may
-// carry a retention TTL, returning the effective window (zero = pruning off) and
-// the health issue to publish for as long as it is off.
-//
-// Pruning is safe only while the window strictly exceeds the events stream's
-// configured MaxAge. The trigger consumer is DeliverAll, so a rebuilt
-// loom-trigger replays every patternStarted the stream still holds, and the
-// cursor's presence is the only thing that stops those replays from re-running
-// historical patterns (Contract #10 §10.9). A cursor that outlives the oldest
-// replayable event still answers every redelivery; one that does not would let
-// a replayed trigger create a fresh instance and re-execute committed side
-// effects.
-//
-// So it fails closed in all three ways it can fail: an unlimited stream (MaxAge
-// zero — no window is ever large enough), a window that does not clear MaxAge,
-// and a stream whose config cannot be read at all (never assume the margin).
-// Unbounded growth is a capacity problem the operator can see and fix; a
-// re-run flow is not recoverable.
-func (e *Engine) resolveInstanceRetention(ctx context.Context) (time.Duration, *healthIssue) {
-	off := func(reason string) (time.Duration, *healthIssue) {
-		e.logger.Error("loom: terminal-instance pruning disabled; loom-state grows unbounded",
-			"reason", reason, "instanceRetention", e.cfg.InstanceRetention, "eventsStream", e.cfg.EventsStream)
-		return 0, &healthIssue{
-			Severity: "warning",
-			Code:     instanceRetentionDisabledCode,
-			Message:  "terminal instance records are retained forever: " + reason,
-			Since:    substrate.FormatTimestamp(time.Now()),
-		}
-	}
-	stream, err := e.conn.JetStream().Stream(ctx, e.cfg.EventsStream)
-	if err != nil {
-		return off(fmt.Sprintf("cannot read stream %q config to verify the retention window clears its MaxAge: %v",
-			e.cfg.EventsStream, err))
-	}
-	maxAge := stream.CachedInfo().Config.MaxAge
-	if maxAge <= 0 {
-		return off(fmt.Sprintf("stream %q retains events with no age limit, so no retention window can outlive a replay",
-			e.cfg.EventsStream))
-	}
-	if e.cfg.InstanceRetention <= maxAge {
-		return off(fmt.Sprintf("retention %s does not exceed stream %q MaxAge %s, so a replayed patternStarted could re-run a pruned instance",
-			e.cfg.InstanceRetention, e.cfg.EventsStream, maxAge))
-	}
-	return e.cfg.InstanceRetention, nil
 }
 
 // supervisedHandler adapts an existing Decision-returning handler to the

@@ -69,7 +69,7 @@ Two kinds of actor read this file; know which one you are.
 
 ## Tests & Determinism
 Never use fixed `time.Sleep` for synchronization in tests — use deterministic sync (channels, polling with condition, WaitGroup). 
-Use valid 20-char NanoIDs with limited alphabet (see `internal/substrate/nanoid.go`) in seed data.
+Use valid 20-char NanoIDs with limited alphabet (see `internal/substrate/keys/nanoid.go`) in seed data.
 
 - **Embedded NATS fixtures come from `internal/natsfixture`** — `natsfixture.Server(t)` / `natsfixture.StartServer(t)`.
   Never hand-roll `natsserver.NewServer` + `nats.Connect` in a test (`lint-conventions` blocks it): a bare

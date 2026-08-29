@@ -43,14 +43,24 @@ func instanceKey(instanceID string) string { return instancePrefix + instanceID 
 // isInstanceRecordKey reports whether k is an instance.<id> cursor record (not an
 // instance.<id>.pattern pin sub-key). The instanceId is a NanoID (dot-free by
 // construction), so a key under the instance. prefix whose remainder contains a
-// '.' is a sub-key (the .pattern pin), never an instance record. Shared by every
-// instance.* scan (the heartbeat counter and the control-plane list) so the
-// filter discipline cannot diverge across copies.
+// '.' is a sub-key (the .pattern pin), never an instance record. Used by
+// listInstances, the control-plane's instance.* scan.
 func isInstanceRecordKey(k string) bool {
 	if !strings.HasPrefix(k, instancePrefix) {
 		return false
 	}
 	return !strings.ContainsRune(k[len(instancePrefix):], '.')
+}
+
+// isPatternPinKey reports whether k is an instance.<id>.pattern pin sub-key —
+// the counterpart of isInstanceRecordKey, kept beside it so the two filters
+// over the instance.* keyspace cannot drift apart. The pin is written in the
+// same AtomicBatch that creates instance.<id> and deleted only in the
+// terminal batch (transition, pinnedDomains' own doc comment), so the set of
+// keys this reports true for is exactly the set of running instances —
+// runningInstanceCounter (health.go) counts them directly, with no body read.
+func isPatternPinKey(k string) bool {
+	return strings.HasPrefix(k, instancePrefix) && strings.HasSuffix(k, patternPinSuffix)
 }
 
 func patternPinKey(instanceID string) string {
@@ -138,12 +148,6 @@ type deadlineMark struct {
 type stateStore struct {
 	conn   *substrate.Conn
 	bucket string
-	// instanceRetention is the per-key TTL stamped on a terminal instance.<id>
-	// cursor record, bounding loom-state's growth (see transition). Zero means
-	// pruning is off and terminal records are kept forever. Resolved once at
-	// engine start (Engine.resolveInstanceRetention) before any handler
-	// goroutine exists, and never written again.
-	instanceRetention time.Duration
 }
 
 func newStateStore(conn *substrate.Conn, bucket string) *stateStore {
@@ -182,8 +186,7 @@ func (s *stateStore) getInstanceAtRevision(ctx context.Context, instanceID strin
 // absent from the response (deleted between the list and the batched read) is
 // skipped, and a per-key unmarshal failure SKIPS that record (logged) rather
 // than failing the whole list — one poisoned record must not blind the
-// operator to every other instance (mirrors the heartbeat counter's
-// skip-on-unmarshal-error posture). A genuine KVGetMulti failure, in
+// operator to every other instance. A genuine KVGetMulti failure, in
 // contrast, fails the whole call: unlike a single poisoned record, it means
 // this read cannot answer for ANY instance, so returning a partial or empty
 // list would be silently wrong rather than degraded — the same fail-closed
@@ -257,19 +260,13 @@ func (s *stateStore) resolveToken(ctx context.Context, token string) (instanceID
 // pin is an invariant break, never a fallback case. No token is written yet —
 // step 0's submission write-aheads its token via transition.
 //
-// The pin's CreateOnly is deliberately NOT relaxed the way redrive's is, and
-// the asymmetry is the point. A terminal batch DELETES the pin, and that DEL
-// marker is permanent, so once an instanceId has reached terminal its pin
-// subject can never accept a CreateOnly write again. For redrive — an operator
-// acting on an instance they can see — that is a bug, and its guard moved to a
-// CAS on the cursor. Here it is a second line of defence: it means a trigger
-// replayed for an id whose cursor has already been pruned fails LOUDLY (a
-// rejected batch) instead of quietly creating a fresh instance and re-running a
-// flow whose side effects already committed. The retention gate
-// (Engine.resolveInstanceRetention) is what makes that replay unreachable in
-// the first place; this is what the system does if that reasoning is ever
-// wrong. Unbounded growth is a capacity problem, a re-run flow is not
-// recoverable, so the create path fails closed.
+// The pin keeps its CreateOnly write even though redrive's cannot. The two are
+// not the same situation: a terminal batch deletes the pin and that DEL marker
+// is permanent, so the subject never accepts a CreateOnly write again. Redrive
+// must succeed against exactly that state, so its guard moved to a CAS on the
+// cursor. createInstance runs only when no cursor exists at all, which for a
+// live instanceId means it never ran — so the pin subject is genuinely empty
+// and CreateOnly is both correct and the tighter guard.
 func (s *stateStore) createInstance(ctx context.Context, inst *Instance, pattern *Pattern) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
@@ -336,7 +333,7 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 	}
 	var pinKeys []string
 	for _, k := range keys {
-		if strings.HasPrefix(k, instancePrefix) && strings.HasSuffix(k, patternPinSuffix) {
+		if isPatternPinKey(k) {
 			pinKeys = append(pinKeys, k)
 		}
 	}
@@ -378,23 +375,12 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 //   - deadlineTTL > 0 arms (PUT, fresh TTL) deadline.<instanceId> (re-arm on
 //     each step); deadlineTTL <= 0 deletes it (terminal).
 //   - inst.Status != running (terminal) also deletes the instance's pattern pin
-//     (instance.<id>.pattern) in the same batch, and stamps the cursor record
-//     with the retention TTL (see below).
-//
-// A terminal cursor record expires after instanceRetention so loom-state holds
-// one retention window of instances rather than every instance ever run. Two
-// conditions gate the stamp. instanceRetention must be non-zero — the engine's
-// startup gate zeroes it unless the window provably outlives the events
-// stream's replay horizon, since the record's presence is the redelivery-dedup
-// guard (Contract #10 §10.9). And PendingToken must be empty: a terminal still
-// naming a token would strand that token.<t>/outbox.<t> peer with no cursor to
-// resolve it back to. The terminal paths clear the token, so this guard is the
-// proof of that, not a case that is expected to fire.
-//
-// The record stops expiring the moment it is written again without a TTL —
-// loom-state is History:1, so the untagged PUT a redrive (or a transition back
-// to running) performs evicts the TTL-bearing message per-subject. Resuming an
-// about-to-expire failed instance therefore un-expires it, with no extra write.
+//     (instance.<id>.pattern) in the same batch. The cursor record itself
+//     persists: its presence is the dedup guard that collapses a re-emitted
+//     trigger for the same instanceId onto the instance that already ran
+//     (Contract #10 §10.9, and the triggerLoom clause of
+//     docs/contracts/10-orchestration-substrate.md), and Weaver re-dispatches a
+//     stable claimId-seeded instanceId for as long as its gap stays open.
 //
 // The write-ahead invariant (§10.6 invariant 1) holds by construction: the op
 // record is persisted in this batch and the relay's publish is the only side
@@ -404,11 +390,9 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
 	}
-	instanceOp := substrate.BatchOp{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body}
-	if inst.Status != StatusRunning && s.instanceRetention > 0 && inst.PendingToken == "" {
-		instanceOp.TTL = s.instanceRetention
+	ops := []substrate.BatchOp{
+		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
 	}
-	ops := []substrate.BatchOp{instanceOp}
 	if inst.Status != StatusRunning {
 		// Terminal (complete/failed): delete the pattern pin in the SAME batch
 		// that flips the status. The pin's removal is what lets the reconcile

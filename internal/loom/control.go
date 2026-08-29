@@ -104,8 +104,8 @@ const pauseDomainStallNote = "in-flight instances awaiting this domain will stal
 //
 // It relies on instance cursor records never being soft-deleted: a terminal is
 // recorded by flipping Status in place, so no isDeleted envelope is ever written
-// for an instance.<id> key (symmetric to runningInstanceCounter). Every key that
-// lists is therefore a live record, decoded directly with no tombstone check.
+// for an instance.<id> key. Every key that lists is therefore a live record,
+// decoded directly with no tombstone check.
 func (e *Engine) ListInstances(ctx context.Context) ([]InstanceSummary, error) {
 	insts, err := e.state.listInstances(ctx, e.logger)
 	if err != nil {

@@ -561,17 +561,39 @@ func TestStateStore_Redrive_ConcurrentCASRejectsLoser(t *testing.T) {
 	conn, ctx := newControlTestConn(t)
 	store := newStateStore(conn, "loom-state")
 
+	// Seeded through the REAL create + terminal path, not a bare put: the
+	// terminal batch deletes the pattern pin and leaves a delete marker on that
+	// subject, which is the state a production redrive actually starts from. A
+	// hand-seeded instance leaves the pin subject never-written, and against
+	// that the superseded CreateOnly re-pin still commits — so this test would
+	// pass under the very implementation it exists to rule out.
 	pat := &Pattern{PatternID: "p1", SubjectType: "widget", Steps: []Step{{Kind: StepKindSystemOp, Operation: "StepA"}}}
-	putInstance(t, ctx, conn, Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusFailed})
+	seed := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
+	require.NoError(t, store.createInstance(ctx, seed, pat))
+	seed.Status = StatusFailed
+	require.NoError(t, store.transition(ctx, seed, "", "", nil, 0))
+	_, err := store.getPinnedPattern(ctx, "inst1")
+	require.ErrorIs(t, err, errPatternPinMissing, "precondition: the terminal batch deleted the pin")
+
 	_, revision, err := store.getInstanceAtRevision(ctx, "inst1")
 	require.NoError(t, err)
 
+	// Distinct pins so the loser's write is identifiable if it ever lands.
+	winnerPat := &Pattern{PatternID: "winner", SubjectType: "widget", Steps: []Step{{Kind: StepKindSystemOp, Operation: "StepA"}}}
+	loserPat := &Pattern{PatternID: "loser", SubjectType: "widget", Steps: []Step{{Kind: StepKindSystemOp, Operation: "StepA"}}}
 	winner := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 	loser := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 
-	require.NoError(t, store.redrive(ctx, winner, pat, revision))
-	err = store.redrive(ctx, loser, pat, revision)
-	require.Error(t, err, "the second racer's stale-revision batch must be rejected")
+	require.NoError(t, store.redrive(ctx, winner, winnerPat, revision))
+	require.Error(t, store.redrive(ctx, loser, loserPat, revision),
+		"the second racer's stale-revision batch must be rejected")
+
+	// The batch is rejected WHOLE: the loser's pin — an unconditional put — must
+	// not have landed alongside its refused cursor write.
+	pinned, err := store.getPinnedPattern(ctx, "inst1")
+	require.NoError(t, err)
+	require.Equal(t, "winner", pinned.PatternID,
+		"the loser's pin must not survive its rejected batch")
 }
 
 // waitForCond polls cond until true or the deadline.
