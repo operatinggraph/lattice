@@ -16,9 +16,12 @@ import (
 var readTemplatePlaceholderRe = regexp.MustCompile(`\{([^{}]+)\}`)
 
 // ValidateOpDispatchTemplates refuses at install any Dispatch.Reads /
-// Dispatch.OptionalReads entry whose placeholders fall outside the read-
-// template vocabulary: {actor}, {scopedTo}, {service}, {payload.<field>},
-// {me.<type>} — each with an optional trailing `:id` modifier. The set is
+// Dispatch.OptionalReads entry — and any Dispatch.Enumerations hub, which is a
+// key template drawn from the same vocabulary — whose placeholders fall outside
+// the read-template vocabulary: {actor}, {scopedTo}, {service},
+// {payload.<field>}, {me.<type>} — each with an optional trailing `:id`
+// modifier. It also holds each declared enumeration to the shape the
+// Processor's envelope parse enforces (validateDispatchEnumerations). The set is
 // closed by default-deny: an unrecognized placeholder is refused rather than
 // silently carrying no floor, the same posture the `# read-posture:`
 // annotation takes for Starlark reads (declaring is cheap, forgetting fails
@@ -38,7 +41,10 @@ var readTemplatePlaceholderRe = regexp.MustCompile(`\{([^{}]+)\}`)
 //     {me.<type>} would force the Processor to compile a required PATTERN
 //     whose exclusion from demotion blankets every declared root of that
 //     type out of demotion, quietly preserving the very existence oracle the
-//     descriptor floor exists to close.
+//     descriptor floor exists to close. An Enumerations hub refuses it for a
+//     second reason of its own — a caller-dependent hub makes the op's
+//     declared read posture caller-dependent, which is the one thing a
+//     declaration exists to make static (validateDispatchEnumerations).
 //   - a {me.<type>} placeholder must occupy a whole dot-delimited segment of
 //     the template — the character before `{` must be start-of-string or
 //     `.`, and the character after `}` must be end-of-string or `.`. A
@@ -88,21 +94,82 @@ func (def Definition) ValidateOpDispatchTemplates() error {
 		if o.Dispatch == nil {
 			continue
 		}
-		if err := validateReadTemplateList(def.Name, o.OperationType, "Reads", o.Dispatch.Reads, true); err != nil {
+		if err := validateReadTemplateList(def.Name, o.OperationType, "Reads", o.Dispatch.Reads, readsClientOnlyRefusal); err != nil {
 			return err
 		}
-		if err := validateReadTemplateList(def.Name, o.OperationType, "OptionalReads", o.Dispatch.OptionalReads, false); err != nil {
+		if err := validateReadTemplateList(def.Name, o.OperationType, "OptionalReads", o.Dispatch.OptionalReads, ""); err != nil {
+			return err
+		}
+		if err := validateDispatchEnumerations(def.Name, o.OperationType, o.Dispatch.Enumerations); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// validateDispatchEnumerations refuses at install a Dispatch.Enumerations entry
+// the Processor's envelope parse would refuse: hub and relation non-empty,
+// direction exactly "out" or "in" (opwire.ParseEnvelope). Install is the loud
+// failure point because the refusal downstream is not a degradation — the
+// Processor rejects the WHOLE envelope on a malformed enumeration, terminally,
+// so the op does not run with one bad declaration dropped, it never runs at
+// all, and every redelivery reproduces the identical dead envelope. The same
+// doctrine the loom-step and weaver-gap surfaces already state
+// (validateStepEnumerations, validateGapEnumerations).
+//
+// The hub additionally runs through the same closed placeholder vocabulary
+// Dispatch.Reads uses, and refuses the client-only {me.<type>} form: what
+// Contract #2 §2.5 buys with a declaration is a STATIC read posture for the op,
+// and a {me.<type>} hub resolves only for a caller whose context supplies that
+// type, so the same op would declare the walk for some callers and silently
+// omit it for others — the walk still runs, now undeclared, for exactly the
+// callers the declaration was meant to cover. A server-resolvable hub declares
+// the same walk for every caller, or fails here.
+func validateDispatchEnumerations(pkgName, opType string, ens []EnumerationSpec) error {
+	for i, en := range ens {
+		field := fmt.Sprintf("Enumerations[%d].Hub", i)
+		if strings.TrimSpace(en.Hub) == "" {
+			return fmt.Errorf(
+				"pkgmgr: package %q op %q Dispatch.Enumerations[%d] requires a Hub — a walk with no hub vertex names nothing to enumerate from",
+				pkgName, opType, i)
+		}
+		if strings.TrimSpace(en.Relation) == "" {
+			return fmt.Errorf(
+				"pkgmgr: package %q op %q Dispatch.Enumerations[%d] requires a Relation — a walk with no relation names nothing to enumerate",
+				pkgName, opType, i)
+		}
+		if en.Direction != enumerationDirectionOut && en.Direction != enumerationDirectionIn {
+			return fmt.Errorf(
+				"pkgmgr: package %q op %q Dispatch.Enumerations[%d] Direction must be %q or %q, got %q",
+				pkgName, opType, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
+		}
+		if err := validateReadTemplateList(pkgName, opType, field, []string{en.Hub}, enumerationHubClientOnlyRefusal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// The clause a client-only ({me.<type>}) placeholder is refused with, one per
+// list that refuses one. The lists refuse it for DIFFERENT reasons and the fix
+// differs with the reason, so the sentence travels with the caller rather than
+// being written once at the refusal: an author told to move an enumeration
+// hub to Dispatch.OptionalReads would be following advice into a field that
+// does not exist on that declaration.
+const (
+	readsClientOnlyRefusal = "which is OptionalReads-only — a required-side {me.<type>} would compile to a required PATTERN whose exclusion blankets every declared root of that type out of demotion; move this read to Dispatch.OptionalReads, or replace it with a server-resolvable placeholder ({actor}/{scopedTo}/{service}/{payload.<field>}) if the op genuinely requires it"
+
+	enumerationHubClientOnlyRefusal = "which an enumeration hub may not carry — {me.<type>} resolves only for a caller whose context supplies that type, so the same op would declare the walk for some callers and omit it for others, leaving the walk running undeclared for exactly the callers the declaration was meant to cover; give the hub a server-resolvable placeholder ({actor}/{scopedTo}/{service}/{payload.<field>}) or a literal key, which declares the same walk for every caller"
+)
+
 // validateReadTemplateList classifies every placeholder in every entry of one
-// Dispatch read list against the closed vocabulary. isRequired marks the
-// Reads list (as opposed to OptionalReads), the only distinction that changes
-// which placeholders are legal.
-func validateReadTemplateList(pkgName, opType, listName string, entries []string, isRequired bool) error {
+// Dispatch template list against the closed vocabulary. clientOnlyRefusal
+// carries the one rule that differs between lists: non-empty refuses a
+// client-only {me.<type>} placeholder here and states why and what to do
+// instead (the Reads list and an Enumerations hub each supply their own), while
+// empty admits one — the OptionalReads case, where a client-only placeholder is
+// the whole point of the list.
+func validateReadTemplateList(pkgName, opType, listName string, entries []string, clientOnlyRefusal string) error {
 	for _, entry := range entries {
 		if entry == "" {
 			continue
@@ -150,10 +217,10 @@ func validateReadTemplateList(pkgName, opType, listName string, entries []string
 				continue
 			}
 
-			if isRequired {
+			if clientOnlyRefusal != "" {
 				return fmt.Errorf(
-					"pkgmgr: package %q op %q Dispatch.Reads entry %q: placeholder %q is client-only ({me.<type>}) vocabulary, which is OptionalReads-only — a required-side {me.<type>} would compile to a required PATTERN whose exclusion blankets every declared root of that type out of demotion; move this read to Dispatch.OptionalReads, or replace it with a server-resolvable placeholder ({actor}/{scopedTo}/{service}/{payload.<field>}) if the op genuinely requires it",
-					pkgName, opType, entry, placeholder)
+					"pkgmgr: package %q op %q Dispatch.%s entry %q: placeholder %q is client-only ({me.<type>}) vocabulary, %s",
+					pkgName, opType, listName, entry, placeholder, clientOnlyRefusal)
 			}
 
 			before := byte(0)

@@ -922,6 +922,32 @@ type OpDispatchSpec struct {
 	// submission the first time it is legitimately absent.
 	OptionalReads []string
 
+	// Enumerations are the dispatched op's ContextHint.Enumerations — the
+	// Contract #2 §2.5 class-(e) `kv.Links` walks the op's script runs,
+	// declared so a descriptor-driven client puts them on the envelope it
+	// submits. Each Hub carries the same template grammar Reads does
+	// ({actor}, {service}, {scopedTo}, {payload.<field>}, each optionally
+	// suffixed `:id`, or a literal key), substituted by the same client
+	// resolver; Relation and Direction are always literals.
+	//
+	// A hub must be SERVER-RESOLVABLE — the client-only {me.<type>} form
+	// Reads admits on its optional side is refused here
+	// (ValidateOpDispatchTemplates). What Contract #2 §2.5 buys with a
+	// declaration is a static read posture for the op, and {me.<type>}
+	// resolves only for a caller whose context supplies that type: the same
+	// op would declare the walk for some callers and omit it for others,
+	// leaving the walk running undeclared for exactly the callers the
+	// declaration was meant to cover. A server-resolvable hub declares the
+	// same walk for every caller, or the package does not install.
+	//
+	// Metadata, not a hydration directive: declaring a walk does not change
+	// how the script runs it — it stays a bounded, paged live read inside the
+	// script, and the Processor validates the declaration's shape and
+	// otherwise ignores it. What the declaration buys is that the walk is
+	// visible on the envelope rather than knowable only by reading the
+	// script.
+	Enumerations []EnumerationSpec
+
 	// VisibleWhen gates OFFERING this op against the state of the target row
 	// the client resolved TargetType from: the op is offered only when the
 	// row's Field column equals Equals. It exists for state-machine op pairs

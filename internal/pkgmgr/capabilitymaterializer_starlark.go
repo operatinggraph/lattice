@@ -370,7 +370,19 @@ type OpPresentationArtifact struct {
 	Group       string `json:"group,omitempty"`
 }
 
-// OpDispatchArtifact mirrors pkgmgr.OpDispatchSpec field-for-field.
+// OpDispatchArtifact is the subset of pkgmgr.OpDispatchSpec an AI-authored op
+// meta may declare — every field below materializes onto the spec unchanged,
+// and the two the spec carries that are absent here (ClassChoices,
+// VisibleWhen) are not declarable through this lane at all: an artifact naming
+// either is reported by unknownOpMetaFields as a key this surface does not
+// expose.
+//
+// The authored surface is deliberately narrower than the hand-written one, so
+// this struct is not a mechanical mirror to be topped up whenever
+// OpDispatchSpec grows. Admitting a field here widens what an authored
+// capability may declare, which is a decision about the authored-artifact
+// admission model — made deliberately, per field, alongside its
+// knownDispatchFields entry and its conversion in opMetaArtifactDefinition.
 type OpDispatchArtifact struct {
 	Class         string            `json:"class,omitempty"`
 	AuthContext   string            `json:"authContext,omitempty"`
@@ -379,6 +391,7 @@ type OpDispatchArtifact struct {
 	ContextParams map[string]string `json:"contextParams,omitempty"`
 	Reads         []string          `json:"reads,omitempty"`
 	OptionalReads []string          `json:"optionalReads,omitempty"`
+	Enumerations  []EnumerationSpec `json:"enumerations,omitempty"`
 }
 
 // knownOpMetaFields are the JSON keys OpMetaArtifactContent exposes for the
@@ -400,7 +413,7 @@ var knownPresentationFields = map[string]bool{
 var knownDispatchFields = map[string]bool{
 	"class": true, "authContext": true, "targetField": true,
 	"targetType": true, "contextParams": true, "reads": true,
-	"optionalReads": true,
+	"optionalReads": true, "enumerations": true,
 }
 
 // unknownOpMetaFields decodes content as a generic JSON object and returns
@@ -540,6 +553,7 @@ func opMetaArtifactDefinition(oc OpMetaArtifactContent, name, version string) De
 			ContextParams: oc.Dispatch.ContextParams,
 			Reads:         oc.Dispatch.Reads,
 			OptionalReads: oc.Dispatch.OptionalReads,
+			Enumerations:  oc.Dispatch.Enumerations,
 		}
 	}
 	return Definition{

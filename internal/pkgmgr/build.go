@@ -720,6 +720,9 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 		}
 		body["optionalReads"] = optional
 	}
+	if len(d.Enumerations) > 0 {
+		body["enumerations"] = enumerationBodies(d.Enumerations)
+	}
 	if d.VisibleWhen != nil {
 		body["visibleWhen"] = map[string]any{
 			"field":  d.VisibleWhen.Field,
