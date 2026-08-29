@@ -137,6 +137,28 @@ func TestComputeOpCatalog_VisibleWhenAloneStillYieldsADispatch(t *testing.T) {
 	}
 }
 
+// A row whose ONLY dispatch content is its declared enumerations must still
+// carry a dispatch object, for the same reason the visibility-only and
+// contextParams-only rows above do: gating the object's construction on the
+// other columns would drop the one declaration this descriptor had to make,
+// and deleting the clause from the presence guard entirely would pass every
+// other test in this file undetected.
+func TestComputeOpCatalog_EnumerationsAloneStillYieldsADispatch(t *testing.T) {
+	entries := map[string]string{
+		"ConfirmActorRole": `{"operationType":"ConfirmActorRole",` +
+			`"dispatchEnumerations":[{"hub":"{actor}","relation":"holdsRole","direction":"out"}]}`,
+	}
+	got := computeOpCatalog(keysOf(entries), fakeKV(entries))
+	d := got["ConfirmActorRole"]
+	if d.Dispatch == nil || len(d.Dispatch.Enumerations) != 1 {
+		t.Fatalf("an enumerations-only dispatch must survive, got %+v", d)
+	}
+	want := opEnumeration{Hub: "{actor}", Relation: "holdsRole", Direction: "out"}
+	if d.Dispatch.Enumerations[0] != want {
+		t.Errorf("enumerations: got %+v, want %+v", d.Dispatch.Enumerations[0], want)
+	}
+}
+
 // contextParams names the schema fields the CLIENT fills from context and
 // never renders. Losing it in the proxy does not degrade the form, it breaks
 // the op: the field renders as a raw-key text input the descriptor promised

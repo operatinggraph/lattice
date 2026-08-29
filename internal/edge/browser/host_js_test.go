@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
 	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
 )
 
@@ -279,6 +280,42 @@ func TestHost_EnqueueQueuesDurableIntentWithOverlay(t *testing.T) {
 	}
 	if !v.Pending {
 		t.Fatalf("overlay value should be pending before confirmation")
+	}
+}
+
+// TestHost_EnqueueForwardsEnumerationsToTheQueuedEnvelope proves a declared
+// dispatch.enumerations reaches the durably-queued envelope's
+// ContextHint.Enumerations exactly, through the real Enqueue → agent →
+// store.ListIntents path — the same gap cmd/facet's own host had at this hop.
+func TestHost_EnqueueForwardsEnumerationsToTheQueuedEnvelope(t *testing.T) {
+	shell := newFakeShell()
+	defer shell.release()
+	h := startHost(t, shell)
+
+	if err := h.Enqueue(enqueueRequest{
+		OperationType: "ResolveWorkOrder",
+		Payload:       json.RawMessage(`{}`),
+		Enumerations: []opwire.EnumerationHint{
+			{Hub: "vtx.identity.abc", Relation: "holdsRole", Direction: "out"},
+		},
+	}, "req_enum"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	intents, err := h.store.ListIntents()
+	if err != nil || len(intents) != 1 {
+		t.Fatalf("ListIntents: len=%d err=%v, want 1", len(intents), err)
+	}
+	var env opwire.OperationEnvelope
+	if err := json.Unmarshal(intents[0].Envelope, &env); err != nil {
+		t.Fatalf("unmarshal queued envelope: %v", err)
+	}
+	if env.ContextHint == nil {
+		t.Fatal("ContextHint = nil, want one built from Enumerations alone")
+	}
+	want := []opwire.EnumerationHint{{Hub: "vtx.identity.abc", Relation: "holdsRole", Direction: "out"}}
+	if len(env.ContextHint.Enumerations) != 1 || env.ContextHint.Enumerations[0] != want[0] {
+		t.Fatalf("ContextHint.Enumerations = %+v, want %+v", env.ContextHint.Enumerations, want)
 	}
 }
 

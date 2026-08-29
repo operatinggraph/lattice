@@ -179,6 +179,61 @@ func TestBuildEnvelope_ForwardsOptionalReads(t *testing.T) {
 	}
 }
 
+// TestBuildEnvelope_ForwardsEnumerations proves a client can declare Contract
+// #2 §2.5 enumerations, both wire forms (bare + nested under contextHint), and
+// that a bare `enumerations` wins over a nested one when both are present
+// (gateway.go:827-830's stated preference) — plus the empty-array floor: a
+// request declaring nothing builds no ContextHint at all.
+func TestBuildEnvelope_ForwardsEnumerations(t *testing.T) {
+	bareHint := []processor.EnumerationHint{{Hub: "vtx.identity.a", Relation: "holdsRole", Direction: "out"}}
+	req := operationRequest{
+		OperationType: "Ping",
+		Enumerations:  bareHint,
+	}
+	env, err := buildEnvelope(req, "vtx.identity.x", time.Now())
+	if err != nil {
+		t.Fatalf("buildEnvelope: %v", err)
+	}
+	if env.ContextHint == nil || len(env.ContextHint.Enumerations) != 1 || env.ContextHint.Enumerations[0] != bareHint[0] {
+		t.Fatalf("ContextHint.Enumerations = %+v, want %+v", env.ContextHint, bareHint)
+	}
+
+	nestedHint := []processor.EnumerationHint{{Hub: "vtx.identity.b", Relation: "assignedTo", Direction: "in"}}
+	nested := operationRequest{
+		OperationType: "Ping",
+		ContextHint:   &operationRequestContext{Enumerations: nestedHint},
+	}
+	env2, err := buildEnvelope(nested, "vtx.identity.x", time.Now())
+	if err != nil {
+		t.Fatalf("buildEnvelope: %v", err)
+	}
+	if env2.ContextHint == nil || len(env2.ContextHint.Enumerations) != 1 || env2.ContextHint.Enumerations[0] != nestedHint[0] {
+		t.Fatalf("nested contextHint.enumerations not forwarded: %+v", env2.ContextHint)
+	}
+
+	both := operationRequest{
+		OperationType: "Ping",
+		Enumerations:  bareHint,
+		ContextHint:   &operationRequestContext{Enumerations: nestedHint},
+	}
+	env3, err := buildEnvelope(both, "vtx.identity.x", time.Now())
+	if err != nil {
+		t.Fatalf("buildEnvelope: %v", err)
+	}
+	if env3.ContextHint == nil || len(env3.ContextHint.Enumerations) != 1 || env3.ContextHint.Enumerations[0] != bareHint[0] {
+		t.Fatalf("bare enumerations must win over nested: %+v", env3.ContextHint)
+	}
+
+	empty := operationRequest{OperationType: "Ping", Enumerations: []processor.EnumerationHint{}}
+	env4, err := buildEnvelope(empty, "vtx.identity.x", time.Now())
+	if err != nil {
+		t.Fatalf("buildEnvelope: %v", err)
+	}
+	if env4.ContextHint != nil {
+		t.Fatalf("ContextHint = %+v, want nil for an empty enumerations array with nothing else declared", env4.ContextHint)
+	}
+}
+
 // --- bearerToken -----------------------------------------------------------
 
 func TestBearerToken(t *testing.T) {

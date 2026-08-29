@@ -336,13 +336,39 @@ func (h *Host) runDrainLoop(ctx context.Context) {
 // same fields cmd/facet's POST /api/enqueue takes, so the renderer's call site
 // is unchanged when W4 drops the HTTP hop.
 type enqueueRequest struct {
-	OperationType string              `json:"operationType"`
-	Payload       json.RawMessage     `json:"payload"`
-	Class         string              `json:"class,omitempty"`
-	Reads         []string            `json:"reads,omitempty"`
-	OptionalReads []string            `json:"optionalReads,omitempty"`
-	AuthContext   *opwire.AuthContext `json:"authContext,omitempty"`
-	TouchedKey    string              `json:"touchedKey,omitempty"`
+	OperationType string                   `json:"operationType"`
+	Payload       json.RawMessage          `json:"payload"`
+	Class         string                   `json:"class,omitempty"`
+	Reads         []string                 `json:"reads,omitempty"`
+	OptionalReads []string                 `json:"optionalReads,omitempty"`
+	Enumerations  []opwire.EnumerationHint `json:"enumerations,omitempty"`
+	AuthContext   *opwire.AuthContext      `json:"authContext,omitempty"`
+	TouchedKey    string                   `json:"touchedKey,omitempty"`
+}
+
+// buildEnqueueEnvelope builds the Contract #2 envelope Enqueue submits,
+// stamping the host's own identity as Actor. ContextHint is built when the
+// request declares any of Reads, OptionalReads, or Enumerations — a request
+// declaring only Enumerations must still get a ContextHint, the same way one
+// declaring only Reads or only OptionalReads already does.
+func buildEnqueueEnvelope(req enqueueRequest, identityID, requestID string) *opwire.OperationEnvelope {
+	env := &opwire.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          opwire.LaneDefault,
+		OperationType: req.OperationType,
+		Actor:         identityID,
+		Payload:       req.Payload,
+		Class:         req.Class,
+		AuthContext:   req.AuthContext,
+	}
+	if len(req.Reads) > 0 || len(req.OptionalReads) > 0 || len(req.Enumerations) > 0 {
+		env.ContextHint = &opwire.ContextHint{
+			Reads:         req.Reads,
+			OptionalReads: req.OptionalReads,
+			Enumerations:  req.Enumerations,
+		}
+	}
+	return env
 }
 
 // Enqueue applies the optimistic overlay for the write's touched key, queues
@@ -353,18 +379,7 @@ func (h *Host) Enqueue(req enqueueRequest, requestID string) error {
 	if req.OperationType == "" {
 		return errors.New("operationType is required")
 	}
-	env := &opwire.OperationEnvelope{
-		RequestID:     requestID,
-		Lane:          opwire.LaneDefault,
-		OperationType: req.OperationType,
-		Actor:         h.identityID,
-		Payload:       req.Payload,
-		Class:         req.Class,
-		AuthContext:   req.AuthContext,
-	}
-	if len(req.Reads) > 0 || len(req.OptionalReads) > 0 {
-		env.ContextHint = &opwire.ContextHint{Reads: req.Reads, OptionalReads: req.OptionalReads}
-	}
+	env := buildEnqueueEnvelope(req, h.identityID, requestID)
 
 	var touched []string
 	if req.TouchedKey != "" {

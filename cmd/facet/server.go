@@ -121,12 +121,13 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 // descriptor form renderer already resolved dispatch.reads templates and
 // dispatch.contextParams substitutions before this call).
 type enqueueRequest struct {
-	OperationType string                 `json:"operationType"`
-	Class         string                 `json:"class"`
-	Payload       json.RawMessage        `json:"payload"`
-	Reads         []string               `json:"reads,omitempty"`
-	OptionalReads []string               `json:"optionalReads,omitempty"`
-	AuthContext   *processor.AuthContext `json:"authContext,omitempty"`
+	OperationType string                      `json:"operationType"`
+	Class         string                      `json:"class"`
+	Payload       json.RawMessage             `json:"payload"`
+	Reads         []string                    `json:"reads,omitempty"`
+	OptionalReads []string                    `json:"optionalReads,omitempty"`
+	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
+	AuthContext   *processor.AuthContext      `json:"authContext,omitempty"`
 	// TouchedKey, if set, is a Contract #1 key this write's optimistic
 	// effect should overlay immediately (design R3) — only meaningful for
 	// an update to an already-known key (e.g. a task's own key); a create
@@ -134,6 +135,31 @@ type enqueueRequest struct {
 	// leaves this empty, per facet-app-ux.md §3.4a's "Pending chip" being
 	// opportunistic, not universal.
 	TouchedKey string `json:"touchedKey,omitempty"`
+}
+
+// buildEnqueueEnvelope builds the Contract #2 envelope handleEnqueue submits,
+// stamping the verified session identity as Actor. ContextHint is built when
+// the request declares any of Reads, OptionalReads, or Enumerations — a
+// request declaring only Enumerations must still get a ContextHint, the same
+// way one declaring only Reads or only OptionalReads already does.
+func buildEnqueueEnvelope(req enqueueRequest, identityID, requestID string) *processor.OperationEnvelope {
+	env := &processor.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          processor.LaneDefault,
+		OperationType: req.OperationType,
+		Actor:         identityID,
+		Payload:       req.Payload,
+		Class:         req.Class,
+		AuthContext:   req.AuthContext,
+	}
+	if len(req.Reads) > 0 || len(req.OptionalReads) > 0 || len(req.Enumerations) > 0 {
+		env.ContextHint = &processor.ContextHint{
+			Reads:         req.Reads,
+			OptionalReads: req.OptionalReads,
+			Enumerations:  req.Enumerations,
+		}
+	}
+	return env
 }
 
 // handleEnqueue implements POST /api/enqueue: builds the envelope, applies
@@ -179,18 +205,7 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	env := &processor.OperationEnvelope{
-		RequestID:     requestID,
-		Lane:          processor.LaneDefault,
-		OperationType: req.OperationType,
-		Actor:         identityID,
-		Payload:       req.Payload,
-		Class:         req.Class,
-		AuthContext:   req.AuthContext,
-	}
-	if len(req.Reads) > 0 || len(req.OptionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: req.Reads, OptionalReads: req.OptionalReads}
-	}
+	env := buildEnqueueEnvelope(req, identityID, requestID)
 
 	var touched []string
 	if req.TouchedKey != "" {
