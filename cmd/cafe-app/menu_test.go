@@ -55,6 +55,28 @@ func TestComputeMenu_NilAdmitLeavesCatalogUnfiltered(t *testing.T) {
 // staffer's building) matches, and so does a unit-level item whose
 // containedIn chain reaches the building, but an item served at an unrelated
 // building does not.
+// TestComputeMenu_PropagatesMissingLocation proves computeMenu carries the
+// menuCatalog lens's own missingLocation flag through to the row it returns —
+// the Manage Menu grid badges/relocate-button decision (app.js's
+// menuItemCard) reads this field, not servedAt's emptiness, so it must
+// survive the projection→row translation.
+func TestComputeMenu_PropagatesMissingLocation(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafe-menu-catalog.a": map[string]any{"menuItemKey": "vtx.menuitem.a", "name": "Croissant", "priceCents": 350, "missingLocation": true},
+		"cafe-menu-catalog.b": map[string]any{"menuItemKey": "vtx.menuitem.b", "name": "Latte", "priceCents": 450, "servedAt": "vtx.location.building1", "missingLocation": false},
+	})
+	rows := computeMenu(keys, get, nil)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d (%+v)", len(rows), rows)
+	}
+	if !rows[0].MissingLocation {
+		t.Errorf("Croissant: want MissingLocation=true, got %+v", rows[0])
+	}
+	if rows[1].MissingLocation {
+		t.Errorf("Latte: want MissingLocation=false, got %+v", rows[1])
+	}
+}
+
 func TestComputeMenu_WorkplaceAdmitFiltersToCoveringLocationsIntersection(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
 		"cafe-menu-catalog.a": map[string]any{

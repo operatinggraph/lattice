@@ -21,14 +21,22 @@ type menuItemProjection struct {
 	PriceCents        *float64 `json:"priceCents"`
 	ServedAt          string   `json:"servedAt"`
 	CoveringLocations []string `json:"coveringLocations"`
+	MissingLocation   bool     `json:"missingLocation"`
 }
 
-// menuItemRow is the self-order picker shape the Resident view renders: the
-// menu item key (the Charge{menuItemKey} target) + display name + price.
+// menuItemRow is the self-order picker shape the Resident view renders (menu
+// item key — the Charge{menuItemKey} target — + display name + price) and
+// also what the staff Manage Menu grid renders: servedAt/coveringLocations/
+// missingLocation ride along unused by the resident picker so the grid can
+// badge an item that has outlived its place (SetMenuItemLocation's own repair
+// target) without a second projection shape.
 type menuItemRow struct {
-	MenuItemKey string `json:"menuItemKey"`
-	Name        string `json:"name"`
-	PriceCents  int64  `json:"priceCents"`
+	MenuItemKey       string   `json:"menuItemKey"`
+	Name              string   `json:"name"`
+	PriceCents        int64    `json:"priceCents"`
+	ServedAt          string   `json:"servedAt,omitempty"`
+	CoveringLocations []string `json:"coveringLocations,omitempty"`
+	MissingLocation   bool     `json:"missingLocation,omitempty"`
 }
 
 // computeMenu assembles the self-order picker rows from the `menuCatalog`
@@ -60,7 +68,14 @@ func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) boo
 		if p.PriceCents != nil {
 			price = int64(*p.PriceCents)
 		}
-		rows = append(rows, menuItemRow{MenuItemKey: p.MenuItemKey, Name: p.Name, PriceCents: price})
+		rows = append(rows, menuItemRow{
+			MenuItemKey:       p.MenuItemKey,
+			Name:              p.Name,
+			PriceCents:        price,
+			ServedAt:          p.ServedAt,
+			CoveringLocations: p.CoveringLocations,
+			MissingLocation:   p.MissingLocation,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows

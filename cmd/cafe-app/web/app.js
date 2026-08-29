@@ -1060,12 +1060,25 @@ function workplaceLocationKey() {
   return (a && a.key) || "";
 }
 
+// menuItemCard renders a Manage Menu grid item. missingLocation (the
+// menuCatalog lens's own flag for an item whose servedAt link is gone — the
+// place was retired out from under it) badges the item and offers Relocate
+// instead of Retire being the only aim staff has on it; a live item just
+// shows Retire, same as before.
 function menuItemCard(it) {
+  const badge = it.missingLocation
+    ? '<span class="badge" style="background:#b00020;color:#fff;">no location</span>'
+    : "";
+  const relocate = it.missingLocation
+    ? '<button type="button" data-relocate="' + escapeHtml(it.menuItemKey) + '">Relocate here</button>'
+    : "";
   return (
     '<div class="card">' +
+    badge +
     '<div class="who">' + escapeHtml(it.name) + "</div>" +
     '<div class="amount">' + money(it.priceCents) + "</div>" +
-    '<div class="card-actions"><button type="button" class="danger" data-retire="' +
+    '<div class="card-actions">' + relocate +
+    '<button type="button" class="danger" data-retire="' +
     escapeHtml(it.menuItemKey) +
     '">Retire</button></div>' +
     "</div>"
@@ -1103,6 +1116,29 @@ async function loadManageMenu() {
           "retire the item"
         );
         toast("Item retired.", true);
+        setTimeout(loadManageMenu, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
+  body.querySelectorAll("[data-relocate]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const menuItemKey = btn.dataset.relocate;
+      const locationKey = workplaceLocationKey();
+      if (!locationKey) { toast("Your session carries no workplace to relocate this item to.", false); return; }
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "SetMenuItemLocation", class: "menuitem",
+            reads: [menuItemKey, locationKey],
+            payload: { menuItemKey, newLocation: locationKey },
+          },
+          "relocate the item"
+        );
+        toast("Item relocated to your workplace.", true);
         setTimeout(loadManageMenu, 700);
       } catch (e) {
         toast(e.message, false);
