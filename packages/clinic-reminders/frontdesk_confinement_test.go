@@ -122,6 +122,13 @@ func seedRemFrontDeskTopology(t *testing.T, ctx context.Context, conn *substrate
 func crDriveAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
 	label, op, class, payload, actorKey, target string, reads []string) processor.MessageOutcome {
 	t.Helper()
+	return crDriveAsOpt(t, ctx, conn, cp, cons, label, op, class, payload, actorKey, target, reads, nil)
+}
+
+// crDriveAsOpt is crDriveAs plus an explicit optionalReads.
+func crDriveAsOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, op, class, payload, actorKey, target string, reads, optionalReads []string) processor.MessageOutcome {
+	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -131,8 +138,8 @@ func crDriveAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads}
+	if len(reads) > 0 || len(optionalReads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
 	}
 	if target != "" {
 		env.AuthContext = &processor.AuthContext{Target: target}
@@ -144,6 +151,12 @@ func crDriveAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 func startSeriesPayload(providerKey string) string {
 	return `{"patientKey":"` + fdrPatientKey + `","providerKey":"` + providerKey +
 		`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`
+}
+
+// fdrGuardKey mirrors StartVisitSeries's own OptionalReads: the per-(patient,
+// provider) active-series guard, always fdrPatientKey in this file's topology.
+func fdrGuardKey(providerKey string) string {
+	return crActiveVisitSeriesKey(fdrPatientKey, providerKey)
 }
 
 // TestFrontDesk_VisitSeries_ConfinedToWorkplace is the guarantee: one front-desk
@@ -159,12 +172,12 @@ func TestFrontDesk_VisitSeries_ConfinedToWorkplace(t *testing.T) {
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fdrconfine", Instance: "cr-fdrconfine"})
 	seedRemFrontDeskTopology(t, ctx, conn)
 
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrok0000000000001", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderAKey), fdrActorKey, "", []string{fdrPatientKey, fdrProviderAKey}); got != processor.OutcomeAccepted {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdrok0000000000001", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), fdrActorKey, "", []string{fdrPatientKey, fdrProviderAKey}, []string{fdrGuardKey(fdrProviderAKey)}); got != processor.OutcomeAccepted {
 		t.Fatalf("front-desk StartVisitSeries with a provider at its OWN workplace = %v, want Accepted", got)
 	}
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrno0000000000002", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), fdrActorKey, "", []string{fdrPatientKey, fdrProviderBKey}); got != processor.OutcomeRejected {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdrno0000000000002", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), fdrActorKey, "", []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk StartVisitSeries with a provider at ANOTHER building = %v, want Rejected — the multi-org gate", got)
 	}
 }
@@ -185,13 +198,13 @@ func TestFrontDesk_VisitSeries_ForgedTargetCannotSkipConfinement(t *testing.T) {
 
 	// (a) target = the caller's OWN actor: the exemption a copied appointment
 	// guard would grant. Here it must NOT skip the workplace check.
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrfrga0000000001", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), fdrActorKey, fdrActorKey, []string{fdrPatientKey, fdrProviderBKey}); got != processor.OutcomeRejected {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdrfrga0000000001", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), fdrActorKey, fdrActorKey, []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk StartVisitSeries cross-building with a forged target==actor = %v, want Rejected — no self exemption on a staff-only op", got)
 	}
 	// (b) target = an arbitrary other identity: likewise no exemption.
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrfrgb0000000002", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), fdrActorKey, "vtx.identity."+fdrPatientID, []string{fdrPatientKey, fdrProviderBKey}); got != processor.OutcomeRejected {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdrfrgb0000000002", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), fdrActorKey, "vtx.identity."+fdrPatientID, []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk StartVisitSeries cross-building with a forged arbitrary target = %v, want Rejected", got)
 	}
 	// (c) POSITIVE control: the SAME forged target==actor but with a SAME-building
@@ -202,8 +215,8 @@ func TestFrontDesk_VisitSeries_ForgedTargetCannotSkipConfinement(t *testing.T) {
 	// script inert — and confinement admits it precisely because provider A is at
 	// the actor's workplace. Were the forge instead rejected upstream, this vector
 	// would reject too.
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrfrgc0000000003", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderAKey), fdrActorKey, fdrActorKey, []string{fdrPatientKey, fdrProviderAKey}); got != processor.OutcomeAccepted {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdrfrgc0000000003", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), fdrActorKey, fdrActorKey, []string{fdrPatientKey, fdrProviderAKey}, []string{fdrGuardKey(fdrProviderAKey)}); got != processor.OutcomeAccepted {
 		t.Fatalf("front-desk StartVisitSeries at its OWN building with a forged target==actor = %v, want Accepted — the forged target is forwarded verbatim and the operator-exempt-only script guard governs", got)
 	}
 }
@@ -216,8 +229,8 @@ func TestFrontDesk_VisitSeries_OperatorUnconfined(t *testing.T) {
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fdroper", Instance: "cr-fdroper"})
 	seedRemFrontDeskTopology(t, ctx, conn)
 
-	if got := crDriveAs(t, ctx, conn, cp, cons, "fdropa0000000001", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), crStaffActorKey, "", []string{fdrPatientKey, fdrProviderBKey}); got != processor.OutcomeAccepted {
+	if got := crDriveAsOpt(t, ctx, conn, cp, cons, "fdropa0000000001", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), crStaffActorKey, "", []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}); got != processor.OutcomeAccepted {
 		t.Fatalf("operator StartVisitSeries with a provider at building B = %v, want Accepted (root stays unconfined)", got)
 	}
 }
@@ -235,11 +248,11 @@ func TestFrontDesk_VisitSeries_PauseResumeConfined(t *testing.T) {
 	// Operator (unconfined) starts both series so Pause/Resume have targets. Same
 	// patient, different providers -> distinct per-(patient,provider) guards, both
 	// accepted.
-	seriesAID := crSubmit(t, ctx, conn, cp, cons, "fdrpaseedA", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, processor.OutcomeAccepted)
+	seriesAID := crSubmitOpt(t, ctx, conn, cp, cons, "fdrpaseedA", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, []string{fdrGuardKey(fdrProviderAKey)}, processor.OutcomeAccepted)
 	seriesAKey := "vtx.visitseries." + seriesAID
-	seriesBID := crSubmit(t, ctx, conn, cp, cons, "fdrpaseedB", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, processor.OutcomeAccepted)
+	seriesBID := crSubmitOpt(t, ctx, conn, cp, cons, "fdrpaseedB", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}, processor.OutcomeAccepted)
 	seriesBKey := "vtx.visitseries." + seriesBID
 
 	// Front-desk may pause/resume the building-A series (its workplace)...
@@ -269,11 +282,11 @@ func TestFrontDesk_VisitSeries_EndConfined(t *testing.T) {
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fdrend", Instance: "cr-fdrend"})
 	seedRemFrontDeskTopology(t, ctx, conn)
 
-	seriesAID := crSubmit(t, ctx, conn, cp, cons, "fdreseedA", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, processor.OutcomeAccepted)
+	seriesAID := crSubmitOpt(t, ctx, conn, cp, cons, "fdreseedA", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, []string{fdrGuardKey(fdrProviderAKey)}, processor.OutcomeAccepted)
 	seriesAKey := "vtx.visitseries." + seriesAID
-	seriesBID := crSubmit(t, ctx, conn, cp, cons, "fdreseedB", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, processor.OutcomeAccepted)
+	seriesBID := crSubmitOpt(t, ctx, conn, cp, cons, "fdreseedB", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}, processor.OutcomeAccepted)
 	seriesBKey := "vtx.visitseries." + seriesBID
 
 	// Front-desk may end the building-A series (its workplace)...
@@ -301,11 +314,11 @@ func TestFrontDesk_VisitSeries_SetSiteConfined(t *testing.T) {
 	seedRemFrontDeskTopology(t, ctx, conn)
 
 	// Operator (unconfined) starts both series so the site vectors have targets.
-	seriesAID := crSubmit(t, ctx, conn, cp, cons, "fdrsseedA", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, processor.OutcomeAccepted)
+	seriesAID := crSubmitOpt(t, ctx, conn, cp, cons, "fdrsseedA", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, []string{fdrGuardKey(fdrProviderAKey)}, processor.OutcomeAccepted)
 	seriesAKey := "vtx.visitseries." + seriesAID
-	seriesBID := crSubmit(t, ctx, conn, cp, cons, "fdrsseedB", "StartVisitSeries", "visitseries",
-		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, processor.OutcomeAccepted)
+	seriesBID := crSubmitOpt(t, ctx, conn, cp, cons, "fdrsseedB", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, []string{fdrGuardKey(fdrProviderBKey)}, processor.OutcomeAccepted)
 	seriesBKey := "vtx.visitseries." + seriesBID
 
 	// Front-desk may site the building-A series (its workplace)...

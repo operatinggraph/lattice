@@ -121,6 +121,11 @@ func wcCreateBookingAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": bookerKey})
 	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
 	optionalReads := append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+bookerID)
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	startsAt, _ := schedData["startsAt"].(string)
+	endsAt, _ := schedData["endsAt"].(string)
+	optionalReads = append(optionalReads, wdSlotClaimKeys(t, bookerKey, startsAt, endsAt)...)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -149,6 +154,11 @@ func wcCreateBookingAsWithReason(t *testing.T, ctx context.Context, conn *substr
 	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": bookerKey})
 	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
 	optionalReads := append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+bookerID)
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	startsAt, _ := schedData["startsAt"].(string)
+	endsAt, _ := schedData["endsAt"].(string)
+	optionalReads = append(optionalReads, wdSlotClaimKeys(t, bookerKey, startsAt, endsAt)...)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -484,6 +494,11 @@ func wcSelfBooking(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	reqID := testutil.GenReqID(label)
 	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": domainConsumerKey})
 	optionalReads := append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+domainConsumerID)
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	startsAt, _ := schedData["startsAt"].(string)
+	endsAt, _ := schedData["endsAt"].(string)
+	optionalReads = append(optionalReads, wdSlotClaimKeys(t, domainConsumerKey, startsAt, endsAt)...)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,

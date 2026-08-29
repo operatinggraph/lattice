@@ -260,7 +260,10 @@ func submitShredIdentityKey(t *testing.T, ctx context.Context, conn *substrate.C
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{identityKey},
+			OptionalReads: []string{identityKey + ".piiKey"},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

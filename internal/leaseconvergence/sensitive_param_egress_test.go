@@ -116,7 +116,10 @@ func TestLeaseConvergence_SensitiveParamEgress_ShredThenReplay_NeverDecrypts(t *
 	// Shred the applicant's key (privacy-base's real op, through the real
 	// Processor — the same commit path production uses).
 	shredReply := h.submitOp("ShredIdentityKey", "shredIdentityKey", "default", bootstrap.BootstrapIdentityKey,
-		map[string]any{"identityKey": applicantKey}, &processor.ContextHint{Reads: []string{applicantKey}})
+		map[string]any{"identityKey": applicantKey}, &processor.ContextHint{
+			Reads:         []string{applicantKey},
+			OptionalReads: []string{applicantKey + ".piiKey"},
+		})
 	require.Equalf(t, processor.ReplyStatusAccepted, shredReply.Status, "ShredIdentityKey: %+v", shredReply.Error)
 
 	// Replay the SAME external.backgroundCheck event (the durable body still

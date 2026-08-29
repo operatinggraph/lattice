@@ -95,12 +95,14 @@ func TestMerge_HappyPath(t *testing.T) {
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
 		ContextHint: &processor.ContextHint{
 			Reads: mergeReads(primaryKey, secondaryKey, edges),
-			// The op's one kv.Links call (the secondary-has-open-tasks
-			// guard), declared as class-(e) metadata (Contract #2 §2.5:
-			// bounded + paged, never hydrated — the declaration feeds the
-			// Edge mirror-coverage gate + the read-posture lint).
+			// The op's two kv.Links calls (the secondary-has-open-tasks
+			// guard + the indexes-driven repoint), declared as class-(e)
+			// metadata (Contract #2 §2.5: bounded + paged, never hydrated —
+			// the declaration feeds the Edge mirror-coverage gate + the
+			// read-posture lint).
 			Enumerations: []processor.EnumerationHint{
 				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
 			},
 		},
 	}
@@ -198,7 +200,13 @@ func TestMerge_EnumeratedEdgesFromLens(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:01:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -241,7 +249,13 @@ func TestMerge_RejectsFabricatedEdge(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:02:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -289,7 +303,13 @@ func TestMerge_RejectsEdgeNotTouchingSecondary(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:03:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -336,7 +356,13 @@ func TestMerge_RejectsTombstonedEdge(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:04:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -383,7 +409,13 @@ func TestMerge_RejectsAlreadyMergedSecondary(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:05:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -436,7 +468,13 @@ func TestMerge_PostMergeRedirect_FR4(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:06:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, mergeEdges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, mergeEdges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, mergeEdges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, mergeEnv)
 	testutil.DriveOne(t, ctx, sharedCP, sharedCons, processor.OutcomeAccepted)
@@ -523,7 +561,13 @@ func TestMerge_NonOperatorActor_Denied(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:08:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -574,7 +618,13 @@ func TestMerge_RejectsSecondaryWithOpenTask(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:09:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -623,7 +673,13 @@ func TestMerge_AllowsSecondaryWithClosedTask(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:10:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -673,6 +729,10 @@ func TestMerge_TombstonesDuplicateOfLink_ForwardDirection(t *testing.T) {
 			OptionalReads: []string{
 				dupKey,
 				"lnk.identity." + primaryID + ".duplicateOf.identity." + secondaryID,
+			},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
 			},
 		},
 	}
@@ -725,6 +785,10 @@ func TestMerge_TombstonesDuplicateOfLink_InvertedMerge(t *testing.T) {
 			OptionalReads: []string{
 				dupKey,
 				"lnk.identity." + bID + ".duplicateOf.identity." + aID,
+			},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
 			},
 		},
 	}
@@ -785,6 +849,7 @@ func TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads: mergeReads(primaryKey, secondaryKey, edges),
 			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
 				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
 			},
 		},
@@ -877,6 +942,7 @@ func TestMerge_IndexesRepoint_SkipsIndexAlreadyRepointedAway(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads: mergeReads(primaryKey, secondaryKey, []string{}),
 			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
 				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
 			},
 		},
@@ -943,7 +1009,13 @@ func TestMerge_TrustGateAcceptsRealClassLink(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:14:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1000,6 +1072,10 @@ func TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         mergeReads(primaryKey, secondaryKey, edges),
 			OptionalReads: []string{primaryLnk},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1052,7 +1128,13 @@ func TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate(t *testing.T)
 		SubmittedAt:   "2026-05-23T10:21:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -1079,6 +1161,10 @@ func acrMergeEnv(reqID, primaryKey, secondaryKey, asp string) *processor.Operati
 		ContextHint: &processor.ContextHint{
 			Reads:         mergeReads(primaryKey, secondaryKey, edges),
 			OptionalReads: []string{secondaryKey + "." + asp},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
 		},
 	}
 }

@@ -453,15 +453,7 @@ func TestCompleteCredentialLink_ScenarioB_CreatesAspect(t *testing.T) {
 
 	scenarioBKey := "vtx.identity.JscnBActHJKMNPQRSTUV"
 	roleKey := consumerRoleKey(t)
-	provisionEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("CmplScenBProv"),
-		Lane:          processor.LaneDefault,
-		OperationType: "ProvisionConsumerIdentity",
-		Actor:         gatewayActorKey,
-		SubmittedAt:   "2026-07-11T09:00:00Z",
-		Class:         "identity",
-		Payload:       provisionPayload(t, scenarioBKey, roleKey),
-	}
+	provisionEnv := provisionEnvelope(t, testutil.GenReqID("CmplScenBProv"), scenarioBKey, roleKey, "2026-07-11T09:00:00Z")
 	testutil.PublishOp(t, conn, provisionEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 

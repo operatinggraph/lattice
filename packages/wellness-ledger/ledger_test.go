@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -402,10 +404,32 @@ func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.session." + nanoIDFromRequestID(reqID)
 }
 
-// createBooking submits CreateBooking and returns the booking's full key.
+// createBooking submits CreateBooking and returns the booking's full key. The
+// session's own .schedule is a required read (prepare_booking_common's
+// SessionStarted check, wellness-domain opmetas.go); the seat-claim cells up
+// to the session's capacity, the booker's own double-book guard, and the
+// booker's slot cells over the session's window are all optionalReads
+// (claim_first_free_seat / bookerSlotClaim, ddls.go).
 func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey string) string {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	optionalReads := []string{sessionKey + ".bkr" + bookerID}
+	for n := 1; n <= 10; n++ {
+		optionalReads = append(optionalReads, sessionKey+".seat"+strconv.Itoa(n))
+	}
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	startsAt, _ := schedData["startsAt"].(string)
+	endsAt, _ := schedData["endsAt"].(string)
+	if start, err := time.Parse(time.RFC3339, startsAt); err == nil {
+		if end, err := time.Parse(time.RFC3339, endsAt); err == nil {
+			for cur := start; cur.Before(end); cur = cur.Add(15 * time.Minute) {
+				cc := strings.ToLower(strings.NewReplacer("-", "", ":", "").Replace(cur.UTC().Format(time.RFC3339)))
+				optionalReads = append(optionalReads, bookerKey+".slot"+cc)
+			}
+		}
+	}
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -414,7 +438,10 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-06-25T13:00:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"session":"` + sessionKey + `","booker":"` + bookerKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{sessionKey, bookerKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
+			OptionalReads: optionalReads,
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

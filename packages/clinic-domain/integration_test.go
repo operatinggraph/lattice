@@ -338,6 +338,64 @@ func clSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 	return clNanoIDFromRequestID(reqID)
 }
 
+// clSubmitOpt is clSubmit plus an explicit optionalReads — for op dispatchers
+// (SetAppointmentStatus) whose declared read posture mixes required Reads with
+// a legitimate-absence OptionalReads.
+func clSubmitOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, class, payload string, reads, optionalReads []string, want processor.MessageOutcome) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         class,
+		Payload:       json.RawMessage(payload),
+	}
+	if len(reads) > 0 || len(optionalReads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return clNanoIDFromRequestID(reqID)
+}
+
+// clRescheduleReads returns RescheduleAppointment's required Reads — the
+// appointment + its .schedule + the withProvider/forPatient endpoint-
+// validation links (app.js submitReschedule, script-read-posture-design.md
+// §13).
+func clRescheduleReads(apptKey, providerKey, patientKey string) []string {
+	apptID := apptKey[len("vtx.appointment."):]
+	providerID := providerKey[len("vtx.provider."):]
+	patientID := patientKey[len("vtx.patient."):]
+	return []string{
+		apptKey, apptKey + ".schedule",
+		"lnk.appointment." + apptID + ".withProvider.provider." + providerID,
+		"lnk.appointment." + apptID + ".forPatient.patient." + patientID,
+	}
+}
+
+// clStatusReads returns the Reads/OptionalReads pair SetAppointmentStatus's
+// dispatcher declares (app.js setStatus): .status is always an optionalRead
+// (absence is the legitimate first-set case); the appointment's .schedule +
+// the withProvider/forPatient links are additionally REQUIRED only on a
+// terminal-status transition (the branch that releases the held slot-claim
+// cells) — the same condition the FE gates provider/patient submission on.
+func clStatusReads(apptKey string, terminal bool, providerKey, patientKey string) (reads, optionalReads []string) {
+	reads = []string{apptKey}
+	optionalReads = []string{apptKey + ".status"}
+	if terminal {
+		apptID := apptKey[len("vtx.appointment."):]
+		providerID := providerKey[len("vtx.provider."):]
+		patientID := patientKey[len("vtx.patient."):]
+		reads = append(reads, apptKey+".schedule",
+			"lnk.appointment."+apptID+".withProvider.provider."+providerID,
+			"lnk.appointment."+apptID+".forPatient.patient."+patientID)
+	}
+	return reads, optionalReads
+}
+
 // createPatient / createProvider mint a vertex and return its full key.
 func createPatient(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, fullName string) string {
 	id := clSubmit(t, ctx, conn, cp, cons, label, "CreatePatient", "patient",
@@ -523,9 +581,12 @@ func TestClinic_DoubleBookRejected(t *testing.T) {
 	// 8. Cancel a1, then re-book its 10:00–10:30 cells → the cancelled appointment's
 	//    claims were released on the terminal transition, so the cells are free → accepted.
 	a1Key := "vtx.appointment." + a1
-	clSubmit(t, ctx, conn, cp, cons, "dbcancel001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+a1Key+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{a1Key}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(a1Key, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "dbcancel001", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+a1Key+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T10:00:00Z")
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T10:15:00Z")
 	mkAppt("dbappt0008", patientKey, providerKey, "2026-08-01T10:00:00Z", "2026-08-01T10:30:00Z", processor.OutcomeAccepted)
@@ -641,19 +702,22 @@ func TestClinic_PatientDoubleBook(t *testing.T) {
 	a7 := "vtx.appointment." + book("pdappt0007", patientKey, provB, "2026-08-10T18:00:00Z", "2026-08-10T18:30:00Z", processor.OutcomeAccepted)
 	clSubmit(t, ctx, conn, cp, cons, "pdres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+a7+`","provider":"`+provB+`","patient":"`+patientKey+`","startsAt":"2026-08-10T14:00:00Z","endsAt":"2026-08-10T14:30:00Z"}`,
-		[]string{a7}, processor.OutcomeRejected)
+		clRescheduleReads(a7, provB, patientKey), processor.OutcomeRejected)
 
 	// 8. Cancel the provider-A 14:00 appointment, then the reschedule onto 14:00
 	//    succeeds (the cancelled appointment's patient slot claims were released on
 	//    the terminal transition).
 	aAKey := "vtx.appointment." + aA
-	clSubmit(t, ctx, conn, cp, cons, "pdcancel01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+aAKey+`","status":"cancelled","provider":"`+provA+`","patient":"`+patientKey+`"}`,
-		[]string{aAKey}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(aAKey, true, provA, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "pdcancel01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+aAKey+`","status":"cancelled","provider":"`+provA+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-08-10T14:00:00Z")
 	clSubmit(t, ctx, conn, cp, cons, "pdres0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+a7+`","provider":"`+provB+`","patient":"`+patientKey+`","startsAt":"2026-08-10T14:00:00Z","endsAt":"2026-08-10T14:30:00Z"}`,
-		[]string{a7}, processor.OutcomeAccepted)
+		clRescheduleReads(a7, provB, patientKey), processor.OutcomeAccepted)
 	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-08-10T14:00:00Z")
 }
 
@@ -671,8 +735,8 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	clSubmit(t, ctx, conn, cp, cons, "setstat0001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"confirmed"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmitOpt(t, ctx, conn, cp, cons, "setstat0001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"confirmed"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	if st, _ := status["data"].(map[string]any); st["value"] != "confirmed" {
@@ -702,8 +766,8 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	apptKey := "vtx.appointment." + apptID
 
 	// checkedIn is a valid status (the new active state).
-	clSubmit(t, ctx, conn, cp, cons, "setchkin001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmitOpt(t, ctx, conn, cp, cons, "setchkin001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
 	if st["value"] != "checkedIn" {
@@ -715,8 +779,8 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 
 	// A transition with an audit note records the note on .status (a non-terminal
 	// state — the note mechanism is independent of the status value).
-	clSubmit(t, ctx, conn, cp, cons, "setconf0001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"confirmed","note":"rescheduled by phone"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmitOpt(t, ctx, conn, cp, cons, "setconf0001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"confirmed","note":"rescheduled by phone"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 	status = clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ = status["data"].(map[string]any)
 	if st["value"] != "confirmed" || st["note"] != "rescheduled by phone" {
@@ -724,8 +788,8 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	}
 
 	// A later noteless transition clears the note (unconditioned upsert).
-	clSubmit(t, ctx, conn, cp, cons, "setsched001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmitOpt(t, ctx, conn, cp, cons, "setsched001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 	status = clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ = status["data"].(map[string]any)
 	if _, hasNote := st["note"]; hasNote {
@@ -752,18 +816,26 @@ func TestClinic_TerminalStatusGuard(t *testing.T) {
 
 	// Move to a terminal status (the visit happened) — the FIRST terminal transition
 	// requires provider + patient (to release the held slot-claim cells).
-	clSubmit(t, ctx, conn, cp, cons, "setcompl001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "setcompl001", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T09:00:00Z")
 
 	// completed→scheduled is REJECTED — a completed visit must not silently revert.
-	clSubmit(t, ctx, conn, cp, cons, "settrevrt01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, processor.OutcomeRejected)
+	// scheduled is non-terminal, so the dispatcher never reaches the release
+	// branch: only .status (optionalReads) is declared.
+	clSubmitOpt(t, ctx, conn, cp, cons, "settrevrt01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeRejected)
 
-	// completed→cancelled (terminal→terminal, different value) is also REJECTED.
-	clSubmit(t, ctx, conn, cp, cons, "settcancl01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, processor.OutcomeRejected)
+	// completed→cancelled (terminal→terminal, different value) is also REJECTED —
+	// by the TerminalStatus guard, which fires off the already-declared .status
+	// BEFORE the script ever reaches the first-terminal-transition release branch,
+	// so schedule/links are never read here either.
+	clSubmitOpt(t, ctx, conn, cp, cons, "settcancl01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeRejected)
 
 	// The status is unchanged by the rejected attempts — still completed.
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
@@ -774,8 +846,8 @@ func TestClinic_TerminalStatusGuard(t *testing.T) {
 
 	// completed→completed (same terminal value) stays accepted — idempotent re-set
 	// under at-least-once, and a noteless re-set clears any stale note.
-	clSubmit(t, ctx, conn, cp, cons, "settidemp01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"completed"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmitOpt(t, ctx, conn, cp, cons, "settidemp01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"completed"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 	status = clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ = status["data"].(map[string]any)
 	if st["value"] != "completed" {
@@ -802,9 +874,12 @@ func TestClinic_NoShowFee(t *testing.T) {
 	apptKey := "vtx.appointment." + apptID
 
 	// Omitted noShowFeeCents defaults to 2500.
-	clSubmit(t, ctx, conn, cp, cons, "setnoshow001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"noShow","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "setnoshow001", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"noShow","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
 	if st["value"] != "noShow" {
@@ -816,9 +891,9 @@ func TestClinic_NoShowFee(t *testing.T) {
 
 	// A caller-supplied positive fee overrides the default on the idempotent
 	// same-value re-set.
-	clSubmit(t, ctx, conn, cp, cons, "setnoshow002", "SetAppointmentStatus", "appointment",
+	clSubmitOpt(t, ctx, conn, cp, cons, "setnoshow002", "SetAppointmentStatus", "appointment",
 		`{"appointmentKey":"`+apptKey+`","status":"noShow","noShowFeeCents":5000}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		[]string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 	status = clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ = status["data"].(map[string]any)
 	if got, _ := st["noShowFeeCents"].(float64); got != 5000 {
@@ -826,9 +901,9 @@ func TestClinic_NoShowFee(t *testing.T) {
 	}
 
 	// A non-positive supplied fee is rejected.
-	clSubmit(t, ctx, conn, cp, cons, "setnoshow003", "SetAppointmentStatus", "appointment",
+	clSubmitOpt(t, ctx, conn, cp, cons, "setnoshow003", "SetAppointmentStatus", "appointment",
 		`{"appointmentKey":"`+apptKey+`","status":"noShow","noShowFeeCents":0}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		[]string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeRejected)
 
 	// A different appointment moved to a non-noShow terminal status never
 	// gets a noShowFeeCents field at all.
@@ -836,9 +911,12 @@ func TestClinic_NoShowFee(t *testing.T) {
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-12T09:00:00Z","endsAt":"2026-07-12T09:30:00Z"}`,
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey2 := "vtx.appointment." + apptID2
-	clSubmit(t, ctx, conn, cp, cons, "setcompl002", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey2+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey2}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(apptKey2, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "setcompl002", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey2+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	status2 := clReadDoc(t, ctx, conn, apptKey2+".status")
 	st2, _ := status2["data"].(map[string]any)
 	if _, present := st2["noShowFeeCents"]; present {
@@ -904,9 +982,12 @@ func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	clSubmit(t, ctx, conn, cp, cons, "setcompl021", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "setcompl021", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 
 	clSubmit(t, ctx, conn, cp, cons, "pastdue021", "MarkPastDueNoShow", "appointment",
 		`{"appointmentKey":"`+apptKey+`"}`,
@@ -1053,7 +1134,7 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 	// PatientDoubleBook conflict-check).
 	clSubmit(t, ctx, conn, cp, cons, "resched0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-12T18:00:00+02:00","endsAt":"2026-07-12T18:30:00+02:00","reason":"Annual checkup"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeAccepted)
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-12T16:00:00Z")
 
@@ -1084,7 +1165,7 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 	// Reschedule again with NO reason → the reason is cleared.
 	clSubmit(t, ctx, conn, cp, cons, "resched0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-13T09:00:00Z","endsAt":"2026-07-13T09:30:00Z"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeAccepted)
 	sd2, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any)
 	if _, present := sd2["reason"]; present {
 		t.Fatalf("an omitted reason should clear it; got reason=%v", sd2["reason"])
@@ -1099,7 +1180,7 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 		[]string{apptKey}, processor.OutcomeAccepted)
 	clSubmit(t, ctx, conn, cp, cons, "resched0003", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-14T09:00:00Z","endsAt":"2026-07-14T09:30:00Z"}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeRejected)
 }
 
 // TestClinic_RescheduleIntoConflictRejected proves Increment 2's core property: a
@@ -1126,7 +1207,7 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 	resched := func(label, apptKey, start, end string, want processor.MessageOutcome) {
 		clSubmit(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
 			`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{apptKey}, want)
+			clRescheduleReads(apptKey, providerKey, patientKey), want)
 	}
 
 	a1 := "vtx.appointment." + mkAppt("rcappt0001", "2026-09-01T10:00:00Z", "2026-09-01T10:30:00Z")
@@ -1152,13 +1233,16 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 	//    check by pointing at an empty book.
 	clSubmit(t, ctx, conn, cp, cons, "rcres0007", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+a2+`","provider":"`+providerKey2+`","patient":"`+patientKey+`","startsAt":"2026-09-01T15:00:00Z","endsAt":"2026-09-01T15:30:00Z"}`,
-		[]string{a2}, processor.OutcomeRejected)
+		clRescheduleReads(a2, providerKey2, patientKey), processor.OutcomeRejected)
 
 	// 8. Cancel a1, then move a2 onto a1's (now freed) 10:00 slot → accepted (a
 	//    cancelled appointment's claims were released on the terminal transition).
-	clSubmit(t, ctx, conn, cp, cons, "rccancel01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+a1+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{a1}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(a1, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "rccancel01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+a1+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	resched("rcres0008", a2, "2026-09-01T10:00:00Z", "2026-09-01T10:30:00Z", processor.OutcomeAccepted)
 }
 
@@ -1216,7 +1300,7 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 	resched := func(label, start, end string, want processor.MessageOutcome) {
 		clSubmit(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
 			`{"appointmentKey":"`+a1Key+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{a1Key}, want)
+			clRescheduleReads(a1Key, providerKey, patientKey), want)
 	}
 	resched("phres0001", "2026-06-28T10:00:00Z", "2026-06-28T10:30:00Z", processor.OutcomeRejected)
 	resched("phres0002", "2026-07-01T10:00:00Z", "2026-07-01T10:30:00Z", processor.OutcomeAccepted)
@@ -1271,11 +1355,11 @@ func TestClinic_PastTimeRejected(t *testing.T) {
 	// RescheduleAppointment into the past is rejected exactly as a create is.
 	clSubmit(t, ctx, conn, cp, cons, "ptres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2025-06-01T10:00:00Z","endsAt":"2025-06-01T10:30:00Z"}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeRejected)
 	// A reschedule to a future time still works (and re-derives remindAt).
 	clSubmit(t, ctx, conn, cp, cons, "ptres0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-08-01T10:00:00Z","endsAt":"2026-08-01T10:30:00Z"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeAccepted)
 	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
 	if sd, _ := sched["data"].(map[string]any); sd["startsAt"] != "2026-08-01T10:00:00Z" {
 		t.Fatalf("after future reschedule, startsAt = %v, want 2026-08-01T10:00:00Z", sched["data"])
@@ -1332,10 +1416,10 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 	// A reschedule INTO the blocked week is rejected; a move to another free slot works.
 	clSubmit(t, ctx, conn, cp, cons, "tores0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-09T10:00:00Z","endsAt":"2026-07-09T10:30:00Z"}`,
-		[]string{outsideKey}, processor.OutcomeRejected)
+		clRescheduleReads(outsideKey, providerKey, patientKey), processor.OutcomeRejected)
 	clSubmit(t, ctx, conn, cp, cons, "tores0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-21T10:00:00Z","endsAt":"2026-07-21T10:30:00Z"}`,
-		[]string{outsideKey}, processor.OutcomeAccepted)
+		clRescheduleReads(outsideKey, providerKey, patientKey), processor.OutcomeAccepted)
 
 	// A different provider with NO .timeOff is unrestricted — a booking in that week is fine.
 	freeProvider := createProvider(t, ctx, conn, cp, cons, "toprv0002", "Dr. Here", "GeneralPractice")
@@ -1384,7 +1468,7 @@ func TestClinic_RescheduleToSameInterval(t *testing.T) {
 	// cells stay live (never released, never re-claimed — an empty diff).
 	clSubmit(t, ctx, conn, cp, cons, "rsres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-15T09:00:00Z","endsAt":"2026-07-15T09:30:00Z","reason":"Checkup, updated note"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeAccepted)
 	sd, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any)
 	if sd["reason"] != "Checkup, updated note" {
 		t.Fatalf("reason = %v, want updated", sd["reason"])
@@ -1430,7 +1514,7 @@ func TestClinic_SlotGridAndTooLong(t *testing.T) {
 	// RescheduleAppointment enforces the same grid guard.
 	clSubmit(t, ctx, conn, cp, cons, "sgres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-04T09:10:00Z","endsAt":"2026-07-04T09:30:00Z"}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		clRescheduleReads(apptKey, providerKey, patientKey), processor.OutcomeRejected)
 	// The appointment's original slot claims survive the rejected reschedule.
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-03T09:00:00Z")
 
@@ -1465,21 +1549,30 @@ func TestClinic_TerminalStatusRequiresEndpoints(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	// Missing provider/patient on the first terminal transition → InvalidArgument.
-	clSubmit(t, ctx, conn, cp, cons, "tecancl001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, processor.OutcomeRejected)
+	// Missing provider/patient on the first terminal transition → InvalidArgument,
+	// before the script ever reads a withProvider/forPatient link.
+	clSubmitOpt(t, ctx, conn, cp, cons, "tecancl001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeRejected)
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
 
-	// A wrong patient (not this appointment's actual patient) → WrongPatient.
-	clSubmit(t, ctx, conn, cp, cons, "tecancl002", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+otherPatient+`"}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+	// A wrong patient (not this appointment's actual patient) → WrongPatient. The
+	// script still reads the (correct) withProvider link and the (absent, because
+	// wrong) forPatient link keyed off the SUPPLIED patient before failing.
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, otherPatient)
+		clSubmitOpt(t, ctx, conn, cp, cons, "tecancl002", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+otherPatient+`"}`,
+			reads, optionalReads, processor.OutcomeRejected)
+	}
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
 
 	// The real endpoints → accepted, cells released.
-	clSubmit(t, ctx, conn, cp, cons, "tecancl003", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "tecancl003", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
 }
 
@@ -1496,8 +1589,8 @@ func TestClinic_RejectsBadStatus(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	clSubmit(t, ctx, conn, cp, cons, "badstat0001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"bogus"}`, []string{apptKey}, processor.OutcomeRejected)
+	clSubmitOpt(t, ctx, conn, cp, cons, "badstat0001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"bogus"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeRejected)
 
 	// The status stays scheduled (the bad transition committed nothing).
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
@@ -1620,9 +1713,9 @@ func TestClinic_CreatePatientWithIdentity(t *testing.T) {
 	identityKey := "vtx.identity.CLidentwithHJKMNPQRS"
 	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
 
-	id := clSubmit(t, ctx, conn, cp, cons, "mkpatid0001", "CreatePatient", "patient",
+	id := clSubmitOpt(t, ctx, conn, cp, cons, "mkpatid0001", "CreatePatient", "patient",
 		`{"fullName":"Bea Nakamura","identityKey":"`+identityKey+`"}`,
-		[]string{identityKey}, processor.OutcomeAccepted)
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + id
 
 	// An IDENTIFIED patient's name lives on the identity's sensitive .name
@@ -1680,13 +1773,13 @@ func TestClinic_CreatePatientRejectsDuplicateIdentityClaim(t *testing.T) {
 	identityKey := "vtx.identity.CLdupePatientHJKMNPQ"
 	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
 
-	clSubmit(t, ctx, conn, cp, cons, "mkpatdup001", "CreatePatient", "patient",
+	clSubmitOpt(t, ctx, conn, cp, cons, "mkpatdup001", "CreatePatient", "patient",
 		`{"fullName":"First Claimant","identityKey":"`+identityKey+`"}`,
-		[]string{identityKey}, processor.OutcomeAccepted)
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
 
-	secondID := clSubmit(t, ctx, conn, cp, cons, "mkpatdup002", "CreatePatient", "patient",
+	secondID := clSubmitOpt(t, ctx, conn, cp, cons, "mkpatdup002", "CreatePatient", "patient",
 		`{"fullName":"Second Claimant","identityKey":"`+identityKey+`"}`,
-		[]string{identityKey}, processor.OutcomeRejected)
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeRejected)
 
 	if !clMissing(t, ctx, conn, "vtx.patient."+secondID) {
 		t.Fatalf("a second patient was committed against an already-claimed identity")
@@ -1776,9 +1869,9 @@ func TestClinic_CreateAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 
 	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
 
-	patientID := clSubmit(t, ctx, conn, cp, cons, "selfpat00001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "selfpat00001", "CreatePatient", "patient",
 		`{"fullName":"Self Booker","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "selfprv0001", "Dr. Nora Vance", "Dermatology")
 
@@ -1822,9 +1915,9 @@ func TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead(t 
 
 	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
 
-	patientID := clSubmit(t, ctx, conn, cp, cons, "lazypat00001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "lazypat00001", "CreatePatient", "patient",
 		`{"fullName":"Lazy Read Booker","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "lazyprv0001", "Dr. Priya Anand", "Neurology")
 
@@ -1907,9 +2000,9 @@ func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 
 	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
 
-	patientID := clSubmit(t, ctx, conn, cp, cons, "reschpat0001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "reschpat0001", "CreatePatient", "patient",
 		`{"fullName":"Self Reschedule Patient","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "reschprv0001", "Dr. Alina Voss", "Family Medicine")
 
@@ -1929,7 +2022,7 @@ func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","provider":"` + providerKey + `","patient":"` + patientKey + `","startsAt":"2026-07-12T16:00:00Z","endsAt":"2026-07-12T16:30:00Z"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		ContextHint:   &processor.ContextHint{Reads: clRescheduleReads(apptKey, providerKey, patientKey), OptionalReads: []string{identifiedByLnk}},
 		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -2041,9 +2134,9 @@ func TestClinic_SelfScopeProbesRevealNothingAboutAnotherPatient(t *testing.T) {
 
 	// The prober's own patient (identifiedBy their identity) — naming any other
 	// patient is what the binding already rejects, so this is their only lever.
-	ownID := clSubmit(t, ctx, conn, cp, cons, "probeownpat01", "CreatePatient", "patient",
+	ownID := clSubmitOpt(t, ctx, conn, cp, cons, "probeownpat01", "CreatePatient", "patient",
 		`{"fullName":"Probe Own Patient","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	ownPatientKey := "vtx.patient." + ownID
 
 	victimPatientKey := createPatient(t, ctx, conn, cp, cons, "probevicpat01", "Probe Victim")
@@ -2116,9 +2209,9 @@ func TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed(t *testing.T
 
 	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
 
-	patientID := clSubmit(t, ctx, conn, cp, cons, "cancelpat0001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "cancelpat0001", "CreatePatient", "patient",
 		`{"fullName":"Self Cancel Patient","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "cancelprv0001", "Dr. Mara Chen", "Internal Medicine")
 
@@ -2138,7 +2231,7 @@ func TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed(t *testing.T
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"cancelled","provider":"` + providerKey + `","patient":"` + patientKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		ContextHint:   &processor.ContextHint{Reads: clRescheduleReads(apptKey, providerKey, patientKey), OptionalReads: []string{identifiedByLnk, apptKey + ".status"}},
 		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -2162,9 +2255,9 @@ func TestClinic_SetAppointmentStatusConsumerSelfScope_NonCancelRejected(t *testi
 
 	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
 
-	patientID := clSubmit(t, ctx, conn, cp, cons, "nclpat0001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "nclpat0001", "CreatePatient", "patient",
 		`{"fullName":"Self NoShow Patient","identityKey":"`+clConsumerKey+`"}`,
-		[]string{clConsumerKey}, processor.OutcomeAccepted)
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "nclprv0001", "Dr. Ines Rocha", "Family Medicine")
 
@@ -2284,9 +2377,9 @@ func TestClinic_CreateAppointment_ResidentVisitWhenLeaseMatchesPatient(t *testin
 
 	identityKey := "vtx.identity.CLrvmatchHJKMNPQRSTU"
 	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
-	patientID := clSubmit(t, ctx, conn, cp, cons, "rvmatchpat01", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "rvmatchpat01", "CreatePatient", "patient",
 		`{"fullName":"Rae Visitor","identityKey":"`+identityKey+`"}`,
-		[]string{identityKey}, processor.OutcomeAccepted)
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "rvmatchprv01", "Dr. Owen Reyes", "Pediatrics")
 
@@ -2317,9 +2410,9 @@ func TestClinic_CreateAppointment_MismatchedLeaseFallsBack(t *testing.T) {
 
 	patientIdentityKey := "vtx.identity.CLrvmisPatHJKMNPQRST"
 	clSeedVertex(t, ctx, conn, patientIdentityKey, "identity", false)
-	patientID := clSubmit(t, ctx, conn, cp, cons, "rvmispat0001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "rvmispat0001", "CreatePatient", "patient",
 		`{"fullName":"Mira Mismatch","identityKey":"`+patientIdentityKey+`"}`,
-		[]string{patientIdentityKey}, processor.OutcomeAccepted)
+		[]string{patientIdentityKey}, []string{patientIdentityKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "rvmisprv0001", "Dr. Owen Reyes", "Pediatrics")
 
@@ -2348,9 +2441,9 @@ func TestClinic_CreateAppointment_PendingLeaseFallsBack(t *testing.T) {
 
 	identityKey := "vtx.identity.CLrvpendHJKMNPQRSTUV"
 	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
-	patientID := clSubmit(t, ctx, conn, cp, cons, "rvpendpat001", "CreatePatient", "patient",
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "rvpendpat001", "CreatePatient", "patient",
 		`{"fullName":"Penny Pending","identityKey":"`+identityKey+`"}`,
-		[]string{identityKey}, processor.OutcomeAccepted)
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "rvpendprv001", "Dr. Owen Reyes", "Pediatrics")
 

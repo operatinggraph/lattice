@@ -182,6 +182,36 @@ func crSubmitAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	return crNanoIDFromRequestID(reqID)
 }
 
+// crActiveVisitSeriesKey mirrors StartVisitSeries's own OptionalReads
+// (packages/clinic-reminders/visitseries.go's op-meta): the per-(patient,
+// provider) active-series guard, absence of which is the legitimate first-
+// series case.
+func crActiveVisitSeriesKey(patientKey, providerKey string) string {
+	providerID := providerKey[len("vtx.provider."):]
+	return patientKey + ".activeVisitSeriesWith" + providerID
+}
+
+// crSubmitOpt is crSubmit plus an explicit optionalReads.
+func crSubmitOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, class, payload string, reads, optionalReads []string, want processor.MessageOutcome) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         crStaffActorKey,
+		SubmittedAt:   crSubmittedAnchor,
+		Class:         class,
+		Payload:       json.RawMessage(payload),
+	}
+	if len(reads) > 0 || len(optionalReads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return crNanoIDFromRequestID(reqID)
+}
+
 // TestRecordAppointmentReminder_WritesMarker mints a bookable appointment then
 // drives RecordAppointmentReminder, asserting the .reminder.sentAt marker lands
 // (class appointmentReminder) — the directOp write-path the appointmentReminders
@@ -480,9 +510,9 @@ func TestStartVisitSeries_MintsSeriesAndLinks(t *testing.T) {
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
 
-	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsstart1", "StartVisitSeries", "visitseries",
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvsstart1", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey := "vtx.visitseries." + seriesID
 
 	series := crReadDoc(t, ctx, conn, seriesKey+".series")
@@ -524,9 +554,9 @@ func TestStartVisitSeries_RejectsUnknownPatient(t *testing.T) {
 	providerKey := "vtx.provider." + providerID
 	unknown := "vtx.patient.CRunknownPatientMNPQRST"
 
-	crSubmit(t, ctx, conn, cp, cons, "crvsbstart", "StartVisitSeries", "visitseries",
+	crSubmitOpt(t, ctx, conn, cp, cons, "crvsbstart", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+unknown+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{unknown, providerKey}, processor.OutcomeRejected)
+		[]string{unknown, providerKey}, []string{crActiveVisitSeriesKey(unknown, providerKey)}, processor.OutcomeRejected)
 }
 
 // TestAdvanceVisitSeries_RollsForward drives AdvanceVisitSeries directly (the
@@ -541,9 +571,9 @@ func TestAdvanceVisitSeries_RollsForward(t *testing.T) {
 	patientKey := "vtx.patient." + patientID
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsaprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
-	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsastart", "StartVisitSeries", "visitseries",
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvsastart", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey := "vtx.visitseries." + seriesID
 
 	crSubmit(t, ctx, conn, cp, cons, "crvsadv001", "AdvanceVisitSeries", "",
@@ -601,9 +631,9 @@ func TestPauseResumeVisitSeries_TogglesPaused(t *testing.T) {
 	patientKey := "vtx.patient." + patientID
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvspprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
-	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvspstart", "StartVisitSeries", "visitseries",
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvspstart", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey := "vtx.visitseries." + seriesID
 
 	crSubmit(t, ctx, conn, cp, cons, "crvsp0001", "PauseVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`, []string{seriesKey}, processor.OutcomeAccepted)
@@ -636,9 +666,9 @@ func TestEndVisitSeries_SetsActiveUntilAndRejectsDouble(t *testing.T) {
 	patientKey := "vtx.patient." + patientID
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvseprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
-	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsestart", "StartVisitSeries", "visitseries",
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvsestart", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey := "vtx.visitseries." + seriesID
 
 	crSubmit(t, ctx, conn, cp, cons, "crvse0001", "EndVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`,
@@ -714,15 +744,15 @@ func TestStartVisitSeries_RejectsDuplicateActiveSeries(t *testing.T) {
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsdprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
 
-	seriesID1 := crSubmit(t, ctx, conn, cp, cons, "crvsdstart1", "StartVisitSeries", "visitseries",
+	seriesID1 := crSubmitOpt(t, ctx, conn, cp, cons, "crvsdstart1", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 
 	// Second call, same pair, same cadence — mirrors the live-confirmed repro
 	// (two calls both committing, 2 active series).
-	crSubmit(t, ctx, conn, cp, cons, "crvsdstart2", "StartVisitSeries", "visitseries",
+	crSubmitOpt(t, ctx, conn, cp, cons, "crvsdstart2", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-08-15T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeRejected)
 
 	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID1 {
 		t.Fatalf("guard seriesKey = %q, want unchanged vtx.visitseries.%s (rejected attempt must not revive it)", got, seriesID1)
@@ -743,16 +773,16 @@ func TestStartVisitSeries_AllowsNewSeriesAfterPause(t *testing.T) {
 	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsuprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
 	providerKey := "vtx.provider." + providerID
 
-	seriesID1 := crSubmit(t, ctx, conn, cp, cons, "crvsustart1", "StartVisitSeries", "visitseries",
+	seriesID1 := crSubmitOpt(t, ctx, conn, cp, cons, "crvsustart1", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey1 := "vtx.visitseries." + seriesID1
 
 	crSubmit(t, ctx, conn, cp, cons, "crvsupause1", "PauseVisitSeries", "", `{"seriesKey":"`+seriesKey1+`"}`, []string{seriesKey1}, processor.OutcomeAccepted)
 
-	seriesID2 := crSubmit(t, ctx, conn, cp, cons, "crvsustart2", "StartVisitSeries", "visitseries",
+	seriesID2 := crSubmitOpt(t, ctx, conn, cp, cons, "crvsustart2", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-09-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 
 	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID2 {
 		t.Fatalf("guard seriesKey = %q, want revived onto vtx.visitseries.%s", got, seriesID2)
@@ -782,13 +812,13 @@ func TestStartVisitSeries_AllowsNewSeriesAfterActiveUntilExpired(t *testing.T) {
 	// Both startAt and activeUntil are well before crSubmittedAnchor
 	// (2026-01-01), so this series has already "ended" by the time every
 	// crSubmit call in this test runs.
-	crSubmit(t, ctx, conn, cp, cons, "crvsxstart1", "StartVisitSeries", "visitseries",
+	crSubmitOpt(t, ctx, conn, cp, cons, "crvsxstart1", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2025-06-01T09:00:00Z","activeUntil":"2025-07-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 
-	seriesID2 := crSubmit(t, ctx, conn, cp, cons, "crvsxstart2", "StartVisitSeries", "visitseries",
+	seriesID2 := crSubmitOpt(t, ctx, conn, cp, cons, "crvsxstart2", "StartVisitSeries", "visitseries",
 		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-09-01T09:00:00Z"}`,
-		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 
 	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID2 {
 		t.Fatalf("guard seriesKey = %q, want revived onto vtx.visitseries.%s", got, seriesID2)

@@ -359,8 +359,11 @@ func (h *harness) submitShred(identityKey, reqLabel string) {
 	env := &processor.OperationEnvelope{
 		RequestID: testutil.GenReqID(reqLabel), Lane: processor.LaneUrgent, OperationType: "ShredIdentityKey",
 		Actor: csStaffActorKey, SubmittedAt: "2026-07-02T10:10:00Z", Class: "shredIdentityKey",
-		Payload:     mustJSON(map[string]any{"identityKey": identityKey}),
-		ContextHint: &processor.ContextHint{Reads: []string{identityKey}},
+		Payload: mustJSON(map[string]any{"identityKey": identityKey}),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{identityKey},
+			OptionalReads: []string{identityKey + ".piiKey"},
+		},
 	}
 	h.submitOp(h.urgentCP, h.urgentCons, env)
 }

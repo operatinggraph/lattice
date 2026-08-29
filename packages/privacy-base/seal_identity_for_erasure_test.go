@@ -137,7 +137,10 @@ func submitShredAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   submittedAt,
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{identityKey},
+			OptionalReads: []string{identityKey + ".piiKey"},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)

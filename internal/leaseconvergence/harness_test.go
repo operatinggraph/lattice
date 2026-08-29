@@ -628,7 +628,12 @@ func (h *harness) seedApplicant() (appKey, appID, applicantKey string) {
 
 	appReply := h.submitOp("CreateLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"applicant": applicantKey, "unit": unitKey,
-	}, &processor.ContextHint{Reads: []string{applicantKey, unitKey}})
+	}, &processor.ContextHint{
+		Reads: []string{applicantKey, unitKey},
+		OptionalReads: []string{
+			"lnk.identity." + applicantKey[len("vtx.identity."):] + ".appliedToUnit.unit." + unitKey[len("vtx.unit."):],
+		},
+	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication: %+v", appReply.Error)
 	appKey = appReply.PrimaryKey
 	appID = appKey[len("vtx.leaseapp."):]

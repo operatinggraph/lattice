@@ -37,7 +37,7 @@ import (
 // (require_site_membership reads both on demand, mirroring CreateAppointment's
 // site branch).
 func submitSetAppointmentSiteAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
-	cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, siteKey, actorKey string, want processor.MessageOutcome) {
+	cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, siteKey, providerKey, actorKey string, want processor.MessageOutcome) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -47,7 +47,10 @@ func submitSetAppointmentSiteAs(t *testing.T, ctx context.Context, conn *substra
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","site":"` + siteKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{apptKey},
+			OptionalReads: []string{siteKey, practicesAtLinkKey(providerKey, siteKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
@@ -76,7 +79,7 @@ func TestClinic_SetAppointmentSite_Fills(t *testing.T) {
 		t.Fatalf("appointment must not carry an atSite link before SetAppointmentSite")
 	}
 
-	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sasfset00001", apptKey, buildingKey, clStaffActorKey, processor.OutcomeAccepted)
+	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sasfset00001", apptKey, buildingKey, providerKey, clStaffActorKey, processor.OutcomeAccepted)
 
 	doc := clReadDoc(t, ctx, conn, lk)
 	if doc["class"] != "atSite" {
@@ -113,7 +116,7 @@ func TestClinic_SetAppointmentSite_NoopAlreadyHasSite(t *testing.T) {
 	// Attempt to "correct" it to buildingB — must no-op, leaving the ORIGINAL
 	// site untouched (reassignment is out of scope; only a missing site is
 	// filled).
-	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sasnset00001", apptKey, buildingB, clStaffActorKey, processor.OutcomeAccepted)
+	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sasnset00001", apptKey, buildingB, providerKey, clStaffActorKey, processor.OutcomeAccepted)
 
 	after := clReadDoc(t, ctx, conn, lk)
 	if del, _ := after["isDeleted"].(bool); del {
@@ -146,7 +149,7 @@ func TestClinic_SetAppointmentSite_RejectsProviderNotAtSite(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "saswset00001", apptKey, buildingKey, clStaffActorKey, processor.OutcomeRejected)
+	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "saswset00001", apptKey, buildingKey, providerKey, clStaffActorKey, processor.OutcomeRejected)
 
 	if !clMissing(t, ctx, conn, atSiteLinkKey(apptKey, buildingKey)) {
 		t.Fatalf("no atSite link should be committed when the provider is not assigned to the requested site")
@@ -222,8 +225,8 @@ func TestClinic_SetAppointmentSite_ConfinedToWorkplace(t *testing.T) {
 		[]string{patientKey, providerB}, processor.OutcomeAccepted)
 	apptAtBKey := "vtx.appointment." + apptAtB
 
-	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sascfsetA001", apptAtAKey, buildingA, sasActorKey, processor.OutcomeAccepted)
-	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sascfsetB001", apptAtBKey, buildingB, sasActorKey, processor.OutcomeRejected)
+	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sascfsetA001", apptAtAKey, buildingA, providerA, sasActorKey, processor.OutcomeAccepted)
+	submitSetAppointmentSiteAs(t, ctx, conn, cp, cons, "sascfsetB001", apptAtBKey, buildingB, providerB, sasActorKey, processor.OutcomeRejected)
 
 	if clMissing(t, ctx, conn, atSiteLinkKey(apptAtAKey, buildingA)) {
 		t.Fatalf("front-desk SetAppointmentSite on an appointment at its OWN workplace should have committed an atSite link")

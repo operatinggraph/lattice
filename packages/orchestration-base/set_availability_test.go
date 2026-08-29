@@ -155,6 +155,7 @@ func TestCreateTask_UnavailableAssignee_FallsBackToQueue(t *testing.T) {
 
 	reqID := testutil.GenReqID("CTUnavailCT01")
 	taskID := taskIDFromRequestID(reqID)
+	taskKey := "vtx.task." + taskID
 	expiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 
 	ctEnv := &processor.OperationEnvelope{
@@ -166,7 +167,10 @@ func TestCreateTask_UnavailableAssignee_FallsBackToQueue(t *testing.T) {
 		Class:         "task",
 		Payload: json.RawMessage(`{"assignee":"` + assigneeKey + `","queue":"` + roleKey + `","forOperation":"` + opKey +
 			`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{assigneeKey, roleKey, opKey, targetKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{assigneeKey, roleKey, opKey, targetKey},
+			OptionalReads: []string{taskKey, assigneeKey + ".availability"},
+		},
 	}
 	testutil.PublishOp(t, conn, ctEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -209,8 +213,9 @@ func TestCreateTask_UnavailableAssignee_NoQueue_Rejected(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	expiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	ctReqID := testutil.GenReqID("CTNoQCT000001")
 	ctEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("CTNoQCT000001"),
+		RequestID:     ctReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateTask",
 		Actor:         otStaffActorKey,
@@ -218,7 +223,10 @@ func TestCreateTask_UnavailableAssignee_NoQueue_Rejected(t *testing.T) {
 		Class:         "task",
 		Payload: json.RawMessage(`{"assignee":"` + assigneeKey + `","forOperation":"` + opKey +
 			`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{assigneeKey, opKey, targetKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{assigneeKey, opKey, targetKey},
+			OptionalReads: []string{"vtx.task." + taskIDFromRequestID(ctReqID), assigneeKey + ".availability"},
+		},
 	}
 	testutil.PublishOp(t, conn, ctEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -258,6 +266,7 @@ func TestCreateTask_AvailableAssignee_DirectAssign_EvenWithQueueGiven(t *testing
 
 	reqID := testutil.GenReqID("CTAvailCT0001")
 	taskID := taskIDFromRequestID(reqID)
+	taskKey := "vtx.task." + taskID
 	expiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 	ctEnv := &processor.OperationEnvelope{
 		RequestID:     reqID,
@@ -268,7 +277,10 @@ func TestCreateTask_AvailableAssignee_DirectAssign_EvenWithQueueGiven(t *testing
 		Class:         "task",
 		Payload: json.RawMessage(`{"assignee":"` + assigneeKey + `","queue":"` + roleKey + `","forOperation":"` + opKey +
 			`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{assigneeKey, roleKey, opKey, targetKey}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{assigneeKey, roleKey, opKey, targetKey},
+			OptionalReads: []string{taskKey, assigneeKey + ".availability"},
+		},
 	}
 	testutil.PublishOp(t, conn, ctEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

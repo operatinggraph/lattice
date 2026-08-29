@@ -90,7 +90,12 @@ func (h *harness) seedRenewableApplication(label string) (appKey, applicantKey, 
 
 	appReply := h.submitOp("CreateLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"applicant": applicantKey, "unit": unitKey,
-	}, &processor.ContextHint{Reads: []string{applicantKey, unitKey}})
+	}, &processor.ContextHint{
+		Reads: []string{applicantKey, unitKey},
+		OptionalReads: []string{
+			"lnk.identity." + applicantKey[len("vtx.identity."):] + ".appliedToUnit.unit." + unitKey[len("vtx.unit."):],
+		},
+	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication(%s): %+v", label, appReply.Error)
 	appKey = appReply.PrimaryKey
 	return appKey, applicantKey, unitKey

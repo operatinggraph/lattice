@@ -60,10 +60,13 @@ func rcptPkgKey(t *testing.T, tag string) string {
 
 // receiptEnv builds the RecordCapabilityInstallReceipt op. The payload arrives
 // as a raw map so a case can omit or malform a field a typed parameter list
-// would always supply.
-func receiptEnv(reqID string, payload map[string]any) *processor.OperationEnvelope {
+// would always supply. reads is whatever ContextHint.Reads the case's own
+// KV state supports declaring — nil where a key the script would touch does
+// not yet exist (a declared miss on a REQUIRED read is a HydrationMiss, not
+// the script's own live-read rejection).
+func receiptEnv(reqID string, payload map[string]any, reads []string) *processor.OperationEnvelope {
 	b, _ := json.Marshal(payload)
-	return &processor.OperationEnvelope{
+	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "RecordCapabilityInstallReceipt",
@@ -71,6 +74,22 @@ func receiptEnv(reqID string, payload map[string]any) *processor.OperationEnvelo
 		SubmittedAt:   rcptSubmittedAt,
 		Class:         "capabilityproposal",
 		Payload:       json.RawMessage(b),
+	}
+	if len(reads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads}
+	}
+	return env
+}
+
+// rcptCloseReads mirrors cmd/loupe/review.go's capabilityCloseReads — the
+// exact four keys RecordCapabilityInstallReceipt requires live before binding
+// a proposal to a package.
+func rcptCloseReads(proposalKey, packageKey string) []string {
+	return []string{
+		proposalKey + ".review",
+		proposalKey + ".target",
+		packageKey,
+		packageKey + ".manifest",
 	}
 }
 
@@ -88,18 +107,18 @@ func receiptPayload(proposalID, packageKey, installRequestID string) map[string]
 // committed outbox aspect. tag makes the requestId unique (testutil.GenReqID is
 // deterministic in its label), so a genuine second attempt against the same
 // proposal is a fresh op rather than a Contract #4 redelivery collapse.
-func driveReceipt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag string, payload map[string]any, want processor.MessageOutcome) string {
+func driveReceipt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag string, payload map[string]any, reads []string, want processor.MessageOutcome) string {
 	t.Helper()
 	reqID := testutil.GenReqID("CARcpt" + tag)
-	driveReceiptAs(t, ctx, conn, cp, cons, reqID, payload, want)
+	driveReceiptAs(t, ctx, conn, cp, cons, reqID, payload, reads, want)
 	return reqID
 }
 
 // driveReceiptAs submits under a CALLER-CHOSEN requestId, for the redelivery
 // case where the whole point is that the two submissions share one.
-func driveReceiptAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, reqID string, payload map[string]any, want processor.MessageOutcome) {
+func driveReceiptAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, reqID string, payload map[string]any, reads []string, want processor.MessageOutcome) {
 	t.Helper()
-	testutil.PublishOp(t, conn, receiptEnv(reqID, payload))
+	testutil.PublishOp(t, conn, receiptEnv(reqID, payload, reads))
 	testutil.DriveOne(t, ctx, cp, cons, want)
 }
 
@@ -194,7 +213,7 @@ func rcptProposalInState(t *testing.T, ctx context.Context, conn *substrate.Conn
 		driveReview(t, ctx, conn, cp, cons, tag, proposalID, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
 	case "applied":
 		driveReview(t, ctx, conn, cp, cons, tag, proposalID, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
-		driveApply(t, ctx, conn, cp, cons, tag, proposalID, packageKey, "REQ-mark-"+tag, processor.OutcomeAccepted)
+		driveApply(t, ctx, conn, cp, cons, tag, proposalID, packageKey, "REQ-mark-"+tag, applyCloseReads(proposalID, packageKey), processor.OutcomeAccepted)
 	default:
 		t.Fatalf("unknown review state %q", state)
 	}
@@ -234,7 +253,7 @@ func TestCapAuthor_Receipt_BindsRealInstall(t *testing.T) {
 	}
 
 	payload := receiptPayload(proposalID, applyResult.PackageKey, applyResult.InstallRequestID)
-	reqID := driveReceipt(t, ctx, conn, cp, cons, "Rea", payload, processor.OutcomeAccepted)
+	reqID := driveReceipt(t, ctx, conn, cp, cons, "Rea", payload, rcptCloseReads(pk, applyResult.PackageKey), processor.OutcomeAccepted)
 
 	assertInstallAspect(t, ctx, conn, pk, applyResult.PackageKey, applyResult.InstallRequestID)
 
@@ -261,7 +280,8 @@ func TestCapAuthor_Receipt_BindsRealInstall(t *testing.T) {
 	// MarkCapabilityProposalApplied still closes the loop over the very package
 	// the receipt named, and stamps the same install pointer, so the two records
 	// agree rather than describing two different commits.
-	driveApply(t, ctx, conn, cp, cons, "rcptrea", proposalID, applyResult.PackageKey, applyResult.InstallRequestID, processor.OutcomeAccepted)
+	driveApply(t, ctx, conn, cp, cons, "rcptrea", proposalID, applyResult.PackageKey, applyResult.InstallRequestID,
+		applyCloseReads(proposalID, applyResult.PackageKey), processor.OutcomeAccepted)
 	if got := reviewState(t, ctx, conn, pk); got != "applied" {
 		t.Fatalf("review.state = %q, want applied", got)
 	}
@@ -296,8 +316,10 @@ func TestCapAuthor_Receipt_NonApprovedState_Refused(t *testing.T) {
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			badID, badKey := rcptProposalInState(t, ctx, conn, cp, cons, tc.badTag, tc.state, packageName, packageKey)
+			// The state guard fires right after .review — .target and the
+			// package are never reached for a non-approved proposal.
 			driveReceipt(t, ctx, conn, cp, cons, tc.badTag,
-				receiptPayload(badID, packageKey, "REQ-install-"+tc.badTag), processor.OutcomeRejected)
+				receiptPayload(badID, packageKey, "REQ-install-"+tc.badTag), []string{badKey + ".review"}, processor.OutcomeRejected)
 			requireNoInstallAspect(t, ctx, conn, badKey)
 			if got := reviewState(t, ctx, conn, badKey); got != tc.state {
 				t.Fatalf("review.state = %q, want %q (unchanged by the refused receipt)", got, tc.state)
@@ -306,7 +328,7 @@ func TestCapAuthor_Receipt_NonApprovedState_Refused(t *testing.T) {
 			// The positive vector: the one offending condition corrected.
 			goodID, goodKey := rcptProposalInState(t, ctx, conn, cp, cons, tc.goodTag, "approved", packageName, packageKey)
 			driveReceipt(t, ctx, conn, cp, cons, tc.goodTag,
-				receiptPayload(goodID, packageKey, "REQ-install-"+tc.goodTag), processor.OutcomeAccepted)
+				receiptPayload(goodID, packageKey, "REQ-install-"+tc.goodTag), rcptCloseReads(goodKey, packageKey), processor.OutcomeAccepted)
 			assertInstallAspect(t, ctx, conn, goodKey, packageKey, "REQ-install-"+tc.goodTag)
 		})
 	}
@@ -328,13 +350,17 @@ func TestCapAuthor_Receipt_UnknownPackage_Refused(t *testing.T) {
 		packageKey := rcptPkgKey(t, "Unk")
 		proposalID, pk := rcptProposalInState(t, ctx, conn, cp, cons, "Unk", "approved", packageName, "")
 
+		// packageKey does not exist yet; the dispatcher still declares it (a
+		// declared-but-absent Reads key hydrates RequiredAbsent, not a hard
+		// HydrationMiss failure — the script's own alive() check is still what
+		// answers UnknownPackage).
 		driveReceipt(t, ctx, conn, cp, cons, "UnkA",
-			receiptPayload(proposalID, packageKey, "REQ-install-unk"), processor.OutcomeRejected)
+			receiptPayload(proposalID, packageKey, "REQ-install-unk"), rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 		requireNoInstallAspect(t, ctx, conn, pk)
 
 		seedPackageManifest(t, ctx, conn, packageKey, packageName, false)
 		driveReceipt(t, ctx, conn, cp, cons, "UnkB",
-			receiptPayload(proposalID, packageKey, "REQ-install-unk"), processor.OutcomeAccepted)
+			receiptPayload(proposalID, packageKey, "REQ-install-unk"), rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 		assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-unk")
 	})
 
@@ -346,12 +372,12 @@ func TestCapAuthor_Receipt_UnknownPackage_Refused(t *testing.T) {
 		// isDeleted would find a perfectly matching package here.
 		seedPackageManifest(t, ctx, conn, packageKey, packageName, true)
 		driveReceipt(t, ctx, conn, cp, cons, "TmbA",
-			receiptPayload(proposalID, packageKey, "REQ-install-tmb"), processor.OutcomeRejected)
+			receiptPayload(proposalID, packageKey, "REQ-install-tmb"), rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 		requireNoInstallAspect(t, ctx, conn, pk)
 
 		seedPackageManifest(t, ctx, conn, packageKey, packageName, false)
 		driveReceipt(t, ctx, conn, cp, cons, "TmbB",
-			receiptPayload(proposalID, packageKey, "REQ-install-tmb"), processor.OutcomeAccepted)
+			receiptPayload(proposalID, packageKey, "REQ-install-tmb"), rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 		assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-tmb")
 	})
 }
@@ -370,12 +396,12 @@ func TestCapAuthor_Receipt_PackageNameMismatch_Refused(t *testing.T) {
 
 	seedPackageManifest(t, ctx, conn, packageKey, "ai-lens-receipt-someone-else", false)
 	driveReceipt(t, ctx, conn, cp, cons, "MismA",
-		receiptPayload(proposalID, packageKey, "REQ-install-mism"), processor.OutcomeRejected)
+		receiptPayload(proposalID, packageKey, "REQ-install-mism"), rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 	requireNoInstallAspect(t, ctx, conn, pk)
 
 	seedPackageManifest(t, ctx, conn, packageKey, packageName, false)
 	driveReceipt(t, ctx, conn, cp, cons, "MismB",
-		receiptPayload(proposalID, packageKey, "REQ-install-mism"), processor.OutcomeAccepted)
+		receiptPayload(proposalID, packageKey, "REQ-install-mism"), rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-mism")
 }
 
@@ -401,8 +427,9 @@ func TestCapAuthor_Receipt_MalformedPackageKey_Refused(t *testing.T) {
 		{"ShpBare", bare},
 	} {
 		t.Run(tc.tag, func(t *testing.T) {
+			// The key-shape guard fires before ANY kv.Read, .review included.
 			driveReceipt(t, ctx, conn, cp, cons, tc.tag,
-				receiptPayload(proposalID, tc.key, "REQ-install-shape"), processor.OutcomeRejected)
+				receiptPayload(proposalID, tc.key, "REQ-install-shape"), nil, processor.OutcomeRejected)
 			requireNoInstallAspect(t, ctx, conn, pk)
 		})
 	}
@@ -410,7 +437,7 @@ func TestCapAuthor_Receipt_MalformedPackageKey_Refused(t *testing.T) {
 	// The positive vector: the same proposal, the same live package, the only
 	// difference being a well-formed key.
 	driveReceipt(t, ctx, conn, cp, cons, "ShpGood",
-		receiptPayload(proposalID, packageKey, "REQ-install-shape"), processor.OutcomeAccepted)
+		receiptPayload(proposalID, packageKey, "REQ-install-shape"), rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-shape")
 }
 
@@ -433,11 +460,11 @@ func TestCapAuthor_Receipt_SecondDifferentReceipt_Refused(t *testing.T) {
 	proposalID, pk := rcptProposalInState(t, ctx, conn, cp, cons, "Bind", "approved", packageName, packageKey)
 
 	first := receiptPayload(proposalID, packageKey, "REQ-install-first")
-	driveReceipt(t, ctx, conn, cp, cons, "BindA", first, processor.OutcomeAccepted)
+	driveReceipt(t, ctx, conn, cp, cons, "BindA", first, rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-first")
 
 	second := receiptPayload(proposalID, packageKey, "REQ-install-second")
-	driveReceipt(t, ctx, conn, cp, cons, "BindB", second, processor.OutcomeRejected)
+	driveReceipt(t, ctx, conn, cp, cons, "BindB", second, rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 
 	// The first binding survives byte for byte — the loser wrote nothing.
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-first")
@@ -446,7 +473,7 @@ func TestCapAuthor_Receipt_SecondDifferentReceipt_Refused(t *testing.T) {
 	// receipt yet, so the refusal above was the key collision and nothing else.
 	siblingID, siblingKey := rcptProposalInState(t, ctx, conn, cp, cons, "Sib", "approved", packageName, packageKey)
 	sibling := receiptPayload(siblingID, packageKey, "REQ-install-second")
-	driveReceipt(t, ctx, conn, cp, cons, "SibA", sibling, processor.OutcomeAccepted)
+	driveReceipt(t, ctx, conn, cp, cons, "SibA", sibling, rcptCloseReads(siblingKey, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, siblingKey, packageKey, "REQ-install-second")
 }
 
@@ -472,10 +499,12 @@ func TestCapAuthor_Receipt_IdenticalResubmission_TrackerCollapsed(t *testing.T) 
 	// a dispatcher pinning a deterministic requestId produces on retry.
 	reqID := testutil.GenReqID("CARcptRedup")
 	payload := receiptPayload(proposalID, packageKey, "REQ-install-redup")
-	driveReceiptAs(t, ctx, conn, cp, cons, reqID, payload, processor.OutcomeAccepted)
+	driveReceiptAs(t, ctx, conn, cp, cons, reqID, payload, rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-redup")
 
-	driveReceiptAs(t, ctx, conn, cp, cons, reqID, receiptPayload(proposalID, packageKey, "REQ-install-redup"), processor.OutcomeDuplicate)
+	// The redelivered requestId never reaches the script (Contract #4 tracker
+	// collapse), so no declaration is needed here.
+	driveReceiptAs(t, ctx, conn, cp, cons, reqID, receiptPayload(proposalID, packageKey, "REQ-install-redup"), nil, processor.OutcomeDuplicate)
 
 	// Collapsed, not re-run: the stored binding is untouched.
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-redup")
@@ -484,7 +513,7 @@ func TestCapAuthor_Receipt_IdenticalResubmission_TrackerCollapsed(t *testing.T) 
 	// same proposal is not collapsed — it reaches the script and is refused by
 	// create-only conditioning. So the duplicate above was the tracker, not the
 	// same refusal wearing a different outcome.
-	driveReceipt(t, ctx, conn, cp, cons, "RedupFresh", receiptPayload(proposalID, packageKey, "REQ-install-redup"), processor.OutcomeRejected)
+	driveReceipt(t, ctx, conn, cp, cons, "RedupFresh", receiptPayload(proposalID, packageKey, "REQ-install-redup"), rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-redup")
 }
 
@@ -507,11 +536,11 @@ func TestCapAuthor_Receipt_TombstonedPackageRoot_Refused(t *testing.T) {
 
 	seedPackageRoot(t, ctx, conn, packageKey, true)
 	driveReceipt(t, ctx, conn, cp, cons, "RootA",
-		receiptPayload(proposalID, packageKey, "REQ-install-root"), processor.OutcomeRejected)
+		receiptPayload(proposalID, packageKey, "REQ-install-root"), rcptCloseReads(pk, packageKey), processor.OutcomeRejected)
 	requireNoInstallAspect(t, ctx, conn, pk)
 
 	seedPackageRoot(t, ctx, conn, packageKey, false)
 	driveReceipt(t, ctx, conn, cp, cons, "RootB",
-		receiptPayload(proposalID, packageKey, "REQ-install-root"), processor.OutcomeAccepted)
+		receiptPayload(proposalID, packageKey, "REQ-install-root"), rcptCloseReads(pk, packageKey), processor.OutcomeAccepted)
 	assertInstallAspect(t, ctx, conn, pk, packageKey, "REQ-install-root")
 }
