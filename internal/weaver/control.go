@@ -249,7 +249,7 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 	// can consult them and no publish can retire them.
 	e.republish.clearTarget(targetID)
 	if ownerID, ok := e.source.ownerVertexID(targetID); ok {
-		e.issues.clear("target:" + ownerID)
+		e.issues.clear(issueKeyTarget(ownerID))
 	}
 
 	// Re-write the disabled marker AFTER the prefix-delete (which removed it
@@ -631,5 +631,5 @@ func issueKeyOscillation(targetA, targetB string, path guardgrammar.Path) string
 	if targetB < targetA {
 		targetA, targetB = targetB, targetA
 	}
-	return "oscillation:" + targetA + "." + targetB + "." + pathString(path)
+	return issuePrefixOscillate + targetA + "." + targetB + "." + pathString(path)
 }

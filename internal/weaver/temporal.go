@@ -339,4 +339,4 @@ func currentFreshUntil(body []byte) (time.Time, bool) {
 	return t, true
 }
 
-func issueKeyTimer(key string) string { return "timer:" + key }
+func issueKeyTimer(key string) string { return issuePrefixTimer + key }

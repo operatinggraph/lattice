@@ -88,6 +88,11 @@ type healthIssue struct {
 	Code     string `json:"code"`
 	Message  string `json:"message"`
 	Since    string `json:"since"`
+	// key is the issue-cache key this entry was raised at. Unexported, so it
+	// never reaches the heartbeat document; it exists so the listing cut can
+	// rank on the key's FAMILY (listingRank), which decides whether an entry is
+	// one of a target-bounded few or one of an unbounded per-row many.
+	key string
 }
 
 // logPaceInterval bounds how long one key's re-derived fault may go without a
@@ -506,7 +511,9 @@ func (c *issueCache) snapshot() []healthIssue {
 	sort.Strings(keys)
 	out := make([]healthIssue, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, c.issues[k])
+		is := c.issues[k]
+		is.key = k
+		out = append(out, is)
 	}
 	return out
 }
@@ -954,7 +961,44 @@ func listingRank(issue healthIssue) int {
 	if issue.Code == rowIssuesCappedCode {
 		return 1
 	}
+	if perEntityIssueFamily(issue.key) {
+		return 3
+	}
 	return 2
+}
+
+// perEntityIssueFamily reports whether key belongs to an issue family whose
+// population grows with the target's ROW COUNT rather than with the number of
+// targets. It is what separates the last two listing tiers.
+//
+// The split is load-bearing and not merely tidy. A fault that is one fact about
+// a whole target — no playbook entry for a gap, an unbuildable template, a
+// paused consumer, a rejected spec — is raised once, while the per-row families
+// are raised once per entity, so on any broken target the second kind
+// outnumbers the first by the row count. Ranked together they are separated
+// only by key order, and `data:`/`gap:`/`sweep:` all sort ahead of `gapConfig:`
+// — so the entries that EXPLAIN a fault lose the cut to the entries that merely
+// COUNT it, and an operator reads a document full of identical per-row warnings
+// with the cause truncated away.
+//
+// Severity used to carry this by accident: the target-scoped config codes were
+// `error`, so tier 0 caught them. Once they were demoted to `warning` — a
+// package-authoring typo degrades Weaver, it does not make it unable to fulfil
+// its responsibility — nothing was left holding the ordering up. Stating the
+// rule on the family says what was always meant, and it no longer moves when a
+// severity is re-judged.
+//
+// An unrecognised or empty key ranks with the bounded families. A new family
+// must be classified here deliberately; failing toward "listed" keeps an
+// unclassified fault visible rather than silently truncating it, and
+// TestListingRank_EveryIssueFamilyIsClassified fails until it is named.
+func perEntityIssueFamily(key string) bool {
+	for _, prefix := range perEntityIssuePrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // severityRank orders issues for the listing cut: `error` ahead of everything

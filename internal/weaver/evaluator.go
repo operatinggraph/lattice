@@ -1838,6 +1838,11 @@ const (
 	issuePrefixData      = "data:"
 	issuePrefixTemplate  = "template:"
 	issuePrefixSweep     = "sweep:"
+	issuePrefixConsumer  = "consumer:"
+	issuePrefixTarget    = "target:"
+	issuePrefixTimer     = "timer:"
+	issuePrefixPending   = "pendingSpec:"
+	issuePrefixOscillate = "oscillation:"
 )
 
 // codeGapEscalatedToAugur is the issueKeyGapEntity code recording that one
@@ -1850,6 +1855,30 @@ const (
 // gating on this latch instead would suppress the expired-mark arm, which is the
 // only recovery a reasoning episode that died has.
 const codeGapEscalatedToAugur = "GapEscalatedToAugur"
+
+// perEntityIssuePrefixes are the issue families keyed BELOW the target, one
+// entry per (entity, column) or per mark: their population is the target's row
+// count, not the number of targets. listingRank ranks them last, behind the
+// target-scoped families that explain a fault rather than count it.
+var perEntityIssuePrefixes = []string{
+	issuePrefixGapEntity,
+	issuePrefixData,
+	issuePrefixTemplate,
+	issuePrefixSweep,
+}
+
+// targetScopedIssuePrefixes are the families raised once per target, spec or
+// timer. They are what an operator needs in front of them when a target breaks,
+// and together with perEntityIssuePrefixes they must account for every family
+// this engine raises — TestListingRank_EveryIssueFamilyIsClassified pins that.
+var targetScopedIssuePrefixes = []string{
+	issuePrefixGapConfig,
+	issuePrefixConsumer,
+	issuePrefixTarget,
+	issuePrefixTimer,
+	issuePrefixPending,
+	issuePrefixOscillate,
+}
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
 // teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,
