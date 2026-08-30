@@ -419,3 +419,48 @@ The empty-state copy itself stays as-is: it is correct once hydration has actual
 **Green checks.** `go test ./cmd/facet/...`, `make test-facet-web`, `go build ./...`, `make vet`,
 `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, then a live cold sign-in on
 `:7810`.
+
+## 11. Build note — the offline demo control surface (§6's "not live-clicked this fire", discharged)
+
+**Scope.** Nothing lets a viewer see Facet's offline-first story on demand — the honest version is a
+host↔NATS drop, not the browser going offline (§6), and nobody can stage a real NATS outage mid-demo. This
+adds a **demo-only, reversible pause** a signed-in viewer can hold and release from the Me screen, gated
+behind an env var so it never exists in a deployment that doesn't opt in.
+
+**Mechanism decided (Winston, in-line — no ratified pattern to extend, but small/contained enough to decide
+without a Designer pass per §2.5's test).** The scout found `substrate.Conn.Close()` terminal (no
+auto-heal — `enginemanager_test.go:141`'s `TestEngineManager_AcquireRebuildsAnEngineWhosePermanentlyClosed`
+proves a closed conn forces a full engine rebuild) and `nats.Conn.ForceReconnect()` (nats.go v1.52.0) only
+forces an IMMEDIATE reconnect, not a held-down one. Neither gives a clean "hold disconnected, then release
+on command" primitive, and building one against the real NATS conn risks an engine rebuild losing the
+in-memory Outbox UI state (`feed.outbox` is explicitly not persisted, `feed.go:81-84`) and a race where any
+OTHER concurrent HTTP request silently heals the "outage" early via `enginemanager.Acquire`'s own
+closed-conn eviction check.
+
+Chose a **logical pause** instead: the real NATS socket stays up and healthy; a `feed`-scoped `demoPaused`
+flag makes every user-observable effect of a real drop happen without touching the transport —
+`setConnected(false)`/`setSyncDegraded(true)` drive the existing (unmodified) reconnect banner,
+`trackingSubmitter.Submit` short-circuits to the existing transport-failure branch (write reverts to
+`queued`, retried by the next drain tick), and `engine`'s `OnChange` closure stops forwarding manifest
+deltas to the feed so no new data visibly lands. Releasing the pause is one flag flip — no rebuild, no
+race, no lost Outbox state, and a fresh SSE connection or drain tick just resumes normally because nothing
+about the underlying engine/store/conn ever changed.
+
+**Non-goal (deliberate).** `internal/edge/sync.Manager` itself keeps pulling and writing fresh deltas into
+the local bbolt mirror in the background during the pause — only forwarding to the browser stops. A viewer
+cannot observe this (the whole point of the pause is what renders on screen), and pausing the shared sync
+package itself would be a materially bigger, riskier touch for no visible payoff. If a future fire needs a
+*literal* wire-level pause (e.g. for a lower-level protocol test), that is new scope, not a gap in this one.
+
+**Touch list** (verified live): `cmd/facet/feed.go` (new `demoPaused` field + `setDemoPaused`/`isDemoPaused`
+on `feed`; `trackingSubmitter.Submit` gains the pause check) · `cmd/facet/engine.go` (new
+`(*engine).SetDemoPaused`; `OnChange` closure gains the pause check) · `cmd/facet/server.go` (new
+`demoControlsEnabled` field; `GET /api/demo/status` always registered, `POST /api/demo/connectivity`
+registered only when enabled) · `cmd/facet/main.go` (new `FACET_DEMO_CONTROLS` env var, doc comment +
+`appsession.Truthy` parse, mirrors `FACET_BROWSER_ENGINE`'s gating shape) · `cmd/facet/web/app.js` (boot-time
+`GET /api/demo/status` fetch, a demo-controls card on the Me screen mirroring `renderClaimCard`, a
+`data-demo-toggle` click handler mirroring `data-link-credential`) · `cmd/facet/feed_test.go` (pause
+transitions + submit short-circuit, mirrors `TestFeed_SyncDegradedTransitions`).
+
+**Green checks.** `go test ./cmd/facet/...`, `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, then a live toggle on `:7810` with `FACET_DEMO_CONTROLS=1`.
