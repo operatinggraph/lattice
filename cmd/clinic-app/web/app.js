@@ -471,11 +471,29 @@ function rejectionMessage(reply) {
 // here, so a descriptor edit changes the form with no app rebuild. A FAILED
 // load is not cached — opCatalogPromise is cleared — so a transient outage
 // retries on the next call instead of poisoning the page for its whole
-// session. Mirrors loftspace-app/web/app.js's own loadOpCatalog.
+// session. Mirrors loftspace-app/web/app.js's own loadOpCatalog — except
+// loftspace fetches the WHOLE catalog unfiltered: its completion modal opens
+// forms for whatever operationType a TASK names (descriptorFor), which can
+// be any op meta in the deployment (a task can bind cross-package), so it
+// has no fixed dependency set to narrow to. Clinic's own catalog use is
+// closed — every op it reads is a hardcoded `state.opCatalog.X` /
+// `[opType]` lookup below (KNOWN_CATALOG_OPS) — so it can safely narrow.
+//
+// KNOWN_CATALOG_OPS lists every operationType this app ever reads off
+// state.opCatalog (grep for `state\.opCatalog` — keep this in sync when a
+// new descriptor-driven form is added) — passed as `?types=` so the server
+// point-reads just these rows instead of the whole cross-vertical bucket
+// (~100 ops from every installed package, unrelated to clinic). A name
+// missing here simply never appears in the cache, the same "not offered"
+// outcome as a package that hasn't declared the op yet.
+const KNOWN_CATALOG_OPS = [
+  "AssignProviderSite", "CreateProvider", "SetProviderProfile", "StartVisitSeries",
+  "ClinicDebitAccount", "ClinicCreditAccount",
+];
 let opCatalogPromise = null;
 async function loadOpCatalog() {
   if (!opCatalogPromise) {
-    opCatalogPromise = appGet("/api/op-catalog").then(
+    opCatalogPromise = appGet("/api/op-catalog?types=" + encodeURIComponent(KNOWN_CATALOG_OPS.join(","))).then(
       (data) => (data && data.catalog) || {},
       (e) => {
         opCatalogPromise = null;

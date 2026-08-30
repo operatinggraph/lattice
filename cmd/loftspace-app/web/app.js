@@ -98,6 +98,13 @@ function photoSrc(oid) {
 // installed. A FAILED load is not cached — opCatalogPromise is cleared — so a
 // transient outage retries on the next tasks/renewals refresh instead of
 // poisoning the page for its whole session.
+//
+// Deliberately fetched UNFILTERED (no `?types=`, unlike café/clinic/wellness's
+// own loadOpCatalog): descriptorFor(operationName) below is looked up for
+// whatever operationType a TASK names, and a task can bind to any op meta in
+// the deployment (a loftspace staffer can be assigned a platform-admin task,
+// e.g. RecordIdentityPII — see cmd/loftspace-app/tasks_test.go's fixture),
+// so there is no fixed per-app dependency set to narrow the request to.
 let opCatalogPromise = null;
 
 async function loadOpCatalog() {

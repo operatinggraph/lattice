@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 )
@@ -242,6 +243,13 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 // The browser never talks to NATS, so this is a thin proxy in the same shape as
 // the app's other lens-backed read handlers: list the bucket's keys, point-read
 // each, re-nest into the descriptor vocabulary.
+//
+// An optional `?types=Op1,Op2` narrows the point-reads to exactly those
+// operationTypes instead of listing the whole cross-vertical bucket — safe
+// because the lens keys each row on its own operationType (IntoKey), so a
+// stale or unknown name in the list just yields no row for that key
+// (computeOpCatalog already skips a miss), never an error. Omit it to get
+// the full catalog, unchanged.
 func (s *server) handleOpCatalog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusBadRequest, "GET required")
@@ -255,11 +263,17 @@ func (s *server) handleOpCatalog(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	bucket := edgemanifest.OpCatalogBucket
-	keys, err := conn.KVListKeys(ctx, bucket)
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is edge-manifest installed and the Refractor projecting?)")
-		return
+	var keys []string
+	if types := r.URL.Query().Get("types"); types != "" {
+		keys = strings.Split(types, ",")
+	} else {
+		var err error
+		keys, err = conn.KVListKeys(ctx, bucket)
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway,
+				"list "+bucket+": "+err.Error()+" (is edge-manifest installed and the Refractor projecting?)")
+			return
+		}
 	}
 	catalog := computeOpCatalog(keys, s.kvGetter(ctx, bucket))
 	s.writeJSON(w, http.StatusOK, map[string]any{"catalog": catalog, "count": len(catalog)})

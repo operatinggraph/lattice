@@ -196,11 +196,20 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
 // retries on the next call instead of poisoning the page for its whole
 // session. Mirrors clinic-app/web/app.js's and wellness-app/web/app.js's own
 // loadOpCatalog.
+//
+// KNOWN_CATALOG_OPS lists every operationType this app ever reads off
+// opCatalogCache (grep for `opCatalogCache\.` / `opCatalogCache\[` — keep
+// this in sync when a new descriptor-driven form is added) — passed as
+// `?types=` so the server point-reads just these rows instead of the whole
+// cross-vertical bucket (~100 ops from every installed package, unrelated to
+// café). A name missing here simply never appears in the cache, the same
+// "not offered" outcome as a package that hasn't declared the op yet.
+const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount"];
 let opCatalogPromise = null;
 let opCatalogCache = null;
 async function loadOpCatalog() {
   if (!opCatalogPromise) {
-    opCatalogPromise = appGet("/api/op-catalog").then(
+    opCatalogPromise = appGet("/api/op-catalog?types=" + encodeURIComponent(KNOWN_CATALOG_OPS.join(","))).then(
       (data) => (data && data.catalog) || {},
       (e) => {
         opCatalogPromise = null;
