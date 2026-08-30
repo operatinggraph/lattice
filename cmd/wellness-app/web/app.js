@@ -967,7 +967,7 @@ async function renderMyBalance() {
       const sign = t.type === "debit" ? "+" : "−";
       const d = new Date(t.postedAt);
       const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + ")" : "");
+      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "");
       list.append(li);
     }
   } catch (_) {
@@ -2170,7 +2170,7 @@ function renderBillingBody(data) {
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + ")" : "");
+    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "");
     list.append(li);
   }
 }
