@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
@@ -114,36 +115,65 @@ func TestOccupiedLeaseAppKeys(t *testing.T) {
 	}
 }
 
+// serviceAttachTestNow anchors every "this period" test at a fixed instant
+// (Tests & Determinism: no wall-clock reliance) — 2026-08-30T12:00:00Z, with
+// a serviceAttachLookbackDays=30 cutoff of 2026-07-31T12:00:00Z.
+var serviceAttachTestNow = time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
 func TestComputeServiceAttachRate(t *testing.T) {
-	occupied := []string{"vtx.leaseapp.a", "vtx.leaseapp.b", "vtx.leaseapp.c"}
+	occupied := []string{
+		"vtx.leaseapp.a", "vtx.leaseapp.b", "vtx.leaseapp.c", "vtx.leaseapp.d",
+		"vtx.leaseapp.e", "vtx.leaseapp.f", "vtx.leaseapp.g", "vtx.leaseapp.h",
+		"vtx.leaseapp.i",
+	}
 
 	bookings := map[string][]byte{
-		"b1": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.a"}),
+		// a: booked, startsAt in the future -> attached (a currently-booked
+		// class always qualifies, its startsAt is always past cutoff).
+		"b1": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.a", Status: "booked", StartsAt: "2026-09-15T09:00:00Z"}),
+		// e: noShow, startsAt inside the lookback window -> attached — a
+		// class that already happened is real usage, not noise.
+		"b2": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.e", Status: "noShow", StartsAt: "2026-08-10T09:00:00Z"}),
+		// f: noShow, startsAt before the lookback window -> not attached.
+		"b3": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.f", Status: "noShow", StartsAt: "2026-05-01T09:00:00Z"}),
+		// g: waitlisted (never got a seat), startsAt otherwise in-window ->
+		// not attached regardless of timing.
+		"b4": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.g", Status: "waitlisted", StartsAt: "2026-08-29T09:00:00Z"}),
+		// h: booked with no parseable startsAt (tombstoned session) ->
+		// falls back to existence-only -> attached.
+		"b5": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.h", Status: "booked"}),
+		// i: noShow with no parseable startsAt -> the existence-only
+		// fallback only covers "booked" -> not attached.
+		"b6": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.i", Status: "noShow"}),
 		// belongs to a landlord/lease NOT in this landlord's occupied set —
 		// must not leak into the count.
-		"b2": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.other-landlord"}),
+		"b7": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.other-landlord", Status: "booked", StartsAt: "2026-09-01T00:00:00Z"}),
 	}
 	tabs := map[string][]byte{
+		// b: still open -> attached, no window check needed.
 		cafedomainPrefixKey("t1"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.b", Status: "open"}),
-		cafedomainPrefixKey("t2"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.c", Status: "settled"}),
+		// c: settled inside the lookback window -> attached.
+		cafedomainPrefixKey("t2"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.c", Status: "settled", SettledAt: "2026-08-20T00:00:00Z"}),
+		// d: settled before the lookback window -> not attached.
+		cafedomainPrefixKey("t3"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.d", Status: "settled", SettledAt: "2026-06-01T00:00:00Z"}),
 		"not-a-tab-key":           mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.c", Status: "open"}), // wrong prefix, ignored
 	}
 	getBookings := func(k string) ([]byte, bool) { v, ok := bookings[k]; return v, ok }
 	getTabs := func(k string) ([]byte, bool) { v, ok := tabs[k]; return v, ok }
 
-	bookingKeys := []string{"b1", "b2"}
-	tabKeys := []string{cafedomainPrefixKey("t1"), cafedomainPrefixKey("t2"), "not-a-tab-key"}
+	bookingKeys := []string{"b1", "b2", "b3", "b4", "b5", "b6", "b7"}
+	tabKeys := []string{cafedomainPrefixKey("t1"), cafedomainPrefixKey("t2"), cafedomainPrefixKey("t3"), "not-a-tab-key"}
 
-	attached, total := computeServiceAttachRate(occupied, bookingKeys, getBookings, tabKeys, getTabs)
-	// a: booked -> attached. b: open tab -> attached. c: settled tab + a
-	// wrong-prefix "open" row that must be ignored -> not attached.
-	if attached != 2 || total != 3 {
-		t.Fatalf("computeServiceAttachRate = (%d, %d), want (2, 3)", attached, total)
+	attached, total := computeServiceAttachRate(occupied, serviceAttachTestNow, bookingKeys, getBookings, tabKeys, getTabs)
+	// attached: a (future booked), b (open tab), c (settled in-window),
+	// e (noShow in-window), h (booked, no timestamp, fallback) = 5 of 9.
+	if attached != 5 || total != 9 {
+		t.Fatalf("computeServiceAttachRate = (%d, %d), want (5, 9)", attached, total)
 	}
 }
 
 func TestComputeServiceAttachRate_NoOccupiedLeases_ZeroNoDivideByZero(t *testing.T) {
-	attached, total := computeServiceAttachRate(nil, []string{"x"}, func(string) ([]byte, bool) { return nil, false }, []string{"y"}, func(string) ([]byte, bool) { return nil, false })
+	attached, total := computeServiceAttachRate(nil, serviceAttachTestNow, []string{"x"}, func(string) ([]byte, bool) { return nil, false }, []string{"y"}, func(string) ([]byte, bool) { return nil, false })
 	if attached != 0 || total != 0 {
 		t.Fatalf("computeServiceAttachRate with no occupied leases = (%d, %d), want (0, 0)", attached, total)
 	}

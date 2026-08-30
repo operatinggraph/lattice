@@ -30,6 +30,17 @@ const LeaseDetailsBucket = "front-desk-lease-details"
 // clinicAppointments does for clinic staff.
 const VisitsBucket = "front-desk-visits"
 
+// BookingHistoryBucket is the NATS-KV read model the frontDeskBookingHistory
+// lens projects into — one row per resident-rate wellness booking of ANY
+// status, keyed by leaseAppKey, carrying status + startsAt. Distinct from
+// BookingsBucket (which stays filtered to status='booked' for the Café
+// front-desk board's "who's off to class right now" badge): a consumer that
+// asks "has this lease used the service in the last period" needs bookings
+// that have since gone noShow/attended, which BookingsBucket's WHERE clause
+// drops on transition (portfolio-pulse's service-attach-rate,
+// cmd/loftspace-app/portfolio.go).
+const BookingHistoryBucket = "front-desk-booking-history"
+
 // Lenses returns the package's Lens declarations. No UNION is needed here
 // (unlike one-bill, which shares one bucket between two lenses to work
 // around the cypher engine's missing UNION) — front-desk re-projects only
@@ -64,6 +75,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        VisitsBucket,
 			Engine:        "full",
 			Spec:          visitsSpec,
+		},
+		{
+			CanonicalName: "frontDeskBookingHistory",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        BookingHistoryBucket,
+			Engine:        "full",
+			Spec:          bookingHistorySpec,
 		},
 	}
 }
@@ -128,3 +147,19 @@ RETURN
   l.key AS leaseAppKey,
   a.schedule.data.startsAt AS startsAt,
   a.schedule.data.endsAt AS endsAt`
+
+// bookingHistorySpec projects one row per resident-rate wellness booking of
+// ANY status — the same residentRate anchor as bookingsSpec, minus its
+// status='booked' WHERE clause, plus the status column a caller needs to
+// tell attended/noShow/waitlisted apart. A consumer asking "did this lease
+// use the service in the last period" wants what happened to the booking,
+// not only what's booked right now.
+const bookingHistorySpec = `MATCH (b:booking)-[:residentRate]->(l:leaseapp)
+OPTIONAL MATCH (b)-[:forSession]->(se:session)
+RETURN
+  b.key AS key,
+  b.key AS bookingKey,
+  l.key AS leaseAppKey,
+  b.status.data.value AS status,
+  se.key AS sessionKey,
+  se.schedule.data.startsAt AS startsAt`

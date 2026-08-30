@@ -38,7 +38,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Permissions), 0; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 3; got != want {
+	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.WeaverTargets), 0; got != want {
@@ -51,7 +51,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantLenses := []string{"frontDeskBookings", "frontDeskLeaseDetails", "frontDeskVisits"}
+	wantLenses := []string{"frontDeskBookings", "frontDeskLeaseDetails", "frontDeskVisits", "frontDeskBookingHistory"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])
