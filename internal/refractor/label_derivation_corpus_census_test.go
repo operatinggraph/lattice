@@ -283,7 +283,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"objectIdentityAttachmentsRead": {narrow, "identity object", modeLabel},
 	"objectLiveness":                {broad, "object", modeBroad},
 	"orphanedTaskGrants":            {broad, "task", modeBroad},
-	"wellnessIdentitiesRead":        {broad, "identity leaseapp", modeBroad},
+	"wellnessIdentitiesRead":        {broad, "booking identity leaseapp session", modeBroad},
 	"wellnessMembers":               {broad, "identity leaseapp", modeBroad},
 	"wellnessSessions":              {broad, "instructor session studio", modeBroad},
 }
