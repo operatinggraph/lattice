@@ -15,6 +15,7 @@ const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
   canSignOut: false, // whether whoami reports a real cookie session
   anchors: [], // the signed-in identity's residence/workplace anchors (whoami hat hints, persona-worlds-design.md §4). A `worksAt` anchor marks front-of-house staff.
+  frontOfHouse: false, // server-resolved frontOfHouse role (GET /api/staff-hats) — the conjunct isFrontDesk composes with the worksAt anchor above. Fails closed: false until proven true.
   identities: [], // the protected cafeIdentitiesRead roster (loadIdentities) — at minimum the signed-in actor's own row, resolved by name
 };
 
@@ -479,12 +480,14 @@ async function loadWhoami() {
       state.identityId = (body && body.loggedIn && body.identityId) || null;
       state.canSignOut = !!(body && body.canSignOut);
       state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
+      await loadStaffHats();
       return;
     } catch (_) {
       if (attempt >= whoamiRetryBackoffsMs.length) {
         state.identityId = null;
         state.canSignOut = false;
         state.anchors = [];
+        state.frontOfHouse = false;
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
@@ -492,14 +495,35 @@ async function loadWhoami() {
   }
 }
 
-// isFrontDesk marks a session that works the café's front of house. The
-// signal is the whoami `worksAt` anchor (persona-worlds-design.md §4);
-// gating rides anchors, not roles — whoami's roles[] arrives as opaque role
-// vertex keys, never canonical names, so it cannot name the frontOfHouse
-// role FE-side. UX curation only: the graph's grants + this app's own
-// server-side read scoping remain the authority.
+// loadStaffHats reads the server-resolved frontOfHouse hat (GET
+// /api/staff-hats) — the app-side mirror of resolveSubjectHats
+// (cmd/cafe-app/readauth.go), which whoami's opaque anchors/roles cannot
+// express FE-side. Fails CLOSED: any fetch error (network, 401, malformed
+// body) leaves state.frontOfHouse false, hiding the staff-only tabs rather
+// than showing a surface the server would only 403 on every write.
+async function loadStaffHats() {
+  try {
+    const body = await api("/api/staff-hats", { credentials: "same-origin" });
+    state.frontOfHouse = !!(body && body.frontOfHouse);
+  } catch (_) {
+    state.frontOfHouse = false;
+  }
+}
+
+// isFrontDesk marks a session that works the café's front of house AND holds
+// the frontOfHouse role — the FE mirror of the write side's own
+// `GrantsTo: [operator, frontOfHouse]` and the read side's own isFrontDesk
+// (cmd/cafe-app/readauth.go): a worksAt-only, role-less caller holds neither
+// a POS grant nor a PII-read grant, so gating on the worksAt anchor alone
+// showed staff tabs that would only 403 on every click. UX curation only:
+// the graph's grants + this app's own server-side read scoping remain the
+// authority.
 function isFrontDesk() {
-  return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
+  return (
+    Array.isArray(state.anchors) &&
+    state.anchors.some((a) => a && a.relation === "worksAt") &&
+    !!state.frontOfHouse
+  );
 }
 
 // nameForIdentity resolves a bare identity NanoID to its display name via the
@@ -541,9 +565,9 @@ function signOut() {
 }
 
 // applyHatGating hides the staff-only tabs (POS, Front Desk, Manage Menu)
-// from a session that lacks the worksAt anchor, and bounces the active view
-// to Resident if it just became disallowed. Idempotent; re-run whenever
-// whoami resolves.
+// from a session that lacks isFrontDesk (worksAt AND frontOfHouse), and
+// bounces the active view to Resident if it just became disallowed.
+// Idempotent; re-run whenever whoami/staff-hats resolve.
 function applyHatGating() {
   const fd = isFrontDesk();
   document.getElementById("tab-pos").hidden = !fd;

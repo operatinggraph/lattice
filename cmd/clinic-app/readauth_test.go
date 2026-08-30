@@ -517,3 +517,72 @@ func TestResolveSubjectHats_OperatorRoleExempted(t *testing.T) {
 		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
 	}
 }
+
+// TestHandleStaffHats_FrontOfHouse_ReportsTrue: a worksAt caller who also
+// holds frontOfHouse (fakeGatewayActorWorkplaces grants it to every staff
+// subject) sees GET /api/staff-hats report {"frontOfHouse": true} — the bit
+// the FE nav gates the staff-only surfaces on (isFrontDesk, above).
+func TestHandleStaffHats_FrontOfHouse_ReportsTrue(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	gwURL := fakeGatewayActorWorkplaces(t, map[string][]string{id: {staffWorkplace}}, nil)
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = gwURL })
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		FrontOfHouse bool `json:"frontOfHouse"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.FrontOfHouse {
+		t.Error("frontOfHouse = false, want true for a worksAt+frontOfHouse caller")
+	}
+}
+
+// TestHandleStaffHats_WorksAtOnly_ReportsFalse is the exact cosmetic-bug
+// shape this endpoint exists to fix: a worksAt caller with NO frontOfHouse
+// role must see {"frontOfHouse": false}, not true — this is what makes the FE
+// nav hide the staff-only tabs instead of showing one that only 403s on
+// click.
+func TestHandleStaffHats_WorksAtOnly_ReportsFalse(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + id,
+			"resolvedActorId": "vtx.identity." + id,
+			"roles":           []string{},
+			"anchors":         []appsession.ActorAnchor{{Relation: "worksAt", Key: staffWorkplace, Name: "Clinic Building"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = srv.URL })
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		FrontOfHouse bool `json:"frontOfHouse"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.FrontOfHouse {
+		t.Error("frontOfHouse = true, want false for a worksAt-only, role-less caller (fail closed)")
+	}
+}
+
+// TestHandleStaffHats_NoCookie_401: fails closed with no body a caller could
+// mistake for a resolved "false" when there is no session at all to resolve.
+func TestHandleStaffHats_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}

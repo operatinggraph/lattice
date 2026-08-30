@@ -223,3 +223,60 @@ func TestResolveSubjectHats_KeylessWorksAtAnchorIsNotStaff(t *testing.T) {
 		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
 	}
 }
+
+// TestHandleStaffHats_FrontOfHouse_ReportsTrue: a worksAt caller who also
+// holds frontOfHouse (fakeGatewayActorWorkplaces grants it to every staff
+// subject) sees GET /api/staff-hats report {"frontOfHouse": true} — the bit
+// the FE nav gates the staff-only tabs on (isFrontDesk, above).
+func TestHandleStaffHats_FrontOfHouse_ReportsTrue(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{id: true}))
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		FrontOfHouse bool `json:"frontOfHouse"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.FrontOfHouse {
+		t.Error("frontOfHouse = false, want true for a worksAt+frontOfHouse caller")
+	}
+}
+
+// TestHandleStaffHats_WorksAtOnly_ReportsFalse is the exact cosmetic-bug
+// shape this endpoint exists to fix: a worksAt caller with NO frontOfHouse
+// role (and no other role) must see {"frontOfHouse": false}, not true — this
+// is what makes the FE nav hide POS/Front Desk/Manage Menu instead of
+// showing a tab that only 403s on click (isFrontDesk's own conjunct).
+func TestHandleStaffHats_WorksAtOnly_ReportsFalse(t *testing.T) {
+	const id = "GGGGGGGGGGGGGGGGGGGG"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorRoles(t,
+		map[string][]string{id: {staffWorkplace}}, nil, nil))
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		FrontOfHouse bool `json:"frontOfHouse"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.FrontOfHouse {
+		t.Error("frontOfHouse = true, want false for a worksAt-only, role-less caller (fail closed)")
+	}
+}
+
+// TestHandleStaffHats_NoSession_Unauthorized: fails closed with no body a
+// caller could mistake for a resolved "false" when there is no session at
+// all to resolve.
+func TestHandleStaffHats_NoSession_Unauthorized(t *testing.T) {
+	s, _ := devSessionServer(t, fakeGatewayActor(t, nil))
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}

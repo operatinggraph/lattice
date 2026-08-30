@@ -18,6 +18,7 @@ const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
   canSignOut: false, // whether whoami reports a real cookie session
   anchors: [], // the signed-in identity's anchors (whoami hat hints, persona-worlds-design.md §4): `worksAt` marks studio staff, an `identifiedBy` vtx.instructor binding marks an instructor
+  frontOfHouse: false, // server-resolved frontOfHouse role (GET /api/staff-hats) — the conjunct isStaff composes with the worksAt anchor above. Fails closed: false until proven true.
   identities: [], // the protected wellnessIdentitiesRead roster (loadIdentities) — at minimum the signed-in actor's own row, resolved by name
 };
 
@@ -206,16 +207,33 @@ async function loadWhoami() {
       state.identityId = (body && body.loggedIn && body.identityId) || null;
       state.canSignOut = !!(body && body.canSignOut);
       state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
+      await loadStaffHats();
       return;
     } catch (_) {
       if (attempt >= whoamiRetryBackoffsMs.length) {
         state.identityId = null;
         state.canSignOut = false;
         state.anchors = [];
+        state.frontOfHouse = false;
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
     }
+  }
+}
+
+// loadStaffHats reads the server-resolved frontOfHouse hat (GET
+// /api/staff-hats) — the app-side mirror of resolveSubjectHats
+// (cmd/wellness-app/readauth.go), which whoami's opaque anchors/roles cannot
+// express FE-side. Fails CLOSED: any fetch error (network, 401, malformed
+// body) leaves state.frontOfHouse false, hiding the staff-only tabs rather
+// than showing a surface the server would only 403 on every write.
+async function loadStaffHats() {
+  try {
+    const body = await api("/api/staff-hats", { credentials: "same-origin" });
+    state.frontOfHouse = !!(body && body.frontOfHouse);
+  } catch (_) {
+    state.frontOfHouse = false;
   }
 }
 
@@ -237,12 +255,19 @@ function anchorKey(relation, keyPrefix) {
   return "";
 }
 
-// isStaff marks a session that works a studio. The signal is the whoami
-// `worksAt` anchor (persona-worlds-design.md §4); gating rides anchors, not
-// roles — whoami's roles[] arrives as opaque role vertex keys, never
-// canonical names, so it cannot name the frontOfHouse role FE-side.
+// isStaff marks a session that works a studio AND holds the frontOfHouse
+// role. The worksAt signal is the whoami anchor (persona-worlds-design.md
+// §4); whoami's roles[] arrives as opaque role vertex keys, never canonical
+// names, so it cannot name the frontOfHouse role FE-side —
+// state.frontOfHouse (GET /api/staff-hats, loadStaffHats) is the app-side
+// mirror of the write side's own `GrantsTo: [operator, frontOfHouse]` and the
+// read side's own isFrontDesk (cmd/wellness-app/readauth.go): a worksAt-only,
+// role-less caller holds neither an op grant nor a PII-read grant, so gating
+// on the worksAt anchor alone showed staff tabs that would only 403 on every
+// click. Orthogonal to instructorKey() — an instructor's own-class roster
+// access needs no front-desk role at all, so it is never conjoined here.
 function isStaff() {
-  return anchorKey("worksAt") !== "";
+  return anchorKey("worksAt") !== "" && !!state.frontOfHouse;
 }
 
 // instructorKey is the vtx.instructor entity this login is bound to, or "".

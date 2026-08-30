@@ -14,6 +14,7 @@ const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
   canSignOut: false, // whether whoami reports a real cookie session (drives the keepalive + the sign-out affordance)
   anchors: [], // the signed-in identity's residence/workplace anchors (whoami hat hints, persona-worlds-design.md §4). A `worksAt` anchor marks a front-desk staffer; a patient carries only `residesIn`. Drives which hats' surfaces show. UX curation only — the graph's grants + RLS remain the authority.
+  frontOfHouse: false, // server-resolved frontOfHouse role (GET /api/staff-hats) — the conjunct isFrontDesk composes with the worksAt anchor above. Fails closed: false until proven true.
   patients: [], // append-only lookup cache — every patient the FE has ever seen, never shrinks (so an
   // already-selected patient's contact lookup survives a later ?q= filter)
   patientOptions: [], // the roster currently rendered in the #patient select — the full cache, or a
@@ -279,6 +280,7 @@ async function loadWhoami() {
       state.identityId = (body && body.loggedIn && body.identityId) || null;
       state.canSignOut = !!(body && body.canSignOut);
       state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
+      await loadStaffHats();
       const btn = $("#sign-out");
       if (btn) btn.hidden = !state.canSignOut;
       renderSignedInAs();
@@ -289,11 +291,27 @@ async function loadWhoami() {
         state.identityId = null;
         state.canSignOut = false;
         state.anchors = [];
+        state.frontOfHouse = false;
         applyHatGating();
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
     }
+  }
+}
+
+// loadStaffHats reads the server-resolved frontOfHouse hat (GET
+// /api/staff-hats) — the app-side mirror of resolveSubjectHats
+// (cmd/clinic-app/readauth.go), which whoami's opaque anchors/roles cannot
+// express FE-side. Fails CLOSED: any fetch error (network, 401, malformed
+// body) leaves state.frontOfHouse false, hiding the staff-only tabs rather
+// than showing a surface the server would only 403 on every write.
+async function loadStaffHats() {
+  try {
+    const body = await api("/api/staff-hats", { credentials: "same-origin" });
+    state.frontOfHouse = !!(body && body.frontOfHouse);
+  } catch (_) {
+    state.frontOfHouse = false;
   }
 }
 
@@ -4627,14 +4645,24 @@ const STAFF_VIEWS = ["schedule", "followups", "series", "availability", "sites"]
 // schedule (the RLS-scoped /api/my-schedule), so this rides its own gate.
 const PROVIDER_VIEWS = ["myschedule"];
 
-// isFrontDesk marks a session that works the clinic desk. The signal is the
-// whoami `worksAt` anchor: in the clinic persona model a front-desk staffer
-// worksAt the building (ensureStaff), while a patient carries only a residesIn
-// anchor or none (persona-worlds §3.4). Gating rides anchors, not roles: whoami's
-// roles[] arrives as opaque role vertex keys (Contract #6 §6, frozen), never
-// canonical names, so it cannot name the frontOfHouse role FE-side.
+// isFrontDesk marks a session that works the clinic desk AND holds the
+// frontOfHouse role. The worksAt signal is the whoami anchor: in the clinic
+// persona model a front-desk staffer worksAt the building (ensureStaff),
+// while a patient carries only a residesIn anchor or none (persona-worlds
+// §3.4). whoami's roles[] arrives as opaque role vertex keys (Contract #6 §6,
+// frozen), never canonical names, so it cannot name the frontOfHouse role
+// FE-side — state.frontOfHouse (GET /api/staff-hats, loadStaffHats) is the
+// app-side mirror of the write side's own `GrantsTo: [operator,
+// frontOfHouse]` and the read side's own isFrontDesk
+// (cmd/clinic-app/readauth.go): a worksAt-only, role-less caller holds
+// neither an op grant nor a PII-read grant, so gating on the worksAt anchor
+// alone showed staff tabs that would only 403 on every click.
 function isFrontDesk() {
-  return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
+  return (
+    Array.isArray(state.anchors) &&
+    state.anchors.some((a) => a && a.relation === "worksAt") &&
+    !!state.frontOfHouse
+  );
 }
 
 // isProvider marks a clinician session — a real login BOUND to a provider entity

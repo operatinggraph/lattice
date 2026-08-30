@@ -145,6 +145,27 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 	return hats, nil
 }
 
+// handleStaffHats implements GET /api/staff-hats: the one FE-visible bit of
+// the caller's server-resolved read-boundary role — whether they hold the
+// frontOfHouse hat resolveSubjectHats already computes. Mirrors cmd/cafe-app's
+// identical handler; see its comment. The nav gates staff-only surfaces on
+// this instead of the raw worksAt anchor alone, so a worksAt-only caller with
+// no frontOfHouse role sees them hidden rather than hitting the same 403 the
+// write side already gives them (isFrontDesk, above). Fails closed on any
+// resolveSubjectHats error.
+func (s *server) handleStaffHats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusBadRequest, "GET required")
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]bool{"frontOfHouse": hats.frontOfHouse})
+}
+
 // actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to
 // read the anchors and roles arrays; the response also carries actorId,
 // which this read boundary does not need.
