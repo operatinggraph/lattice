@@ -642,6 +642,18 @@ def execute(state, op):
         if move_in != None:
             terms_data = {"moveInDate": move_in, "leaseTermMonths": require_number(p, "leaseTermMonths")}
             req_rent = optional_number(p, "requestedRent")
+            if req_rent == None:
+                # No rent offer from the applicant — fall back to the unit's own
+                # listed rent, so leaseRentSettlementSpec (semantic-contracts) has
+                # a requestedRent to gate missing_account on. Same key + idiom
+                # SetApplicantProfile already reads for its income-to-rent check.
+                # read-posture: (d) declared optionalReads at CreateLeaseApplication
+                # dispatch — a unit with no listing yet has no rent to fall back to.
+                listing = kv.Read(unit + ".listing")
+                if listing != None and not listing.isDeleted:
+                    r = listing.data.get("rentAmount")
+                    if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:
+                        req_rent = r
             if req_rent != None:
                 terms_data["requestedRent"] = req_rent
             mutations.append(make_aspect(app_key, "terms", "terms", terms_data))

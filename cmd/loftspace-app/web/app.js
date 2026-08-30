@@ -1376,8 +1376,13 @@ async function submitApply(ev) {
         operationType: "CreateLeaseApplication",
         class: "leaseapp",
         reads: [state.applicant, row.unitKey],
+        // The unit's listing rent is (d)-declared optionalReads — absent on a
+        // unit with no listing yet, in which case the op just leaves
+        // requestedRent unset (scripts.go's fallback, same key/idiom as
+        // SetApplicantProfile's income-to-rent lookup below).
         optionalReads: [
           "lnk.identity." + shortKey(state.applicant) + ".appliedToUnit.unit." + shortKey(row.unitKey),
+          row.unitKey + ".listing",
         ],
         payload,
       },

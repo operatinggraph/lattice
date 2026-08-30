@@ -372,9 +372,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The per-(applicant, unit) guard link is absent on a first
 				// application and tombstoned after a withdraw — its absence is
 				// exactly the condition that permits the create, so it can
-				// never be a required read.
+				// never be a required read. The unit's listing rent (rent
+				// fallback when the applicant offers none, scripts.go) is
+				// absent on a unit with no listing yet — same absence-
+				// tolerant idiom SetApplicantProfile already declares for the
+				// identical key.
 				OptionalReads: []string{
 					"lnk.identity.{payload.applicant:id}.appliedToUnit.unit.{payload.unit:id}",
+					"{payload.unit}.listing",
 				},
 			},
 		},

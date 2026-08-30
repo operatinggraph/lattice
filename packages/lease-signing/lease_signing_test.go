@@ -1101,6 +1101,86 @@ func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
 	}
 }
 
+// TestCreateLeaseApplication_NoRequestedRent_FallsBackToUnitListing: an
+// applicant who supplies moveInDate/leaseTermMonths but no requestedRent gets
+// the unit's own listed rent (seedUnit's rentAmount: 2400) written into
+// .terms — the fix for leaseRentSettlementSpec (semantic-contracts) never
+// projecting a missing_account gap for a lease with no rent offer.
+func TestCreateLeaseApplication_NoRequestedRent_FallsBackToUnitListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-rent-fallback")
+
+	applicantKey := seedApplicant(t, ctx, conn, "CCrentapp1cntHJKMNPQ")
+	unitKey := seedUnit(t, ctx, conn, "CCrentvtx1cntHJKMNPQ")
+
+	reqID := testutil.GenReqID("appRentFB0001")
+	appID := nanoIDFromRequestID(reqID)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	appKey := "vtx.leaseapp." + appID
+
+	tdoc := readDoc(t, ctx, conn, appKey+".terms")
+	tdata, _ := tdoc["data"].(map[string]any)
+	rent, _ := tdata["requestedRent"].(float64)
+	if rent != 2400 {
+		t.Fatalf("terms.requestedRent = %v, want 2400 (unit's listed rent, fallen back to)", tdata["requestedRent"])
+	}
+}
+
+// TestCreateLeaseApplication_NoRequestedRent_NoListing_StaysUnset: the same
+// omission on a unit with no .listing aspect at all leaves requestedRent
+// unset (no fallback value exists) rather than erroring — the same
+// absence-tolerant degrade leaseRentSettlementSpec's own doc comment already
+// asserts for a requestedRent-less application.
+func TestCreateLeaseApplication_NoRequestedRent_NoListing_StaysUnset(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-rent-nolisting")
+
+	applicantKey := seedApplicant(t, ctx, conn, "DDrentapp1cntHJKMNPQ")
+	unitKey := "vtx.unit.DDrentvtx1cntHJKMNPQ"
+	seedVertex(t, ctx, conn, unitKey, "location", map[string]any{})
+
+	reqID := testutil.GenReqID("appRentNL0001")
+	appID := nanoIDFromRequestID(reqID)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	appKey := "vtx.leaseapp." + appID
+
+	tdoc := readDoc(t, ctx, conn, appKey+".terms")
+	tdata, _ := tdoc["data"].(map[string]any)
+	if _, present := tdata["requestedRent"]; present {
+		t.Fatalf("terms.requestedRent should stay unset with no unit listing to fall back to, got %v", tdata["requestedRent"])
+	}
+}
+
 // TestCreateLeaseApplication_UnknownUnit_Rejected: an application naming a
 // non-existent unit is rejected (no-orphan; unit is required + alive-checked).
 func TestCreateLeaseApplication_UnknownUnit_Rejected(t *testing.T) {
