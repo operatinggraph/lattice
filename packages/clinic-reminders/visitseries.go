@@ -1423,6 +1423,12 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"{payload.patientKey}.activeVisitSeriesWith{payload.providerKey:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -1446,6 +1452,12 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
 				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_status", Equals: "active"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -1469,6 +1481,12 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
 				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_status", Equals: "paused"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -1493,6 +1511,12 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  visitSeriesVertexDDL,
 				Reads:       []string{"{payload.seriesKey}.series"},
 				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_endable", Equals: true},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -1524,6 +1548,12 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				// direct read of the building document, so there is no
 				// site-keyed read to declare.
 				Reads: []string{"{payload.seriesKey}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{OperationType: advanceVisitSeriesOp},

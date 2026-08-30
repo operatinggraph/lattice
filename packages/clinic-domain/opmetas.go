@@ -113,6 +113,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// meaningful rejection the script renders (AuthDenied), not a
 				// correctness error.
 				OptionalReads: []string{"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -164,6 +170,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The self-scope ownership probe, same shape and rationale as
 				// CreateAppointment's above.
 				OptionalReads: []string{"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -234,6 +246,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					// as CreateAppointment's / RescheduleAppointment's above.
 					"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -265,6 +283,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// script-derived and undeclarable) — a meaningful rejection, not
 				// a correctness error.
 				OptionalReads: []string{"lnk.provider.{payload.providerKey:id}.identifiedBy.identity.{actor:id}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -293,6 +317,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The standing-caller ownership probe, same shape and
 				// rationale as SetProviderHours's above.
 				OptionalReads: []string{"lnk.provider.{payload.providerKey:id}.identifiedBy.identity.{actor:id}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -326,6 +356,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
 				Reads:       []string{"{payload.appointmentKey}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -356,6 +392,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// shared helper's own doc comment describes the class-(d)
 				// posture CreateAppointment's optional site uses.
 				Reads: []string{"{payload.appointmentKey}", "{payload.site}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{

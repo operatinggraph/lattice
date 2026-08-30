@@ -570,7 +570,8 @@ func createAppointment(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 		Class:         "appointment",
 		Payload: json.RawMessage(`{"patient":"` + patientKey + `","provider":"` + providerKey +
 			`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{patientKey, providerKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{patientKey, providerKey},
+			Enumerations: testutil.DeclaredEnumerations("CreateAppointment", ledgerActorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

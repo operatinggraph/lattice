@@ -36,6 +36,8 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
+	clinicreminders "github.com/operatinggraph/lattice/packages/clinic-reminders"
 )
 
 const (
@@ -138,8 +140,9 @@ func crDriveAsOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	enums := testutil.DeclaredEnumerations(op, actorKey, clinicreminders.OpMetas(), clinicdomain.OpMetas())
+	if len(reads) > 0 || len(optionalReads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: enums}
 	}
 	if target != "" {
 		env.AuthContext = &processor.AuthContext{Target: target}

@@ -29,6 +29,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // practicesAtLinkKey is the deterministic per-(provider, building) practicesAt
@@ -314,7 +315,8 @@ func clCreateAppointmentWithSite(t *testing.T, ctx context.Context, conn *substr
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads},
+		ContextHint: &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads,
+			Enumerations: testutil.DeclaredEnumerations("CreateAppointment", clStaffActorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)

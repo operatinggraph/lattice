@@ -13,6 +13,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // A tombstoned provider confers nothing — the resolver half of the workplace
@@ -141,7 +142,8 @@ func submitSetStatusAsKey(t *testing.T, ctx context.Context, conn *substrate.Con
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{apptKey + ".status"}},
+		ContextHint: &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{apptKey + ".status"},
+			Enumerations: testutil.DeclaredEnumerations("SetAppointmentStatus", actorKey, clinicdomain.OpMetas())},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	failure := ""

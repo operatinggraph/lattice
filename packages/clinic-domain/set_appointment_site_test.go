@@ -28,6 +28,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // submitSetAppointmentSiteAs submits SetAppointmentSite as an arbitrary actor
@@ -50,6 +51,7 @@ func submitSetAppointmentSiteAs(t *testing.T, ctx context.Context, conn *substra
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{apptKey},
 			OptionalReads: []string{siteKey, practicesAtLinkKey(providerKey, siteKey)},
+			Enumerations:  testutil.DeclaredEnumerations("SetAppointmentSite", actorKey, clinicdomain.OpMetas()),
 		},
 	}
 	testutil.PublishOp(t, conn, env)
