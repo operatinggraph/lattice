@@ -1199,6 +1199,23 @@ function fmtDate(s) {
   return isNaN(d) ? s : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+// customerMemo strips a raw entity key from a ledger memo before it reaches
+// a customer surface — a memo is free text an operator typed (staff form
+// below, or a hand-run remediation), so nothing stops one from embedding a
+// bare NanoID (2026-08-29: a remediation memo did exactly that, "Appt
+// <NanoID>", live on 33 statement lines). No ledger op can amend a posted
+// memo (root data {} + an append-only .entry aspect, D5), so this is the
+// durable fix even for the already-posted lines.
+function customerMemo(memo) {
+  if (!memo) return memo;
+  const nanoid = "[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789]{20}";
+  return memo
+    .replace(new RegExp("\\b(?:Appt|Session|Booking|Visit|Lease)\\s+" + nanoid + "\\b\\.?", "gi"), "")
+    .replace(new RegExp("\\b" + nanoid + "\\b", "g"), "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // renderCardPhoto builds the Browse card's cover image. With photos it shows the
 // first as a cover with an "n photos" count and opens the lightbox on click;
 // with none it shows a neutral placeholder so a listing nobody photographed still
@@ -2632,7 +2649,7 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
       li.className = "ledger-entry " + t.type;
       const sign = t.type === "debit" ? "+" : "−";
       li.textContent =
-        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + (t.memo ? " — " + t.memo : "");
+        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + (t.memo ? " — " + customerMemo(t.memo) : "");
       // "Why was I charged this?" (Fire V4) — a semantic-contracts clause
       // authorized this transaction (t.clauseProse from the ledgerHistory
       // lens's optional authorizedBy hop); a plain human-recorded charge
@@ -2770,7 +2787,7 @@ async function refreshStatementBody(body, leaseAppKey) {
         const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
         li.textContent =
           fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
-          (e.memo ? " — " + e.memo : "");
+          (e.memo ? " — " + customerMemo(e.memo) : "");
         list.append(li);
       }
       period.append(list);
@@ -2796,7 +2813,7 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   amount.placeholder = "Amount ($)";
   const memo = document.createElement("input");
   memo.type = "text";
-  memo.placeholder = "Memo (optional)";
+  memo.placeholder = "Memo (optional — shown to the resident)";
   const charge = document.createElement("button");
   charge.className = "ghost";
   charge.textContent = "+ Record charge";

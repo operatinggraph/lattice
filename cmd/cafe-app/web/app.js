@@ -350,6 +350,22 @@ function money(cents) {
   return "$" + n.toFixed(2);
 }
 
+// customerMemo strips a raw entity key from a ledger memo before it reaches
+// a customer surface — a memo is free text an operator typed, so nothing
+// stops one from embedding a bare NanoID (2026-08-29: a remediation memo did
+// exactly that on a sibling app's statement). No ledger op can amend a
+// posted memo (append-only entry, D5), so this is the durable fix even for
+// already-posted lines.
+function customerMemo(memo) {
+  if (!memo) return memo;
+  const nanoid = "[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789]{20}";
+  return memo
+    .replace(new RegExp("\\b(?:Appt|Session|Booking|Visit|Tab|Order)\\s+" + nanoid + "\\b\\.?", "gi"), "")
+    .replace(new RegExp("\\b" + nanoid + "\\b", "g"), "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // ledgerBalanceLine renders a signed balanceCents (debits − credits) as
 // owed/credit/paid-in-full, mirroring loftspace-app's refreshLedgerBody —
 // money() alone reads a negative balance as "$-21.59", which says nothing
@@ -1299,7 +1315,7 @@ async function renderResident() {
             (r) =>
               '<li class="ledger-entry ' + r.type + '">' +
               (r.type === "debit" ? "+" : "−") + money(r.amountCents) +
-              (r.memo ? " — " + escapeHtml(r.memo) : "") +
+              (r.memo ? " — " + escapeHtml(customerMemo(r.memo)) : "") +
               " (" + r.postedAt + ")</li>"
           )
           .join("") +
@@ -1326,7 +1342,7 @@ async function renderResident() {
       : ledger.accountKey
         ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
           '<input id="record-payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment ($)" required />' +
-          '<input id="record-payment-memo" type="text" placeholder="Memo (optional)" />' +
+          '<input id="record-payment-memo" type="text" placeholder="Memo (optional — shown to the resident)" />' +
           '<button id="record-payment-submit" type="submit">Record Payment</button>' +
           "</form>"
         : '<p class="meta" style="margin-top:14px;">No café account for this lease yet — nothing to credit.</p>') +

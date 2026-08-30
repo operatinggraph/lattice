@@ -404,6 +404,22 @@ function money(cents) {
   return "$" + n.toFixed(2);
 }
 
+// customerMemo strips a raw entity key from a ledger memo before it reaches
+// a customer surface — a memo is free text an operator typed, so nothing
+// stops one from embedding a bare NanoID (2026-08-29: a remediation memo did
+// exactly that on a sibling app's statement). No ledger op can amend a
+// posted memo (append-only entry, D5), so this is the durable fix even for
+// already-posted lines.
+function customerMemo(memo) {
+  if (!memo) return memo;
+  const nanoid = "[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789]{20}";
+  return memo
+    .replace(new RegExp("\\b(?:Appt|Session|Booking|Visit)\\s+" + nanoid + "\\b\\.?", "gi"), "")
+    .replace(new RegExp("\\b" + nanoid + "\\b", "g"), "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // priceLabel renders a class's priceCents for a schedule/roster card: "Free"
 // for 0/absent, otherwise the dollar amount.
 function priceLabel(cents) {
@@ -951,7 +967,7 @@ async function renderMyBalance() {
       const sign = t.type === "debit" ? "+" : "−";
       const d = new Date(t.postedAt);
       const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
+      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + ")" : "");
       list.append(li);
     }
   } catch (_) {
@@ -2154,7 +2170,7 @@ function renderBillingBody(data) {
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
+    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + ")" : "");
     list.append(li);
   }
 }
@@ -2354,16 +2370,59 @@ async function renderStudiosAdmin() {
     grid.innerHTML = '<div class="empty">No studios yet.</div>';
     return;
   }
-  grid.innerHTML = studios.map(studioCard).join("");
+  // Best-effort: the horizon warning is an affordance, not load-bearing, so a
+  // failed sessions fetch just renders the cards without it.
+  let sessions = [];
+  try {
+    sessions = await loadSessions();
+  } catch (_) {
+    /* cards render without the horizon warning */
+  }
+  grid.innerHTML = studios.map((s) => studioCard(s, sessions)).join("");
   studios.forEach(wireStudioCard);
 }
 
-function studioCard(s) {
+// GRID_HORIZON_DAYS days is how far out a studio's schedule must already
+// reach before staff stop seeing the dry-grid warning — the studio's grid
+// backlog row: a member can only book what's minted, and a series is a
+// bounded eager batch (CreateSessionSeries never extends itself), so nothing
+// else surfaces an ending schedule.
+const GRID_HORIZON_DAYS = 7;
+
+// studioGridWarning reads the studio's own already-projected upcoming
+// sessions (wellnessSessions lens: studioKey/startsAt/endsAt) — no new lens
+// field needed, the horizon is a client-side computation over data already
+// on the page.
+function studioGridWarning(s, sessions) {
+  const now = Date.now();
+  const upcoming = sessions.filter(
+    (se) => se.studioKey === s.studioKey && se.startsAt && new Date(se.startsAt).getTime() > now,
+  );
+  if (!upcoming.length) {
+    return '<p class="studio-grid-dry" style="color:#b00020;font-weight:600;">Schedule is empty — no upcoming classes at this studio.</p>';
+  }
+  const lastEnds = upcoming.reduce((max, se) => {
+    const t = new Date(se.endsAt || se.startsAt).getTime();
+    return Math.max(max, t);
+  }, 0);
+  const daysLeft = Math.floor((lastEnds - now) / 86400000);
+  if (daysLeft <= GRID_HORIZON_DAYS) {
+    return (
+      '<p class="studio-grid-dry" style="color:#b00020;font-weight:600;">Schedule runs out in ' +
+      daysLeft + (daysLeft === 1 ? " day" : " days") + " — book more classes." +
+      "</p>"
+    );
+  }
+  return "";
+}
+
+function studioCard(s, sessions) {
   const id = domId(s.studioKey);
   return (
     '<div class="card">' +
     '<div class="who">' + esc(s.name || "?") + "</div>" +
     '<div class="meta">' + esc(shortKey(s.studioKey)) + "</div>" +
+    studioGridWarning(s, sessions || []) +
     '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button>' +
     '<button id="retire-' + id + '" class="danger">Retire</button></div>' +
     '<div id="sess-form-' + id + '" class="session-form" hidden>' +
