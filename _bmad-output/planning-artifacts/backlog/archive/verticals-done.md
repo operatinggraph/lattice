@@ -389,3 +389,14 @@ Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detai
 - 2026-06-26 · `777d180` · LoftSpace signed-lease Inc A: project lease terms + terms-review panel
 - 2026-06-26 · `6c30a10` · LoftSpace landlord surface Inc 2: `DecideLeaseApplication` + lens gating
 - 2026-08-04 · `f836a533` · A booked visit finally says where to go — submitBook falls back to the provider's own sole practicesAt site when the site filter is left on "Any site".
+- 2026-08-28 · `883e2875` · `derive_reads` adoption for CreateSession/CreateSessionSeries/CreateAppointment/RescheduleAppointment (item 8); ReassignSession stays client-declared (excluded, not adopted — see build note). triage §2 item 8
+- 2026-08-28 · `634cf8d4` · descriptorform's `{me.<type>}` typed self-anchor + the `?` optional marker (item 7), mirroring Facet's own resolver. triage §2 item 7
+- 2026-08-28 · `ae5f39ec` · descriptorform's shared mint-and-reveal ceremony plumbing (item 6) — form.mjs mints/hashes/reveals, gated on an affirmative `accepted` (a cold review caught a weaker "not rejected" first pass). triage §2 item 6
+- 2026-08-28 · `7f6c0047` · descriptorform's dispatch.visibleWhen finally evaluates against context.row instead of refusing outright — unblocks clinic-reminders' Pause/Resume/EndVisitSeries. triage §2 item 5
+- 2026-08-28 · `a296e149` · descriptorform accepts `{entity.<column>}` as an alias for `{context.<field>}`, matching the spelling Facet-facing packages already use. triage §2 item 4
+- 2026-08-28 · `cf9d9909` · descriptorform gains a textarea kind + per-field x-visibleWhen conditional visibility; RecordEncounter carries it. clinic-domain 0.34.9
+- 2026-08-27 · `c47bd017` · StartVisitSeries migrated off its hand-built form onto the shared descriptor renderer; providerKey fills via a new contextParams entry. clinic-reminders 0.10.3
+- 2026-08-27 · `2ef6ce8f` · A `"type":"array"` op field can no longer be silently submitted as a string — normalizeCatalogRow refuses the row until a real array kind ships (live hazard: SetProviderHours/SetProviderTimeOff already declare one).
+- 2026-08-27 · `2b0faf8f` · The two landlord views agree on "qualified" again — unit-applications now mirrors the RLS view's applicantApproved instead of folding in the decision.
+- 2026-08-27 · `cd41d53b` · A rival/tombstoned-unit applicant can no longer sign a stale grant — SignLease re-verifies unit availability at execution time. lease-signing 0.31.9
+- 2026-08-27 · `e233ce28` · `SetAppointmentStatus` can finally submit — schema widened + Dispatch.Reads declared for it + 9 more ops (clinic/service/wellness-domain). clinic-domain 0.34.8, service-domain 0.10.5, wellness-domain 0.22.8
