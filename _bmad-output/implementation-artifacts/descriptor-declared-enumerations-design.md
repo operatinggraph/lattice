@@ -425,3 +425,56 @@ any touched interface reaches.
 
 `docs/contracts/*`; hydration; the `read` rows; the 98 non-actor-role walk rows; Loom/Weaver's own
 enumeration surfaces; any new hub grammar.
+
+### 8.8 Close — what shipped, and the three premises the build corrected
+
+**Shipped:** 31 of the 32 ops declare `{actor} holdsRole out`; the baseline's walk rows fall 130 → 99
+and its `holdsRole` rows 32 → 1. SHAs `4daaf0a` (clinic's 12), `e6306a6` (the other 18), `6af0555`
+(RemoveUnitOwner), `a138f25` (review fixes), plus `4c3375b` (the helper's own tests).
+
+**Correction 1 — §8.4's increment boundary was wrong, and the build changed it.** The brief said a
+package's declarations, envelope edits and row retirements land together. They cannot: a baseline row is
+keyed by **operationType**, so retiring one breaks every dispatcher of that op *wherever it lives*.
+clinic-ledger and clinic-reminders both book a clinic-domain `CreateAppointment`; wellness-ledger,
+loftspace-ledger, privacy-base, semantic-contracts and `internal/leaseconvergence` all dispatch ops they
+do not own. **The unit is the OP and every dispatcher of it**, and the commits are grouped that way.
+
+**Correction 2 — the declaration is resolved from the spec, not restated in each fixture.** The cafe
+precedent hardcoded the hint in its test envelopes. That agrees with the spec only by coincidence:
+deleting a spec's `Enumerations` would leave every fixture green with its baseline row already retired —
+the ratchet's coverage silently gone. `internal/testutil/declared_enumerations.go` resolves the hint from
+the op's own meta instead, so each fixture is a **revert-proof** of the declaration its retired row rests
+on. Proven by experiment at close: deleting `AssignUnitOwner`'s declaration reddens four tests.
+
+**Correction 3 — §8.5's reason for `ReleaseOrphanedBooking` was checkable and wrong.** It said the Weaver
+gap-action grammar admits only `row.<column>`, so the dispatching actor is unnameable. A **literal hub is
+in that grammar** (`strategist.go:882` `resolveReadKey`). The real blocker is one level down:
+`bootstrap.WeaverIdentityKey` is a package-level **var populated at runtime** — each deployment generates
+its own primordial ID set on first boot (`internal/bootstrap/nanoid.go:65-81,605`) — so a package
+`Definition` built at package-init cannot embed it, and a lens cannot project an identity it has no way to
+know. Neither half of the grammar can reach it. **The conclusion stands; the stated reason is replaced.**
+
+**Why the two undeclared ops are treated differently, which is the whole point.** `RemoveUnitOwner` has no
+descriptor but a closed, documented dispatcher set, all of them hand-built envelopes — a channel the
+baseline's own header sanctions — so declaring there is truthful and its row retires. `ReleaseOrphanedBooking`
+*also* has hand-built test dispatchers, and declaring at them would have retired its row too. **That is
+refused deliberately:** its real dispatcher is the Weaver, which genuinely cannot declare, so a
+fixture-side declaration would delete the guard's coverage of a walk that stays undeclared in production.
+A row retired against a declaration production does not send is worse than the row.
+
+The residue is one row and one filed item — `[Weaver] A Weaver-dispatched op cannot declare a walk hubbed
+on the dispatching actor`, 🔭 flag-for-Andrew, a Contract #10 templating addition.
+
+**Reviews.** One cold adversarial pass over the item's whole diff: 1 MAJOR + 4 MINOR, all fixed in this
+run, none filed. Classified:
+
+| class | component | finding | the check that catches it now |
+|---|---|---|---|
+| **implementation-bug** | loftspace-domain | MAJOR — the one helper serving an op *without* a spec keyed its hardcoded-hint fallback on "the resolve came back empty", so deleting a *different* op's declaration fell through to the literal and stayed green. The anti-pattern the item exists to kill, reintroduced at its one exception. | fallback keyed on the op; deleting the declaration reddens four tests in that file |
+| **implementation-bug** | lease-signing | a submit helper appended through the caller's `ContextHint` pointer, which one test reuses across two submissions — inert only while that op declares nothing | merges into a copy |
+| **brief-gap** | scripts | 34 seed-script dispatch sites declared nothing while their ops now do — an inconsistency this item created | both seeds resolve from `pkgregistry` in the submit helper |
+| **convention** | testutil / loftspace | a doc comment narrating the build rather than the code; a version bumped twice for one content change | conventions lint; the bump reverted |
+
+**Dossier — one class routed.** `docs/components/pkgmgr.md`: *a fixture that hardcodes a value the
+descriptor also declares is not a proof of the declaration — it agrees by coincidence, and the declaration
+can be deleted with every test still green. Resolve it from the descriptor so the fixture is a revert-proof.*

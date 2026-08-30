@@ -1,5 +1,9 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-23 · `69b48ba` · [Bridge] augur adapter registration CLOSED — escalation tier dead in every deployment; composition-root census gate, 3 families mutation-pinned; cold review caught forged model provenance
+- 2026-08-23 · `62432f2` · [Refractor] dispositionEvalErr privacy-critical arm CLOSED — the tier fell through to Nak+nil (no pause, no alert, no backoff); mutation-proven
+- 2026-08-23 · `9718dac7` · [Pkgmgr] live-vs-declared permission reconciliation CLOSED — key-based against declaredKeys, registry-anchored, five drift classes + a CI gate; 3 cold reviews found a fail-open and 3 false remedies
+- 2026-08-23 · `a12fef1` · [Pkgmgr] grant-slice property-map gate CLOSED — parse-time propVars, one quote-aware scanner; cold review found a BLOCKING false refusal (sibling walks sharing `{k: false}`) + a smuggled accumulator
 - 2026-08-23 · `a6e8cec` · [Weaver] malformed-anchor RowDataError CLOSED — per-entity key, level-driven raise/clear, registry-removal teardown; 4 review findings fixed, placement move-mutation pinned
 - 2026-08-23 · `20264df` · [Tooling] ceremony 5s SLA CLOSED — 5 waits across 2 harnesses poll to a 3-min convergence ceiling, mirroring verify-erasure-ceremony
 - 2026-08-23 · `960bb01` · [Docs] root actor set named by its predicate — 21 comments said "kernel-seeded" for a `holdsRole → operator` population; contracts untouched
