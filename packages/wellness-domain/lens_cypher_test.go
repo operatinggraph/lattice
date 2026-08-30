@@ -801,6 +801,38 @@ func TestWellnessIdentitiesRead_WorkplaceAnchorFanOut(t *testing.T) {
 		"authz_anchors must carry the self-anchor PLUS the bare NanoID of the unit and every building covering it")
 }
 
+// TestWellnessIdentitiesRead_BookingAnchorFanOut proves a returning guest's
+// authz_anchors carries every building covering the location their booked
+// session is at — a returning guest has no lease or workplace grant to
+// anchor on, so without this fan-out a real front-desk staffer's
+// worksAt-building grant matched no row but the guest's own. Mirrors
+// TestWellnessIdentitiesRead_WorkplaceAnchorFanOut's shape, walked from the
+// identity side via bookedBy + forSession + atLocation (Contract #1 §1.1:
+// booking is the later-arriving vertex in both the bookedBy and forSession
+// links, so it is the source of each).
+func TestWellnessIdentitiesRead_BookingAnchorFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	aliceKey := f.vtx(t, "alice", "identity")
+	f.aspect(t, "alice", "name", "name", envelopeData())
+	f.vtx(t, "bk", "booking")
+	f.vtx(t, "se", "session")
+	f.vtx(t, "pl", "location")
+	f.vtx(t, "building", "location")
+	f.edge(t, "bookedBy", "bk", "alice")
+	f.edge(t, "forSession", "bk", "se")
+	f.edge(t, "atLocation", "se", "pl")
+	f.edge(t, "containedIn", "pl", "building")
+
+	rows := f.project(t, wellnessIdentitiesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, aliceKey, rows[0].Values["identity_key"])
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["pl"], f.ids["building"]}, rows[0].Values["authz_anchors"],
+		"authz_anchors must carry the self-anchor PLUS the bare NanoID of the session's location and every building containing it")
+}
+
 // TestWellnessIdentitiesRead_NoLeaseKeepsSelfAnchorOnly proves an identity
 // with no leaseapp application at all (e.g. an instructor or staffer with no
 // residence of their own) still projects — the self-anchor survives on its

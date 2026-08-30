@@ -62,8 +62,10 @@
       </div>
       <button id="roster-book-submit">Book</button>
       <div class="field">
-        <label for="roster-book-guest">Book a guest (identity key, standard rate)</label>
-        <input type="text" id="roster-book-guest" placeholder="vtx.identity.…">
+        <label for="guest-search">Book a guest (standard rate)</label>
+        <input type="search" id="guest-search" placeholder="Search guests by name…" autocomplete="off" aria-label="Search guests by name" />
+        <select id="roster-book-guest" aria-label="Choose which guest to book"></select>
+        <button type="button" id="new-guest" class="ghost">＋ New guest</button>
       </div>
       <button id="roster-book-guest-submit" class="ghost">Book guest</button>
     </div>
@@ -120,6 +122,32 @@
     </div>
   </section>
 </main>
+
+<!-- New guest modal -->
+<div id="guest-overlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="guest-title">
+    <h2 id="guest-title">New guest</h2>
+    <p class="lead">Register a guest. Name is required; contact is optional.</p>
+    <form id="guest-form">
+      <div class="field">
+        <label for="ng-name">Full name</label>
+        <input type="text" id="ng-name" placeholder="Alex Rivera" />
+      </div>
+      <div class="field">
+        <label for="ng-phone">Phone <span class="opt">(optional)</span></label>
+        <input type="text" id="ng-phone" placeholder="555-0100" />
+      </div>
+      <div class="field">
+        <label for="ng-email">Email <span class="opt">(optional)</span></label>
+        <input type="email" id="ng-email" placeholder="alex@example.com" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="guest-cancel" class="ghost">Cancel</button>
+        <button type="submit" id="guest-submit">Create guest</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <div id="toast" class="toast" hidden></div>
 

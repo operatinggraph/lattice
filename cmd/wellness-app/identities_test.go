@@ -22,3 +22,15 @@ func TestHandleIdentities_ValidSession_PoolUnconfigured_502(t *testing.T) {
 		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
 	}
 }
+
+// TestHandleIdentities_QParam_PoolUnconfigured_502: the same clean 502 with a
+// `?q=` search term on the request — the new front-desk typeahead query
+// parameter is read before the pool-nil check trips, so it must never panic
+// or change the pool-unconfigured error path.
+func TestHandleIdentities_QParam_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t) // session set, pgPool nil
+	rec := sessionGET(s, s.handleIdentities, "/api/identities?q=ali", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
+	}
+}

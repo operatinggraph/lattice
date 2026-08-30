@@ -239,7 +239,13 @@ var appOpCeilings = map[string]int{
 	// scope, same as form.mjs. appOpDebt's two entries for them are deleted
 	// in the same diff.
 	"cmd/loftspace-app": 18,
-	"cmd/wellness-app":  12,
+	// 13: CreateUnclaimedIdentity backs the new-guest modal's submit
+	// (submitNewGuest, app.js), reusing loftspace-app's/clinic-app's own
+	// hand-built new-identity ceremony for the same op — a hardcoded literal
+	// because a name + optional email/phone form is exactly what those two
+	// apps already hand-wire for it, not a new descriptor-catalog gap
+	// (verticals-designer-triage-2026-08-27.md §15).
+	"cmd/wellness-app": 13,
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every
