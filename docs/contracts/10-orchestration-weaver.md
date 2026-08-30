@@ -187,6 +187,27 @@ every column the playbook templates name**.) Substitution is **type-preserving**
 resolving to a JSON number (e.g. a lens-computed `amountCents`) is passed to the op as a number, not
 stringified — `resolveParam` returns the row value verbatim. A monetary param is integer cents.
 
+> **📐 PROPOSED — UNRATIFIED.** The clause below is a proposal, not yet ratified. Nothing implements it.
+
+A gap action's **`enumerations[].hub`** additionally admits the token **`{actor}`**, which the Strategist
+substitutes with the **dispatching engine's own actor key** — the identity its actuator stamps on the
+submitted envelope. Neither half of the templating above can reach that identity: it is not a violation-row
+column (the Lens has no way to know it), and it cannot be written as a literal either, because each
+deployment generates its own primordial identity set on first boot, so a package `Definition` built at
+package-init has no value to embed.
+
+It exists because a declared class-(e) walk (Contract #2 §2.5) whose hub is the **submitter** rather than
+the **subject** has nothing else to name it. The actor-role confinement preamble every domain script runs
+walks the *actor's* `holdsRole` links, while the violation row describes the subject — so a
+Weaver-dispatched op that runs that preamble is undeclarable today, and its walk stays measured residue
+instead of a declaration.
+
+`{actor}` is admitted on a **hub only** — never on a param or a `reads` entry, which address subject state
+that `row.<column>` already reaches. It carries the same meaning as `OpDispatchSpec.Enumerations`' `{actor}`
+on the descriptor surface, so one operation declaring the same walk on two dispatching surfaces writes it
+identically. The "no expressions" rule is unchanged: `{actor}` is a token resolved by substitution, exactly
+as `row.<column>` is.
+
 ### `triggerLoom` authorization — `StartLoomPattern` + pattern-as-target
 
 Starting a Loom instance is the op `StartLoomPattern` carrying **`authContext.target =
