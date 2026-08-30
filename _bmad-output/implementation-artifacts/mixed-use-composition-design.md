@@ -144,6 +144,14 @@ mechanism — no primitive to file, no Designer/Andrew gate; built directly in `
   positive-attach path is proven by `TestComputeServiceAttachRate` (unit test) against the real
   join logic, not live-clicked; no console errors.
 
+**Correction (Vertical PO, 2026-08-30):** "attached" measured existence of a live row —
+`frontDeskBookings` filters to `status='booked'`, a tab counted only while unsettled — so a lease whose
+class already happened (`attended`/`noShow`) or whose tab already settled read as un-attached even
+though the resident used the service. `computeServiceAttachRate` now reads a new `frontDeskBookingHistory`
+lens (any booking status, `front-desk` 0.3.1) gated on a `serviceAttachLookbackDays`=30 window over
+`startsAt`/`settledAt` instead of raw existence; `waitlisted` bookings are excluded (never got a seat).
+`front-desk` now declares **four** lenses, not three.
+
 ## Increment 4 (shipped this fire) — front-desk: lease details
 
 The other front-desk tail from the Deferred list below: term/rent on the card, not just the
@@ -243,6 +251,6 @@ own `cafeTabSettlement` lens already served it) and **operations portfolio-pulse
 service-attach-rate Inc 3). The row's original "+ Loupe" phrasing (PO's initial framing) was never built as
 a bespoke Loupe surface and this fire does not add one: Loupe is the platform's generic admin/console
 inspector (`lattice-architecture.md` P5 exception) and already inspects any installed package's lens
-buckets, including `front-desk`'s three, without needing a purpose-built view — consistent with every
+buckets, including `front-desk`'s four, without needing a purpose-built view — consistent with every
 prior increment's registry-only Loupe touch (`cmd/loupe/pkg.go`'s `packageRegistry`, for install/admin
 visibility, not a dedicated aggregate page). No further increments are scoped on this item.
