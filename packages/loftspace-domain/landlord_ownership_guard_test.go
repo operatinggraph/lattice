@@ -20,6 +20,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 const (
@@ -112,6 +113,7 @@ func loOwnershipAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 				manageLinkKey(landlordKey, unitKey),
 				"lnk.identity." + actorID + ".manages.unit." + unitID,
 			},
+			Enumerations: testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas()),
 		},
 		AuthContext: &processor.AuthContext{Target: target, Task: task},
 	}

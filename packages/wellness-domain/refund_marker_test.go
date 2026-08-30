@@ -18,6 +18,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 // seedAspect directly seeds an aspect document — the mirror of seedVertex/
@@ -47,7 +48,7 @@ func submitCancelBooking(t *testing.T, ctx context.Context, conn *substrate.Conn
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},

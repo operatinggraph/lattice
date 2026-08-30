@@ -12,6 +12,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 )
 
 // Workplace write confinement for LoftspaceCreateAccount (verticals.md —
@@ -132,7 +133,7 @@ func createAccountAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("LoftspaceCreateAccount", actorKey, loftspaceledger.OpMetas()), Reads: []string{leaseKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)

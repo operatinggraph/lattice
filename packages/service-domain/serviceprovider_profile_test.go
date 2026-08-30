@@ -12,6 +12,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	servicedomain "github.com/operatinggraph/lattice/packages/service-domain"
 )
 
 // seedIdentifiedByLink writes the serviceprovider identifiedBy identity link
@@ -46,7 +47,7 @@ func profileEnv(t *testing.T, label, spKey, displayName, actorKey string) *proce
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "serviceprovider",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("SetServiceProviderProfile", actorKey, servicedomain.OpMetas()),
 			Reads:         []string{spKey},
 			OptionalReads: []string{"lnk.serviceprovider." + spID + ".identifiedBy.identity." + actorID},
 		},

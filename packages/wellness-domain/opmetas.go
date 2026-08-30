@@ -129,6 +129,12 @@ func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 				"lnk.session.{payload.sessionKey:id}.ledBy.instructor.{payload.instructor:id}",
 				"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
 			},
+			// The operator-role confinement probe: the workplace-exempt
+			// short-circuit walks the actor's own holdsRole links to test
+			// for the operator role (actor_holds_operator).
+			Enumerations: []pkgmgr.EnumerationSpec{
+				{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 }
@@ -196,6 +202,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"vtx.session.{payload.session:id}.bkr{actor:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -239,6 +251,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 				OptionalReads: []string{
 					"vtx.session.{payload.session:id}.bkr{actor:id}",
+				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
 		},
@@ -293,6 +311,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.booking.{payload.bookingKey:id}.forSession.session.{payload.session:id}",
 					"lnk.booking.{payload.bookingKey:id}.bookedBy.identity.{actor:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -338,6 +362,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"lnk.session.{payload.sessionKey:id}.ledBy.instructor.{payload.instructor:id}",
 					"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
+				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
 		},
@@ -393,6 +423,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.session.{payload.session:id}.ledBy.instructor.{payload.instructor:id}",
 					"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -442,6 +478,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// script's own StudioConflict/InstructorConflict on collision,
 				// never a bare commit-time RevisionConflict.
 				OptionalReads: []string{"{payload.instructor}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -488,6 +530,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// #2 §2.5 class (g)) — see CreateSession's op-meta comment
 				// above.
 				OptionalReads: []string{"{payload.instructor}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -529,6 +577,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// render a control that fails closed.
 				ContextParams: map[string]string{"location": "{me.workplace}"},
 				Reads:         []string{"{payload.location}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -640,6 +694,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// undeclared, and that is the class-(b) debt not to copy.
 				OptionalReads: []string{
 					"lnk.instructor.{payload.instructorKey:id}.identifiedBy.identity.{actor:id}",
+				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
 		},

@@ -62,6 +62,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "leaseAppKey",
 				TargetType:  "leaseapp",
 				Reads:       []string{"{payload.leaseAppKey}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{

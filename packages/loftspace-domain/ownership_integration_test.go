@@ -28,6 +28,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 // lsLandlordID is a valid 20-char Contract #1 NanoID (no I/O/l/0): the happy
@@ -57,7 +58,7 @@ func assignUnitOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "loftspaceOwnership",
 		Payload:       json.RawMessage(`{"landlord":"` + landlordKey + `","unit":"` + unitKey + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("AssignUnitOwner", actor, loftspacedomain.OpMetas()),
 			Reads:         []string{landlordKey, unitKey},
 			OptionalReads: []string{manageLinkKey(landlordKey, unitKey)},
 		},

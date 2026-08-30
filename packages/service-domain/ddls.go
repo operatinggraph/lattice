@@ -181,6 +181,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"lnk.serviceprovider.{payload.serviceprovider:id}.identifiedBy.identity.{actor:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -252,6 +258,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// ownership chain RecordServiceOutcome declares above.
 				OptionalReads: []string{
 					"lnk.serviceprovider.{payload.serviceProviderKey:id}.identifiedBy.identity.{actor:id}",
+				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
 		},

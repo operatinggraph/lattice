@@ -174,7 +174,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-02T12:00:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("LoftspaceCreateAccount", scActorKey, loftspaceledger.OpMetas()), Reads: []string{leaseAppKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

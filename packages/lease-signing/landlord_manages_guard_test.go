@@ -18,6 +18,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 )
 
 const (
@@ -97,6 +98,13 @@ func llSubmitAsLandlordReply(t *testing.T, ctx context.Context, conn *substrate.
 	label, opType, class string, payload map[string]any, hint *processor.ContextHint) (processor.MessageOutcome, *processor.OperationReply) {
 	t.Helper()
 	b, _ := json.Marshal(payload)
+	enums := testutil.DeclaredEnumerations(opType, llLandlordKey, leasesigning.OpMetas())
+	if len(enums) > 0 {
+		if hint == nil {
+			hint = &processor.ContextHint{}
+		}
+		hint.Enumerations = append(hint.Enumerations, enums...)
+	}
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,

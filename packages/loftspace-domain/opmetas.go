@@ -182,6 +182,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.identity.{actor:id}.manages.unit.{payload.unit:id}",
 					"lnk.identity.{payload.landlord:id}.manages.unit.{payload.unit:id}",
 				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 	}

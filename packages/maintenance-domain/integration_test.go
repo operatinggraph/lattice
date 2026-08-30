@@ -290,7 +290,7 @@ func mdSubmitReportIssue(t *testing.T, ctx context.Context, conn *substrate.Conn
 		SubmittedAt:   "2026-07-21T09:00:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint:   &processor.ContextHint{Reads: []string{location}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReportIssue", actorKey, maintenancedomain.OpMetas()), Reads: []string{location}},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")
@@ -310,7 +310,7 @@ func mdSubmitResolve(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-21T11:30:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ResolveWorkOrder", actorKey, maintenancedomain.OpMetas()),
 			Reads:         []string{workOrderKey},
 			OptionalReads: []string{workOrderKey + ".resolution"},
 		},
@@ -342,7 +342,7 @@ func mdSubmitReportIssueWithReason(t *testing.T, ctx context.Context, conn *subs
 		SubmittedAt:   "2026-07-21T09:00:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint:   &processor.ContextHint{Reads: []string{location}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReportIssue", actorKey, maintenancedomain.OpMetas()), Reads: []string{location}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	msg := ""

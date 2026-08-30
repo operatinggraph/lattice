@@ -21,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 )
 
 const (
@@ -64,6 +65,8 @@ func lfDecideAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer,
 	label, leaseAppKey, unitKey, actorKey, forgedTarget string) processor.MessageOutcome {
 	t.Helper()
+	hint := decideReadsFor(leaseAppKey, unitKey)
+	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", actorKey, leasesigning.OpMetas())
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -73,7 +76,7 @@ func lfDecideAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Class:         "leaseapp",
 		Payload: json.RawMessage(`{"leaseAppKey":"` + leaseAppKey +
 			`","decision":"declined","unit":"` + unitKey + `"}`),
-		ContextHint: decideReadsFor(leaseAppKey, unitKey),
+		ContextHint: hint,
 	}
 	if forgedTarget != "" {
 		env.AuthContext = &processor.AuthContext{Target: forgedTarget}

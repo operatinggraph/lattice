@@ -25,6 +25,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 )
 
 func newPIIPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string) (*processor.CommitPath, jetstream.Consumer) {
@@ -72,11 +73,14 @@ func createIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // recordPIIReads is the known-key read set RecordIdentityPII needs: the target
 // identity vertex + its state aspect. (.mergedInto is NOT declared — it is
 // absent pre-merge; the merged guard keys off state == "merged".)
-func recordPIIReads(identityKey string) *processor.ContextHint {
-	return &processor.ContextHint{Reads: []string{
-		identityKey,
-		identityKey + ".state",
-	}}
+func recordPIIReads(identityKey, actorKey string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads: []string{
+			identityKey,
+			identityKey + ".state",
+		},
+		Enumerations: testutil.DeclaredEnumerations("RecordIdentityPII", actorKey, identitydomain.OpMetas()),
+	}
 }
 
 // TestRecordPII_SSNDOBAreSensitive_AfterInstall — the sensitivity proof
@@ -132,7 +136,7 @@ func TestRecordPII_WritesAspects_RootMinimal_D5(t *testing.T) {
 		SubmittedAt:   "2026-05-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(identityKey),
+		ContextHint:   recordPIIReads(identityKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -189,7 +193,7 @@ func TestRecordPII_AcceptsLeapDayDOB(t *testing.T) {
 		SubmittedAt:   "2026-05-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","ssn":"123-45-6789","dob":"2000-02-29"}`),
-		ContextHint:   recordPIIReads(identityKey),
+		ContextHint:   recordPIIReads(identityKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -219,7 +223,7 @@ func TestRecordPII_ResubmitRejected(t *testing.T) {
 		SubmittedAt:   "2026-05-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(identityKey),
+		ContextHint:   recordPIIReads(identityKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, first)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -233,7 +237,7 @@ func TestRecordPII_ResubmitRejected(t *testing.T) {
 		SubmittedAt:   "2026-05-22T12:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","ssn":"987-65-4321","dob":"1985-12-31"}`),
-		ContextHint:   recordPIIReads(identityKey),
+		ContextHint:   recordPIIReads(identityKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, second)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -301,7 +305,7 @@ func TestRecordPII_RejectsBadFormats(t *testing.T) {
 				SubmittedAt:   "2026-05-22T11:00:00Z",
 				Class:         "identity",
 				Payload:       json.RawMessage(payload),
-				ContextHint:   recordPIIReads(identityKey),
+				ContextHint:   recordPIIReads(identityKey, staffActorKey),
 			}
 			testutil.PublishOp(t, conn, env)
 			testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -339,7 +343,7 @@ func TestRecordPII_StaffRejectedOnClaimedIdentity(t *testing.T) {
 		SubmittedAt:   "2026-07-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(claimedKey),
+		ContextHint:   recordPIIReads(claimedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -362,7 +366,7 @@ func TestRecordPII_StaffRejectedOnClaimedIdentity(t *testing.T) {
 		SubmittedAt:   "2026-07-22T11:00:01Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + unclaimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(unclaimedKey),
+		ContextHint:   recordPIIReads(unclaimedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, env2)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -404,7 +408,7 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
 		AuthContext:   &processor.AuthContext{Task: taskKey, Target: claimedKey},
-		ContextHint:   recordPIIReads(claimedKey),
+		ContextHint:   recordPIIReads(claimedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -429,7 +433,7 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + openKey + `","ssn":"555-44-3333","dob":"1979-06-11"}`),
 		AuthContext:   &processor.AuthContext{Target: openKey},
-		ContextHint:   recordPIIReads(openKey),
+		ContextHint:   recordPIIReads(openKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, control)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -449,7 +453,7 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
 		AuthContext:   &processor.AuthContext{Target: forgedKey},
-		ContextHint:   recordPIIReads(forgedKey),
+		ContextHint:   recordPIIReads(forgedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, forged)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -477,7 +481,7 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
 		AuthContext:   &processor.AuthContext{Task: taskKey, Target: claimedKey},
-		ContextHint:   recordPIIReads(forgedKey),
+		ContextHint:   recordPIIReads(forgedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, subst)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -500,7 +504,7 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
 		AuthContext:   &processor.AuthContext{Task: taskKey, Target: forgedKey},
-		ContextHint:   recordPIIReads(forgedKey),
+		ContextHint:   recordPIIReads(forgedKey, frontDeskActorKey),
 	}
 	testutil.PublishOp(t, conn, substituted)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -526,7 +530,7 @@ func TestRecordPII_OperatorAllowedOnClaimedIdentity(t *testing.T) {
 		SubmittedAt:   "2026-07-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(claimedKey),
+		ContextHint:   recordPIIReads(claimedKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -613,7 +617,7 @@ func TestRecordPII_OperatorRoleOnSecondPage(t *testing.T) {
 		SubmittedAt:   "2026-07-27T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(claimedKey),
+		ContextHint:   recordPIIReads(claimedKey, pagedActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -636,7 +640,7 @@ func TestRecordPII_RejectsBadTarget(t *testing.T) {
 		SubmittedAt:   "2026-05-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + leaseKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(leaseKey),
+		ContextHint:   recordPIIReads(leaseKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -651,7 +655,7 @@ func TestRecordPII_RejectsBadTarget(t *testing.T) {
 		SubmittedAt:   "2026-05-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + ghostKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   recordPIIReads(ghostKey),
+		ContextHint:   recordPIIReads(ghostKey, staffActorKey),
 	}
 	testutil.PublishOp(t, conn, env2)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)

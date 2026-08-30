@@ -623,7 +623,8 @@ func (h *harness) seedApplicant() (appKey, appID, applicantKey string) {
 	landlordKey := landlordReply.PrimaryKey
 	ownerReply := h.submitOp("AssignUnitOwner", "loftspaceOwnership", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"landlord": landlordKey, "unit": unitKey,
-	}, &processor.ContextHint{Reads: []string{landlordKey, unitKey}})
+	}, &processor.ContextHint{Reads: []string{landlordKey, unitKey},
+		Enumerations: testutil.DeclaredEnumerations("AssignUnitOwner", bootstrap.BootstrapIdentityKey, loftspacedomain.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, ownerReply.Status, "AssignUnitOwner: %+v", ownerReply.Error)
 
 	appReply := h.submitOp("CreateLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{

@@ -32,6 +32,10 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
+	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 // withExtraLenses activates additional actor-aggregate lenses (beyond
@@ -117,7 +121,8 @@ func (h *harness) assignLandlord(unitKey string) (landlordKey string) {
 
 	ownerReply := h.submitOp("AssignUnitOwner", "loftspaceOwnership", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"landlord": landlordKey, "unit": unitKey,
-	}, &processor.ContextHint{Reads: []string{landlordKey, unitKey}})
+	}, &processor.ContextHint{Reads: []string{landlordKey, unitKey},
+		Enumerations: testutil.DeclaredEnumerations("AssignUnitOwner", bootstrap.BootstrapIdentityKey, loftspacedomain.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, ownerReply.Status, "AssignUnitOwner: %+v", ownerReply.Error)
 	return landlordKey
 }
@@ -129,7 +134,8 @@ func (h *harness) approveWithTenancy(appKey, applicantKey, unitKey string) {
 	h.t.Helper()
 	piiReply := h.submitOp("RecordIdentityPII", "identity", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"identityKey": applicantKey, "ssn": "123456789", "dob": "1990-01-01",
-	}, &processor.ContextHint{Reads: []string{applicantKey}})
+	}, &processor.ContextHint{Reads: []string{applicantKey},
+		Enumerations: testutil.DeclaredEnumerations("RecordIdentityPII", bootstrap.BootstrapIdentityKey, identitydomain.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, piiReply.Status, "RecordIdentityPII: %+v", piiReply.Error)
 
 	signReply := h.submitOp("SignLease", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
@@ -139,7 +145,8 @@ func (h *harness) approveWithTenancy(appKey, applicantKey, unitKey string) {
 
 	decideReply := h.submitOp("DecideLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"leaseAppKey": appKey, "decision": "approved", "unit": unitKey,
-	}, &processor.ContextHint{Reads: []string{appKey, unitKey}})
+	}, &processor.ContextHint{Reads: []string{appKey, unitKey},
+		Enumerations: testutil.DeclaredEnumerations("DecideLeaseApplication", bootstrap.BootstrapIdentityKey, leasesigning.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, decideReply.Status, "DecideLeaseApplication(approved): %+v", decideReply.Error)
 
 	// Settle: an approve ALSO opens the pre-existing leaseApplicationComplete

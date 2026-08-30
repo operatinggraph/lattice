@@ -1,5 +1,5 @@
 name: maintenance-domain
-version: 0.2.10
+version: 0.2.11
 description: |
   Cross-vertical maintenance work orders: vtx.workorder.<NanoID> raised at a
   location by ReportIssue and closed by ResolveWorkOrder, the op an FR28

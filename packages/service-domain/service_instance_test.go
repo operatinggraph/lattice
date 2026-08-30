@@ -236,7 +236,7 @@ func TestServiceInstance_OutcomeInAspect_RootMinimal(t *testing.T) {
 		// The .outcome aspect does not exist yet, so it is NOT listed in Reads
 		// (a not-yet-written key is a hydration miss). The CreateOnly write is
 		// the once-only guarantee.
-		ContextHint: &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, recEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -460,7 +460,7 @@ func TestRecordServiceOutcome_UnknownInstance_Rejected(t *testing.T) {
 		Payload:       json.RawMessage(`{"instanceKey":"` + missing + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
 		// The instance does not exist; the root read alone is a hydration miss
 		// (the absent instance is rejected before the outcome is written).
-		ContextHint: &processor.ContextHint{Reads: []string{missing}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{missing}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -484,7 +484,7 @@ func TestRecordServiceOutcome_OnTemplate_Rejected(t *testing.T) {
 		// The template is alive + hydratable but its .class ends in .template,
 		// so the structured NotAnInstance guard fires. A template has no
 		// .outcome aspect, so it is not listed.
-		ContextHint: &processor.ContextHint{Reads: []string{tplKey}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{tplKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -528,7 +528,7 @@ func TestRecordServiceOutcome_AlreadyRecorded_Rejected(t *testing.T) {
 			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 			Class:         "service",
 			Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
-			ContextHint:   &processor.ContextHint{Reads: reads},
+			ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: reads},
 		}
 	}
 
@@ -583,7 +583,7 @@ func TestRecordServiceOutcome_StaleRevision_Rejected(t *testing.T) {
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":99}`),
 		// No .outcome yet; the stale expectedRevision=99 makes the OCC-guarded
 		// root touch conflict and reject.
-		ContextHint: &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, recEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -740,7 +740,7 @@ func TestRecordServiceOutcome_StatusOutOfEnum_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"pending","completedAt":"2026-06-18T14:00:00Z"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -784,7 +784,7 @@ func TestRecordServiceOutcome_CompletedAtMalformed_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"not-a-timestamp"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -806,7 +806,7 @@ func TestRecordServiceOutcome_CompletedAtAbsent_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -913,7 +913,7 @@ func TestCreateServiceInstance_ExtraSegmentKey_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + badInstance + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{}},
 	}
 	testutil.PublishOp(t, conn, recEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -938,7 +938,7 @@ func TestRecordServiceOutcome_ZeroExpectedRevision_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":0}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", svcStaffActorKey, servicedomain.OpMetas()), Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -1159,7 +1159,7 @@ func TestRecordServiceOutcome_ProviderProbesLearnNothingAboutAnotherInstance(t *
 			Class:         "service",
 			Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"` +
 				`,"template":"` + candidateTpl + `","serviceprovider":"` + spKey + `"}`),
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", proberKey, servicedomain.OpMetas()),
 				Reads: []string{instKey},
 				OptionalReads: []string{
 					"lnk.service." + instKey[len("vtx.service."):] + ".instanceOf.service." + tplID,
@@ -1275,7 +1275,7 @@ func TestRecordServiceOutcome_BoundProviderRecordsOwnOutcome(t *testing.T) {
 		// No "template" field at all — the guard resolves it itself.
 		Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"` +
 			`,"serviceprovider":"` + spKey + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordServiceOutcome", providerKey, servicedomain.OpMetas()),
 			Reads:         []string{instKey},
 			OptionalReads: []string{"lnk.serviceprovider." + spID + ".identifiedBy.identity." + providerID},
 		},
