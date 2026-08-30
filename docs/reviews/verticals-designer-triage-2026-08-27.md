@@ -732,3 +732,46 @@ Two corrections to earlier claims in this document, made where they stand rather
 operations declare `contextHint.enumerations`, not one; and **four** channels populate that field — Loom
 `StepSpec`, Weaver `GapActionSpec`, a hand-built envelope (`cmd/lattice/candidates`), and client
 pass-through via the Gateway — not two.
+
+## 15. Build note — item 3, wellness guest search (2026-08-29)
+
+Fire brief for §3's work-list, re-verified live before build (all touch-points current, no drift):
+
+- **(a) create-guest form.** `cmd/wellness-app/web/app.js`'s `bookGuest()` (~1321-1339) and
+  `renderBookMember()` (~1269-1313) drive the existing `#roster-book-guest` typed-key input
+  (`web/index.html:66`). Mirrors clinic's `openNewPatient`/`submitNewPatient`
+  (`cmd/clinic-app/web/app.js:823-915`): `CreateUnclaimedIdentity` (name required, email/phone
+  optional, client-minted `claimKeyHash` — granted to `frontOfHouse`,
+  `packages/identity-domain/permissions.go:46-51`) returns the identity key directly; wellness has
+  no patient-equivalent second op, so the returned key feeds straight into `bookMemberIn`.
+- **(b) anchor arm.** `wellnessIdentitiesReadSpec` (`packages/wellness-domain/lenses.go:439-447`)
+  today carries self-anchor + one leaseapp→unit→building fan-out. Adding the pattern-comprehension
+  arm `(i)<-[:bookedBy]-(bk:booking)-[:forSession]->(se:session)-[:atLocation]->(pl)-[:containedIn*0..7]->(c)`
+  — link names confirmed live (`ddls.go:754-755` booking→session via `forSession`, booking→identity
+  via `bookedBy`; `ddls.go:2442-2443` session→location via `atLocation`) — mirrors
+  `applicantRosterReadSpec`'s multi-arm concatenation
+  (`packages/loftspace-domain/lenses.go:249-259`). Needs: wellness-domain manifest + `Version`
+  constant bump (both currently `0.22.12`, in sync); a new
+  `TestWellnessIdentitiesRead_BookingAnchorFanOut` fixture mirroring
+  `TestWellnessIdentitiesRead_WorkplaceAnchorFanOut` (`lens_cypher_test.go:783-802`, booking/session/
+  location vertices + edges instead of leaseapp/unit); no change needed to
+  `TestWellnessIdentitiesRead_NoLeaseKeepsSelfAnchorOnly` (`:811-823`) — it has no booking either, so
+  the self-anchor-only assertion still holds under the new arm.
+- **?q= filter.** `cmd/wellness-app/identities.go` has no filter today (`selectIdentitiesSQL`,
+  unconditional). Add `selectIdentitiesFilteredSQL` + a `q` param on `queryIdentities`/
+  `handleIdentities`, mirroring `cmd/clinic-app/patients.go:59-71,80-96` exactly (`ILIKE` + `LIMIT
+  50`, empty `q` preserves current behavior).
+- **debounced picker.** Replace `web/index.html:66`'s raw-key `<input>` with a typeahead wired like
+  clinic's `wirePatientSearch` (`cmd/clinic-app/web/app.js:749-760`, 250ms debounce) against
+  `/api/identities?q=`, resolving to a key on selection; `bookGuest()`'s key-taking contract is
+  unchanged (only the source of the value changes).
+- **(c) passing finding.** `cmd/loftspace-app/search.go:47-50`'s comment still claims
+  "WildcardAnchor-only" scoping — stale since `5280967a` added console-based identity naming.
+  Correct the comment in the same fire (no behavior change).
+
+**Non-goals:** no change to `CreateUnclaimedIdentity`'s op-meta/grants; no `registeredAt` link or
+persistent location anchor on identity (deliberately — the multi-arm booking anchor already scopes
+tighter, per §3's disclosure analysis); no touch to `bookMemberIn`'s server-side validation.
+
+**Review depth:** mechanical package + FE change mirroring two shipped precedents exactly, no new
+mechanism, no capability-plane change — lead review (XS/S class).
