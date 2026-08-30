@@ -330,8 +330,9 @@ func clSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads}
+	enums := testutil.DeclaredEnumerations(op, clStaffActorKey, clinicdomain.OpMetas())
+	if len(reads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, Enumerations: enums}
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
@@ -353,8 +354,9 @@ func clSubmitOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	enums := testutil.DeclaredEnumerations(op, clStaffActorKey, clinicdomain.OpMetas())
+	if len(reads) > 0 || len(optionalReads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: enums}
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
@@ -2358,7 +2360,8 @@ func clCreateAppointmentWithLease(t *testing.T, ctx context.Context, conn *subst
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads},
+		ContextHint: &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads,
+			Enumerations: testutil.DeclaredEnumerations("CreateAppointment", clStaffActorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)

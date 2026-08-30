@@ -12,6 +12,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // Front-desk write confinement for CreateAppointment / CreatePatient
@@ -139,7 +140,8 @@ func submitCreateApptAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   &processor.ContextHint{Reads: []string{fdPatientKey, providerKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{fdPatientKey, providerKey},
+			Enumerations: testutil.DeclaredEnumerations("CreateAppointment", actorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")
@@ -162,8 +164,9 @@ func submitCreateApptWithTargetAs(t *testing.T, ctx context.Context, conn *subst
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads},
-		AuthContext:   &processor.AuthContext{Target: target},
+		ContextHint: &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads,
+			Enumerations: testutil.DeclaredEnumerations("CreateAppointment", actorKey, clinicdomain.OpMetas())},
+		AuthContext: &processor.AuthContext{Target: target},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")

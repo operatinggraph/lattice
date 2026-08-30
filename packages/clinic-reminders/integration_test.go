@@ -174,8 +174,9 @@ func crSubmitAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads}
+	enums := testutil.DeclaredEnumerations(op, actor, clinicreminders.OpMetas(), clinicdomain.OpMetas())
+	if len(reads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, Enumerations: enums}
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
@@ -204,8 +205,9 @@ func crSubmitOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 		Class:         class,
 		Payload:       json.RawMessage(payload),
 	}
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	enums := testutil.DeclaredEnumerations(op, crStaffActorKey, clinicreminders.OpMetas(), clinicdomain.OpMetas())
+	if len(reads) > 0 || len(optionalReads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: enums}
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)

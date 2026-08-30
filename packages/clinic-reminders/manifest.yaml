@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.10.5
+version: 0.10.6
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
