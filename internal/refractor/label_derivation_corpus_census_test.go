@@ -176,6 +176,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeBroad},
 	"edgeStaffPanes":                 {narrow, "identity meta role", modeBroad},
 	"followUpReminders":              {narrow, "appointment patient provider", modeRelation},
+	"frontDeskBookingHistory":        {narrow, "booking leaseapp session", modeRelation},
 	"frontDeskBookings":              {narrow, "booking leaseapp session", modeRelation},
 	"frontDeskLeaseDetails":          {narrow, "leaseapp unit", modeRelation},
 	"frontDeskVisits":                {narrow, "appointment leaseapp", modeRelation},

@@ -125,6 +125,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"edgeTasks#0":                       {"p p!assignee", 0},
 	"edgeTasks#1":                       {"p p!assignee", 0},
 	"followUpReminders":                 {"p", 0},
+	"frontDeskBookingHistory":           {"p", 0},
 	"frontDeskBookings":                 {"p", 0},
 	"frontDeskLeaseDetails":             {"p", 0},
 	"frontDeskVisits":                   {"p", 0},

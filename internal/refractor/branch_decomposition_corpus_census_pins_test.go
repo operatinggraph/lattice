@@ -69,6 +69,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"edgeTasks#0":                       {"g1/o5!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"edgeTasks#1":                       {"g1/o6!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"followUpReminders":                 {"g2/o2!no-aggregating-item", 0, 2},
+	"frontDeskBookingHistory":           {"g1/o1!no-aggregating-item", 0, 1},
 	"frontDeskBookings":                 {"g1/o1!no-aggregating-item", 0, 1},
 	"frontDeskLeaseDetails":             {"g1/o1!no-aggregating-item", 0, 1},
 	"frontDeskVisits":                   {"g0/o0!no-aggregating-item", 0, 0},
