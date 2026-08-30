@@ -303,3 +303,125 @@ The recurring shape across #1, #6 and #7 is one brief-quality defect, not three:
 compiled from the code that produces a value and not from the code that consumes it.** A brief for a fire
 that threads a new field should be built by walking the chain from the far end backwards — from the wire
 format that must carry it, back through every host, doc and pin that names its siblings.
+
+## 8. Fire brief — the actor-role sweep outside cafe (build note, 2026-08-30)
+
+§5.6 named the remaining actor-role declarations as "this run's own next units". This is that sweep's
+brief. Board row: `[packages] Declare the actor-role confinement walk on the ops outside cafe`.
+
+### 8.1 Scope sentence (verbatim, board row)
+
+> The `{actor} holdsRole out` walk is 39 of the 139 baselined shapes; cafe's 8 ops declare it and their 7
+> rows are retired. Same mechanical pattern for the rest (clinic, loftspace, wellness, identity,
+> lease-signing), each op's dispatcher and its hand-built test envelopes together.
+
+**Census re-run live (standing checklist #2 — every census is a premise), 2026-08-30 at `9d0bec7`:**
+`grep -c "^walk" internal/testutil/read_drift_baseline.txt` = **130** walk rows (down from the design's
+139 — cafe's 7 retired, plus two others since); `grep "^walk" | grep holdsRole` = **32**. So the sweep's
+remainder is 32 rows, not the row's "same pattern for the rest" read against 39.
+
+**The row's package list is incomplete.** It names five packages; the 32 rows span **nine**, and three of
+them (`service-domain`, `maintenance-domain`, `lease-signing`) have no `opmetas.go` at all — their
+`OpDispatchSpec` literals live in `ddls.go` / `permissions.go`. Two more owners the row does not name are
+`clinic-reminders` (the five visit-series ops, in `visitseries.go`) and `loftspace-ledger`.
+
+**Green bar:** every one of the 32 ops declares `{actor} holdsRole out` on its `OpDispatchSpec` **and** on
+every hand-built test envelope that dispatches it, its baseline row is gone, and `ReadDriftGuard` is green
+across the whole tree.
+
+### 8.2 Verified touch-list (checked live 2026-08-30)
+
+Ops by owning package, with the file carrying their `OpDispatchSpec` literals:
+
+| package | ops | dispatch-spec file | version (manifest + `package.go` mirror) |
+|---|---|---|---|
+| clinic-domain | 7 — CreateAppointment, RescheduleAppointment, SetAppointmentStatus, SetAppointmentSite, SetProviderHours, SetProviderTimeOff, RecordEncounter | `opmetas.go` (13 specs) | 0.34.15 |
+| wellness-domain | 11 — CancelBooking, CreateBooking, CreateSession, CreateSessionSeries, CreateStudio, JoinWaitlist, ReassignSession, ReleaseOrphanedBooking, SetBookingAttendance, SetInstructorProfile, TombstoneSession | `opmetas.go` (12 specs) | 0.22.11 |
+| clinic-reminders | 5 — StartVisitSeries, PauseVisitSeries, ResumeVisitSeries, EndVisitSeries, SetVisitSeriesSite | `visitseries.go:1410,1443,1466,1489,1515` | 0.10.5 |
+| loftspace-domain | 2 — AssignUnitOwner, RemoveUnitOwner | `opmetas.go` (4 specs) | 0.12.1 |
+| loftspace-ledger | 1 — LoftspaceCreateAccount | `opmetas.go` (3 specs) | 0.5.0 |
+| lease-signing | 1 — DecideLeaseApplication | `permissions.go` (9 specs) | 0.31.12 |
+| identity-domain | 1 — RecordIdentityPII | `opmetas.go` (6 specs) | 0.20.9 |
+| service-domain | 2 — RecordServiceOutcome, SetServiceProviderProfile | `ddls.go` (3 specs) | 0.10.5 |
+| maintenance-domain | 2 — ReportIssue, ResolveWorkOrder | `permissions.go` (2 specs) | 0.2.10 |
+
+Baseline rows to retire: the 32 `walk\t<op>\tvtx.identity.<id> holdsRole out` rows,
+`internal/testutil/read_drift_baseline.txt:131-252` (non-contiguous; the file is sorted by op).
+
+### 8.3 Precedents to mirror
+
+- Declaration on the spec → `packages/cafe-domain/opmetas.go:111-113` (OpenTab), `:152` (Charge) —
+  `Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{actor}", Relation: "holdsRole", Direction: "out"}}`,
+  under a comment naming the confinement probe that walks it.
+- Declaration on a hand-built **test** envelope → `packages/cafe-domain/integration_test.go:329,423,1641`
+  — `Enumerations: []processor.EnumerationHint{{Hub: <actorKey>, Relation: "holdsRole", Direction: "out"}}`.
+  Note the two types differ: `pkgmgr.EnumerationSpec` (templated `{actor}`) on the spec,
+  `processor.EnumerationHint` (a concrete key) on the envelope.
+- Row retirement → the cafe rows removed in `bcc2681`.
+- **Per-package shared test submit helpers** are where most envelope edits land, not the call sites:
+  `clSubmit`/`clSubmitOpt` (clinic-domain), `wdSubmit` (wellness-domain), `crSubmit`/`crSubmitOpt`
+  (clinic-reminders), `mdSubmit` (maintenance-domain), `decide`/`decideReason` (lease-signing),
+  `assignUnitOwner`/`removeUnitOwner` (loftspace-domain), `submitOutcome` (service-domain). One edit in a
+  helper covers every op it dispatches — which is what makes this sweep a fire rather than 512 edits.
+
+### 8.4 Increment order + green checks
+
+**One increment per package, largest first.** The landing shape is §4's *land each increment on main*, and
+the invariant that keeps main correct across boundaries is: **a package's spec declarations, its test-
+envelope declarations and its baseline-row retirements land in the SAME commit**, so the baseline and the
+corpus are never inconsistent at a boundary. A package not yet swept keeps its rows and stays green.
+
+1. clinic-domain (7) — `go test ./packages/clinic-domain/...`
+2. wellness-domain (11) — `go test ./packages/wellness-domain/...`
+3. clinic-reminders (5) — `go test ./packages/clinic-reminders/...`
+4. loftspace-domain (2) + loftspace-ledger (1) — `go test ./packages/loftspace-...`
+5. the tail: lease-signing (1), identity-domain (1), service-domain (2), maintenance-domain (2)
+
+Whole-fire gate: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `DIFF_BASE=<base> go run ./scripts/lint-package-version.go`,
+`go test ./... -p 4` with **`POSTGRES_TEST_DSN` exported** (REMOTE.md §3), plus the build-tagged harnesses
+any touched interface reaches.
+
+### 8.5 In-scope gotchas
+
+- **The guard reads the ENVELOPE, not the spec** (`read_drift_guard.go:121-129`: `env.ContextHint`
+  `.Enumerations`). Declaring on `OpDispatchSpec` is inert for a Go test that hand-builds its envelope, so
+  a row retired on the strength of the spec edit alone reddens. **The guard's own failure message names the
+  op and the shape** — it is the reliable feedback loop for finding every under-declaring dispatcher, and
+  is what this fire drives each increment against rather than a static census of 512 test-file mentions.
+- **Declaring is always safe; retiring is not** (§5.5). Retire a row only once that package's tests pass
+  with it gone.
+- **NFR-S6 refuses an enumeration** (D8). The equalized set is `ClaimIdentity` / `CompleteCredentialLink`;
+  neither is among the 32, but `identity-domain` owns both, so its increment must not spread the pattern to
+  a sibling op by symmetry.
+- **`packages/` content edits bump the manifest version AND the `Version` constant** (e.g.
+  `packages/clinic-domain/package.go:139`). Nine packages, nine pairs. `lint-package-version` gates it.
+- **Two of the 32 have no `OpDispatchSpec`, and each declares on a DIFFERENT surface** (checked live; both
+  are deliberate, with the reason recorded beside them):
+  - `ReleaseOrphanedBooking` — `wellness-domain/opmetas.go:136-139` states it is dispatched only by the
+    `wellnessOrphanedBookingSettlement` Weaver target (`targets.go`), no human path. Its declaring surface
+    is therefore **`GapActionSpec.Enumerations`** (the Weaver precedent, §1's second row), not the dispatch
+    spec.
+  - `RemoveUnitOwner` — `loftspace-domain/opmetas.go:17-19` states it "stays bare: no `cmd/*-app` source
+    references it … the trusted admin tool hardcodes its own dispatch." Its declaring surface is that
+    **hand-built envelope**, the channel the baseline's own header lists third.
+
+  Both are declarable; neither is a designer gap. A scout pass reported five *further* ops as bare
+  (`clinic-reminders`' visit-series family) — that was false: all five carry a full `OpDispatchSpec` at
+  `visitseries.go:1410,1443,1466,1489,1515`. Verify a "this op cannot declare" claim against the spec
+  literal itself, not against the op-name constant block near the top of the file.
+- **No history/changelog comments** (CLAUDE.md); doc comments describe the field as it is now.
+- **Dossier — `docs/components/pkgmgr.md`:** an artifact struct that mirrors a spec "field-for-field" has a
+  companion `knownDispatchFields` allowlist; adding to one without the other silently rejects the field as
+  smuggled. (Not expected to bind here — this fire adds no field — but the sweep touches the same specs.)
+
+### 8.6 Adjacent finds
+
+- **`pkgmgr.md`'s dossier stands at 15 against its cap of 12** (§7 recorded it, owed work, still owed).
+- The remaining 98 non-`holdsRole` walk rows are the link-discovered-hub class and the payload-hub class,
+  already routed: `📐 needs designer pass · no-pattern: chained/link-discovered enumeration hub declaration`.
+
+### 8.7 Non-goals (drift fence)
+
+`docs/contracts/*`; hydration; the `read` rows; the 98 non-actor-role walk rows; Loom/Weaver's own
+enumeration surfaces; any new hub grammar.
