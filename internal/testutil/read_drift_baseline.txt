@@ -132,6 +132,10 @@ read	VoidCharge	vtx.leaseapp.<id>
 walk	BackfillAppointmentSite	vtx.appointment.<id> atSite out
 walk	BackfillAppointmentSite	vtx.appointment.<id> withProvider out
 walk	BackfillAppointmentSite	vtx.provider.<id> practicesAt out
+# BackfillLeaseTerms resolves its unit the same way SignLease/DecideLeaseApplication
+# already do (leaseapp_unit(), scripts.go) — mirrors SignLease's own undeclared
+# walk below; an operator-only manual repair op with no OpMeta/Dispatch descriptor.
+walk	BackfillLeaseTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	BackfillVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	BackfillVisitSeriesSite	vtx.visitseries.<id> atSite out
 walk	BackfillVisitSeriesSite	vtx.visitseries.<id> withProvider out

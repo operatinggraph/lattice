@@ -148,6 +148,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
+			OperationType: "BackfillLeaseTerms",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to backfill requestedRent onto a lease application approved before CreateLeaseApplication's unit-listing-rent fallback existed (0.31.14) — a one-time manual repair, never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "OpenRenewal",
 			Scope:         "any",
 			Note:          "Grants the operator (Weaver's service actor) the right to submit OpenRenewal — the directOp the leaseExpiry target dispatches (the SetListingStatus cross-package directOp precedent).",

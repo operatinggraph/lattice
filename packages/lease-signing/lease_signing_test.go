@@ -102,6 +102,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "ShredIdentityKey", Scope: "any"},
 			{OperationType: "DecideLeaseApplication", Scope: "any"},
 			{OperationType: "SetApplicantProfile", Scope: "any"},
+			{OperationType: "BackfillLeaseTerms", Scope: "any"},
 			{OperationType: "OpenRenewal", Scope: "any"},
 			{OperationType: "SetRenewalTerms", Scope: "any"},
 			{OperationType: "VerifyGuarantor", Scope: "any"},
@@ -1179,6 +1180,157 @@ func TestCreateLeaseApplication_NoRequestedRent_NoListing_StaysUnset(t *testing.
 	if _, present := tdata["requestedRent"]; present {
 		t.Fatalf("terms.requestedRent should stay unset with no unit listing to fall back to, got %v", tdata["requestedRent"])
 	}
+}
+
+// TestBackfillLeaseTerms_NoTermsAtAll_FallsBackToUnitListing: an application
+// created before the CreateLeaseApplication fallback existed (no moveInDate at
+// all, so no .terms aspect was ever written) gets requestedRent backfilled
+// from the unit's own listed rent (seedUnit's rentAmount: 2400) — the repair
+// for the 3 live leases verticals.md names ("4 of 8 signed leases … never got
+// a ledger account or rent clause").
+func TestBackfillLeaseTerms_NoTermsAtAll_FallsBackToUnitListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "backfill-terms-fallback")
+
+	applicantKey := seedApplicant(t, ctx, conn, "EEtermapp1cntHJKMNPQ")
+	unitKey := seedUnit(t, ctx, conn, "EEtermvtx1cntHJKMNPQ")
+	appKey := applyToUnit(t, ctx, conn, cp, cons, "backfillNoTerms01", applicantKey, unitKey, processor.OutcomeAccepted)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("backfillTerms01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillLeaseTerms",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".terms"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	tdoc := readDoc(t, ctx, conn, appKey+".terms")
+	tdata, _ := tdoc["data"].(map[string]any)
+	rent, _ := tdata["requestedRent"].(float64)
+	if rent != 2400 {
+		t.Fatalf("terms.requestedRent = %v, want 2400 (unit's listed rent, backfilled)", tdata["requestedRent"])
+	}
+}
+
+// TestBackfillLeaseTerms_AlreadyHasRequestedRent_NoOp: an application that
+// already carries a requestedRent (the applicant offered one, or a prior
+// backfill already ran) is left untouched — mirrors
+// BackfillPatientRegistration's own already-present no-op (clinic-domain).
+func TestBackfillLeaseTerms_AlreadyHasRequestedRent_NoOp(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "backfill-terms-noop")
+
+	applicantKey := seedApplicant(t, ctx, conn, "FFtermapp1cntHJKMNPQ")
+	unitKey := seedUnit(t, ctx, conn, "FFtermvtx1cntHJKMNPQ")
+
+	reqID := testutil.GenReqID("backfillHasRent1")
+	appID := nanoIDFromRequestID(reqID)
+	createEnv := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12,"requestedRent":1900}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+		},
+	}
+	testutil.PublishOp(t, conn, createEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	appKey := "vtx.leaseapp." + appID
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("backfillHasRent2"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillLeaseTerms",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".terms"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	tdoc := readDoc(t, ctx, conn, appKey+".terms")
+	tdata, _ := tdoc["data"].(map[string]any)
+	rent, _ := tdata["requestedRent"].(float64)
+	if rent != 1900 {
+		t.Fatalf("terms.requestedRent = %v, want unchanged 1900 (already-present no-op)", tdata["requestedRent"])
+	}
+	moveIn, _ := tdata["moveInDate"].(string)
+	if moveIn != "2026-08-01" {
+		t.Fatalf("terms.moveInDate = %q, want unchanged 2026-08-01 (no-op must not touch other fields)", moveIn)
+	}
+}
+
+// TestBackfillLeaseTerms_UnknownApplication_Rejected: a leaseAppKey naming a
+// non-existent application is rejected (no partial write on a missing subject).
+func TestBackfillLeaseTerms_UnknownApplication_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "backfill-terms-unknown")
+
+	missingApp := "vtx.leaseapp.GGnoexistHJKMNPQRSTU"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("backfillUnknown1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillLeaseTerms",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + missingApp + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{missingApp}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestBackfillLeaseTerms_NoListing_Rejected: a unit with no .listing aspect at
+// all carries no rent to backfill from — rejected (NoRentSource) rather than a
+// silent no-write, so an operator running the repair script sees the case it
+// cannot fix rather than a quiet skip.
+func TestBackfillLeaseTerms_NoListing_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "backfill-terms-nolisting")
+
+	applicantKey := seedApplicant(t, ctx, conn, "HHtermapp1cntHJKMNPQ")
+	unitKey := "vtx.unit.HHtermvtx1cntHJKMNPQ"
+	seedVertex(t, ctx, conn, unitKey, "location", map[string]any{})
+	appKey := applyToUnit(t, ctx, conn, cp, cons, "backfillNoListing01", applicantKey, unitKey, processor.OutcomeAccepted)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("backfillNoList2"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillLeaseTerms",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".terms"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
 // TestCreateLeaseApplication_UnknownUnit_Rejected: an application naming a

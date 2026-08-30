@@ -7,7 +7,8 @@
 // package has been correctly installed. Asserts:
 //
 //	14 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
-//	  WithdrawLeaseApplication/DecideLeaseApplication/SetApplicantProfile);
+//	  WithdrawLeaseApplication/DecideLeaseApplication/SetApplicantProfile/
+//	  BackfillLeaseTerms);
 //	  applicantProfile / underwritingParties / applicationSignals (aspectType —
 //	  the three-way split SetApplicantProfile writes, up to one batch);
 //	  decidedProfileSnapshot (aspectType — the fair-housing preservation record
@@ -121,7 +122,7 @@ func main() {
 	fmt.Printf("verify-package-lease-signing: scanning %d Core KV keys...\n", len(allKeys))
 
 	ddlChecks := []ddlCheck{
-		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile"}},
+		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms"}},
 		{canonical: "applicantProfile", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},

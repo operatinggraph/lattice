@@ -1201,6 +1201,78 @@ def execute(state, op):
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 
+    if ot == "BackfillLeaseTerms":
+        # A one-time historical-data repair, operator-only and manual —
+        # mirrors BackfillPatientRegistration's shape exactly (clinic-domain):
+        # an application approved before CreateLeaseApplication's
+        # unit-listing-rent fallback existed (0.31.14) can carry no .terms
+        # aspect at all, so leaseRentSettlementSpec (semantic-contracts) —
+        # gated on requestedRent present — never projects a row and the
+        # lease never gets a ledger account or rent clause. This gap cannot
+        # recur (every CreateLeaseApplication since 0.31.14 already falls
+        # back to the unit's listed rent), so a standing auto-remediation
+        # loop would be the wrong shape, same reasoning as the clinic
+        # precedent's own comment.
+        app_key = required_string(p, "leaseAppKey")
+        parts_of(app_key, "leaseAppKey", "leaseapp")
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+
+        # read-posture: (d) declared optionalReads at BackfillLeaseTerms
+        # dispatch — absent is the common not-yet-backfilled case (the whole
+        # reason this op exists); a .terms aspect that already carries
+        # requestedRent is the already-repaired case.
+        terms = kv.Read(app_key + ".terms")
+        existing_move_in = None
+        existing_term_months = None
+        if terms != None and not terms.isDeleted:
+            if terms.data.get("requestedRent") != None:
+                # Already backfilled (or never needed it) — no-op cleanly
+                # rather than reject, mirroring BackfillPatientRegistration's
+                # own already-present no-op. No primaryKey: an empty write
+                # footprint has nothing for the reply-constraint to validate
+                # it against.
+                return {"mutations": [], "events": [], "response": {}}
+            existing_move_in = terms.data.get("moveInDate")
+            existing_term_months = terms.data.get("leaseTermMonths")
+
+        # The unit this application applies to, from the application's OWN
+        # appliesToUnit link — never a payload field (leaseapp_unit's own
+        # forgery-resistance rationale above). Absent/dead would be a
+        # structural break of the no-orphan invariant (FR29): every leaseapp
+        # is minted with a live appliesToUnit link and nothing ever tombstones
+        # just the link.
+        unit_key = leaseapp_unit(app_key)
+        if unit_key == None:
+            fail("UnitNoLongerAvailable: application " + app_key + " names no live unit; cannot backfill terms")
+
+        # Same key + fallback idiom CreateLeaseApplication's own requestedRent
+        # fallback reads above — the unit's own listed rent.
+        # read-posture: (e) follow-up read off the appliesToUnit enumeration
+        # leaseapp_unit() just walked.
+        listing = kv.Read(unit_key + ".listing")
+        rent = None
+        if listing != None and not listing.isDeleted:
+            r = listing.data.get("rentAmount")
+            if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:
+                rent = r
+        if rent == None:
+            fail("NoRentSource: unit " + unit_key + " carries no listed rent to backfill application " + app_key + " with")
+
+        # Rebuilt from the fields .terms can ever carry (mirrors
+        # BackfillPatientRegistration's own literal reconstruction) rather
+        # than copying terms.data wholesale.
+        merged = {"requestedRent": rent}
+        if existing_move_in != None:
+            merged["moveInDate"] = existing_move_in
+        if existing_term_months != None:
+            merged["leaseTermMonths"] = existing_term_months
+        mutations = [make_aspect_upsert(app_key, "terms", "terms", merged)]
+        events = [{"class": "leaseapp.termsBackfilled",
+                   "data": {"leaseAppKey": app_key, "requestedRent": rent}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
     fail("leaseapp DDL: unknown operationType: " + ot)
 `, "__RENEWAL_WINDOW__", renewalWindow, 1)
 

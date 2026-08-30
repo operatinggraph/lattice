@@ -94,7 +94,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -158,7 +158,17 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"a missing field is a spec mismatch, not an absent value), and a field is omitted only when it is structurally absent " +
 			"(no guarantor ⇒ no guarantor fields at all; no references supplied ⇒ no references field). UNCONDITIONED upsert " +
 			"(re-submittable — a re-submit overwrites all three aspects). It verifies unit is the application's appliesToUnit " +
-			"target (the Withdraw precedent) and feeds no gap — capture + surface, not a convergence gate.",
+			"target (the Withdraw precedent) and feeds no gap — capture + surface, not a convergence gate. " +
+			"BackfillLeaseTerms{leaseAppKey} is an operator-only, manual, one-time repair for an application " +
+			"approved before CreateLeaseApplication's unit-listing-rent fallback existed (0.31.14, this package): " +
+			"with no .terms aspect at all, leaseRentSettlementSpec (semantic-contracts, gated on requestedRent " +
+			"present) never projects a row, so a signed and approved lease never gets a ledger account or rent " +
+			"clause. It resolves the application's OWN appliesToUnit link (never a payload field, the leaseapp_unit " +
+			"resolver's forgery-resistance rationale) and writes {requestedRent: unit.listing.rentAmount} onto " +
+			".terms, preserving any moveInDate/leaseTermMonths already present; no-ops cleanly if requestedRent is " +
+			"already set (mirrors BackfillPatientRegistration's own already-present no-op, clinic-domain). This gap " +
+			"cannot recur — every CreateLeaseApplication since 0.31.14 already falls back to the unit's listed rent " +
+			"— so this is a one-time repair, never a standing auto-remediation loop.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -167,7 +177,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months (CreateLeaseApplication; required when moveInDate is supplied)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent (CreateLeaseApplication; optional, only with moveInDate). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
-			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication) or decide (DecideLeaseApplication); required, validated alive."},` +
+			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), or backfill (BackfillLeaseTerms); required, validated alive."},` +
 			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
 			`"annualIncome":{"type":"number","description":"The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE — stored in the .profile aspect (underwritingRecord retention class), NEVER projected; only the derived incomeToRentMet boolean reaches the read model."},` +
@@ -191,7 +201,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseTermMonths":       "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":         "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch. The caller lists it in ContextHint.Reads.",
+			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent. The caller lists it in ContextHint.Reads.",
 			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE: stored in the .profile aspect, custodied on the package's underwritingRecord retention class (RetentionClasses) rather than the applicant's identity, and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it into the non-sensitive .applicationSignals aspect, and only that boolean reaches the read model.",
 			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
 			"employerName":          "The applicant's employer name (SetApplicantProfile; optional). SENSITIVE — stored in the .profile aspect, never projected.",
@@ -294,6 +304,15 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"leaseapp.profileSubmitted{leaseAppKey}. Returns primaryKey. Rejects a non-existent application, a unit that " +
 					"is not the application's unit (UnitMismatch), a non-positive annualIncome, or an out-of-enum " +
 					"employmentStatus.",
+			},
+			{
+				Name:    "BackfillLeaseTerms — repair a pre-0.31.14 approved lease missing requestedRent",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Resolves the application's own appliesToUnit link and upserts .terms with requestedRent set to " +
+					"the unit's own listed rent (unit.listing.rentAmount), preserving any moveInDate/leaseTermMonths already " +
+					"present. No-ops if requestedRent is already set. Operator-only. Rejects a non-existent application " +
+					"(UnknownLeaseApplication), one whose unit is no longer live (UnitNoLongerAvailable), or a unit carrying " +
+					"no listed rent to backfill from (NoRentSource).",
 			},
 		},
 		Effects: map[string][]json.RawMessage{
