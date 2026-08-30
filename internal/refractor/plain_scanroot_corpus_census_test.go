@@ -137,6 +137,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"consoleOperatorReadGrants":      {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"demoOperatorReadGrants":         {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"duplicateCandidates":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"frontDeskBookingHistory":        {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"frontDeskBookings":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"frontDeskLeaseDetails":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"frontDeskVisits":                {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
