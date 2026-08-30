@@ -57,6 +57,10 @@ type server struct {
 	// is the token injected for that identity (there is no cookie to read it
 	// from). Empty in a login-only deployment.
 	bootToken string
+	// demoControlsEnabled gates POST /api/demo/connectivity (FACET_DEMO_
+	// CONTROLS) — the demo-only reversible host↔NATS pause toggle
+	// (facet-app-ux.md §11). False in a deployment that never opted in.
+	demoControlsEnabled bool
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -80,6 +84,10 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/claim", s.handleClaim)
 	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
 	inner.HandleFunc("/api/pane", s.handlePane)
+	inner.HandleFunc("/api/demo/status", s.handleDemoStatus)
+	if s.demoControlsEnabled {
+		inner.HandleFunc("/api/demo/connectivity", s.handleDemoConnectivity)
+	}
 	s.session.RegisterRoutes(inner)
 	mux.Handle("/", s.session.RequireSession(inner))
 }
@@ -232,6 +240,50 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	})
 
 	s.writeJSON(w, http.StatusAccepted, map[string]string{"requestId": requestID})
+}
+
+// handleDemoStatus implements GET /api/demo/status: tells the browser
+// whether this deployment has the demo-only connectivity control enabled at
+// all, so the UI can decide whether to render the toggle. Always registered
+// (cheap, no side effects) — the mutating endpoint below is the one that's
+// conditionally wired.
+func (s *server) handleDemoStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]bool{"enabled": s.demoControlsEnabled})
+}
+
+// handleDemoConnectivity implements POST /api/demo/connectivity: toggles the
+// signed-in identity's own engine into (or out of) the demo-only reversible
+// host↔NATS pause (facet-app-ux.md §11). Only registered when
+// demoControlsEnabled — see registerRoutes.
+func (s *server) handleDemoConnectivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	identityID, ok := appsession.Identity(r.Context())
+	if !ok {
+		s.writeError(w, http.StatusUnauthorized, "no session identity")
+		return
+	}
+	var req struct {
+		Paused bool `json:"paused"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+	eng, err := s.engines.Acquire(identityID)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "start engine: "+err.Error())
+		return
+	}
+	defer s.engines.Release(identityID)
+	eng.SetDemoPaused(req.Paused)
+	s.writeJSON(w, http.StatusOK, map[string]bool{"paused": req.Paused})
 }
 
 func (s *server) writeJSON(w http.ResponseWriter, status int, v any) {

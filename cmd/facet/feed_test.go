@@ -16,6 +16,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/edge/store"
 	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
 	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // TestFeed_SyncDegradedTransitions pins the connectivity frame's second axis:
@@ -73,6 +74,86 @@ func TestFeed_SyncDegradedTransitions(t *testing.T) {
 	connected, degraded = fd.connectivityState()
 	require.False(t, connected)
 	require.False(t, degraded)
+}
+
+// TestFeed_DemoPausedTransitions pins the demo-only pause's mechanism
+// (facet-app-ux.md §11): setDemoPaused drives the SAME connectivity frame
+// the real connected/syncDegraded axes do, so the reconnect banner needs no
+// changes of its own to honor it — and isDemoPaused reflects the flag the
+// whole way.
+func TestFeed_DemoPausedTransitions(t *testing.T) {
+	fd := newFeed(nil)
+	ch := fd.subscribe()
+	defer fd.unsubscribe(ch)
+
+	nextFrame := func() frame {
+		t.Helper()
+		select {
+		case fr := <-ch:
+			return fr
+		default:
+			t.Fatal("expected a frame, none published")
+			return frame{}
+		}
+	}
+
+	require.False(t, fd.isDemoPaused())
+
+	fd.setDemoPaused(true)
+	// setDemoPaused drives setConnected then setSyncDegraded in turn; both
+	// transition here (true->false, false->true), so each publishes its own
+	// frame — the second is the settled state a subscriber that only reads
+	// the latest frame would see.
+	_ = nextFrame()
+	fr := nextFrame()
+	require.Equal(t, "connectivity", fr.Kind)
+	require.False(t, fr.Connected)
+	require.True(t, fr.SyncDegraded)
+	require.True(t, fd.isDemoPaused())
+
+	fd.setDemoPaused(false)
+	_ = nextFrame()
+	fr = nextFrame()
+	require.True(t, fr.Connected)
+	require.False(t, fr.SyncDegraded)
+	require.False(t, fd.isDemoPaused())
+}
+
+// submitterFunc adapts a plain function to agent.Submitter, for a test
+// double that fails the test if invoked (see
+// TestTrackingSubmitter_Submit_ShortCircuitsOnDemoPause).
+type submitterFunc func(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error)
+
+func (f submitterFunc) Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+	return f(ctx, env)
+}
+
+// TestTrackingSubmitter_Submit_ShortCircuitsOnDemoPause proves the demo-only
+// pause (feed.setDemoPaused) never reaches the real transport: the wrapped
+// Submitter is never called, the outbox entry reverts to "queued" exactly
+// like the genuine transport-failure branch, and the caller sees
+// errDemoPaused.
+func TestTrackingSubmitter_Submit_ShortCircuitsOnDemoPause(t *testing.T) {
+	fd := newFeed(nil)
+	fd.setDemoPaused(true)
+
+	sub := &trackingSubmitter{
+		inner: submitterFunc(func(context.Context, *processor.OperationEnvelope) (*processor.OperationReply, error) {
+			t.Fatal("inner Submitter must not be called while the demo pause is active")
+			return nil, nil
+		}),
+		feed: fd,
+	}
+
+	env := &processor.OperationEnvelope{RequestID: "req-demo-paused-01"}
+	fd.enqueueOutbox(&outboxEntry{RequestID: env.RequestID, State: "queued"})
+
+	_, err := sub.Submit(context.Background(), env)
+	require.ErrorIs(t, err, errDemoPaused)
+
+	entries := fd.snapshotOutbox()
+	require.Len(t, entries, 1)
+	require.Equal(t, "queued", entries[0].State)
 }
 
 // TestFeed_SnapshotManifestFrames_ExcludesRetractedRows proves a fresh SSE

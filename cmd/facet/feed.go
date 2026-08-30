@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -14,6 +15,11 @@ import (
 	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
+
+// errDemoPaused is returned by trackingSubmitter.Submit while the demo-only
+// pause (setDemoPaused) is active — it never reaches the real transport, so
+// this is the only signal a caller sees.
+var errDemoPaused = errors.New("facet: demo pause active")
 
 // frame is one SSE event pushed to every connected browser tab. kind selects
 // the SSE `event:` name the browser's EventSource listens on
@@ -126,6 +132,12 @@ type feed struct {
 	// row's displayName on its way to the browser. nil (no Vault control
 	// plane wired) passes every row through untouched.
 	selfName *edgevault.SelfName
+	// demoPaused is the demo-only reversible host↔NATS pause (facet-app-
+	// ux.md §11) — distinct from connected/syncDegraded above, which it
+	// drives: the real NATS connection stays up throughout, so this bit is
+	// what tells trackingSubmitter.Submit and engine.go's OnChange closure
+	// to behave as though it had dropped, without touching the transport.
+	demoPaused bool
 }
 
 func newFeed(selfName *edgevault.SelfName) *feed {
@@ -310,6 +322,27 @@ func (f *feed) connectivityState() (connected, syncDegraded bool) {
 	return f.connected, f.syncDegraded
 }
 
+// setDemoPaused flips the demo-only host↔NATS pause: the real connection
+// stays up, but every user-observable effect of a real drop is driven
+// through the existing connectivity/sync-degraded axes so the reconnect
+// banner and Outbox behave exactly as they would during a genuine outage.
+func (f *feed) setDemoPaused(paused bool) {
+	f.mu.Lock()
+	f.demoPaused = paused
+	f.mu.Unlock()
+	f.setConnected(!paused)
+	f.setSyncDegraded(paused)
+}
+
+// isDemoPaused reports the demo-only pause state — trackingSubmitter checks
+// it before every write, and engine.go's OnChange closure checks it before
+// forwarding a manifest delta.
+func (f *feed) isDemoPaused() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.demoPaused
+}
+
 // enqueueOutbox records a freshly-queued write and publishes its initial
 // "queued" frame.
 func (f *feed) enqueueOutbox(e *outboxEntry) {
@@ -445,6 +478,13 @@ type trackingSubmitter struct {
 }
 
 func (t *trackingSubmitter) Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+	if t.feed.isDemoPaused() {
+		// Demo-only pause (feed.setDemoPaused): behave exactly like the real
+		// transport-failure path below — revert to queued, retried by the next
+		// drain tick — without touching the network.
+		t.feed.setOutboxState(env.RequestID, "queued", "", "")
+		return nil, errDemoPaused
+	}
 	t.feed.setOutboxState(env.RequestID, "submitting", "", "")
 	reply, err := t.inner.Submit(ctx, env)
 	if err != nil {

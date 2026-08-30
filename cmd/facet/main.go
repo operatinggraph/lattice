@@ -59,6 +59,11 @@
 //	FACET_INSTANCE     OPTIONAL health-kv instance id (default: auto-
 //	                   generated facet-<NanoID>)
 //	FACET_HEARTBEAT_EVERY  OPTIONAL heartbeat interval (default: 10s)
+//	FACET_DEMO_CONTROLS  OPTIONAL — set to enable the demo-only reversible
+//	                   host↔NATS pause toggle (GET /api/demo/status always
+//	                   reports whether it's on; POST /api/demo/connectivity
+//	                   is only registered when it is). Unset: the toggle
+//	                   never appears and the endpoint 404s. Demo posture only.
 //
 // Two NATS planes, never conflated: every per-identity engine connection
 // (engine.go) stays confined by natsauth's issued permission set —
@@ -214,6 +219,11 @@ func run(logger *slog.Logger) error {
 			"wasmDir", browserEngine.wasmDir, "shellDir", browserEngine.shellDir, "wsUrl", browserEngine.wsURL)
 	}
 
+	demoControlsEnabled := appsession.Truthy(os.Getenv("FACET_DEMO_CONTROLS"))
+	if demoControlsEnabled {
+		logger.Info("facet demo controls enabled: the offline-pause toggle is live at /api/demo/connectivity")
+	}
+
 	loginPage, err := webFS.ReadFile("web/login.html")
 	if err != nil {
 		return fmt.Errorf("read embedded login page: %w", err)
@@ -244,15 +254,16 @@ func run(logger *slog.Logger) error {
 	}
 
 	srv := &server{
-		logger:         logger,
-		gatewayURL:     gatewayURL,
-		devSigner:      signer,
-		session:        session,
-		engines:        engines,
-		bootIdentityID: bootIdentityID,
-		pgPool:         pgPool,
-		browserEngine:  browserEngine,
-		bootToken:      os.Getenv("EDGE_TOKEN"),
+		logger:              logger,
+		gatewayURL:          gatewayURL,
+		devSigner:           signer,
+		session:             session,
+		engines:             engines,
+		bootIdentityID:      bootIdentityID,
+		pgPool:              pgPool,
+		browserEngine:       browserEngine,
+		bootToken:           os.Getenv("EDGE_TOKEN"),
+		demoControlsEnabled: demoControlsEnabled,
 	}
 	// Contract #5 heartbeat — a SECOND, host-level connection distinct from
 	// every per-identity engine connection above (see the doc comment's

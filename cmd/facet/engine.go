@@ -192,6 +192,9 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 		ActorHeader: actorHeader,
 		Logger:      cfg.Logger,
 		OnChange: func(key string, deleted bool) {
+			if fd.isDemoPaused() {
+				return
+			}
 			fd.publishManifestKey(overlayStore, key, deleted)
 		},
 		OnHydrationComplete: func(revision uint64) {
@@ -292,6 +295,12 @@ func runSyncLoop(ctx context.Context, mgr *edgesync.Manager, fd syncDegradedMark
 			backoff = maxBackoff
 		}
 	}
+}
+
+// SetDemoPaused flips this engine's demo-only reversible host↔NATS pause
+// (facet-app-ux.md §11) — see feed.setDemoPaused for the mechanism.
+func (e *engine) SetDemoPaused(paused bool) {
+	e.feed.setDemoPaused(paused)
 }
 
 // Close stops the engine's background goroutines and releases its store and

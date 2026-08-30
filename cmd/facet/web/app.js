@@ -235,6 +235,15 @@ const state = {
   // delivered has no freshness to claim, which is different from one whose
   // last delta happens to be old.
   lastFrameAt: null,
+  // Whether this deployment has the demo-only connectivity control enabled
+  // at all (FACET_DEMO_CONTROLS, feature-detected once at boot by
+  // loadDemoStatus) — gates whether renderMe shows the toggle.
+  demoControlsEnabled: false,
+  // Whether this device's demo-only host↔NATS pause is currently held
+  // (facet-app-ux.md §11). Reconciled from the server's response to every
+  // toggle — the connectivity SSE frame is what actually drives the
+  // reconnect banner.
+  demoPaused: false,
 };
 
 const maxOutboxHistory = 50;
@@ -1846,6 +1855,7 @@ function renderMe() {
     ${workplaces.length ? `<h3 class="category-heading">Workplaces</h3>${chipRow(workplaces, "")}` : ""}
     ${bindings.length ? `<h3 class="category-heading">What I provide</h3>${bindingChipRow(bindings)}` : ""}
     ${m.claimed ? renderAccountPanes() : renderClaimCard()}
+    ${renderDemoControlsCard()}
   `;
   if (m.claimed) loadIdlePanes();
 }
@@ -1949,6 +1959,48 @@ function linkCredential() {
     })
     .catch((err) => toast(String(err), false))
     .finally(() => { linkInFlight = false; scheduleRender(); });
+}
+
+// loadDemoStatus feature-detects the demo-only connectivity toggle (facet-
+// app-ux.md §11) once at boot so renderMe can decide whether to show it.
+// A fetch failure just leaves it hidden — this is never load-bearing.
+function loadDemoStatus() {
+  fetch("/api/demo/status")
+    .then((r) => r.json())
+    .then((body) => { state.demoControlsEnabled = !!(body && body.enabled); scheduleRender(); })
+    .catch(() => {});
+}
+
+// renderDemoControlsCard draws the Me screen's demo-only offline-pause
+// toggle (facet-app-ux.md §11), mirroring renderClaimCard's card shape.
+// Hidden entirely unless the deployment opted in (state.demoControlsEnabled).
+function renderDemoControlsCard() {
+  if (!state.demoControlsEnabled) return "";
+  return `<div class="card" style="cursor:default;margin-top:18px">
+    <div class="title">Demo: offline mode</div>
+    <div class="subtitle" style="margin-bottom:10px">${state.demoPaused ? "Simulating a host↔NATS outage — writes queue, nothing new arrives." : "Pause this device's connection to see Facet survive going offline."}</div>
+    <button class="ghost-btn" data-demo-toggle>${state.demoPaused ? "Reconnect" : "Simulate offline"}</button>
+  </div>`;
+}
+
+// toggleDemoConnectivity flips the demo-only pause (facet-app-ux.md §11).
+// Not optimistic: state.demoPaused only updates once the server confirms it
+// (the round trip is local-process, sub-millisecond) — the connectivity SSE
+// frame is the actual authority for the reconnect banner either way.
+function toggleDemoConnectivity() {
+  const next = !state.demoPaused;
+  return fetch("/api/demo/connectivity", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paused: next }),
+  })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { toast((body && body.error) || "Could not toggle demo connectivity", false); return; }
+      state.demoPaused = !!(body && body.paused);
+      scheduleRender();
+    })
+    .catch((err) => toast(String(err), false));
 }
 
 // ------------------------------------------------------------------ modal
@@ -2895,6 +2947,9 @@ function onGlobalClick(e) {
   const linkCred = e.target.closest("[data-link-credential]");
   if (linkCred) { linkCredential(); return; }
 
+  const demoToggle = e.target.closest("[data-demo-toggle]");
+  if (demoToggle) { toggleDemoConnectivity(); return; }
+
   const openOp = e.target.closest("[data-open-op]");
   if (openOp) {
     openDescriptorForm(openOp.dataset.openOp, {
@@ -3018,5 +3073,6 @@ document.addEventListener("DOMContentLoaded", () => {
   // field is a picker at all rather than a key to transcribe.
   document.body.addEventListener("focusin", onGlobalFocusIn);
   loadWhoami();
+  loadDemoStatus();
   startFeed();
 });
