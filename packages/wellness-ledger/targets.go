@@ -96,6 +96,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			Description: "Every booking on a paid class is charged its class price once to the member's account, " +
 				"whether or not the member ends up attending.",
 			LensRef: ClassPriceSettlementTarget,
+			// missing_price_charge carries its own retry cap (maxretries_price_charge
+			// = 3, retry_budget.go), so a stuck class-price charge that exhausts it
+			// escalates to the Augur AI-reasoning tier (mirroring lease-signing's
+			// renewalComplete Augur block) instead of only raising a standing
+			// Health-KV GapBudgetExhausted issue with no remediation path.
+			Augur: &pkgmgr.AugurSpec{Escalate: []string{"exhausted"}},
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
 					Action:    "directOp",
