@@ -1308,8 +1308,18 @@ async function renderBookMember(se, bookings, generation) {
     }
   }
   document.getElementById("roster-book-submit").disabled = false;
-  document.getElementById("roster-book-guest").value = "";
+  resetGuestPicker();
   form.hidden = false;
+}
+
+// resetGuestPicker clears the guest typeahead's search box and matched
+// options together, so a stale name from the class the staffer just
+// navigated away from never lingers next to the newer class's roster.
+function resetGuestPicker() {
+  const search = document.getElementById("guest-search");
+  if (search) search.value = "";
+  const select = document.getElementById("roster-book-guest");
+  if (select) select.innerHTML = "";
 }
 
 // bookGuest is the front desk's walk-in path: CreateBooking's booker field
@@ -1317,7 +1327,10 @@ async function renderBookMember(se, bookings, generation) {
 // wellnessMembers directory (lease-anchored by construction), so a guest with
 // no lease at this building has no row to pick — this control books them
 // directly by key instead, with no leaseAppKey, which CreateBooking already
-// treats as the designed standard-rate branch rather than a rejection.
+// treats as the designed standard-rate branch rather than a rejection. The
+// key comes from #roster-book-guest's selected option (the typeahead below
+// resolves a name to a key by picking one), never a typed key — its
+// `.value.trim()` contract is unchanged from the raw-key input it replaces.
 async function bookGuest() {
   const btn = document.getElementById("roster-book-guest-submit");
   const input = document.getElementById("roster-book-guest");
@@ -1328,13 +1341,152 @@ async function bookGuest() {
   btn.disabled = true;
   try {
     await bookMemberIn(se, guestKey, "");
-    input.value = "";
+    resetGuestPicker();
     toast("Booked.", true);
     setTimeout(renderRoster, 700);
   } catch (e) {
     toast(e.message, false);
   } finally {
     btn.disabled = false;
+  }
+}
+
+// ---- guest search (typeahead) + new guest modal ----
+//
+// The guest picker has no directory to default to the way the member picker
+// does (loadMembers, lease-anchored) — a walk-in guest's only standing
+// relationship is a booking that doesn't exist yet — so it stays empty until
+// the staffer types a name, then narrows to /api/identities?q=, the same
+// server-scoped roster search wellnessIdentitiesRead already resolves names
+// against (packages/wellness-domain/lenses.go's booking fan-out). Mirrors
+// clinic-app's wirePatientSearch/loadPatients debounce (app.js), 250ms.
+
+let guestSearchTimer = null;
+function wireGuestSearch() {
+  const input = document.getElementById("guest-search");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    clearTimeout(guestSearchTimer);
+    const q = input.value.trim();
+    guestSearchTimer = setTimeout(() => searchGuests(q), 250);
+  });
+}
+
+// searchGuests repopulates #roster-book-guest with the server's matches for
+// q — an empty q clears the picker rather than loading a whole roster (there
+// is no unscoped guest directory to fall back to). bookGuest() reads the
+// selected option's value, so each option's value is the full identity key
+// (identity_key from the protected read) and its text is the display name.
+async function searchGuests(q) {
+  const select = document.getElementById("roster-book-guest");
+  if (!select) return;
+  if (!q) {
+    select.innerHTML = "";
+    return;
+  }
+  let results = [];
+  try {
+    const data = await api("/api/identities?q=" + encodeURIComponent(q), { credentials: "same-origin" });
+    results = (data && data.identities) || [];
+  } catch (e) {
+    results = [];
+  }
+  select.innerHTML = "";
+  if (!results.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(no matches)";
+    select.appendChild(opt);
+    return;
+  }
+  for (const g of results) {
+    const opt = document.createElement("option");
+    opt.value = g.identityKey;
+    opt.textContent = g.name;
+    select.appendChild(opt);
+  }
+}
+
+function openNewGuest() {
+  document.getElementById("guest-form").reset();
+  document.getElementById("guest-overlay").hidden = false;
+  document.getElementById("ng-name").focus();
+}
+
+function closeNewGuest() {
+  document.getElementById("guest-overlay").hidden = true;
+}
+
+// sha256Hex returns the lowercase hex sha256 of a string — the shape
+// CreateUnclaimedIdentity stores for claimKeyHash. Mirrors
+// clinic-app/loftspace-app's own sha256Hex.
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// mintClaimSecret returns a random claim-secret plaintext for a new guest's
+// unclaimed identity. It is hashed and only the hash is sent as
+// CreateUnclaimedIdentity's claimKeyHash; the plaintext never enters
+// Lattice. A front-desk-created guest never needs the plaintext back — unlike
+// loftspace's self-registration flow, nothing here ever signs in as this
+// identity — so unlike loftspace-app it is discarded rather than surfaced.
+function mintClaimSecret() {
+  const a = new Uint8Array(32);
+  crypto.getRandomValues(a);
+  return Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// submitNewGuest calls ONLY CreateUnclaimedIdentity — wellness has no
+// patient-equivalent second op, unlike clinic-app's submitNewPatient — and on
+// success seats the new guest directly into the picker (one option, selected)
+// so the staffer's next click is the existing "Book guest" button; it does
+// not book on their behalf, keeping bookGuest()'s own confirmation step.
+async function submitNewGuest(ev) {
+  ev.preventDefault();
+  const name = document.getElementById("ng-name").value.trim();
+  if (!name) {
+    toast("A guest name is required.", false);
+    return;
+  }
+  const email = document.getElementById("ng-email").value.trim();
+  const phone = document.getElementById("ng-phone").value.trim();
+  const submit = document.getElementById("guest-submit");
+  submit.disabled = true;
+  try {
+    const claimKeyHash = await sha256Hex(mintClaimSecret());
+    const payload = { name, claimKeyHash };
+    if (email) payload.email = email;
+    if (phone) payload.phone = phone;
+    // No optionalReads: the dedup identityindex probes are class-(g) keys
+    // identity-domain's own derive_reads computes from this payload
+    // (Contract #2 §2.5), mirroring loftspace-app/clinic-app's own
+    // CreateUnclaimedIdentity submits.
+    const reply = await opOrThrow(
+      { operationType: "CreateUnclaimedIdentity", class: "identity", payload },
+      "create the guest",
+      false,
+    );
+    const key = reply && reply.primaryKey ? reply.primaryKey : "";
+    closeNewGuest();
+    if (key) {
+      const select = document.getElementById("roster-book-guest");
+      select.innerHTML = "";
+      const opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = name;
+      select.appendChild(opt);
+      select.value = key;
+      const search = document.getElementById("guest-search");
+      if (search) search.value = name;
+      toast("Guest created — click Book guest to add them.", true);
+    } else {
+      toast("Guest created.", true);
+    }
+  } catch (e) {
+    toast("Could not create guest: " + e.message, false);
+  } finally {
+    submit.disabled = false;
   }
 }
 
@@ -2612,6 +2764,13 @@ function init() {
   });
   document.getElementById("roster-book-submit").addEventListener("click", bookSelectedMember);
   document.getElementById("roster-book-guest-submit").addEventListener("click", bookGuest);
+  wireGuestSearch();
+  document.getElementById("new-guest").addEventListener("click", openNewGuest);
+  document.getElementById("guest-cancel").addEventListener("click", closeNewGuest);
+  document.getElementById("guest-overlay").addEventListener("click", (e) => {
+    if (e.target === document.getElementById("guest-overlay")) closeNewGuest();
+  });
+  document.getElementById("guest-form").addEventListener("submit", submitNewGuest);
   document.getElementById("billing-member").addEventListener("change", renderBilling);
   document.getElementById("billing-charge").addEventListener("click", () => submitBillingEntry("WellnessDebitAccount", "record the charge"));
   document.getElementById("billing-payment").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "record the payment"));

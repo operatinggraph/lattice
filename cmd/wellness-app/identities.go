@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
@@ -40,12 +41,25 @@ FROM read_wellness_identities
 WHERE name IS NOT NULL
 ORDER BY name, identity_key`
 
+// selectIdentitiesFilteredSQL narrows the roster to a name-ILIKE match,
+// capped so a broad term can't pull the whole roster's history into one
+// response — mirrors cmd/clinic-app's selectPatientsFilteredSQL
+// (patients.go).
+const selectIdentitiesFilteredSQL = `
+SELECT identity_key, name
+FROM read_wellness_identities
+WHERE name IS NOT NULL AND name ILIKE $1
+ORDER BY name, identity_key
+LIMIT 50`
+
 // queryIdentities runs the protected read inside a per-request transaction
 // with a txn-local actor session variable — the same pooling-safety
 // discipline as cmd/loftspace-app's queryIdentities (SET LOCAL is discarded
 // at COMMIT, so the pooled connection returns clean for the next request).
-// The query itself carries no auth filter; RLS is the scope.
-func queryIdentities(ctx context.Context, pool pgxBeginner, actorID string) ([]protectedIdentityRow, error) {
+// The query itself carries no auth filter; RLS is the scope. q, if
+// non-empty, narrows to a case-insensitive name match (front-desk
+// typeahead) — empty q preserves the prior unfiltered behavior.
+func queryIdentities(ctx context.Context, pool pgxBeginner, actorID, q string) ([]protectedIdentityRow, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -56,7 +70,12 @@ func queryIdentities(ctx context.Context, pool pgxBeginner, actorID string) ([]p
 		return nil, err
 	}
 
-	rows, err := tx.Query(ctx, selectIdentitiesSQL)
+	var rows pgx.Rows
+	if q == "" {
+		rows, err = tx.Query(ctx, selectIdentitiesSQL)
+	} else {
+		rows, err = tx.Query(ctx, selectIdentitiesFilteredSQL, "%"+q+"%")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +114,8 @@ func (s *server) handleIdentities(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	rows, err := queryIdentities(ctx, s.pgPool, actorID)
+	q := r.URL.Query().Get("q")
+	rows, err := queryIdentities(ctx, s.pgPool, actorID, q)
 	if err != nil {
 		s.logger.Error("read protected wellness identities", "error", err)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected identities model")

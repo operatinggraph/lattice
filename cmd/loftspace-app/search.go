@@ -45,9 +45,14 @@ type searchResult struct {
 const maxApplicationsPerPersonHit = 3
 
 // selectSearchPeopleSQL matches the roster by case-insensitive name
-// substring. No auth WHERE — RLS (WildcardAnchor-only, mirrors
-// selectIdentitiesSQL) scopes the roster to actors holding the reserved
-// staff grant; anyone else gets zero rows.
+// substring. No auth WHERE — RLS scopes the roster the same way
+// selectIdentitiesSQL's does (staff_identities.go): each row's authz_anchors
+// carries the identity's own NanoID plus the managing landlord and covering
+// buildings of any unit it has a live lease application against
+// (packages/loftspace-domain/lenses.go's applicantRosterReadSpec), so a
+// landlord or worksAt-anchored staffer matches rows within their own scope
+// even without the reserved WildcardAnchor grant; only WildcardAnchor sees
+// the whole roster, and a session matching none of these gets zero rows.
 const selectSearchPeopleSQL = `
 SELECT identity_key, name
 FROM read_loftspace_identities

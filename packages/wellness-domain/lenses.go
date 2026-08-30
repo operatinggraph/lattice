@@ -424,10 +424,10 @@ RETURN
 // at rest), mirroring loftspace-domain's applicantRosterReadSpec.
 // authz_anchors carries the identity's OWN bare NanoID (see the Lenses()
 // declaration above for why that self-anchor is the right shape here) PLUS
-// the workplace fan-out below.
+// the workplace fan-out and the booking fan-out below.
 //
-// The fan-out is a pattern comprehension anchored on `i`, one hop further
-// out than wellnessMembersSpec's own coveringLocations walk:
+// The workplace fan-out is a pattern comprehension anchored on `i`, one hop
+// further out than wellnessMembersSpec's own coveringLocations walk:
 // identity -> leaseapp -> unit -> building. `applicationFor` runs
 // leaseapp -> identity (Contract #1 §1.1: the later-arriving leaseapp is the
 // source), so the walk reads `(i)<-[:applicationFor]-(l:leaseapp)`; the
@@ -436,12 +436,29 @@ RETURN
 // worksAt_covers) resolves the name of any member whose lease that building
 // covers — the same gap cafe-domain's cafeIdentitiesRead already closed for
 // its front desk.
+//
+// The booking fan-out is a second pattern comprehension, mirroring
+// applicantRosterReadSpec's multi-arm `+` concatenation
+// (loftspace-domain/lenses.go): identity <- bookedBy - booking -
+// forSession -> session -atLocation-> location -containedIn*0..7-> building.
+// `bookedBy` runs booking -> identity and `forSession` runs
+// booking -> session (Contract #1 §1.1: the later-arriving vertex is the
+// source), so the walk reads
+// `(i)<-[:bookedBy]-(bk:booking)-[:forSession]->(se:session)-[:atLocation]->(pl)`.
+// A returning guest has no lease or workplace grant to anchor on — their
+// only standing relationship is the booking itself — so a front-desk
+// staffer's worksAt-building grant resolves the guest's name only for the
+// building(s) their booked session's location falls within, never
+// platform-wide: the fan-out scopes disclosure at least as tight as the
+// booking row the staffer already sees. An identity with no booking still
+// projects on the self-anchor alone (the walk finds no match and the
+// fan-out is simply empty).
 const wellnessIdentitiesReadSpec = `MATCH (i:identity)
 WHERE i.name.data.ct <> null
 RETURN
   nanoIdFromKey(i.key)   AS identity_id,
   i.key                  AS identity_key,
   i.name.data            AS name,
-  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(l:leaseapp)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | nanoIdFromKey(c.key)]
+  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(l:leaseapp)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | nanoIdFromKey(c.key)] + [(i)<-[:bookedBy]-(bk:booking)-[:forSession]->(se:session)-[:atLocation]->(pl)-[:containedIn*0..7]->(c) | nanoIdFromKey(c.key)]
                          AS authz_anchors
 `

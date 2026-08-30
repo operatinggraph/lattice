@@ -193,6 +193,7 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .panel .lead { color: var(--text-dim); font-size: 13px; margin: 0 0 16px; }
 .field { margin-bottom: 14px; display: flex; flex-direction: column; gap: 5px; }
 .field label { font-size: 13px; }
+.field .opt { color: var(--text-dim); font-weight: 400; }
 .field input, .field select { width: 100%; }
 .field-row { display: flex; gap: 10px; align-items: center; }
 .panel-actions { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
@@ -222,6 +223,29 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-record-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ledger-record-form input { flex: 1; min-width: 100px; }
 .ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }
+
+/* Modal (new guest) */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 18px;
+}
+.modal {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px;
+  width: 100%;
+  max-width: 440px;
+}
+.modal h2 { margin: 0 0 4px; font-size: 18px; }
+.modal .lead { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 
 .toast {
   position: fixed;
