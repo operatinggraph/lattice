@@ -213,7 +213,15 @@ var appOpDebt = map[string]string{}
 // feeds. This ceiling is a floor on hand-wiring this scan can see, not a
 // census of every possible hand-wired op.
 var appOpCeilings = map[string]int{
-	"cmd/cafe-app": 6,
+	// 7: SetMenuItemLocation is the Manage Menu grid's Relocate action, a
+	// zero-input row button reusing the ceremony the adjacent Retire button
+	// (RetireMenuItem, already counted) established — click a card, submit a
+	// payload assembled entirely from that card's key plus the session's own
+	// workplace. There is no field for a person to fill, so there is no form
+	// for internal/descriptorform to render: the op-catalog path renders a
+	// descriptor's schema, and this surface has none. A hand-built ceremony
+	// serving a second op, not a new descriptor-catalog gap.
+	"cmd/cafe-app": 7,
 	// 15: StartVisitSeries moved off this app's own hardcoded literal onto
 	// internal/descriptorform (verticals-designer-triage-2026-08-27.md §2 work-
 	// list item 2) — its intervalDays/startAt/activeUntil now render from the
