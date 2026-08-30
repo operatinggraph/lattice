@@ -991,6 +991,9 @@ func reapExcessCoManagers(ctx context.Context, conn *substrate.Conn, adminKey, u
 			&processor.ContextHint{
 				Reads:         []string{landlordKey, unitKey},
 				OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: adminKey, Relation: "holdsRole", Direction: "out"},
+				},
 			})
 		fmt.Printf("==> reaped excess co-manager: %s no longer manages %s\n", landlordKey, unitKey)
 	}
@@ -1030,6 +1033,9 @@ func reapExcessCoManagersLive(ctx context.Context, conn *substrate.Conn, adminKe
 				&processor.ContextHint{
 					Reads:         []string{landlordKey, unitKey},
 					OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+					Enumerations: []processor.EnumerationHint{
+						{Hub: adminKey, Relation: "holdsRole", Direction: "out"},
+					},
 				})
 			fmt.Printf("==> reaped excess co-manager: %s no longer manages %s\n", landlordKey, unitKey)
 		}

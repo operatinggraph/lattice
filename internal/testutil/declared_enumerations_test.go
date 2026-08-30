@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	testActorKey = "vtx.identity.ACTORAAAAAAAAAAAAAAA"
+	testActorKey = "vtx.identity.ACTRAAAAAAAAAAAAAAAA"
 	testHubKey   = "vtx.building.BLDGAAAAAAAAAAAAAAAA"
 )
 

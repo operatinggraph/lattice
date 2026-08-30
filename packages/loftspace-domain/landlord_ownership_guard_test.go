@@ -113,11 +113,25 @@ func loOwnershipAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 				manageLinkKey(landlordKey, unitKey),
 				"lnk.identity." + actorID + ".manages.unit." + unitID,
 			},
-			Enumerations: testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas()),
+			Enumerations: loOwnershipEnumerations(opType, actorKey),
 		},
 		AuthContext: &processor.AuthContext{Target: target, Task: task},
 	}
 	return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+}
+
+// loOwnershipEnumerations names the actor-role confinement walk both ownership
+// ops run (ownership.go's actor_holds_operator). AssignUnitOwner resolves it
+// from its own OpDispatchSpec, so the fixture stays a revert-proof of that
+// declaration. RemoveUnitOwner carries no OpMetaSpec at all — opmetas.go states
+// why: no cmd/*-app renders it — so there is nothing to resolve from, and the
+// hand-built envelope declares the walk directly, which is itself a sanctioned
+// declaring channel.
+func loOwnershipEnumerations(opType, actorKey string) []processor.EnumerationHint {
+	if declared := testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas()); len(declared) > 0 {
+		return declared
+	}
+	return []processor.EnumerationHint{{Hub: actorKey, Relation: "holdsRole", Direction: "out"}}
 }
 
 // loSeedLandlord seeds a signed-in identity holding `consumer` plus its cap doc.

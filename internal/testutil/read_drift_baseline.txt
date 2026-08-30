@@ -192,7 +192,6 @@ walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
-walk	RemoveUnitOwner	vtx.identity.<id> holdsRole out
 walk	ReportIssue	vtx.building.<id> containedIn out
 walk	ReportIssue	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.building.<id> containedIn out

@@ -79,7 +79,17 @@ func removeUnitOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "loftspaceOwnership",
 		Payload:       json.RawMessage(`{"landlord":"` + landlordKey + `","unit":"` + unitKey + `"}`),
-		ContextHint:   &processor.ContextHint{OptionalReads: []string{manageLinkKey(landlordKey, unitKey)}},
+		// RemoveUnitOwner carries no OpMetaSpec (opmetas.go states why: no
+		// cmd/*-app renders it), so there is no Dispatch.Enumerations for
+		// testutil.DeclaredEnumerations to resolve. The hand-built envelope is
+		// itself a sanctioned declaring channel, so the actor-role probe's walk
+		// is named here, on the dispatcher that runs it.
+		ContextHint: &processor.ContextHint{
+			OptionalReads: []string{manageLinkKey(landlordKey, unitKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actor, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
