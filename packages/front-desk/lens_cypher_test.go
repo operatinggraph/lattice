@@ -282,3 +282,40 @@ func TestFrontDeskVisits_SkipsCancelledAppointment(t *testing.T) {
 	rows := f.project(t, visitsSpec)
 	require.Empty(t, rows, "a soft-deleted appointment must be filtered by the engine's isDeleted guard")
 }
+
+func TestFrontDeskBookingHistory_ProjectsNonBookedStatusRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newFdFixture(t)
+	f.mkBooking(t, "b1", "noShow", "resident", true, true)
+
+	rows := f.project(t, bookingHistorySpec)
+	require.Len(t, rows, 1, "unlike bookingsSpec, bookingHistorySpec must project a booking that has since gone noShow")
+	v := rows[0].Values
+	require.Equal(t, "vtx.leaseapp."+f.ids["b1_lease"], v["leaseAppKey"])
+	require.Equal(t, "noShow", v["status"])
+	require.Equal(t, "2026-07-11T09:00:00Z", v["startsAt"])
+}
+
+func TestFrontDeskBookingHistory_SkipsStandardRateBooking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newFdFixture(t)
+	f.mkBooking(t, "b1", "booked", "standard", true, false)
+
+	rows := f.project(t, bookingHistorySpec)
+	require.Empty(t, rows, "a booking with no residentRate link must not project, same confinement as bookingsSpec")
+}
+
+func TestFrontDeskBookingHistory_SkipsCancelledBooking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newFdFixture(t)
+	f.mkBookingDeleted(t, "b1", "attended", "resident", true, true, true)
+
+	rows := f.project(t, bookingHistorySpec)
+	require.Empty(t, rows, "a soft-deleted booking must be filtered by the engine's isDeleted guard")
+}

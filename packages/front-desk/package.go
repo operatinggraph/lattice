@@ -1,7 +1,7 @@
 // Package frontdesk is the Café/Wellness/Clinic "mixed-use composition
 // surfaces" Increment 1 (+ the Inc 4 lease-details tail, + the Inc 5 clinic
 // tail) — the front-desk unified resident context. It owns no vertex types,
-// links, or permissions of its own: three Lens declarations (Lenses()) —
+// links, or permissions of its own: four Lens declarations (Lenses()) —
 // frontDeskBookings re-projects wellness-domain's residentRate-linked
 // bookings, keyed by leaseAppKey, into front-desk-bookings (a resident's
 // booked class surfaced right next to their café tab, without asking);
@@ -11,7 +11,11 @@
 // class); frontDeskVisits re-projects clinic-domain's residentVisit-linked
 // appointments, keyed by leaseAppKey, into front-desk-visits (existence +
 // time of a resident's own upcoming clinic visit — never the visit reason or
-// clinical content).
+// clinical content); frontDeskBookingHistory re-projects the same
+// residentRate-linked bookings as frontDeskBookings but at ANY status, keyed
+// by leaseAppKey, into front-desk-booking-history — a consumer measuring
+// usage over a period, not "booked right now", needs bookings that have
+// since gone noShow/attended and dropped out of frontDeskBookings' filter.
 //
 // The café half of the unified context (open tabs) needs no re-projection:
 // cafe-domain's own cafeTabSettlement convergence lens already serves it
@@ -34,8 +38,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "front-desk",
-	Version:     "0.3.0",
-	Description: "Café/Wellness/Clinic mixed-use composition Inc 1 + Inc 4 + Inc 5 — front-desk unified resident context: wellness-domain's resident-rate bookings, every leaseapp's unit rent/term, and clinic-domain's resident-confined visits (existence + time only), all re-projected keyed by leaseAppKey, joined client-side with cafe-domain's open tabs.",
+	Version:     "0.3.1",
+	Description: "Café/Wellness/Clinic mixed-use composition Inc 1 + Inc 4 + Inc 5 — front-desk unified resident context: wellness-domain's resident-rate bookings, every leaseapp's unit rent/term, and clinic-domain's resident-confined visits (existence + time only), all re-projected keyed by leaseAppKey, joined client-side with cafe-domain's open tabs. frontDeskBookingHistory re-projects the same bookings at any status for period-based usage consumers.",
 	Depends:     []string{"wellness-domain", "clinic-domain"},
 	Lenses:      Lenses(),
 }
