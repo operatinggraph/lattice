@@ -2932,6 +2932,22 @@ function moneyAmount(cents) {
   return typeof cents === "number" ? "$" + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
 }
 
+// customerMemo strips a raw entity key from a ledger memo before it reaches
+// a customer surface — a memo is free text an operator typed, so nothing
+// stops one from embedding a bare NanoID (2026-08-29: a remediation memo did
+// exactly that on a sibling app's statement). No ledger op can amend a
+// posted memo (append-only entry, D5), so this is the durable fix even for
+// already-posted lines.
+function customerMemo(memo) {
+  if (!memo) return memo;
+  const nanoid = "[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789]{20}";
+  return memo
+    .replace(new RegExp("\\b(?:Appt|Session|Booking|Visit)\\s+" + nanoid + "\\b\\.?", "gi"), "")
+    .replace(new RegExp("\\b" + nanoid + "\\b", "g"), "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // loadLedger (re)loads and renders the selected patient's billing panel: the
 // running balance, the transaction list (oldest first). Bails to an empty
 // state with no patient selected.
@@ -2991,7 +3007,7 @@ function renderLedger(data) {
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    let line = when + " · " + sign + moneyAmount(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "");
+    let line = when + " · " + sign + moneyAmount(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "");
     if (t.visitStartsAt) {
       const vd = new Date(t.visitStartsAt);
       const visitWhen = isNaN(vd) ? t.visitStartsAt : vd.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
