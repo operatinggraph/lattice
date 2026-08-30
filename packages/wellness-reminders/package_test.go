@@ -1,8 +1,10 @@
 package wellnessreminders
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -81,5 +83,42 @@ func TestPackage_StructurePins(t *testing.T) {
 		if i < len(wantTargets) && d.TargetID != wantTargets[i] {
 			t.Errorf("WeaverTargets[%d]: got %q, want %q", i, d.TargetID, wantTargets[i])
 		}
+	}
+}
+
+// TestPastDueBookings_NoShowFeeIsATypedZero pins pastdue.go's noShowFeeCents
+// param at the json:0 typed literal (internal/weaver/registry.go's Params
+// grammar), not a plain string "0". GapActionSpec.Params is
+// map[string]string, so an unprefixed "0" would reach wellness-domain's
+// ddls.go optional_number as the Starlark string "0", which its
+// `type(v) != type(0) and type(v) != type(0.0)` check rejects, returning
+// None — the field never lands on .status and the sweep silently bills the
+// 2500 default on every auto no-show. Decoding the literal here (mirroring
+// internal/weaver/strategist.go's resolveParam, without importing that
+// internal package) proves it resolves to the JSON number 0, which is what
+// optional_number's type check requires.
+func TestPastDueBookings_NoShowFeeIsATypedZero(t *testing.T) {
+	target := pastDueBookingsTarget()
+	ga, ok := target.Gaps["missing_noshow_transition"]
+	if !ok {
+		t.Fatalf("pastDueBookingsTarget has no missing_noshow_transition gap")
+	}
+	const wantParam = "json:0"
+	if got := ga.Params["noShowFeeCents"]; got != wantParam {
+		t.Fatalf("Params[noShowFeeCents]: got %q, want %q (a plain \"0\" reaches Starlark as a string, "+
+			"which optional_number treats as absent, silently billing the 2500 default)", got, wantParam)
+	}
+
+	literal, ok := strings.CutPrefix(wantParam, "json:")
+	if !ok {
+		t.Fatalf("param %q does not carry the json: typed-literal prefix", wantParam)
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(literal), &decoded); err != nil {
+		t.Fatalf("literal %q is not valid JSON: %v", literal, err)
+	}
+	n, ok := decoded.(float64)
+	if !ok || n != 0 {
+		t.Fatalf("literal %q decodes to %#v, want the JSON number 0", literal, decoded)
 	}
 }

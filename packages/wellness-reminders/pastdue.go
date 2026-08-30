@@ -14,7 +14,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // separate marker needed).
 //
 //	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND endsAt<=$now gate)
-//	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow", noShowFeeCents: "0")
+//	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow", noShowFeeCents: json:0)
 //
 // Unlike clinic's MarkPastDueNoShow, this dispatches wellness-domain's own
 // SetBookingAttendance directly rather than through a dedicated op:
@@ -27,11 +27,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // same status='booked' restriction); `attended`/`noShow` are already
 // terminal. Because this playbook shares SetBookingAttendance with the staff
 // path rather than getting its own dedicated op (clinic's MarkPastDueNoShow
-// vs SetAppointmentStatus split), it must explicitly route
-// noShowFeeCents:"0" — a caller-supplied 0 is SetBookingAttendance's signal
-// for "documentation lapse, not a billable no-show" (ddls.go), so this sweep
-// never bills the default $25; a staff-observed SetBookingAttendance call
-// (which omits the field) still does. Once dispatched, wellness-ledger's
+// vs SetAppointmentStatus split), it must explicitly route a caller-supplied
+// 0 — SetBookingAttendance's signal for "documentation lapse, not a billable
+// no-show" (ddls.go) — which needs the json:<literal> typed-literal token
+// (registry.go's Params grammar), not the plain string "0": GapActionSpec's
+// Params bag is map[string]string, so an unprefixed "0" arrives at the
+// Starlark script as the string "0", and ddls.go's optional_number rejects
+// any non-numeric-typed value, returning None — the field never lands on
+// .status and every sweep-driven no-show silently bills the 2500 default
+// instead. json:0 decodes through resolveParam (strategist.go) into the
+// JSON number 0 before dispatch, so optional_number sees the number it
+// checks for. A staff-observed SetBookingAttendance call (which omits the
+// field entirely, never sending "0" in any form) still bills the default
+// $25. Once dispatched, wellness-ledger's
 // existing wellnessNoShowSettlement lens (unchanged by this package) reads
 // noShowFeeCents when present and positive to post the account charge — this
 // closes only the missing status transition, not the billing gate, which
@@ -125,7 +133,7 @@ func pastDueBookingsTarget() pkgmgr.WeaverTargetSpec {
 			"missing_noshow_transition": {
 				Action:    "directOp",
 				Operation: "SetBookingAttendance",
-				Params:    map[string]string{"bookingKey": "row.entityKey", "session": "row.sessionKey", "status": "noShow", "noShowFeeCents": "0"},
+				Params:    map[string]string{"bookingKey": "row.entityKey", "session": "row.sessionKey", "status": "noShow", "noShowFeeCents": "json:0"},
 				Reads:     []string{"row.entityKey", "row.sessionKey"},
 			},
 		},

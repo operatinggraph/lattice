@@ -590,7 +590,17 @@ add. A plain text field is still a fully real, submittable form for every op tha
 `x-entityRef` field — the freeze trigger is *type detection*, not picker parity — so this is named
 as the honest next residual, not silently folded into "done": **the Facet entity-ref candidate
 picker** (`ManifestStore` tracks `manifest.ent.*`, `DescriptorFormSheet` gets a search-and-pick
-control mirroring `app.js`'s), filed to `verticals.md`.
+control mirroring `app.js`'s).
+
+**Amended (Winston, 2026-08-30) — this residual SHIPPED, on both renderers, and the "filed to
+`verticals.md`" clause above was never true.** `ManifestStore.entityRefCandidates`/the
+`DescriptorFormSheet` search-and-pick control landed `9982e740` (2026-08-06); `app.js`'s side (the
+mirror source the SwiftUI commit names) was live at least as early as `87010105` (2026-07-26, café's
+menu-item picker). No `verticals.md` row for this residual was ever found on a 2026-08-30 audit —
+the paragraph's "filed to `verticals.md`" was aspirational, not a completed action, and nothing
+caught the drift because the residual closed three days later anyway. Flagging the pattern
+(a design doc's "filed" clause is a claim, not a fact — verify the row exists), not reopening the
+item.
 
 **`scripts/lint-facet-renderer-drift.go`** (Makefile `lint-facet-renderer-drift`, CI STRICT) is the
 new structural guard the retargeted trigger asked for: it substring-checks that both
