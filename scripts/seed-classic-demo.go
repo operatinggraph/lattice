@@ -51,6 +51,7 @@ import (
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/scripts/pkgverify"
@@ -1436,7 +1437,7 @@ func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType
 		Class:         class,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Payload:       payloadBytes,
-		ContextHint:   hint,
+		ContextHint:   withDeclaredEnumerations(operationType, actorKey, hint),
 	}
 	reply, err := output.SubmitOp(ctx, conn, env)
 	must(err, "submit "+operationType)
@@ -1461,7 +1462,7 @@ func submitSelfOp(ctx context.Context, conn *substrate.Conn, actorKey, operation
 		Class:         class,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Payload:       payloadBytes,
-		ContextHint:   hint,
+		ContextHint:   withDeclaredEnumerations(operationType, actorKey, hint),
 		AuthContext:   &processor.AuthContext{Target: actorKey},
 	}
 	reply, err := output.SubmitOp(ctx, conn, env)
@@ -1492,4 +1493,47 @@ func must(err error, context string) {
 func mustSHA256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// declaredEnumerations resolves the class-(e) walks an operation's own package
+// descriptor declares (pkgmgr.OpDispatchSpec.Enumerations, Contract #2 §2.5)
+// into the hints this seed's envelopes carry, substituting the {actor} hub with
+// the submitting actor. The seed is a real dispatcher, so it declares what the
+// descriptor declares — resolved from the registry rather than restated here,
+// which is what keeps the two from drifting.
+func declaredEnumerations(operationType, actorKey string) []processor.EnumerationHint {
+	var hints []processor.EnumerationHint
+	for _, def := range pkgregistry.All() {
+		for _, m := range def.OpMetas {
+			if m.OperationType != operationType || m.Dispatch == nil {
+				continue
+			}
+			for _, e := range m.Dispatch.Enumerations {
+				hub := e.Hub
+				if hub == "{actor}" {
+					hub = actorKey
+				} else if strings.ContainsAny(hub, "{}") {
+					continue // a payload-templated hub the caller must supply itself
+				}
+				hints = append(hints, processor.EnumerationHint{Hub: hub, Relation: e.Relation, Direction: e.Direction})
+			}
+		}
+	}
+	return hints
+}
+
+// withDeclaredEnumerations returns a copy of hint carrying the operation's
+// declared walks. A copy, because a caller may reuse one hint across
+// submissions.
+func withDeclaredEnumerations(operationType, actorKey string, hint *processor.ContextHint) *processor.ContextHint {
+	enums := declaredEnumerations(operationType, actorKey)
+	if len(enums) == 0 {
+		return hint
+	}
+	merged := processor.ContextHint{}
+	if hint != nil {
+		merged = *hint
+	}
+	merged.Enumerations = append(append([]processor.EnumerationHint{}, merged.Enumerations...), enums...)
+	return &merged
 }

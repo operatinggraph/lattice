@@ -121,17 +121,21 @@ func loOwnershipAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 }
 
 // loOwnershipEnumerations names the actor-role confinement walk both ownership
-// ops run (ownership.go's actor_holds_operator). AssignUnitOwner resolves it
-// from its own OpDispatchSpec, so the fixture stays a revert-proof of that
-// declaration. RemoveUnitOwner carries no OpMetaSpec at all — opmetas.go states
-// why: no cmd/*-app renders it — so there is nothing to resolve from, and the
-// hand-built envelope declares the walk directly, which is itself a sanctioned
-// declaring channel.
+// ops run (ownership.go's actor_holds_operator), from the channel each one has.
+//
+// The RemoveUnitOwner arm is keyed on the OP, never on "the resolve came back
+// empty". Keyed on emptiness, deleting AssignUnitOwner's own
+// Dispatch.Enumerations would silently fall through to the hardcoded hint and
+// leave every submission green with its baseline row already retired — the
+// exact failure DeclaredEnumerations exists to make impossible. Only the op
+// that genuinely has no OpMetaSpec to resolve from (opmetas.go states why: no
+// cmd/*-app renders it) declares through its hand-built envelope, which is
+// itself a sanctioned declaring channel.
 func loOwnershipEnumerations(opType, actorKey string) []processor.EnumerationHint {
-	if declared := testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas()); len(declared) > 0 {
-		return declared
+	if opType == "RemoveUnitOwner" {
+		return []processor.EnumerationHint{{Hub: actorKey, Relation: "holdsRole", Direction: "out"}}
 	}
-	return []processor.EnumerationHint{{Hub: actorKey, Relation: "holdsRole", Direction: "out"}}
+	return testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas())
 }
 
 // loSeedLandlord seeds a signed-in identity holding `consumer` plus its cap doc.

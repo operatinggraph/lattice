@@ -98,12 +98,16 @@ func llSubmitAsLandlordReply(t *testing.T, ctx context.Context, conn *substrate.
 	label, opType, class string, payload map[string]any, hint *processor.ContextHint) (processor.MessageOutcome, *processor.OperationReply) {
 	t.Helper()
 	b, _ := json.Marshal(payload)
-	enums := testutil.DeclaredEnumerations(opType, llLandlordKey, leasesigning.OpMetas())
-	if len(enums) > 0 {
-		if hint == nil {
-			hint = &processor.ContextHint{}
+	// The declared walk is added to a COPY of the caller's hint: a caller may
+	// reuse one hint pointer across several submissions, and appending through
+	// it would give the second envelope the first one's hints again.
+	if enums := testutil.DeclaredEnumerations(opType, llLandlordKey, leasesigning.OpMetas()); len(enums) > 0 {
+		merged := processor.ContextHint{}
+		if hint != nil {
+			merged = *hint
 		}
-		hint.Enumerations = append(hint.Enumerations, enums...)
+		merged.Enumerations = append(append([]processor.EnumerationHint{}, merged.Enumerations...), enums...)
+		hint = &merged
 	}
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),

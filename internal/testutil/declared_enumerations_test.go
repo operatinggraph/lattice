@@ -69,9 +69,9 @@ func TestDeclaredEnumerations_PayloadHubIsReportedNotDropped(t *testing.T) {
 	}
 }
 
-// TestDeclaredEnumerations_SpansMetaSets covers the cross-package case that
-// broke three clinic fixtures: the op's meta is owned by a package other than
-// the one under test, so a caller naming both sets must still find it.
+// TestDeclaredEnumerations_SpansMetaSets covers the cross-package case: an op's
+// meta is owned by a package other than the one under test, so a caller naming
+// both sets must still find it.
 func TestDeclaredEnumerations_SpansMetaSets(t *testing.T) {
 	own := metaWith("StartVisitSeries", actorRole())
 	other := metaWith("CreateAppointment", actorRole())
