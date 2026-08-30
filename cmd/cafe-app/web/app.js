@@ -358,6 +358,9 @@ function money(cents) {
 // already-posted lines.
 function customerMemo(memo) {
   if (!memo) return memo;
+  // derived-key: not a key derivation — this alphabet builds a regex to
+  // recognize and STRIP a raw entity key from customer-facing text, no
+  // hash/digest is computed and no key is produced.
   const nanoid = "[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789]{20}";
   return memo
     .replace(new RegExp("\\b(?:Appt|Session|Booking|Visit|Tab|Order)\\s+" + nanoid + "\\b\\.?", "gi"), "")
