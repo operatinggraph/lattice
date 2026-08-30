@@ -263,10 +263,8 @@ func (s *server) handleOpCatalog(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	bucket := edgemanifest.OpCatalogBucket
-	var keys []string
-	if types := r.URL.Query().Get("types"); types != "" {
-		keys = strings.Split(types, ",")
-	} else {
+	keys := opCatalogKeysFromTypesParam(r.URL.Query().Get("types"))
+	if keys == nil {
 		var err error
 		keys, err = conn.KVListKeys(ctx, bucket)
 		if err != nil {
@@ -284,4 +282,16 @@ func (s *server) handleOpCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	catalog := computeOpCatalog(keys, get)
 	s.writeJSON(w, http.StatusOK, map[string]any{"catalog": catalog, "count": len(catalog)})
+}
+
+// opCatalogKeysFromTypesParam parses `?types=Op1,Op2` into the exact bucket
+// keys to point-read (the lens's IntoKey is operationType, so a name here IS
+// a key). Empty input means "no filter" — nil, not an empty slice, so the
+// caller's `== nil` falls back to listing the whole bucket instead of
+// point-reading zero keys.
+func opCatalogKeysFromTypesParam(types string) []string {
+	if types == "" {
+		return nil
+	}
+	return strings.Split(types, ",")
 }

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // TestComputeOpCatalog_ReNestsTheDescriptorVocabulary pins the descriptor
 // round trip for this app's own op_catalog.go (identical to
@@ -33,5 +36,22 @@ func TestComputeOpCatalog_ReNestsTheDescriptorVocabulary(t *testing.T) {
 	want := opEnumeration{Hub: "{actor}", Relation: "holdsRole", Direction: "out"}
 	if len(d.Dispatch.Enumerations) != 1 || d.Dispatch.Enumerations[0] != want {
 		t.Errorf("enumerations: got %+v, want [%+v]", d.Dispatch.Enumerations, want)
+	}
+}
+
+// TestOpCatalogKeysFromTypesParam pins the two outcomes handleOpCatalog's
+// `?types=` branch depends on: absent/empty must come back nil (so the
+// `keys == nil` check falls back to KVListKeys and the full catalog still
+// works), and a comma list must split into exactly those keys with no
+// trimming or dedup — a caller that gets this wrong either serves the whole
+// bucket when it meant to narrow, or silently drops a wanted op.
+func TestOpCatalogKeysFromTypesParam(t *testing.T) {
+	if got := opCatalogKeysFromTypesParam(""); got != nil {
+		t.Errorf("empty types: got %#v, want nil", got)
+	}
+	got := opCatalogKeysFromTypesParam("VoidCharge,CreditCafeAccount")
+	want := []string{"VoidCharge", "CreditCafeAccount"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
 	}
 }
