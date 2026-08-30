@@ -1223,15 +1223,17 @@ async function renderRoster() {
     body.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
-  // Marking attendance is the bound instructor's own beat, and only once the
-  // class has begun — SetBookingAttendance answers SessionNotStarted before
-  // that, so the control would only fail closed. The server re-derives both
-  // facts and the Starlark guard re-derives them again at submit; this is the
-  // affordance, not the authority.
+  // Marking attendance is the bound instructor's own beat, or front-of-house
+  // staff's (workplace-confined, ddls.go SetBookingAttendance) — either way
+  // only once the class has begun; SetBookingAttendance answers
+  // SessionNotStarted before that, so the control would only fail closed.
+  // The server re-derives both facts and the Starlark guard re-derives them
+  // again at submit; this is the affordance, not the authority.
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   const mine = instructorKey();
   const isLeader = !!(se && mine && se.instructorKey === mine);
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+  const canMark = (isLeader || isStaff()) && started;
 
   // bookings.length counts every live row on this session, booked and
   // waitlisted alike — split them so the summary and staff seat gate below
@@ -1244,15 +1246,12 @@ async function renderRoster() {
   // (wellness-domain ddls.go) — once the class has begun, attendance is the
   // record of what happened and a seat is no longer front-desk-releasable.
   body.innerHTML = bookings.length
-    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started, isStaff() && !started)).join("") + "</div>"
+    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, canMark, isStaff() && !started)).join("") + "</div>"
     : '<div class="empty">No one has booked this session yet.</div>';
-  if (isLeader && !started && bookings.length) {
+  if ((isLeader || isStaff()) && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
   }
-  if (isStaff() && se && se.missingInstructor) {
-    summary.textContent += " — no instructor assigned; use Reassign to enable attendance";
-  }
-  if (isLeader && started) bindAttendance(sessionKey, mine);
+  if (canMark) bindAttendance(sessionKey, mine);
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey, se);
   await renderBookMember(se, bookings, generation);
   renderCancelClass(sessionKey);
@@ -1672,13 +1671,25 @@ async function awaitProjectedStatus(sessionKey, bookingKey, want) {
   }
 }
 
-// markAttendance submits SetBookingAttendance for a booking on a class this
-// instructor leads. It carries NO authContext.target — the grant is scope=any
-// and the script confines it by the three links below, not by a caller-supplied
-// target (packages/wellness-domain/ddls.go).
+// markAttendance submits SetBookingAttendance for a booking, either on a
+// class `mine` leads (the two ownership-probe optionalReads bind that path)
+// or, when `mine` is falsy, as front-of-house staff (the script's workplace
+// walk binds that path instead, packages/wellness-domain/ddls.go). It carries
+// NO authContext.target either way — the grant is scope=any.
 async function markAttendance(bookingKey, sessionKey, value, mine) {
   const bookId = idOf(bookingKey);
   const sessId = idOf(sessionKey);
+  const optionalReads = [
+    "lnk.booking." + bookId + ".forSession.session." + sessId,
+  ];
+  const payload = { bookingKey: bookingKey, session: sessionKey, status: value };
+  if (mine) {
+    optionalReads.push(
+      "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
+      "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
+    );
+    payload.instructor = mine;
+  }
   await opOrThrow(
     {
       operationType: "SetBookingAttendance",
@@ -1690,12 +1701,8 @@ async function markAttendance(bookingKey, sessionKey, value, mine) {
       // session-match and the two ownership probes are (d)-declared — an absent
       // link is a meaningful rejection, not a correctness error.
       reads: [bookingKey, bookingKey + ".status", sessionKey + ".schedule"],
-      optionalReads: [
-        "lnk.booking." + bookId + ".forSession.session." + sessId,
-        "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
-        "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
-      ],
-      payload: { bookingKey: bookingKey, session: sessionKey, status: value, instructor: mine },
+      optionalReads,
+      payload,
     },
     "record attendance",
     false,

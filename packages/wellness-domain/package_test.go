@@ -124,7 +124,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
 		{"JoinWaitlist", "any", staff}, {"JoinWaitlist", "self", []string{"consumer"}},
 		{"CancelBooking", "any", staff}, {"CancelBooking", "self", []string{"consumer"}},
-		{"SetBookingAttendance", "any", []string{"operator", "provider"}},
+		{"SetBookingAttendance", "any", []string{"operator", "provider", "frontOfHouse"}},
 		{"CreateInstructor", "any", operatorOnly}, {"TombstoneInstructor", "any", operatorOnly},
 		{"SetInstructorProfile", "any", []string{"operator", "provider"}},
 		{"BindInstructorIdentity", "any", operatorOnly},

@@ -1,6 +1,7 @@
-// Workplace confinement for the three staff-widened wellness writes:
-// CreateStudio, CreateBooking and CancelBooking each grant `frontOfHouse` at
-// scope=any (permissions.go), and scope=any carries no platform-checked target,
+// Workplace confinement for the staff-widened wellness writes: CreateStudio,
+// CreateBooking, CancelBooking and SetBookingAttendance each grant
+// `frontOfHouse` at scope=any (permissions.go), and scope=any carries no
+// platform-checked target,
 // so the ONLY thing keeping a front-desk hat inside its own building is the
 // script's workplace walk. Every case below therefore leads with the positive
 // sibling — the same call at the staffer's OWN location, which must be Accepted
@@ -59,6 +60,7 @@ func wcStaffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateStudio", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
+			{OperationType: "SetBookingAttendance", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -457,6 +459,125 @@ func TestWorkplace_StaffCannotCancelElsewhereByNamingTheirOwnSession(t *testing.
 	}
 	if !keyExists(t, ctx, conn, bookingB) {
 		t.Errorf("the substituted CancelBooking tombstoned %s; it must be denied before any mutation", bookingB)
+	}
+}
+
+// wcSetAttendanceAs submits SetBookingAttendance as an arbitrary actor with no
+// instructor param — the front-of-house path, confined by workplace instead of
+// a lead binding (ddls.go) — and returns the outcome plus the script's own
+// failure text.
+func wcSetAttendanceAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, bookingKey, sessionKey, actorKey, submittedAt string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := attendanceEnv(t, label, bookingKey, sessionKey, "attended", "", actorKey, submittedAt)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return outcome, failure
+}
+
+// TestWorkplace_StaffMarkAttendanceConfinedToTheirBuilding: SetBookingAttendance
+// grants frontOfHouse at scope=any (permissions.go), confined by the same
+// session -atStudio-> studio -locatedAt-> location walk CancelBooking uses.
+func TestWorkplace_StaffMarkAttendanceConfinedToTheirBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcattend")
+	wcSeedStaff(t, ctx, conn)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcatstudioa0000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcatstudiob0000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+
+	sessionA, _ := createSession(t, ctx, conn, cp, cons, "wdwcatsessiona000001",
+		studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	sessionB, _ := createSession(t, ctx, conn, cp, cons, "wdwcatsessionb000001",
+		studioB, "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20)
+	member := seedIdentity(t, ctx, conn, wcMemberID)
+
+	bookingA, outcome := createBooking(t, ctx, conn, cp, cons,
+		"wdwcatbooka00000001", sessionA, member, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateBooking at building A = %v, want Accepted", outcome)
+	}
+	bookingB, outcome := createBooking(t, ctx, conn, cp, cons,
+		"wdwcatbookb00000001", sessionB, member, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateBooking at building B = %v, want Accepted", outcome)
+	}
+
+	// POSITIVE SIBLING: marking attendance at the staffer's own building.
+	if got, why := wcSetAttendanceAs(t, ctx, conn, cp, cons,
+		"wdwcatmarka0000001", bookingA, sessionA, wcStaffKey, "2026-07-08T09:05:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("staff SetBookingAttendance at its OWN building = %v (%s), want Accepted", got, why)
+	}
+	if got := attendanceStatus(t, ctx, conn, bookingA)["value"]; got != "attended" {
+		t.Errorf("bookingA.status.value = %v, want attended", got)
+	}
+
+	got, why := wcSetAttendanceAs(t, ctx, conn, cp, cons,
+		"wdwcatmarkb0000001", bookingB, sessionB, wcStaffKey, "2026-07-08T18:05:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff SetBookingAttendance at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("cross-building SetBookingAttendance was rejected by something other than the "+
+			"workplace guard: %q", why)
+	}
+	if got := attendanceStatus(t, ctx, conn, bookingB)["value"]; got != "booked" {
+		t.Errorf("the denied cross-building SetBookingAttendance wrote bookingB.status.value = %v", got)
+	}
+}
+
+// TestWorkplace_StaffCannotMarkAttendanceElsewhereByNamingTheirOwnSession pins
+// the guard ORDER, mirroring TestWorkplace_StaffCannotCancelElsewhereByNamingTheirOwnSession:
+// SetBookingAttendance's location comes from the session the CALLER supplies,
+// so confining before that session is bound to this booking would let a
+// staffer name a class at their own building and mark attendance on a booking
+// anywhere. require_matching_session answers first, which is what closes it.
+func TestWorkplace_StaffCannotMarkAttendanceElsewhereByNamingTheirOwnSession(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcatorder")
+	wcSeedStaff(t, ctx, conn)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcaostudioa0000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcaostudiob0000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+
+	sessionA, _ := createSession(t, ctx, conn, cp, cons, "wdwcaosessiona000001",
+		studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	sessionB, _ := createSession(t, ctx, conn, cp, cons, "wdwcaosessionb000001",
+		studioB, "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20)
+	member := seedIdentity(t, ctx, conn, wcMemberID)
+
+	bookingB, outcome := createBooking(t, ctx, conn, cp, cons,
+		"wdwcaobookb00000001", sessionB, member, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateBooking at building B = %v, want Accepted", outcome)
+	}
+
+	// THE SUBSTITUTION: building B's booking, building A's session key —
+	// answered after BOTH sessions have started, so a mis-ordered guard cannot
+	// hide behind SessionNotStarted instead.
+	got, why := wcSetAttendanceAs(t, ctx, conn, cp, cons,
+		"wdwcaomarksub00001", bookingB, sessionA, wcStaffKey, "2026-07-08T18:05:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff SetBookingAttendance naming its OWN session for ANOTHER session's booking = %v, "+
+			"want Rejected — the supplied session must be bound to the booking before it can "+
+			"carry the confinement", got)
+	}
+	if !strings.Contains(why, "WrongSession") {
+		t.Errorf("the substituted session was rejected by something other than the booking's "+
+			"own session binding: %q", why)
+	}
+	if got := attendanceStatus(t, ctx, conn, bookingB)["value"]; got != "booked" {
+		t.Errorf("the substituted SetBookingAttendance wrote bookingB.status.value = %v", got)
 	}
 }
 

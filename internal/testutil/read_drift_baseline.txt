@@ -112,6 +112,7 @@ read	SetAppointmentSite	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentSite	lnk.provider.<id>.identifiedBy.identity.<id>
 read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
+read	SetBookingAttendance	lnk.identity.<id>.worksAt.building.<id>
 read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
 read	SetVisitSeriesSite	lnk.identity.<id>.worksAt.building.<id>
 read	Settle	vtx.leaseapp.<id>
@@ -208,6 +209,9 @@ walk	SetAppointmentSite	vtx.provider.<id> practicesAt out
 walk	SetAppointmentStatus	vtx.appointment.<id> atSite out
 walk	SetAppointmentStatus	vtx.appointment.<id> withProvider out
 walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
+walk	SetBookingAttendance	vtx.building.<id> containedIn out
+walk	SetBookingAttendance	vtx.session.<id> atStudio out
+walk	SetBookingAttendance	vtx.studio.<id> locatedAt out
 walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	SetRenewalTerms	vtx.renewal.<id> renews out
 walk	SetVisitSeriesSite	vtx.building.<id> containedIn out

@@ -55,13 +55,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // class is the operator/instructor surface, not the front-desk one (unlike
 // CreateSession, the studio front-desk beat below).
 //
-// SetBookingAttendance carries the SAME [operator, provider] pair for the same
-// reason: who actually showed is the judgement of whoever ran the class, and
-// the script confines a provider-role caller to bookings on a session it is
-// ledBy-bound to. Front-of-house is deliberately excluded here too — a plain
-// frontOfHouse grant would be unconfined authority to restate any member's
-// attendance in any studio, the staff read boundary these packages do not yet
-// draw.
+// SetBookingAttendance additionally grants `frontOfHouse` at scope=any,
+// workplace-confined exactly like CancelBooking (`session -atStudio->
+// studio -locatedAt-> location`, checked against the caller's `worksAt`):
+// a provider-role caller is still confined by the script to bookings on a
+// session it is ledBy-bound to (who actually showed is the judgement of
+// whoever ran the class), while a front-of-house caller marks attendance for
+// any booking at a studio they staff — the same staff/instructor split
+// ReassignSession already draws.
 //
 // CreateInstructor / TombstoneInstructor are operator-only (mirrors
 // clinic-domain's CreateProvider / TombstoneProvider — entity provisioning
@@ -151,8 +152,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "SetBookingAttendance",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit SetBookingAttendance operations, and a bound instructor the right to record attendance on a booking for a class THEY lead (the script's standing guard confines a non-operator caller to the session it is ledBy-bound to via its own instructor identifiedBy binding).",
-			GrantsTo:      []string{"operator", "provider"},
+			Note:          "Grants the operator the right to submit SetBookingAttendance operations, a bound instructor the right to record attendance on a booking for a class THEY lead (the script's standing guard confines a non-operator, non-workplace caller to the session it is ledBy-bound to via its own instructor identifiedBy binding), and front-of-house staff the right to record attendance for any booking at a studio they worksAt (the script confines them to the session's studio location, mirroring CancelBooking).",
+			GrantsTo:      []string{"operator", "provider", "frontOfHouse"},
 		},
 		mk("CreateInstructor"),
 		mk("TombstoneInstructor"),

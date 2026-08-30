@@ -3895,36 +3895,53 @@ def execute(state, op):
         # unconditionally; a bound instructor may additionally mark only a
         # booking on a class THEY lead — the caller supplies the instructor
         # param and BOTH the session's ledBy link to it AND the caller's own
-        # identifiedBy binding to it must be alive (known keys). front-of-house
-        # holds no SetBookingAttendance grant, so no workplace binder is needed.
+        # identifiedBy binding to it must be alive (known keys). A caller with
+        # no instructor param is the front-of-house path, confined by
+        # workplace below instead of a lead binding.
+        staff_confine_needed = False
         if not actor_holds_operator(op.actor):
             instr_key = optional_string(p, "instructor")
-            if instr_key == None:
-                fail("AuthDenied: " + op.actor + " may not record attendance on " + book_key + " (no instructor supplied)")
-            _, instr_id = parts_of(instr_key, "instructor", "instructor")
-            _, actor_id = parts_of(op.actor, "actor", "identity")
-            # The caller's own binding answers first. It is keyed on op.actor, so
-            # it can only ever say "am I this instructor?" — whereas the ledBy
-            # check below answers about the SESSION, and every bound instructor in
-            # the deployment holds this grant. Ahead of the binding, one
-            # instructor could walk a studio's published schedule against a
-            # stranger's class and read off who leads it, by which of the two
-            # denials came back.
-            # read-posture: (d) declared optionalReads by SetBookingAttendance's dispatcher.
-            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
-            if bound == None or bound.isDeleted:
-                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
-            # read-posture: (d) declared optionalReads by SetBookingAttendance's
-            # dispatcher for the instructor-standing path (absence is a
-            # meaningful AuthDenied, not a correctness error).
-            led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
-            if led_by == None or led_by.isDeleted:
-                fail("AuthDenied: " + instr_key + " does not lead session " + session)
+            if instr_key != None:
+                _, instr_id = parts_of(instr_key, "instructor", "instructor")
+                _, actor_id = parts_of(op.actor, "actor", "identity")
+                # The caller's own binding answers first. It is keyed on op.actor, so
+                # it can only ever say "am I this instructor?" — whereas the ledBy
+                # check below answers about the SESSION, and every bound instructor in
+                # the deployment holds this grant. Ahead of the binding, one
+                # instructor could walk a studio's published schedule against a
+                # stranger's class and read off who leads it, by which of the two
+                # denials came back.
+                # read-posture: (d) declared optionalReads by SetBookingAttendance's dispatcher.
+                bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+                if bound == None or bound.isDeleted:
+                    fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
+                # read-posture: (d) declared optionalReads by SetBookingAttendance's
+                # dispatcher for the instructor-standing path (absence is a
+                # meaningful AuthDenied, not a correctness error).
+                led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
+                if led_by == None or led_by.isDeleted:
+                    fail("AuthDenied: " + instr_key + " does not lead session " + session)
+            else:
+                staff_confine_needed = True
 
-        # Ordered after the binder: this answers differently for THIS booking's
-        # session than any other, so ahead of the guard it would tell any caller
-        # holding the grant which class a stranger's booking is for.
+        # Ordered after the instructor binder: that answers differently for
+        # THIS booking's session than any other, so ahead of the guard it
+        # would tell any caller holding the grant which class a stranger's
+        # booking is for. The front-of-house workplace check is ordered
+        # AFTER this instead (below), mirroring CancelBooking: confining on
+        # the caller-supplied session before it is proven to be THIS
+        # booking's actual session would let a staffer name a session at
+        # their own building to probe a stranger's booking.
         require_matching_session(book_id, session)
+
+        if staff_confine_needed:
+            # Front-of-house confinement, the same session -atStudio->
+            # studio -locatedAt-> location walk CancelBooking uses.
+            # workplace-exempt: (no-validated-path) SetBookingAttendance
+            # grants no scope=self row and mints no task, so
+            # op.authTargetValidated is never legitimately true here — this
+            # always falls through to the worksAt walk.
+            require_workplace(session_locations(session), "cannot record attendance on " + session)
 
         # read-posture: (a) declared reads at SetBookingAttendance dispatch —
         # attendance is only meaningful once the class has begun, the mirror of
