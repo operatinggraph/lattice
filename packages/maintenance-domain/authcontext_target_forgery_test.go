@@ -19,6 +19,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	maintenancedomain "github.com/operatinggraph/lattice/packages/maintenance-domain"
 )
 
 // mdSubmitResolveForged submits ResolveWorkOrder with a caller-chosen
@@ -37,7 +38,7 @@ func mdSubmitResolveForged(t *testing.T, ctx context.Context, conn *substrate.Co
 		SubmittedAt:   "2026-07-21T11:30:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ResolveWorkOrder", actorKey, maintenancedomain.OpMetas()),
 			Reads:         []string{workOrderKey},
 			OptionalReads: []string{workOrderKey + ".resolution"},
 		},
@@ -141,7 +142,7 @@ func TestResolveWorkOrder_TaskGrantCannotSubstituteAnotherWorkOrder(t *testing.T
 		SubmittedAt:   "2026-07-21T11:30:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ResolveWorkOrder", mdTechKey, maintenancedomain.OpMetas()),
 			Reads:         []string{woBKey},
 			OptionalReads: []string{woBKey + ".resolution"},
 		},
@@ -200,7 +201,7 @@ func TestReportIssue_ForgedTargetStaysConfined(t *testing.T) {
 		SubmittedAt:   "2026-07-21T09:00:00Z",
 		Class:         "workOrder",
 		Payload:       json.RawMessage(b),
-		ContextHint:   &processor.ContextHint{Reads: []string{mdBuildingBKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReportIssue", mdTechKey, maintenancedomain.OpMetas()), Reads: []string{mdBuildingBKey}},
 		AuthContext:   &processor.AuthContext{Target: mdBuildingBKey},
 	}
 	testutil.PublishOp(t, conn, env)

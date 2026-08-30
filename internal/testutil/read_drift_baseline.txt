@@ -128,7 +128,6 @@ read	VoidCharge	vtx.leaseapp.<id>
 
 # walk rows: per operationType, the kv.Links enumerations no contextHint declares.
 #
-walk	AssignUnitOwner	vtx.identity.<id> holdsRole out
 walk	BackfillAppointmentSite	vtx.appointment.<id> atSite out
 walk	BackfillAppointmentSite	vtx.appointment.<id> withProvider out
 walk	BackfillAppointmentSite	vtx.provider.<id> practicesAt out
@@ -137,7 +136,6 @@ walk	BackfillVisitSeriesSite	vtx.visitseries.<id> atSite out
 walk	BackfillVisitSeriesSite	vtx.visitseries.<id> withProvider out
 walk	CancelBooking	vtx.booking.<id> settlesClassPrice in
 walk	CancelBooking	vtx.building.<id> containedIn out
-walk	CancelBooking	vtx.identity.<id> holdsRole out
 walk	CancelBooking	vtx.session.<id> atStudio out
 walk	CancelBooking	vtx.session.<id> forSession in
 walk	CancelBooking	vtx.studio.<id> locatedAt out
@@ -153,7 +151,6 @@ walk	CreateAppointment	vtx.building.<id> containedIn out
 walk	CreateAppointment	vtx.leaseapp.<id> applicationFor out
 walk	CreateAppointment	vtx.provider.<id> practicesAt out
 walk	CreateBooking	vtx.building.<id> containedIn out
-walk	CreateBooking	vtx.identity.<id> holdsRole out
 walk	CreateBooking	vtx.session.<id> atLocation out
 walk	CreateBooking	vtx.session.<id> atStudio out
 walk	CreateBooking	vtx.studio.<id> locatedAt out
@@ -162,12 +159,9 @@ walk	CreateLeaseDocInstance	vtx.leaseapp.<id> appliesToUnit out
 walk	CreateLeaseDocInstance	vtx.unit.<id> manages in
 walk	CreateMenuItem	vtx.building.<id> containedIn out
 walk	CreateSession	vtx.building.<id> containedIn out
-walk	CreateSession	vtx.identity.<id> holdsRole out
 walk	CreateSession	vtx.studio.<id> locatedAt out
-walk	CreateSessionSeries	vtx.identity.<id> holdsRole out
 walk	CreateSessionSeries	vtx.studio.<id> locatedAt out
 walk	CreateStudio	vtx.building.<id> containedIn out
-walk	CreateStudio	vtx.identity.<id> holdsRole out
 walk	CreateStudio	vtx.unit.<id> containedIn out
 walk	CreditAccount	vtx.account.<id> heldFor out
 walk	CreditAccount	vtx.account.<id> postedTo in
@@ -178,15 +172,12 @@ walk	CreditCafeAccount	vtx.floor.<id> containedIn out
 walk	CreditCafeAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	CreditCafeAccount	vtx.unit.<id> containedIn out
 walk	DecideLeaseApplication	vtx.building.<id> containedIn out
-walk	DecideLeaseApplication	vtx.identity.<id> holdsRole out
 walk	DecideLeaseApplication	vtx.leaseapp.<id> appliesToUnit out
 walk	DecideLeaseApplication	vtx.unit.<id> containedIn out
 walk	EndVisitSeries	vtx.building.<id> containedIn out
 walk	EndVisitSeries	vtx.provider.<id> practicesAt out
 walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
-walk	JoinWaitlist	vtx.identity.<id> holdsRole out
 walk	LoftspaceCreateAccount	vtx.building.<id> containedIn out
-walk	LoftspaceCreateAccount	vtx.identity.<id> holdsRole out
 walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out
 walk	MarkPastDueNoShow	vtx.appointment.<id> forPatient out
@@ -197,19 +188,13 @@ walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
 walk	PauseVisitSeries	vtx.provider.<id> practicesAt out
 walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
-walk	ReassignSession	vtx.identity.<id> holdsRole out
 walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
-walk	RecordIdentityPII	vtx.identity.<id> holdsRole out
-walk	RecordServiceOutcome	vtx.identity.<id> holdsRole out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
-walk	RemoveUnitOwner	vtx.identity.<id> holdsRole out
 walk	ReportIssue	vtx.building.<id> containedIn out
-walk	ReportIssue	vtx.identity.<id> holdsRole out
 walk	ReportIssue	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.building.<id> containedIn out
-walk	ResolveWorkOrder	vtx.identity.<id> holdsRole out
 walk	ResolveWorkOrder	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.workorder.<id> locatedAt out
 walk	ResumeVisitSeries	vtx.provider.<id> practicesAt out
@@ -223,11 +208,8 @@ walk	SetAppointmentSite	vtx.provider.<id> practicesAt out
 walk	SetAppointmentStatus	vtx.appointment.<id> atSite out
 walk	SetAppointmentStatus	vtx.appointment.<id> withProvider out
 walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
-walk	SetBookingAttendance	vtx.identity.<id> holdsRole out
-walk	SetInstructorProfile	vtx.identity.<id> holdsRole out
 walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	SetRenewalTerms	vtx.renewal.<id> renews out
-walk	SetServiceProviderProfile	vtx.identity.<id> holdsRole out
 walk	SetVisitSeriesSite	vtx.building.<id> containedIn out
 walk	SetVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out
@@ -237,7 +219,6 @@ walk	SettleStaleTab	vtx.tab.<id> chargedTo out
 walk	SignLease	vtx.leaseapp.<id> appliesToUnit out
 walk	StartVisitSeries	vtx.building.<id> containedIn out
 walk	StartVisitSeries	vtx.provider.<id> practicesAt out
-walk	TombstoneSession	vtx.identity.<id> holdsRole out
 walk	TombstoneSession	vtx.session.<id> ledBy out
 walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out
 walk	VerifyGuarantor	vtx.renewal.<id> renews out

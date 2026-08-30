@@ -25,6 +25,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 const (
@@ -105,7 +106,7 @@ func wcCreateStudioAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "studio",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: reads},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateStudio", actorKey, wellnessdomain.OpMetas()), Reads: reads},
 	}
 	testutil.PublishOp(t, conn, env)
 	return "vtx.studio." + nanoIDFromRequestID(reqID), testutil.DriveOne(t, ctx, cp, cons, "")
@@ -134,7 +135,7 @@ func wcCreateBookingAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
 			OptionalReads: optionalReads,
 		},
@@ -167,7 +168,7 @@ func wcCreateBookingAsWithReason(t *testing.T, ctx context.Context, conn *substr
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
 			OptionalReads: optionalReads,
 		},
@@ -202,7 +203,7 @@ func wcCancelBookingAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
 			OptionalReads: []string{forSessionLnkKey(t, bookingKey, sessionKey)},
 		},
@@ -508,7 +509,7 @@ func wcSelfBooking(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Class:         "booking",
 		Payload:       payload,
 		AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", domainConsumerKey},
 			OptionalReads: optionalReads,
 		},
@@ -644,7 +645,7 @@ func wcCreateStudioAsWithReason(t *testing.T, ctx context.Context, conn *substra
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "studio",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateStudio", actorKey, wellnessdomain.OpMetas()), Reads: []string{locationKey}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	failure := ""

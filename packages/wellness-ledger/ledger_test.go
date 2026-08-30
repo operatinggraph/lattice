@@ -378,6 +378,8 @@ func createStudio(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "studio",
 		Payload:       json.RawMessage(`{"name":"` + name + `"}`),
+
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateStudio", ledgerActorKey, wellnessdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -397,7 +399,7 @@ func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		Class:         "session",
 		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Vinyasa Flow","startsAt":"` + startsAt +
 			`","endsAt":"` + endsAt + `","capacity":10}`),
-		ContextHint: &processor.ContextHint{Reads: []string{studioKey}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", ledgerActorKey, wellnessdomain.OpMetas()), Reads: []string{studioKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -438,7 +440,7 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-06-25T13:00:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"session":"` + sessionKey + `","booker":"` + bookerKey + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", ledgerActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
 			OptionalReads: optionalReads,
 		},

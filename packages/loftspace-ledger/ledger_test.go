@@ -166,7 +166,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("LoftspaceCreateAccount", ledgerActorKey, loftspaceledger.OpMetas()), Reads: []string{leaseAppKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -223,7 +223,7 @@ func TestLoftspaceCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, guardKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("LoftspaceCreateAccount", ledgerActorKey, loftspaceledger.OpMetas()), Reads: []string{leaseKey, guardKey}},
 	}
 	testutil.PublishOp(t, conn, dup)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -243,7 +243,7 @@ func TestLoftspaceCreateAccount_UnknownLease(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"vtx.leaseapp.BBABSENTLEASEHJKMNPQ"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.leaseapp.BBABSENTLEASEHJKMNPQ"}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("LoftspaceCreateAccount", ledgerActorKey, loftspaceledger.OpMetas()), Reads: []string{"vtx.leaseapp.BBABSENTLEASEHJKMNPQ"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)

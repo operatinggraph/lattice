@@ -93,6 +93,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// the read-before-write terminal marker. Declaring it required
 				// would fault the op on the key that is correctly missing.
 				OptionalReads: []string{"{payload.workOrderKey}.resolution"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -134,6 +140,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// nowhere has nowhere to report an issue at.
 				ContextParams: map[string]string{"location": "{me.workplace}"},
 				Reads:         []string{"{payload.location}"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 	}

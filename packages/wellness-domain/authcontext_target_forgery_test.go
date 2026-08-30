@@ -21,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 const (
@@ -74,7 +75,7 @@ func wfCreateSessionAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "session",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
 		},

@@ -20,6 +20,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 const (
@@ -112,10 +113,29 @@ func loOwnershipAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 				manageLinkKey(landlordKey, unitKey),
 				"lnk.identity." + actorID + ".manages.unit." + unitID,
 			},
+			Enumerations: loOwnershipEnumerations(opType, actorKey),
 		},
 		AuthContext: &processor.AuthContext{Target: target, Task: task},
 	}
 	return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+}
+
+// loOwnershipEnumerations names the actor-role confinement walk both ownership
+// ops run (ownership.go's actor_holds_operator), from the channel each one has.
+//
+// The RemoveUnitOwner arm is keyed on the OP, never on "the resolve came back
+// empty". Keyed on emptiness, deleting AssignUnitOwner's own
+// Dispatch.Enumerations would silently fall through to the hardcoded hint and
+// leave every submission green with its baseline row already retired — the
+// exact failure DeclaredEnumerations exists to make impossible. Only the op
+// that genuinely has no OpMetaSpec to resolve from (opmetas.go states why: no
+// cmd/*-app renders it) declares through its hand-built envelope, which is
+// itself a sanctioned declaring channel.
+func loOwnershipEnumerations(opType, actorKey string) []processor.EnumerationHint {
+	if opType == "RemoveUnitOwner" {
+		return []processor.EnumerationHint{{Hub: actorKey, Relation: "holdsRole", Direction: "out"}}
+	}
+	return testutil.DeclaredEnumerations(opType, actorKey, loftspacedomain.OpMetas())
 }
 
 // loSeedLandlord seeds a signed-in identity holding `consumer` plus its cap doc.

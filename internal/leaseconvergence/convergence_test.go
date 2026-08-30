@@ -10,6 +10,9 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
+	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 )
 
 // gapColumns are the §10.2 gap bools the steady-state assertion pins false: the
@@ -30,7 +33,8 @@ func (h *harness) driveApplicantSteps(appKey, applicantKey string) {
 		"identityKey": applicantKey,
 		"ssn":         "123456789",
 		"dob":         "1990-01-01",
-	}, &processor.ContextHint{Reads: []string{applicantKey}})
+	}, &processor.ContextHint{Reads: []string{applicantKey},
+		Enumerations: testutil.DeclaredEnumerations("RecordIdentityPII", bootstrap.BootstrapIdentityKey, identitydomain.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, piiReply.Status, "RecordIdentityPII: %+v", piiReply.Error)
 
 	signReply := h.submitOp("SignLease", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
@@ -59,7 +63,8 @@ func (h *harness) decideLandlord(appKey, decision string) {
 		reads = append(reads, h.lastUnitKey)
 	}
 	reply := h.submitOp("DecideLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, payload,
-		&processor.ContextHint{Reads: reads})
+		&processor.ContextHint{Reads: reads,
+			Enumerations: testutil.DeclaredEnumerations("DecideLeaseApplication", bootstrap.BootstrapIdentityKey, leasesigning.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, reply.Status, "DecideLeaseApplication(%s): %+v", decision, reply.Error)
 }
 

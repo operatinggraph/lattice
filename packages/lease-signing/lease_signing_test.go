@@ -1854,6 +1854,8 @@ func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
 // ignores.
 func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
+	hint := decideReadsFor(leaseAppKey, unit)
+	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", lsActorKey, leasesigning.OpMetas())
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -1862,7 +1864,7 @@ func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *process
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","decision":"` + decision + `"}`),
-		ContextHint:   decideReadsFor(leaseAppKey, unit),
+		ContextHint:   hint,
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
@@ -1958,6 +1960,8 @@ func TestDecideLeaseApplication(t *testing.T) {
 func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, reason, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason})
+	hint := decideReadsFor(leaseAppKey, unit)
+	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", lsActorKey, leasesigning.OpMetas())
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -1966,7 +1970,7 @@ func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   decideReadsFor(leaseAppKey, unit),
+		ContextHint:   hint,
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)

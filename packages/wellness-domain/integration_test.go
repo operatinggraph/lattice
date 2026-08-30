@@ -226,6 +226,8 @@ func createStudio(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "studio",
 		Payload:       json.RawMessage(`{"name":"` + name + `"}`),
+
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateStudio", domainActorKey, wellnessdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -313,7 +315,7 @@ func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "session",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
 		},
@@ -345,7 +347,7 @@ func createSessionPriced(t *testing.T, ctx context.Context, conn *substrate.Conn
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "session",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
 		},
@@ -394,7 +396,7 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -433,7 +435,7 @@ func joinWaitlist(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("JoinWaitlist", domainActorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -468,7 +470,7 @@ func attendanceEnv(t *testing.T, label, bookingKey, sessionKey, status, instruct
 		SubmittedAt:   submittedAt,
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("SetBookingAttendance", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
 			OptionalReads: optionalReads,
 		},
@@ -530,7 +532,7 @@ func TestSetBookingAttendance_CarriesFieldsForwardThenBlocksCancel(t *testing.T)
 		SubmittedAt:   "2026-07-08T09:40:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
@@ -654,7 +656,7 @@ func TestSetBookingAttendance_NoShowFeeCents(t *testing.T) {
 			SubmittedAt:   submittedAt,
 			Class:         "booking",
 			Payload:       payload,
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("SetBookingAttendance", domainActorKey, wellnessdomain.OpMetas()),
 				Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
 				OptionalReads: []string{"lnk.booking." + bookID + ".forSession.session." + sessID},
 			},
@@ -793,7 +795,7 @@ func TestSetBookingAttendance_InstructorConfinedToTheirOwnClass(t *testing.T) {
 			Class:         "session",
 			Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Class","instructor":"` + instructorKey +
 				`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `","capacity":4}`),
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 				Reads:         []string{studioKey, instructorKey},
 				OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
 			},
@@ -943,7 +945,7 @@ func TestCreateSession_DeriveReadsClaimsCellsWithNoClientDeclaration(t *testing.
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "session",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{studioKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -983,7 +985,7 @@ func TestCreateSession_DeriveReadsCatchesStudioDoubleBookWithNoClientDeclaration
 			SubmittedAt:   "2026-07-07T12:00:00Z",
 			Class:         "session",
 			Payload:       payload,
-			ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+			ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{studioKey}},
 		}
 		testutil.PublishOp(t, conn, env)
 		return testutil.DriveOne(t, ctx, cp, cons, "")
@@ -1019,7 +1021,7 @@ func TestCreateSessionSeries_DeriveReadsClaimsCellsForEveryOccurrence(t *testing
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "sessionseries",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{studioKey}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSessionSeries", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{studioKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -1258,7 +1260,7 @@ func TestCancelBooking_ReleasesSeatForNextClaimant(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
@@ -1343,7 +1345,7 @@ func TestCreateBooking_RejectsPastSession(t *testing.T) {
 		SubmittedAt:   "2026-07-08T10:00:00Z", // after the 09:00 start
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()),
 			Reads: []string{sessionKey, sessionKey + ".schedule", lateBookerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+lateBookerID),
 				wdSlotClaimKeys(t, lateBookerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -1389,7 +1391,7 @@ func TestCancelBooking_ReleasesGuardForRebook(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
@@ -1421,7 +1423,7 @@ func TestTombstoneSession_ReleasesStudioSlotCells(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			sessionKey, sessionKey + ".schedule",
 			atStudioLnkKey(t, sessionKey, studioKey),
 		}},
@@ -1540,7 +1542,7 @@ func reassignSessionEnv(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   submittedAt,
 		Class:         "session",
 		Payload:       payloadBytes,
-		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", actorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
 	}
 }
 
@@ -1580,7 +1582,7 @@ func TestReassignSession_SwapsInstructor(t *testing.T) {
 		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
 		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Vinyasa Flow","instructor":"` + instructorA +
 			`","startsAt":"2026-07-08T09:00:00Z","endsAt":"2026-07-08T09:30:00Z","capacity":20}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey, instructorA},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
 		},
@@ -1711,7 +1713,7 @@ func TestReassignSession_NonOperatorCannotMoveStudio(t *testing.T) {
 		RequestID: testutil.GenReqID("wdrsdnymove0000001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: staffActorKey, SubmittedAt: "2026-07-08T08:00:00Z", Class: "session",
 		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioA + `","newStudio":"` + studioB + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", staffActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", studioB},
 			OptionalReads: append([]string{atStudioLnkKey(t, sessionKey, studioA)}, wdSlotClaimKeys(t, studioB, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
 		},
@@ -1733,7 +1735,7 @@ func TestReassignSession_NonOperatorCannotMoveStudio(t *testing.T) {
 		RequestID: testutil.GenReqID("wdrsdnyrepair00001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: staffActorKey, SubmittedAt: "2026-07-08T08:01:00Z", Class: "session",
 		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","newStudio":"` + studioB + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", staffActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", studioB},
 			OptionalReads: wdSlotClaimKeys(t, studioB, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
 		},
@@ -1785,7 +1787,7 @@ func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T
 		RequestID: testutil.GenReqID("wdrsfxrepair0000001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:05:00Z", Class: "session",
 		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","newStudio":"` + liveStudio + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads: []string{sessionKey, sessionKey + ".schedule", liveStudio},
 			// session_atstudio_link's own walk-returned link (the CURRENT,
 			// tombstoned studio — known here since the session was created
@@ -1814,7 +1816,7 @@ func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T
 		RequestID: testutil.GenReqID("wdrsfxbadargs00001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:10:00Z", Class: "session",
 		Payload:     json.RawMessage(`{"sessionKey":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule"}},
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{sessionKey, sessionKey + ".schedule"}},
 	}
 	outcome3, reply3 := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, badEnv)
 	if outcome3 != processor.OutcomeRejected {
@@ -1892,7 +1894,7 @@ func TestReassignSession_ClearsInstructorWithNoReplacement(t *testing.T) {
 		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
 		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Vinyasa Flow","instructor":"` + instructorA +
 			`","startsAt":"2026-07-08T09:00:00Z","endsAt":"2026-07-08T09:30:00Z","capacity":20}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey, instructorA},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
 		},
@@ -2162,7 +2164,7 @@ func TestReassignSession_InstructorConfinedToTheirOwnClass(t *testing.T) {
 			Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
 			Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Class","instructor":"` + instructorKey +
 				`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `","capacity":4}`),
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 				Reads:         []string{studioKey, instructorKey},
 				OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
 			},
@@ -2230,7 +2232,7 @@ func TestReleaseOrphanedBooking_ReleasesSeatAndGuardAfterSessionTombstoned(t *te
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			sessionKey, sessionKey + ".schedule",
 			atStudioLnkKey(t, sessionKey, studioKey),
 		}},
@@ -2339,7 +2341,7 @@ func TestCreateBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 			Reads: []string{sessionKey, sessionKey + ".schedule", domainConsumerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+domainConsumerID),
 				wdSlotClaimKeys(t, domainConsumerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -2380,7 +2382,7 @@ func TestCreateBooking_ConsumerSelfScope_RejectedForOtherBooker(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 			Reads: []string{sessionKey, sessionKey + ".schedule", otherBookerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+otherBookerID),
 				wdSlotClaimKeys(t, otherBookerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -2422,7 +2424,7 @@ func TestCancelBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule", forSessionLnkKey(t, bookingKey, sessionKey)},
 			OptionalReads: []string{bookedByLnk},
 		},
@@ -2507,7 +2509,7 @@ func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T
 		Class:         "session",
 		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Private Class","instructor":"` + leaderKey +
 			`","startsAt":"2026-07-09T09:00:00Z","endsAt":"2026-07-09T09:30:00Z","capacity":4}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{studioKey, leaderKey},
 			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-09T09:00:00Z", "2026-07-09T09:30:00Z"),
 		},
@@ -2526,7 +2528,7 @@ func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T
 			SubmittedAt:   "2026-07-07T12:00:00Z",
 			Class:         "session",
 			Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + guessStudio + `"}`),
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", proberKey, wellnessdomain.OpMetas()),
 				Reads: []string{sessionKey, sessionKey + ".schedule"},
 				OptionalReads: []string{
 					"lnk.session." + sessionID + ".atStudio.studio." + guessStudio[len("vtx.studio."):],
@@ -2570,7 +2572,7 @@ func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T
 			SubmittedAt:   "2026-07-07T12:00:00Z",
 			Class:         "session",
 			Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `","instructor":"` + candidate + `"}`),
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", proberKey, wellnessdomain.OpMetas()),
 				Reads: []string{sessionKey, sessionKey + ".schedule"},
 				OptionalReads: []string{
 					"lnk.session." + sessionID + ".ledBy.instructor." + candidateID,
@@ -2642,7 +2644,7 @@ func TestCancelBooking_ConsumerSelfScope_SessionProbeRevealsNothing(t *testing.T
 			// envelope takes: declared in Reads a miss faults at hydration before
 			// the script runs, so the submitter simply declares it optional and
 			// the in-script order becomes the only guard.
-			ContextHint: &processor.ContextHint{
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 				Reads: []string{bookingKey, bookingKey + ".status", guessKey + ".schedule"},
 				OptionalReads: []string{
 					"lnk.booking." + bookingID + ".forSession.session." + guessKey[len("vtx.session."):],
@@ -2708,7 +2710,7 @@ func TestCancelBooking_ConsumerSelfScope_RejectedForOthersBooking(t *testing.T) 
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainConsumerKey, wellnessdomain.OpMetas()),
 			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule", forSessionLnkKey(t, bookingKey, sessionKey)},
 			OptionalReads: []string{bookedByLnk},
 		},
@@ -2738,7 +2740,7 @@ func profileEnv(t *testing.T, label, instructorKey, displayName, actorKey string
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "instructor",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("SetInstructorProfile", actorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{instructorKey},
 			OptionalReads: []string{"lnk.instructor." + instrID + ".identifiedBy.identity." + actorID},
 		},
@@ -3050,7 +3052,7 @@ func TestCancelBooking_PromotesEarliestWaitlistedBooking(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingOneKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingOneKey, bookingOneKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingOneKey, sessionKey),
 		}},
@@ -3128,7 +3130,7 @@ func TestCancelBooking_WaitlistedBookerLeavesWaitlist(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + waitlistKey + `","session":"` + sessionKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			waitlistKey, waitlistKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, waitlistKey, sessionKey),
 		}},
@@ -3179,7 +3181,7 @@ func TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned(t *te
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			sessionKey, sessionKey + ".schedule",
 			atStudioLnkKey(t, sessionKey, studioKey),
 		}},
@@ -3254,7 +3256,7 @@ func createSessionWithInstructor(t *testing.T, ctx context.Context, conn *substr
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "session",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
 			Reads: []string{studioKey, instructorKey},
 			OptionalReads: append(
 				wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
@@ -3333,7 +3335,7 @@ func TestTombstoneSession_ReleasesInstructorSlotCells(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:10:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioA + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			sessionKey, sessionKey + ".schedule",
 			atStudioLnkKey(t, sessionKey, studioA),
 			"lnk.session." + sessionKey[len("vtx.session."):] + ".ledBy.instructor." + instructorID,
@@ -3464,7 +3466,7 @@ func TestCreateBooking_RejectsBookerAcrossOverlappingSessions(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()),
 			Reads:         []string{sessionB, sessionB + ".schedule", booker},
 			OptionalReads: append(wdSeatKeys(sessionB, 20), wdSlotClaimKeys(t, booker, "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z")...),
 		},
@@ -3513,7 +3515,7 @@ func TestCancelBooking_ReleasesBookerSlotCells(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:30:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionA + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
 			bookingKey, bookingKey + ".status", sessionA + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionA),
 		}},

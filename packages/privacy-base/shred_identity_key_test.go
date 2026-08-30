@@ -21,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	"github.com/operatinggraph/lattice/internal/vault"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 )
 
 const (
@@ -133,7 +134,7 @@ func recordPII(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-02T10:05:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey, identityKey + ".state"}},
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("RecordIdentityPII", pbStaffActorKey, identitydomain.OpMetas()), Reads: []string{identityKey, identityKey + ".state"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
