@@ -32,17 +32,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   conflating the label namespace with either one is wrong a third way). Minted: dynamic-type-taxonomy
   §17.9 — it both retired ratified check A3-1 and left the flip guard's divergent-type gap. Check: none
   yet (the board row's fix).
-- **A new field on a descriptor must be checked against every downstream REFUSAL keyed on that field, not
-  only against what consumes it.** Install validated the new `Dispatch.Enumerations` for shape and vocabulary
-  and stopped there, while `descriptor_floor.go` refuses *every* enumeration for the NFR-S6 equalized set —
-  a refusal whose written justification was that no descriptor could name one, which the new field
-  falsified. A declaration on `ClaimIdentity` would therefore install clean and take identity claiming down
-  completely and un-attributably, since NFR-S6 collapses the fault to a details-less `ClaimKeyInvalid` on
-  every redelivery. The general shape: adding a declarable field turns some downstream "unreachable by
-  construction" branch into a reachable one, and its comment is the thing that tells you it was unreachable.
-  Grep the new field's name and its wire spelling across refusal sites before shipping it. Minted: the
-  descriptor-declared-enumerations item, found independently by two cold reviews. Check:
-  `TestValidateOpDispatchTemplates_*NFRS6*` (install refuses it, with a non-member positive control).
 - **An injected dependency held in a nil-able field silently disables the gate it feeds** — the compiler
   enforces the interface and sees nothing at the injection site, so a fixture that builds the struct by hand
   runs the gate as a no-op and reports green on code the real entry point refuses. Minted:
@@ -56,6 +45,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `validateAll` carries at least one test that drives `def.validateAll()` — not the rule — over a fixture
   legal in all other respects, asserting wording only that member emits, so a short-circuit from an earlier
   validator cannot pass for it. `packagename_test.go` is the idiom.**
+  **Third sighting (the actor-role declaration sweep): a fixture that HARDCODES a value the descriptor also
+  declares is not a proof of the declaration — it agrees by coincidence.** Every test envelope restated
+  `{Hub: <actor>, Relation: "holdsRole", Direction: "out"}` by hand, so deleting an op's
+  `Dispatch.Enumerations` left the whole suite green with that op's drift-baseline row already retired —
+  the ratchet's coverage gone silently, which is the same "the rule is covered, the delivery is not" shape
+  one level out. Check (mandated test shape): a fixture asserting a declared value RESOLVES it from the
+  declaration (`testutil.DeclaredEnumerations`), never restates it; and the fallback for a surface that
+  genuinely has no declaration is keyed on THAT surface by name, never on "the resolve came back empty" —
+  an emptiness-keyed fallback silently re-absorbs the deletion it exists to expose.
 - **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
   granted" is NOT evidence the remedy works.** Two sightings. The cap refusal advised dropping the redundant
   concrete label, which clears exhaustiveness and trades the refusal for the exact silent regression the gate
@@ -173,16 +171,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   analyzed. Minted: grant-provenance §12 (un-tombstone prerequisite), caught by cold adversarial review.
   Check: none yet (key the guard on the anchor-type prefix, e.g. `metaVertexPrefix`, never on
   tombstone-state alone).
-- **A check whose DECLARED side is read from the same store the writer controls is an echo, not a check** —
-  the permission reconciler compared live `vtx.permission.*` against each package's `declaredKeys`, and both
-  halves are Core KV written by one actor in one operation, so an attacker-authored manifest declaring an
-  attacker-authored permission reconciled perfectly clean while reading as a security gate. The tell is that
-  no input to the comparison comes from outside the system under audit. Minted: the live-vs-declared
-  permission reconciler, cold security review (2026-08-23). Check: anchor the declared side in something the
-  writer cannot author — for a package that is `internal/pkgregistry`'s compiled `Definition` (note it cannot
-  be imported from `internal/pkgmgr`: every `packages/*` imports pkgmgr, so the anchor lives in the calling
-  script) — and where no anchor exists, say so as a named residual at the point the code drops the data,
-  never as a silent narrowing behind a passing gate.
 - **One fact computed twice, owned by nobody, is a divergence waiting to be exploited — and one helper
   answering two different questions is the same defect** — `patternVarNames` served both the accumulator
   check (which must see every name a clause RESOLVES) and the cross-walk disjointness rule (which must see
@@ -194,17 +182,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   only by cold review (2026-08-23). Check: for each shared helper name the question each caller asks and
   split them if the answers differ; for each boundary computed in two places, delete one and make the other
   the single source.
-- **A provenance stamp the audited party writes is a label, not evidence — so the classes keyed on it must
-  not be where the semantic check lives** — the grant-edge reconciler classified `origin` into five classes
-  and ran its derivation check ("an edge may only grant a permission its declaring package owns") in the
-  `package` arm alone. `origin` is client-supplied at every authoring channel, so a forger picks their own
-  class: stamping `{"origin":"runtime"}` landed a live edge conferring the kernel's `InstallPackage`
-  permission on an arbitrary role in an inventory NOTICE, invisible to the gate. The design had reasoned
-  that omitting the field was the cheapest laundering; adding one was cheaper. Minted: grant-edge
-  provenance, cold security review (2026-08-25). Check: for every class a self-asserted field selects, ask
-  what is still verified when the attacker picks that class — and anchor at least one predicate on something
-  the writer does not control (here: a kernel permission has exactly one legitimate grant edge, so any other
-  edge onto it is drift whatever it claims).
 - **A reconciler reading its two sides at different moments reports a state that never existed** — the
   permission gate takes six sequential unfenced reads; a package uninstall commits the manifest tombstone and
   the declared-key tombstones atomically, but a read landing between them sees live package-origin edges and
