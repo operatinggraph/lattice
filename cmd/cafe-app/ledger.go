@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -82,6 +83,29 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 		}
 	}
 	return rows, balance
+}
+
+// rawGetter reads one bucket entry's raw bytes for a key, erroring on a real
+// fetch failure (distinct from kvGetter's bool, which conflates "no such
+// row" with "the read failed").
+type rawGetter func(key string) ([]byte, error)
+
+// readAllOrFail fetches every listed key via get, failing on the first
+// error instead of silently treating a fetch failure as "no such row." A
+// key just came back from a KVListKeys call on the same bucket, so a
+// KVGet error on it is a real projection/network fault, not evidence the
+// row doesn't exist — letting it fall through as absent is what silently
+// dropped ledger lines and produced a wrong balance.
+func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
+	values := make(map[string][]byte, len(keys))
+	for _, k := range keys {
+		v, err := get(k)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", k, err)
+		}
+		values[k] = v
+	}
+	return values, nil
 }
 
 // deriveStatement turns a chronologically-sorted ledger into a due date and
@@ -192,7 +216,20 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 			"list "+acctBucket+": "+err.Error()+" (is cafe-ledger installed and the Refractor projecting?)")
 		return
 	}
-	accountKey := resolveLeaseAccount(acctKeys, s.kvGetter(ctx, acctBucket), leaseAppKey)
+	acctValues, err := readAllOrFail(acctKeys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, acctBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read lease accounts for ledger", "bucket", acctBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+acctBucket+" incomplete: "+err.Error())
+		return
+	}
+	acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
+	accountKey := resolveLeaseAccount(acctKeys, acctGet, leaseAppKey)
 
 	bucket := cafeledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -201,7 +238,20 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 			"list "+bucket+": "+err.Error()+" (is cafe-ledger installed and the Refractor projecting?)")
 		return
 	}
-	rows, balance := computeLedgerHistory(keys, s.kvGetter(ctx, bucket), leaseAppKey)
+	ledgerValues, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read ledger history", "bucket", bucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+bucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
+	rows, balance := computeLedgerHistory(keys, get, leaseAppKey)
 	dueDate, isOverdue, daysOverdue := deriveStatement(rows, balance, time.Now().UTC())
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"leaseAppKey":  leaseAppKey,

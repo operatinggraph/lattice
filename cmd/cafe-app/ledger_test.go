@@ -1,9 +1,38 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
+
+// TestReadAllOrFail_FailsLoudOnAnyFetchError proves a KVGet failure on a
+// listed key aborts the whole read instead of silently vanishing the row —
+// the bug that let a transient fetch failure produce a wrong balance.
+func TestReadAllOrFail_FailsLoudOnAnyFetchError(t *testing.T) {
+	boom := errors.New("boom")
+	_, err := readAllOrFail([]string{"vtx.cafetransaction.1", "vtx.cafetransaction.2"}, func(key string) ([]byte, error) {
+		if key == "vtx.cafetransaction.2" {
+			return nil, boom
+		}
+		return []byte(`{}`), nil
+	})
+	if err == nil {
+		t.Fatal("want an error when one of two listed keys fails to fetch, got nil")
+	}
+}
+
+func TestReadAllOrFail_AllValuesOnSuccess(t *testing.T) {
+	values, err := readAllOrFail([]string{"a", "b"}, func(key string) ([]byte, error) {
+		return []byte(key), nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(values["a"]) != "a" || string(values["b"]) != "b" {
+		t.Errorf("values = %+v, want each key's own bytes", values)
+	}
+}
 
 func TestComputeLedgerHistory_FiltersSumsAndOrders(t *testing.T) {
 	keys, get := fakeKV(map[string]any{

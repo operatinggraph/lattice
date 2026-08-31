@@ -2,12 +2,41 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
+
+// TestReadAllOrFail_FailsLoudOnAnyFetchError proves a KVGet failure on a
+// listed key aborts the whole read instead of silently vanishing the row —
+// the bug that let a transient fetch failure produce a wrong balance.
+func TestReadAllOrFail_FailsLoudOnAnyFetchError(t *testing.T) {
+	boom := errors.New("boom")
+	_, err := readAllOrFail([]string{"vtx.wellnesstransaction.1", "vtx.wellnesstransaction.2"}, func(key string) ([]byte, error) {
+		if key == "vtx.wellnesstransaction.2" {
+			return nil, boom
+		}
+		return []byte(`{}`), nil
+	})
+	if err == nil {
+		t.Fatal("want an error when one of two listed keys fails to fetch, got nil")
+	}
+}
+
+func TestReadAllOrFail_AllValuesOnSuccess(t *testing.T) {
+	values, err := readAllOrFail([]string{"a", "b"}, func(key string) ([]byte, error) {
+		return []byte(key), nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(values["a"]) != "a" || string(values["b"]) != "b" {
+		t.Errorf("values = %+v, want each key's own bytes", values)
+	}
+}
 
 // seedLedgerAccount seeds one wellnessMemberAccounts row — keyed by the
 // identity itself (memberAccountsSpec, packages/wellness-ledger/lenses.go).
