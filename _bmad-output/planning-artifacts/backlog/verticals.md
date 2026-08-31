@@ -29,6 +29,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **The landlord's only renewal action fails 9 times in 12** | `SetRenewalTerms` returns `ScriptTimeout: wall budget 250ms` on 9 of 12 paced live submits (café's is 9/20). Its landlord-authority walk is 2 `kv.Links` + a per-candidate `kv.Read` over renewal→leaseapp→unit→`manages` ([renewal_scripts.go:195](../../../packages/lease-signing/renewal_scripts.go:195)) — not a confinement walk. | LoftSpace | platform | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) confinement-walk wall row — widen it past `worksAt_covers` |
 | **The front desk cannot book, cancel or re-status a single appointment** | 0 of 20 live staff `CreateAppointment` / `SetAppointmentStatus` submits returned `ScriptTimeout: wall budget 250ms`, while the same patient self-books 4/6 and staff `ClinicDebitAccount` is 4/4 — `workplace_exempt()` ([ddls.go:2053](../../../packages/clinic-domain/ddls.go:2053)) skips the walk for the self path only. Café's is 9/20. | Clinic | platform | ★★★ | S–M | 🚧 blocked-on: [lattice.md](lattice.md) confinement-walk batched-read row |
 | **6 standing $25 auto-no-show charges on Riley Chen still await a waiver** | The no-show-fee code fix is shipped and live; what's left is a live `ClinicCreditAccount reason:"waiver"` write, not code. | Clinic | pkg | ★ | XS | 🚧 blocked-on: Andrew/interactive session — live-financial-write policy hold, not a credentials gap |
+| **The front desk's badges and rent/term lines go blank rather than say it cannot read** | All three handlers in [frontdesk.go](../../../cmd/cafe-app/frontdesk.go:78) turn a KV-list failure on their own lens bucket into `200 {…:[]}` — the only three list sites across the four apps that do not 502. Live: one staffer, one minute, `frontdesk-visits` 6 rows while `frontdesk-bookings` answered `200 rows=0` over a 43-row bucket. | Café | FE | ★★ | S | 📋 ready · same fix shape as the ledger reads `c791574b`/`aa29c41e` — 502 unless the error is bucket-not-found |
+| **The overdue banner exists only in the overdue resident's own browser** | `deriveStatement` ([ledger.go:119](../../../cmd/cafe-app/ledger.go:119)) is derived at render and read by the resident panel alone: no lens projects it, the front-desk grid carries no balance, `OpenTab` has no overdue predicate and no weaverTarget reminds anyone. | Café | pkg + FE | ★★ | M | 📋 ready · follow-on to the due-date fire `abd881cf` |
+| **The POS menu offers every item twice** | Menu coverage is hierarchical, so a building-level item and a unit-level one both cover a unit lease and the picker renders "Croissant — $3.50" twice with nothing to tell them apart. Live on `vtx.leaseapp.pcC8hPQNpaxUnWAeEA63`: 4 options, 2 real items. | Café | pkg + FE | ★★ | S | 📋 ready · resolve to the most specific covering item, or disclose `servedAt` in the option |
 | **A submitted application is invisible to applicant AND landlord, and the app calls the projection healthy** | A live `CreateLeaseApplication` committed 12:54Z was absent from `read_lease_applications` and `read_landlord_lease_applications` at 13:03Z; both endpoints answered `projectionHealthy: true`. False-healthy symptom fixed `d8cf4144`; the underlying zero-progress lens bug is not. | LoftSpace | FE + pkg | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) Postgres-lens zero-progress row |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -49,12 +52,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×28, Clinic ×27, Café ×17, Wellness ×14.
+- **Rotation to date:** LoftSpace ×28, Clinic ×27, Café ×18, Wellness ×14.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-27:** Wellness — drove member/instructor/staff hats live through book/roster/bill; $525 of no-show fees nobody asked for and nobody can waive, 29 classes nobody can check in; filed 2.
-- **2026-08-27:** LoftSpace — drove applicant + landlord hats live through browse/apply/sign/decide/renew; a closed task keeps its grant while an expired one keeps its inbox slot, 19 ruled-out applicants can still sign; filed 4.
-- **2026-08-27:** Clinic — drove patient, provider + front-desk hats live through schedule/document/series; the whole forward schedule is front-desk-invisible, 3 of 4 providers can't sign in, a patient can't read their own note; filed 3.
 - **2026-08-28:** Café — drove resident + two front-of-house hats live through menu/tab/charge/settle/ledger; every staff write ScriptTimeouts while the resident path converges clean; filed 3.
 - **2026-08-28:** Wellness — drove member/instructor/two staff hats live through schedule/book/roster/ledger; the auto no-show sweep still bills $25, 8 bookings never converge, one class remains; filed 3 + 1 platform.
 - **2026-08-28:** LoftSpace — drove applicant + landlord hats live through browse/apply/sign/decide/renew/statement; expired tasks read as live work, the one bill is 97 ungrouped lines, 33 of them quote an internal PO ruling; filed 3.
@@ -63,7 +63,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-29:** Wellness — drove member/instructor/two staff hats live through schedule/book/roster/ledger/bill; nobody at the desk can mark attendance and 25 of 25 bookings are no-shows; filed 3.
 - **2026-08-30:** LoftSpace — drove applicant + two landlord hats live through browse/apply/sign/decide/renew/bill; 4 of 8 signed leases never bill rent, a new application reaches neither party; filed 4 + 1 platform.
 - **2026-08-30:** Clinic — drove patient, provider + front-desk hats live through book/status/document/bill; the front desk can't book at all and the patient's bill loses lines; filed 3.
-- **Next:** Café.
+- **2026-08-30:** Café — drove frontOfHouse + resident hats through menu/tab/ledger/front-desk on a saturated stack; front-desk reads fail quiet, overdue is browser-only, menu doubles; filed 3.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
