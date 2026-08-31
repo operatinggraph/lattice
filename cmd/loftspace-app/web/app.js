@@ -1466,7 +1466,7 @@ function renderApplications() {
   if (state.applications.length === 0) {
     empty.hidden = false;
     empty.textContent = state.appsProjectionHealthy === false
-      ? "Application data is temporarily paused — this list may be incomplete. Try again shortly."
+      ? "Application data is temporarily behind — this list may be incomplete. Try again shortly."
       : "No applications yet. Browse a listing and apply to get started.";
     $("#apps-summary").textContent = "";
     return;
@@ -2416,7 +2416,7 @@ function renderRenewals() {
   if (state.renewals.length === 0) {
     empty.hidden = false;
     if (state.renewalsProjectionHealthy === false) {
-      empty.textContent = "Renewals data is temporarily paused — this list may be incomplete. Try again shortly.";
+      empty.textContent = "Renewals data is temporarily behind — this list may be incomplete. Try again shortly.";
     } else {
       empty.textContent = landlord
         ? "No renewal cycles yet for the units you manage."
@@ -3395,7 +3395,7 @@ async function loadLandlordRLS() {
     el.hidden = false;
     if (units.length === 0) {
       if (data.projectionHealthy === false) {
-        el.textContent = "🔒 RLS read boundary: the projection is temporarily paused — this scope may be incomplete.";
+        el.textContent = "🔒 RLS read boundary: the projection is temporarily behind — this scope may be incomplete.";
       } else {
         // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
         // empty (no oracle); state the scope, not a cause we cannot distinguish here.

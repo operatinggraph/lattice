@@ -3,6 +3,7 @@ package projectionhealth_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -78,5 +79,160 @@ func TestCheck_PausedRule(t *testing.T) {
 	}
 	if st.PauseReason != health.PauseReasonStructural {
 		t.Fatalf("PauseReason = %q, want %q", st.PauseReason, health.PauseReasonStructural)
+	}
+}
+
+func TestCheck_StalledLag(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = 50 * time.Millisecond
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "leaseApplicationsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	// Stamp an old lagProgressAt (older than the shrunk StallThreshold) with a
+	// nonzero lag — the backlog has stopped shrinking.
+	oldProgress := time.Now().Add(-time.Hour)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, time.Time{}, oldProgress, 0, time.Time{}))
+
+	st := projectionhealth.Check(context.Background(), conn, "leaseApplicationsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if st.Paused {
+		t.Fatalf("Paused = true, want false")
+	}
+	if !st.Stalled {
+		t.Fatalf("Stalled = false, want true")
+	}
+	if st.StallReason == "" {
+		t.Fatalf("StallReason = %q, want non-empty", st.StallReason)
+	}
+}
+
+func TestCheck_DrainingLagNotStalled(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = time.Hour
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "landlordLeaseApplicationsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	// A fresh lagProgressAt — lag is still actively draining.
+	freshProgress := time.Now()
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, time.Time{}, freshProgress, 0, time.Time{}))
+
+	st := projectionhealth.Check(context.Background(), conn, "landlordLeaseApplicationsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if st.Stalled {
+		t.Fatalf("Stalled = true for a fresh lagProgressAt, want false")
+	}
+}
+
+func TestCheck_ZeroLagNotStalled(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = 50 * time.Millisecond
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "clinicAppointmentsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	// Zero lag with an old lagProgressAt must never read as stalled — there is
+	// no outstanding backlog to be stuck.
+	oldProgress := time.Now().Add(-time.Hour)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 0, time.Time{}, oldProgress, 0, time.Time{}))
+
+	st := projectionhealth.Check(context.Background(), conn, "clinicAppointmentsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if st.Stalled {
+		t.Fatalf("Stalled = true for zero ConsumerLag, want false")
+	}
+}
+
+func TestCheck_PausedTakesPrecedenceOverStall(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = 50 * time.Millisecond
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "clinicAppointmentsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	oldProgress := time.Now().Add(-time.Hour)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, time.Time{}, oldProgress, 0, time.Time{}))
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, "some failure"))
+
+	st := projectionhealth.Check(context.Background(), conn, "clinicAppointmentsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if !st.Paused {
+		t.Fatalf("Paused = false, want true")
+	}
+	if st.Stalled {
+		t.Fatalf("Stalled = true for a paused rule, want false (paused takes precedence)")
+	}
+	if st.StallReason != "" {
+		t.Fatalf("StallReason = %q, want empty when paused", st.StallReason)
+	}
+}
+
+func TestCheck_StalledAckPending(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = 50 * time.Millisecond
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "clinicAppointmentsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	// Zero lag (drained) but a stuck ack floor with nonzero ack-pending — the
+	// consumer has been handed everything and cannot finish it.
+	oldFloorProgress := time.Now().Add(-time.Hour)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 0, time.Time{}, time.Time{}, 7, oldFloorProgress))
+
+	st := projectionhealth.Check(context.Background(), conn, "clinicAppointmentsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if !st.Stalled {
+		t.Fatalf("Stalled = false for a stuck nonzero AckPending, want true")
+	}
+	if st.StallReason == "" {
+		t.Fatalf("StallReason = %q, want non-empty", st.StallReason)
+	}
+}
+
+func TestCheck_FreshAckFloorNotStalled(t *testing.T) {
+	orig := projectionhealth.StallThreshold
+	projectionhealth.StallThreshold = time.Hour
+	defer func() { projectionhealth.StallThreshold = orig }()
+
+	conn := startConnWithHealthKV(t)
+	kv, err := conn.OpenKV(context.Background(), bootstrap.HealthKVBucket)
+	require.NoError(t, err)
+	r := health.New(kv, "clinicAppointmentsRead")
+	require.NoError(t, r.SetActive(context.Background()))
+	freshFloorProgress := time.Now()
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 0, time.Time{}, time.Time{}, 7, freshFloorProgress))
+
+	st := projectionhealth.Check(context.Background(), conn, "clinicAppointmentsRead")
+	if !st.Known {
+		t.Fatalf("Known = false, want true")
+	}
+	if st.Stalled {
+		t.Fatalf("Stalled = true for a fresh AckFloorProgressAt, want false")
 	}
 }

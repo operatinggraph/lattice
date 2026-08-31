@@ -2485,7 +2485,7 @@ function renderAppts() {
     empty.hidden = false;
     empty.textContent = state.apptsProjectionHealthy
       ? "No appointments yet. Book one on the Book tab."
-      : "Appointment data is temporarily paused — this list may be incomplete. Try again shortly.";
+      : "Appointment data is temporarily behind — this list may be incomplete. Try again shortly.";
     $("#appts-summary").textContent = "";
     return;
   }
@@ -2566,7 +2566,7 @@ function renderMySchedule() {
     empty.hidden = false;
     empty.textContent = state.mySchedProjectionHealthy
       ? "No appointments on your schedule yet."
-      : "Schedule data is temporarily paused — this list may be incomplete. Try again shortly.";
+      : "Schedule data is temporarily behind — this list may be incomplete. Try again shortly.";
     $("#myschedule-summary").textContent = "";
     return;
   }
@@ -3316,7 +3316,7 @@ function renderMySeries() {
     empty.hidden = false;
     empty.textContent = state.mySeriesProjectionHealthy
       ? "No recurring visit series for this patient yet."
-      : "Visit-series data is temporarily paused — this list may be incomplete. Try again shortly.";
+      : "Visit-series data is temporarily behind — this list may be incomplete. Try again shortly.";
     return;
   }
   empty.hidden = true;
