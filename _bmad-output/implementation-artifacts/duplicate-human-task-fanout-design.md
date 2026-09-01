@@ -409,6 +409,25 @@ cluster C (bootstrap-epoch wipe, not a defect), Inc 2 (`CancelTask` on the 3 liv
 an **operator action** on the running stack, do it after Inc 1 ships and the package refreshes live, not a
 code change).
 
+**Inc 1 shipped `a0b6264b`, live-verified.** `make refresh-loftspace` diff-applied the package and restarted
+`bin/loftspace-app`; the new `applicantOnboarding.gk12KRqMMVwjVwfxsb5c` row projects live in `weaver-targets`
+with `missing_onboarding: false` (this applicant's gate is currently closed) and `inflight_onboarding: true`.
+No code path can mint a second onboarding task for one applicant from here on.
+
+**Inc 2 — paused, not done.** Live census of the 8 `RecordIdentityPII` tasks scoped to
+`vtx.identity.gk12KRqMMVwjVwfxsb5c` reproduces §1's cluster A exactly: 4 cancelled 2026-07-20 (the retired
+op-meta `EUayYDxpPRZYZZhZEUay`), 4 still **open** (`zT4yXzMXqRJBLKTRCb8H`, `hmUYfcPJzxtQZEchLcv8`,
+`QQZvbYHQxg63nvU2VNjK`, `qN8tvKtc9on5ZvTohtvx`, all created within 206ms on 2026-07-26T08:38:08 under the live
+op-meta `QW5wujHcQVk7mRfiQW5w`). **New finding this census surfaces:** the identity itself reads
+`{"note": "Primordial admin identity. Authors all primordial provenance fields.", "protected": true}` — not an
+ordinary demo persona. §1/§2's "one applicant with four applications" framing did not flag that the applicant
+IS the protected primordial admin. Whether that's a benign seed-data reuse (a showcase script minting a demo
+lease application under the bootstrap identity rather than a fresh persona) or something the seed data should
+not do is worth five minutes of grounding before any `CancelTask` touches it — cancelling against a `protected`
+identity blind is not the same risk class as cancelling against an ordinary demo applicant. **Revive:** next
+Vertical Steward fire on this stream, after confirming why `gk12KRqMMVwjVwfxsb5c` holds live lease applications
+at all (check `scripts/seed-showcase.go`'s applicant-minting path).
+
 **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
 ./scripts/lint-conventions.go`, `DIFF_BASE=main go run ./scripts/lint-package-version.go`, `go run
 ./scripts/lint-gap-column-declaration.go` (confirm actual invocation), `go test ./packages/lease-signing/...`.
