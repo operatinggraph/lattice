@@ -432,3 +432,35 @@ at all (check `scripts/seed-showcase.go`'s applicant-minting path).
 ./scripts/lint-conventions.go`, `DIFF_BASE=main go run ./scripts/lint-package-version.go`, `go run
 ./scripts/lint-gap-column-declaration.go` (confirm actual invocation), `go test ./packages/lease-signing/...`.
 No frozen contract touched, no fork — L2-eligible, lead review (S size).
+
+## Inc 2 grounding — Vertical Steward, 2026-09-01
+
+**The revive question answered: `gk12KRqMMVwjVwfxsb5c` is a stranded, pre-rotation identity, not the
+live admin.** `scripts/seed-showcase.go` never references this key or the primordial admin at all — the
+seed-script hypothesis is refuted. `lattice bootstrap verify` explains the real mechanism: this deployment
+underwent a bootstrap-epoch rotation, and `vtx.role.niR13mqp2r15q1iEge4P` (the role `gk12KRqMMVwjVwfxsb5c`
+holds, canonicalName `operator`) is reported as `STRANDED OPERATOR ROLE … not this deployment's operator
+role, and no live identity holds it. Live grants (0): none — unreachable without a holder.` This is the
+same documented, non-defect boundary the design's own §17 names as Cluster C ("a weaver-state wipe between
+bootstrap epochs"). The *current* epoch's admin is a different identity, `vtx.identity.ZieEKvPvwv7M9C14Yhr8`
+(live capability doc healthy, holds the current `roleOperator` `dkXW9DvHFcjGHPLVVxaa`) — confirmed by
+`lattice.bootstrap.json` (`status: committed`, `generatedAt: 2026-08-22`).
+
+The 4 stale `RecordIdentityPII` tasks (`scopedTo`/`assignedTo` = `gk12KRqMMVwjVwfxsb5c`, `createdBy` =
+`vtx.identity.jkgztdCGrgNUKMwtPvZz`, the internal Loom service actor — also stranded, same rotation) are
+therefore litter from *before* the epoch rotation, tied to an identity with zero live platform authority
+today. This is a materially safer read than the design's original hedge ("cancelling against a `protected`
+identity blind is not the same risk class as an ordinary demo applicant") — the identity is not live-admin
+at all, it's an inert fossil. **Confirmed by trying:** `CancelTask` submitted as `gk12KRqMMVwjVwfxsb5c`
+itself correctly fails `AuthDenied: no matching platformPermission` (the stranded role carries no grants) —
+the platform's own auth plane already proves this identity is powerless, independent of this grounding.
+
+**Inc 2 remains undone — blocked on execution, not grounding.** With the live current-epoch admin actor
+(`vtx.identity.ZieEKvPvwv7M9C14Yhr8`), the fix is 4 `lattice op submit --operation-type CancelTask
+--actor vtx.identity.ZieEKvPvwv7M9C14Yhr8 --context-hint-reads vtx.task.<id> --payload
+'{"taskKey":"vtx.task.<id>"}'` calls (`zT4yXzMXqRJBLKTRCb8H`, `hmUYfcPJzxtQZEchLcv8`,
+`QQZvbYHQxg63nvU2VNjK`, `qN8tvKtc9on5ZvTohtvx` — all live-verified `status: open` this fire). This
+session's own write-action guard declined the live op-submit as the admin actor before it reached the
+platform's auth plane — an environment-level stop, not an item- or grounding-level one. **Revive:** any
+session (this stream or Andrew directly) with permission to run `lattice op submit` against the running
+stack; the command above is ready to paste as-is, no further grounding needed.
