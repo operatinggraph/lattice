@@ -36,16 +36,96 @@ func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexK
 	}
 }
 
+// seedPostedClassPriceCharge seeds a class-price charge against bookingKey
+// exactly as WellnessDebitAccount{priceBookingRef} would have left it — a
+// wellnesstransaction + .entry aspect + postedTo (→ a seeded wellnessaccount)
+// + settlesClassPrice (→ the booking). wellness-ledger is not installed in
+// this harness (wellness-domain has no dependency on it), so the shape is
+// seeded raw. Returns the account and transaction keys.
+func seedPostedClassPriceCharge(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey, acctID, txID string, amountCents float64) (string, string) {
+	t.Helper()
+	_, bookID, _ := substrate.ParseVertexKey(bookingKey)
+
+	acctKey := "vtx.wellnessaccount." + acctID
+	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
+
+	txKey := "vtx.wellnesstransaction." + txID
+	seedVertex(t, ctx, conn, txKey, "wellnesstransaction", nil)
+	seedAspect(t, ctx, conn, txKey, "entry", "transactionEntry", map[string]any{
+		"type": "debit", "amountCents": amountCents, "postedAt": "2026-07-08T08:00:00Z",
+	})
+	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".postedTo.wellnessaccount."+acctID,
+		txKey, acctKey, "postedTo", "postedTo")
+	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".settlesClassPrice.booking."+bookID,
+		txKey, bookingKey, "settlesClassPrice", "settlesClassPrice")
+	return acctKey, txKey
+}
+
+// trackerEventClasses returns the op tracker's eventClasses list for reqID —
+// how an emitted event is observed from a package test, since the commit
+// enriches the tracker with one entry per event in the same atomic batch
+// (identity-hygiene's assertTrackerEvent precedent).
+func trackerEventClasses(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID string) []string {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.TrackerKey(reqID))
+	if err != nil {
+		t.Fatalf("tracker not found for %s: %v", reqID, err)
+	}
+	tr, err := processor.ParseTracker(entry.Value)
+	if err != nil {
+		t.Fatalf("ParseTracker: %v", err)
+	}
+	raw, _ := tr.Data["eventClasses"].([]interface{})
+	out := make([]string, 0, len(raw))
+	for _, ec := range raw {
+		s, _ := ec.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+func assertTrackerEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID, eventClass string) {
+	t.Helper()
+	classes := trackerEventClasses(t, ctx, conn, reqID)
+	for _, ec := range classes {
+		if ec == eventClass {
+			return
+		}
+	}
+	t.Fatalf("%s not in tracker eventClasses: %v", eventClass, classes)
+}
+
+func assertNoTrackerEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID, eventClass string) {
+	t.Helper()
+	classes := trackerEventClasses(t, ctx, conn, reqID)
+	for _, ec := range classes {
+		if ec == eventClass {
+			t.Fatalf("%s must not be in tracker eventClasses: %v", eventClass, classes)
+		}
+	}
+}
+
 // submitCancelBooking dispatches CancelBooking with the same declared reads
 // TestCancelBooking_ReleasesSeatForNextClaimant uses, and asserts Accepted.
+// It submits a full day ahead of every session these tests create, which is
+// well outside the late-cancellation window — submitCancelBookingAt is the
+// variant that aims at the window deliberately.
 func submitCancelBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, reqID, bookingKey, sessionKey string) {
+	t.Helper()
+	submitCancelBookingAt(t, ctx, conn, cp, cons, reqID, bookingKey, sessionKey, "2026-07-07T12:10:00Z")
+}
+
+// submitCancelBookingAt is submitCancelBooking with the submission instant
+// under the caller's control — what the late-cancellation-window tests need,
+// since the window is measured from the session's own startsAt.
+func submitCancelBookingAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, reqID, bookingKey, sessionKey, submittedAt string) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CancelBooking",
 		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-07T12:10:00Z",
+		SubmittedAt:   submittedAt,
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
@@ -78,25 +158,10 @@ func TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T) {
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
 	}
-	_, bookID, _ := substrate.ParseVertexKey(bookingKey)
 
-	// Seed the charge exactly as WellnessDebitAccount{priceBookingRef} would
-	// have left it — a wellnesstransaction + .entry aspect + postedTo (→ a
-	// seeded wellnessaccount) + settlesClassPrice (→ this booking).
-	acctKey := "vtx.wellnessaccount.BBWELLREFUNDACT1HJKM"
-	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
-	_, acctID, _ := substrate.ParseVertexKey(acctKey)
-
-	txKey := "vtx.wellnesstransaction.BBWELLREFUNDTXN1HJKM"
-	seedVertex(t, ctx, conn, txKey, "wellnesstransaction", nil)
+	acctKey, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey,
+		"BBWELLREFUNDACT1HJKM", "BBWELLREFUNDTXN1HJKM", 1500.0)
 	_, txID, _ := substrate.ParseVertexKey(txKey)
-	seedAspect(t, ctx, conn, txKey, "entry", "transactionEntry", map[string]any{
-		"type": "debit", "amountCents": 1500.0, "postedAt": "2026-07-08T08:00:00Z",
-	})
-	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".postedTo.wellnessaccount."+acctID,
-		txKey, acctKey, "postedTo", "postedTo")
-	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".settlesClassPrice.booking."+bookID,
-		txKey, bookingKey, "settlesClassPrice", "settlesClassPrice")
 
 	cancelReqID := testutil.GenReqID("wdrefundcancel000001")
 	submitCancelBooking(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey)
@@ -128,6 +193,8 @@ func TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T) {
 	if !keyExists(t, ctx, conn, reversesLnk) {
 		t.Fatalf("reverses link must exist: %s", reversesLnk)
 	}
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
 }
 
 // TestCancelBooking_NoRefundMarkerWhenNeverCharged proves the negative case:
@@ -158,4 +225,162 @@ func TestCancelBooking_NoRefundMarkerWhenNeverCharged(t *testing.T) {
 	if keyExists(t, ctx, conn, refundKey) {
 		t.Fatalf("no wellnessrefund marker should exist for a never-charged booking: %s", refundKey)
 	}
+}
+
+// TestCancelBooking_LateCancelForfeitsClassPrice is the late-cancellation
+// window's own proof, at the case that motivated it: a member cancelling on
+// the way out the door, minutes before the class. The cancellation still
+// succeeds and still frees the seat — but no wellnessrefund marker mints, so
+// the class-price charge stands unreversed exactly as a no-show's does, and
+// wellness.lateCancelForfeited is emitted in place of the refund event.
+func TestCancelBooking_LateCancelForfeitsClassPrice(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "latecancelforfeit")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdlatestudio000001", "Late Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdlatesession000001", studioKey, "Late Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLLATECANCLBKR1H")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdlatebooking000001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+
+	_, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey,
+		"BBWELLLATEACCT1HJKMN", "BBWELLLATETXN1HJKMNP", 1500.0)
+
+	// One minute before the 09:00 start — the row's own example.
+	cancelReqID := testutil.GenReqID("wdlatecancel000001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a late cancellation still cancels — the booking must be tombstoned")
+	}
+	if keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("a late cancellation still frees the seat — seat1 must be released")
+	}
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+	if keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("no wellnessrefund marker may mint for a late cancellation: %s", refundKey)
+	}
+	if keyExists(t, ctx, conn, refundKey+".detail") {
+		t.Fatalf("no wellnessrefund detail aspect may be written for a late cancellation: %s", refundKey+".detail")
+	}
+	if !keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("the forfeited class-price charge must stand: %s", txKey)
+	}
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+}
+
+// TestCancelBooking_RefundWindowBoundary pins both sides of the two-hour
+// cutoff to the minute. Exactly on the mark forfeits — the same
+// at-the-boundary-the-stricter-rule-wins inequality as the SessionStarted
+// guard — while one minute earlier still refunds in full.
+func TestCancelBooking_RefundWindowBoundary(t *testing.T) {
+	cases := []struct {
+		name        string
+		suffix      string
+		bookerID    string
+		acctID      string
+		txID        string
+		submittedAt string
+		wantRefund  bool
+	}{
+		{
+			name: "exactly on the two-hour mark forfeits", suffix: "A",
+			bookerID: "BBWELLBNDACANCLBKRHJ", acctID: "BBWELLBNDAACCTHJKMNP", txID: "BBWELLBNDATXNHJKMNPQ",
+			submittedAt: "2026-07-08T07:00:00Z", wantRefund: false,
+		},
+		{
+			name: "one minute outside the window still refunds", suffix: "B",
+			bookerID: "BBWELLBNDBCANCLBKRHJ", acctID: "BBWELLBNDBACCTHJKMNP", txID: "BBWELLBNDBTXNHJKMNPQ",
+			submittedAt: "2026-07-08T06:59:00Z", wantRefund: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupDomainEnv(t)
+			cp, cons := newDomainPipeline(t, ctx, conn, "refundboundary"+tc.suffix)
+
+			studioKey := createStudio(t, ctx, conn, cp, cons, "wdbndstudio"+tc.suffix, "Boundary Studio")
+			sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdbndsession"+tc.suffix, studioKey, "Boundary Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+			}
+
+			bookerKey := seedIdentity(t, ctx, conn, tc.bookerID)
+			bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdbndbooking"+tc.suffix, sessionKey, bookerKey, "")
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+			}
+
+			seedPostedClassPriceCharge(t, ctx, conn, bookingKey, tc.acctID, tc.txID, 1500.0)
+
+			cancelReqID := testutil.GenReqID("wdbndcancel" + tc.suffix)
+			submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, tc.submittedAt)
+
+			refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+			if got := keyExists(t, ctx, conn, refundKey); got != tc.wantRefund {
+				t.Fatalf("wellnessrefund marker exists = %v, want %v (submitted %s against a 09:00 start)", got, tc.wantRefund, tc.submittedAt)
+			}
+			if tc.wantRefund {
+				assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+				assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+			} else {
+				assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+				assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+			}
+		})
+	}
+}
+
+// TestCancelBooking_LateWaitlistCancelUnaffected proves the window reaches
+// only what a booking could actually forfeit. A waitlisted booking never
+// carried a class-price charge (wellness-ledger's classPriceSettlementSpec
+// posts only once status is 'booked'), so leaving the waitlist minutes before
+// the class releases its slot exactly as it always did — nothing forfeited,
+// no forfeiture event.
+func TestCancelBooking_LateWaitlistCancelUnaffected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "latewaitlistleave")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdlatewlstudio00001", "Late Waitlist Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdlatewlsession0001", studioKey, "Late Waitlist Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	seatedKey := seedIdentity(t, ctx, conn, "BBWELLLATEWLSEAT1HJK")
+	if _, outcome := createBooking(t, ctx, conn, cp, cons, "wdlatewlbooking0001", sessionKey, seatedKey, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+
+	waitlistedKey := seedIdentity(t, ctx, conn, "BBWELLLATEWLBKR1HJKM")
+	waitlistBookingKey, outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdlatewljoin000001", sessionKey, waitlistedKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("joinWaitlist outcome = %v, want Accepted", outcome)
+	}
+
+	cancelReqID := testutil.GenReqID("wdlatewlcancel00001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, waitlistBookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+	if keyExists(t, ctx, conn, waitlistBookingKey) {
+		t.Fatalf("the waitlisted booking must be tombstoned after leaving the waitlist")
+	}
+	if keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("wl1 must be released when the waitlisted booker leaves, late window or not")
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 (the seated booker's) must be untouched — a waitlisted cancel promotes nobody")
+	}
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+	if keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("a waitlisted booking has no charge, so no refund marker either: %s", refundKey)
+	}
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.waitlistLeft")
 }

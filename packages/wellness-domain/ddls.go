@@ -788,6 +788,13 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"AttendanceRecorded is the more specific rejection whenever both would apply), then reads the " +
 			"booking's own .status.seat (stored at create time — no stored " +
 			"back-reference needed to recompute it) and releases that seat cell and soft-deletes the booking. " +
+			"A cancellation inside the two hours before startsAt is still accepted but forfeits the class price: " +
+			"no wellnessrefund marker is minted for it, so a settlesClassPrice charge that already posted stands " +
+			"unreversed — the same standing charge a no-show leaves — and a wellness.lateCancelForfeited event is " +
+			"emitted instead of wellness.classPriceRefundQueued. Exactly on the two-hour mark forfeits (the same " +
+			"at-the-boundary-the-stricter-rule-wins inequality as SessionStarted). It forfeits the class price " +
+			"only and posts no separate no-show fee, and it applies to any caller — the window is about timing, " +
+			"not who submits. A waitlisted booking is unaffected: it never carried a class-price charge to forfeit. " +
 			"SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
 			"attended or noShow, carrying rate / seat / booker / session / className / classStartsAt forward " +
 			"unchanged (an OCC upsert on the aspect's own revision) — those fields now only matter for " +
@@ -878,7 +885,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "CancelBooking — release a seat",
 				Payload:         map[string]any{"bookingKey": "vtx.booking.<NanoID>", "session": "vtx.session.<NanoID>"},
-				ExpectedOutcome: "Validates the booking is alive + class=booking and the supplied session is its actual session, releases the held seat, and soft-deletes the booking. If the session carries a live waitlisted booking, the LOWEST-waitlistSlot one is handed the freed seat directly (its own .status flips to booked, its .wl<n> slot is released) instead of the seat cell being freed for ordinary first-come booking. Returns primaryKey.",
+				ExpectedOutcome: "Validates the booking is alive + class=booking and the supplied session is its actual session, releases the held seat, and soft-deletes the booking. If the session carries a live waitlisted booking, the LOWEST-waitlistSlot one is handed the freed seat directly (its own .status flips to booked, its .wl<n> slot is released) instead of the seat cell being freed for ordinary first-come booking. Submitted more than two hours before startsAt, an already-posted class-price charge is reversed by a fresh wellnessrefund marker; submitted inside that window it is forfeited (no marker, charge stands). Returns primaryKey.",
 			},
 			{
 				Name: "SetBookingAttendance — an instructor marks their own class",
@@ -1304,7 +1311,10 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Wellness class-price refund marker. Vertex shape: vtx.wellnessrefund.<NanoID>, " +
 			"class=wellnessrefund, root data = {} (minimal, D5 — the data lives in the .detail aspect). Minted " +
 			"ONLY by CancelBooking (booking vertexType DDL, ddls.go), and only when the booking being cancelled " +
-			"already carries a posted settlesClassPrice charge — the one case wellness-ledger's own " +
+			"already carries a posted settlesClassPrice charge AND the cancellation lands more than two hours " +
+			"before the session's startsAt — inside that late-cancellation window the charge is forfeited rather " +
+			"than reversed, so no marker mints at all and the debit stands exactly as a no-show's does. A posted " +
+			"charge is the one case wellness-ledger's own " +
 			"wellnessClassPriceSettlement lens cannot self-correct, since its `MATCH (bk:booking {key: " +
 			"$actorKey})` simply stops matching a tombstoned booking (no charge is ever posted for a booking " +
 			"cancelled BEFORE it was charged; that half of the gap needs no fix). Exists because the booking " +
@@ -1334,7 +1344,7 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "wellnessrefund — a class-price refund marker",
 				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
-				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID> (root {}) + .detail aspect; minted by CancelBooking only when a settlesClassPrice charge already existed for the booking. wellness-ledger's wellnessRefundSettlement lens converges it into a WellnessCreditAccount.",
+				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID> (root {}) + .detail aspect; minted by CancelBooking only when a settlesClassPrice charge already existed for the booking and the cancellation lands more than two hours before startsAt. wellness-ledger's wellnessRefundSettlement lens converges it into a WellnessCreditAccount.",
 			},
 		},
 	}
@@ -2991,6 +3001,11 @@ def make_tombstone(key):
 GRID_STEP = "15m"
 MAX_SLOT_CELLS = 96  # 24h of 15-minute cells -- a generous backstop, not an expected ceiling
 
+# The late-cancellation window, expressed as the negative offset from a
+# session's own startsAt that opens it. A cancellation submitted at or after
+# that instant forfeits the class-price charge (CancelBooking below).
+LATE_CANCEL_WINDOW_OFFSET = "-2h"
+
 def slot_cells(starts_at, ends_at):
     cells = []
     cur = starts_at
@@ -3784,6 +3799,17 @@ def execute(state, op):
         if submitted >= starts_at:
             fail("SessionStarted: session " + session + " started at " + str(starts_at) + ", cannot cancel a booking once the class has begun (submitted " + submitted + ")")
 
+        # A cancellation inside the late window is still allowed — it just
+        # forfeits the class price (the refund branch below). Computed here,
+        # beside the guard that already resolved starts_at, so both time
+        # rules read together. rfc3339_add re-emits canonical whole-second
+        # UTC, the same form rfc3339_utc gives submitted, so the comparison
+        # is lexical == chronological exactly as the guard above is. The
+        # inequality matches that guard's too: at the boundary the stricter
+        # rule wins, so cancelling exactly on the two-hour mark forfeits.
+        late_cancel_cutoff = time.rfc3339_add(starts_at, LATE_CANCEL_WINDOW_OFFSET)
+        is_late_cancel = submitted >= late_cancel_cutoff
+
         if value == "booked":
             seat_n = status.data.get("seat")
             if seat_n == None:
@@ -3867,6 +3893,28 @@ def execute(state, op):
                     account_key = alk.targetVertex
             if account_key == None:
                 continue
+            # The late-cancellation window: inside it, the charge simply is
+            # not reversed. Nothing is minted, so the debit that already
+            # posted stands — the same standing charge a no-show leaves
+            # (SetBookingAttendance never reverses one either). Without the
+            # window a cancellation one second before the start would refund
+            # in full, so a member intending to skip would always cancel
+            # rather than no-show and pay nothing, while a member who simply
+            # does not turn up pays the class price plus the no-show fee.
+            #
+            # Forfeiting the class price is the whole consequence: this is
+            # deliberately not full no-show parity, which would also post the
+            # separate noShowFeeCents debit and needs a marker type and a
+            # wellness-ledger convergence lens of its own. That is a distinct
+            # increment, not an unfinished edge of this one.
+            #
+            # It reaches only a 'booked' booking in practice — a waitlisted
+            # one has nothing to forfeit, since classPriceSettlementSpec only
+            # posts once status is 'booked' (wellness-ledger/lenses.go), so
+            # this loop never finds a charge for it at all.
+            if is_late_cancel:
+                events.append({"class": "wellness.lateCancelForfeited", "data": {"bookingKey": book_key, "session": session, "accountKey": account_key, "amountCents": amount_cents}})
+                break
             refund_id = nanoid.new()
             refund_key = "vtx.wellnessrefund." + refund_id
             reverses_lnk = "lnk.wellnessrefund." + refund_id + ".reverses.wellnesstransaction." + charge_tx_id
