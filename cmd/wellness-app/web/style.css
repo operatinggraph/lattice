@@ -224,6 +224,10 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-record-form input { flex: 1; min-width: 100px; }
 .ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }
 
+.arrears-row { cursor: pointer; padding: 4px 6px; border-radius: 4px; }
+.arrears-row:hover { background: var(--bg-raised); }
+.arrears-row .arrears-overdue { color: var(--red); font-weight: 600; }
+
 /* Modal (new guest) */
 .overlay {
   position: fixed;
