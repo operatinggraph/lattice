@@ -51,7 +51,13 @@ func computeFrontDeskBookings(keys []string, get kvGetter) []bookingRow {
 // (a saturated stack, a transient projection fault) is a real read failure
 // and must 502 — silently returning an empty list is indistinguishable from
 // "nobody is here today" and was reaching residents as a blank grid with no
-// error either time. Front Desk is a STAFF-ONLY surface (persona-worlds-design.md
+// error either time. Every listed key is then read via readAllOrFail rather
+// than the lossy per-key kvGetter: a KVGet error on a key that just came
+// back from KVListKeys is a real fetch fault, not evidence the row doesn't
+// exist (ledger.go's readAllOrFail doc comment) — letting it fall through as
+// absent would silently drop a resident's booked-class badge instead of
+// failing the request, the same shape handleFrontDeskBalances already
+// avoids. Front Desk is a STAFF-ONLY surface (persona-worlds-design.md
 // Fire W4 §3): a resident is refused rather than served an empty or partial
 // grid, and a staffer is served only the leases their workplace covers
 // (facet-staff-worlds-design.md §9). The best-effort posture covers THIS
@@ -91,7 +97,20 @@ func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.BookingsBucket+": "+err.Error())
 		return
 	}
-	rows := computeFrontDeskBookings(keys, s.kvGetter(ctx, frontdesk.BookingsBucket))
+	values, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, frontdesk.BookingsBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read front-desk bookings", "bucket", frontdesk.BookingsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+frontdesk.BookingsBucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
+	rows := computeFrontDeskBookings(keys, get)
 	filtered := make([]bookingRow, 0, len(rows))
 	for _, row := range rows {
 		if visible.admits(row.LeaseAppKey) {
@@ -138,8 +157,9 @@ func computeFrontDeskLeaseDetails(keys []string, get kvGetter) []leaseDetailRow 
 // served from the front-desk package's frontDeskLeaseDetails lens (P5). A
 // stack without front-desk installed has no such bucket; that reads back as
 // "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings — any other list failure 502s, same as there.
-// Staff-only and workplace-confined, same as handleFrontDeskBookings.
+// handleFrontDeskBookings — any other list failure 502s, and every listed
+// key is read via readAllOrFail, same as there. Staff-only and
+// workplace-confined, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -173,7 +193,20 @@ func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.LeaseDetailsBucket+": "+err.Error())
 		return
 	}
-	rows := computeFrontDeskLeaseDetails(keys, s.kvGetter(ctx, frontdesk.LeaseDetailsBucket))
+	values, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, frontdesk.LeaseDetailsBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read front-desk lease details", "bucket", frontdesk.LeaseDetailsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+frontdesk.LeaseDetailsBucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
+	rows := computeFrontDeskLeaseDetails(keys, get)
 	filtered := make([]leaseDetailRow, 0, len(rows))
 	for _, row := range rows {
 		if visible.admits(row.LeaseAppKey) {
@@ -221,8 +254,9 @@ func computeFrontDeskVisits(keys []string, get kvGetter) []visitRow {
 // from the front-desk package's frontDeskVisits lens (P5). A stack without
 // front-desk (or clinic-domain) installed has no such bucket; that reads
 // back as "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings — any other list failure 502s, same as there.
-// Staff-only and workplace-confined, same as handleFrontDeskBookings.
+// handleFrontDeskBookings — any other list failure 502s, and every listed
+// key is read via readAllOrFail, same as there. Staff-only and
+// workplace-confined, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -256,7 +290,20 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.VisitsBucket+": "+err.Error())
 		return
 	}
-	rows := computeFrontDeskVisits(keys, s.kvGetter(ctx, frontdesk.VisitsBucket))
+	values, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, frontdesk.VisitsBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read front-desk visits", "bucket", frontdesk.VisitsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+frontdesk.VisitsBucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
+	rows := computeFrontDeskVisits(keys, get)
 	filtered := make([]visitRow, 0, len(rows))
 	for _, row := range rows {
 		if visible.admits(row.LeaseAppKey) {
@@ -275,13 +322,12 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 // alongside cafe-domain — this bucket going missing is not the ordinary
 // "optional package not installed" case — but the read still answers 200
 // empty on substrate.IsBucketNotFound rather than inventing a different
-// posture for what is otherwise the same failure shape. And unlike those
-// three, this handler reads every key via readAllOrFail rather than the
-// lossy per-key kvGetter they use: a balance is money, and a KVGet error on
-// a key that just came back from KVListKeys is a real fetch fault, not
-// evidence the row doesn't exist (ledger.go's readAllOrFail doc comment) —
-// letting it fall through as absent would silently understate a lease's
-// balance instead of failing the request.
+// posture for what is otherwise the same failure shape. Every key is read
+// via readAllOrFail, same as the other three: a balance is money, and a
+// KVGet error on a key that just came back from KVListKeys is a real fetch
+// fault, not evidence the row doesn't exist (ledger.go's readAllOrFail doc
+// comment) — letting it fall through as absent would silently understate a
+// lease's balance instead of failing the request.
 func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
