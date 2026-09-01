@@ -10,9 +10,9 @@ This is the critical design principle: every actor's auth traces back to graph t
 
 ### 7.2 Primordial Seeding Inventory
 
-`make up` writes the following directly to Core KV at first initialization (the sole sanctioned non-Processor write path **into Core KV**, and only during bootstrap). One other non-Processor write path exists, and it is deliberately **not** a Core KV path: trusted clients stream binary blob **bytes** directly into the `core-objects` Object Store — the off-graph blob plane, parallel to Health-KV being a non-Processor *state* plane (Decision #4). Those byte writes carry no graph state and never touch the Capability Lens; the **graph** record of an object (its `vtx.object.<oid>` vertex + `.content` aspect + links) is still written through the Processor like any other state. See the large-file/binary design.
+`make up` writes the following directly to Core KV at first initialization (the sole sanctioned non-Processor write path **into Core KV**, and only during bootstrap). One other non-Processor write path exists, and it is deliberately **not** a Core KV path: trusted clients stream binary blob **bytes** directly into the `core-objects` Object Store — the off-graph blob plane, parallel to Health-KV being a non-Processor *state* plane (Decision #4). Those byte writes carry no graph state and never touch the Capability Lens; the **graph** record of an object (its `vtx.object.<oid>` vertex + `.content` aspect + links) is still written through the Processor like any other state (`docs/components/object-store-manager.md`).
 
-**1. Meta-meta root DDL** — the kernel's **sole** DDL: one `vtx.meta.<NanoID>` vertex (`canonicalName: "root"`, `class: "meta.ddl.vertexType"`) that governs **all** `vtx.meta.*` mutations via `CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, dispatching on `op.payload.targetClass` (one of `meta.ddl.vertexType` / `aspectType` / `linkType` / `eventType` / `meta.lens`). It is self-describing (a `meta.ddl.vertexType` that itself governs meta-vertices). The former five separate per-class meta-meta DDLs collapsed into this one root DDL, plus the reserved aspect-type DDLs (item 3) and the package-lifecycle DDLs (`InstallPackage` / `UninstallPackage` / `UpgradePackage`).
+**1. Meta-meta root DDL** — the kernel's **sole** DDL: one `vtx.meta.<NanoID>` vertex (`canonicalName: "root"`, `class: "meta.ddl.vertexType"`) that governs **all** `vtx.meta.*` mutations via `CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, dispatching on `op.payload.targetClass` (one of `meta.ddl.vertexType` / `aspectType` / `linkType` / `eventType` / `meta.lens`). It is self-describing (a `meta.ddl.vertexType` that itself governs meta-vertices). The kernel also seeds the reserved aspect-type DDLs (item 3) and the package-lifecycle DDLs (`InstallPackage` / `UninstallPackage` / `UpgradePackage`).
 
 **2. Reserved type DDLs** — DDLs for the platform's foundational vertex types:
 - `meta` type DDL (used by all meta-vertices)
@@ -21,25 +21,22 @@ This is the critical design principle: every actor's auth traces back to graph t
 - `role` type DDL (used by role vertices in the auth graph)
 - `permission` type DDL (used by permission vertices)
 
-**3. Reserved aspect-type DDLs** — aspect types used by the meta-meta layer itself:
-- `canonicalName`
+**3. Reserved aspect-type DDLs** — the five self-description aspect types the meta-meta layer
+itself uses (each also carries all five descriptive aspects itself, avoiding a chicken-and-egg
+dependency with post-bootstrap DDL enforcement):
 - `description`
-- `schema`
-- `sensitive`
-- `permittedCommands`
-- `vertexSchema`
-- `cypherRule` (used by Lens definitions)
-- `targetBucket` (used by Lens definitions)
-- `outputSchema` (used by Lens definitions to declare projection document shape)
+- `inputSchema`
+- `outputSchema`
+- `fieldDescription`
+- `examples`
 
-**4. Reserved link-type DDLs** — link types the Capability Lens cypher rule walks:
+**4. Reserved link-type DDLs** — the two link types the root capability projection walks:
 - `holdsRole` — identity → role (identity holds role)
 - `grantedBy` — permission → role (permission is granted by role)
-- (additional link types the rule walks; the exact set is established by the cypher rule's authoring in Story 3.x)
 
 **5. Capability Lens definition** — a `vtx.meta.<NanoID>` vertex with `class: "meta.lens"` carrying:
 - `canonicalName: "capability"`
-- `cypherRule`: the openCypher rule that walks identity → role → permission topology and (post-bootstrap) availableAt/unavailableAt/containedIn topology for service access
+- `cypherRule`: the openCypher rule that walks identity → role → permission topology (the narrow root projection; package-owned lenses project their own disjoint `cap.*` slices, Contract #6 §6.1)
 - `targetBucket: "capability"`
 - `outputSchema`: JSON Schema for the Capability KV document (Contract #6 §6.2)
 
@@ -48,7 +45,7 @@ This is the critical design principle: every actor's auth traces back to graph t
 **7. System identity vertices** (seven kernel actors, each carrying `data.protected: true` for anti-brick immutability — per §6.1, `protected` is *not* a capability designator):
 - The **primordial admin identity** (`vtx.identity.<NanoID>`, `class: "identity"`) — authors all primordial entries' provenance.
 - **Five internal service-actor identities** — Loom, Weaver, the Bridge, object-store-manager, and the privacy worker (`class: "identity.system.<component>"`). **There is no `identity.system.processor`**: the Processor is the sole Core-KV *writer* (P2), not an actor that submits operations, so it needs no seeded actor identity.
-- **The Gateway identity** (`class: "identity.system.gateway"`) — unlike the six above, it does **not** hold the operator role (item 8): it is internet-facing (triggered by every unauthenticated HTTP request that reaches it), so it is deliberately scoped narrow instead of root-equivalent. It earns only the package-declared `identityProvisioner` role via a one-time post-install ops action (`gateway-claim-flow-identity-provisioning-design.md` §3.3/§4).
+- **The Gateway identity** (`class: "identity.system.gateway"`) — unlike the six above, it does **not** hold the operator role (item 8): it is internet-facing (triggered by every unauthenticated HTTP request that reaches it), so it is deliberately scoped narrow instead of root-equivalent. It earns only the package-declared `identityProvisioner` role via a one-time post-install ops action.
 
 Six of the seven hold the operator role (item 8), which is what projects their root-equivalent capability; the Gateway is the one exception.
 
@@ -58,7 +55,6 @@ Six of the seven hold the operator role (item 8), which is what projects their r
 
 This `holdsRole → operator` topology is the root designation (item 6).
 
-(Additional internal service actor identities for Loom, Weaver, etc. are seeded by their respective stream's bootstrap procedures in Phase 2+, following the same pattern — with or without the operator `holdsRole` link, per that actor's own trust-boundary needs.)
 
 **9. Bootstrap operation tracker** — a synthetic `vtx.op.<NanoID>` representing platform genesis. This tracker has **no TTL** (it's a permanent record, not subject to the 24h idempotency horizon). All primordial entities reference this tracker in their `createdByOp` field, making the entire bootstrap a "single operation" in the provenance audit trail.
 
@@ -66,11 +62,11 @@ This `holdsRole → operator` topology is the root designation (item 6).
 
 ### 7.3 NanoID Generation and Bootstrap Config
 
-All NanoIDs for primordial vertices are generated at first `make up` execution and persisted to `lattice.bootstrap.json` (or equivalent path determined by deployment conventions). The config file's top level carries a version marker plus the nested primordial-ID set (`internal/bootstrap.BootstrapFile` / `PrimordialIDsRaw` is authoritative for the full field list, which grows as the kernel does — see that file's version history comment):
+All NanoIDs for primordial vertices are generated at first `make up` execution and persisted to `lattice.bootstrap.json` (or equivalent path determined by deployment conventions). The config file's top level carries a version marker plus the nested primordial-ID set; the id set grows as the kernel does, and the `version` marker versions the file's schema:
 
 ```json
 {
-  "version": "16",
+  "version": "<n>",
   "generatedAt": "2026-05-12T14:32:18.142Z",
   "status": "committed",
   "primordialIDs": {
@@ -94,7 +90,7 @@ This config provides the deployment a stable reference set for the primordial Na
 
 ### 7.4 Bootstrap Idempotence and Re-runs
 
-**Re-running `make up` on an existing deployment** detects the existing `lattice.bootstrap.json` and skips re-seeding. `make up` is idempotent in the sense that running it twice produces the same end state — NOT in the sense that it rewrites primordial vertices.
+**Re-running `make up` on an existing deployment** skips re-seeding when the bucket itself shows the seed committed (below). `make up` is idempotent in the sense that running it twice produces the same end state — NOT in the sense that it rewrites primordial vertices.
 
 **Core KV, not the file, is the authority on whether a bucket has been seeded.** `lattice.bootstrap.json` is file-local: it records what a bootstrap run once did on *some* Core KV, not what *this* Core KV holds. The two can disagree — a recreated or wiped bucket behind a surviving `status="committed"` file — and a deployment that skipped seeding on the file's word alone would come up "ready" with silently-empty reads. Bootstrap therefore probes the bucket (the op tracker key) after provisioning and seeds on the bucket's answer.
 
@@ -119,7 +115,7 @@ exits with an error naming the component that failed to reach readiness. Sequenc
 
 Several things deliberately stay out of `make up`:
 
-**No "Hello Lattice" demo data.** The canonical reference implementation (FR55) is opt-in via a separate `make hello-lattice` (or equivalent) target. Bootstrap produces a minimal, viable, empty platform; demo content is a layer on top.
+**No "Hello Lattice" demo data.** The canonical reference implementation (FR55) is opt-in (`examples/hello-lattice`). Bootstrap produces a minimal, viable, empty platform; demo content is a layer on top.
 
 **No business DDLs.** The bootstrap seeds only the meta-meta layer and platform-essential types (`meta`, `op`, `identity`, `role`, `permission`). Business types (`lease`, `unit`, `building`, `service`, etc.) are authored by operators (or by AI agents in self-improvement flows) after bootstrap completes, via the standard write path (`ops.meta.>` lane).
 
@@ -127,10 +123,11 @@ Several things deliberately stay out of `make up`:
 
 **No Lens projections beyond Capability.** Other Lenses (business projections, query surfaces) are authored after bootstrap and activate via CDC.
 
-### 7.7 Bypass coverage
+### 7.7 Root designation is topology, not class
 
-The bypass suite MUST prove the topology-not-class rule (§7.2 item 6) in both directions: an identity
-**with** the `holdsRole → operator` topology projects root capability; an identity carrying a system
-`class` value but **without** the topology does not; and removing the role's inbound `grantedBy` links
-drops the corresponding capabilities on the next projection cycle (the auth boundary is reactive to
-topology).
+Root capability tracks the `holdsRole → operator` topology (§7.2 item 6) in both directions: an
+identity **with** the topology projects root capability; an identity carrying a system `class` value
+but **without** the topology does not; and removing the role's inbound `grantedBy` links drops the
+corresponding capabilities on the next projection cycle — the auth boundary is **reactive to
+topology**, never to class or to any flag. The bypass suite proves this invariant in both
+directions.

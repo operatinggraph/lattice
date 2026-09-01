@@ -1,8 +1,8 @@
 # Contract #5 — Health KV Convention
 
-> **Phase 1 schema inventory** lives at `docs/observability/health-kv-schema.md` (Story 6.2). This contract describes the convention; the schema doc enumerates emitted keys per component, reserved namespaces, and the `lattice health summary` rollup semantics.
+> The **schema inventory** lives at `docs/observability/health-kv-schema.md`. This contract describes the convention; the schema doc enumerates emitted keys per component, reserved namespaces, and the `lattice health summary` rollup semantics.
 
-Health KV is the operational observability plane. Every running component writes its own heartbeat to Health KV; readers (humans, CLI tooling at Phase 1; Lens projections at Phase 2+) observe component liveness and operational metrics. Health KV is a **soft convention at MVP** — Stream 7's Closed-loop Weaver auditor (deferred) is the first automated consumer, at which point the convention hardens into a hard contract.
+Health KV is the operational observability plane. Every running component writes its own heartbeat to Health KV; readers — humans, `lattice health summary`, console surfaces, and automated consumers (a Weaver `surface` gap raises §5.5 `issues[]` entries, Contract #10 §10.8) — observe component liveness and operational metrics. The convention is **hard**: the shapes here are what every consumer keys on.
 
 ### 5.1 Bucket and Key Pattern
 
@@ -54,12 +54,12 @@ health.<component>.<instance>
 | `key` | yes | Echo of the Health KV key |
 | `component` | yes | Canonical component name (matches `<component>` segment) |
 | `instance` | yes | Canonical instance identifier (matches `<instance>` segment) |
-| `version` | yes | Health document schema version. Phase 1 = `"1.0"`. Consumers can branch on this; the contract evolves freely until Stream 7. |
+| `version` | yes | Health document schema version (`"1.0"`). Consumers can branch on this. |
 | `status` | yes | Component liveness/operational state. Enum: see §5.3 |
 | `heartbeatAt` | yes | Timestamp of this heartbeat write. Readers compare against current time + heartbeat interval to detect staleness. |
 | `startedAt` | yes | Component startup timestamp (immutable across heartbeats from the same instance). |
 | `uptime` | yes | ISO 8601 duration since `startedAt`. Computed at heartbeat time. |
-| `metrics` | yes | Component-specific operational counters and gauges. Baseline metrics per component are recommended (§5.4); additional metrics are component-author's discretion. |
+| `metrics` | yes | Component-specific operational counters and gauges; the per-component inventory is the schema doc's (§5.4). |
 | `issues` | yes | Array of structured issue records. Empty `[]` when `status: "healthy"`. Non-empty for `degraded` and `unhealthy`. See §5.5. |
 
 ### 5.3 Status Enumeration
@@ -106,26 +106,22 @@ Each entry in the `issues` array:
 | `message` | yes | Human-readable description. |
 | `since` | yes | ISO 8601 timestamp of when this issue first arose; persists across heartbeats while the issue continues. |
 
-Issues are component-tracked: a component holds open issues in memory and includes them in each heartbeat. When an issue resolves, the component removes it from its in-memory set; the next heartbeat omits it from the `issues` array.
+An open issue persists across heartbeats (`since` marks its onset and holds while it continues); a resolved issue is simply **absent** from the next heartbeat — there is no explicit "resolved" record.
 
 ### 5.6 Heartbeat Cadence and TTL
 
-**Heartbeat interval:** Default **10 seconds** per heartbeat (matches NFR-O1's "every 10 seconds" requirement). Configurable per component — Refractor under heavy CDC load may heartbeat less frequently; components with faster failure profiles may heartbeat more frequently.
+**Heartbeat interval:** Default **10 seconds** per heartbeat (NFR-O1). Configurable per component.
 
 **TTL on each heartbeat write:** Default `TTL = heartbeat_interval × ttl_multiplier` where `ttl_multiplier = 10`. With the 10s default heartbeat, TTL = **100 seconds**. After 100s with no heartbeat write, NATS publishes a `PURGE` marker for the component's health key; observers see "no health entry" rather than stale-looking data.
 
-Both `heartbeat_interval` and `ttl_multiplier` are component-configurable via deployment config. The 10× multiplier is the architecture-locked default; it provides breathing room for GC pauses, brief network blips, and other transient events without false-positive component-death alarms.
+Both `heartbeat_interval` and `ttl_multiplier` are component-configurable via deployment config; the 10× multiplier is the architecture-locked default (breathing room for transient stalls without false-positive component-death alarms).
 
-**Each heartbeat OVERWRITES the previous heartbeat** (NATS KV update with no `expectedRevision`), resetting the TTL clock. Continuous heartbeating keeps the entry alive indefinitely; missed heartbeats expire it within the TTL window.
+**Each heartbeat OVERWRITES the previous heartbeat**, resetting the TTL clock. Continuous heartbeating keeps the entry alive indefinitely; missed heartbeats expire it within the TTL window.
 
 ### 5.7 Reading and Writing Semantics
 
-**Writers:** Every component writes its own heartbeat to its own key on the heartbeat interval. The only writes to Health KV are heartbeat writes; no component writes to another component's health entry.
+**Writers:** Every component writes its own heartbeat to its own key on the heartbeat interval. The only writes to Health KV are heartbeat writes; no component writes to another component's health entry. A component that stops gracefully emits one final heartbeat with `status: "shuttingDown"` before exit, so an orderly stop is distinguishable from a silent death.
 
-**Readers (Phase 1):** Humans via NATS CLI (`nats kv get health <key>`), and the Lattice CLI tool (`make health` or equivalent). The console/Lens projections in FR47 and FR52 are Phase 2 — they'll project Health KV via a Lens then.
+**Readers:** Humans via NATS CLI (`nats kv get health <key>`), `lattice health summary`, and console surfaces.
 
-**Health KV is NOT projected via the Capability Lens at Phase 1.** Every actor with NATS cluster access can read Health KV. This is consistent with the architecture's "Health KV reads are not auth-gated at MVP" note. Phase 2+ may add capability scoping; not in Phase 1 scope.
-
-**Bypass-suite boundary:** direct-KV-write bypass coverage (category #1) does NOT apply to Health KV —
-it is the explicitly sanctioned direct-write surface (§5.1); the suite must not count Health KV writes
-as bypass attempts.
+**Health KV reads are not auth-gated.** Every actor with NATS cluster access can read Health KV.

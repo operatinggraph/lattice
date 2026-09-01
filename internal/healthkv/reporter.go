@@ -130,7 +130,7 @@ func New(cfg Config) *Reporter {
 
 // Run blocks, emitting a "starting" heartbeat immediately and then a probed
 // heartbeat on each Interval tick, until ctx is cancelled — at which point it
-// emits one final "shuttingDown" heartbeat (Contract #5 §5.8 step 7) on a
+// emits one final "shuttingDown" heartbeat (Contract #5 §5.7) on a
 // short detached context so shutdown isn't lost to ctx's own cancellation.
 func (r *Reporter) Run(ctx context.Context) {
 	r.emitFixed(ctx, StatusStarting)
