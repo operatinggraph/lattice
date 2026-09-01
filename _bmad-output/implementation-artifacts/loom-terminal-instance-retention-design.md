@@ -1,5 +1,10 @@
 # Terminal Loom instances never leave `loom-state` — bound them against the window that makes it safe
 
+**Superseded 2026-09-01 for the accretion item** by
+[`loom-instance-enumeration-bounding-design.md`](loom-instance-enumeration-bounding-design.md), which declines
+the pruning direction entirely and bounds the enumeration instead. Nothing in §2/§3 Inc 1/Inc 3 below is a
+build instruction; this doc survives as the record of what was measured and why the TTL was withdrawn.
+
 **Status: ⚠️ PARTIALLY WITHDRAWN 2026-08-29 — the pruning half is FALSIFIED and was not shipped.** Read §0
 before anything else; it supersedes §2 and §3's Inc 1/Inc 3 wherever they differ. What shipped is the
 heartbeat fix (§3 Inc 2) and the `RedriveInstance` repair the build found (build note). What did not is the

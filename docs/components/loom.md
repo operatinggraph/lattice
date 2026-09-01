@@ -326,8 +326,10 @@ not an oversight: the record's presence is the dedup guard that collapses a re-e
 `triggerLoom` re-dispatch **re-publishes** a new `patternStarted` carrying a stable `claimId`-seeded
 `instanceId` for as long as its gap column stays open (`docs/contracts/10-orchestration-substrate.md`, the
 `triggerLoom` clause). The second horizon is unbounded, which is why `loom-state` cannot simply age its
-cursors out: bounding the bucket needs durable dedup evidence that outlives the record, which does not exist
-yet. See `_bmad-output/implementation-artifacts/loom-terminal-instance-retention-design.md` §0.
+cursors out. The terminal record is therefore retained indefinitely, deliberately; what a bounding design
+would first have to bound is that horizon, not the record. See
+`_bmad-output/implementation-artifacts/loom-instance-enumeration-bounding-design.md` (§1, §9), and
+`loom-terminal-instance-retention-design.md` §0 for the falsified TTL direction.
 
 Correlation on a completion is a **direct `token.<token>` GET** — durable, domain-independent, and
 **multi-instance-safe**: any engine replica resolves any token via the bucket (no in-memory index, no
