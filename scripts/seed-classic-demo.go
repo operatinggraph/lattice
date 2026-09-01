@@ -1053,12 +1053,21 @@ func reapExcessCoManagersLive(ctx context.Context, conn *substrate.Conn, adminKe
 // verticals.md). Address-filtered rather than name-filtered — CreateLocation's
 // presentation.name here is the generic "Unit 1" — mirroring
 // reapDuplicateProviders' safety rationale: no other seed script mints a unit
-// at this address.
+// at this address. A candidate a live leaseapp applies to (unitsWithLiveLeaseApps)
+// is kept regardless of address match: real applicant/landlord activity can
+// land on a "duplicate" between seed runs, and TombstoneLocation itself has
+// no way to see that (location-domain doesn't know appliesToUnit).
 func reapDuplicateListings(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
+	tenanted := unitsWithLiveLeaseApps(ctx, conn)
+
 	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.unit.")
 	must(err, "list vtx.unit. keys")
 	for _, key := range keys {
 		if key == keep || !alive(ctx, conn, key) {
+			continue
+		}
+		if tenanted[key] {
+			fmt.Printf("==> kept %s (12 Classic Demo Ave duplicate, but a live leaseapp applies to it)\n", key)
 			continue
 		}
 		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".address")
@@ -1401,6 +1410,27 @@ func reapLeasesByApplicant(ctx context.Context, conn *substrate.Conn, applicantK
 			})
 		fmt.Printf("==> reaped ghost lease: %s (applicant=%s, verify-fire litter)\n", leaseKey, applicantKey)
 	}
+}
+
+// unitsWithLiveLeaseApps returns the set of unit keys any live leaseapp
+// currently names via appliesToUnit — reapDuplicateListings consults it so a
+// "duplicate" unit that has since accumulated a real application (PO/demo
+// exploration between seed runs) is kept, not tombstoned out from under a
+// tenancy TombstoneLocation has no way to see (location-domain is
+// vertical-agnostic; only loftspace-domain knows what appliesToUnit means).
+func unitsWithLiveLeaseApps(ctx context.Context, conn *substrate.Conn) map[string]bool {
+	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
+	must(err, "list lnk.leaseapp. keys")
+	tenanted := map[string]bool{}
+	for _, link := range links {
+		idx := strings.Index(link, ".appliesToUnit.unit.")
+		if idx < 0 || !alive(ctx, conn, link) {
+			continue
+		}
+		unitID := link[idx+len(".appliesToUnit.unit."):]
+		tenanted["vtx.unit."+unitID] = true
+	}
+	return tenanted
 }
 
 // alive reports whether key names a live (non-tombstoned) Core KV document —

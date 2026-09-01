@@ -57,7 +57,7 @@ func main() {
 	must(err, "list vtx.leaseapp. keys")
 	sort.Strings(keys)
 
-	fixed := 0
+	fixed, skipped := 0, 0
 	for _, key := range keys {
 		if strings.Count(key, ".") != 2 {
 			continue // an aspect/tombstone key, not the leaseapp vertex itself
@@ -82,13 +82,19 @@ func main() {
 			}
 		}
 
-		submitOp(ctx, conn, adminKey, "BackfillLeaseTerms", "leaseapp",
+		reply, err := trySubmitOp(ctx, conn, adminKey, "BackfillLeaseTerms", "leaseapp",
 			map[string]any{"leaseAppKey": key},
 			&processor.ContextHint{Reads: []string{key}, OptionalReads: []string{key + ".terms"}})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "==> SKIP %s: %v\n", key, err)
+			skipped++
+			continue
+		}
+		_ = reply
 		fmt.Printf("==> backfilled terms: %s\n", key)
 		fixed++
 	}
-	fmt.Printf("==> done: %d lease application(s) backfilled.\n", fixed)
+	fmt.Printf("==> done: %d lease application(s) backfilled, %d skipped (see stderr).\n", fixed, skipped)
 }
 
 func alive(ctx context.Context, conn *substrate.Conn, key string) bool {
@@ -105,7 +111,13 @@ func alive(ctx context.Context, conn *substrate.Conn, key string) bool {
 	return !doc.IsDeleted
 }
 
-func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, payload map[string]any, hint *processor.ContextHint) *processor.OperationReply {
+// trySubmitOp submits an operation and reports a processor-level rejection
+// (e.g. a domain guard like UnitNoLongerAvailable refusing one specific
+// candidate) as an error rather than exiting — the caller decides whether
+// that candidate is skippable. A transport/setup failure (can't even reach
+// the Processor) still goes through must(), since that means the script
+// itself can't proceed, not that this one candidate is bad.
+func trySubmitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, payload map[string]any, hint *processor.ContextHint) (*processor.OperationReply, error) {
 	reqID, err := substrate.NewNanoID()
 	must(err, "generate requestId")
 	payloadBytes, err := json.Marshal(payload)
@@ -122,20 +134,13 @@ func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType
 	}
 	reply, err := output.SubmitOp(ctx, conn, env)
 	must(err, "submit "+operationType)
-	mustAccepted(reply, operationType)
-	return reply
-}
-
-func mustAccepted(reply *processor.OperationReply, context string) {
-	if reply.Status == processor.ReplyStatusAccepted {
-		return
+	if reply.Status != processor.ReplyStatusAccepted {
+		if reply.Error != nil {
+			return nil, fmt.Errorf("rejected code=%s message=%s", reply.Error.Code, reply.Error.Message)
+		}
+		return nil, fmt.Errorf("status=%s (no error detail)", reply.Status)
 	}
-	if reply.Error != nil {
-		fmt.Fprintf(os.Stderr, "FATAL %s: rejected code=%s message=%s\n", context, reply.Error.Code, reply.Error.Message)
-	} else {
-		fmt.Fprintf(os.Stderr, "FATAL %s: status=%s (no error detail)\n", context, reply.Status)
-	}
-	os.Exit(1)
+	return reply, nil
 }
 
 func must(err error, context string) {
