@@ -384,3 +384,98 @@ func TestCancelBooking_LateWaitlistCancelUnaffected(t *testing.T) {
 	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
 	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.waitlistLeft")
 }
+
+// TestReleaseOrphanedBooking_MintsRefundMarkerWhenAlreadyCharged proves a
+// studio-initiated cancellation (TombstoneSession, then Weaver's
+// ReleaseOrphanedBooking drain) refunds an already-posted class-price charge
+// exactly as CancelBooking's own refund does — but unconditionally: unlike
+// CancelBooking there is no late-cancellation forfeiture branch, because the
+// booker did nothing to cause this cancellation. The session here is
+// tombstoned one minute before its own start — squarely inside what would be
+// CancelBooking's forfeiture window — to prove the window does not apply.
+func TestReleaseOrphanedBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanrefund")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphanrfstudio0001", "Priced Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdorphanrfsessio0001", studioKey, "Priced Vinyasa", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLURPHRFBKR1HJKM")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdorphanrfbookin0001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+
+	acctKey, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey,
+		"BBWELLURPHRFACT1HJKM", "BBWELLURPHRFTXN1HJKM", 1500.0)
+	_, txID, _ := substrate.ParseVertexKey(txKey)
+
+	// One minute before the 09:00 start — squarely inside CancelBooking's
+	// two-hour forfeiture window, to prove ReleaseOrphanedBooking ignores it.
+	tombstoneReqID := testutil.GenReqID("wdorphanrftombst0001")
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     tombstoneReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T08:59:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	releaseReqID := testutil.GenReqID("wdorphanrfreleas0001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:05:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status", sessionKey,
+		}},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(releaseReqID)
+	if !keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("wellnessrefund marker must exist: %s", refundKey)
+	}
+	detail := readDoc(t, ctx, conn, refundKey+".detail")
+	data, _ := detail["data"].(map[string]any)
+	if data["accountKey"] != acctKey {
+		t.Fatalf("refund detail accountKey = %v, want %v", data["accountKey"], acctKey)
+	}
+	if data["amountCents"] != 1500.0 {
+		t.Fatalf("refund detail amountCents = %v, want 1500", data["amountCents"])
+	}
+	if data["bookingKey"] != bookingKey {
+		t.Fatalf("refund detail bookingKey = %v, want %v", data["bookingKey"], bookingKey)
+	}
+	if data["className"] != "Priced Vinyasa" {
+		t.Fatalf("refund detail className = %v, want Priced Vinyasa", data["className"])
+	}
+
+	_, refundID, _ := substrate.ParseVertexKey(refundKey)
+	reversesLnk := "lnk.wellnessrefund." + refundID + ".reverses.wellnesstransaction." + txID
+	if !keyExists(t, ctx, conn, reversesLnk) {
+		t.Fatalf("reverses link must exist: %s", reversesLnk)
+	}
+	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.classPriceRefundQueued")
+	assertNoTrackerEvent(t, ctx, conn, releaseReqID, "wellness.lateCancelForfeited")
+}

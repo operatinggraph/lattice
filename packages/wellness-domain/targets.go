@@ -27,6 +27,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // doctrine), so it is still readable even though the session vertex itself
 // is dead. Params carries only bookingKey — ReleaseOrphanedBooking takes no
 // session param, unlike CancelBooking, so there is nothing else to template.
+// ReleaseOrphanedBooking also mints a wellnessrefund marker, unconditionally,
+// when the released booking already carries a posted settlesClassPrice
+// charge (a live kv.Links walk inside the script, not declared here — the
+// same class-(e) shape CancelBooking's identical lookup uses).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{

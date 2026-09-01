@@ -197,7 +197,13 @@ walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
 walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
+# Mirrors CancelBooking's identical undeclared settlesClassPrice/postedTo
+# walk pair above (line 143/148) — ReleaseOrphanedBooking runs the same
+# already-posted-charge lookup, unconditionally, to mint the same
+# wellnessrefund marker on a studio-initiated cancellation.
+walk	ReleaseOrphanedBooking	vtx.booking.<id> settlesClassPrice in
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
+walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
 walk	ReportIssue	vtx.building.<id> containedIn out
 walk	ReportIssue	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.building.<id> containedIn out
