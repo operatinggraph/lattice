@@ -77,6 +77,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/frontdesk-bookings", s.handleFrontDeskBookings)
 	inner.HandleFunc("/api/frontdesk-lease-details", s.handleFrontDeskLeaseDetails)
 	inner.HandleFunc("/api/frontdesk-visits", s.handleFrontDeskVisits)
+	inner.HandleFunc("/api/frontdesk-balances", s.handleFrontDeskBalances)
 	inner.HandleFunc("/api/ledger", s.handleLedger)
 	inner.HandleFunc("/api/residents", s.handleResidents)
 	inner.HandleFunc("/api/menu", s.handleMenu)

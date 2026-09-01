@@ -1030,6 +1030,18 @@ async function loadFrontDesk() {
     (vs.visits || []).forEach((v) => keepSoonest(visitsByLease, v));
   } catch (_) { /* front-desk not installed / unreachable — visit badge just doesn't show */ }
 
+  // Same join, for the resident's own house-tab balance — the front desk's
+  // own counterpart to the overdue banner the resident already sees on
+  // their own ledger view (ledger.go's deriveStatement). The endpoint
+  // already returns at most one row per leaseAppKey, so no keepSoonest
+  // reduction is needed here. Best-effort, same degrade-to-hidden posture
+  // as the joins above.
+  let balancesByLease = {};
+  try {
+    const bal = await appGet("/api/frontdesk-balances");
+    (bal.balances || []).forEach((b) => { balancesByLease[b.leaseAppKey] = b; });
+  } catch (_) { /* balances unreachable — badge just doesn't show */ }
+
   // Same resident-name/unit-address join the lease pickers use
   // (loadLeasePickerContext) — the card's "who" + rent/term lines.
   const { residentsByLease, leaseDetailsByLease } = await loadLeasePickerContext();
@@ -1040,7 +1052,7 @@ async function loadFrontDesk() {
     return;
   }
   grid.innerHTML = tabs
-    .map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey], leaseDetailsByLease[t.leaseAppKey], visitsByLease[t.leaseAppKey], residentsByLease[t.leaseAppKey]))
+    .map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey], leaseDetailsByLease[t.leaseAppKey], visitsByLease[t.leaseAppKey], residentsByLease[t.leaseAppKey], balancesByLease[t.leaseAppKey]))
     .join("");
   tabs.forEach((t) => {
     const btn = document.getElementById("settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""));
@@ -1067,8 +1079,28 @@ async function loadFrontDesk() {
   });
 }
 
-function frontDeskCard(t, booking, lease, visit, bookerKey) {
+// frontDeskBalanceBadge renders a joined balance row's overdue/owed state
+// for the front-desk card — the staff counterpart to the resident's own
+// overdue banner (ledger.go's deriveStatement, this file's statementLine()).
+// An overdue lease reuses statementLine() unchanged (same field names —
+// dueDate/isOverdue/daysOverdue — so the red banner reads identically on
+// both surfaces); a lease that owes something but isn't overdue yet gets a
+// neutral due-by note with the amount; a lease with nothing owed (no joined
+// row at all — handleFrontDeskBalances omits zero/credit leases) renders
+// nothing.
+function frontDeskBalanceBadge(balance) {
+  if (!balance) return "";
+  if (balance.isOverdue) return statementLine(balance);
+  if (balance.balanceCents > 0) {
+    const due = balance.dueDate ? new Date(balance.dueDate).toLocaleDateString() : "?";
+    return '<div class="meta">Owes ' + money(balance.balanceCents) + ", due " + due + "</div>";
+  }
+  return "";
+}
+
+function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
   const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, "");
+  const balanceBadge = frontDeskBalanceBadge(balance);
   const classBadge = booking
     ? '<div class="meta">🧘 Booked: ' + (booking.sessionName || "class") + " · " + (booking.startsAt || "?") + "</div>"
     : "";
@@ -1092,6 +1124,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey) {
     '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
+    balanceBadge +
     chargeLinesBlock(t.lines, t.itemsMemo, null) +
     classBadge +
     leaseLine +

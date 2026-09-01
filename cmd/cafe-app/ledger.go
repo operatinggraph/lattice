@@ -67,12 +67,26 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			PostedAt:       p.PostedAt,
 		})
 	}
+	sortLedgerRows(rows)
+	return rows, sumBalance(rows)
+}
+
+// sortLedgerRows sorts ledger rows chronologically (postedAt, then
+// transactionKey as the tiebreaker) — the order every FIFO-aging computation
+// in this file depends on.
+func sortLedgerRows(rows []ledgerEntryRow) {
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].PostedAt != rows[j].PostedAt {
 			return rows[i].PostedAt < rows[j].PostedAt
 		}
 		return rows[i].TransactionKey < rows[j].TransactionKey
 	})
+}
+
+// sumBalance sums a chronologically-sorted ledger's running balance in cents
+// (sum debits − sum credits) — the ledger stores no running total
+// (append-only, D5).
+func sumBalance(rows []ledgerEntryRow) int64 {
 	var balance int64
 	for _, r := range rows {
 		switch r.Type {
@@ -82,7 +96,71 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			balance -= r.AmountCents
 		}
 	}
-	return rows, balance
+	return balance
+}
+
+// balanceRow is one lease's balance/due-date/overdue statement for the
+// front-desk grid — the same shape deriveStatement computes for the resident
+// ledger view, but for every lease the front desk is confined to instead of
+// the one leaseAppKey a resident names.
+type balanceRow struct {
+	LeaseAppKey  string `json:"leaseAppKey"`
+	BalanceCents int64  `json:"balanceCents"`
+	DueDate      string `json:"dueDate"`
+	IsOverdue    bool   `json:"isOverdue"`
+	DaysOverdue  int    `json:"daysOverdue"`
+}
+
+// computeLedgerBalances groups the cafeLedgerHistory lens rows by
+// leaseAppKey and derives each lease's balance/due-date/overdue state in one
+// pass — the front-desk grid needs every visible lease's statement at once,
+// and re-running computeLedgerHistory's per-lease scan once per lease found
+// in the bucket would redecode the same rows N times over. A lease whose
+// balance settles to zero or credit is left out of the result entirely —
+// deriveStatement's own "nothing to age" case for one lease, applied per
+// group.
+func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balanceRow {
+	byLease := make(map[string][]ledgerEntryRow)
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p ledgerEntryProjection
+		if json.Unmarshal(raw, &p) != nil || p.TransactionKey == "" || p.LeaseAppKey == "" {
+			continue
+		}
+		var amount int64
+		if p.AmountCents != nil {
+			amount = int64(*p.AmountCents)
+		}
+		byLease[p.LeaseAppKey] = append(byLease[p.LeaseAppKey], ledgerEntryRow{
+			TransactionKey: p.TransactionKey,
+			Type:           p.Type,
+			AmountCents:    amount,
+			Memo:           p.Memo,
+			PostedAt:       p.PostedAt,
+		})
+	}
+
+	rows := make([]balanceRow, 0, len(byLease))
+	for leaseAppKey, entries := range byLease {
+		sortLedgerRows(entries)
+		balance := sumBalance(entries)
+		if balance <= 0 {
+			continue
+		}
+		dueDate, isOverdue, daysOverdue := deriveStatement(entries, balance, now)
+		rows = append(rows, balanceRow{
+			LeaseAppKey:  leaseAppKey,
+			BalanceCents: balance,
+			DueDate:      dueDate,
+			IsOverdue:    isOverdue,
+			DaysOverdue:  daysOverdue,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].LeaseAppKey < rows[j].LeaseAppKey })
+	return rows
 }
 
 // rawGetter reads one bucket entry's raw bytes for a key, erroring on a real

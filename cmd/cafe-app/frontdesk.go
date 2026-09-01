@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
+	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
 )
 
@@ -262,4 +264,77 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"visits": filtered})
+}
+
+// handleFrontDeskBalances implements GET /api/frontdesk-balances — every
+// visible lease's balance/due-date/overdue statement for the front-desk
+// grid, served from the cafe-ledger package's cafeLedgerHistory lens (P5,
+// cmd/cafe-app/ledger.go's computeLedgerBalances). Staff-only and
+// workplace-confined, same as handleFrontDeskBookings. Unlike this file's
+// other three joins, cafe-ledger is a core cafe package always installed
+// alongside cafe-domain — this bucket going missing is not the ordinary
+// "optional package not installed" case — but the read still answers 200
+// empty on substrate.IsBucketNotFound rather than inventing a different
+// posture for what is otherwise the same failure shape. And unlike those
+// three, this handler reads every key via readAllOrFail rather than the
+// lossy per-key kvGetter they use: a balance is money, and a KVGet error on
+// a key that just came back from KVListKeys is a real fetch fault, not
+// evidence the row doesn't exist (ledger.go's readAllOrFail doc comment) —
+// letting it fall through as absent would silently understate a lease's
+// balance instead of failing the request.
+func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request) {
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hats.isFrontDesk() && !hats.isOperator {
+		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	visible, err := s.visibleLeases(ctx, hats)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	bucket := cafeledger.LedgerHistoryBucket
+	keys, err := conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		if substrate.IsBucketNotFound(err) {
+			s.writeJSON(w, http.StatusOK, map[string]any{"balances": []balanceRow{}})
+			return
+		}
+		s.logger.Error("list front-desk balances", "bucket", bucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "list "+bucket+": "+err.Error())
+		return
+	}
+	values, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read ledger history for front-desk balances", "bucket", bucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+bucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
+	rows := computeLedgerBalances(keys, get, time.Now().UTC())
+	filtered := make([]balanceRow, 0, len(rows))
+	for _, row := range rows {
+		if visible.admits(row.LeaseAppKey) {
+			filtered = append(filtered, row)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"balances": filtered})
 }
