@@ -122,6 +122,7 @@ read	StartVisitSeries	vtx.visitseries.<id>.series
 read	TombstoneAppointment	lnk.appointment.<id>.forPatient.patient.<id>
 read	TombstoneAppointment	lnk.appointment.<id>.withProvider.provider.<id>
 read	TombstoneAppointment	vtx.appointment.<id>.schedule
+read	TombstoneSession	lnk.identity.<id>.worksAt.building.<id>
 read	VerifyGuarantor	lnk.identity.<id>.manages.unit.<id>
 read	VoidCharge	lnk.identity.<id>.worksAt.building.<id>
 read	VoidCharge	lnk.identity.<id>.worksAt.unit.<id>
@@ -227,7 +228,10 @@ walk	SettleStaleTab	vtx.tab.<id> chargedTo out
 walk	SignLease	vtx.leaseapp.<id> appliesToUnit out
 walk	StartVisitSeries	vtx.building.<id> containedIn out
 walk	StartVisitSeries	vtx.provider.<id> practicesAt out
+walk	TombstoneSession	vtx.building.<id> containedIn out
+walk	TombstoneSession	vtx.session.<id> atStudio out
 walk	TombstoneSession	vtx.session.<id> ledBy out
+walk	TombstoneSession	vtx.studio.<id> locatedAt out
 walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out
 walk	VerifyGuarantor	vtx.renewal.<id> renews out
 walk	VoidCharge	vtx.building.<id> containedIn out

@@ -1158,17 +1158,18 @@ function myClassCard(b) {
 // constrains only the session's location, never the booker.
 //
 // What the roster CAN write is attendance. SetBookingAttendance grants
-// `provider` scope=any, confined in-script to a booking on a session the
-// caller both leads (ledBy) and is identifiedBy-bound to, so the bound
-// instructor marks who showed — the "attendance" half of §7.3's instructor
-// hat. Staff hold no such grant, so the controls appear for the bound
-// instructor alone, and only once the class has started.
+// `provider` AND `frontOfHouse` at scope=any — a bound instructor marks who
+// showed (confined in-script by ledBy + identifiedBy, the "attendance" half
+// of §7.3's instructor hat), and staff mark it too (confined instead by the
+// session's own workplace, mirroring CancelBooking), so the controls appear
+// for either, and only once the class has started.
 //
-// The CLASS itself is different. TombstoneSession grants `provider`
-// scope=any, confined in-script to a session the caller both leads (ledBy)
-// and is identifiedBy-bound to, so a bound instructor may call off their own
-// class — the "cancel-own-session" half of §7.3's instructor hat. Staff hold
-// no such grant, so the control appears for the bound instructor alone.
+// The CLASS itself works the same way. TombstoneSession grants `provider`
+// AND `frontOfHouse` at scope=any: a bound instructor may call off their own
+// class (ledBy + identifiedBy, the "cancel-own-session" half of §7.3's
+// instructor hat), and staff may call off any class at a studio they worksAt
+// (workplace-confined, resolved off the session's own atStudio link — never
+// a caller-supplied studio), so the control appears for either.
 
 async function loadRoster() {
   const select = document.getElementById("roster-session");
@@ -1718,15 +1719,18 @@ async function markAttendance(bookingKey, sessionKey, value, mine) {
   );
 }
 
-// renderCancelClass appends the instructor's own "Call off this class"
-// control, for a session THIS login is the bound instructor of. The server
-// re-derives the same fact for the roster read, and the Starlark guard
-// re-derives it again at submit — this is the affordance, not the authority.
+// renderCancelClass appends the "Call off this class" control for the bound
+// instructor of THIS session, or for front-of-house staff (workplace-
+// confined, ddls.go TombstoneSession) — the same isLeader-or-isStaff split
+// canMark uses above. The server re-derives the same fact for the roster
+// read, and the Starlark guard re-derives it again at submit — this is the
+// affordance, not the authority.
 function renderCancelClass(sessionKey) {
   const mine = instructorKey();
-  if (!mine) return;
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
-  if (!se || se.instructorKey !== mine) return;
+  if (!se) return;
+  const isLeader = !!(mine && se.instructorKey === mine);
+  if (!isLeader && !isStaff()) return;
 
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
@@ -1736,7 +1740,7 @@ function renderCancelClass(sessionKey) {
     const btn = document.getElementById("cancel-class");
     btn.disabled = true;
     try {
-      await cancelOwnClass(se, mine);
+      await cancelClass(se, isLeader ? mine : null);
       toast("Class called off.", true);
       staffSessionsCache = null;
       document.getElementById("roster-session").dataset.loaded = "";
@@ -1748,32 +1752,41 @@ function renderCancelClass(sessionKey) {
   });
 }
 
-// cancelOwnClass submits TombstoneSession for a class this instructor leads.
-// It carries NO authContext.target — the grant is scope=any and the script
-// confines it by the two ownership links below, not by a caller-supplied
-// target (packages/wellness-domain/ddls.go's TombstoneSession).
-async function cancelOwnClass(se, mine) {
+// cancelClass submits TombstoneSession — for a class this instructor leads
+// when leaderInstructorKey is supplied, or for front-of-house staff
+// (leaderInstructorKey null) confined instead by the session's own workplace
+// — packages/wellness-domain/ddls.go's TombstoneSession. It carries NO
+// authContext.target either way: the grant is scope=any and the script
+// confines it in-script, not by a caller-supplied target.
+async function cancelClass(se, leaderInstructorKey) {
   const sessId = idOf(se.sessionKey);
+  // The atStudio link proves the named studio is genuinely this session's —
+  // required for BOTH standing paths, since require_matching_studio runs
+  // after the binder for either. The two ownership probes and the
+  // instructor's own slot cells are (d)-declared only on the instructor
+  // path; the front-of-house path carries neither (its confinement reads —
+  // the session's own atStudio walk and the resolved studio's locatedAt
+  // walk — are link-discovered, undeclarable up front, ddls.go).
+  const optionalReads = ["lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey)];
+  const payload = { sessionKey: se.sessionKey, studio: se.studioKey };
+  if (leaderInstructorKey) {
+    payload.instructor = leaderInstructorKey;
+    optionalReads.push(
+      "lnk.session." + sessId + ".ledBy.instructor." + idOf(leaderInstructorKey),
+      "lnk.instructor." + idOf(leaderInstructorKey) + ".identifiedBy.identity." + idOf(identityKey()),
+      ...slotCellKeys(leaderInstructorKey, se.startsAt, se.endsAt),
+    );
+  }
   await opOrThrow(
     {
       operationType: "TombstoneSession",
       class: "session",
       // The session and its schedule are (a)-declared required reads — the
       // schedule is what the script releases the studio's held slot cells
-      // from. The atStudio link proves the named studio is genuinely this
-      // session's, and the two ownership probes are (d)-declared: an absent
-      // link is a meaningful AuthDenied, not a correctness error.
+      // from.
       reads: [se.sessionKey, se.sessionKey + ".schedule"],
-      // Instructor cells released mirror the studio's (instructorSlotClaim,
-      // ddls.go) — `mine` is this class's actual ledBy instructor (checked
-      // by renderCancelClass before this control ever renders).
-      optionalReads: [
-        "lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey),
-        "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
-        "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
-        ...slotCellKeys(mine, se.startsAt, se.endsAt),
-      ],
-      payload: { sessionKey: se.sessionKey, studio: se.studioKey, instructor: mine },
+      optionalReads,
+      payload,
     },
     "call off the class",
     false,

@@ -1,6 +1,6 @@
 // Workplace confinement for the staff-widened wellness writes: CreateStudio,
-// CreateBooking, CancelBooking and SetBookingAttendance each grant
-// `frontOfHouse` at scope=any (permissions.go), and scope=any carries no
+// CreateBooking, CancelBooking, SetBookingAttendance and TombstoneSession each
+// grant `frontOfHouse` at scope=any (permissions.go), and scope=any carries no
 // platform-checked target,
 // so the ONLY thing keeping a front-desk hat inside its own building is the
 // script's workplace walk. Every case below therefore leads with the positive
@@ -61,6 +61,7 @@ func wcStaffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
 			{OperationType: "SetBookingAttendance", Scope: "any"},
+			{OperationType: "TombstoneSession", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -479,6 +480,104 @@ func wcSetAttendanceAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		}
 	}
 	return outcome, failure
+}
+
+// wcTombstoneSessionAs submits TombstoneSession as an arbitrary actor with no
+// instructor param — the front-of-house path, confined by workplace instead of
+// a lead binding (ddls.go, mirroring SetBookingAttendance's own front-of-house
+// branch) — and returns the outcome plus the script's own failure text.
+func wcTombstoneSessionAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, sessionKey, studioKey, actorKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"sessionKey": sessionKey, "studio": studioKey})
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "session",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", actorKey, wellnessdomain.OpMetas()),
+			Reads: []string{sessionKey, sessionKey + ".schedule"},
+			// Absence-tolerant: a caller naming the WRONG studio never has
+			// this link (require_matching_studio's own WrongStudio fail is
+			// the meaningful rejection then, not a correctness error) —
+			// mirrors cmd/wellness-app/web/app.js's cancelClass, which
+			// declares this identically as optional.
+			OptionalReads: []string{atStudioLnkKey(t, sessionKey, studioKey)},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return outcome, failure
+}
+
+// TestWorkplace_StaffCancelClassConfinedToTheirBuilding: TombstoneSession
+// grants frontOfHouse at scope=any (permissions.go), confined by the same
+// session -atStudio-> studio -locatedAt-> location walk CancelBooking and
+// SetBookingAttendance use — resolved off the session's OWN atStudio link,
+// never the caller-supplied studio param (ddls.go).
+func TestWorkplace_StaffCancelClassConfinedToTheirBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwctomb")
+	wcSeedStaff(t, ctx, conn)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwctombstudioa000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwctombstudiob000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+
+	sessionA, _ := createSession(t, ctx, conn, cp, cons, "wdwctombsessiona00001",
+		studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	sessionB, _ := createSession(t, ctx, conn, cp, cons, "wdwctombsessionb00001",
+		studioB, "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20)
+
+	// POSITIVE SIBLING: cancelling a class at the staffer's own building.
+	if got, why := wcTombstoneSessionAs(t, ctx, conn, cp, cons,
+		"wdwctombcancela0001", sessionA, studioA, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff TombstoneSession at its OWN building = %v (%s), want Accepted", got, why)
+	}
+	if keyExists(t, ctx, conn, sessionA) {
+		t.Errorf("%s must be tombstoned by the accepted TombstoneSession", sessionA)
+	}
+
+	got, why := wcTombstoneSessionAs(t, ctx, conn, cp, cons,
+		"wdwctombcancelb0001", sessionB, studioB, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff TombstoneSession at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("cross-building TombstoneSession was rejected by something other than the "+
+			"workplace guard: %q", why)
+	}
+	if !keyExists(t, ctx, conn, sessionB) {
+		t.Errorf("the denied cross-building TombstoneSession tombstoned %s; it must be denied before any mutation", sessionB)
+	}
+
+	// The workplace walk passing (staff DOES work at studioA's building) must
+	// not short-circuit require_matching_studio: naming a studio that is not
+	// THIS session's actual studio still has to fail, even once the binder
+	// itself is satisfied.
+	sessionA2, _ := createSession(t, ctx, conn, cp, cons, "wdwctombsessiona20001",
+		studioA, "Afternoon Flow", "2026-07-08T14:00:00Z", "2026-07-08T14:30:00Z", 20)
+	got, why = wcTombstoneSessionAs(t, ctx, conn, cp, cons,
+		"wdwctombcancelwrong0001", sessionA2, studioB, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff TombstoneSession naming the WRONG studio for its own-building session = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "WrongStudio") {
+		t.Errorf("the mismatched studio was rejected by something other than the studio-match guard: %q", why)
+	}
+	if !keyExists(t, ctx, conn, sessionA2) {
+		t.Errorf("the denied wrong-studio TombstoneSession tombstoned %s; it must be denied before any mutation", sessionA2)
+	}
 }
 
 // TestWorkplace_StaffMarkAttendanceConfinedToTheirBuilding: SetBookingAttendance

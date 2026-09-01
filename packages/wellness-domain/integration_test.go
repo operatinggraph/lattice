@@ -2441,7 +2441,10 @@ func TestCancelBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 // check answers differently for this session's own studio than for any other,
 // so ahead of the instructor binder it tells anyone holding a TombstoneSession
 // grant where a class they have no part in is held. Behind it, a caller who
-// cannot name the instructor they are bound to learns nothing either way.
+// supplies no instructor is now routed to the front-of-house workplace
+// check instead of a hard "no instructor" denial — but that check is keyed
+// off the session's OWN atStudio link, never the caller's guessed studio, so
+// it still answers identically for the real studio and a decoy.
 func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "tombprobe")
@@ -2475,6 +2478,20 @@ func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T
 
 	studioKey := createStudio(t, ctx, conn, cp, cons, "wdtprstudio000001", "Held Here")
 	decoyStudio := createStudio(t, ctx, conn, cp, cons, "wdtprstudio000002", "Not Here")
+	// Both studios are wired to DIFFERENT real buildings — the front-of-house
+	// confinement path resolves the studio off the session's own atStudio
+	// link, never the caller's guessed studio, so location_keys must differ
+	// between the two studios for the assertion below to prove anything: an
+	// unwired studio makes both calls resolve the same empty list regardless
+	// of which one the script actually consulted.
+	const tombprobeBuildingRealID = "BBWELLTPRBLDGREALHJK"
+	const tombprobeBuildingDecoyID = "BBWELLTPRBLDGDECAYJK"
+	tombprobeBuildingReal := "vtx.building." + tombprobeBuildingRealID
+	tombprobeBuildingDecoy := "vtx.building." + tombprobeBuildingDecoyID
+	seedVertex(t, ctx, conn, tombprobeBuildingReal, "building", map[string]any{})
+	seedVertex(t, ctx, conn, tombprobeBuildingDecoy, "building", map[string]any{})
+	wfSeedStudioAt(t, ctx, conn, studioKey, tombprobeBuildingReal, tombprobeBuildingRealID)
+	wfSeedStudioAt(t, ctx, conn, decoyStudio, tombprobeBuildingDecoy, tombprobeBuildingDecoyID)
 
 	// The session is led by a real instructor, and a second instructor exists —
 	// the roster a prober would walk. The prober is bound to neither.
@@ -2554,8 +2571,8 @@ func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T
 	if real != decoy {
 		t.Errorf("the studio probe locates a class for a caller with no part in it:\n  its studio → %s\n  decoy      → %s", real, decoy)
 	}
-	if !strings.Contains(real, "no instructor supplied") {
-		t.Errorf("probes should be answered by the binder, got %q", real)
+	if !strings.Contains(real, "does not worksAt any location covering") {
+		t.Errorf("probes should be answered by the front-of-house workplace check, got %q", real)
 	}
 
 	// The roster probe: supplying an instructor candidate, naming the session's

@@ -42,18 +42,26 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // confined by the script to a session it is ledBy-bound to, exactly like
 // TombstoneSession.
 //
-// TombstoneSession additionally grants `provider` at scope=any (widening the
-// EXISTING scope=any row's GrantsTo, never a second row — a permission's
-// identity is its (operationType, scope) pair, Contract #8 §8.1, mirroring
-// clinic-domain's SetProviderHours widening in wave 1): a bound instructor
-// cancels only a class THEY lead. Scope stays `any` (there is no scope=self
-// equivalent for a non-identity target vertex like session), so the Starlark
-// script itself confines a provider-role, non-operator caller to the session
-// it is ledBy-bound to via the caller's own instructor identifiedBy binding —
-// the same third-standing-binder shape clinic-domain's provider hat uses.
-// front-of-house is deliberately NOT granted TombstoneSession — cancelling a
-// class is the operator/instructor surface, not the front-desk one (unlike
-// CreateSession, the studio front-desk beat below).
+// TombstoneSession additionally grants `provider` and `frontOfHouse` at
+// scope=any (widening the EXISTING scope=any row's GrantsTo, never a second
+// row — a permission's identity is its (operationType, scope) pair, Contract
+// #8 §8.1, mirroring clinic-domain's SetProviderHours widening in wave 1) —
+// the same three-way split ReassignSession already draws on this same vertex
+// type. Scope stays `any` (there is no scope=self equivalent for a
+// non-identity target vertex like session), so the Starlark script itself
+// binds a non-operator caller by which optional param they supply, not by
+// which grant put them here (the same shape ReassignSession's own binder
+// uses): an `instructor` param routes to the ledBy + identifiedBy binding
+// (cancels only a class THEY lead), and its absence routes to the workplace
+// walk (cancels a class at a studio they worksAt) — so a bound instructor
+// who also worksAt a covered location can reach the workplace path too by
+// simply omitting `instructor`, exactly as a front-of-house caller does.
+// The workplace walk resolves the studio off the session's own atStudio
+// link via session_atstudio_link + this script's studio_locations, never
+// the caller-supplied studio param below, falling back to the session's own
+// atLocation snapshot when the studio has since been TombstoneStudio'd —
+// the same enforce_workplace confinement, fallback included, CancelBooking
+// and SetBookingAttendance apply via their own script's session_locations.
 //
 // SetBookingAttendance additionally grants `frontOfHouse` at scope=any,
 // workplace-confined exactly like CancelBooking (`session -atStudio->
@@ -104,8 +112,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "TombstoneSession",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit TombstoneSession operations, and a bound instructor the right to cancel a class THEY lead (the script's standing guard confines a non-operator caller to the session it is ledBy-bound to via its own instructor identifiedBy binding).",
-			GrantsTo:      []string{"operator", "provider"},
+			Note:          "Grants the operator and front-of-house staff the right to submit TombstoneSession (cancels a class off a studio's grid), and a bound instructor the right to cancel a class THEY lead — the script's standing guard routes a non-operator caller by whether they supply an instructor param: with one, to the session it is ledBy-bound to via its own instructor identifiedBy binding; without one, to a studio at a location they worksAt (falling back to the session's own atLocation snapshot if its studio was since tombstoned).",
+			GrantsTo:      []string{"operator", "provider", "frontOfHouse"},
 		},
 		{
 			OperationType: "ReassignSession",

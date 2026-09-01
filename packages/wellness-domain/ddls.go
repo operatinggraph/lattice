@@ -2603,31 +2603,56 @@ def execute(state, op):
         # the caller supplies the instructor param and BOTH the session's
         # ledBy link to it AND the caller's own identifiedBy binding to it
         # must be alive (known keys, mirroring clinic-domain's
-        # actor_bound_to_provider two-hop shape). front-of-house holds no
-        # TombstoneSession grant, so no workplace binder is needed here.
+        # actor_bound_to_provider two-hop shape). Absent an instructor param,
+        # a front-of-house caller must worksAt a location the session's OWN
+        # studio sits at, resolved off the atStudio link via
+        # session_atstudio_link + this script's own studio_locations (never
+        # the caller-supplied studio below) — this script carries no
+        # session_locations helper (Starlark scripts share no globals across
+        # DDLs), so the studio is resolved here the same way
+        # ReassignSession's operator-repair path just below already does.
+        # Falls back to the session's own atLocation snapshot
+        # (CreateSession/CreateSessionSeries write one per location the
+        # studio sat at, at mint time) when studio_locations comes back
+        # empty — TombstoneStudio does not cascade onto atStudio, so a
+        # decommissioned studio must not strand a staffer who still needs
+        # to clear its now-orphaned classes off the grid (the exact reason
+        # the booking script's own session_locations carries this same
+        # fallback).
         if not actor_holds_operator(op.actor):
             instr_key = optional_string(p, "instructor")
-            if instr_key == None:
-                fail("AuthDenied: " + op.actor + " may not cancel session " + sess_key + " (no instructor supplied)")
-            _, instr_id = parts_of(instr_key, "instructor", "instructor")
-            _, actor_id = parts_of(op.actor, "actor", "identity")
-            # The caller's own binding answers first. It is keyed on op.actor, so
-            # it can only ever say "am I this instructor?" — whereas the ledBy
-            # check below answers about the SESSION, and every bound instructor in
-            # the deployment holds this grant. Ahead of the binding, one
-            # instructor could walk a studio's published roster against a
-            # stranger's session and read off who leads it, by which of the two
-            # denials came back.
-            # read-posture: (d) declared optionalReads by TombstoneSession's dispatcher.
-            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
-            if bound == None or bound.isDeleted:
-                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
-            # read-posture: (d) declared optionalReads by TombstoneSession's
-            # dispatcher for the instructor-standing path (absence is a
-            # meaningful AuthDenied, not a correctness error).
-            led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
-            if led_by == None or led_by.isDeleted:
-                fail("AuthDenied: " + instr_key + " does not lead session " + sess_key)
+            if instr_key != None:
+                _, instr_id = parts_of(instr_key, "instructor", "instructor")
+                _, actor_id = parts_of(op.actor, "actor", "identity")
+                # The caller's own binding answers first. It is keyed on op.actor, so
+                # it can only ever say "am I this instructor?" — whereas the ledBy
+                # check below answers about the SESSION, and every bound instructor in
+                # the deployment holds this grant. Ahead of the binding, one
+                # instructor could walk a studio's published roster against a
+                # stranger's session and read off who leads it, by which of the two
+                # denials came back.
+                # read-posture: (d) declared optionalReads by TombstoneSession's dispatcher.
+                bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+                if bound == None or bound.isDeleted:
+                    fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
+                # read-posture: (d) declared optionalReads by TombstoneSession's
+                # dispatcher for the instructor-standing path (absence is a
+                # meaningful AuthDenied, not a correctness error).
+                led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
+                if led_by == None or led_by.isDeleted:
+                    fail("AuthDenied: " + instr_key + " does not lead session " + sess_key)
+            else:
+                _, confine_studio = session_atstudio_link(sess_key)
+                confine_locs = studio_locations(confine_studio)
+                if not confine_locs:
+                    # read-posture: (e) relation=atLocation epoch=none -- a
+                    # session carries at most a handful of atLocation
+                    # snapshot links, never a keyspace scan.
+                    aloc_page, _ = kv.Links(sess_key, "atLocation", "out")
+                    for lk in aloc_page:
+                        if not lk.isDeleted:
+                            confine_locs.append(lk.targetVertex)
+                enforce_workplace(confine_locs, "cannot cancel session " + sess_key)
 
         # The session's studio, needed below to release its held cells. Verified
         # as genuinely THIS session's studio, and ordered after the binder: the
