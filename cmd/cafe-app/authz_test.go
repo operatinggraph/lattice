@@ -427,6 +427,32 @@ func TestHandleFrontDeskBookings_Staff_200(t *testing.T) {
 	}
 }
 
+func TestHandleFrontDeskBalances_Unauthenticated_401(t *testing.T) {
+	s, _ := devSessionServer(t, fakeGatewayActor(t, nil))
+	rec := sessionGET(s, s.handleFrontDeskBalances, "/api/frontdesk-balances", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleFrontDeskBalances_Resident_403(t *testing.T) {
+	staff, resA := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
+	rec := sessionGET(s, s.handleFrontDeskBalances, "/api/frontdesk-balances", cookieFor(resA))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (front desk is staff-only)", rec.Code)
+	}
+}
+
+func TestHandleFrontDeskBalances_Staff_200(t *testing.T) {
+	staff := "AAAAAAAAAAAAAAAAAAAA"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
+	rec := sessionGET(s, s.handleFrontDeskBalances, "/api/frontdesk-balances", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s, want 200 for staff", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleFrontDeskLeaseDetails_Resident_403(t *testing.T) {
 	staff, resA := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
@@ -1042,6 +1068,7 @@ func TestHandleFrontDesk_ListFailure_502sInsteadOfEmpty(t *testing.T) {
 		{"bookings", s.handleFrontDeskBookings, "/api/frontdesk-bookings"},
 		{"lease-details", s.handleFrontDeskLeaseDetails, "/api/frontdesk-lease-details"},
 		{"visits", s.handleFrontDeskVisits, "/api/frontdesk-visits"},
+		{"balances", s.handleFrontDeskBalances, "/api/frontdesk-balances"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := sessionGET(s, tc.h, tc.path, cookieFor(root))
@@ -1124,6 +1151,74 @@ func TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases(t *testing.T) {
 	}
 }
 
+// TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement proves the
+// grouped balance computation: (a) an old unpaid debit ages past the
+// statement grace period into an overdue balance with the right
+// daysOverdue, (b) a lease whose debit is fully offset by a credit — balance
+// <= 0 — is omitted from the response entirely rather than coming back with
+// balanceCents 0, and (c) staff only see balances for leases their
+// workplace covers, mirroring
+// TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases's confinement check.
+func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+
+	// vtx.leaseapp.mine: an old unpaid debit at the staffer's own building —
+	// must come back overdue.
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.mine1", map[string]any{
+		"transactionKey": "vtx.tx.mine1", "accountKey": "vtx.account.mine",
+		"leaseAppKey": "vtx.leaseapp.mine", "type": "debit", "amountCents": 4500.0,
+		"memo": "House tab", "postedAt": old,
+	})
+
+	// vtx.leaseapp.paid: also at the staffer's building, but an old debit
+	// fully offset by a credit — balance <= 0 — must be omitted entirely.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.paid", "DDDDDDDDDDDDDDDDDDDD", staffWorkplace)
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.paid1", map[string]any{
+		"transactionKey": "vtx.tx.paid1", "accountKey": "vtx.account.paid",
+		"leaseAppKey": "vtx.leaseapp.paid", "type": "debit", "amountCents": 2000.0,
+		"memo": "House tab", "postedAt": old,
+	})
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.paid2", map[string]any{
+		"transactionKey": "vtx.tx.paid2", "accountKey": "vtx.account.paid",
+		"leaseAppKey": "vtx.leaseapp.paid", "type": "credit", "amountCents": 2000.0,
+		"memo": "Paid", "postedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// vtx.leaseapp.theirs: an old unpaid debit at a building this staffer
+	// does NOT work at — must never appear in their front-desk grid.
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.theirs1", map[string]any{
+		"transactionKey": "vtx.tx.theirs1", "accountKey": "vtx.account.theirs",
+		"leaseAppKey": "vtx.leaseapp.theirs", "type": "debit", "amountCents": 9900.0,
+		"memo": "House tab", "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskBalances, "/api/frontdesk-balances", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Balances []balanceRow `json:"balances"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Balances) != 1 || body.Balances[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("front-desk balances = %+v, want exactly the overdue covered lease (paid-off and foreign leases omitted)", body.Balances)
+	}
+	row := body.Balances[0]
+	if row.BalanceCents != 4500 {
+		t.Fatalf("balanceCents = %d, want 4500", row.BalanceCents)
+	}
+	if !row.IsOverdue {
+		t.Fatalf("isOverdue = false, want true for a debit %d days old (grace period is %d days)",
+			statementGraceDays+5, statementGraceDays)
+	}
+	if row.DaysOverdue < 1 {
+		t.Fatalf("daysOverdue = %d, want >= 1", row.DaysOverdue)
+	}
+}
+
 // TestFrontDesk_MissingWorkplacesBucket_502 pins the deliberate asymmetry in
 // the front desk's best-effort posture. A missing FRONT-DESK bucket is
 // tolerated — that package is an optional cross-vertical join, so the grid
@@ -1147,6 +1242,7 @@ func TestFrontDesk_MissingWorkplacesBucket_502(t *testing.T) {
 		{"bookings", s.handleFrontDeskBookings, "/api/frontdesk-bookings"},
 		{"lease-details", s.handleFrontDeskLeaseDetails, "/api/frontdesk-lease-details"},
 		{"visits", s.handleFrontDeskVisits, "/api/frontdesk-visits"},
+		{"balances", s.handleFrontDeskBalances, "/api/frontdesk-balances"},
 		{"tabs", s.handleTabs, "/api/tabs"},
 		{"leases", s.handleLeases, "/api/leases"},
 	} {
