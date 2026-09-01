@@ -382,7 +382,7 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 //     docs/contracts/10-orchestration-substrate.md), and Weaver re-dispatches a
 //     stable claimId-seeded instanceId for as long as its gap stays open.
 //
-// The write-ahead invariant (§10.6 invariant 1) holds by construction: the op
+// The write-ahead invariant (loom.md crash-safety invariant 1) holds by construction: the op
 // record is persisted in this batch and the relay's publish is the only side
 // effect, decoupled and idempotent.
 func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, outbox *outboxRecord, deadlineTTL time.Duration) error {

@@ -147,7 +147,7 @@ re-triggered `StartLoomPattern` re-runs **every guardless step whose effects don
 A fresh instance (a new `instanceId`, since the lost cursor was the old one's key) replays guards
 from cursor 0 against the subject's current Core KV state: a guarded step whose guard is now false
 is correctly re-skipped (no double-submit), but a guardless step has no guard-replay signal — its
-run/skip can never be inferred from Core KV (§10.6 invariant 2) — so replay always **lands on** and
+run/skip can never be inferred from Core KV (crash-safety invariant 2, State & crash-safety below) — so replay always **lands on** and
 **re-runs** it. Because each step's `requestId` derives from `(instanceId, cursor)`, the re-run's
 `requestId` is gen-2's own, distinct from gen-1's already-committed one — Contract #4's
 `vtx.op.<requestId>` dedup tracker cannot see across generations, so the guardless step's op commits
@@ -219,7 +219,7 @@ to a userTask (dispatch to an async completer, then park; the completer is a hum
   aspects, not fat root `data`).
 - The **instance key** is the write-ahead handle Loom **mints itself** — Loom does not own the bridge's
   later result-op `requestId`, so it parks on a handle it controls, minted exactly as the deterministic
-  `taskId` is for a userTask (§10.6 invariant 1).
+  `taskId` is for a userTask (crash-safety invariant 1, State & crash-safety).
 - The **bridge** (`docs/components/bridge.md`) consumes `events.external.>`, calls the adapter
   idempotently (`idempotencyKey = instanceKey`), and posts the **`replyOp`** back carrying
   `payload.externalRef = instanceKey`. The `replyOp` DDL records the outcome aspect(s) **and emits
@@ -291,6 +291,19 @@ prior `token.<oldToken>`, **writes the `outbox.<token>` op record, and arms `dea
 Because the op-to-submit lives in the same batch (the **command outbox**), submission is no longer a dual
 write: the relay publishes it fire-and-forget and deletes the record on publish-ack (re-publish idempotent
 via the chosen `requestId` + the Contract #4 tracker). Write-ahead therefore holds by construction.
+
+**Binding crash-safety invariants** (rebuildability depends on these; they are engine law, not
+story latitude):
+
+1. **Write-ahead = the atomic batch (outbox-inclusive).** The `token.<token>` pointer, the
+   `instance.<id>` update, the `outbox.<token>` op record, and the `deadline.<instanceId>` TTL
+   persist in one `substrate.AtomicBatch`; the side effect is the relay's decoupled, idempotent
+   publish *from* that batch (for a userTask, `CreateTask` with the engine's deterministic
+   `taskId`, so the `token.<taskKey>` is known write-ahead). A crash can never orphan a token
+   between side effect and persist.
+2. **Guardless steps complete only via their token.** A step with no guard has no guard-replay
+   signal, so its completion comes solely from its pending token — re-drive must not re-run a step
+   whose token is still pending, or it double-submits.
 
 **Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
 on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,

@@ -52,7 +52,7 @@ pickup path):
   prefix with **`violating = (review.state == "approved")`** and the proposed action/params + the
   TRUSTED candidate as param columns.
 - Its single gap `missing_dispatch` maps to the **`proposedOp`** action (§10.8): Weaver materialises
-  the row-carried `{action, params}` into the existing `buildPlan` after the **dispatch-time
+  the row-carried `{action, params}` into an ordinary dispatch after the **dispatch-time
   deterministic re-validation** (action vocabulary · live-registry resolution · default-deny scope to
   the trusted candidate · Weaver-authority), then dispatches a **two-op** episode: the proposed
   remediation op (carrying a **proposal-scoped deterministic requestId**, so a sweep re-dispatch

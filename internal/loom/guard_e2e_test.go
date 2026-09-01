@@ -47,7 +47,7 @@ func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, subject
 // guardedOnboardingPattern is the §10.5 worked-example fixture
 // (docs/contracts/10-orchestration-surfaces.md:350-361): SetName/SetPhone guarded
 // on the profile aspect's name/phone fields, with a guardless final SetAddress
-// (which exercises §10.6 invariant 2 — a guardless step has no guard-replay
+// (which exercises loom.md crash-safety invariant 2 — a guardless step has no guard-replay
 // signal and is reached, never skipped).
 func guardedOnboardingPattern(patternID string) loom.Pattern {
 	return loom.Pattern{
@@ -280,7 +280,7 @@ func TestGuardE2E_AllGuardsFalseCompletesOnTrigger(t *testing.T) {
 }
 
 // TestGuardE2E_DisasterRecoveryCursorRebuild proves AC#6 (the §10.5-fixture
-// disaster-recovery test, honoring §10.6 invariant 2). It runs a guarded
+// disaster-recovery test, honoring loom.md crash-safety invariant 2). It runs a guarded
 // onboarding flow to mid-pattern, WIPES loom-state entirely, re-triggers, and
 // asserts identical EFFECTIVE resumption — the fresh instance guard-replays
 // against the (still-populated) subject, lands on the same step a continuing

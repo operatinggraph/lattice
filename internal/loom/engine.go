@@ -817,7 +817,7 @@ func (e *Engine) advance(ctx context.Context, instanceID, token string) error {
 // Guard replay is a forward-skip mechanism only: it answers "is this step's
 // precondition already satisfied, so skip it?", never "did this step already
 // run?" (that is the durable token's job, §10.6). A guardless step's run/skip is
-// NOT derivable from Core KV (it has no guard-replay signal, §10.6 invariant 2),
+// NOT derivable from Core KV (it has no guard-replay signal, loom.md crash-safety invariant 2),
 // so replay always LANDS ON a guardless step (no guard = run), never skips past
 // one on inferred completion. This is what makes the cursor crash-rebuildable: a
 // fresh instance over a partially-populated subject lands on the same effective
@@ -1204,7 +1204,7 @@ func isUserTaskToken(token string) bool {
 // terminal collapses on the Contract #4 tracker.
 const lifecycleCursor = -1
 
-// --- Step-deadline-exceeded handler (Contract #10 §10.6) -------------------
+// --- Step-deadline-exceeded handler (Contract #10 §10.6 failure detection) --
 
 // deadlineDurable is the deadline watcher's durable consumer name.
 const deadlineDurable = "loom-deadline"

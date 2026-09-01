@@ -43,14 +43,14 @@ that reads identity aspects **and** a service-instance vertex **across links**
 (`MATCH (app)-[:applicationFor]->(id), (id)<-[:providedTo]-(inst:service)`) — MAY be projected by an
 **`actorAggregate`** lens (Refractor Output descriptor, `projectionKind: "actorAggregate"`) instead of
 the plain `nats_kv` projection (which reprojects only its own anchor vertex and would miss a linked
-constituent flipping). **The §10.2 key shape is unchanged** (Option (b) at ratification): such a lens
-declares an explicit **key column** (the bare-NanoID `<entityId>`) that the actorAggregate `BuildKey`
-emits **instead of** its default `{actorSuffix}` (= `<type>.<id>`), so the row key stays
-`<targetId>.<entityId>` (bare NanoID) and Weaver's `splitRowKey` accepts it unchanged.
+constituent flipping). **The §10.2 key shape is unchanged**: such a lens declares an explicit **key
+column** (the bare-NanoID `<entityId>`) emitted **instead of** its default `{actorSuffix}`
+(= `<type>.<id>`), so the row key stays `<targetId>.<entityId>` and the engine consumes it
+unchanged.
 
-**Watch.** Weaver does a **filtered watch `<targetId>.>`** per target it manages (discovering each
-target's id from the `meta.weaverTarget` registry, §10.8). Row-per-candidate (incl. non-violating)
-means Weaver watches all rows under its prefix and **acts only on `violating == true`** (lane 1).
+**Watch.** Weaver observes each installed target's rows under its `<targetId>.` prefix.
+Row-per-candidate (incl. non-violating) means every row is observed and Weaver **acts only on
+`violating == true`**.
 
 **Column conventions (the §10.2↔§10.8 contract seam):**
 - `entityKey` — echo of the candidate vertex key (the value mirrors the key, as the cap-doc echoes
@@ -163,8 +163,8 @@ Every action's params are resolved per row (templating below). The Actuator subm
 | `triggerLoom` | `{ pattern, subject }` | submit `StartLoomPattern{ patternRef: pattern, subjectKey: subject }` → Loom (§10.5). `subject` must resolve to a vertex of the pattern's `subjectType`. **Auth: see below.** Also the path for **external remediation** (since 2026-06-18, 13.1): `triggerLoom` a pattern whose body is an `externalTask` (§10.5) — this **replaces the retired `nudge` action**. |
 | `assignTask` | `{ operation, assignee, target }` | `CreateTask` (§10.1): `assignedTo`→`assignee`, `forOperation`→`operation`, `scopedTo`→`target`. |
 | `directOp` | `{ operation, target?, params?, reads?, optionalReads? }` | submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. `optionalReads?` is the op's `contextHint.optionalReads` (Contract #2 §2.5's absence-tolerant half) — same grammar as `reads?`, for a key whose absence is a legitimate branch of the op rather than a correctness error; a `row.<column>` entry that resolves null/absent **drops that one entry** rather than failing the gap (the rows where the column is null are precisely the rows an absence-tolerant declaration is written for). `optionalReads` is accepted on `directOp` only — on any other action it is **refused at install and at load** (that field is the engine's own there). Both fields additive + `omitempty`: a `directOp` that omits them dispatches exactly as before. A clause-billing target is a canonical consumer: `operation` is the literal `DebitAccount`, `target`/`params`/`reads` row-templated (the amount as a numeric param column; clause + account keys routed into `reads` for hydration). |
-| `proposedOp` | *(none — sourced from the row)* | **Additive, opt-in (Augur dispatch, Fire 2b).** Dispatch the **row-carried** `proposedAction` + `proposedParams` (materialised into a `GapAction`) after a **dispatch-time deterministic re-validation** (action ∈ the escalation catalog `{triggerLoom, assignTask, directOp}` · live-registry resolution via the existing `buildPlan` · **default-deny scope** to the row's TRUSTED candidate `candidateKey` · op ∈ Weaver's service-actor authority). Unlike the three static actions, the op + params are *data per row*, not playbook config; the proposed op carries a **proposal-scoped deterministic requestId** so a sweep re-dispatch collapses on the Contract #4 tracker (at-most-once). Used **only** by the `augur` package's primordial `augurDispatch` convergence target (see "Augur dispatch" below); wiring `proposedOp` to a row whose source is not a §5-validated approved proposal is a package bug. The `directOp`-must-be-literal guard stays intact for ordinary playbooks — `proposedOp` is the gated sibling for the one §5-validated dynamic-op surface. |
-| `surface` | `{ issueCode, issueSeverity? }` | **Additive (FR28/FR29 Fire 3).** Dispatch **nothing** — no op, no mark, no OCC, no episode. While the gap column stays true, raises a Contract #5 §5.5 `issues[]` entry keyed `issueCode` at `issueSeverity` (default `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column. `issueCode` is required; `issueSeverity` ∈ `{warning, error}`. Manual-intervention-only — the sibling of `triggerLoom`/`assignTask`/`directOp`/`proposedOp` for a gap the playbook author wants surfaced, never remediated. Used by `orchestration-base`'s primordial `unroutedTasks` target (`missing_claim` → `{action:"surface", issueCode:"UnroutedTasks"}` — an open role-queued task left unclaimed past its own `expiresAt`). |
+| `proposedOp` | *(none — sourced from the row)* | **Additive, opt-in (Augur dispatch).** Dispatch the **row-carried** `proposedAction` + `proposedParams` (materialised into a `GapAction`) after a **dispatch-time deterministic re-validation** (action ∈ the escalation catalog `{triggerLoom, assignTask, directOp}` · live-registry resolution · **default-deny scope** to the row's TRUSTED candidate `candidateKey` · op ∈ Weaver's service-actor authority). Unlike the three static actions, the op + params are *data per row*, not playbook config; the proposed op carries a **proposal-scoped deterministic requestId** so a sweep re-dispatch collapses on the Contract #4 tracker (at-most-once). Used **only** by the `augur` package's primordial `augurDispatch` convergence target ([10-orchestration-augur.md](10-orchestration-augur.md)); wiring `proposedOp` to a row whose source is not a §5-validated approved proposal is a package bug. The `directOp`-must-be-literal guard stays intact for ordinary playbooks — `proposedOp` is the gated sibling for the one §5-validated dynamic-op surface. |
+| `surface` | `{ issueCode, issueSeverity? }` | **Additive (FR28/FR29).** Dispatch **nothing** — no op, no mark, no OCC, no episode. While the gap column stays true, raises a Contract #5 §5.5 `issues[]` entry keyed `issueCode` at `issueSeverity` (default `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column. `issueCode` is required; `issueSeverity` ∈ `{warning, error}`. Manual-intervention-only — the sibling of `triggerLoom`/`assignTask`/`directOp`/`proposedOp` for a gap the playbook author wants surfaced, never remediated. Used by `orchestration-base`'s primordial `unroutedTasks` target (`missing_claim` → `{action:"surface", issueCode:"UnroutedTasks"}` — an open role-queued task left unclaimed past its own `expiresAt`). |
 
 The former `nudge` action is **retired** — external I/O lives in Loom + the bridge; external
 remediation is `triggerLoom` of a pattern containing an `externalTask` (§10.5/§10.6).
@@ -231,22 +231,19 @@ falls out of the existing capability scope model (Contract #6 §6.7), with **no 
 - **Weaver** holds `StartLoomPattern @ scope: any` (seeded in `orchestration-base`) → may start any
   pattern. This is the only caller Phase 2 needs.
 - **External / per-pattern callers** would use `scope: specific` (allowed-pattern-target list) or a
-  task-scoped ephemeral grant (§10.7). **Phase-3 carry:** step-3's `matchPlatformPermission` currently
-  **actively DENIES** platform `scope: specific` (returns `AuthContextMismatch`, "not implemented" —
-  it is not a silent pass; Contract #6 §6.7). So **do not seed an external `scope: specific`
-  `StartLoomPattern` grant in Phase 2** expecting it to authorize — it won't. The *mechanism* is specced
-  now; only `scope: any` (Weaver) is **implemented and exercised** in Phase 2.
+  task-scoped ephemeral grant (§10.7). **Carry:** platform `scope: specific` is currently **actively
+  DENIED** (`AuthContextMismatch` — a deny, never a silent pass; Contract #6 §6.7), so **do not seed
+  an external `scope: specific` `StartLoomPattern` grant** expecting it to authorize — it won't. The
+  *mechanism* is specced; only `scope: any` (Weaver) is implemented and exercised.
 
 ### Flow & anti-storm
 
 Lane-1 sees a `violating` row → for **every** currently-true `missing_*` gap **not already
 in-flight**, the Strategist looks up `gaps[col]` and the Actuator executes:
 
-- **In-flight mark** in `weaver-state`, keyed **`<targetId>.<entityId>.<gapColumn>`** (entity *ID*,
-  not the dotted full key — §10.2). Set via **KV create (CAS-on-absent)** — *that* create **is** the
-  anti-storm OCC: concurrent evaluations race the create, the loser drops, the winner dispatches.
-  Value shape, lease/TTL, level-reconciled clearing, episode tagging, and per-action re-fire
-  idempotency are **§10.3's** (`weaver-state` mark + reclaim), stated once there.
+- **In-flight suppression**: concurrent evaluations of one gap dispatch **exactly once** — the
+  suppression, its self-expiring backstop, level-reconciled clearing, episode identity, and
+  per-action re-fire idempotency are **§10.3's** (the mark), stated once there.
 - **Mark clears** on **gap-close**, **planned-leg completion** (the pinned leg's declared `effects`
   all hold in the current row), or **lease expiry** — all **level-reconciled, never edge-triggered**
   (§10.3). Async remediations close their gap when their downstream work lands and the Lens
@@ -268,7 +265,7 @@ in-flight**, the Strategist looks up `gaps[col]` and the Actuator executes:
 
 Target + playbook are **package data**; the Weaver engine is a generic dispatcher.
 
-### Planner extension — selection & synthesis (Ratified 2026-07-04 — build-pending)
+### Planner extension — selection & synthesis (Ratified 2026-07-04)
 
 > **Ratified 2026-07-04 (Andrew).** **Everything in this subsection is additive and opt-in**: a
 > target carrying none of the new fields behaves **byte-identically** to the frozen shapes above.
@@ -289,10 +286,10 @@ rejects wholesale on a malformed guard (same doctrine as pattern load).
   "missing_<g>": { "action": … }           // frozen shape — ALWAYS wins (operator override)
                | { "candidates": [ { "action": …, "pre"?: <guard>, "cost"?: int }, … ] }
                | { "goal": <guard>,        // synthesis target (per-leg execution below)
-                   "goalColumns"?: { "<column>": "<aspect path>" },  // see below (Fire 6 Increment 2)
+                   "goalColumns"?: { "<column>": "<aspect path>" },  // see below
                    "actions": [ { "ref": "<unique>", <one frozen action's fields>,
                                   "pre"?: <guard>, "effects": [ <atoms> ], "cost"?: int }, … ] }
-                                             // the gap's planning catalog — see below (2026-07-05)
+                                             // the gap's planning catalog — see below
 }
 ```
 
@@ -347,7 +344,7 @@ rejects wholesale on a malformed guard (same doctrine as pattern load).
   (its meaning extends to "no playbook entry AND no derivable plan"); no new trigger token. Budget
   exhaustion on a planned gap raises a standing Health issue at the suppression site (never a silent
   park).
-- **Diagnostics + engine-autonomous freeze.** Weaver keeps in-memory, heartbeat-surfaced diagnostics
+- **Diagnostics + engine-autonomous freeze.** Weaver keeps heartbeat-surfaced diagnostics
   (per-target contraction trajectory; an oscillation detector joining dispatched `actionRef`s to the
   aspect paths their `effects` assert — inventory: the Health schema doc). On a **confirmed two-target
   fight** over one contested path, the detector **freezes both targets** via the §10.3 `__control`

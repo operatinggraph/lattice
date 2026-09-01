@@ -9,7 +9,7 @@ This contract defines the data shapes the orchestration engines introduce. All s
 are frozen — implementation stories build to these shapes; changes require a contract revision, not an
 in-flight redefinition. **Known deferred carries** (do NOT reopen the frozen shapes — they extend them
 later): shared pure-Starlark guard evaluator (until the first Starlark guard is authored, §10.5);
-platform `scope: specific` in step-3 (§10.8 `triggerLoom` external callers, Phase 3); `weaver-work`
+platform `scope: specific` authorization (§10.8 `triggerLoom` external callers, Phase 3); `weaver-work`
 durable bucket (lane-2 / Phase 3, §10.3).
 
 ---
