@@ -71,6 +71,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-01 · `ed25f080` · Café front-desk bookings/lease-details/visits now fail loud (502) on a real KVGet error instead of silently dropping the row, closing the gap `aa29c41e`'s balances fix left.
 - 2026-09-01 · `b3436086` · A member no longer eats the cost of a class the studio cancels — ReleaseOrphanedBooking now mints the same wellnessrefund marker CancelBooking does, unconditionally (no late-cancel window, since the studio caused it).
 - 2026-09-01 · `77e196a5` · Wellness can no longer cancel free at the door — CancelBooking forfeits the class price inside a 2h window instead of refunding it.
 - 2026-09-01 · `99233d11` · Wellness front desk can finally see who owes the studio money — new `/api/frontdesk-arrears`, worst-first, mirrors the café pattern.
