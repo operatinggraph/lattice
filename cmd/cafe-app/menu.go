@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -79,6 +80,44 @@ func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) boo
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows
+}
+
+// dedupeMostSpecific collapses same-named rows down to the most specific
+// covering item, for the caller-scoped views (a leaseAppKey picker or a
+// staffer's workplace-confined grid) where menu coverage is hierarchical: a
+// building-level item and a unit-level item can both cover the same lease or
+// workplace, and if they share a display name the picker shows "Croissant —
+// $3.50" twice with nothing to tell them apart. row is shadowed by other
+// when other's own location is strictly nested inside row's — i.e. row's
+// ServedAt shows up in other's ancestor chain (CoveringLocations) — so only
+// a genuine ancestor/descendant pair collapses. Two same-named rows at
+// unrelated locations (a staffer covering two separate buildings) share no
+// such relation and both stay, since a real containment match is required.
+// Not applied to the unscoped catalog (admit == nil, e.g. the operator's
+// Manage Menu view of everything): there every row is independently the
+// caller's business to see, not one lease's or one workplace's offer set.
+func dedupeMostSpecific(rows []menuItemRow) []menuItemRow {
+	byName := make(map[string][]menuItemRow, len(rows))
+	for _, r := range rows {
+		byName[r.Name] = append(byName[r.Name], r)
+	}
+	out := make([]menuItemRow, 0, len(rows))
+	for _, r := range rows {
+		shadowed := false
+		for _, other := range byName[r.Name] {
+			if other.MenuItemKey == r.MenuItemKey {
+				continue
+			}
+			if r.ServedAt != other.ServedAt && slices.Contains(other.CoveringLocations, r.ServedAt) {
+				shadowed = true
+				break
+			}
+		}
+		if !shadowed {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // leaseCoveringLocations reads the one cafeLeaseWorkplaces row for leaseAppKey
@@ -164,5 +203,8 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeMenu(keys, s.kvGetter(ctx, cafedomain.MenuCatalogBucket), admit)
+	if admit != nil {
+		rows = dedupeMostSpecific(rows)
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"menu": rows})
 }

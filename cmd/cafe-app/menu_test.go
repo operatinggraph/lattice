@@ -102,3 +102,51 @@ func TestComputeMenu_WorkplaceAdmitFiltersToCoveringLocationsIntersection(t *tes
 		t.Fatalf("want only the item whose covering chain reaches the staffer's building, got %+v", rows)
 	}
 }
+
+// TestDedupeMostSpecific_BuildingAndUnitLevelItem_KeepsOnlyTheUnitOne proves
+// the live shape the PO found: a building-level "Croissant" and a
+// unit-level "Croissant" both admitted for one lease collapse to the more
+// specific (unit) row instead of appearing twice with nothing to tell them
+// apart.
+func TestDedupeMostSpecific_BuildingAndUnitLevelItem_KeepsOnlyTheUnitOne(t *testing.T) {
+	rows := []menuItemRow{
+		{MenuItemKey: "vtx.menuitem.building", Name: "Croissant", PriceCents: 350,
+			ServedAt: "vtx.location.riverside", CoveringLocations: []string{"vtx.location.riverside"}},
+		{MenuItemKey: "vtx.menuitem.unit", Name: "Croissant", PriceCents: 350,
+			ServedAt: "vtx.location.unit4b", CoveringLocations: []string{"vtx.location.unit4b", "vtx.location.riverside"}},
+	}
+	out := dedupeMostSpecific(rows)
+	if len(out) != 1 || out[0].MenuItemKey != "vtx.menuitem.unit" {
+		t.Fatalf("want only the unit-level item, got %+v", out)
+	}
+}
+
+// TestDedupeMostSpecific_UnrelatedBuildings_KeepsBoth proves two same-named
+// items admitted from UNRELATED locations (a staffer covering two separate
+// buildings) are left alone — collapsing requires a real ancestor/descendant
+// pair, and neither item's location is the other's ancestor here.
+func TestDedupeMostSpecific_UnrelatedBuildings_KeepsBoth(t *testing.T) {
+	rows := []menuItemRow{
+		{MenuItemKey: "vtx.menuitem.a", Name: "Croissant", PriceCents: 350,
+			ServedAt: "vtx.location.riverside", CoveringLocations: []string{"vtx.location.riverside"}},
+		{MenuItemKey: "vtx.menuitem.b", Name: "Croissant", PriceCents: 375,
+			ServedAt: "vtx.location.lakeside", CoveringLocations: []string{"vtx.location.lakeside"}},
+	}
+	out := dedupeMostSpecific(rows)
+	if len(out) != 2 {
+		t.Fatalf("want both unrelated items kept, got %+v", out)
+	}
+}
+
+// TestDedupeMostSpecific_DifferentNames_Untouched proves the filter never
+// drops a row over a same-location item with a different name.
+func TestDedupeMostSpecific_DifferentNames_Untouched(t *testing.T) {
+	rows := []menuItemRow{
+		{MenuItemKey: "vtx.menuitem.a", Name: "Croissant", ServedAt: "vtx.location.unit4b", CoveringLocations: []string{"vtx.location.unit4b", "vtx.location.riverside"}},
+		{MenuItemKey: "vtx.menuitem.b", Name: "Latte", ServedAt: "vtx.location.riverside", CoveringLocations: []string{"vtx.location.riverside"}},
+	}
+	out := dedupeMostSpecific(rows)
+	if len(out) != 2 {
+		t.Fatalf("want both distinct-named items kept, got %+v", out)
+	}
+}

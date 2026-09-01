@@ -493,6 +493,39 @@ func TestHandleMenu_LeaseAppKey_OffersOnlyItemsChargeWouldAccept(t *testing.T) {
 	}
 }
 
+// TestHandleMenu_LeaseAppKey_BuildingAndUnitLevelDuplicate_CollapsesToUnit is
+// the live shape PO found: a building-level "Croissant" and a unit-level
+// "Croissant" both cover the same lease (menu coverage is hierarchical), and
+// the picker must show it once — the more specific (unit) row — not twice.
+func TestHandleMenu_LeaseAppKey_BuildingAndUnitLevelDuplicate_CollapsesToUnit(t *testing.T) {
+	const unit = "vtx.unit.4b"
+	resA := "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.aaa", resA, staffWorkplace, unit)
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.building", map[string]any{
+		"menuItemKey": "vtx.menuitem.building", "name": "Croissant", "priceCents": 350,
+		"servedAt": staffWorkplace, "coveringLocations": []string{staffWorkplace},
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.unit", map[string]any{
+		"menuItemKey": "vtx.menuitem.unit", "name": "Croissant", "priceCents": 350,
+		"servedAt": unit, "coveringLocations": []string{unit, staffWorkplace},
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu?leaseAppKey=vtx.leaseapp.aaa", cookieFor(resA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 1 || body.Menu[0].MenuItemKey != "vtx.menuitem.unit" {
+		t.Fatalf("menu = %+v, want exactly the unit-level item, collapsed from the building-level duplicate", body.Menu)
+	}
+}
+
 func TestHandleMenu_LeaseAppKey_NotYourLease_403(t *testing.T) {
 	resA, resB := "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, nil))
