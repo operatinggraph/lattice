@@ -36,7 +36,7 @@ The operation envelope is the message format a client publishes to `core-operati
 | `payload` | yes | object | immutable | Operation-specific data. Shape varies by `operationType`. Schema validated by Starlark dispatch (not by envelope schema; envelope is type-agnostic). May be empty `{}` for parameterless operations. |
 | `contextHint` | optional | object with `reads: string[]`, optional `optionalReads: string[]`, optional `egressReads: string[]`, and optional `enumerations: {hub, relation, direction}[]` | immutable | JIT Hydration directive — declared read set. `reads` lists Core KV keys the script reads whose **absence is a correctness error** (a missing key faults `HydrationMiss`, fail-closed). `optionalReads` lists declared keys whose **absence is a legitimate branch** (read-before-create / dedup) — hydrated if present, recorded as the absent sentinel if missing (never `HydrationMiss`). `egressReads` lists keys read **for external egress** — hydrated fail-closed like `reads`, except a `sensitive: true` aspect (Contract #3 §3.10) hydrates as a **sensitive-ref** (its at-rest ciphertext + the aspect key, Processor-authenticated per the §3.10 ref-provenance rule — never the key envelope, per the §3.10 live-envelope rule), never decrypted plaintext; a non-sensitive key hydrates normally; a key in both `reads` and `egressReads` is an envelope validation error. `enumerations` declares `kv.Links` link-enumerations (§2.5.1) as **metadata** — bounded, paged, **not** hydrated — for the Edge mirror-coverage gate + static classification. The `reads`/`optionalReads`/`egressReads` **summed** length MUST NOT exceed **1000** (§2.5 "Declared-read ceiling") or the envelope is rejected `EnvelopeMalformed`. If a read is absent from `contextHint`, the Processor falls back to lazy on-demand reads (not Edge-predictable). See §2.5. |
 
-**`actor` form:** Full vertex key including the `vtx.` prefix. Short forms (`identity.<id>`) are reserved for HTTP headers in Phase 2 (Gateway translates to full key before envelope submission).
+**`actor` form:** Full vertex key including the `vtx.` prefix. Short forms (`identity.<id>`) are not valid envelope values.
 
 **Optional field — `class` (optional, `omitempty`):**
 
@@ -55,8 +55,8 @@ Phase 1 reserves four lanes. Operations on each lane publish to a corresponding 
 | Lane | JetStream Subject | Consumer Semantics | Use Case |
 |------|-------------------|---------------------|----------|
 | `default` | `ops.default.>` | Standard parallel consumer; bulk of operator and AI traffic | Normal business operations |
-| `meta` | `ops.meta.>` | **Serialized** consumer (concurrency = 1); DDL cache invalidation synchronous with commit | DDL changes; Lens definition changes; event schema changes. Serialization prevents concurrent DDL races. |
-| `urgent` | `ops.urgent.>` | Priority parallel consumer with higher weight in scheduling | Time-sensitive business operations (e.g., security overrides, emergency revocations). Operator-defined criteria — platform does not auto-promote. |
+| `meta` | `ops.meta.>` | **Serialized** consumer (concurrency = 1); a committed DDL change is visible to the next meta-lane op | DDL changes; Lens definition changes; event schema changes. Serialization prevents concurrent DDL races. |
+| `urgent` | `ops.urgent.>` | Priority parallel consumer | Time-sensitive business operations (e.g., security overrides, emergency revocations). Operator-defined criteria — platform does not auto-promote. |
 | `system` | `ops.system.>` | Parallel consumer dedicated to internal service actors | Loom/Weaver/admin tool operations. Separating these from `default` prevents internal automation from competing with user-facing operations for consumer capacity. |
 
 **Lane authorization:** Submitting to a lane is itself capability-controlled. The Capability Lens grants per-lane submission rights. Most actors hold `default` only. `meta` requires operator/admin capability. `urgent` requires explicit grant. `system` is reserved for internal service actors. A submission to a lane the actor lacks capability for is rejected at commit step 3 (auth check) before any further processing.
@@ -120,7 +120,7 @@ For dedup-detected resubmits:
 There is **no `detail` field**. The reply carries only commit-trace identifiers
 the Processor itself produced (`primaryKey`, `revisions`) — never arbitrary,
 script-returned data. The write path is not a read channel: read-derived signals
-travel on business events (e.g. `IdentityCreated.data.duplicate`), and one-time
+travel on business events (e.g. `identity.created` carrying `data.duplicate`), and one-time
 secrets are never returned (see §2.7).
 
 ### 2.5 Context Hint Semantics
@@ -193,12 +193,12 @@ It returns the Core KV canonical links incident to `hubKey` under `relation` in 
 This is the **one sanctioned relaxation** of the otherwise known-key-reads-only write path. It is bounded, paged, lazy, and scoped:
 
 - **Bound to the hub's vertex id in BOTH directions — a server-side subject-filtered list.** The canonical link key is `lnk.<sourceType>.<sourceId>.<relation>.<targetType>.<targetId>` (Contract #1 §1.1; source first). The hub's vertex id is a **fixed token** in either direction, so the read is bounded by the hub's degree *in that direction*, never the link space:
-  - `direction:"out"` (hub is the source) → key filter `lnk.<hubType>.<hubId>.<relation>.>` (hub id in the prefix; `>` matches `<targetType>.<targetId>`).
-  - `direction:"in"` (hub is the target) → key filter `lnk.*.*.<relation>.<hubType>.<hubId>` (hub id in the suffix; the two `*` wildcard `<sourceType>.<sourceId>`, one token each; `<relation>` fixed).
-  Both filters are evaluated server-side — only matching keys are returned, so **neither direction scans the keyspace**. The link keeps its natural §1.1 direction; the guard chooses the `direction` matching where the hub sits in that link.
+  The filter is evaluated server-side in both directions — only matching keys are returned, so
+  **neither direction scans the keyspace**. The link keeps its natural §1.1 direction; the guard
+  chooses the `direction` matching where the hub sits in that link.
 - **Paged, not fail-closed-capped.** A high-degree hub (e.g. a service template with many `instanceOf` instances pointing back) is enumerated **page by page** via the opaque `cursor`/`nextCursor` — the call **never silently truncates** and **never fail-closes a legitimately high-degree hub**. `limit` bounds each page; the guard pages until `nextCursor` is `None`. (A guard that must page a very-high-degree hub bears that cost explicitly — a visible authoring choice, not a hidden cap.)
 - **Lazy.** The enumeration + per-key reads happen **only when the script calls `kv.Links`**, and only for the pages it pulls — never eagerly pre-hydrated (a wildcard/prefix filter has no exact-key form to pre-declare in `contextHint.reads`). Reads run under the per-invocation wall-budget context and count against the script timeout (NFR-P4).
-- **Core KV links only.** `kv.Links` reads **only** the Core KV canonical link keyspace. It never reads the Refractor Adjacency KV (Refractor-private) and never a lens/read-model (P5: applications read lenses; the write path reads its own Core KV). `hubKey` must be a 3-segment vertex key; the constructed filter is always under `lnk.` — no `vtx.`/aspect prefixes, no other bucket.
+- **Core KV links only.** `kv.Links` reads **only** the Core KV canonical link keyspace — never an engine-private index and never a lens/read-model (P5: applications read lenses; the write path reads its own Core KV). `hubKey` must be a 3-segment vertex key; the constructed filter is always under `lnk.` — no `vtx.`/aspect prefixes, no other bucket.
 - **Not a serialization point.** `kv.Links` returns the **currently-committed** matching links; it is **not** snapshot-isolated and does **not** itself serialize concurrent writers, and a paged enumeration may observe an add/remove between pages. A guard enforcing a constraint over the returned set **MUST** additionally contend a shared OCC-guarded key (a per-hub scalar epoch both concurrent writers bump) for correctness: a concurrent mutation bumps the epoch, the step-8 OCC CAS fails, and the op re-hydrates and re-enumerates. The enumeration recovers the *set*; the OCC-guarded scalar recovers the *lock*.
 - **Live read, not replay-stable.** Like `kv.Read`, `kv.Links` reads live Core KV — two runs of the same `requestId` may observe different sets. The deterministic id + the step-8 OCC commit are the idempotency authority, not replay determinism.
 
@@ -223,11 +223,11 @@ The reply envelope's `error.code` is one of a closed enumeration. The shipped se
 | `RevisionConflict` | Atomic batch rejected due to concurrent revision change; retries exhausted | Step 8 |
 | `BatchTooLarge` | A single operation's atomic batch exceeded the message-count ceiling (>998 business mutations) or a mutation value exceeded the payload ceiling (`max_payload`). Terminal — no redelivery. `details`: `reason` (`mutationCount`\|`valueSize`), `limit`, `actual`, `key` (valueSize only). See Contract #3 §3.9.1. | Step 8 |
 | `InternalError` | Unrecoverable Processor failure not covered by above codes | Any step |
-| `CellMoved` | **Reserved (Multi-cell, Phase 3 — not yet emitted):** the target vertex has migrated to another cell and this cell has drained it; the write was not applied. `details.newCell` carries the cell the caller must re-route through — a `410 Gone`-equivalent stray-write rejection (no data lost; the caller re-submits to the correct cell). | Pre-step-1 (cell-router check) |
+| `CellMoved` | **Reserved (multi-cell; not yet emitted):** the target vertex has migrated to another cell and this cell has drained it; the write was not applied. `details.newCell` carries the cell the caller must re-route through — a `410 Gone`-equivalent stray-write rejection (no data lost; the caller re-submits to the correct cell). | Pre-step-1 (cell-router check) |
 
 `CellMoved` is documented but reserved (not yet emitted).
 
-Each code is paired with a human-readable `message` and structured `details` appropriate to the failure mode. The enumeration is extensible — Phase 2+ may add codes; a shipped (wire-emitted) code is immutable contract.
+Each code is paired with a human-readable `message` and structured `details` appropriate to the failure mode. The enumeration is extensible — new codes may be added; a shipped (wire-emitted) code is immutable contract.
 
 ### 2.7 Closed `response` script-return schema
 
@@ -294,50 +294,35 @@ All three fields are optional. `null`, omitted, or the entire `authContext` bloc
 
 `authContext.target` is a **client-supplied** field the Processor forwards unexamined on the paths that do not check it (`scope: "any"` and the service path), so an op script must never treat its mere presence as proof of anything. The Processor therefore derives a read-only boolean the script sees as **`op.authTargetValidated`**: true exactly when the auth path that matched *validated* the target — `scope: "self"` (target proven `== actor`) or the task path (target proven `==` the matched `ephemeralGrant.target`) — and false everywhere else, including the service path. It is not an envelope input: a client-supplied value is dropped, and the Processor sets it after step 3. A guard that exempts a caller from a confinement rule keys on `op.authTargetValidated`; a guard that merely needs to know which entity the caller named may still read `op.authContextTarget`.
 
-**Processor dispatch at step 3:**
+**Path precedence and match predicates (step 3):**
 
-```
-if authContext.task is set:
-    look up ephemeralGrants[] entry where taskKey == authContext.task
-    AND the entry's operationType matches the envelope's operationType
-    AND the entry's target matches authContext.target
-    AND expiresAt > now
-    → allow or deny (AuthDenied / AuthContextMismatch)
-
-elif authContext.service is set:
-    look up serviceAccess[] entry where service == authContext.service
-    AND allowedOperations[] contains the envelope's operationType
-    → allow or deny
-
-else:
-    look up platformPermissions[] entry matching the envelope's operationType
-    validate scope:
-        scope=any    → allow
-        scope=self   → require authContext.target == actor
-        scope=owned  → deferred to Phase 2
-    → allow or deny
-```
+- **Task path** (`authContext.task` set): authorized iff a grant matches `taskKey` ∧ the envelope's
+  `operationType` ∧ `target` ∧ `expiresAt > now` (Contract #6 §6.6); otherwise `AuthDenied` /
+  `AuthContextMismatch`.
+- **Service path** (`authContext.service` set): authorized iff the actor's service access covers that
+  service and its allowed operations contain the envelope's `operationType` (Contract #6 §6.3).
+- **Platform path** (neither set): authorized iff a platform permission matches the envelope's
+  `operationType`, with scope semantics `any` → allow · `self` → require
+  `authContext.target == actor` · `specific`/`owned` → see Contract #6 §6.7.
 
 Task auth takes precedence over service auth, which takes precedence over platform auth. An actor may hold multiple auth paths to the same operation; they explicitly declare which path they're invoking via `authContext`. This makes the auth path inspectable at the wire level and testable in adversarial suites.
 
-**Amendment — generic auth-hook dispatcher, one-key-per-path.** Step 3 dispatches over a
-**data-driven registry** rather than scanning sections of one `cap.<actor>` document:
+**Generic auth-hook dispatcher, one-key-per-path.** Step 3 dispatches over a **data-driven
+registry**:
 
 - **Core owns a fixed set of matcher *kinds*** (`task`, `service`, `platform`); Lattice packages
   remain **data-only** and never ship matcher code.
 - **A package declares, as install-time data**, which matcher kind authorizes its grant type and which
-  **disjoint Capability-KV key** that path reads (+ the field mapping). The dispatch table is data,
-  not a `switch` naming grant types.
+  **disjoint Capability-KV key** that path reads (+ the field mapping).
 - **One-key-per-path invariant:** path selection happens **before** the read, and each path maps to
   **exactly one** disjoint Capability-KV key. **Two packages contributing the same path is a config
-  error**; a single path never fans into N reads. The one bounded exception is the **system-actor platform
-  path** — the deny-closed `cap.<actor>` ∪ `cap.roles.<actor>` union of Contract #6 §6.1 ("Step-3 key
-  derivation"); it is core-internal to the platform path, never a package-contributed fan-out, and
-  the ordinary-actor and scoped paths remain strictly one-key.
+  error**; a single path never fans into N reads. The one bounded exception is the **system-actor
+  platform path** — the deny-closed `cap.<actor>` ∪ `cap.roles.<actor>` union of Contract #6 §6.1
+  ("key derivation"); it is core-internal to the platform path, never a package-contributed fan-out,
+  and the ordinary-actor and scoped paths remain strictly one-key.
 
-The precedence order (task → service → platform) and the forgery-resistance property below are
-unchanged. The dispatch pseudocode above describes the single-document form; the decomposed form
-reads the path-specific disjoint key via the registered hook (Contract #6 §6.1/§6.13).
+The precedence order (task → service → platform) and the forgery-resistance property below hold
+identically in this decomposed form (Contract #6 §6.1/§6.13).
 
 **Forgery resistance:**
 

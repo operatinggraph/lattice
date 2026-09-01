@@ -13,12 +13,12 @@ Three key shapes are valid in Core KV. No other shapes are permitted.
 **Field definitions:**
 
 - **`<type>`** — a single lowercase identifier matching `[a-z][a-z0-9]*`. The type is a coarse routing/filtering category. Fine-grained classification lives in the document's `class` field.
-- **`<id>`** — a NanoID generated per the architecture's locked specification in `lattice-architecture.md` §Entity ID Generation: **20 characters drawn from a custom 58-character alphabet that excludes visually ambiguous characters** (`I`, `l`, `O`, `0`). This applies to runtime entities, `op` trackers (whose IDs match the operation's `requestId`), and `meta` meta-vertices uniformly. Deterministic readable IDs are NOT permitted in primary keys — meta-vertex discovery is by `class` + canonicalName aspect, not by key. A separate **8-character NanoID** form from the same alphabet is reserved for human-facing short codes (display references, verbal sharing) and MUST NOT be used as a primary key. Substrate tests MUST include collision-rate validation against the published alphabet and length spec.
+- **`<id>`** — a NanoID: **20 characters drawn from a custom 58-character alphabet that excludes visually ambiguous characters** (`I`, `l`, `O`, `0`). This applies to runtime entities, `op` trackers (whose IDs match the operation's `requestId`), and `meta` meta-vertices uniformly. Deterministic readable IDs are NOT permitted in primary keys — meta-vertex discovery is by `class` + canonicalName aspect, not by key. A separate **8-character NanoID** form from the same alphabet is reserved for human-facing short codes (display references, verbal sharing) and MUST NOT be used as a primary key.
 - **`<localName>`** — for aspects and links: a lowercase camelCase identifier matching `[a-z][a-zA-Z0-9]*`. Underscore prefix (`_name`) is reserved for platform-generated system metadata; business DDL must not use underscore-prefixed local names.
 - **Link directionality** — every link DDL declares its canonical name and direction at **design time**, encoding the typical graph-growth pattern: the link's source side (`<typeA>.<idA>`) is the vertex that is *typically added later* in the graph's lifetime; the target side (`<typeB>.<idB>`) is the vertex that *typically pre-exists* (it was already in the graph when the source side appeared). The convention is semantic, not algorithmic — there is no auto-sort by type, by NanoID, or by `createdAt`. Example:
   - `lnk.identity.<idA>.reportsTo.identity.<idB>` — both endpoints are type `identity`, but the manager identity pre-exists the report: the link points from the report (later-added) to the manager (pre-existing). Same-type links follow the same conceptual rule; runtime callers know which endpoint is which from the operation's semantics, not from string comparison. The name reads as a sentence, "source reportsTo target"; once the link DDL is authored, its direction is fixed.
 
-  Substrate is **direction-agnostic**: `substrate.LinkKey(type1, id1, linkName, type2, id2)` constructs the key in caller-provided order; the substrate does NOT validate or re-sort. The DDL's Starlark script (or other authorized caller) is responsible for emitting endpoints in the DDL-declared direction. The link DDL's `.description` aspect SHOULD document its directional semantics for downstream consumers (FR19 self-description aspect).
+  The storage layer is **direction-agnostic**: it neither validates nor re-sorts endpoint order. The writer is responsible for emitting endpoints in the DDL-declared direction. The link DDL's `.description` aspect SHOULD document its directional semantics for downstream consumers (FR19 self-description aspect).
 
 **Parser disambiguation rule:**
 - Count segments by dot-splitting the key. 3 segments → vertex. 4 segments → aspect. 6 segments → link. Any other segment count is malformed and rejected at write time.
@@ -29,16 +29,16 @@ Three key shapes are valid in Core KV. No other shapes are permitted.
 - DDL validation rejects mixed-case types and localNames at write time; legitimate paths cannot produce mixed-case keys.
 
 **Soft-delete addressing:**
-- Soft-deleted entities retain their keys. Deletion is the `isDeleted: true` flag on the document, not a key change. Every reader independently filters on `isDeleted` (Processor enforces in commit path; Refractor enforces in CDC handlers).
+- Soft-deleted entities retain their keys. Deletion is the `isDeleted: true` flag on the document, not a key change. Every reader independently filters on `isDeleted` — the platform hides nothing.
 
 ### 1.2 Reserved Types
 
 Only two type names are reserved by the platform:
 
-- **`meta`** — schema and configuration meta-entities (DDL, Lens definitions, event schemas, system configuration). Distinguished by `class` field. Low-churn, durable, replicated to every Processor's DDL cache.
+- **`meta`** — schema and configuration meta-entities (DDL, Lens definitions, event schemas, system configuration). Distinguished by `class` field. Low-churn, durable.
 - **`op`** — idempotency trackers. Key ID matches operation `requestId`. High-churn, short-lived (24h idempotency horizon). Separate from `meta` for retention/archival policy isolation.
 
-Operator-defined DDL **must not** register vertex types named `meta` or `op`. Attempting to do so is rejected by Processor at meta-DDL commit time.
+Operator-defined DDL **must not** register vertex types named `meta` or `op`. Attempting to do so is rejected.
 
 Other names that might *look* like they should be reserved but aren't:
 - `lens`, `event`, `ddl`, `actor` — these are *flavors of `meta`*, distinguished by the document's `class` field (`meta.lens`, `meta.event.<name>`, `meta.ddl.vertexType`, etc.)
@@ -72,7 +72,7 @@ Every Core KV value (vertex, aspect, or link) is a JSON document carrying a unif
 | `key` | string | immutable | Echo of the KV key. Useful in logs, exports, and event payloads where the key isn't always carried in the envelope. |
 | `class` | string | mutable | Type/kind classification used for DDL lookup. Dot-separated hierarchical descriptor permitted (e.g., `identity.ai.onboarding-assistant`). DDL lookup is exact match against canonical name. |
 | `isDeleted` | boolean | mutable | Soft-delete tombstone. Default `false`. Readers filter independently. |
-| `createdAt` | string (ISO 8601) | immutable | Document creation timestamp (set by Processor at commit step 8). |
+| `createdAt` | string (ISO 8601) | immutable | Document creation timestamp — platform-set at commit, never client-supplied. |
 | `createdBy` | string (vertex key) | immutable | Identity vertex of the actor who created this entity. |
 | `createdByOp` | string (op vertex key) | immutable | The operation tracker that committed creation. |
 | `lastModifiedAt` | string (ISO 8601) | mutable | Timestamp of most recent commit affecting this document. |
@@ -134,22 +134,21 @@ redundant and risk drift.
 
 ### 1.4 Reserved Underscore-Prefixed Local Names
 
-Aspect and link `localName` values starting with `_` are reserved for platform-generated system metadata. Business DDL must not register classes that would naturally suggest underscore-prefixed local names, and write operations may not produce underscore-prefixed local names from Starlark scripts (Processor rejects at commit step 6).
+Aspect and link `localName` values starting with `_` are reserved for platform-generated system metadata. Business DDL must not register classes that would naturally suggest underscore-prefixed local names, and write operations may not produce underscore-prefixed local names from Starlark scripts (rejected at commit).
 
 ### 1.5 DDL Lookup at Commit Time
 
-When the Processor validates a mutation (commit step 6), it resolves the DDL for the affected entity by **class-based lookup against the DDL cache**.
-
-**Lookup algorithm:**
+When a mutation commits, the governing DDL for the affected entity resolves by **class**, in this
+precedence:
 
 1. Read the document's `class` field.
 2. Determine the DDL kind from the entity being mutated (vertex / aspect / link).
-3. Query the DDL cache: "find a meta-vertex with `class: 'meta.ddl.<kind>Type'` and a `canonicalName` aspect equal to the document's `class`."
+3. Resolve the DDL of that kind whose `canonicalName` equals the document's `class` (exact match).
 4. If found → validate against the resolved schema, enforce `permittedCommands`, apply sensitivity constraints (for aspects).
-5. **If not found, resolve the *type authority* by `instanceOf` chain** (vertex mutations only): follow the mutated vertex's live `lnk.<root>.instanceOf.<type>.<id>` link to its target, bounded to `MAX_INSTANCEOF_HOPS` (4) with a visited-set cycle guard. The target may be read from the current atomic batch, the hydrated working set, or on demand; tombstoned `instanceOf` links are ignored. Terminate when the target **is** a `vtx.meta.*` **vertexType** DDL (the type authority) or is a vertex whose own `class` resolves to a vertexType DDL — and validate the mutation against **that** DDL's `permittedCommands`. This lets a fine-grained discriminator class (`service.backgroundCheck.instance`) inherit its governing DDL from the single type it is an instance of, without registering a DDL per subtype. The walk is **fail-open**: a missing/cyclic/over-bound chain falls through to step 6, never to a *wrong* DDL.
+5. **If not found, resolve the *type authority* by `instanceOf` chain** (vertex mutations only): follow the mutated vertex's live `lnk.<root>.instanceOf.<type>.<id>` link to its target, **bounded to 4 hops** and cycle-safe; tombstoned `instanceOf` links are ignored. Terminate when the target **is** a `vtx.meta.*` **vertexType** DDL (the type authority) or is a vertex whose own `class` resolves to a vertexType DDL — and validate the mutation against **that** DDL's `permittedCommands`. This lets a fine-grained discriminator class (`service.backgroundCheck.instance`) inherit its governing DDL from the single type it is an instance of, without registering a DDL per subtype. The walk is **fail-open**: a missing, cyclic, or over-bound chain falls through to step 6, **never to a *wrong* DDL** — and a taxonomy deeper than 4 hops gets no enforcement.
 6. If neither an exact match (step 3–4) nor an `instanceOf` type authority (step 5) is found → accept the mutation with no schema validation, no `permittedCommands` enforcement, no sensitivity constraint. (Permissive-by-default.)
 
-**Class lookup is exact match** at step 3. Hierarchical class strings (e.g., `identity.ai.onboarding-assistant`) match only DDLs with exactly that canonical name. To validate AI-specific identities under their own rules, operators register a DDL with canonical name `identity.ai.onboarding-assistant`. To use the generic identity DDL, set `class: "identity"`. Prefix matching is not part of Phase 1. **A fine-grained subtype class that is not itself a registered DDL** resolves its governing DDL via the step-5 `instanceOf` chain rather than by prefix — the type relationship is an explicit link, not a string convention.
+**Class lookup is exact match** at step 3. Hierarchical class strings (e.g., `identity.ai.onboarding-assistant`) match only DDLs with exactly that canonical name. To validate AI-specific identities under their own rules, operators register a DDL with canonical name `identity.ai.onboarding-assistant`. To use the generic identity DDL, set `class: "identity"`. There is no prefix matching. **A fine-grained subtype class that is not itself a registered DDL** resolves its governing DDL via the step-5 `instanceOf` chain rather than by prefix — the type relationship is an explicit link, not a string convention.
 
 **No default class.** A write submission that omits the `class` field resolves no governing DDL — step 6
 takes the permissive-by-default path above (no schema validation, no `permittedCommands`, no sensitivity
@@ -162,7 +161,7 @@ nothing defaults or infers it from the key.
 - Vertex-type DDLs: unique `canonicalName` across all `class: "meta.ddl.vertexType"` meta-vertices
 - Event-type DDLs: unique `canonicalName` across all `class: "meta.ddl.eventType"` meta-vertices
 
-Names can collide *across* kinds (an aspect class `email` and a link class `email` could coexist; their addresses are syntactically distinct). Processor enforces uniqueness within kind at meta-DDL commit time.
+Names can collide *across* kinds (an aspect class `email` and a link class `email` could coexist; their addresses are syntactically distinct). Uniqueness within kind is enforced at commit.
 
 ### 1.6 Permissive-by-Default
 
@@ -177,8 +176,6 @@ Names can collide *across* kinds (an aspect class `email` and a link class `emai
 **Consequences for FR57 (write-scope per DDL):** `permittedCommands` enforcement applies to a type that is reachable by class lookup **or** by the §1.5 step-5 `instanceOf` type-authority resolution. A **fine-grained subtype** vertex (a dotted discriminator class with no DDL of its own) is enforced via its `instanceOf` type authority — so the envelope-class discriminator (P7) does *not* turn off `permittedCommands`. A vertex that is neither a declared type nor `instanceOf`-linked to one remains undeclared and bypasses FR57's enforcement, consistent with the permissive model — operators who want strict write-scope register a DDL with `permittedCommands`, or link the subtype's instances to a type that has one. A `permittedCommands` that is absent or empty is **unrestricted** (the permissive default); when present, an `operationType` not in the list rejects the entire operation.
 
 **Consequences for sensitive aspects (PRD Item 6):** a sensitive aspect's **key custody** is declared by its aspect-type DDL (`custody.kind`), found by the same class lookup, and the anchoring rule follows the declared kind: custody kind `identity` (the default when undeclared) requires the aspect to attach to an `identity` vertex; custody kind `retentionClass` permits any anchor and custodies the DEK on the declared retention-class holder. Undeclared aspects have no enforced sensitivity. Operators handling sensitive data must register a DDL with the sensitive flag, and — for data whose retention obligation outlives a data subject's erasure request — with a retention-class custody declaration.
-
-**Consequences for the bypass test suite (NFR-S2, Phase 1 Gate 2):** The "DDL schema violation" bypass category applies to *declared* types. The other three categories (direct KV write, stream publish outside `ops.*`, Starlark I/O escape) are unchanged — they're enforced regardless of DDL state.
 
 **Cardinality, mandatoryness, target-type restrictions, and vertex-type-specific constraints** are NOT part of DDL. They are business-logic concerns enforced by Starlark scripts on the operations that mutate the affected entities. This is consistent with architectural principle P4 (Starlark enforces single-operation invariants).
 
@@ -221,7 +218,7 @@ aspect-/link-type DDLs may carry `permittedCommands`. An event-type DDL carries 
 
 **Discovery and bootstrap:**
 - DDL meta-vertices are NOT addressable by deterministic key (their IDs are NanoIDs).
-- Discovery is by class-based lookup against the Processor's in-memory DDL cache, built at startup by scanning `vtx.meta.>` CDC and maintained incrementally via CDC updates.
+- Discovery is by class-based lookup (§1.5), never by key.
 - The platform ships with **primordial meta-vertices** that describe the meta-meta layer (the DDL for `meta.ddl.vertexType`, `meta.ddl.aspectType`, etc.). These are seeded by `make up` and are not authored through the write path. Their NanoIDs are fixed for any given platform version.
 
 ### 1.8 Worked Example — two aspects, one class

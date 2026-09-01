@@ -147,6 +147,26 @@ Constraints:
 
 On failure, error wraps `ErrAtomicBatchRejected`.
 
+Both batch helpers are cancellation-aware: the `ctx` bounds the commit round trip and is checked
+before each fire-and-forget publish, so an upstream deadline or `SIGTERM`-driven cancellation
+propagates end-to-end mid-batch (each call site supplies its lane-SLA deadline; the Processor commit
+path wraps `ctx` with its per-attempt commit timeout).
+
+**Committed-revision derivation.** An atomic batch lands all N messages as a contiguous block of
+stream sequences, and a Core KV entry's revision equals its stream sequence, so per-key committed
+revisions derive from the ack: `firstSeq = ack.Sequence − ack.BatchSize + 1`, key *i* at
+`firstSeq + i`. `BatchAck.Revisions` carries the map, populated only when the contiguous-sequence
+invariant holds for the ack (`BatchSize == len(ops)`); otherwise it is nil — no revisions are
+fabricated.
+
+**Size ceilings (Contract #3 §3.9.1's enforcement).** Both helpers check fail-closed before any
+publish: the NATS server default of 1000 messages per atomic batch (`streamDefaultMaxAtomicBatchSize`;
+overridable via `jetstream_limits.max_batch_size`, which deployments must not lower below 1000 —
+`deploy/nats-server.conf` sets no override) yields the contract's 998-business-mutation cap once the
+tracker + optional outbox aspect ride along, surfaced as `ErrBatchTooLarge`; a marshaled value over
+the negotiated `max_payload` minus headroom surfaces as `ErrValueTooLarge`. The Processor maps either
+to Contract #2's terminal `BatchTooLarge`.
+
 ### Publish batch
 
 `(*Conn).PublishBatch(ctx context.Context, ops []PublishOp) (*PublishBatchAck, error)`
