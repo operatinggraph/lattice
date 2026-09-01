@@ -2,6 +2,18 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-29 · `361286fb` · wellnessClassPriceSettlement's exhausted missing_price_charge gap now escalates to Augur instead of parking behind an unread Health warning — mirrors lease-signing's renewalComplete. wellness-ledger 0.2.16.
+- 2026-08-29 · `71a4c245` · The Manage Menu grid badges an item whose place was retired and can Relocate it to the staffer's own workplace via the existing SetMenuItemLocation op. cmd/cafe-app only.
+- 2026-08-29 · `abd881cf` · The house tab now carries a due date and OVERDUE banner — FIFO-aged from the oldest unpaid debit, 15-day grace, no ledger schema change (balance stays derived). cmd/cafe-app only.
+- 2026-08-29 · `ffcef9f5` · OpenTab now rejects a lease the landlord hasn't approved (live $4.50 self-order gap) — server-side LeaseNotApproved + POS picker badges the unapproved option. cafe-domain 0.11.27.
+- 2026-08-29 · `c5c7f994` · LoftSpace task cards for the same op now show which application they're about (unit address, joined off `scopedTo`) — verified live. triage §4
+- 2026-08-29 · `fe85490d` · A descriptor-driven front desk can finally run the clinic — CreateAppointment/SetAppointmentStatus op-metas widened to the staff-reachable surface (wellness precedent). clinic-domain 0.34.15.
+- 2026-08-29 · `a8de5330` · A charge/refund for a called-off wellness class now names the class — className/classStartsAt snapshot onto booking.status at write time, survives TombstoneSession. wellness-domain 0.22.11, wellness-ledger 0.2.15.
+- 2026-08-29 · `0bda5e71`+`aca5009d` · Front-desk `ScriptTimeout`s (~1 in 10) fixed — confinement check no longer runs `actor_holds_operator()` twice per write. clinic-domain 0.34.14.
+- 2026-08-29 · `f8f4c454`+`3da97510`+`f9a03a08` · A recurring visit series' front-desk card now shows its clinic site and can set one via the existing `SetVisitSeriesSite` op, reusing the appointment "Set site" modal. clinic-reminders 0.10.5.
+- 2026-08-29 · `160ae80a` · A stuck renewal (retry budget exhausted) now escalates to Augur AI-reasoning instead of only raising a standing Health issue — mirrors leaseApplicationComplete's Augur block. lease-signing 0.31.11.
+- 2026-08-29 · `f7f58eac` · A landlord's decision now preserves the qualification profile it was based on — `.decidedProfileSnapshot` create-only-stamped on the first decision. lease-signing 0.31.10.
+- 2026-08-29 · `13eb28ac` · A workplace-holding wellness instructor without `frontOfHouse` can no longer read a whole building's roster via bare `covers()` — confined to the session(s) they personally lead. bookings.go, sessions.go, residents.go.
 - 2026-08-28 · `682b3d5d` · The one-bill statement now groups by month with a net subtotal per period, instead of one 97-line flat list. loftspace-app FE only, no lens change.
 - 2026-08-28 · `2b495eba` · Expired open tasks now badge "expired" (red) instead of "open" — mirrors Facet's isExpired check; Complete stays enabled per platform's surface-only-past-deadline design.
 - 2026-08-28 · `2f3ba08d` · A patient can finally read their own encounter note — `clinicEncountersReadSpec` gains a patient self-anchor, FE `asSelf` note-suppression dropped. clinic-domain 0.34.12
