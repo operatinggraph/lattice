@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
@@ -267,5 +268,172 @@ func TestHandleLedger_MemberNamingOwnIdentityKeyStillSelfService(t *testing.T) {
 	rec := sessionGET(s, s.handleLedger, "/api/ledger?identityKey="+identityA, cookieFor(memberA))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — naming your own identity is still self-service; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---- GET /api/frontdesk-arrears: the front desk's arrears grid ----
+
+func decodeArrears(t *testing.T, rec *httptest.ResponseRecorder) []balanceRow {
+	t.Helper()
+	var body struct {
+		Arrears []balanceRow `json:"arrears"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode arrears: %v (body=%s)", err, rec.Body.String())
+	}
+	return body.Arrears
+}
+
+// The arrears grid is a per-user read, so it needs a session like every
+// other one — mirrors TestHandleMembers_RefusesWithNoSession.
+func TestHandleFrontDeskArrears_Unauthenticated_401(t *testing.T) {
+	s, _ := devSessionServer(t)
+
+	rec := muxGET(s, "/api/frontdesk-arrears", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — /api/frontdesk-arrears must not be on the public-read exemption list; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// A member reads no arrears grid, not even one they'd appear in — mirrors
+// TestHandleMembers_MemberForbidden.
+func TestHandleFrontDeskArrears_Resident_403(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(memberA))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — a member reads no arrears grid; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleFrontDeskArrears_Staff_200(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for staff; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleFrontDeskArrears_OverdueOmitPaidAndConfinement proves the
+// grouped balance computation: (a) an old unpaid debit ages past the
+// statement grace period into an overdue balance with the right
+// daysOverdue, (b) a member whose debit is fully offset by a credit —
+// balance <= 0 — is omitted from the response entirely rather than coming
+// back with balanceCents 0, and (c) staff only see arrears for members their
+// workplace covers, mirroring café's
+// TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement.
+func TestHandleFrontDeskArrears_OverdueOmitPaidAndConfinement(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+
+	// memberA: covered by staffSubj's own workplace, with an old unpaid debit
+	// — must come back overdue.
+	seedMember(t, s.conn, leaseHere, memberA)
+	identityA := "vtx.identity." + memberA
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "memo": "Class package", "postedAt": old,
+	})
+
+	// memberB: also covered, but an old debit fully offset by a credit —
+	// balance <= 0 — must be omitted entirely.
+	seedMember(t, s.conn, "vtx.leaseapp.pB4mQtZbXvNqK7wHdYct", memberB)
+	identityB := "vtx.identity." + memberB
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", "accountKey": "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb",
+		"identityKey": identityB, "type": "debit", "amountCents": 2000.0, "memo": "Class package", "postedAt": old,
+	})
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.cccccccccccccccccccc", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.cccccccccccccccccccc", "accountKey": "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb",
+		"identityKey": identityB, "type": "credit", "amountCents": 2000.0, "memo": "Paid", "postedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// memberC: an old unpaid debit at a building this staffer does NOT work
+	// at — must never appear in their arrears grid.
+	otherSubj := "kkkkkkkkkkkkkkkkkkkk"
+	seedMember(t, s.conn, "vtx.leaseapp.eR3nKpXvZmBtQ7wHdYcg", otherSubj, otherWorkplace)
+	identityC := "vtx.identity." + otherSubj
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.dddddddddddddddddddd", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.dddddddddddddddddddd", "accountKey": "vtx.wellnessaccount.dddddddddddddddddddd",
+		"identityKey": identityC, "type": "debit", "amountCents": 9900.0, "memo": "Class package", "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rows := decodeArrears(t, rec)
+	if len(rows) != 1 || rows[0].IdentityKey != identityA {
+		t.Fatalf("arrears = %+v, want exactly the overdue covered member (paid-off and foreign members omitted)", rows)
+	}
+	row := rows[0]
+	if row.BalanceCents != 4500 {
+		t.Fatalf("balanceCents = %d, want 4500", row.BalanceCents)
+	}
+	if !row.IsOverdue {
+		t.Fatalf("isOverdue = false, want true for a debit %d days old (grace period is %d days)",
+			statementGraceDays+5, statementGraceDays)
+	}
+	if row.DaysOverdue < 1 {
+		t.Fatalf("daysOverdue = %d, want >= 1", row.DaysOverdue)
+	}
+}
+
+// TestHandleFrontDeskArrears_SortsWorstFirst proves the staff-triage sort:
+// isOverdue descending, then daysOverdue descending, then balanceCents
+// descending.
+func TestHandleFrontDeskArrears_SortsWorstFirst(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	now := time.Now().UTC()
+
+	// memberA: barely overdue (grace + 1 day) — the least severe of the two
+	// overdue members.
+	seedMember(t, s.conn, leaseHere, memberA)
+	identityA := "vtx.identity." + memberA
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.eeeeeeeeeeeeeeeeeeee", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.eeeeeeeeeeeeeeeeeeee", "accountKey": "vtx.wellnessaccount.eeeeeeeeeeeeeeeeeeee",
+		"identityKey": identityA, "type": "debit", "amountCents": 1000.0, "memo": "Class package",
+		"postedAt": now.AddDate(0, 0, -(statementGraceDays + 1)).Format(time.RFC3339),
+	})
+
+	// memberB: far more overdue (grace + 20 days) and a larger balance — must
+	// sort first.
+	seedMember(t, s.conn, "vtx.leaseapp.mB8nWpKrXvMqY3LdHcyt", memberB)
+	identityB := "vtx.identity." + memberB
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.ffffffffffffffffffff", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.ffffffffffffffffffff", "accountKey": "vtx.wellnessaccount.ffffffffffffffffffff",
+		"identityKey": identityB, "type": "debit", "amountCents": 8000.0, "memo": "Class package",
+		"postedAt": now.AddDate(0, 0, -(statementGraceDays + 20)).Format(time.RFC3339),
+	})
+
+	// memberC: owes money but is NOT yet overdue — must sort last.
+	notOverdueSubj := "mmmmmmmmmmmmmmmmmmmm"
+	seedMember(t, s.conn, "vtx.leaseapp.nT8mWpKrXvMqY3LdHcyg", notOverdueSubj)
+	identityNotOverdue := "vtx.identity." + notOverdueSubj
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.gggggggggggggggggggg", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.gggggggggggggggggggg", "accountKey": "vtx.wellnessaccount.gggggggggggggggggggg",
+		"identityKey": identityNotOverdue, "type": "debit", "amountCents": 500.0, "memo": "Class package",
+		"postedAt": now.Format(time.RFC3339),
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rows := decodeArrears(t, rec)
+	if len(rows) != 3 {
+		t.Fatalf("arrears = %+v, want all 3 covered members (2 overdue + 1 not-yet-due)", rows)
+	}
+	if rows[0].IdentityKey != identityB {
+		t.Fatalf("rows[0] = %+v, want memberB (most overdue) first", rows[0])
+	}
+	if rows[1].IdentityKey != identityA {
+		t.Fatalf("rows[1] = %+v, want memberA (less overdue) second", rows[1])
+	}
+	if rows[2].IdentityKey != identityNotOverdue {
+		t.Fatalf("rows[2] = %+v, want the not-yet-overdue member last", rows[2])
 	}
 }

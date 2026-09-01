@@ -2148,6 +2148,58 @@ async function loadRosterBilling() {
     select.dataset.loaded = "1";
   }
   await renderBilling();
+  await loadBillingArrears();
+}
+
+// arrearsLine renders one arrears row's dueDate/isOverdue/daysOverdue fields
+// (cmd/wellness-app/ledger.go's deriveStatement) as an overdue banner or a
+// neutral due-by note — wellness has no existing due-date renderer, so this
+// mirrors cafe-app's statementLine() rather than duplicating a due-date
+// format ad hoc.
+function arrearsLine(row) {
+  const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "?";
+  if (row.isOverdue) {
+    const days = row.daysOverdue || 0;
+    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
+  }
+  return "Due " + due;
+}
+
+// loadBillingArrears populates the front desk's arrears list — every covered
+// member who currently owes money, worst-first (server-sorted,
+// handleFrontDeskArrears). Best-effort: a fetch failure hides the section
+// rather than failing the whole billing panel, since the picker + per-member
+// ledger view underneath it work fine without it.
+async function loadBillingArrears() {
+  const list = document.getElementById("billing-arrears");
+  const empty = document.getElementById("billing-arrears-empty");
+  if (!list || !empty) return;
+  let data;
+  try {
+    data = await appGet("/api/frontdesk-arrears");
+  } catch (_) {
+    list.innerHTML = "";
+    empty.hidden = true;
+    return;
+  }
+  const rows = data.arrears || [];
+  list.innerHTML = "";
+  if (!rows.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "ledger-entry arrears-row";
+    li.innerHTML = esc(nameForIdentity(idOf(row.identityKey))) + " — " + money(row.balanceCents) + " · " + arrearsLine(row);
+    li.addEventListener("click", () => {
+      const select = document.getElementById("billing-member");
+      select.value = row.identityKey;
+      renderBilling();
+    });
+    list.append(li);
+  }
 }
 
 // renderBilling (re)loads and paints the selected member's balance +

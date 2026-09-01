@@ -8,12 +8,19 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
+
+// statementGraceDays is the net term between a charge posting and it counting
+// overdue. Wellness has no existing due-date/grace-period policy of its own
+// to contradict, so this adopts cmd/cafe-app/ledger.go's own 15-day term for
+// cross-vertical consistency rather than inventing a second number.
+const statementGraceDays = 15
 
 // ledgerEntryProjection is one row of the wellness-ledger `wellnessLedgerHistory`
 // lens, read from its NATS-KV read-model bucket (P5 — never Core KV).
@@ -94,12 +101,26 @@ func computeLedgerHistory(keys []string, get kvGetter, identityKey string) ([]le
 			Reason:         p.Reason,
 		})
 	}
+	sortLedgerRows(rows)
+	return rows, sumBalance(rows)
+}
+
+// sortLedgerRows sorts ledger rows chronologically (postedAt, then
+// transactionKey as the tiebreaker) — the order every FIFO-aging computation
+// in this file depends on.
+func sortLedgerRows(rows []ledgerEntryRow) {
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].PostedAt != rows[j].PostedAt {
 			return rows[i].PostedAt < rows[j].PostedAt
 		}
 		return rows[i].TransactionKey < rows[j].TransactionKey
 	})
+}
+
+// sumBalance sums a chronologically-sorted ledger's running balance in cents
+// (sum debits − sum credits) — the ledger stores no running total
+// (append-only, D5).
+func sumBalance(rows []ledgerEntryRow) int64 {
 	var balance int64
 	for _, r := range rows {
 		switch r.Type {
@@ -109,7 +130,123 @@ func computeLedgerHistory(keys []string, get kvGetter, identityKey string) ([]le
 			balance -= r.AmountCents
 		}
 	}
-	return rows, balance
+	return balance
+}
+
+// balanceRow is one member's balance/due-date/overdue statement for the
+// front-desk arrears grid — the same shape deriveStatement computes for the
+// member's own ledger view, but for every member the front desk is confined
+// to instead of the one identityKey a member names.
+type balanceRow struct {
+	IdentityKey  string `json:"identityKey"`
+	BalanceCents int64  `json:"balanceCents"`
+	DueDate      string `json:"dueDate"`
+	IsOverdue    bool   `json:"isOverdue"`
+	DaysOverdue  int    `json:"daysOverdue"`
+}
+
+// computeLedgerBalances groups the wellnessLedgerHistory lens rows by
+// identityKey and derives each member's balance/due-date/overdue state in
+// one pass — the front-desk arrears grid needs every visible member's
+// statement at once, and re-running computeLedgerHistory's per-member scan
+// once per member found in the bucket would redecode the same rows N times
+// over. A member whose balance settles to zero or credit is left out of the
+// result entirely — deriveStatement's own "nothing to age" case for one
+// member, applied per group.
+func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balanceRow {
+	byIdentity := make(map[string][]ledgerEntryRow)
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p ledgerEntryProjection
+		if json.Unmarshal(raw, &p) != nil || p.TransactionKey == "" || p.IdentityKey == "" {
+			continue
+		}
+		var amount int64
+		if p.AmountCents != nil {
+			amount = int64(*p.AmountCents)
+		}
+		byIdentity[p.IdentityKey] = append(byIdentity[p.IdentityKey], ledgerEntryRow{
+			TransactionKey: p.TransactionKey,
+			Type:           p.Type,
+			AmountCents:    amount,
+			Memo:           p.Memo,
+			PostedAt:       p.PostedAt,
+			ClassName:      p.ClassName,
+			ClassStartsAt:  p.ClassStartsAt,
+			Reason:         p.Reason,
+		})
+	}
+
+	rows := make([]balanceRow, 0, len(byIdentity))
+	for identityKey, entries := range byIdentity {
+		sortLedgerRows(entries)
+		balance := sumBalance(entries)
+		if balance <= 0 {
+			continue
+		}
+		dueDate, isOverdue, daysOverdue := deriveStatement(entries, balance, now)
+		rows = append(rows, balanceRow{
+			IdentityKey:  identityKey,
+			BalanceCents: balance,
+			DueDate:      dueDate,
+			IsOverdue:    isOverdue,
+			DaysOverdue:  daysOverdue,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].IdentityKey < rows[j].IdentityKey })
+	return rows
+}
+
+// deriveStatement turns a chronologically-sorted ledger into a due date and
+// overdue state, without the ledger ever storing either: credits offset the
+// OLDEST still-open debit first (FIFO aging, mirroring how a real statement
+// ages a balance), so the survivor at the front of the queue is the charge
+// that has actually been sitting unpaid the longest — not just the most
+// recent charge. A zero/credit balance has nothing to age and returns no due
+// date. A malformed postedAt on the oldest open debit fails closed (no due
+// date) rather than guessing.
+func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (dueDate string, isOverdue bool, daysOverdue int) {
+	if balanceCents <= 0 {
+		return "", false, 0
+	}
+	type openDebit struct {
+		postedAt  string
+		remaining int64
+	}
+	var open []openDebit
+	for _, r := range rows {
+		switch r.Type {
+		case "debit":
+			open = append(open, openDebit{postedAt: r.PostedAt, remaining: r.AmountCents})
+		case "credit":
+			remaining := r.AmountCents
+			for remaining > 0 && len(open) > 0 {
+				if open[0].remaining > remaining {
+					open[0].remaining -= remaining
+					remaining = 0
+				} else {
+					remaining -= open[0].remaining
+					open = open[1:]
+				}
+			}
+		}
+	}
+	if len(open) == 0 {
+		return "", false, 0
+	}
+	oldest, err := time.Parse(time.RFC3339, open[0].postedAt)
+	if err != nil {
+		return "", false, 0
+	}
+	due := oldest.AddDate(0, 0, statementGraceDays)
+	if !now.After(due) {
+		return due.Format(time.RFC3339), false, 0
+	}
+	days := int(now.Sub(due).Hours()/24) + 1
+	return due.Format(time.RFC3339), true, days
 }
 
 // rawGetter reads one bucket entry's raw bytes for a key, erroring on a real
@@ -256,4 +393,99 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		"transactions": rows,
 		"balanceCents": balance,
 	})
+}
+
+// handleFrontDeskArrears implements GET /api/frontdesk-arrears — every
+// covered member's balance/due-date/overdue statement for the front desk's
+// billing panel, served from the wellnessLedgerHistory lens (P5,
+// computeLedgerBalances above). Staff-only and workplace-confined, same gate
+// handleMembers uses (computeCoveredMembers, residents.go) — this handler
+// adds no new authority, only a new affordance over members already visible
+// to this caller's picker.
+//
+// Unlike handleMembers, a missing WellnessMembersBucket here is still a real
+// 502 (it is the confinement source, residents.go's own reasoning) — but
+// unlike café's front-desk joins, wellness-ledger is a core wellness package
+// always installed alongside wellness-domain, not an optional cross-vertical
+// join, so a missing LedgerHistoryBucket is also a 502, not a best-effort
+// empty answer.
+//
+// Every key from LedgerHistoryBucket is read via readAllOrFail rather than
+// the lossy per-key kvGetter handleMembers uses for its own bucket: a
+// balance is money, and a KVGet error on a key that just came back from
+// KVListKeys is a real fetch fault, not evidence the row doesn't exist
+// (readAllOrFail's own doc comment) — letting it fall through as absent
+// would silently understate a member's balance instead of failing the
+// request.
+//
+// Results sort worst-first (isOverdue desc, then daysOverdue desc, then
+// balanceCents desc) — staff triage priority, so the most overdue,
+// longest-overdue, highest-amount cases surface first in the grid.
+func (s *server) handleFrontDeskArrears(w http.ResponseWriter, r *http.Request) {
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	if !hats.isFrontDesk() && !hats.isOperator {
+		s.writeError(w, http.StatusForbidden,
+			"the arrears grid is a front-desk surface for the place you work at")
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	membersBucket := wellnessdomain.WellnessMembersBucket
+	memberKeys, err := conn.KVListKeys(ctx, membersBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+membersBucket+": "+err.Error()+" (is wellness-domain installed and the Refractor projecting?)")
+		return
+	}
+	covered := make(map[string]bool)
+	for _, m := range computeCoveredMembers(memberKeys, s.kvGetter(ctx, membersBucket), hats) {
+		covered[m.BookerKey] = true
+	}
+
+	bucket := wellnessledger.LedgerHistoryBucket
+	keys, err := conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+bucket+": "+err.Error()+" (is wellness-ledger installed and the Refractor projecting?)")
+		return
+	}
+	values, err := readAllOrFail(keys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read ledger history for front-desk arrears", "bucket", bucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+bucket+" incomplete: "+err.Error())
+		return
+	}
+	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
+	rows := computeLedgerBalances(keys, get, time.Now().UTC())
+	filtered := make([]balanceRow, 0, len(rows))
+	for _, row := range rows {
+		if covered[row.IdentityKey] {
+			filtered = append(filtered, row)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].IsOverdue != filtered[j].IsOverdue {
+			return filtered[i].IsOverdue
+		}
+		if filtered[i].DaysOverdue != filtered[j].DaysOverdue {
+			return filtered[i].DaysOverdue > filtered[j].DaysOverdue
+		}
+		return filtered[i].BalanceCents > filtered[j].BalanceCents
+	})
+	s.writeJSON(w, http.StatusOK, map[string]any{"arrears": filtered})
 }
