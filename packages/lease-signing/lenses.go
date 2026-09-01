@@ -55,6 +55,47 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// applicantOnboarding — the IDENTITY-anchored companion convergence
+			// target for the one piece of work in this package that is a property
+			// of the PERSON rather than of an application: recording PII.
+			//
+			// leaseApplicationComplete anchors on the leaseapp, so an applicant
+			// holding N applications projects N rows. Every other gap on that
+			// target closes per-application (a signature, this application's
+			// document, this unit's listing flip), but onboarding closes ONCE for
+			// the person — `ssnVal` is the APPLICANT's own `.ssn` aspect, read
+			// across the applicationFor hop. Dispatching from there mints one Loom
+			// instance per row (the artifact id is derived from the row's own
+			// entityId), so one applicant with four applications receives four
+			// identical RecordIdentityPII cards. This lens moves the dispatch to
+			// the granularity the work actually has: ONE ROW PER APPLICANT, so one
+			// applicant is one gap is one task by construction, with no dedup
+			// mechanism anywhere. leaseApplicationComplete keeps projecting
+			// missing_onboarding — the application is still blocked on it, and the
+			// applicant FE's stepper still reads the column — but declares it
+			// `surface` there, dispatching nothing (targets.go).
+			//
+			// Same shared weaver-targets bucket as every other target this package
+			// declares; the rows are namespaced by OutputKeyPattern, and the
+			// targetId IS that prefix (the §10.2↔§10.8 binding). The anchor is the
+			// identity, so the row key is the applicant's bare NanoID.
+			CanonicalName:  "applicantOnboarding",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           applicantOnboardingSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "identity",
+				OutputKeyPattern: "applicantOnboarding.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_onboarding", "inflight_onboarding", "applicant", "entityKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
 			// leaseApplicationsRead — the protected Postgres read model for the
 			// applicant-facing "My Applications" view (D1.3 Fire 2, the
 			// applicant-self milestone). Contract #6 §6.14: protected-by-default,
@@ -814,6 +855,87 @@ RETURN
   %d                     AS maxretries_payment,
   (((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
+
+// applicantOnboardingSpec is the identity-anchored onboarding convergence
+// cypher — one row per applicant, whatever number of applications they hold.
+//
+// It anchors on the identity (a required MATCH, `{key: $actorKey}` — the
+// identityAnchors shape), OPTIONAL-walks INBOUND to every application that
+// names it (`(id)<-[:applicationFor]-(app:leaseapp)`, Contract #1 direction: the
+// later-arriving leaseapp is the source), OPTIONAL-walks each application's unit,
+// and OPTIONAL-walks the identity's own open user tasks.
+//
+//   - missing_onboarding — the applicant has recorded no PII (no `.ssn` aspect)
+//     AND holds AT LEAST ONE application that still needs it. `ssnVal` reads
+//     `id.ssn.data` (the WHOLE aspect body, never `.data.value`: step 6.5
+//     replaces a sensitive aspect's entire `data` field with its ciphertext
+//     envelope, so a `.value` hop resolves null for every real ssn — the same
+//     presence-only read leaseApplicationCompleteSpec documents). The
+//     per-application half is the SAME gate leaseApplicationCompleteSpec applies
+//     to its four applicant gaps — `(unitKey <> null) AND ((unitStatus <>
+//     'leased') OR (landlordDecision = 'approved'))` — so an applicant whose only
+//     applications are terminal (the unit tombstoned, or leased to a rival) stops
+//     being asked for their SSN, exactly as the per-application target already
+//     stops asking. It is evaluated INSIDE the count CASE, per application, so a
+//     person with one live and one dead application still converges on the live
+//     one.
+//   - inflight_onboarding — the §10.3 dispatch-suppression companion, the same
+//     predicate leaseApplicationCompleteSpec carries: an OPEN task bound through
+//     forOperation to RecordIdentityPII. Here the task hangs off the ANCHOR
+//     itself (the onboarding userTask has always been scoped to the applicant),
+//     so no neighbour hop is needed. Discriminating on op.data.operationType is
+//     what keeps an unrelated open task on the same person from parking a gap it
+//     cannot close. No maxretries_onboarding companion: this is a userTask gap,
+//     whose duplicate dispatch is prevented at the source by the claimId-stable
+//     artifact id, and the installer's §10.3 companion-pair rule covers the
+//     external-class actions only.
+//   - violating is the single gap (this target has exactly one), spelled out
+//     rather than implied — Contract #10 §10.2: violating is lens-projected.
+//
+// Both aggregates are `count(DISTINCT CASE WHEN … THEN <key> ELSE null END)`
+// over OPTIONAL MATCHes carrying NO filtering WHERE beyond the task's own status
+// — the fan-collapse idiom leaseApplicationCompleteSpec uses for its providedTo
+// fan. A filtering WHERE that removes the only match collapses the upstream
+// anchor to null in the grouped projection, and DISTINCT on each fan's own keys
+// collapses the cross product between the application fan and the task fan, so
+// the row count stays exactly one per identity (the §0.C
+// guardOutputKeyCollision guard).
+//
+// entityKey and applicant are the same value here — the anchor IS the applicant
+// — projected under both names so the row reads like every other convergence
+// row: `applicant` is the §10.8 template the playbook's triggerLoom Subject
+// names (row.applicant, unchanged from where it was moved), `entityKey` is the
+// row's own entity for anything reading the target generically.
+//
+// STALENESS, deliberately accepted. The unit sits TWO hops from this anchor
+// (identity ← leaseapp → unit), so a unit's `.listing.status` flip reprojects
+// this row through the pipeline's pattern-directed anchor derivation
+// (internal/refractor/pipeline/anchor_derivation.go walks the compiled pattern's
+// own hops, and the ActorEnumerator BFS fallback is undirected) rather than
+// through a one-hop neighbour rule. The gap's CLOSING fact — the applicant's own
+// `.ssn` write — is zero hops from the anchor and needs none of that.
+//
+// '= null' (not IS NULL) is the full engine's null test.
+const applicantOnboardingSpec = `
+MATCH (id:identity {key: $actorKey})
+OPTIONAL MATCH (id)<-[:applicationFor]-(app:leaseapp)
+OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (id)<-[:scopedTo]-(onbTask:task)
+  WHERE onbTask.data.status = 'open'
+OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp)
+WITH
+  id.key AS entityKey,
+  id.ssn.data AS ssnVal,
+  count(DISTINCT CASE WHEN (u.key <> null) AND ((u.listing.data.status <> 'leased') OR (app.decision.data.value = 'approved')) THEN app.key ELSE null END) AS onboardingApps,
+  count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS applicant,
+  ((ssnVal = null) AND (onboardingApps > 0)) AS missing_onboarding,
+  (onbTaskOpen > 0)                          AS inflight_onboarding,
+  ((ssnVal = null) AND (onboardingApps > 0)) AS violating
+`
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
 // Fire 2). A plain one-row-per-leaseapp projection: it anchors on every leaseapp,

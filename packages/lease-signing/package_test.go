@@ -176,7 +176,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 14; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 6; got != want {
+	if got, want := len(Package.Lenses), 7; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 23; got != want {
@@ -188,7 +188,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 3; got != want {
+	if got, want := len(Package.WeaverTargets), 4; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 4; got != want {
@@ -236,6 +236,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		protected bool
 	}{
 		{"leaseApplicationComplete", "nats-kv", false},
+		{"applicantOnboarding", "nats-kv", false},
 		{"leaseApplicationsRead", "postgres", true},
 		{"landlordLeaseApplicationsRead", "postgres", true},
 		{"leaseExpiry", "nats-kv", false},

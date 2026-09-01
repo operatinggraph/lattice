@@ -85,6 +85,13 @@ const (
 // can decide", and the runtime withholds it from strictly more lenses, never
 // fewer. That direction is the safe one.
 var corpusActorOneKeyVerdicts = map[string]string{
+	// The onboarding companion's `(onbTask)-[:forOperation]->(onbOp)` leaves
+	// onbOp UNTYPED, exactly as leaseApplicationComplete's does, so an identity
+	// can bind there as well as at the anchor. The leaseapp-anchored sibling
+	// reads oneKey only because ITS actor type is leaseapp; anchoring the same
+	// untyped hop on the identity is what moves this one to the walk. That is
+	// the safe direction — reprojection work, never a stale row.
+	"applicantOnboarding":               walkMultiPosition,
 	"appointmentReminders":              oneKey,
 	"augurDispatchPending":              oneKey,
 	"cafeStaleTabSettlement":            oneKey,

@@ -50,10 +50,17 @@
 //     .outcome aspect across the applicationFor/providedTo links, emitting the
 //     bare-NanoID convergence key via 14.2's key column.
 //
+//   - The `applicantOnboarding` actorAggregate convergence lens + its target —
+//     anchored on the applicant IDENTITY, one row per person however many
+//     applications they hold. It carries the single missing_onboarding gap and
+//     is what dispatches the onboarding pattern; the leaseapp-anchored target
+//     keeps projecting the column but declares it `surface`, because the work
+//     (recording PII) is per-person while that anchor is per-application.
+//
 //   - The §10.8 playbook (meta.weaverTarget leaseApplicationComplete) — gap →
-//     remediation: missing_onboarding/missing_bgcheck/missing_payment via
-//     triggerLoom (the bgcheck/payment patterns contain an externalTask),
-//     missing_signature via assignTask SignLease.
+//     remediation: missing_bgcheck/missing_payment via triggerLoom (the
+//     bgcheck/payment patterns contain an externalTask), missing_signature via
+//     assignTask SignLease.
 //
 //   - The three loomPatterns — backgroundCheck + collectPayment (each a single
 //     externalTask step, completionDomains ["orchestration"]) and onboarding (a
@@ -82,14 +89,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.31.15",
+	Version: "0.31.16",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
 		"the anchored executed-lease artifact's doc_store_name/doc_filename/doc_content_type pointers) plus its " +
 		"landlordLeaseApplicationsRead sibling (the landlord/residence audience anchored on the managing landlord via the " +
-		"loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook " +
-		"(triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask SignLease, triggerLoom onboarding, directOp " +
+		"loftspace-domain manages link, D1.3 Increment 2), the identity-anchored applicantOnboarding convergence lens + " +
+		"target (one row per applicant, so the PII request is made once however many applications they hold — " +
+		"leaseApplicationComplete keeps missing_onboarding as a surface-declared column), the §10.8 playbook " +
+		"(triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask SignLease, triggerLoom onboarding off " +
+		"applicantOnboarding, directOp " +
 		"SetListingStatus to mark the unit leased on approval, directOp AttachObject to anchor the produced executed-lease " +
 		"artifact under the signedLease slot), an augur escalation on \"exhausted\" so a gap that spends its retry budget " +
 		"reaches AI reasoning instead of an unread Health-KV warning, the externalTask " +

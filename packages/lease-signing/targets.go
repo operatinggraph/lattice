@@ -3,12 +3,27 @@ package leasesigning
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract #10
-// §10.8). TargetID == the lens OutputKeyPattern prefix (leaseApplicationComplete)
-// — the §10.2↔§10.8 binding. LensRef resolves to the leaseApplicationComplete
-// lens's in-batch NanoID at install.
+// §10.8). TargetID == the bound lens's OutputKeyPattern prefix — the §10.2↔§10.8
+// binding. LensRef resolves to that lens's in-batch NanoID at install.
 //
-// Each gap → remediation:
-//   - missing_onboarding → triggerLoom(onboarding) over the applicant identity.
+// Two targets are declared here (the renewal chain adds two more): the
+// leaseapp-anchored leaseApplicationComplete, and the identity-anchored
+// applicantOnboarding. The split is a granularity one — a convergence target's
+// anchor must be the granularity of the work its gaps dispatch, and recording
+// PII is a property of the PERSON while every other gap here is a property of
+// the APPLICATION.
+//
+// leaseApplicationComplete — each gap → remediation:
+//   - missing_onboarding → NOTHING dispatches here. It is surface-declared
+//     (violating, projected, an operator-visible Health issue), because the work
+//     it names is per-IDENTITY while this target's anchor is per-APPLICATION: an
+//     applicant holding N applications projects N rows, and a triggerLoom from
+//     here mints one Loom instance per row (the artifact id is derived from the
+//     row's own entityId), so one person is asked for their SSN N times. The
+//     real dispatch lives on the applicantOnboarding target below, whose anchor
+//     IS the applicant. The column stays projected and stays in `violating`: the
+//     application genuinely is blocked on onboarding, the applicant FE's stepper
+//     reads it, and it closes on the same `.ssn` write it always did.
 //   - missing_bgcheck    → triggerLoom(backgroundCheck): an externalTask pattern.
 //     Adapter is set to the pattern's own vendor (backgroundCheck) purely as an
 //     admission-bucketing label (resolved.Adapter, evaluator.go admitGap) — the
@@ -58,10 +73,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     when the signedLease link lands and the lens reprojects; a detached
 //     executed lease re-opens it (self-healing re-attach).
 //
+// applicantOnboarding — one gap, one remediation:
+//   - missing_onboarding → triggerLoom(onboarding) over the applicant identity
+//     (row.applicant, which on this target is the anchor itself). One row per
+//     applicant means one gap per applicant means one RecordIdentityPII task,
+//     by construction — no dedup mechanism involved. Its lens carries the
+//     identity-scoped inflight_onboarding companion, so a task already sitting
+//     open suppresses re-dispatch across mark-lease reclaims.
+//
 // External remediation is triggerLoom of an externalTask pattern (the retired
-// nudge action is never used). Every gap key is a column the lens projects, and
-// the converse holds too: every missing_* column the lens projects is a gap key
-// — surface-declared (missing_decision, missing_manager) where the package
+// nudge action is never used). Every gap key is a column the bound lens
+// projects, and the converse holds too: every missing_* column a bound lens
+// projects is a gap key — surface-declared (missing_decision, missing_manager,
+// and missing_onboarding on leaseApplicationComplete) where this target
 // deliberately dispatches nothing for it, so Weaver can tell a deliberate
 // orphan from an authoring omission. And every row.<col> template
 // (row.applicant, row.entityKey, row.unitKey, the row.doc* pointers) is a lens
@@ -94,7 +118,6 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		// this target, declared vs. default-capped alike.
 		Augur: &pkgmgr.AugurSpec{Escalate: []string{"exhausted"}},
 		Gaps: map[string]pkgmgr.GapActionSpec{
-			"missing_onboarding":    {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
 			"missing_bgcheck":       {Action: "triggerLoom", Pattern: "backgroundCheck", Subject: "row.applicant", Adapter: "backgroundCheck"},
 			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant", Adapter: "stripe"},
 			"missing_signature":     {Action: "assignTask", Operation: "SignLease", Assignee: "row.applicant", Target: "row.entityKey"},
@@ -116,6 +139,22 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			// long redelivery floor forever the way an undeclared column would.
 			"missing_decision": {Action: "surface", IssueCode: "LeaseDecisionAwaiting", IssueSeverity: "warning"},
 			"missing_manager":  {Action: "surface", IssueCode: "LeaseUnitUnmanaged", IssueSeverity: "warning"},
+			// missing_onboarding is the third surface-declared column, and the
+			// only one whose work IS dispatched — from the applicantOnboarding
+			// target below, whose anchor matches the work's granularity. Declaring
+			// it here keeps the projected column out of dispatchGap's config-error
+			// arm (which would hold every application of an un-onboarded applicant
+			// on the long redelivery floor) and gives an operator a named issue
+			// for an application blocked on a person who has not recorded PII.
+			"missing_onboarding": {Action: "surface", IssueCode: "LeaseOnboardingAwaiting", IssueSeverity: "warning"},
+		},
+	}, {
+		TargetID: "applicantOnboarding",
+		Description: "An applicant holding at least one live lease application has recorded their PII. One row per " +
+			"applicant, so the request is made once however many applications they hold.",
+		LensRef: "applicantOnboarding",
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_onboarding": {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
 		},
 	}}
 	return append(targets, RenewalTargets()...)
