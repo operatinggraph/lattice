@@ -9,8 +9,8 @@
 //	5 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
 //	  (CreateProvider + TombstoneProvider + SetProviderProfile + SetProviderHours +
 //	  SetProviderTimeOff + BindProviderIdentity), appointment (CreateAppointment +
-//	  RescheduleAppointment + SetAppointmentStatus + RecordEncounter +
-//	  TombstoneAppointment), clinicSite (SetSiteProfile), clinicSiteAssignment
+//	  RescheduleAppointment + SetAppointmentStatus + CorrectAppointmentStatus +
+//	  RecordEncounter + TombstoneAppointment), clinicSite (SetSiteProfile), clinicSiteAssignment
 //	  (AssignProviderSite + RemoveProviderSite — the provider→building
 //	  practicesAt link, mirroring loftspace-domain's loftspaceOwnership), each
 //	  with its self-description.
@@ -23,7 +23,7 @@
 //	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
 //	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
 //	replaced the scalar OCC epoch + hasBooking-link enumeration).
-//	19 permission vertices: one per (operationType, scope) pair (Contract #8
+//	20 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1 — a permission's identity IS that pair, so a widened grantee set
 //	  lands on the SAME vertex, never a second one): most ops carry a single
 //	  scope=any vertex granted to operator; CreateAppointment/
@@ -32,7 +32,9 @@
 //	  patient-books-their-own-appointment idiom); SetProviderHours/
 //	  SetProviderTimeOff/RescheduleAppointment/SetAppointmentStatus's scope=any
 //	  vertex is ALSO granted to provider (a bound provider's own availability/
-//	  appointments); BindProviderIdentity carries its own scope=any vertex
+//	  appointments); CorrectAppointmentStatus carries its own scope=any vertex
+//	  granted to operator/frontOfHouse/provider, no scope=self (staff-only
+//	  correction); BindProviderIdentity carries its own scope=any vertex
 //	  granted to operator only (the role-minting bind ceremony is operator-only).
 //	1 package vertex + manifest aspect (name=clinic-domain).
 //
@@ -62,7 +64,7 @@ const (
 var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
-	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
 }
 
@@ -88,23 +90,24 @@ type permGrant struct {
 }
 
 var clinicOpGrants = map[string][]permGrant{
-	"CreatePatient":         {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"TombstonePatient":      {{"any", "operator"}},
-	"CreateProvider":        {{"any", "operator"}},
-	"TombstoneProvider":     {{"any", "operator"}},
-	"SetProviderProfile":    {{"any", "operator"}},
-	"SetProviderHours":      {{"any", "operator"}, {"any", "provider"}},
-	"SetProviderTimeOff":    {{"any", "operator"}, {"any", "provider"}},
-	"CreateAppointment":     {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
-	"RescheduleAppointment": {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
-	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
-	"SetAppointmentSite":    {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
-	"RecordEncounter":       {{"any", "operator"}, {"any", "provider"}},
-	"TombstoneAppointment":  {{"any", "operator"}},
-	"SetSiteProfile":        {{"any", "operator"}},
-	"AssignProviderSite":    {{"any", "operator"}},
-	"RemoveProviderSite":    {{"any", "operator"}},
-	"BindProviderIdentity":  {{"any", "operator"}},
+	"CreatePatient":            {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"TombstonePatient":         {{"any", "operator"}},
+	"CreateProvider":           {{"any", "operator"}},
+	"TombstoneProvider":        {{"any", "operator"}},
+	"SetProviderProfile":       {{"any", "operator"}},
+	"SetProviderHours":         {{"any", "operator"}, {"any", "provider"}},
+	"SetProviderTimeOff":       {{"any", "operator"}, {"any", "provider"}},
+	"CreateAppointment":        {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
+	"RescheduleAppointment":    {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
+	"SetAppointmentStatus":     {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
+	"CorrectAppointmentStatus": {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
+	"SetAppointmentSite":       {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
+	"RecordEncounter":          {{"any", "operator"}, {"any", "provider"}},
+	"TombstoneAppointment":     {{"any", "operator"}},
+	"SetSiteProfile":           {{"any", "operator"}},
+	"AssignProviderSite":       {{"any", "operator"}},
+	"RemoveProviderSite":       {{"any", "operator"}},
+	"BindProviderIdentity":     {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -180,11 +183,11 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"}},
-		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
+		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BackfillPatientRegistration"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
-		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"}},
+		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"}},
 		{canonical: "providerHours", class: "meta.ddl.aspectType", ops: []string{"SetProviderHours"}},
 		{canonical: "providerTimeOff", class: "meta.ddl.aspectType", ops: []string{"SetProviderTimeOff"}},
 		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},
