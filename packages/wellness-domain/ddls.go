@@ -3806,9 +3806,12 @@ def execute(state, op):
         # (wellness-ledger/lenses.go), so the class-price gap it converges
         # never fires for a cancelled booking in the first place — this
         # branch exists only to REVERSE a charge that already landed.
-        # Checked regardless of booked/waitlisted: classPriceSettlementSpec
-        # carries no status filter, so either could in principle already
-        # carry a charge.
+        # Run after both branches above rather than only the "booked" one:
+        # classPriceSettlementSpec only ever posts a charge once status is
+        # 'booked' (wellness-ledger/lenses.go), so a booking still waitlisted
+        # at cancel time can never have one and this lookup is a guaranteed
+        # no-op for it — sharing the one lookup costs nothing and keeps the
+        # branches from diverging on this reversal logic.
         # read-posture: (e) relation=settlesClassPrice epoch=none -- a
         # booking carries at most one live settlesClassPrice transaction
         # (wellnessClassPriceSettlement's own txCount=0 gate is single-fire).

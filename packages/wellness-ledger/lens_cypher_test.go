@@ -159,13 +159,14 @@ func (f *wlFixture) projectClassPriceAt(t *testing.T, bookingName string) []rule
 	return out
 }
 
-// mkPricedBooking seeds one booking forSession a session carrying the given
-// (optional, nil to omit) priceCents, and bookedBy a fresh identity —
-// classPriceSettlementSpec's counterpart to mkBooking. Status is
-// deliberately NOT set: the class-price gap is unconditional on attendance.
-func (f *wlFixture) mkPricedBooking(t *testing.T, name string, priceCents any) {
+// mkPricedBooking seeds one booking with the given status, forSession a
+// session carrying the given (optional, nil to omit) priceCents, and
+// bookedBy a fresh identity — classPriceSettlementSpec's counterpart to
+// mkBooking.
+func (f *wlFixture) mkPricedBooking(t *testing.T, name string, status string, priceCents any) {
 	t.Helper()
 	f.vtx(t, name, "booking")
+	f.aspect(t, name, "status", "bookingStatus", map[string]any{"value": status})
 	f.vtx(t, name+"_session", "session")
 	schedData := map[string]any{"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0}
 	if priceCents != nil {
@@ -280,7 +281,7 @@ func TestWellnessClassPriceSettlement_NoPrice_NotViolating(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "freebkg", nil)
+	f.mkPricedBooking(t, "freebkg", "booked", nil)
 
 	v := f.projectClassPriceAt(t, "freebkg")[0].Values
 	require.Equal(t, "vtx.booking."+f.ids["freebkg"], v["entityKey"])
@@ -294,7 +295,7 @@ func TestWellnessClassPriceSettlement_ZeroPrice_NotViolating(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "zerobkg", 0.0)
+	f.mkPricedBooking(t, "zerobkg", "booked", 0.0)
 
 	v := f.projectClassPriceAt(t, "zerobkg")[0].Values
 	require.Equal(t, 0.0, v["priceCents"])
@@ -307,7 +308,7 @@ func TestWellnessClassPriceSettlement_PricedNoAccount_MissingAccount(t *testing.
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "noacctpbkg", 1500.0)
+	f.mkPricedBooking(t, "noacctpbkg", "booked", 1500.0)
 
 	v := f.projectClassPriceAt(t, "noacctpbkg")[0].Values
 	require.Nil(t, v["accountKey"], "booker has no wellness-ledger account yet")
@@ -316,12 +317,27 @@ func TestWellnessClassPriceSettlement_PricedNoAccount_MissingAccount(t *testing.
 	require.Equal(t, true, v["violating"])
 }
 
+func TestWellnessClassPriceSettlement_Waitlisted_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "waitlistedpbkg", "waitlisted", 1500.0)
+
+	v := f.projectClassPriceAt(t, "waitlistedpbkg")[0].Values
+	require.Equal(t, "waitlisted", v["status"])
+	require.Equal(t, 1500.0, v["priceCents"])
+	require.Equal(t, false, v["missing_account"], "no seat held yet — must not open an account")
+	require.Equal(t, false, v["missing_price_charge"], "no seat held yet — must not charge")
+	require.Equal(t, false, v["violating"])
+}
+
 func TestWellnessClassPriceSettlement_PricedWithAccountNoCharge_MissingPriceCharge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "unchargedpbkg", 1500.0)
+	f.mkPricedBooking(t, "unchargedpbkg", "booked", 1500.0)
 	f.vtx(t, "unchargedpbkg_acct", "wellnessaccount")
 	f.edge(t, "heldFor", "unchargedpbkg_acct", "unchargedpbkg_identity")
 
@@ -340,7 +356,7 @@ func TestWellnessClassPriceSettlement_PricedCharged_Converged(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "chargedpbkg", 1500.0)
+	f.mkPricedBooking(t, "chargedpbkg", "booked", 1500.0)
 	f.vtx(t, "chargedpbkg_acct", "wellnessaccount")
 	f.edge(t, "heldFor", "chargedpbkg_acct", "chargedpbkg_identity")
 	f.vtx(t, "chargedpbkg_tx", "wellnesstransaction")
@@ -416,7 +432,7 @@ func TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge(t *testin
 		t.Skip("requires NATS")
 	}
 	f := newWlFixture(t)
-	f.mkPricedBooking(t, "crossedbkg", 1500.0)
+	f.mkPricedBooking(t, "crossedbkg", "booked", 1500.0)
 	f.vtx(t, "crossedbkg_acct", "wellnessaccount")
 	f.edge(t, "heldFor", "crossedbkg_acct", "crossedbkg_identity")
 	f.vtx(t, "crossedbkg_tx", "wellnesstransaction")

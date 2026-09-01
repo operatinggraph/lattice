@@ -210,29 +210,33 @@ RETURN
 // classPriceSettlementSpec is the one-row-per-booking convergence cypher for
 // the OTHER wellness billing gap: a session carrying a positive priceCents
 // needs its class-price charge posted onto the booker's wellness-ledger
-// account, once — regardless of attendance outcome. Unlike
-// noShowSettlementSpec, this is UNCONDITIONAL on booking .status: a class
-// price is owed for booking the seat, not for showing up or not, so there is
-// no status filter here at all (the mirror omission of noShowSettlementSpec's
-// `status = 'noShow'` clause). Two independent gaps, mirroring
-// noShowSettlementSpec's own missing_account/missing_charge split:
+// account, once — regardless of attendance outcome, but only once the
+// booking actually holds a seat. Both gaps below carry a `status = 'booked'`
+// clause mirroring noShowSettlementSpec's `status = 'noShow'` gate: a
+// `waitlisted` booking holds no seat yet (find_promotion_candidate,
+// wellness-domain/ddls.go, is what flips it to booked when one frees up), so
+// it must not be charged — charging on write would bill a class the booker
+// may never attend, with no promotion-independent event to trigger a refund.
+// Two independent gaps, mirroring noShowSettlementSpec's own
+// missing_account/missing_charge split:
 //
-//   - `missing_account` — the booking's session carries an effective price >
-//     0, and the booker has no wellnessaccount yet (accountKey null). Weaver
-//     dispatches WellnessCreateAccount{identityKey} (targets.go), opening the
-//     account lazily on first priced booking rather than requiring it
-//     pre-exist.
+//   - `missing_account` — the booking is booked, its session carries an
+//     effective price > 0, and the booker has no wellnessaccount yet
+//     (accountKey null). Weaver dispatches WellnessCreateAccount{identityKey}
+//     (targets.go), opening the account lazily on first priced booking
+//     rather than requiring it pre-exist.
 //
-//   - `missing_price_charge` — the booking's session carries an effective
-//     price > 0, the booker has a ledger account, and no wellnesstransaction
-//     `settlesClassPrice` this booking yet (count(tx.key) collapses the fan to
-//     a single existence check, the same objectLiveness/clauseSatisfaction
-//     idiom noShowSettlementSpec uses). Weaver dispatches
-//     WellnessDebitAccount{accountKey, amountCents, priceBookingRef} (targets.go) —
-//     the priceBookingRef extension writes the settlesClassPrice audit link
-//     this OPTIONAL MATCH walks (a DISTINCT relation from settles, so this
-//     lens's count() never sees a no-show-fee transaction and vice versa), so
-//     once posted the gap converges and stays converged.
+//   - `missing_price_charge` — the booking is booked, its session carries an
+//     effective price > 0, the booker has a ledger account, and no
+//     wellnesstransaction `settlesClassPrice` this booking yet
+//     (count(tx.key) collapses the fan to a single existence check, the same
+//     objectLiveness/clauseSatisfaction idiom noShowSettlementSpec uses).
+//     Weaver dispatches WellnessDebitAccount{accountKey, amountCents,
+//     priceBookingRef} (targets.go) — the priceBookingRef extension writes
+//     the settlesClassPrice audit link this OPTIONAL MATCH walks (a DISTINCT
+//     relation from settles, so this lens's count() never sees a no-show-fee
+//     transaction and vice versa), so once posted the gap converges and
+//     stays converged.
 //
 //   - `priceCents` — the EFFECTIVE price this booking owes, not the session's
 //     raw priceCents: a booking whose own .status.rate is "resident" charges
@@ -267,6 +271,7 @@ OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
 OPTIONAL MATCH (bk)<-[:settlesClassPrice]-(tx:wellnesstransaction)
 WITH
   bk.key AS entityKey,
+  bk.status.data.value AS status,
   (CASE WHEN (bk.status.data.rate = 'resident') AND (se.schedule.data.residentPriceCents <> null) THEN se.schedule.data.residentPriceCents ELSE se.schedule.data.priceCents END) AS priceCents,
   se.schedule.data.name AS sessionName,
   id.key AS identityKey,
@@ -280,11 +285,12 @@ RETURN
   accountKey,
   priceCents,
   sessionName,
-  ((priceCents <> null) AND (priceCents > 0) AND (accountKey = null)) AS missing_account,
-  ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_price_charge,
+  status,
+  ((status = 'booked') AND (priceCents <> null) AND (priceCents > 0) AND (accountKey = null)) AS missing_account,
+  ((status = 'booked') AND (priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_price_charge,
   (
-    ((priceCents <> null) AND (priceCents > 0) AND (accountKey = null))
-    OR ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0))
+    ((status = 'booked') AND (priceCents <> null) AND (priceCents > 0) AND (accountKey = null))
+    OR ((status = 'booked') AND (priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0))
   ) AS violating,
   %d AS maxretries_price_charge
 `, maxPriceChargeRetries)
