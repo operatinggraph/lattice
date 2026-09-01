@@ -3,31 +3,29 @@
 Capability-package install and uninstall are **kernel operations** routed through
 the Processor, not substrate-direct writes. The formal install contract (C3) is
 "the `InstallPackage` op envelope carrying the pre-built mutation manifest." This
-contract defines the op payloads, the kernel-script guardrails, the atomicity and
+contract defines the op payloads, the guardrails, the atomicity and
 cache-coherence guarantees, and the kernel-protection rules.
 
 It builds on [Contract #2 — Operation Envelope](02-operation-envelope.md) (the op
 is a normal envelope on the `meta` lane) and
-[Contract #3 — Mutation Batch](03-mutation-batch-event-list.md) (the script emits
-a mutation batch the Committer applies atomically).
+[Contract #3 — Mutation Batch](03-mutation-batch-event-list.md) (the op commits
+a mutation batch atomically).
 
 ---
 
-## 8.1 Design — thin script, fat manifest
+## 8.1 Payload model — pre-computed logical documents, deterministic keys
 
-The client (`internal/pkgmgr`) pre-computes the complete mutation set for a
-package — every DDL, lens, permission, grant link, declared role, role index,
-the package vertex, and the `.manifest` aspect. It ships them as **logical
-documents** in the op payload. The kernel script is thin: it iterates the
-supplied mutations, enforces guardrails, and emits them. This keeps the
-privileged kernel script small and auditable while the (untrusted-but-validated)
-mutation computation stays client-side.
+The submitter pre-computes the **complete mutation set** for a package — every
+DDL, lens, permission, grant link, declared role, role index, the package
+vertex, and the `.manifest` aspect — and ships them as **logical documents** in
+the op payload.
 
 - **Logical documents** carry `class`, `data`, `isDeleted` (and for aspects
   `vertexKey`, `localName`; for links `sourceVertex`, `targetVertex`,
-  `localName`) — but **no provenance**. The Processor stamps `createdAt`,
-  `createdBy`, `createdByOp` at step 8 from the install actor, so installed
-  entities carry real provenance authored by the actor that ran the install.
+  `localName`) — but **no provenance**. The platform stamps `createdAt`,
+  `createdBy`, `createdByOp` from the install actor at commit, so installed
+  entities carry real provenance authored by the actor that ran the install; a
+  submitted provenance value is never honored.
 - **Deterministic, version-independent NanoIDs.** Every entity's NanoID is derived
   from `package name + entity tag` (`sha256` → Contract #1 alphabet) — **not** the
   version. The same logical entity keeps the **same** key across versions, so a
@@ -37,7 +35,7 @@ mutation computation stays client-side.
   `operationType + scope` (logical identity), not the list index, so reordering a
   package's permissions does not churn keys.
 - **Deterministic `requestId`.** The op `requestId` is derived from
-  `name + version` (install) so a re-submit dedup-short-circuits at step 2.
+  `name + version` (install), so a re-submit dedups as the same operation.
 
 ---
 
@@ -65,10 +63,9 @@ mutation computation stays client-side.
 **Response detail:** `{ name, version, declaredKeys: [<key>, …] }`.
 **Event:** `PackageInstalled { name, version, keyCount }`.
 
-### Guardrails (enforced by the kernel script)
+### Guardrails
 
-`InstallPackage` is privileged, so the script must not be an arbitrary-write
-backdoor:
+`InstallPackage` is privileged, so it must not be an arbitrary-write backdoor:
 
 | Guardrail | Rule |
 |---|---|
@@ -76,19 +73,16 @@ backdoor:
 | system-aspect | no aspect `localName` may start with `_` → `InvalidArgument` |
 | create-only | every mutation `op` must be `create` (no updates/tombstones in an install) |
 
-Note: the install/uninstall scripts declare no `ContextHint.Reads`, so they do
-**not** perform a protected-key check (their hydrated `state` is empty). Kernel
-protected-key enforcement is the Processor commit-time guard (§8.4), which is
-authoritative and path-independent. `InstallPackage` is additionally safe by
-construction — installs are create-only, so the atomic batch's CreateOnly
-condition conflicts on any attempt to overwrite an existing protected root.
+Kernel protected-key enforcement is the commit-time guard (§8.4) — authoritative
+and path-independent. `InstallPackage` is additionally safe by construction:
+installs are create-only, so an attempt to overwrite any existing root (protected
+or not) conflicts rather than committing.
 
-### Atomicity + cache coherence (M5/B2)
+### Atomicity + cache coherence
 
-All mutations land in **one** step-8 atomic batch. The existing step-8
-`vtx.meta.*` invalidation fires **in-commit** for the DDL/lens meta-vertices in
-that batch, so a class the package just declared is usable immediately on the
-same running Processor — **no restart, no manual refresh**.
+All mutations commit as **one atomic operation**, and a class the package just
+declared is usable immediately on the same running platform — **no restart, no
+manual refresh**.
 
 ---
 
@@ -97,7 +91,7 @@ same running Processor — **no restart, no manual refresh**.
 **Envelope:** `lane: "meta"`, `operationType: "UninstallPackage"`,
 `class: "UninstallPackage"`, `actor: <admin/operator identity>`.
 
-**Payload:** the client reads the package's `.manifest` aspect first, then
+**Payload:** the submitter reads the package's `.manifest` aspect first, then
 submits its `declaredKeys`. Each entry may be a bare key string or a
 `{ key, expectedRevision }` object:
 
@@ -114,39 +108,31 @@ submits its `declaredKeys`. Each entry may be a bare key string or a
 **Response detail:** `{ name, tombstonedKeys: [<key>, …] }`.
 **Event:** `PackageUninstalled { name, keyCount }`.
 
-The script tombstones each declared key and (when a key carries an integer
-`expectedRevision`) asserts it for OCC. The script itself performs **no**
-protected-key check — a tombstone of a protected kernel key is rejected
-authoritatively by the Processor commit-time guard (§8.4), not by this script.
+Each declared key is tombstoned; a key carrying an integer `expectedRevision`
+asserts it for OCC. A tombstone of a protected kernel key is rejected by the
+commit-time guard (§8.4).
 
-**Exception (client-side): a retention-class holder is never submitted for
-tombstone.** A `vtx.retentionclass.<NanoID>` key holder (root + its
-`.retentionPolicy` aspect) is excluded from the `declaredKeys` the client reads
-off the manifest and submits in the payload — per §8.1 the client pre-computes
-the complete mutation set, so this is a read-time filter, not a script change.
-Its DEK may be destroyed only by `ShredRetentionClassKey`
-(`retention-class-key-custody-design.md` §4.3), whose target-existence guard
-refuses an already-tombstoned holder; submitting it here for tombstone would
-strand the class key it custodies beyond any reach, permanently. The excluded
-keys are reported back to the caller
-(`pkgmgr.UninstallResult.RetentionHoldersPreserved`) rather than silently
-dropped, and stay live in Core KV — undeclared, but still shreddable on the
-controller's own retention schedule. A holder the uninstall finds ALREADY
-tombstoned is reported under the sibling
-`pkgmgr.UninstallResult.RetentionHoldersAlreadyStranded` instead: it is
-excluded from the tombstone set like any holder, but it is not preserved —
-`ShredRetentionClassKey` already refuses it, so the class key it custodies is
-past every destruction path, and an operator carrying that retention
-obligation needs to see it named rather than counted as intact. Every other
-declared key (DDL/lens/permission/grant/role/aspect) tombstones normally.
+**Exception: a retention-class holder is never submitted for tombstone.** A
+`vtx.retentionclass.<NanoID>` key holder (root + its `.retentionPolicy` aspect)
+is excluded from the submitted `declaredKeys`. Its DEK may be destroyed only by
+`ShredRetentionClassKey`, whose target-existence guard refuses an
+already-tombstoned holder — tombstoning the holder here would strand the class
+key it custodies beyond any reach, permanently. The excluded keys are **reported
+to the caller, never silently dropped**, in two distinct buckets: **preserved**
+(left live in Core KV — undeclared, but still shreddable on the controller's own
+retention schedule) and **already-stranded** (found already tombstoned: the
+class key it custodies is past every destruction path, and an operator carrying
+that retention obligation needs to see it named rather than counted as intact).
+Every other declared key (DDL/lens/permission/grant/role/aspect) tombstones
+normally.
 
-> **Per-key OCC (read-time revision).** Before submitting, the client `KVGet`s each
-> declared key and passes the entry's revision as its `expectedRevision`. If any
-> declared key is concurrently modified between the client's read and the commit,
-> the whole atomic batch is rejected (`RevisionConflict`) — the batch is atomic, so
+> **Per-key OCC (read-time revision).** Before submitting, the submitter reads
+> each declared key and passes its current revision as `expectedRevision`. If any
+> declared key is concurrently modified between that read and the commit, the
+> whole atomic batch is rejected (`RevisionConflict`) — the batch is atomic, so
 > the package is left **fully installed** (never half-uninstalled); re-run the
-> uninstall. Conditioning on the *read-time* revision (not the install-time one) is
-> what makes a legitimately-upgraded key not spuriously conflict.
+> uninstall. Conditioning on the *read-time* revision (not the install-time one)
+> is what makes a legitimately-upgraded key not spuriously conflict.
 
 ---
 
@@ -158,124 +144,106 @@ admin identity, and the primordial meta-permissions. Protection is a
 `protected: true` field in the **root vertex document `data`** (not a separate
 aspect).
 
-**Authoritative guard (Processor commit-time, path-independent).** The
-authoritative kernel-protection backstop is the Processor commit step (step 8,
-`rejectProtectedMutations` in `internal/processor/step8_commit.go`). For every
-`update` or `tombstone` mutation it derives the 3-segment root
-(`vtx.<type>.<id>`), `KVGet`s the root document, and **rejects the whole
-operation** with error code `ProtectedKey` when `data.protected == true`.
-`create` mutations are exempt (create-only already conflicts on overwrite). This
-guard is path-independent: it covers `InstallPackage`, `UninstallPackage`,
-`UpdateMetaVertex` / `TombstoneMetaVertex`, and any future DDL at once,
-regardless of whether the originating script inspected `data.protected`. A root
-that does not exist is not protected (allow).
+**Authoritative guard (commit-time, path-independent).** Every `update` or
+`tombstone` mutation whose root vertex document carries `data.protected == true`
+**rejects the whole operation** with error code `ProtectedKey`. `create`
+mutations are exempt (create-only already conflicts on overwrite). The guard is
+path-independent: it covers `InstallPackage`, `UninstallPackage`,
+`UpdateMetaVertex` / `TombstoneMetaVertex`, and any future op at once,
+regardless of what the originating script checked. A root that does not exist is
+not protected (allow).
 
 Defense-in-depth (clearer per-op error, **not** authoritative):
+`UpdateMetaVertex` / `TombstoneMetaVertex` reject a protected target with the
+distinct code `ProtectedMetaVertex: <key>`; the commit-time guard above remains
+the authoritative backstop.
 
-- `UpdateMetaVertex` / `TombstoneMetaVertex` (meta-root DDL) reject a target whose
-  root `data.protected == true` → `ProtectedMetaVertex: <key>`. This is functional
-  and tested (the meta-root DDL declares the target in `ContextHint.Reads`), but
-  the Processor commit-time guard above is the authoritative backstop.
+Net invariant: an operation cannot disable auth (the Capability lenses) or the
+kernel (the meta-root DDL) by rewriting or tombstoning them.
 
-Net invariant: an operation cannot disable auth (the Capability lenses) or the kernel (the meta-root
-DDL) by rewriting or tombstoning them.
+**Permission/role provenance protection (commit-time, path-independent).** In
+addition to the protected-root guard, every `update` mutation (and any
+`tombstone` mutation that carries a document) targeting an existing
+`vtx.permission.<id>` root is rejected — error code `PermissionProvenance` — if
+it would change `data.operationType`, `data.scope`, `data.origin`,
+`data.declaredBy`, or `data.lanes` from the value already committed: those
+fields are **write-once** outside the RBAC op surface (which itself never
+rewrites them — `UpdatePermission` is deliberately ungranted to every role).
+`data.origin` / `data.declaredBy` may be set for the first time on a permission
+stored without them (a pre-existing installation predating their introduction);
+every other guarded field must already be present. `data.note` may still change
+freely. The identical rule makes a role's **entire root document** write-once —
+not only its `.canonicalName` aspect (a top-level root field shadows a
+same-named aspect in cypher reads) — and protects the `.canonicalName` aspect
+itself the same way. A `vtx.roleindex.<id>` root (the canonical-name→role
+lookup) is write-once in full by the same rule: a rewritten `data.roleId` would
+redirect a canonical role name to a different role's grants with no new grant
+step. No legitimate path needs the guarded fields to change on a surviving key
+(§8.1 keys are content-addressed on them): a real change produces a **different
+key** — a create paired with a tombstone — never an update.
 
-**Permission/role provenance protection (Processor commit-time, path-independent).** In addition to the
-protected-root guard above, every `update` mutation (and any `tombstone` mutation that carries a
-document) targeting an existing `vtx.permission.<id>` root is rejected — error code
-`PermissionProvenance` — if it would change `data.operationType`, `data.scope`, `data.origin`,
-`data.declaredBy`, or `data.lanes` from the value already committed. These are the fields
-`grant-provenance-runtime-permission-minting-design.md`'s origin invariant and the lane-gate
-(`platformLaneGate`) depend on staying write-once outside the RBAC op surface (which itself never
-rewrites them — `UpdatePermission` is deliberately ungranted to every role). `data.origin`/
-`data.declaredBy` may be set for the first time on a permission stored without them (a pre-existing
-installation predating their introduction); every other guarded field must already be present.
-`data.note` may still change freely. The identical rule makes a role's **entire root document**
-write-once — not only its `.canonicalName` aspect, since a top-level field on the root shadows a
-same-named aspect in every cypher read (`isDeleted` excepted) — and protects the `.canonicalName` aspect
-itself the same way. A `vtx.roleindex.<id>` root (the canonical-name→role lookup, `data.canonicalName` +
-`data.roleId`) is write-once in full by the same rule: a rewritten `data.roleId` would redirect a
-canonical role name to a different role's grants once a consumer resolves through it, with no new grant
-step. Permission entity keys are content-addressed on `(package, operationType, scope)`
-(§8.1), so a legitimate upgrade never needs to change `operationType`/`scope` on a surviving key — a real
-change necessarily produces a different key (a create paired with a tombstone of the old one), never an
-update; a role root carries no field on any legitimate path, and a roleindex root's key is content-addressed
-on `canonicalName` alone, so `data.roleId` for a surviving key never legitimately changes either. This
-closes the channel the protected-root guard does not: an ordinary (non-`protected`) permission/role/
-roleindex vertex, rewritten via `UpgradePackage` or any future path that trusts a client-supplied mutation
-body — see `permission-role-provenance-write-once-design.md`.
+**Package-manifest ownership scoping (commit-time, path-independent).** Four
+further guards, all rejecting with error code **`PackageScope`**, running
+unconditionally for `InstallPackage`/`UpgradePackage`/`UninstallPackage` — and
+an envelope cannot dodge them by making its `class` and `operationType`
+diverge:
 
-**Package-manifest ownership scoping (Processor commit-time, path-independent).** Four further guards, all
-enforced by `PackageScopeError`, running unconditionally for `InstallPackage`/`UpgradePackage`/
-`UninstallPackage` (resolved from `class` with an `operationType` fallback — never `operationType` alone, so
-an envelope can't dodge these by having the two diverge): (1) none of the three may ever mutate a `holdsRole`
-link — no package `Definition` field produces one; (2) a **created** `.manifest` aspect (identified by key
-shape, not by the payload's claimed name) may only declare keys the same batch itself creates, plus its own
-package root — this closes the manifest's own root of trust, on both a real `InstallPackage` and an
-`UpgradePackage` naming a not-yet-installed name; (3) an `UpgradePackage`/`UninstallPackage` `update`/
-`tombstone` must target a key already in the **named package's own** prior `.manifest.declaredKeys` (the
-package's own root and manifest aspect are exempt as self-referential), or a key the SAME batch's own
-manifest update legitimately adds — which itself may only be a batch-created key, an already-declared key,
-or a key whose stored document is already tombstoned **and** is also an update/tombstone target elsewhere in
-the same batch (closes a real revive-after-removal path without re-opening arbitrary live-key rewrite); (4)
-a **created** link's source vertex (never the target — an asymmetric rule; a symmetric one breaks the
-`grantsTo:[operator]` pattern 20+ shipped packages rely on) and a **created** aspect's parent vertex must
-each be in what the batch creates or already owns. `InstallPackage` is create-only and so is naturally
-exempt from rule (3) only — rules (1), (2), and (4) all still apply to it. See
-`permission-role-provenance-write-once-design.md` §19 for the full shape and residuals. **Not closed by this
-guard:** a `create` of a fresh permission/role vertex whose key is self-consistent with the named package's
-own claimed content, `grantedBy`-linked to a role the actor already legitimately holds — closing that needs
-server-side access to a package's real compiled Definition, which does not exist today (§19.6). **Narrowed,
-not closed:** reviving an already-**dead**, non-protected key some other package once declared — no live
-key is reachable by any path above, but per-key ownership provenance (which package legitimately minted a
-given key, tracked durably across time) does not exist today, so a dual-declaration of an orphaned dead key
-remains possible (§19.6).
+1. none of the three may ever mutate a `holdsRole` link — no package
+   `Definition` field produces one;
+2. a **created** `.manifest` aspect may only declare keys the same batch itself
+   creates, plus its own package root;
+3. an `UpgradePackage`/`UninstallPackage` `update`/`tombstone` must target a key
+   already in the **named package's own** prior `.manifest.declaredKeys` (the
+   package's own root and manifest aspect are exempt as self-referential), or a
+   key the same batch's own manifest update legitimately adds — itself limited
+   to a batch-created key, an already-declared key, or a key whose stored
+   document is already tombstoned **and** is also an update/tombstone target
+   elsewhere in the same batch;
+4. a **created** link's source vertex (never the target — deliberately
+   asymmetric, so a package may grant to a role it does not own) and a
+   **created** aspect's parent vertex must each be in what the batch creates or
+   already owns.
+
+`InstallPackage` is create-only and so is naturally exempt from rule (3) only —
+rules (1), (2), and (4) all still apply to it.
+
+**Not closed by this guard:** a `create` of a fresh permission/role vertex whose
+key is self-consistent with the named package's own claimed content,
+`grantedBy`-linked to a role the actor already legitimately holds — closing that
+requires server-side verification of a package's real compiled Definition, which
+the platform does not perform. **Narrowed, not closed:** reviving an
+already-**dead**, non-protected key some other package once declared — no live
+key is reachable by any path above, but per-key mint provenance is not tracked
+durably, so a dual-declaration of an orphaned dead key remains possible.
 
 ---
 
 ## 8.6 `UpgradePackage` op
 
-In-place version upgrade (and dev-mode same-version re-apply). The client reads the
-installed package's `.manifest.declaredKeys` (the **old** key set), rebuilds the
-**new** manifest with the same logical-document machinery as install (§8.1, on the
-now version-independent keys), **diffs by key**, and ships the delta as a single
-mixed-mutation op:
+In-place version upgrade (and dev-mode same-version re-apply). The submitter
+reads the installed package's `.manifest.declaredKeys` (the **old** key set),
+rebuilds the **new** manifest with the same logical-document rules as install
+(§8.1, on the version-independent keys), **diffs by key**, and ships the delta
+as a single mixed-mutation op:
 
 - a key in **new \ old** → `create`
 - a key in **new ∩ old** whose body **changed** → `update` (a byte-equal body is
-  omitted — no needless re-stamp / re-rebuild). **Exception:** for a
-  non-definition key (anything outside `vtx.meta.*` — permission/role vertices,
-  the `grantedBy` grant link) whose committed body is already tombstoned, the
-  diff omits the update too, even though the body differs: a surviving key can
-  only be tombstoned by an out-of-band operator action
-  (`RevokePermission`/`TombstonePermission`/`TombstoneRole`), never by this
-  diff itself, so silently reviving it via the body-diff path would undo a
-  deliberate revocation. `vtx.meta.*` definitions are unaffected and keep the
-  plain body-diff rule — this exception is scoped to grant/role topology,
-  mirroring `internal/bootstrap/reconcile.go`'s definition-vs-topology
-  boundary (`grant-provenance-runtime-permission-minting-design.md` §12).
-- a key in **old \ new** → `tombstone`. **Exception:** a `vtx.retentionclass.<NanoID>`
-  key holder (root or its `.retentionPolicy` aspect) is never tombstoned by this
-  diff, whether the removal is a class rename (a new canonicalName mints a new
-  holder key, so the old one falls out of the new set) or an outright drop. Its
-  DEK may be destroyed only by `ShredRetentionClassKey`
-  (`retention-class-key-custody-design.md` §4.3), whose target-existence guard
-  refuses an already-tombstoned holder — so tombstoning it here would strand
-  the class key it custodies beyond any reach, permanently, the opposite of
-  what a retention obligation promises. The excluded keys are left live but
-  undeclared; their **count** is reported back
-  (`UpgradeResult`/`ApplyResult.RetentionHoldersPreserved`, with
-  `.RetentionHoldersAlreadyStranded` counting any holder the diff found
-  already tombstoned), never silently dropped — `Installer.Uninstall`'s
-  sibling result carries the key list itself
-  (`pkgmgr.UninstallResult.RetentionHoldersPreserved`), since an uninstall has
-  no other delta to size the operator's attention against. Mirrors the
-  grant/role exception above in principle (a topology entity's destruction
-  belongs to its own explicit verb, never to a package diff) but is a
-  separate mechanism at a different point of this same diff — the
-  **removal** partition, not the **update/revival** guard, since a rename's
-  old holder is absent from the new set entirely rather than surviving with a
-  stale body.
+  omitted — no needless re-stamp). **Exception:** for a non-definition key
+  (anything outside `vtx.meta.*` — permission/role vertices, the `grantedBy`
+  grant link) whose committed body is already tombstoned, the diff omits the
+  update even though the body differs: a surviving grant/role key is tombstoned
+  only by an explicit operator action
+  (`RevokePermission`/`TombstonePermission`/`TombstoneRole`), and **a
+  deliberate revocation is never silently undone by a later upgrade**.
+  `vtx.meta.*` definitions keep the plain body-diff rule.
+- a key in **old \ new** → `tombstone`. **Exception:** a
+  `vtx.retentionclass.<NanoID>` key holder (root or its `.retentionPolicy`
+  aspect) is never tombstoned by this diff, whether the removal is a class
+  rename or an outright drop — same rule and reasons as §8.3's uninstall
+  exception. The excluded keys are left live but undeclared, and are **reported,
+  never silently dropped**: the upgrade reports preserved and already-stranded
+  **counts**; an uninstall reports the **key list itself** (§8.3), since it has
+  no other delta to size the operator's attention against.
 
 Because keys are version-independent (§8.1), a surviving entity keeps its key, so the
 upgrade is a true in-place update; every NanoID cross-reference stays valid.
@@ -306,37 +274,35 @@ a re-submit of the same upgrade short-circuits.
 **Response detail:** `{ name, fromVersion, toVersion, created: [<key>…], updated: [<key>…], tombstoned: [<key>…] }`.
 **Event:** `PackageUpgraded { name, fromVersion, toVersion, createdCount, updatedCount, tombstonedCount }`.
 
-### Guardrails (enforced by the kernel script)
+### Guardrails
 
-Same key-shape + underscore-aspect rejection as install (shared `installGuardrailHelpers`).
-`op` must be one of `create` / `update` / `tombstone`. **Unlike install, `UpgradePackage`
-is not create-only**, so it is not safe-by-construction; it relies on the **authoritative
-Processor commit-time protected-key guard** (§8.4, `rejectProtectedMutations`), which already
-covers every `update` / `tombstone` "regardless of … the originating script" — an upgrade
-therefore cannot rewrite or tombstone a protected kernel / auth root.
+Same key-shape + underscore-aspect rejection as install. `op` must be one of
+`create` / `update` / `tombstone`. **Unlike install, `UpgradePackage` is not
+create-only**, so it is not safe by construction; the §8.4 commit-time guards
+cover every `update`/`tombstone` path-independently — an upgrade cannot rewrite
+or tombstone a protected kernel / auth root.
 
 ### Atomicity + cache coherence
 
-All create/update/tombstone mutations land in **one** step-8 atomic batch (all-or-nothing —
-no half-migrated package), and the step-8 `vtx.meta.*` invalidation fires in-commit for every
-touched DDL/lens meta-vertex, so the new definitions are usable immediately (no restart).
-Downstream reaction is the existing CDC machinery — lens hot-swap vs full rebuild (which evicts
-rows the new cypher no longer matches), Weaver/Loom registry reloads: `docs/components/refractor.md`
-(Lens lifecycle) + `docs/components/_packages.md`.
+All create/update/tombstone mutations commit as **one atomic operation**
+(all-or-nothing — no half-migrated package), and the new definitions are usable
+immediately (no restart). Downstream read models and engine registries converge
+via the ordinary CDC machinery: `docs/components/refractor.md` (Lens lifecycle)
++ `docs/components/_packages.md`.
 
 ### OCC
 
-`update` / `tombstone` are conditioned on the **read-time revision**, the same as uninstall
-(§8.3): the diff already `KVGet`s each surviving key for the body comparison, and a removed key
-is read to capture its revision, so each mutation asserts the revision it was read at as its
-`expectedRevision`. A concurrent Processor write to a declared key between the diff read and the
-commit fails the whole atomic batch (`RevisionConflict`); the batch is atomic, so the package is
-left at its **pre-upgrade** version (never half-migrated) — re-run the upgrade to resolve.
+`update` / `tombstone` are conditioned on the **read-time revision**, the same as
+uninstall (§8.3): each mutation asserts the revision its key was read at as its
+`expectedRevision`. A concurrent write to a declared key between the diff read
+and the commit fails the whole atomic batch (`RevisionConflict`); the batch is
+atomic, so the package is left at its **pre-upgrade** version (never
+half-migrated) — re-run the upgrade to resolve.
 
 ---
 
 ## 8.7 Out of scope
 
-- **In-flight-instance DDL-version pinning** (a breaking DDL change during an upgrade while a
-  Loom instance is mid-pattern or a Weaver gap is open): warned/blocked by a future migration
-  guard (brainstorm G6). The upgrade is atomic but does not today fence in-flight orchestration.
+- **In-flight-instance DDL-version pinning:** the upgrade is atomic but does not
+  fence in-flight orchestration — a breaking DDL change can land while a Loom
+  instance is mid-pattern or a Weaver gap is open.

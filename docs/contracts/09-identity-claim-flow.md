@@ -1,6 +1,6 @@
-# Contract #9 — Identity Claim Flow (Option C: client-minted claim secret)
+# Contract #9 — Identity Claim Flow (client-minted claim secret)
 
-**Status:** FROZEN (Phase 1.5, Story 1.5.7)
+**Status:** FROZEN
 
 This contract specifies how a one-time identity claim secret flows through the
 `identity` DDL's `CreateUnclaimedIdentity` and `ClaimIdentity` operations. The
@@ -9,7 +9,7 @@ is not a delivery channel for secrets.
 
 ---
 
-## 9.1 The custody model (Option C)
+## 9.1 The custody model
 
 - The **client** mints the claim secret (plaintext).
 - The client computes `sha256(plaintext)` and submits **only the hash** in the
@@ -40,7 +40,7 @@ Rationale and the rejected server-side-mint alternatives:
 ```
 
 **Reply:** `response: {"primaryKey": "vtx.identity.<id>"}` only. The reply returns
-**no secret**. Duplicate detection rides the `IdentityCreated` event's
+**no secret**. Duplicate detection rides the `identity.created` event's
 `data.duplicate` flag — not the reply.
 
 The client retains the plaintext it minted; it is the single copy and the single
@@ -49,11 +49,10 @@ of band).
 
 ## 9.3 `ClaimIdentity`
 
-Unchanged in mechanism. The actor submits the `claimKey` **plaintext** plus the
-`targetIdentityKey`. The script computes `sha256(plaintext)` and compares it,
-constant-time, against the stored `.claimKey` hash. On success it writes the
-`credentialBinding` aspect, transitions `state` `unclaimed → claimed`, and
-tombstones the `.claimKey` aspect.
+The actor submits the `claimKey` **plaintext** plus the `targetIdentityKey`. On a
+matching hash the identity gains its `credentialBinding` aspect, `state`
+transitions `unclaimed → claimed`, and the `.claimKey` aspect is **tombstoned**
+— the claim is one-time; a second claim finds no key.
 
 All failure modes collapse to the generic `ClaimKeyInvalid` reply code
 (NFR-S6 anti-enumeration); specific outcomes surface only via Health KV.
@@ -66,9 +65,6 @@ All failure modes collapse to the generic `ClaimKeyInvalid` reply code
 - `claimKeyHash`: lowercase hex `sha256`, validated for shape on create.
 - The `CreateUnclaimedIdentity` reply carries only `primaryKey` (the created
   identity key) per the closed `response` schema (Contract #2 §2.7).
-- The CLI (`lattice identity create-unclaimed`) mints the secret locally, prints
-  the plaintext once, submits only the hash, and reads the created key from
-  `OperationReply.primaryKey`.
-- There is **no `secret.mint()` Starlark builtin and no `OneTimeSecret` reply
-  field** — the Processor stays fully generic (zero per-operation coupling); a
-  server-side mint surface may not be reintroduced.
+- Lattice exposes **no server-side secret-mint primitive and no reply field that
+  carries a secret** — every minting client follows §9.1, and a server-side mint
+  surface may not be introduced.
