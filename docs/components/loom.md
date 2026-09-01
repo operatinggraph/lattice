@@ -292,6 +292,19 @@ Because the op-to-submit lives in the same batch (the **command outbox**), submi
 write: the relay publishes it fire-and-forget and deletes the record on publish-ack (re-publish idempotent
 via the chosen `requestId` + the Contract #4 tracker). Write-ahead therefore holds by construction.
 
+**Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
+on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,
+`Conn.AtomicBatch` on the bucket is rejected. The "no secondary KV index" rule forbids a **separate
+index bucket** (dual-write atomicity / drift); the co-located disjoint-prefix `token.` index in the
+*same* bucket, written in the same atomic batch, is sanctioned and stronger. `deadline.` is keyed on
+**`instanceId`** (not the token) because the interpreter is linear — exactly one step pending per
+instance, so one key always denotes the current step's clock — and because a TTL expiry marker is a
+delete-marker carrying no old value: the subject itself must carry the instanceId, where a
+`token.`-keyed TTL would lose the reverse mapping. The expiry arrives via the loom-state CDC as
+`KeyValuePurge` / `Nats-Marker-Reason: MaxAge` (distinct from a normal DEL) and drives the
+step-deadline-exceeded handler; the value is thin (`setAt`, observability only) — the handler
+reconstructs from `instance.<instanceId>`.
+
 **The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
 recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
 not an oversight: the record's presence is the dedup guard that collapses a re-emitted trigger for the same
