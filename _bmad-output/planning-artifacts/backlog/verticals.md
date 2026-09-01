@@ -31,7 +31,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **6 standing $25 auto-no-show charges on Riley Chen still await a waiver** | The no-show-fee code fix is shipped and live; what's left is a live `ClinicCreditAccount reason:"waiver"` write, not code. | Clinic | pkg | ★ | XS | 🚧 blocked-on: Andrew/interactive session — live-financial-write policy hold, not a credentials gap |
 | **A submitted application is invisible to applicant AND landlord, and the app calls the projection healthy** | A live `CreateLeaseApplication` committed 12:54Z was absent from `read_lease_applications` and `read_landlord_lease_applications` at 13:03Z; both endpoints answered `projectionHealthy: true`. False-healthy symptom fixed `d8cf4144`; the underlying zero-progress lens bug is not. | LoftSpace | FE + pkg | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) Postgres-lens zero-progress row |
 | **A member cancels free one minute before class, but a no-show costs $25** | `CancelBooking`'s only time gate is SessionStarted ([ddls.go:3760](../../../packages/wellness-domain/ddls.go:3760)) and the refund is unconditional — no cancellation window exists anywhere in the vertical, so the $25 no-show fee is avoidable by cancelling on the way out the door. | Wellness | pkg + FE | ★★ | S–M | 📋 ready · a studio's core economics; needs a window on `.schedule` + a late-cancel fee tier |
-| **The studio cannot see who owes it money** | Front-desk Billing paints one balance at a time from a 45-name dropdown ([app.js:2142](../../../cmd/wellness-app/web/app.js:2142)) — no arrears list, no due date, no overdue notion. Live: two members carry $245 and $355 unpaid, invisible until clicked. `wellnessMemberAccounts` ([lenses.go:408](../../../packages/wellness-ledger/lenses.go:408)) projects a row per booker but no balance. | Wellness | pkg + FE | ★★ | M | 📋 ready · project the balance + an arrears grid; café `abd881cf` is precedent |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -70,6 +69,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-01 · `99233d11` · Wellness front desk can finally see who owes the studio money — new `/api/frontdesk-arrears`, worst-first, mirrors the café pattern.
 - 2026-09-01 · `6df9b708` · Café front desk can finally see who owes the café money — new `/api/frontdesk-balances` mirrors the resident's own overdue statement onto the front-desk grid.
 - 2026-09-01 · `786c51ab` · Wellness front desk can finally cancel a class off the grid — `TombstoneSession` now grants frontOfHouse, workplace-confined off the session's own studio.
 - 2026-09-01 · `baf4e9b3` · Wellness's class-price charge now gates on `status='booked'` — a waitlisted booking was charged like a confirmed one and, absent promotion, never refunded.
