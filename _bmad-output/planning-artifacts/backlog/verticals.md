@@ -30,6 +30,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **The front desk cannot book, cancel or re-status a single appointment** | 0 of 20 live staff `CreateAppointment` / `SetAppointmentStatus` submits returned `ScriptTimeout: wall budget 250ms`, while the same patient self-books 4/6 and staff `ClinicDebitAccount` is 4/4 — `workplace_exempt()` ([ddls.go:2053](../../../packages/clinic-domain/ddls.go:2053)) skips the walk for the self path only. Café's is 9/20. | Clinic | platform | ★★★ | S–M | 🚧 blocked-on: [lattice.md](lattice.md) confinement-walk batched-read row |
 | **6 standing $25 auto-no-show charges on Riley Chen still await a waiver** | The no-show-fee code fix is shipped and live; what's left is a live `ClinicCreditAccount reason:"waiver"` write, not code. | Clinic | pkg | ★ | XS | 🚧 blocked-on: Andrew/interactive session — live-financial-write policy hold, not a credentials gap |
 | **A submitted application is invisible to applicant AND landlord, and the app calls the projection healthy** | A live `CreateLeaseApplication` committed 12:54Z was absent from `read_lease_applications` and `read_landlord_lease_applications` at 13:03Z; both endpoints answered `projectionHealthy: true`. False-healthy symptom fixed `d8cf4144`; the underlying zero-progress lens bug is not. | LoftSpace | FE + pkg | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) Postgres-lens zero-progress row |
+| **The landlord's service-attach KPI is dark whenever ONE of its two sources is absent** | `/api/portfolio-pulse` gates BOTH cross-package reads on `bErr == nil && tErr == nil` ([portfolio.go:333](../../../cmd/loftspace-app/portfolio.go:333)), so an absent `front-desk-booking-history` bucket zeroes the readable café half too — live: 4 signed leases, 2 carrying café tabs, answers `occupiedLeases:0`, the FE's documented "no data". Degrades with no log line. | LoftSpace | pkg + FE | ★★ | S | 📋 ready · PO-witnessed 2026-09-01 |
+| **Account settings cannot say which sign-in method you are using, yet offers Remove on every one** | The "this sign-in" badge compares `bareId(c.actorKey)` — the credential actor — with `state.identityId`, the person ([app.js:620](../../../cmd/loftspace-app/web/app.js:620)); the two are never equal (15/15 live `boundTo` links), and login re-mints the cookie as the RESOLVED identity, so the session carries no credential provenance to compare against. | LoftSpace | FE + appsession | ★ | S | 📋 ready · PO-witnessed 2026-09-01 |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -62,7 +64,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-30:** Clinic — drove patient, provider + front-desk hats live through book/status/document/bill; the front desk can't book at all and the patient's bill loses lines; filed 3.
 - **2026-08-30:** Café — drove frontOfHouse + resident hats through menu/tab/ledger/front-desk on a saturated stack; front-desk reads fail quiet, overdue is browser-only, menu doubles; filed 3.
 - **2026-08-31:** Wellness — drove member/front-desk hats live through schedule/series/book/waitlist/promote/cancel/refund/bill; the waitlist bills before it seats and the desk can neither cancel a class nor see who owes; filed 4.
-- **Next:** LoftSpace.
+- **2026-09-01:** LoftSpace — drove landlord + applicant hats live through listings/apply/decide/renew/tasks/ledger/one-bill/account; the attach KPI is dark and nothing names the sign-in you are on; filed 2 + 1 platform.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
