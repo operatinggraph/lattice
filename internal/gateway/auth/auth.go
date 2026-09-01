@@ -239,6 +239,14 @@ type VerifiedActor struct {
 	// becomes TokenID, consumed by the provision-time identityindex probe
 	// (multi-credential-identity-linking-design.md §3.4).
 	VerifiedEmail string
+	// CredentialID is the bare id of the credential that authenticated this
+	// token, from the optional `cred_id` claim — set only by a minter that
+	// resolved sign-in through a credential's `boundTo` link onto a DIFFERENT
+	// identity (a dev-posture app's login flow). Defaults to Subject when the
+	// claim is absent, which is the correct value whenever a token's own
+	// subject signed itself in with no such resolution — an IdP-issued token
+	// never sets this claim and always falls into that default.
+	CredentialID string
 }
 
 // idpClaims extends jwt.RegisteredClaims with the optional, non-authenticating
@@ -248,6 +256,9 @@ type idpClaims struct {
 	jwt.RegisteredClaims
 	Email         string `json:"email,omitempty"`
 	EmailVerified bool   `json:"email_verified,omitempty"`
+	// CredID is the optional `cred_id` claim (see VerifiedActor.CredentialID)
+	// — an IdP never sets it; only a dev-posture app's own minter does.
+	CredID string `json:"cred_id,omitempty"`
 }
 
 // trustedKey is one trusted kid's key + provenance/binding, held together so
@@ -454,6 +465,10 @@ func (v *Verifier) Verify(tokenString string) (VerifiedActor, error) {
 	if claims.EmailVerified {
 		verifiedEmail = strings.TrimSpace(claims.Email)
 	}
+	credentialID := strings.TrimSpace(claims.CredID)
+	if credentialID == "" {
+		credentialID = actorSubject
+	}
 	return VerifiedActor{
 		ActorID:       IdentityKeyPrefix + actorSubject,
 		Subject:       actorSubject,
@@ -462,6 +477,7 @@ func (v *Verifier) Verify(tokenString string) (VerifiedActor, error) {
 		Issuer:        iss,
 		RawSubject:    sub,
 		VerifiedEmail: verifiedEmail,
+		CredentialID:  credentialID,
 	}, nil
 }
 

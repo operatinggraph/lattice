@@ -11,9 +11,11 @@
 const state = {
   listings: [], applications: [], tasks: [], renewals: [], docs: [], identities: [], units: [], credentials: [],
   // applicant is the signed-in identity's key (loadWhoami) — not a choice.
-  // identityId is its bare NanoID; anchors are the whoami hat hints the landlord
-  // surface is gated on; canSignOut distinguishes a real cookie session.
-  applicant: null, identityId: null, anchors: [], canSignOut: false,
+  // identityId is its bare NanoID; credentialId is the (possibly different)
+  // credential that authenticated this session, for "which sign-in method am
+  // I on" UX; anchors are the whoami hat hints the landlord surface is gated
+  // on; canSignOut distinguishes a real cookie session.
+  applicant: null, identityId: null, credentialId: null, anchors: [], canSignOut: false,
   current: null, currentTask: null, view: "browse", highlight: null,
   // formHandle is the shared internal/descriptorform module's live
   // { descriptor, submit() } for the currently-open completion — null
@@ -443,6 +445,7 @@ async function loadWhoami() {
     try {
       const body = await api("/api/whoami", { credentials: "same-origin" });
       state.identityId = (body && body.loggedIn && body.identityId) || null;
+      state.credentialId = (body && body.loggedIn && body.credentialId) || null;
       state.applicant = state.identityId ? "vtx.identity." + state.identityId : null;
       state.canSignOut = !!(body && body.canSignOut);
       // Anchors are the signed-in session's hat hints; a body reporting
@@ -453,6 +456,7 @@ async function loadWhoami() {
     } catch (_) {
       if (attempt >= whoamiRetryBackoffsMs.length) {
         state.identityId = null;
+        state.credentialId = null;
         state.applicant = null;
         state.canSignOut = false;
         state.anchors = [];
@@ -597,7 +601,11 @@ function renderAccount() {
     return;
   }
   empty.hidden = true;
-  const currentDevice = state.identityId;
+  // The credential that authenticated THIS session, not the (possibly
+  // different, boundTo-resolved) identity it opened — c.actorKey below is
+  // always a raw credential key, so comparing it to the identity id never
+  // matched.
+  const currentDevice = state.credentialId;
   for (const c of creds) list.append(renderCredentialCard(c, creds.length, currentDevice));
   const n = creds.length;
   $("#account-summary").textContent = `${n} sign-in method${n === 1 ? "" : "s"}`;
