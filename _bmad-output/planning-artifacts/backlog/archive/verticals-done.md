@@ -2,6 +2,17 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-28 · `682b3d5d` · The one-bill statement now groups by month with a net subtotal per period, instead of one 97-line flat list. loftspace-app FE only, no lens change.
+- 2026-08-28 · `2b495eba` · Expired open tasks now badge "expired" (red) instead of "open" — mirrors Facet's isExpired check; Complete stays enabled per platform's surface-only-past-deadline design.
+- 2026-08-28 · `2f3ba08d` · A patient can finally read their own encounter note — `clinicEncountersReadSpec` gains a patient self-anchor, FE `asSelf` note-suppression dropped. clinic-domain 0.34.12
+- 2026-08-28 · `4da005a0` · Visit series survive a tombstoned provider via a new atSite link, mirroring appointment's mechanism. clinic-reminders 0.10.4
+- 2026-08-28 · `792ca811` · Clinic's 4 duplicate providers + the "Dr Proof" sentinel reaped live, incl. orphaned litter appointments; Patel stays deliberately unbound (row's "bind Patel" note was wrong).
+- 2026-08-28 · `ecb0a0d1` · Unled wellness classes now flag `missingInstructor`; roster badges + points staff at the already-granted Reassign control. wellness-domain 0.22.10
+- 2026-08-28 · `38906487` · Dr. Classic Demo given a practicesAt site + all appointments stamped atSite — front desk's forward schedule (0 → 22 scheduled rows visible) finally readable/actionable.
+- 2026-08-28 · `48c59f4b` · Front-desk surfaces (café/clinic/wellness) now require `frontOfHouse`, not just `worksAt` — a worksAt-only staffer no longer sees other residents'/patients'/members' rows they hold zero write grant for. triage §7
+- 2026-08-28 · `ec63ae71` · descriptorform vocabulary strand CLOSED (items 1–9) — the drift gate now pins `{me.<type>}`/`{entity.<column>}` too. triage §2
+- 2026-08-28 · `5ac9b361` · VoidCharge's itemized (lineId) form declared in its InputSchema — descriptor clients (Facet included) can finally submit it, not just cafe-app's hand-built button. cafe-domain 0.11.25
+- 2026-08-28 · `b997ff2a` · Café front-desk ScriptTimeout on OpenTab/Charge/VoidCharge/CreateMenuItem fixed — a redundant workplace_exempt() operator recheck removed; verified live, no timeout. cafe-domain 0.11.24
 - 2026-08-27 · `2ce7da1d`+`d8988c1e` · Task liveness closed — `capabilityEphemeral` stops granting past completion, `staleAssignedTasks` mirrors unroutedTasks. orchestration-base 0.7.13
 - 2026-08-27 · `5f12d337` · DetachObject gets a full OpMetaSpec via `derive_reads`, closing AttachObject/DetachObject at its ratified scope ([design §22](../../implementation-artifacts/staff-descriptor-rendering-design.md)). objects-base 0.3.8
 - 2026-08-27 · `fab81059` · Auto no-show sweep stops billing $25; `WellnessCreditAccount` gains `reason` (payment\|waiver) mirroring `7e6b1ab3`. Live 21 fees/$525 not remediated (needs Andrew). wellness-domain 0.22.7, wellness-ledger 0.2.14
