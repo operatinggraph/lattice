@@ -602,6 +602,42 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   checklist** — it is far more expensive and it arrives after the draft has hardened. Walk the reflexes
   yourself first; hand the reviewers the findings that need a second mind.
 
+- **A declaration is only as trustworthy as the VALUE that fills its blank — "static", "package-authored"
+  and "install-validated" say nothing about WHO supplies the input.** When a design introduces a
+  declaration that resolves against state (a path, a template, a scoped query, an anchor), the reflexes
+  above ask whether the channel exists and whether the mechanism can be bent. This one asks the question
+  that decides whether it is safe: **for every variable the declaration carries, whose value is it?** A
+  shape the package author fixes at install still resolves against a root, and if that root is a payload
+  field it is *submitter input* — the caller then chooses whose data is reached and how much the traversal
+  costs, before any guard the operation's own script applies. (Trialed 2026-09-01, the declared-path
+  design: I wrote, into a frozen contract, *"a caller cannot add, widen, drop or redirect one … fixed at
+  install and identical for every dispatcher"*, having verified the *shape* was static and never that its
+  one input was platform-owned. The adversarial pass produced the exploit in three lines — hold the op at
+  `Scope:"any"`, submit another tenant's key, receive a MAC'd ref for a stranger's encrypted name — and
+  the Processor had **already ruled on the identical shape** in the same package: `descriptor_floor.go`
+  refuses a payload-derived template because *"an exclusion set the attacker can address is not a
+  precedence rule, it is a bypass."*) **Two checks, both cheap:** (1) list every variable the declaration
+  resolves against and label each *platform-owned* (an engine-resolved subject, a violation row, a
+  step-3-validated target) or *caller-owned* (a payload field, a literal in an envelope, anything from
+  `contextHint`) — and if a caller-owned one appears anywhere on a security path, the design is not
+  finished; (2) grep the component for an existing refusal of the same shape before proposing it — a
+  platform that has already refused your idea once has written down the reason.
+
+  **Corollary — the surface that knows the SHAPE is rarely the surface that owns the VALUE, and the design
+  goes where both are true.** In the same fire the answer was not "the package author knows the traversal,
+  so declare it beside the script" (true about the shape, silent about the root) but "the orchestration
+  engine resolved the subject, so declare it on the step" — narrower, and the only place both halves hold.
+  When no such surface exists, that is the finding: say so rather than settling for the one that knows the
+  shape.
+
+  **Second corollary — before pricing your change as a WIDENING, go read what the baseline actually
+  allows.** I framed the same design as "moving naming authority from the dispatcher to the package" and
+  it was wrong in the unsafe direction: the declaration list I believed a dispatcher controlled is
+  submitter wire that no authorization step inspects at all. A widening/narrowing claim is a claim about
+  *two* states, and the reflex is to ground the new one and assume the old. Ground both — the correction
+  changes what you owe the principal (here: a ★★★ board row for the open channel, and a "not a widening"
+  paragraph replacing the one that asked him to ratify a widening that was not happening).
+
 - **A predicate you write in ONE clause is a claim that the set it filters has ONE shape — enumerate the
   shapes first, and write the predicate over the enumeration.** All three blockers from the 2026-08-03
   credential-binding pass were this single failure, in one 40-line algorithm: (1) an ownership guard
