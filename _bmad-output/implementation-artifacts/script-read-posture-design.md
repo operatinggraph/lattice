@@ -1,6 +1,6 @@
 # Design — Script-read posture: declared reads as the norm, bounded enumeration, and Processor-side guarded operations
 
-**Status: ✅ Andrew-ratified 2026-07-01** (reshaped over a ratification working session + two `bmad-party-mode` adversarial rounds — see §0). **Fires 1–2 contract surface (Contract #2 `optionalReads` + `enumerations` + read-posture) committed; the guard surface (Contract #2 `guard`/`correlationToken`, #3 `operation.guardSkipped`, #10 §10.5/§10.6) is staged at Fire 3 (build-deferred, and #03 currently carries an unrelated uncommitted edit).** **Fires 1–2 BUILT 2026-07-06 on branch `claude/fable-model-qb9o6s`, awaiting Andrew's review/merge — see §12 build checkpoint.**
+**Status: ✅ Andrew-ratified 2026-07-01** (reshaped over a ratification working session + two `bmad-party-mode` adversarial rounds — see §0). **Fires 1–2 SHIPPED on main (contract surface — Contract #2 `optionalReads` + `enumerations` + read-posture — committed; code merged, the build branch is gone). Fire 3's guard surface (Contract #2 `guard`/`correlationToken`, #3 `operation.guardSkipped`, #10 §10.5/§10.6) remains design-only: build-deferred, and its contract edits are NOT currently staged anywhere — re-stage from §here when the fire revives.**
 **Author: Winston (Designer fire).**
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Refinements & ops* → "Script-read posture".
 **Origin:** the Edge Lattice party-mode finding **F8** ("scripts reading Core KV is the root smell").

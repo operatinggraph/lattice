@@ -1,20 +1,19 @@
 # Design — userTask dispatch idempotency (stop duplicate human tasks)
 
-**Status:** ✅ Built (code) — awaiting Andrew on the contract only. ALL code is implemented + 3-layer
+**Status:** ✅ CLOSED — code built (2026-06-26) and the Contract #10 §10.3 amendment ratified + committed in the 2026-08-25 batch (`8d039bdb`, 2026-08-26); nothing pending. ALL code is implemented + 3-layer
 reviewed + gates green: the §2.5 lazy `kv.Read()` keystone (§4.4 / §8 step 3, keystone commit `3a35941`
 on main), the Weaver `claimId` mint/preserve (§3, §8.1), the `deriveStable*` derivations (§8.2), the
 `CreateTask` `kv.Read` branch + `StartLoomPattern` optional `instanceId` (§8.3–8.4), and the interim-cap
 revert (§8.5). Enforcement is **consumer-side** (Processor/Loom), not a producer-side GET — see §4.3.
-The **only** thing pending is the **Contract #10 §10.3 amendment (§7)** — applied **uncommitted in the
-main checkout** for Andrew to ratify + commit (the code commits to main; the frozen contract does not,
-per the autonomous-mandate protocol).
+The Contract #10 §10.3 amendment (§7) is **ratified and committed** (`8d039bdb`; the clause now
+lives in `10-orchestration-substrate.md`, restated at promise altitude by the 2026-08-31 posture sweep).
 **Refinement found at build (vs §4.4):** `StartLoomPattern`'s dedup is **at Loom**, not a Processor
 `kv.Read` — the Loom instance lives in **loom-state**, not Core KV, so a Processor read can't reach it.
 `triggerLoom` instead carries the stable `claimId`-seeded `instanceId`, and Loom's `getInstance`
 presence + `createInstance` `CreateOnly` collapse the re-emitted `patternStarted`. Same idempotency
 guarantee, correct tier. Only `assignTask`→`CreateTask` (a Core-KV task) uses the `kv.Read` branch.
 **Author:** Winston (Steward, 2026-06-25; built 2026-06-26). **Frozen-contract touches:** Contract #10
-§10.3 (§7) only — **uncommitted in main, pending Andrew**. Contract #2 §2.5 was already specified —
+§10.3 (§7) only — ratified + committed (`8d039bdb`). Contract #2 §2.5 was already specified —
 implementing it was a conformance fill (landed). The interim `maxretries=1` cap is now **reverted** (the
 general fix supersedes it).
 

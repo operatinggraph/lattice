@@ -1,8 +1,11 @@
 # Permission/role provenance write-once — closing the `UpgradePackage` rewrite gap
 
-**Status: 📐 awaiting-Andrew (ratification)** — Designer fire (Winston), 2026-08-14. Security &
-trust-boundary item, S–M. No architectural fork; **Contract #8 touch staged uncommitted** (§7 below) —
-flagged for Andrew per that alone, plus the security severity.
+**Status: ✅ SHIPPED** — Designer fire (Winston, 2026-08-14); write-once guard built and the §19
+package-manifest ownership scoping fire built on top (2026-08-15+). The Contract #8 clauses are
+**ratified and committed on main** (write-once `PermissionProvenance` + `PackageScopeError` scoping).
+Residuals stay filed, not lost: the create-arm forgery (§8(a)/§19.6) is the shelved board row
+"[bootstrap] a package-plane actor can forge a package-origin permission" (revive: consoleOperator
+delegated below root).
 
 ## For Andrew (one-look ratification block)
 
