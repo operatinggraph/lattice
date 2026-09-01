@@ -255,6 +255,60 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 		},
 		{
+			OperationType: "CorrectAppointmentStatus",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Correct status",
+				Description: "Correct a wrong terminal status (e.g. a no-show who actually showed). Does not reverse a no-show fee already charged — use a manual credit for that.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Correct status",
+			},
+			// The status enum is the THREE terminal values, not
+			// SetAppointmentStatus's full six: this op refuses a non-terminal
+			// target in-script, so offering scheduled/confirmed/checkedIn on
+			// the form would render a choice that can only ever reject.
+			// note is required here where SetAppointmentStatus leaves it
+			// optional — a correction rewrites a record already treated as
+			// final, so the reason is part of the write.
+			// No provider/patient: the first terminal transition already
+			// released the slot-claim cells, and a terminal→terminal move
+			// touches none, so there is nothing for them to validate against.
+			InputSchema: `{"type":"object","properties":` +
+				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
+				`"status":{"type":"string","title":"What actually happened","enum":["completed","cancelled","noShow"],` +
+				`"enumLabels":{"completed":"Completed — the visit happened","cancelled":"Cancelled — the visit was called off","noShow":"No-show — the patient never came"},` +
+				`"description":"What the appointment's outcome actually was. Only the terminal values — this op corrects a final call, it does not re-open the appointment."},` +
+				`"note":{"type":"string","title":"Reason","maxLength":500,"description":"Why the recorded status was wrong. Required — the correction's audit trail."}},` +
+				`"required":["appointmentKey","status","note"]}`,
+			FieldDescriptions: map[string]string{
+				"appointmentKey": "The appointment being corrected — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
+				"status":         "The outcome that actually happened: completed, cancelled or noShow. The appointment must already be in one of those three states.",
+				"note":           "Required reason for the correction, kept on the appointment alongside the status it replaced.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class: "appointment",
+				// standing, not "self": this op carries no scope=self grant
+				// (staff-only correction), so it has no authContext target to
+				// bind — the SetAppointmentSite posture, not
+				// SetAppointmentStatus's.
+				AuthContext: "standing",
+				TargetField: "appointmentKey",
+				TargetType:  "appointment",
+				Reads:       []string{"{payload.appointmentKey}"},
+				// The current .status is OPTIONAL for the same reason
+				// SetAppointmentStatus declares it so — absence is a legitimate
+				// state of the appointment, answered here by this op's own
+				// NotTerminal rejection rather than a correctness error.
+				OptionalReads: []string{"{payload.appointmentKey}.status"},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
 			OperationType: "SetProviderHours",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Set working hours",

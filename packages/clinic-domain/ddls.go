@@ -418,7 +418,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     appointmentVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
 			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
@@ -435,7 +435,16 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"The terminal statuses {cancelled, completed, noShow} are FINAL: " +
 			"re-setting the same terminal value is idempotent, but changing a terminal status to a different one is " +
 			"rejected (TerminalStatus) so a finished / cancelled visit cannot silently revert; non-terminal statuses " +
-			"move freely. RecordEncounter upserts two sibling aspects along the sensitivity boundary: .encounter — the " +
+			"move freely. CorrectAppointmentStatus{appointmentKey, status, note} is the explicit repair for a WRONG " +
+			"terminal call — the move SetAppointmentStatus refuses (an auto no-show on a patient who was actually " +
+			"seen). It transitions ONLY between the terminal values (NotTerminal if the appointment never reached one; " +
+			"InvalidArgument for a non-terminal target), touches no slot-claim cells (the first terminal transition " +
+			"already released them, so it takes no provider/patient), and REQUIRES an audit note. It records the " +
+			"overwritten value as .status.correctedFrom and emits clinic.appointmentStatusCorrected. Staff-only " +
+			"(operator / front-of-house / the appointment's own bound provider, workplace-confined exactly as " +
+			"SetAppointmentStatus's staff path) — no patient self-service scope. It never re-opens a terminal " +
+			"appointment to scheduled/confirmed/checkedIn: that would re-claim released cells against whatever has " +
+			"been booked since, and is out of scope. RecordEncounter upserts two sibling aspects along the sensitivity boundary: .encounter — the " +
 			"raw clinical record {summary, assessment?, plan?}, SENSITIVE, its DEK custodied on the clinicalRecord " +
 			"retention class (never on the patient's identity), readable only through the clinicEncountersRead Secure Lens, which decrypts it at projection for the treating provider — and .documentation " +
 			"— the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), followUpRequested, " +
@@ -515,9 +524,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the patient claims residency under (CreateAppointment; optional). Checked against the lease's applicationFor link matching the patient's identifiedBy identity — a mismatch falls through with no residentVisit link, never a hard failure."},` +
 			`"site":{"type":"string","description":"vtx.building.<NanoID> clinic site the appointment is booked at. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries one). When supplied, validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
-			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
-			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set)."},` +
-			`"note":{"type":"string","description":"Optional audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
+			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
+			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set). CorrectAppointmentStatus also requires it, restricted to the three terminal values."},` +
+			`"note":{"type":"string","description":"Audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). REQUIRED on CorrectAppointmentStatus — a correction rewrites a record already treated as final. Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
 			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account."},` +
 			`"summary":{"type":"string","maxLength":4000,"description":"Visit summary / clinical note (RecordEncounter; required). RAW clinical content, stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class; reaches a reader only through the clinicEncountersRead Secure Lens, decrypted at projection for the treating provider."},` +
 			`"assessment":{"type":"string","maxLength":4000,"description":"Clinical assessment / diagnosis (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only."},` +
@@ -536,9 +545,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey":       "Optional full vtx.leaseapp.<NanoID> key the patient claims residency under (CreateAppointment). Verified via the lease's applicationFor link matching the patient's own identifiedBy identity before writing a residentVisit link (appointment→leaseapp); a mismatch or absent lease silently omits the link.",
 			"site":              "Full vtx.building.<NanoID> clinic site key. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries a live one). Validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building).",
 			"appointmentId":     "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
-			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
-			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient.",
-			"note":              "Optional audit note recorded with a SetAppointmentStatus transition (e.g. a cancel / no-show reason). Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
+			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient. CorrectAppointmentStatus requires it too, restricted to the three terminal values.",
+			"note":              "Audit note recorded with a status transition (e.g. a cancel / no-show reason). Optional on SetAppointmentStatus, REQUIRED on CorrectAppointmentStatus. Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge.",
 			"summary":           "Required visit summary / clinical note (RecordEncounter). RAW clinical content stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class; reaches a reader only through the clinicEncountersRead Secure Lens, decrypted at projection for the treating provider.",
 			"assessment":        "Optional clinical assessment / diagnosis (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only.",
@@ -601,6 +610,19 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"was omitted) and releases the appointment's held slot-claim cells. Emits clinic.appointmentStatusSet. " +
 					"clinic-ledger's clinicNoShowSettlement lens picks up the fee and posts a DebitAccount charge once the " +
 					"patient has a ledger account. Returns primaryKey.",
+			},
+			{
+				Name: "CorrectAppointmentStatus — the no-show who was actually seen",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "status": "completed",
+					"note": "Patient was present and seen; auto no-show was wrong."},
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment and that the caller is the " +
+					"operator, the appointment's own bound provider, or workplace-confined to one of its sites. " +
+					"Requires the CURRENT status to be terminal (NotTerminal otherwise — the first terminal " +
+					"transition is SetAppointmentStatus's job) and the target status to be one of the three terminal " +
+					"values (InvalidArgument otherwise — this op never re-opens an appointment). Requires a note. " +
+					"Upserts .status {value: completed, note, correctedFrom: noShow} — no slot-claim cell moves, " +
+					"since the first terminal transition already released them. Emits " +
+					"clinic.appointmentStatusCorrected. Returns primaryKey.",
 			},
 			{
 				Name:    "MarkPastDueNoShow — Weaver-dispatched auto no-show (pastDueAppointments target)",
@@ -772,29 +794,34 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 
 // statusAspectTypeDDL declares the .status aspect (class appointmentStatus) — the
 // step-6 write gate for CreateAppointment (initial), SetAppointmentStatus
-// (staff transitions), and MarkPastDueNoShow (the Weaver-dispatched auto
-// no-show). Declaration-only; NON-sensitive.
+// (staff transitions), CorrectAppointmentStatus (terminal→terminal repair), and
+// MarkPastDueNoShow (the Weaver-dispatched auto no-show). Declaration-only;
+// NON-sensitive.
 func statusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     statusAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
+		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
 			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?, " +
-			"noShowFeeCents?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
+			"noShowFeeCents?, correctedFrom?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
 			"(transitions, with an optional audit note — a cancel / no-show reason, distinct from the .schedule visit " +
 			"reason — and, only when transitioning to noShow, a noShowFeeCents amount: caller-supplied or a 2500 " +
-			"default), and MarkPastDueNoShow (the same noShow transition, Weaver-dispatched once a non-terminal " +
+			"default), CorrectAppointmentStatus (a terminal→terminal repair of a wrong final call, which requires the " +
+			"note and additionally records correctedFrom — the terminal value it overwrote), and MarkPastDueNoShow " +
+			"(the same noShow transition, Weaver-dispatched once a non-terminal " +
 			"appointment's endsAt passes unattended, always the 2500 default fee) — whose appointment vertexType DDL " +
 			"owns both scripts; this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
+			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"},"noShowFeeCents":{"type":"number"},` +
+			`"correctedFrom":{"type":"string","enum":["cancelled","completed","noShow"]}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":          "Appointment status: scheduled | confirmed | checkedIn | completed | cancelled | noShow.",
-			"note":           "Optional audit note recorded with a status transition (e.g. a cancel / no-show reason).",
+			"note":           "Audit note recorded with a status transition (e.g. a cancel / no-show reason). Optional on SetAppointmentStatus, required on CorrectAppointmentStatus.",
 			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted).",
+			"correctedFrom":  "The terminal status this correction overwrote, present only on a CorrectAppointmentStatus write — the only trace of the wrong call once the upsert lands.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -3049,6 +3076,69 @@ def execute(state, op):
             mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": appt_key}}
+
+    if ot == "CorrectAppointmentStatus":
+        # The explicit repair for a WRONG terminal call — the move
+        # SetAppointmentStatus's TerminalStatus guard refuses (an auto no-show on a
+        # patient who was actually seen). Scope is deliberately terminal→terminal
+        # ONLY: re-opening to scheduled/confirmed/checkedIn would have to re-claim
+        # the released slot cells against whatever has been booked since, a
+        # different and larger feature. Within the terminal set no cell moves at
+        # all — the FIRST terminal transition already released them — so this op
+        # takes no provider/patient and writes only the .status aspect.
+        appt_key = required_string(p, "appointmentKey")
+        _, appt_id = parts_of(appt_key, "appointmentKey", "appointment")
+        if not vertex_alive(state, appt_key):
+            fail("UnknownAppointment: " + appt_key)
+        cls = class_of(state, appt_key)
+        if cls != "appointment":
+            fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+
+        # Same staff-standing confinement SetAppointmentStatus applies to its
+        # non-self path (operator / the appointment's own bound provider /
+        # workplace), so a correction is a write into someone else's building on
+        # exactly the terms an ordinary status write is.
+        # workplace-exempt: (no-validated-path) this op grants no scope=self and
+        # mints no task (operator/frontOfHouse/provider "any" only), so
+        # op.authTargetValidated is never legitimately true here and only an
+        # operator reaches the exemption — SetAppointmentSite's reasoning exactly.
+        if not (op.authTargetValidated or actor_holds_operator(op.actor)):
+            standing_provider = appointment_provider(appt_id)
+            if not actor_bound_to_appointment_provider(op.actor, standing_provider):
+                enforce_workplace_confined(appointment_sites(appt_id), "cannot correct status on appointment " + appt_key)
+
+        status = required_status(p)
+        if status not in TERMINAL_STATUSES:
+            fail("InvalidArgument: status: CorrectAppointmentStatus only transitions between terminal statuses (cancelled/completed/noShow) — use SetAppointmentStatus for the first terminal transition")
+
+        cur_val = None
+        # read-posture: (d) declared in contextHint.optionalReads by
+        # CorrectAppointmentStatus's dispatcher (cmd/clinic-app/web/app.js) —
+        # absence means the appointment never reached a terminal status, which is
+        # this op's own NotTerminal rejection below, not a correctness error.
+        cur_status = kv.Read(appt_key + ".status")
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+        if cur_val not in TERMINAL_STATUSES:
+            fail("NotTerminal: appointment " + appt_key + " is not in a terminal status; use SetAppointmentStatus for the first terminal transition")
+
+        # The note is MANDATORY here, unlike SetAppointmentStatus's optional one:
+        # this rewrites a record already treated as final, so the reason is part
+        # of the write, not an extra.
+        note = optional_string(p, "note")
+        if note == None:
+            fail("InvalidArgument: note: required for a status correction")
+
+        # correctedFrom keeps the overwritten value on the aspect itself — the
+        # only trace of the wrong call once the upsert lands. A same-value
+        # correction stays accepted (the re-runnable posture SetAppointmentStatus's
+        # own terminal idempotency uses) and simply records the value unchanged.
+        status_data = {"value": status, "note": note, "correctedFrom": cur_val}
+        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
+        events = [{"class": "clinic.appointmentStatusCorrected",
+                   "data": {"appointmentKey": appt_key, "from": cur_val, "to": status}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 

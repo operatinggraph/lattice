@@ -145,6 +145,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
+			OperationType: "CorrectAppointmentStatus",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to correct a WRONG terminal status (the move SetAppointmentStatus's TerminalStatus guard refuses — e.g. an auto no-show on a patient who was actually seen), and a bound provider the right to correct THEIR OWN appointments (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to — the same three roles and the same confinement as SetAppointmentStatus's any-scope grant). No consumer self-scope: correcting a final record is a staff action, unlike the patient's own cancel.",
+			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
+		},
+		{
 			OperationType: "RecordEncounter",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit RecordEncounter operations, and a bound provider the right to document THEIR OWN appointment's visit (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to).",

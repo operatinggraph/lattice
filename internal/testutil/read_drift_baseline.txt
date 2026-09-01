@@ -65,6 +65,13 @@ read	CancelBooking	lnk.identity.<id>.worksAt.building.<id>
 read	CancelRenewal	lnk.identity.<id>.manages.unit.<id>
 read	Charge	vtx.leaseapp.<id>
 read	ClinicCreditAccount	lnk.patient.<id>.identifiedBy.identity.<id>
+# CorrectAppointmentStatus reuses SetAppointmentStatus's staff-standing
+# confinement verbatim, so it inherits the same two undeclarable follow-ups
+# (the `SetAppointmentStatus` rows below): each hangs off a vertex only a prior
+# walk resolves — the building from the appointment's site walk, the provider
+# from its withProvider walk — so no dispatcher can name either key up front.
+read	CorrectAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
+read	CorrectAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
 read	CreateAppointment	lnk.identity.<id>.worksAt.building.<id>
 read	CreateAppointment	lnk.patient.<id>.identifiedBy.identity.<id>
 read	CreateAppointment	vtx.provider.<id>.hours
@@ -153,6 +160,14 @@ walk	Charge	vtx.menuitem.<id> servedAt out
 walk	Charge	vtx.unit.<id> containedIn out
 walk	ClinicCreditAccount	vtx.clinicaccount.<id> heldFor out
 walk	ClinicCreditAccount	vtx.clinicaccount.<id> postedTo in
+# The link-discovered hubs of that same confinement guard: the appointment's
+# provider, that provider's sites, and each site's containedIn ancestry are all
+# reached from a hub a prior walk produced, which no declaring channel can name
+# at dispatch time (see this file's walk-row note above).
+walk	CorrectAppointmentStatus	vtx.appointment.<id> atSite out
+walk	CorrectAppointmentStatus	vtx.appointment.<id> withProvider out
+walk	CorrectAppointmentStatus	vtx.building.<id> containedIn out
+walk	CorrectAppointmentStatus	vtx.provider.<id> practicesAt out
 walk	CreateAppointment	vtx.building.<id> containedIn out
 walk	CreateAppointment	vtx.leaseapp.<id> applicationFor out
 walk	CreateAppointment	vtx.provider.<id> practicesAt out

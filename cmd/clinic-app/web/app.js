@@ -55,6 +55,9 @@ const state = {
   slotApptCache: {}, // providerKey -> existing appointments, for the booking slot picker (invalidated on book)
   slotPatientApptCache: {}, // patientKey -> the patient's appointments across all providers (cross-provider double-book exclusion; invalidated on book)
   slotCalAnchor: null, // UTC-midnight Date for the 1st of the month shown in the booking calendar (null → current UTC month)
+  correcting: null, // the appointment the Correct-status modal is open for
+  correctingOnDone: null, // the grid reload that modal's submit calls
+  correctingHandle: null, // the mounted CorrectAppointmentStatus descriptor-form handle submitCorrectStatus submits
   opCatalog: null, // operationType -> op-catalog descriptor (GET /api/op-catalog), the dispatch shape descriptor-form-migrated forms render from
   editProvider: undefined, // the #avail-provider value the "Provider details" descriptor form was last rendered for — re-render only on change
   editProviderHandle: null, // the mounted SetProviderProfile descriptor-form handle saveProviderEdit submits
@@ -488,7 +491,7 @@ function rejectionMessage(reply) {
 // outcome as a package that hasn't declared the op yet.
 const KNOWN_CATALOG_OPS = [
   "AssignProviderSite", "CreateProvider", "SetProviderProfile", "StartVisitSeries",
-  "ClinicDebitAccount", "ClinicCreditAccount",
+  "ClinicDebitAccount", "ClinicCreditAccount", "CorrectAppointmentStatus",
 ];
 let opCatalogPromise = null;
 async function loadOpCatalog() {
@@ -3866,14 +3869,26 @@ function selectSchedAppt(a) {
     cancel.addEventListener("click", () => setStatus(a, "cancelled", loadSchedule));
     acts.append(cancel);
     d.append(acts);
-  } else if ((a.status || "").toLowerCase() === "completed") {
+  } else if (isTerminal(a.status)) {
+    // The desk view reads /api/staff/appointments as the signed-in staff
+    // identity — the same front-desk/provider surface renderApptCard serves and
+    // the same audience CorrectAppointmentStatus is granted to — so the finished
+    // appointment gets the same pair of affordances here: documentation for a
+    // completed visit, and the status correction for ANY terminal status.
     const acts = document.createElement("div");
     acts.className = "sd-actions";
-    const doc = document.createElement("button");
-    doc.className = "ghost";
-    doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
-    doc.addEventListener("click", () => openEncounter(a, loadSchedule));
-    acts.append(doc);
+    if ((a.status || "").toLowerCase() === "completed") {
+      const doc = document.createElement("button");
+      doc.className = "ghost";
+      doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
+      doc.addEventListener("click", () => openEncounter(a, loadSchedule));
+      acts.append(doc);
+    }
+    const correct = document.createElement("button");
+    correct.className = "ghost";
+    correct.textContent = "Correct status";
+    correct.addEventListener("click", () => openCorrectStatus(a, loadSchedule));
+    acts.append(correct);
     d.append(acts);
   }
   d.hidden = false;
@@ -4115,6 +4130,23 @@ function renderApptCard(a, opts) {
     actions.append(btns);
   }
 
+  // Correcting a WRONG final status (CorrectAppointmentStatus) — staff/bound-
+  // provider only, never the patient self-service view (asSelf), and offered for
+  // EVERY terminal status rather than completed alone: the corpus this closes is
+  // the auto-marked no-shows nobody could say "the patient was here" about. It
+  // sits after the documentation block deliberately — documenting a completed
+  // visit is the common action, correcting the record the rarer one.
+  if (opts.cancelable && !opts.asSelf && isTerminal(a.status)) {
+    const btns = document.createElement("span");
+    btns.className = "card-btns";
+    const correct = document.createElement("button");
+    correct.className = "ghost";
+    correct.textContent = "Correct status";
+    correct.addEventListener("click", () => openCorrectStatus(a, onDone));
+    btns.append(correct);
+    actions.append(btns);
+  }
+
   card.append(title);
   if (sub.textContent) card.append(sub);
   card.append(when);
@@ -4238,6 +4270,107 @@ function lifecycleButtons(a, onDone) {
     frag.append(b);
   }
   return frag;
+}
+
+// ---- Status correction (repair a WRONG terminal call) ----
+//
+// CorrectAppointmentStatus is the op the TerminalStatus guard leaves room for:
+// once an appointment is completed / cancelled / noShow, SetAppointmentStatus
+// refuses every move, so an auto no-show on a patient who was actually seen had
+// no repair at all. This one transitions only BETWEEN the terminal values,
+// requires a reason, and touches no slot cells — it never RE-OPENS the
+// appointment, so the freed time is never silently re-claimed.
+//
+// Staff-only (the op carries no consumer self-scope): never offered in the
+// self-service patient view, the same gate the Set-site affordance uses.
+
+// The modal renders from the op catalog (internal/descriptorform), not a
+// hand-built form: the descriptor already carries everything this surface needs
+// — the three-value status enum with its labels, the required reason, and
+// appointmentKey filled from dispatch.targetField — so the status/note fields,
+// the reads and the envelope all come from the owning package rather than being
+// restated here. Mirrors renderProviderEditForm / renderStartSeriesForm.
+
+function isTerminal(status) {
+  return TERMINAL_STATUSES.includes((status || "").toLowerCase());
+}
+
+async function openCorrectStatus(a, onDone) {
+  state.correcting = a;
+  state.correctingOnDone = onDone || loadAppts;
+  state.correctingHandle = null;
+  const who = a.patientName || shortKey(a.patientKey);
+  $("#correct-status-context").textContent =
+    `${who} · ${fmtWhen(a.startsAt, a.endsAt)} · recorded as ${a.status}`;
+  const mount = $("#correct-status-fields");
+  const btn = $("#correct-status-submit");
+  mount.innerHTML = "";
+  btn.disabled = true;
+  $("#correct-status-overlay").hidden = false;
+
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    toast("Could not load the correction form: " + e.message, "err");
+    closeCorrectStatus();
+    return;
+  }
+  // The operator may have closed the modal, or opened it on another
+  // appointment, while these awaits were in flight.
+  if (state.correcting !== a) return;
+  const row = (state.opCatalog || {}).CorrectAppointmentStatus;
+  const me = state.identityId ? "vtx.identity." + state.identityId : undefined;
+  const handle = row && renderOpForm(row, { target: a.appointmentKey, row: a, me }, mount);
+  if (!handle) {
+    toast("The correction form is unavailable.", "err");
+    closeCorrectStatus();
+    return;
+  }
+  state.correctingHandle = handle;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
+}
+
+function closeCorrectStatus() {
+  $("#correct-status-overlay").hidden = true;
+  $("#correct-status-fields").innerHTML = "";
+  state.correcting = null;
+  state.correctingOnDone = null;
+  state.correctingHandle = null;
+}
+
+async function submitCorrectStatus(ev) {
+  ev.preventDefault();
+  const handle = state.correctingHandle;
+  if (!handle) return;
+  const onDone = state.correctingOnDone || loadAppts; // captured before close clears it
+  const btn = $("#correct-status-submit");
+  btn.disabled = true;
+  try {
+    let envelope, reveal;
+    try {
+      ({ envelope, reveal } = await handle.submit());
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitCatalogOp(envelope);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not correct status — " + msg, "err");
+      return;
+    }
+    revealCeremonySecret(reveal, reply);
+    closeCorrectStatus();
+    toast("Status corrected.", "ok");
+    if (onDone) onDone();
+  } catch (e) {
+    toast("Could not correct status: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---- Reschedule (move an appointment to a new time) ----
@@ -4882,6 +5015,12 @@ function init() {
     if (e.target === $("#set-site-overlay")) closeSetSite();
   });
   $("#set-site-form").addEventListener("submit", submitSetSite);
+
+  $("#correct-status-cancel").addEventListener("click", closeCorrectStatus);
+  $("#correct-status-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#correct-status-overlay")) closeCorrectStatus();
+  });
+  $("#correct-status-form").addEventListener("submit", submitCorrectStatus);
 
   $("#encounter-cancel").addEventListener("click", closeEncounter);
   $("#encounter-overlay").addEventListener("click", (e) => {

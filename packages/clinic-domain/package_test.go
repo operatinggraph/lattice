@@ -50,7 +50,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
-		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
@@ -83,7 +83,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"patientDemographics":       {"CreatePatient", "BackfillPatientRegistration"},
 		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
+		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
 		"providerHours":             {"SetProviderHours"},
 		"providerTimeOff":           {"SetProviderTimeOff"},
 		"providerSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
@@ -263,7 +263,12 @@ func TestPackage_Permissions(t *testing.T) {
 		// no consumer self-scope (the clinic site is not patient-editable).
 		"SetAppointmentSite":   op("operator", "frontOfHouse", "provider"),
 		"SetAppointmentStatus": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		"RecordEncounter":      op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
+		// The terminal→terminal repair for a wrong final call: the SAME three
+		// roles and the same in-script confinement as SetAppointmentStatus's
+		// any-scope grant, and deliberately NO consumer self-scope — correcting
+		// a final record is a staff action, unlike the patient's own cancel.
+		"CorrectAppointmentStatus": op("operator", "frontOfHouse", "provider"),
+		"RecordEncounter":          op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
 		"SetSiteProfile": operatorOnly(), "AssignProviderSite": operatorOnly(), "RemoveProviderSite": operatorOnly(),
 		"BindProviderIdentity": {{scope: "any", grantsTo: []string{"operator"}}},
 		// Weaver-only auto no-show (clinic-reminders' pastDueAppointments target's
@@ -437,8 +442,8 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.WeaverTargets); got != 1 {
 		t.Fatalf("expected 1 weaverTarget, got %d", got)
 	}
-	if got := len(Package.OpMetas); got != 13 {
-		t.Errorf("OpMetas: got %d, want 13", got)
+	if got := len(Package.OpMetas); got != 14 {
+		t.Errorf("OpMetas: got %d, want 14", got)
 	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)

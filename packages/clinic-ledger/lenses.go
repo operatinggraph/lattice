@@ -90,8 +90,13 @@ func Lenses() []pkgmgr.LensSpec {
 //     DebitAccount{accountKey, amountCents, appointmentRef} (targets.go) —
 //     the appointmentRef extension writes the settles audit link this
 //     OPTIONAL MATCH walks, so once posted the gap converges and stays
-//     converged (noShow is a terminal status — SetAppointmentStatus rejects
-//     transitioning away from it — so there is no re-open path to guard).
+//     converged. clinic-domain's CorrectAppointmentStatus CAN move a noShow
+//     to a different terminal status (e.g. a wrongly-marked no-show corrected
+//     to completed) — every predicate above is gated on `status = 'noShow'`,
+//     so a corrected appointment simply drops out of this lens's scope
+//     rather than re-opening missing_charge; it does NOT reverse an
+//     already-posted fee. That's a real, currently-undone gap, not a
+//     guarded one — filed as a Clinic backlog row (verticals.md).
 //
 // Once missing_account converges (ClinicCreateAccount writes the patient's
 // .ledgerAccount guard aspect), the next lens tick reads the now-real
