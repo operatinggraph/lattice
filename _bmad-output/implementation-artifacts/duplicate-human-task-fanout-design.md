@@ -342,3 +342,74 @@ row correspondence.
 - **`loom-state` holds 12,340 terminal instances; `lnk.service.*` shows ~12.3k service claims, 3,637 on one
   identity.** The existing `[Loom] Terminal instance cursors cannot be pruned` row covers the first; the
   second is a live observation for the Surveyor, not refiled here.
+
+---
+
+## Build note (Inc 1) — Vertical Steward, 2026-09-01
+
+**Verified touch-list** (re-checked live against this fire's HEAD, `ed86daee`, no drift from §7's claims):
+- `packages/lease-signing/targets.go:97` — `missing_onboarding` playbook entry (`triggerLoom`/`onboarding`/`row.applicant`).
+- `packages/lease-signing/targets.go:117-118` — the `missing_decision`/`missing_manager` surface-declared-gap
+  idiom to mirror (`Action: "surface", IssueCode: …, IssueSeverity: "warning"`, no Subject/Assignee/Target).
+- `packages/lease-signing/lenses.go:786` — `missing_onboarding` gap predicate on `leaseApplicationComplete`.
+- `packages/lease-signing/lenses.go:708-710,753,793` — `inflight_onboarding` companion (identity-anchored
+  `OPTIONAL MATCH (id)<-[:scopedTo]-(onbTask:task) … forOperation … RecordIdentityPII`).
+- `packages/lease-signing/lenses.go:689` (`readinessWithItems`, shared fragment) — `ssnVal = id.ssn.data`.
+- `packages/identity-domain/lenses.go:124-139` — `identityAnchors`, the precedent actorAggregate lens
+  anchored on `identity` (`AnchorType: "identity"`, own bucket, `RealnessFilter: "key"`), to mirror for the
+  new lens's shape (own bucket here too — `weaver-targets` is a shared bucket key-namespaced by
+  `OutputKeyPattern`, so reusing it is fine and is what every other target in this package does; a fresh
+  bucket is not required and adds an unneeded moving part).
+- `packages/lease-signing/lens_unit_test.go:20,268` — the two cross-check tests every target/lens pair must
+  satisfy by construction (`TestLeaseSigning_PlaybookColumnsMatchLens` checks the `leaseApplicationComplete`
+  target only, by `TargetID`, so it is unaffected by the new target; `TestLeaseSigning_MissingColumnsAreDeclaredGaps`
+  iterates **every** target this package declares, so the new target/lens pair must satisfy it too — every
+  `missing_*` BodyColumn needs a `Gaps` entry, and a `surface` action needs `IssueCode` + a `warning`/`error`
+  `IssueSeverity`).
+- Manifest: `packages/lease-signing/manifest.yaml:2` (`version: 0.31.15`) and the mirroring `Version` constant,
+  `packages/lease-signing/package.go:85` (`Version: "0.31.15"`) — bump both, in lockstep, to `0.31.16`.
+- `scripts/lint-gap-column-declaration.go` — enforces exactly the invariant `TestLeaseSigning_MissingColumnsAreDeclaredGaps`
+  asserts in-process; run it directly too (`DIFF_BASE=<base> go run ./scripts/lint-gap-column-declaration.go`
+  or however the Makefile wires it — confirm the invocation from the script/Makefile, not from memory).
+
+**Increment order (this fire ships Inc 1 only; Inc 2 is a live-stack operator action, not a code change — see
+§7):**
+
+1. **`targets.go`** — flip `missing_onboarding`'s entry on `leaseApplicationComplete` from `triggerLoom` to
+   the `surface` idiom (mirror `missing_decision`/`missing_manager` exactly): pick an `IssueCode` (e.g.
+   `LeaseOnboardingAwaiting`) and `IssueSeverity: "warning"`. **Do not remove the column from the lens** —
+   §7 point 1 is explicit that it stays projected/violating with no playbook entry.
+2. **`lenses.go`** — add ONE new `pkgmgr.LensSpec` (`ProjectionKind: "actorAggregate"`, `AnchorType:
+   "identity"`, `Bucket: "weaver-targets"`, `OutputKeyPattern` naming the new target, e.g.
+   `"applicantOnboarding.{actorSuffix}"`) whose cypher anchors on `(id:identity {key: $actorKey})`,
+   OPTIONAL-walks `(id)<-[:applicationFor]-(app:leaseapp)-[:appliesToUnit]->(u:unit)` to aggregate
+   (`count(DISTINCT CASE WHEN …)`, mirroring the fan-collapse idiom `leaseApplicationCompleteSpec` already
+   uses for `providedTo`) whether **any** application still needs onboarding — same per-app gate
+   `leaseApplicationCompleteSpec` uses, `(unitKey <> null) AND ((unitStatus <> 'leased') OR (landlordDecision
+   = 'approved'))` — and OPTIONAL-walks the identity-anchored `inflight_onboarding` companion (mirror
+   `lenses.go:708-710` verbatim, now the anchor itself instead of a neighbor hop). `missing_onboarding` on
+   the new lens = `(ssnVal = null) AND (that aggregate > 0)`; `violating` = the same expression (this target
+   has exactly one gap). Reuse the shared `readinessOptionalMatch`/`readinessWithItems` fragment ONLY if it
+   fits without pulling in bgcheck/payment noise this target doesn't need — a bespoke minimal WITH is
+   probably cleaner here; builder's call, grounded in the precedent, not copied wholesale.
+3. **`targets.go`** — add the new `pkgmgr.WeaverTargetSpec` (`TargetID` == the new lens's `OutputKeyPattern`
+   prefix, `LensRef` == its `CanonicalName`, one `Gaps` entry: `"missing_onboarding": {Action: "triggerLoom",
+   Pattern: "onboarding", Subject: "row.applicant"}` — moved verbatim from step 1, `row.applicant` now
+   resolving to the identity anchor's own key).
+4. **Tests, in the same package idiom as `TestLeaseApplicationComplete_InflightOnboarding`
+   (`lens_cypher_test.go:1415`)**: one applicant identity with **two** lease applications and no `.ssn`
+   aspect → exactly **one** open `RecordIdentityPII` task after the split (mutation-tested: revert the split,
+   confirm the test fails/duplicates). Confirm the surface-declared column on `leaseApplicationComplete`
+   still projects `violating` on both applications. Confirm `inflight_onboarding` on the NEW target still
+   suppresses re-dispatch while a task is open (same shape as the existing inflight test).
+5. **Version bump**: `manifest.yaml` + `package.go` `Version` constant, `0.31.15` → `0.31.16`.
+
+**Non-goals (explicitly out, per §10):** cluster B (ad-hoc `CreateTask`, needs a human, not this fire),
+cluster C (bootstrap-epoch wipe, not a defect), Inc 2 (`CancelTask` on the 3 live redundant cluster-A cards —
+an **operator action** on the running stack, do it after Inc 1 ships and the package refreshes live, not a
+code change).
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+./scripts/lint-conventions.go`, `DIFF_BASE=main go run ./scripts/lint-package-version.go`, `go run
+./scripts/lint-gap-column-declaration.go` (confirm actual invocation), `go test ./packages/lease-signing/...`.
+No frozen contract touched, no fork — L2-eligible, lead review (S size).
