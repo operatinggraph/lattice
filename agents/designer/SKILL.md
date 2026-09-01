@@ -1148,6 +1148,31 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   alone already gave automatic fix-uptake for every declined row, so the automatic rebuilds
   were standing bursts serving a one-time heal. The corrected design was simpler and cheaper.)
 
+- **A claim about what CONTAINS a hazard today must include the LINT CORPUS — in this codebase a recurring
+  guard gets promoted into `scripts/lint-*.go`, so "the guard is package-authored" is NOT the same as "an
+  author can omit it."** Every reflex above interrogates a mechanism a design *proposes*; this one
+  interrogates the sentence a design leans on to justify existing at all — *"what actually stops this
+  today?"* The failure is structural rather than careless: a containment census naturally sweeps the
+  runtime (the Processor, the engines, the scripts) and stops there, because a linter is not where data
+  flows. But the improvement loop's whole point is that a twice-seen guard class becomes a gate
+  (`agents/steward/SKILL.md` §4), so the *enforcement* of a package convention routinely lives in a file no
+  runtime census touches — 140 lines with its own self-tests, refusing six near-miss spellings by name.
+  **`grep -rn "<the guard's spelling>" scripts/lint-*.go` before any sentence of the form "contained by a
+  package-authored X, not a platform rule."** (Trialed 2026-09-01, the egress-declaration fire: I *filed*
+  the row asserting `contextHint.egressReads` was "contained by a package-authored script guard, not a
+  platform rule," then designed against my own sentence. `checkPrimordialActorGuard`
+  (`scripts/lint-conventions.go:1730-1870`) structurally requires every `external.<adapter>` emission in a
+  `packages/**` script to sit inside its own `if op.actor != primordialActor["<engine>"]:` refusal,
+  *before* the branch's first data access, across all seven external-emitting ops — and it cites, by name,
+  the very design my sentence cited. The exfiltration end was closed; the design's payoff had to be
+  re-derived down to the declaration end, and the ★★★ severity to ★★.) **Two corollaries.** (1) When you
+  do find the gate, **open its own early returns** — mine skips any op whose grant is not `Scope:"any"`
+  (`packageOpScopeIsAny`) and scans `packages/**` only, and those two exemptions are where the residue
+  lives; the exclusion reflex applies to a gate exactly as it applies to a skip predicate. (2) **A row you
+  filed yourself gets the least scrutiny of any input you will ever receive**, because paraphrasing your
+  own sentence is indistinguishable from having verified it — brief the falsifying census against your
+  *own* filed rows the same way you would against a stranger's.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
