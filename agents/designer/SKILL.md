@@ -1074,6 +1074,28 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   anchor you named and the guard, and mark which inputs each step produces. If the guard reads a
   field a later step produces, you have a fork, not a placement.
 
+- **A transport/primitive swap is grounded only when you have read WHICH SERVER QUEUE serves the verb
+  and NAMED the cost's SCALING AXIS — a quiet-host median is a floor, never a decision.** (Trialed
+  2026-09-01, the kv.Links listing-leg fire: three successive transports each measured faster on the
+  quiet bench and each died on an axis the bench structurally cannot see — `multi_last` resolves the
+  whole matched set before honoring any bound and walks message blocks proportional to the matched
+  subjects' last-write spread; `STREAM.INFO` rides the server's deliberately deprioritized API queue,
+  which silently discards its whole backlog past a limit, so the payoff inverts under exactly the
+  saturation being fixed; batched filtered direct get steps the stream-sequence span, not the matched
+  set. Two full adversarial passes were spent discovering what one vendor-source read per candidate
+  would have found first.) **The checks, per candidate, BEFORE the draft:** (1) find the verb's
+  dispatch/queue registration in the pinned server source and state its service priority relative to
+  the verb it replaces — a swap from a prioritized path to a deprioritized one is a refutation on its
+  own; (2) name the variable each measured cost scales with (matched set? keyspace? block spread?
+  sequence span?), say what grows that variable in a production deployment, and either measure THAT
+  axis or state plainly that the bench cannot; (3) when your recommendation resembles ANY prior
+  design's alternatives-table row, quote that row verbatim in your own §alternatives before departing
+  from it — the first draft here re-proposed a ratified rejection by name because the fork summary was
+  recalled instead of re-read. Corollary: a refutation record is a legitimate, complete designer
+  outcome — when every transport loses on a binding axis, "the prescribed primitive is refuted, not
+  unbuilt" plus the safe demand-side residue is the design, and it stops the next three fires from
+  re-proposing the refuted shapes.
+
 - **A direction named at a hold is a POINTER, not a pre-ratified mechanism — and an AUTOMATIC,
   standing trigger for a heavyweight operation needs evidence-of-need at the trigger.** When the
   principal holds a design and names the replacement direction, the named mechanism sets the
