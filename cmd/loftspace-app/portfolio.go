@@ -41,10 +41,14 @@ const serviceAttachLookbackDays = 30
 // exists twice (cmd/cafe-app reads front-desk's bucket; this app already
 // reads packages/privacy-base's), so this is applying an established
 // pattern, not inventing one. Best-effort: unlike occupancy (which 502s if
-// Postgres is down), a missing NATS connection or an unreadable bucket
-// degrades attach-rate to zero/omitted rather than failing the whole
-// portfolio-pulse response — the same posture front-desk-bookings itself
-// takes ("no bucket = no rows, not an error").
+// Postgres is down), a missing NATS connection degrades attach-rate to
+// zero/omitted rather than failing the whole portfolio-pulse response — the
+// same posture front-desk-bookings itself takes ("no bucket = no rows, not
+// an error"). The two buckets are independent sources, though: one being
+// unreadable (e.g. that vertical's package has never written to it, so its
+// bucket doesn't exist yet) degrades attach-rate to the OTHER source alone,
+// not to zero — a landlord with only café-active leases must not read as
+// "no data" just because no wellness booking has ever been made.
 //
 // "Attached" reads frontDeskBookingHistory (any booking status, not just
 // currently-booked) and cafeTabSettlement gated on a startsAt/settledAt
@@ -324,13 +328,23 @@ func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 	// applications read nor the NATS-KV lens buckets are load-bearing for
 	// occupancy above, so any failure here just leaves the three
 	// attach-rate fields at their zero value rather than failing the
-	// request front-desk-bookings-style.
+	// request front-desk-bookings-style. The two lens buckets are
+	// independent sources (wellness bookings, café tabs) — one being
+	// absent (e.g. that vertical's package has never written to it) must
+	// not zero out the other's readable half too, so each source degrades
+	// on its own rather than gating on both.
 	if appRows, err := queryLandlordApplications(ctx, s.pgPool, actor.Subject); err == nil && s.conn != nil {
 		occupied := occupiedLeaseAppKeys(appRows)
 		conn := s.conn
 		bookingKeys, bErr := conn.KVListKeys(ctx, frontdesk.BookingHistoryBucket)
+		if bErr != nil {
+			s.logger.Warn("portfolio-pulse: front-desk-booking-history unavailable, degrading service-attach-rate to café-tabs only", "error", bErr)
+		}
 		tabKeys, tErr := conn.KVListKeys(ctx, weaverTargetsBucket)
-		if bErr == nil && tErr == nil {
+		if tErr != nil {
+			s.logger.Warn("portfolio-pulse: weaver-targets unavailable, degrading service-attach-rate to bookings only", "error", tErr)
+		}
+		if bErr == nil || tErr == nil {
 			getBookings := func(key string) ([]byte, bool) {
 				entry, err := conn.KVGet(ctx, frontdesk.BookingHistoryBucket, key)
 				if err != nil {

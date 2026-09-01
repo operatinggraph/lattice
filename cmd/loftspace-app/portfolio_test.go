@@ -172,6 +172,28 @@ func TestComputeServiceAttachRate(t *testing.T) {
 	}
 }
 
+// A missing bucket (e.g. a vertical whose package has never written a row)
+// surfaces as an empty key list, not an error, at this layer — the handler
+// is what turns a KVListKeys error into "pass empty keys for that source".
+// This locks in that computeServiceAttachRate itself already does the right
+// thing with a wholly-empty source: the other source's leases still count,
+// instead of the whole rate collapsing to 0 (portfolio-pulse's
+// service-attach-rate KPI going dark whenever just one of its two sources
+// was absent).
+func TestComputeServiceAttachRate_OneSourceEmpty_OtherSourceStillCounts(t *testing.T) {
+	occupied := []string{"vtx.leaseapp.a", "vtx.leaseapp.b"}
+	tabs := map[string][]byte{
+		cafedomainPrefixKey("t1"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.a", Status: "open"}),
+	}
+	getTabs := func(k string) ([]byte, bool) { v, ok := tabs[k]; return v, ok }
+	getBookings := func(string) ([]byte, bool) { t.Fatal("getBookings called with no booking keys"); return nil, false }
+
+	attached, total := computeServiceAttachRate(occupied, serviceAttachTestNow, nil, getBookings, []string{cafedomainPrefixKey("t1")}, getTabs)
+	if attached != 1 || total != 2 {
+		t.Fatalf("computeServiceAttachRate with bookings source empty = (%d, %d), want (1, 2)", attached, total)
+	}
+}
+
 func TestComputeServiceAttachRate_NoOccupiedLeases_ZeroNoDivideByZero(t *testing.T) {
 	attached, total := computeServiceAttachRate(nil, serviceAttachTestNow, []string{"x"}, func(string) ([]byte, bool) { return nil, false }, []string{"y"}, func(string) ([]byte, bool) { return nil, false })
 	if attached != 0 || total != 0 {
