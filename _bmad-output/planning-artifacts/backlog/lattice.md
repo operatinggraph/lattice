@@ -63,7 +63,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Processor/Loom] A key discovered by a traversal cannot be declared on any surface** | Consolidates the link-discovered walk hub and the link-discovered sensitive egress: every declaration surface resolves its key at dispatch time, so a key reached by following a link is undeclarable by construction. Census: 47 of 102 baselined walk rows; blocks LoftSpace's executed-lease tenant name. | ★★ | L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/declared-path-reads-design.md) |
 | **[Refractor] Two Postgres-target lenses made zero net progress for 3 days while KV-target siblings drain** | `leaseApplicationsRead` (51,757) and `landlordLeaseApplicationsRead` (21,249) held identical lag AND `lastProjectedAt` across 3 Health-KV samples over 6 min, while `leaseApplicationComplete` on the same instance moved 127,511→127,434. All 56 `read_lease_applications` rows sit at `projection_seq` 19314; a live `CreateLeaseApplication` committed 12:54Z was absent at 13:03Z. | ★★★ | M | 📋 ready · PO-witnessed · re-derive: 2026-08-27 retired a wedged-rebuild row as refuted |
 | **[Weaver/Loom/Refractor] Retire the holder-less `control-operator` role** | Decided: its intended holder went to `consoleOperator` (a strict superset) one day after it shipped, two later ratified designs declined to use it, nothing references it. Recipe: `control-authz` version bump; `diffManifest` tombstones the orphans (two-way door); drop the lint allowlist entry. | ★ | XS | 📋 ready · [triage §9](../../../docs/reviews/lattice-designer-triage-2026-08-27.md) |
-| **[orchestration-base] Two identical open tasks for one piece of work** | `CreateTask`'s dedup is task-id-scoped ([ddls.go:363](../../../packages/orchestration-base/ddls.go:363)): a second dispatch lineage reseeds a new id and mints a second task with identical `assignedTo`/`forOperation`/`scopedTo`, so the person's action list shows the card twice. Live: 8 redundant of 100 tasks. | ★★ | S–M | 📐 needs designer pass · no-pattern: work-scoped task-identity dedup · PO-witnessed 2026-09-01 (LoftSpace) |
 
 ### Survey log (round-robin rotation)
 
@@ -138,6 +137,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-01 · (triage, no code) · [orchestration-base] duplicate-human-task row retired — the prescribed work-scoped dedup is REFUTED (3 shapes, code-cited); cause is an anchor-vs-work granularity mismatch, package fix filed on verticals
 - 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
 - 2026-08-31 · `571e45e6` · [Contracts] #10 §10.8 {actor} hub token ratified ahead of build — transitional note in text; build fire filed 📋 ready
 - 2026-08-31 · `935492df` · [Contracts] #10 §10.8 ratified with posture trims — three-arm param grammar + directOp optionalReads land; gate narration and internal names stay out
@@ -173,7 +173,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-08-24 · `b9121e8` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
 - 2026-08-24 · `3a35bde` · [Weaver] inflight_<g> suppression-vs-reclaim contract CLOSED — the error fired on a contract-legal declaration; class+key+prefix retired, verdict and two-leg suppression unchanged; cold review clean
 - 2026-08-24 · `624d445` · [Processor/identity-domain] claim-rejection timing oracle CLOSED — n=3000 overturned the same-day n=40 "no gap"; quantized release from receipt, NFR-S6 op set, reply key-echo closed; 3 cold reviews
-- 2026-08-24 · `c44216c` · [Refractor] CapabilityRepairBlocked names its class — BlockedClass across fold/sweep/health; content+retraction error-on-sight, provenance stays warning, business-lens ceiling held; guard untouched; 3 cold reviews
-- 2026-08-24 · `87cb2bb` · [Processor/identity-domain] NFR-S6 descriptor-floor drift gated — hostile probe derived from the descriptor, floored set pinned independently; 3 revert-proofs
 
 - *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `5a85ad7`)*

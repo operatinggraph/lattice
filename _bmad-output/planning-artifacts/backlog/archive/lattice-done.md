@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-24 · `c44216c` · [Refractor] CapabilityRepairBlocked names its class — BlockedClass across fold/sweep/health; content+retraction error-on-sight, provenance stays warning, business-lens ceiling held; guard untouched; 3 cold reviews
+- 2026-08-24 · `87cb2bb` · [Processor/identity-domain] NFR-S6 descriptor-floor drift gated — hostile probe derived from the descriptor, floored set pinned independently; 3 revert-proofs
 - 2026-08-23 · `5a85ad7` · [Tooling] this-fire narration gate CLOSED — 5 phrases admitted on measurement, matched across a wrapped comment block; 160 sites swept, 113 AST-proven comment-only
 - 2026-08-23 · `e3fc6b2` · [CI] `TestRefractor_E2E_P99` shared-runner contention CLOSED — moved off unit-1's `-p 4` batch into its own sequential step; isolated p99=50ms vs the 500ms budget
 - 2026-08-23 · `69b48ba` · [Bridge] augur adapter registration CLOSED — escalation tier dead in every deployment; composition-root census gate, 3 families mutation-pinned; cold review caught forged model provenance
