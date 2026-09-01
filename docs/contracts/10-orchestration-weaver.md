@@ -205,6 +205,23 @@ resolves null/absent is a **data error** — surface, do not fire a malformed re
 `optionalReads`, where it drops that one entry (see `directOp`). (This is why §10.2 requires the Lens
 to **project every column the playbook templates name**.) A monetary param is integer cents.
 
+A gap action's **`enumerations[].hub`** additionally admits the token **`{actor}`**, substituted at
+dispatch with the dispatching engine's **own actor key** — the identity stamped on the submitted
+envelope. A hub otherwise admits a literal or `row.<column>`, and neither can name that identity: it
+is not a violation-row column (no lens can project it), and each deployment generates its own
+primordial identity set on first boot, so no package `Definition` can embed it as a literal. It
+exists for a declared walk (Contract #2 §2.5 class (e)) hubbed on the **submitter** rather than the
+**subject** — canonically the actor-role confinement walk a dispatched op's script runs. `{actor}` is
+admitted on a **hub only** — on a param, a `reads`/`optionalReads` entry, or any other authored value
+it is **refused at install and at load**. The token spells and means the same on the op-descriptor
+dispatch surface, so an operation declaring the same walk on both dispatching surfaces writes it
+identically. The "no expressions" rule is unchanged: `{actor}` resolves by substitution, exactly as
+`row.<column>` does.
+
+*Transitional (2026-08-31): ratified ahead of its build — the engine does not yet substitute the
+token, and until the build lands a `{actor}` hub is not refused but dispatches as a plain literal.
+Struck when substitution + refusal ship.*
+
 ### `triggerLoom` authorization — `StartLoomPattern` + pattern-as-target
 
 Starting a Loom instance is the op `StartLoomPattern` carrying **`authContext.target =
