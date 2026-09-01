@@ -930,6 +930,24 @@ function scheduleCard(se, myStatusBySession) {
 // answers for the session's own subject and nobody else — there is no booker
 // parameter to send, and no picker to send one from.
 
+// The late-cancellation window, mirroring CancelBooking's own
+// LATE_CANCEL_WINDOW_OFFSET (packages/wellness-domain/ddls.go): a
+// cancellation this close to the start forfeits the class price. The server
+// is authoritative — this constant exists only so the member is told what
+// clicking Cancel will cost before it costs it.
+const LATE_CANCEL_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+// isLateCancel answers whether cancelling THIS booking right now would
+// forfeit its class price. Waitlisted bookings and free classes are excluded
+// for the same reason the script's own forfeiture never reaches them: neither
+// carries a posted class-price charge to lose.
+function isLateCancel(b) {
+  if (b.status === "waitlisted" || !(b.priceCents > 0) || !b.startsAt) return false;
+  const startsAtMs = new Date(b.startsAt).getTime();
+  if (!isFinite(startsAtMs)) return false;
+  return startsAtMs - Date.now() <= LATE_CANCEL_WINDOW_MS;
+}
+
 async function loadMyClasses() {
   await renderMyClasses();
 }
@@ -1075,6 +1093,12 @@ async function renderMyClasses() {
     const btn = document.getElementById("mycancel-" + domId(b.bookingKey));
     if (!btn) return;
     btn.addEventListener("click", async () => {
+      // Courtesy only — CancelBooking enforces the window itself, whoever
+      // submits. Asked before the button is disabled so declining leaves the
+      // card exactly as it was.
+      if (isLateCancel(b) && !confirm("This class starts in under 2 hours — cancelling now forfeits your payment for it (" + priceLabel(b.priceCents) + "), the same as a no-show. Cancel anyway?")) {
+        return;
+      }
       btn.disabled = true;
       try {
         const forSessionLnk = "lnk.booking." + idOf(b.bookingKey) + ".forSession.session." + idOf(b.sessionKey);
