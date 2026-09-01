@@ -378,12 +378,16 @@ func TestHandleDevLogin_ResolvesBoundCredential(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"identityId":"`+bound+`"`)
 
 	// The cookie must carry the RESOLVED identity's own token, so downstream
-	// calls authenticate as that identity with no further round trip.
+	// calls authenticate as that identity with no further round trip — but it
+	// must ALSO remember which credential opened it, or an account-settings
+	// page can never tell a session's own sign-in method apart from the
+	// identity's other bound credentials (they are never the same NanoID).
 	cookie := cookieNamed(w.Result(), testCookieName)
 	require.NotNil(t, cookie)
 	actor, err := authn.Authenticate(context.Background(), cookie.Value)
 	require.NoError(t, err)
 	require.Equal(t, bound, actor.Subject)
+	require.Equal(t, credential, actor.CredentialID)
 }
 
 // TestHandleDevLogin_ResolvedIdentityIsFenced closes the side door: a linked
@@ -440,7 +444,7 @@ func TestHandleWhoami_Fallback(t *testing.T) {
 	w := httptest.NewRecorder()
 	m.handleWhoami(w, httptest.NewRequest(http.MethodGet, WhoamiPath, nil))
 	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"loggedIn":true,"identityId":"bootid12345678991234","canSignOut":false}`, w.Body.String())
+	require.JSONEq(t, `{"loggedIn":true,"identityId":"bootid12345678991234","credentialId":"bootid12345678991234","canSignOut":false}`, w.Body.String())
 }
 
 func TestHandleLogout_ClearsCookie(t *testing.T) {
@@ -734,6 +738,31 @@ func TestHandleRefresh_ValidCookieRotatesTokenAndCookie(t *testing.T) {
 	actor, err := m.cfg.Authn.Authenticate(context.Background(), body.Token)
 	require.NoError(t, err)
 	require.Equal(t, identity, actor.Subject)
+}
+
+// TestHandleRefresh_PreservesCredentialID pins that a refresh carries forward
+// the ORIGINAL login's credential provenance rather than collapsing it to the
+// identity — dropping it here would make "this sign-in" (account-settings)
+// silently stop matching as soon as a session's sliding refresh fires.
+func TestHandleRefresh_PreservesCredentialID(t *testing.T) {
+	signer := testSigner(t)
+	m := refreshTestManager(t, signer, nil)
+	identity, credential := testNanoID(t), testNanoID(t)
+	oldToken, _, err := signer.MintWithCredential(identity, credential)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, RefreshPath, nil)
+	r.AddCookie(&http.Cookie{Name: testCookieName, Value: oldToken})
+	m.handleRefresh(w, r)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body refreshResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	actor, err := m.cfg.Authn.Authenticate(context.Background(), body.Token)
+	require.NoError(t, err)
+	require.Equal(t, identity, actor.Subject)
+	require.Equal(t, credential, actor.CredentialID)
 }
 
 // TestHandleRefresh_GraceWindowAcceptsRecentlyExpiredToken proves the

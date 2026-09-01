@@ -57,15 +57,39 @@ func NewSigner(priv *rsa.PrivateKey, kid string, ttl time.Duration, now func() t
 	return &Signer{priv: priv, kid: kid, ttl: ttl, now: now, aud: aud}
 }
 
+// sessionClaims is what Mint/MintWithCredential sign — jwt.RegisteredClaims
+// plus the optional `cred_id` claim auth.VerifiedActor.CredentialID reads back.
+type sessionClaims struct {
+	jwt.RegisteredClaims
+	CredID string `json:"cred_id,omitempty"`
+}
+
 // Mint signs a bearer token for subject and reports when it expires.
 func (s *Signer) Mint(subject string) (string, time.Time, error) {
+	return s.mint(subject, "")
+}
+
+// MintWithCredential signs a bearer token for subject, additionally recording
+// which credential authenticated it (the `cred_id` claim) — for the one case
+// where the two differ: a login that resolved a credential, via its `boundTo`
+// link, onto a different identity's session. Every other mint (a direct
+// sign-in, a session refresh, a throwaway device credential) needs no
+// distinct value and calls Mint.
+func (s *Signer) MintWithCredential(subject, credentialID string) (string, time.Time, error) {
+	return s.mint(subject, credentialID)
+}
+
+func (s *Signer) mint(subject, credentialID string) (string, time.Time, error) {
 	now := s.now()
 	exp := now.Add(s.ttl)
-	claims := jwt.RegisteredClaims{
-		Subject:   subject,
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(exp),
+	claims := sessionClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   subject,
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(exp),
+		},
+		CredID: credentialID,
 	}
 	if s.aud != "" {
 		claims.Audience = jwt.ClaimStrings{s.aud}

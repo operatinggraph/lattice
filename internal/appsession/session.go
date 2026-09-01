@@ -216,8 +216,9 @@ type contextKey struct{}
 // session proves nothing about who the caller is, so it must not reach a
 // per-user surface.
 type info struct {
-	identityID string
-	viaCookie  bool
+	identityID   string
+	viaCookie    bool
+	credentialID string
 }
 
 // Identity returns the signed-in identity RequireSession resolved.
@@ -231,6 +232,30 @@ func Identity(ctx context.Context) (string, bool) {
 func ViaCookie(ctx context.Context) bool {
 	si, ok := ctx.Value(contextKey{}).(info)
 	return ok && si.viaCookie
+}
+
+// credentialContextKey is a context key distinct from contextKey so
+// WithSession's existing two-argument signature (and its many call sites)
+// stays unchanged — CredentialID is optional provenance, not part of the
+// core identity/viaCookie pair every caller already threads through.
+type credentialContextKey struct{}
+
+// CredentialID returns the bare id of the credential that authenticated this
+// session — the identity itself, unless sign-in resolved a DIFFERENT
+// credential's `boundTo` link onto this identity (multi-credential
+// sign-in). Absent when no session was resolved at all.
+func CredentialID(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(credentialContextKey{}).(string)
+	return v, ok && v != ""
+}
+
+// withCredentialID returns ctx additionally carrying the authenticating
+// credential's id, alongside whatever WithSession already stored.
+func withCredentialID(ctx context.Context, credentialID string) context.Context {
+	if credentialID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, credentialContextKey{}, credentialID)
 }
 
 // WithSession returns ctx carrying a resolved session — what RequireSession
@@ -250,7 +275,7 @@ func (m *Manager) resolve(r *http.Request) (info, bool) {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
 			if actor, err := m.cfg.Authn.Authenticate(ctx, tok); err == nil && actor.Subject != "" {
-				return info{identityID: actor.Subject, viaCookie: true}, true
+				return info{identityID: actor.Subject, viaCookie: true, credentialID: actor.CredentialID}, true
 			}
 			// A cookie that is PRESENT but does not verify fails CLOSED. It
 			// must never fall through to the boot identity: a session whose
@@ -263,7 +288,7 @@ func (m *Manager) resolve(r *http.Request) (info, bool) {
 		}
 	}
 	if m.cfg.FallbackIdentityID != "" {
-		return info{identityID: m.cfg.FallbackIdentityID}, true
+		return info{identityID: m.cfg.FallbackIdentityID, credentialID: m.cfg.FallbackIdentityID}, true
 	}
 	return info{}, false
 }
@@ -296,7 +321,8 @@ func (m *Manager) RequireSession(next http.Handler) http.Handler {
 			m.writeError(w, http.StatusUnauthorized, "login required (no valid session cookie and no boot identity configured)")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithSession(r.Context(), si.identityID, si.viaCookie)))
+		ctx := withCredentialID(WithSession(r.Context(), si.identityID, si.viaCookie), si.credentialID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -448,7 +474,11 @@ func (m *Manager) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 			m.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
 			return
 		}
-		token, exp, err = m.cfg.Signer.Mint(resolved)
+		// bareID still names the raw credential here — record it as the
+		// token's cred_id claim before it is overwritten below, so a caller
+		// can later tell "this sign-in" apart from the identity's other bound
+		// credentials (which this same resolution step is why they differ).
+		token, exp, err = m.cfg.Signer.MintWithCredential(resolved, bareID)
 		if err != nil {
 			m.writeError(w, http.StatusInternalServerError, "mint resolved session token: "+err.Error())
 			return
@@ -588,9 +618,10 @@ func (m *Manager) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	// still answers loggedIn (via the fallback), and the login page bounces
 	// straight back into the app.
 	resp := map[string]any{
-		"loggedIn":   true,
-		"identityId": si.identityID,
-		"canSignOut": si.viaCookie,
+		"loggedIn":     true,
+		"identityId":   si.identityID,
+		"credentialId": si.credentialID,
+		"canSignOut":   si.viaCookie,
 	}
 	// Hat hints (roles + residence/workplace anchors) let an app render only
 	// the surfaces a signed-in identity's bindings authorize, without joining
@@ -656,7 +687,10 @@ func (m *Manager) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		m.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
 		return
 	}
-	token, exp, err := m.cfg.Signer.Mint(actor.Subject)
+	// A refresh mints a fresh token for the same session, so it must carry
+	// forward whichever credential the ORIGINAL login recorded — dropping it
+	// here would make "this sign-in" silently stop matching on next refresh.
+	token, exp, err := m.cfg.Signer.MintWithCredential(actor.Subject, actor.CredentialID)
 	if err != nil {
 		m.writeError(w, http.StatusInternalServerError, "mint refreshed session token: "+err.Error())
 		return
