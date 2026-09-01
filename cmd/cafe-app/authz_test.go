@@ -984,6 +984,42 @@ func TestOperator_ReachesTheFrontDesk(t *testing.T) {
 	}
 }
 
+// TestHandleFrontDesk_ListFailure_502sInsteadOfEmpty proves all three
+// frontdesk-* handlers 502 on a genuine KVListKeys failure instead of
+// silently answering 200 with an empty list, which is indistinguishable from
+// "nobody is here today." The buckets exist (newTestConn creates them), so
+// this is NOT the legitimate "package not installed" empty-bucket case —
+// that stays 200 via substrate.IsBucketNotFound, unchanged, and
+// TestOperator_ReachesTheFrontDesk above still proves the happy path. An
+// expired natsTimeout forces a real, non-bucket-not-found KVListKeys error:
+// the operator hat skips visibleLeases' own NATS reads entirely (isOperator
+// short-circuits to unrestricted), so the expired context is untouched until
+// the handler's own KVListKeys call — the exact call this test targets.
+func TestHandleFrontDesk_ListFailure_502sInsteadOfEmpty(t *testing.T) {
+	const root = "FFFFFFFFFFFFFFFFFFFF"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{}, map[string]bool{root: true}))
+	s.natsTimeout = time.Nanosecond
+
+	for _, tc := range []struct {
+		name string
+		h    http.HandlerFunc
+		path string
+	}{
+		{"bookings", s.handleFrontDeskBookings, "/api/frontdesk-bookings"},
+		{"lease-details", s.handleFrontDeskLeaseDetails, "/api/frontdesk-lease-details"},
+		{"visits", s.handleFrontDeskVisits, "/api/frontdesk-visits"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := sessionGET(s, tc.h, tc.path, cookieFor(root))
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, body=%s, want 502 (a real list failure must not read as an empty grid)",
+					rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestStaffWhoAlsoLives_SeesTheirOwnLeaseToo: one person, two hats. A café
 // staffer who works at one building and RENTS at another must still see their
 // own house tab — the write side says the ownership probe and the workplace

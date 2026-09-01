@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/operatinggraph/lattice/internal/substrate"
 	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
 )
 
@@ -42,16 +43,19 @@ func computeFrontDeskBookings(keys []string, get kvGetter) []bookingRow {
 // handleFrontDeskBookings implements GET /api/frontdesk-bookings — the
 // resident's booked-class badge for the front-desk grid, served from the
 // front-desk package's frontDeskBookings lens (P5). A stack without
-// front-desk installed simply has no such bucket; that reads back as "no
-// rows," not an error, so the front-desk view still renders (just without
-// class badges) rather than failing the whole page. Front Desk is a
-// STAFF-ONLY surface (persona-worlds-design.md Fire W4 §3): a resident is
-// refused rather than served an empty or partial grid, and a staffer is served
-// only the leases their workplace covers (facet-staff-worlds-design.md §9).
-// The best-effort posture covers THIS package's bucket only: a missing
-// cafeLeaseWorkplaces bucket is a 502, because that one is the confinement
-// source and an empty grid would read as "nobody is here today" rather than
-// "this app cannot tell who you may see."
+// front-desk installed has no such bucket; that reads back as "no rows,"
+// not an error, so the front-desk view still renders (just without class
+// badges) rather than failing the whole page. Any OTHER KVListKeys failure
+// (a saturated stack, a transient projection fault) is a real read failure
+// and must 502 — silently returning an empty list is indistinguishable from
+// "nobody is here today" and was reaching residents as a blank grid with no
+// error either time. Front Desk is a STAFF-ONLY surface (persona-worlds-design.md
+// Fire W4 §3): a resident is refused rather than served an empty or partial
+// grid, and a staffer is served only the leases their workplace covers
+// (facet-staff-worlds-design.md §9). The best-effort posture covers THIS
+// package's bucket only: a missing cafeLeaseWorkplaces bucket is a 502,
+// because that one is the confinement source and an empty grid would read as
+// "nobody is here today" rather than "this app cannot tell who you may see."
 func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -77,7 +81,12 @@ func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request)
 
 	keys, err := conn.KVListKeys(ctx, frontdesk.BookingsBucket)
 	if err != nil {
-		s.writeJSON(w, http.StatusOK, map[string]any{"bookings": []bookingRow{}})
+		if substrate.IsBucketNotFound(err) {
+			s.writeJSON(w, http.StatusOK, map[string]any{"bookings": []bookingRow{}})
+			return
+		}
+		s.logger.Error("list front-desk bookings", "bucket", frontdesk.BookingsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.BookingsBucket+": "+err.Error())
 		return
 	}
 	rows := computeFrontDeskBookings(keys, s.kvGetter(ctx, frontdesk.BookingsBucket))
@@ -125,10 +134,10 @@ func computeFrontDeskLeaseDetails(keys []string, get kvGetter) []leaseDetailRow 
 // handleFrontDeskLeaseDetails implements GET /api/frontdesk-lease-details —
 // every resident's applied-to unit rent/term for the front-desk grid,
 // served from the front-desk package's frontDeskLeaseDetails lens (P5). A
-// stack without front-desk installed simply has no such bucket; that reads
-// back as "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings. Staff-only and workplace-confined, same as
-// handleFrontDeskBookings.
+// stack without front-desk installed has no such bucket; that reads back as
+// "no rows," not an error, same best-effort posture as
+// handleFrontDeskBookings — any other list failure 502s, same as there.
+// Staff-only and workplace-confined, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -154,7 +163,12 @@ func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Requ
 
 	keys, err := conn.KVListKeys(ctx, frontdesk.LeaseDetailsBucket)
 	if err != nil {
-		s.writeJSON(w, http.StatusOK, map[string]any{"leaseDetails": []leaseDetailRow{}})
+		if substrate.IsBucketNotFound(err) {
+			s.writeJSON(w, http.StatusOK, map[string]any{"leaseDetails": []leaseDetailRow{}})
+			return
+		}
+		s.logger.Error("list front-desk lease details", "bucket", frontdesk.LeaseDetailsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.LeaseDetailsBucket+": "+err.Error())
 		return
 	}
 	rows := computeFrontDeskLeaseDetails(keys, s.kvGetter(ctx, frontdesk.LeaseDetailsBucket))
@@ -203,10 +217,10 @@ func computeFrontDeskVisits(keys []string, get kvGetter) []visitRow {
 // handleFrontDeskVisits implements GET /api/frontdesk-visits — the
 // resident's upcoming-clinic-visit badge for the front-desk grid, served
 // from the front-desk package's frontDeskVisits lens (P5). A stack without
-// front-desk (or clinic-domain) installed simply has no such bucket; that
-// reads back as "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings. Staff-only and workplace-confined, same as
-// handleFrontDeskBookings.
+// front-desk (or clinic-domain) installed has no such bucket; that reads
+// back as "no rows," not an error, same best-effort posture as
+// handleFrontDeskBookings — any other list failure 502s, same as there.
+// Staff-only and workplace-confined, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -232,7 +246,12 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 
 	keys, err := conn.KVListKeys(ctx, frontdesk.VisitsBucket)
 	if err != nil {
-		s.writeJSON(w, http.StatusOK, map[string]any{"visits": []visitRow{}})
+		if substrate.IsBucketNotFound(err) {
+			s.writeJSON(w, http.StatusOK, map[string]any{"visits": []visitRow{}})
+			return
+		}
+		s.logger.Error("list front-desk visits", "bucket", frontdesk.VisitsBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "list "+frontdesk.VisitsBucket+": "+err.Error())
 		return
 	}
 	rows := computeFrontDeskVisits(keys, s.kvGetter(ctx, frontdesk.VisitsBucket))
