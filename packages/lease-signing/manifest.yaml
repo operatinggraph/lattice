@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.15
+version: 0.31.16
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -8,9 +8,14 @@ description: |
   read boundary, D1.3 Fire 2; carries the anchored executed-lease artifact's
   doc pointers) plus its landlordLeaseApplicationsRead sibling
   (the landlord/residence audience anchored on the managing landlord via the
-  loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook
+  loftspace-domain manages link, D1.3 Increment 2), the identity-anchored
+  applicantOnboarding convergence lens + target (one row per applicant, so the
+  PII request is made once however many applications they hold — the
+  leaseApplicationComplete row keeps missing_onboarding as a surface-declared
+  column), the §10.8 playbook
   (triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask
-  SignLease, triggerLoom onboarding, directOp AttachObject anchoring the
+  SignLease, triggerLoom onboarding off applicantOnboarding, directOp
+  AttachObject anchoring the
   produced executed-lease artifact), an augur escalation on "exhausted" so a
   gap that spends its retry budget reaches AI reasoning instead of an unread
   Health-KV warning, the externalTask
@@ -73,6 +78,10 @@ declares:
       class: meta.ddl.vertexType
   lenses:
     - canonicalName: leaseApplicationComplete
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: applicantOnboarding
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -166,6 +175,8 @@ declares:
   weaverTargets:
     - targetId: leaseApplicationComplete
       lensRef: leaseApplicationComplete
+    - targetId: applicantOnboarding
+      lensRef: applicantOnboarding
     - targetId: leaseExpiry
       lensRef: leaseExpiry
     - targetId: renewalComplete

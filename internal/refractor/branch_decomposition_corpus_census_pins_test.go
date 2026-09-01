@@ -73,6 +73,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"frontDeskBookings":                 {"g1/o1!no-aggregating-item", 0, 1},
 	"frontDeskLeaseDetails":             {"g1/o1!no-aggregating-item", 0, 1},
 	"frontDeskVisits":                   {"g0/o0!no-aggregating-item", 0, 0},
+	"applicantOnboarding":               {"g2/o4[app,u;onbOp,onbTask] g0/o0!no-aggregating-item", 2, 2},
 	"identityAnchors":                   {"g4/o7[bound;container,loc;managed,managedContainer;work,workContainer]", 4, 4},
 	"identityCredentialBindingsRead":    {"g0/o0!no-aggregating-item", 0, 0},
 	"identityCredentialsRead":           {"g0/o0!no-aggregating-item", 0, 0},
@@ -141,6 +142,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 // ReachesADifferential asserts the two enumerations agree, because the first
 // version of this sentence was true of nine of the seventeen.
 var decomposingCorpusLenses = []string{
+	"applicantOnboarding",
 	"capabilityEphemeral",
 	"capabilityRoles",
 	"capabilityServiceAccess",
@@ -167,6 +169,7 @@ var decomposingCorpusLenses = []string{
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
 // thirty-two clause-counted literals; the analysis derives TWENTY-SIX.
 var siblingBranchGroupLenses = []string{
+	"applicantOnboarding",
 	"appointmentReminders",
 	"cafeTabSettlement",
 	"capabilityEphemeral",
@@ -201,6 +204,7 @@ var siblingBranchGroupLenses = []string{
 // all, so the branch product IS the intended row count there, and the rest by
 // §4.2's non-DISTINCT collect/count, clauseSatisfaction included.
 var multiGroupDecomposingLenses = []string{
+	"applicantOnboarding",
 	"capabilityEphemeral",
 	"clinicPatientsRead",
 	"edgeIdentity",
@@ -216,6 +220,7 @@ var multiGroupDecomposingLenses = []string{
 // AST rather than anything the executor materializes, so decomposition must
 // leave every one of them exactly where it found it.
 var footprintValidationVerdicts = map[string]bool{
+	"applicantOnboarding":               true,
 	"appointmentReminders":              true,
 	"augurDispatchPending":              false,
 	"cafeStaleTabSettlement":            false,

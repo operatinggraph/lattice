@@ -197,6 +197,14 @@ func randomBranchShape(prefix string, r *rand.Rand) branchCorpusShape {
 // the KV, which is the multi-base-row half of the coverage.
 type branchCorpus struct {
 	actorKey, leaseAppKey, renewalKey, clauseKey, objectKey string
+
+	// onboardingActorKey is a SECOND applicant, deliberately not onboarded.
+	// applicantOnboarding's application branch reaches its RETURN only through
+	// `(ssnVal = null) AND (onboardingApps > 0)`, and the primary actor carries
+	// an .ssn (the lease block seeds it so leaseApplicationComplete's own
+	// booleans expose their subtrees) — which masks that conjunct at every
+	// value of the count. This anchor exposes it.
+	onboardingActorKey string
 }
 
 // seedBranchCorpus writes one corpus of shape s. Every logical name is
@@ -468,6 +476,33 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 		putEdge(t, reg, adjKV, "forOperation", tk, onbOp)
 		putEdge(t, reg, adjKV, "scopedTo", tk, actor)
 	}
+
+	// The un-onboarded applicant (branchCorpus.onboardingActorKey): their own
+	// application, its listed unit, and OnbTasks open RecordIdentityPII tasks,
+	// all disjoint from the primary actor's subgraph so no other lens's anchor
+	// can reach any of it. Both of applicantOnboarding's sibling branch groups
+	// — the application/unit walk and the task/operation walk — fold real
+	// content here, and neither is masked, because this identity carries no
+	// .ssn aspect.
+	onbActor := name("onbactor")
+	putVertex(t, reg, coreKV, onbActor, "identity", map[string]any{
+		"data": map[string]any{"state": "claimed"},
+	})
+	onbApp := name("onbapp")
+	putVertex(t, reg, coreKV, onbApp, "leaseapp", nil)
+	putEdge(t, reg, adjKV, "applicationFor", onbApp, onbActor)
+	onbUnit := name("onbunit")
+	putVertex(t, reg, coreKV, onbUnit, "unit", nil)
+	putAspect(t, reg, coreKV, onbUnit, "listing", map[string]any{"rentAmount": 2100, "status": "listed"})
+	putEdge(t, reg, adjKV, "appliesToUnit", onbApp, onbUnit)
+	for i := 0; i < s.OnbTasks; i++ {
+		tk := name("onbactortask%d", i)
+		putVertex(t, reg, coreKV, tk, "task", map[string]any{
+			"data": map[string]any{"status": "open", "expiresAt": future},
+		})
+		putEdge(t, reg, adjKV, "forOperation", tk, onbOp)
+		putEdge(t, reg, adjKV, "scopedTo", tk, onbActor)
+	}
 	// leaseExpiry reads the tenancy aspect (no backfill — an application without
 	// one never enters that lens) and leaseRentSettlement the ledger account.
 	putAspect(t, reg, coreKV, app, "tenancy", map[string]any{
@@ -595,11 +630,12 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	putEdge(t, reg, adjKV, "signedLease", obj, app)
 
 	return branchCorpus{
-		actorKey:    vtxKey(reg, actor),
-		leaseAppKey: vtxKey(reg, app),
-		renewalKey:  vtxKey(reg, renewal),
-		clauseKey:   vtxKey(reg, clause),
-		objectKey:   vtxKey(reg, obj),
+		actorKey:           vtxKey(reg, actor),
+		leaseAppKey:        vtxKey(reg, app),
+		renewalKey:         vtxKey(reg, renewal),
+		clauseKey:          vtxKey(reg, clause),
+		objectKey:          vtxKey(reg, obj),
+		onboardingActorKey: vtxKey(reg, onbActor),
 	}
 }
 
@@ -755,6 +791,18 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 					n++
 				}
 				return n
+			}},
+		{name: "applicantOnboarding", spec: corpusSpec(t, "applicantOnboarding"), anchor: c.onboardingActorKey, rows: 1,
+			evidence: func(t *testing.T, row map[string]any) {
+				// One assertion per sibling branch group. missing_onboarding
+				// carries the application/unit walk's count (this anchor has no
+				// .ssn, so the conjunct that would mask it is true), and
+				// inflight_onboarding carries the task/operation walk's.
+				boolEvidence(t, row, "missing_onboarding", true, "application")
+				boolEvidence(t, row, "inflight_onboarding", true, "onboarding-task")
+			},
+			content: func(row map[string]any) int {
+				return boolsTrue(row, "missing_onboarding", "inflight_onboarding")
 			}},
 		{name: "renewalComplete", spec: corpusSpec(t, "renewalComplete"), anchor: c.renewalKey, rows: 1,
 			evidence: func(t *testing.T, row map[string]any) {
@@ -1010,6 +1058,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 	// package refractor, which sees the whole installed registry; this package
 	// cannot enumerate it, so the names are restated and the two must agree.
 	for _, name := range []string{
+		"applicantOnboarding",
 		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess", "clinicPatientsRead",
 		"edgeIdentity", "edgeManifestProviderReadGrants", "edgeManifestReadGrants",
 		"edgeManifestStaffReadGrants", "identityAnchors", "identityErasureResidue",

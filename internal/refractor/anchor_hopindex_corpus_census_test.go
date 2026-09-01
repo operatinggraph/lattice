@@ -130,6 +130,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"edgeTasks#0":                       hopIndexed,
 	"edgeTasks#1":                       hopIndexed,
 	"followUpReminders":                 hopIndexed,
+	"applicantOnboarding":               hopIndexed,
 	"identityAnchors":                   hopIndexed,
 	"identityErasureResidue":            hopIndexed,
 	"leaseApplicationComplete":          hopIndexed,

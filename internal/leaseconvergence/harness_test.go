@@ -405,8 +405,9 @@ func (h *harness) startAdjacencyBootstrapper(ctx context.Context, adjKV *substra
 	}
 }
 
-// startRefractor discovers the installed leaseApplicationComplete lens (plus
-// any extraLenses, e.g. the renewal targets) via ONE CoreKVSource watch and
+// startRefractor discovers the installed leaseApplicationComplete and
+// applicantOnboarding lenses (plus any extraLenses, e.g. the renewal targets)
+// via ONE CoreKVSource watch and
 // wires each through projection.InstallActorAggregate (the production
 // actor-aggregate path) onto the weaver-targets bucket — see harnessConfig
 // extraLenses' doc for why this test binary uses a single source.
@@ -420,7 +421,11 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		return entry.Revision
 	}
 
-	want := map[string]bool{"leaseApplicationComplete": true, "piiKeyEnvelope": true}
+	// applicantOnboarding is not optional here: it is the target that DISPATCHES
+	// the onboarding pattern (leaseApplicationComplete surfaces the column but
+	// dispatches nothing for it), so without it activated no RecordIdentityPII
+	// task is ever created and every convergence run stalls on the PII gap.
+	want := map[string]bool{"leaseApplicationComplete": true, "applicantOnboarding": true, "piiKeyEnvelope": true}
 	for _, n := range extraLenses {
 		want[n] = true
 	}

@@ -129,6 +129,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// blocker was the `containedIn*1..` variable-length hop
 	// (typed-relation-signatures-design.md §9.2), rewritten to a fixed
 	// single hop now every live wiring is verified unit->building at depth 1.
+	"applicantOnboarding":            {broad, "identity leaseapp task unit", modeBroad},
 	"applicantRosterRead":            {narrow, "building identity leaseapp unit", modeLabel},
 	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
 	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},

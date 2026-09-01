@@ -129,6 +129,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"frontDeskBookings":                 {"p", 0},
 	"frontDeskLeaseDetails":             {"p", 0},
 	"frontDeskVisits":                   {"p", 0},
+	"applicantOnboarding":               {"key(entityKey ssnVal) p!ssnVal", 0},
 	"identityAnchors":                   {"key(actorKey)", 0},
 	"identityCredentialBindingsRead":    {"p", 0},
 	"identityCredentialsRead":           {"p", 0},

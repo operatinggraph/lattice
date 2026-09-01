@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/lenstest"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -1545,4 +1546,303 @@ func TestLeaseApplicationComplete_MaxRetriesColumns(t *testing.T) {
 	rows := f.project(t, "app")
 	require.Len(t, rows, 1)
 	requireMaxRetriesColumns(t, rows[0].Values)
+}
+
+// ---------------------------------------------------------------------------
+// applicantOnboarding — the identity-anchored onboarding target.
+//
+// The defect these pin: recording PII is one piece of work per PERSON, and it
+// used to be dispatched from a target anchored on the leaseapp. An applicant
+// holding N applications projected N violating rows, each of which dispatched
+// its own Loom instance, so one person received N identical RecordIdentityPII
+// cards. The fix re-anchors the gap where the work lives; these tests hold that
+// anchor in place.
+// ---------------------------------------------------------------------------
+
+// projectApplicantOnboarding runs the applicantOnboarding lens over one identity
+// anchor, the same way projectAt runs the leaseapp-anchored one: $actorKey is
+// the anchor's own vertex key and $now is the projection instant the live
+// pipeline supplies.
+func (f *lensFixture) projectApplicantOnboarding(t *testing.T, identityName, now string) []ruleengine.ProjectionResult {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(applicantOnboardingSpec)
+	require.NoError(t, err, "applicantOnboarding cypher must parse on the full engine")
+	idKey := "vtx.identity." + f.ids[identityName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    idKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// twoApplicationsFixture seeds the shape the defect was witnessed on: ONE
+// applicant identity holding TWO live lease applications, each on its own
+// listed-and-available unit, with no `.ssn` aspect anywhere — so onboarding is
+// genuinely outstanding and both applications are genuinely live.
+func twoApplicationsFixture(t *testing.T, f *lensFixture) {
+	t.Helper()
+	f.vtx(t, "alice", "identity")
+	f.vtx(t, "app1", "leaseapp")
+	f.vtx(t, "app2", "leaseapp")
+	f.vtx(t, "unit1", "unit")
+	f.vtx(t, "unit2", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.aspect(t, "unit2", "listing", "listing", map[string]any{"rentAmount": 1800, "status": "available"})
+	f.edge(t, "applicationFor", "app1", "alice")
+	f.edge(t, "applicationFor", "app2", "alice")
+	f.edge(t, "appliesToUnit", "app1", "unit1")
+	f.edge(t, "appliesToUnit", "app2", "unit2")
+}
+
+// TestApplicantOnboarding_TwoApplicationsProjectOneRow is the headline: the
+// applicant fan-out collapses inside the aggregator, so two applications yield
+// exactly ONE violating row — the §0.C guardOutputKeyCollision shape, and the
+// reason one applicant can only ever be one gap on this target.
+func TestApplicantOnboarding_TwoApplicationsProjectOneRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	aliceKey := "vtx.identity." + f.ids["alice"]
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1, "one applicant is exactly one row however many applications they hold")
+	v := rows[0].Values
+	require.Equal(t, aliceKey, v["actorKey"], "the row key seeds from the identity anchor")
+	require.Equal(t, aliceKey, v["entityKey"])
+	require.Equal(t, aliceKey, v["applicant"], "row.applicant is the triggerLoom Subject the playbook templates")
+	require.Equal(t, true, v["missing_onboarding"], "no .ssn and a live application → the person owes PII")
+	require.Equal(t, true, v["violating"], "this target's single gap IS its violating predicate")
+	require.Equal(t, false, v["inflight_onboarding"], "no task exists yet")
+}
+
+// TestApplicantOnboarding_SsnClosesTheGapForEveryApplication: the gap closes on
+// the APPLICANT's own `.ssn` write — one RecordIdentityPII, both applications
+// satisfied — and the row stops violating, which is what makes EmptyBehavior
+// "delete" retire it.
+func TestApplicantOnboarding_SsnClosesTheGapForEveryApplication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_onboarding"], "ssn recorded once → onboarded, for every application at once")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestApplicantOnboarding_NoLiveApplicationDoesNotAsk pins the per-application
+// half of the gate, evaluated inside the count CASE: an applicant whose only
+// application's unit has leased to someone else is not asked for their SSN. This
+// is the same terminal-not-violating rule leaseApplicationComplete already
+// applies to its four applicant gaps — without it, a losing rival keeps being
+// asked for PII against a unit they can no longer get, indefinitely.
+func TestApplicantOnboarding_NoLiveApplicationDoesNotAsk(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	// Both units lease to somebody else; neither of alice's applications was
+	// approved, so neither takes the landlordDecision escape hatch.
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.aspect(t, "unit2", "listing", "listing", map[string]any{"rentAmount": 1800, "status": "leased"})
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1, "the anchor never drops — the filtering lives inside the CASE, not on the OPTIONAL MATCH")
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_onboarding"], "no application still needs onboarding → stop asking")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestApplicantOnboarding_OneLiveApplicationAmongDeadOnesStillAsks is the
+// converse, and the reason the gate is evaluated PER APPLICATION rather than
+// over the applicant as a whole: one live application is enough.
+func TestApplicantOnboarding_OneLiveApplicationAmongDeadOnesStillAsks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["missing_onboarding"], "app2's unit is still available → the person still owes PII")
+}
+
+// TestApplicantOnboarding_InflightSuppressesRedispatch pins the §10.3
+// suppression companion on the new anchor. Only a person closes this gap, so
+// without the companion every mark-lease reclaim re-dispatches a remediation
+// whose task is already sitting open. The task hangs off the identity, which on
+// this target IS the anchor — no neighbour hop.
+func TestApplicantOnboarding_InflightSuppressesRedispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	f.seedTask(t, "onbtask", "recordpii", "RecordIdentityPII", "alice", "open")
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1, "the task fan collapses too — still one row")
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_onboarding"], "an open RecordIdentityPII task on the applicant → in flight")
+	require.Equal(t, true, v["missing_onboarding"], "an assigned task is NOT a recorded ssn → the gap stays open")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestApplicantOnboarding_WrongOperationDoesNotSuppress is the over-suppression
+// guard, and the reason the companion discriminates on op.data.operationType
+// rather than counting open tasks: several gaps hang tasks off the same
+// applicant, and an open task bound to an operation that cannot close this gap
+// must not park it.
+func TestApplicantOnboarding_WrongOperationDoesNotSuppress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	f.seedTask(t, "othertask", "otherop", "RecordLeaseServiceOutcome", "alice", "open")
+	// A CLOSED RecordIdentityPII task no longer suppresses either — a cancelled
+	// or expired remediation must be re-dispatchable, not parked forever.
+	f.seedTask(t, "staletask", "recordpii", "RecordIdentityPII", "alice", "cancelled")
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["inflight_onboarding"], "neither an unrelated op nor a cancelled task suppresses this gap")
+	require.Equal(t, true, v["missing_onboarding"])
+}
+
+// TestLeaseApplicationComplete_SurfacedOnboardingStillViolatesBothApplications
+// pins the OTHER half of the split. missing_onboarding is now surface-declared
+// on the leaseapp-anchored target — it dispatches nothing — but it is still a
+// projected column and still folded into `violating`, on EVERY application the
+// un-onboarded applicant holds. The application genuinely is blocked on
+// onboarding; the applicant FE's stepper reads the column; only the playbook
+// action changed.
+func TestLeaseApplicationComplete_SurfacedOnboardingStillViolatesBothApplications(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+
+	for _, app := range []string{"app1", "app2"} {
+		rows := f.projectAt(t, app, now)
+		require.Len(t, rows, 1, "%s projects one row", app)
+		v := rows[0].Values
+		require.Equalf(t, true, v["missing_onboarding"], "%s: the column survives the demotion to surface", app)
+		require.Equalf(t, true, v["violating"], "%s: an application blocked on onboarding is still violating", app)
+	}
+
+	ga, declared := gapAction(t, "leaseApplicationComplete", "missing_onboarding")
+	require.True(t, declared, "the projected column must still be a declared gap (else dispatchGap's config-error arm holds the row on the long redelivery floor)")
+	require.Equal(t, "surface", ga.Action, "the leaseapp anchor must not dispatch this gap — that is the defect")
+	require.NotEmpty(t, ga.IssueCode)
+}
+
+// TestApplicantOnboarding_OneApplicantYieldsOneDispatch is the regression the
+// whole split exists to prevent, asserted at the seam where the duplication was
+// actually minted.
+//
+// Weaver derives a triggerLoom's Loom instanceId from
+// (targetID, entityID, gapColumn, claimID) — internal/weaver/actuator.go's
+// deriveStableInstanceID — where entityID is the ROW's own entity. Distinct rows
+// therefore give distinct instanceIds, distinct Loom instances, and distinct
+// RecordIdentityPII tasks; no idempotency token downstream can tell them apart,
+// which is why the observed burst produced four cards for one person from one
+// correct lineage. So the count of DISTINCT (targetID, entityID, gapColumn)
+// tuples a fixture yields for `missing_onboarding` across every DISPATCHING
+// target IS the count of tasks the applicant receives.
+//
+// The walk is driven off the package's own declarations rather than a hardcoded
+// target name, so it re-fails if the dispatching action ever moves back: with
+// missing_onboarding declared triggerLoom on the leaseapp-anchored target, this
+// fixture's two applications contribute two tuples and the assertion reads 2.
+func TestApplicantOnboarding_OneApplicantYieldsOneDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	twoApplicationsFixture(t, f)
+	aliceKey := "vtx.identity." + f.ids["alice"]
+
+	// The rows this fixture projects, per target: every anchor of every target
+	// that could carry the column. A target declaring missing_onboarding with no
+	// entry here would leave the assertion blind, so the walk fails on one.
+	rowsByTarget := map[string][]ruleengine.ProjectionResult{
+		"leaseApplicationComplete": append(f.projectAt(t, "app1", now), f.projectAt(t, "app2", now)...),
+		"applicantOnboarding":      f.projectApplicantOnboarding(t, "alice", now),
+	}
+	require.Len(t, rowsByTarget["leaseApplicationComplete"], 2, "the fixture must actually fan out, else this proves nothing")
+
+	type dispatchKey struct{ targetID, entityID, gapColumn string }
+	dispatches := map[dispatchKey]string{} // → the resolved triggerLoom Subject
+	dispatchingTargets := 0
+	for _, wt := range WeaverTargets() {
+		ga, declared := wt.Gaps["missing_onboarding"]
+		if !declared {
+			continue
+		}
+		rows, known := rowsByTarget[wt.TargetID]
+		require.Truef(t, known, "target %q declares missing_onboarding but this test projects no rows for it — extend rowsByTarget", wt.TargetID)
+		if ga.Action == "surface" {
+			continue // raises a Health issue and Acks; mints no artifact
+		}
+		dispatchingTargets++
+		require.Equalf(t, "triggerLoom", ga.Action, "target %q: unexpected onboarding action", wt.TargetID)
+		require.Equalf(t, "row.applicant", ga.Subject, "target %q: the onboarding pattern's subject is the applicant identity", wt.TargetID)
+		for _, row := range rows {
+			if row.Values["missing_onboarding"] != true {
+				continue
+			}
+			entityKey, ok := row.Values["entityKey"].(string)
+			require.True(t, ok, "every convergence row carries entityKey")
+			subject, ok := row.Values["applicant"].(string)
+			require.True(t, ok, "row.applicant must resolve, or the dispatch has no subject")
+			dispatches[dispatchKey{wt.TargetID, entityKey, "missing_onboarding"}] = subject
+		}
+	}
+
+	require.Lenf(t, dispatches, 1,
+		"one applicant with two live applications must yield exactly ONE RecordIdentityPII dispatch, got %d: %v", len(dispatches), dispatches)
+	require.Equal(t, 1, dispatchingTargets, "exactly one target may dispatch onboarding — two would each mint their own instance")
+	for k, subject := range dispatches {
+		require.Equal(t, "applicantOnboarding", k.targetID)
+		require.Equal(t, aliceKey, k.entityID, "the dispatch is keyed on the PERSON, not on either application")
+		require.Equal(t, aliceKey, subject, "and it asks that same person")
+	}
+}
+
+// gapAction resolves one declared gap off a target by TargetID, so a test can
+// assert on the playbook without assuming target ordering.
+func gapAction(t *testing.T, targetID, gapColumn string) (pkgmgr.GapActionSpec, bool) {
+	t.Helper()
+	for _, wt := range WeaverTargets() {
+		if wt.TargetID != targetID {
+			continue
+		}
+		ga, ok := wt.Gaps[gapColumn]
+		return ga, ok
+	}
+	t.Fatalf("target %q is not declared by this package", targetID)
+	return pkgmgr.GapActionSpec{}, false
 }
