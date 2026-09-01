@@ -100,7 +100,7 @@ var (
 )
 
 // BindingMode is how a trusted key's verified `sub` claim binds to a Lattice
-// actor id (Contract #11 §3.2) — a property of the KEY SOURCE, fixed at load
+// actor id (Contract #11 §11.3) — a property of the KEY SOURCE, fixed at load
 // time, never inferred from token content.
 type BindingMode string
 
@@ -117,7 +117,7 @@ const (
 	ModeNanoID BindingMode = "nanoid"
 )
 
-// BindingSpec is a trusted key's subject-binding rule (Contract #11 §3.2). A
+// BindingSpec is a trusted key's subject-binding rule (Contract #11 §11.3). A
 // kid with no declared spec is a construction error — a trusted key never
 // binds by silent default (finding A2).
 type BindingSpec struct {
@@ -177,7 +177,7 @@ type Config struct {
 	// KeyInfo carries per-kid provenance (source/alg/addedAt) AND the
 	// mandatory BindingSpec for the keys in Keys. Every kid in Keys MUST have
 	// an entry here with a valid Spec (NewVerifier rejects a spec-less kid —
-	// a trusted key never binds by silent default, Contract #11 §3.2); the
+	// a trusted key never binds by silent default, Contract #11 §11.3); the
 	// Source/Alg/AddedAt fields may be left zero (observability-only, surfaced
 	// via Verifier.Info() for the Gateway's jwks health block, never consulted
 	// on the Verify hot path).
@@ -190,7 +190,7 @@ type Config struct {
 // Source/Alg/AddedAt are observability only (the Gateway's jwks health block,
 // Contract #5) and never consulted on the Verify hot path; Spec IS consulted
 // — it is how Verify turns a verified `sub` into an actor id (Contract #11
-// §3.2).
+// §11.3).
 type KeyInfo struct {
 	// Source is "jwks" (fetched from the configured JWKS endpoint) or
 	// "static" (an operator-configured KeysDir/dev-mode PEM).
@@ -203,7 +203,7 @@ type KeyInfo struct {
 	// genuinely new kid gets a fresh timestamp).
 	AddedAt time.Time
 	// Spec is the mandatory subject-binding rule for this kid (Contract #11
-	// §3.2). Required — see the Config.KeyInfo doc.
+	// §11.3). Required — see the Config.KeyInfo doc.
 	Spec BindingSpec
 }
 
@@ -223,12 +223,12 @@ type VerifiedActor struct {
 	// ExpiresAt is the token `exp`.
 	ExpiresAt time.Time
 	// Issuer is the raw `iss` claim, when present — provenance (Contract #11
-	// §3.2/§3.3), captured regardless of binding mode. Never itself a trust
+	// §11.3), captured regardless of binding mode. Never itself a trust
 	// decision (the opaque-mode issuer check already ran inside Verify).
 	Issuer string
 	// RawSubject is the raw `sub` claim as the IdP sent it — under ModeOpaque
 	// this differs from Subject (which carries the DERIVED id); under
-	// ModeNanoID the two are identical. Provenance only (§3.3's .idpBinding
+	// ModeNanoID the two are identical. Provenance only (§11.3's .idpBinding
 	// aspect), never itself an actor id.
 	RawSubject string
 	// VerifiedEmail is the `email` claim, populated only when the IdP also
@@ -278,7 +278,7 @@ type Verifier struct {
 // every token, which is correct, but the misconfiguration is worth surfacing at
 // construction rather than silently denying all reads). It returns an error if
 // any kid in cfg.Keys has no valid cfg.KeyInfo[kid].Spec — a trusted key never
-// binds by silent default (Contract #11 §3.2, finding A2).
+// binds by silent default (Contract #11 §11.3, finding A2).
 func NewVerifier(cfg Config) (*Verifier, error) {
 	if len(cfg.Keys) == 0 {
 		return nil, ErrNoTrustedKeys
@@ -411,7 +411,7 @@ func (v *Verifier) Verify(tokenString string) (VerifiedActor, error) {
 	}
 	iss := strings.TrimSpace(claims.Issuer)
 
-	// Subject binding (Contract #11 §3.2) — a property of the trust source,
+	// Subject binding (Contract #11 §11.3) — a property of the trust source,
 	// never inferred from token content (rejected Option C, design §4).
 	var actorSubject string
 	switch matched.Info.Spec.Mode {
@@ -429,7 +429,7 @@ func (v *Verifier) Verify(tokenString string) (VerifiedActor, error) {
 		// input string, even with ':' inside either value.
 		//
 		// derived-key: the actor's opaque subject — the identity of the CALLER,
-		// derived from the IdP's (iss, sub) claim pair per Contract #11 §3.2.
+		// derived from the IdP's (iss, sub) claim pair per Contract #11 §11.3.
 		// Not a declared read and not derivable by any package: it is minted
 		// during token verification, before an envelope exists, and it is the
 		// input the whole operation plane is authorized against rather than a

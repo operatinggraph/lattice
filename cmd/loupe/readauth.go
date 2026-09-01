@@ -174,7 +174,7 @@ func setupOperatorAuth(logger *slog.Logger, loopback bool) (*auth.Authenticator,
 	issuer := os.Getenv("LOUPE_JWT_ISSUER")
 	if strings.TrimSpace(issuer) == "" {
 		return nil, nil, fmt.Errorf("LOUPE_JWT_ISSUER is required alongside LOUPE_JWT_PUBLIC_KEY " +
-			"(a configured external IdP source MUST pin an expected iss — Contract #11 §3.2)")
+			"(a configured external IdP source MUST pin an expected iss — Contract #11 §11.3)")
 	}
 	kid := envOrDefault("LOUPE_JWT_KID", "idp-key-1")
 	verifier, err := auth.NewVerifier(auth.Config{

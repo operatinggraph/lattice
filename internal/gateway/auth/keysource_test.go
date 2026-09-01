@@ -63,7 +63,7 @@ func TestLoadTrustedKeys_DirWithKeysLoadsThem(t *testing.T) {
 
 // TestLoadTrustedKeys_KeysDirWithNoIssuerErrors — a configured KeysDir with
 // no declared KeysDirIssuer refuses to load: a configured external source
-// MUST pin an expected iss (Contract #11 §3.2, finding A8).
+// MUST pin an expected iss (Contract #11 §11.3, finding A8).
 func TestLoadTrustedKeys_KeysDirWithNoIssuerErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPEM(t, dir, "idp-key-1.pem")

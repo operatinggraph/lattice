@@ -11,10 +11,9 @@ and decrypt-on-read for sensitive aspects (SSN, DOB, …), plus the irreversible
 primitive (`ShredKey`) that makes right-to-be-forgotten a cryptographic guarantee rather than a
 best-effort delete. A key holder is the vertex a sensitive aspect's custody resolves to: an aspect-type
 DDL's `Custody.Kind` declares which — `identity` (the aspect's own anchoring identity vertex) is the
-default and the only kind any shipped package uses; `retentionClass` (a package-declared
-`vtx.retentionclass.<id>` holder, so a record with a retention obligation survives its data subject's
-erasure) is defined but currently refused at install (`internal/pkgmgr/custodyscope.go`) because the
-verb that destroys a class-held DEK, `ShredRetentionClassKey`, does not exist yet. Unlike
+default; `retentionClass` (a package-declared `vtx.retentionclass.<id>` holder, so a record with a
+retention obligation survives its data subject's erasure) is **installable** — its destroying verb is
+`ShredRetentionClassKey` (`packages/privacy-base`), on the controller's retention schedule. Unlike
 Loom/Weaver/the Bridge/object-store-manager, **Vault is not an always-on binary** — it is a library
 embedded in the two processes that need it: `cmd/processor` (the authoritative instance, hosting
 encrypt/decrypt/shred on the commit path) and `cmd/refractor` (a second, independently-KEK-loaded
@@ -162,6 +161,6 @@ failure blocks the other:
 **Deferred:** a production KMS backend (the interface's other implementer) — the local envelope
 backend is the dev + trusted-tool (Loupe, loopback-only) posture. The attended delivery-boundary
 reset + a live e2e against a running stack are the last Vault Fire 5b gate (destructive to the shared
-dev stack — see `vault-crypto-shredding-design.md`). `ShredRetentionClassKey` — the verb that would
-destroy a `retentionClass`-custodied DEK — is also unbuilt, which is why `pkgmgr` refuses that custody
-kind at install (`retention-class-key-custody-design.md`).
+dev stack — see `vault-crypto-shredding-design.md`). `ShredRetentionClassKey` — the verb that
+destroys a `retentionClass`-custodied DEK — is built (`packages/privacy-base`), and `pkgmgr` installs
+that custody kind (`internal/pkgmgr/custodyscope.go`).

@@ -670,7 +670,7 @@ func consumerGrantLinkKey(actorKey, roleKey string) string {
 // failed pre-flight must not take the whole write plane down.
 //
 // idpIssuer/idpSubject are the verifier's raw provenance (VerifiedActor.Issuer/
-// .RawSubject, Contract #11 §3.3) — non-empty only for an opaque-mode token
+// .RawSubject, Contract #11 §11.3) — non-empty only for an opaque-mode token
 // (a real external IdP); a nanoid-mode dev token carries no iss claim, so
 // both are empty and the payload omits them (ProvisionConsumerIdentity treats
 // the pair as optional). When present, the script writes them onto a fresh

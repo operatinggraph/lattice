@@ -77,7 +77,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"CompleteCredentialLink appends to, and UnlinkCredential removes an entry from — " +
 				"multi-credential-identity-linking-design.md §3.1/§8), " +
 				"idpBinding (sensitive; the raw iss/sub of the external IdP token an opaque-mode ActorID was " +
-				"derived from — Contract #11 §3.3, written only by ProvisionConsumerIdentity, absent for a " +
+				"derived from — Contract #11 §11.3, written only by ProvisionConsumerIdentity, absent for a " +
 				"nanoid-mode/dev-provisioned actor), " +
 				"mergedInto (vertex-key reference, set only by identity-hygiene package's MergeIdentity), " +
 				"erasureRequested (privacy-base-owned marker; its PRESENCE closes this identity's write path — " +
@@ -135,7 +135,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"dob":{"type":"string","description":"Applicant date of birth (RecordIdentityPII, required). ISO YYYY-MM-DD; stored as a sensitive aspect."},` +
 				`"targetActorKey":{"type":"string","description":"vtx.identity.<NanoID> — the ActorID a verified JWT subject maps to (ProvisionConsumerIdentity). Caller-derived, never minted."},` +
 				`"consumerRoleKey":{"type":"string","description":"vtx.role.<NanoID> of the consumer role to grant (ProvisionConsumerIdentity). Caller-resolved via pkgmgr.RoleID; validated alive before granting."},` +
-				`"idpIssuer":{"type":"string","description":"Raw JWT iss claim (ProvisionConsumerIdentity, optional). Present only for an opaque-mode token (Contract #11 §3.2); written verbatim into the .idpBinding aspect."},` +
+				`"idpIssuer":{"type":"string","description":"Raw JWT iss claim (ProvisionConsumerIdentity, optional). Present only for an opaque-mode token (Contract #11 §11.3); written verbatim into the .idpBinding aspect."},` +
 				`"idpSubject":{"type":"string","description":"Raw JWT sub claim (ProvisionConsumerIdentity, optional). Must accompany idpIssuer; written verbatim into the .idpBinding aspect."},` +
 				`"linkKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted link secret (InitiateCredentialLink, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
 				`"linkKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
@@ -170,7 +170,7 @@ func DDLs() []pkgmgr.DDLSpec {
 					Payload: map[string]any{"name": "Alice Smith", "email": "alice@example.com", "claimKeyHash": "<sha256-hex-of-client-minted-secret>"},
 					ExpectedOutcome: "Creates vtx.identity.<NanoID> with class=identity, writes name/email/state/claimKey aspects " +
 						"(claimKey stores the supplied hash verbatim). Returns primaryKey (the identity key). " +
-						"Duplicate detection rides the IdentityCreated event's data.duplicate flag, not the reply.",
+						"Duplicate detection rides the identity.created event's data.duplicate flag, not the reply.",
 				},
 				{
 					Name:    "ClaimIdentity — actor claims their identity",
@@ -249,7 +249,7 @@ func DDLs() []pkgmgr.DDLSpec {
 						"idpIssuer": "https://accounts.google.com", "idpSubject": "110169484474386276334",
 					},
 					ExpectedOutcome: "Same as the fresh-actor case, plus a sensitive .idpBinding aspect recording the raw " +
-						"iss/sub (Contract #11 §3.3) — the audit answer to which IdP account this identity is.",
+						"iss/sub (Contract #11 §11.3) — the audit answer to which IdP account this identity is.",
 				},
 			},
 		},
@@ -453,10 +453,10 @@ func DDLs() []pkgmgr.DDLSpec {
 			Sensitive:         true,
 			PermittedCommands: []string{"ProvisionConsumerIdentity"},
 			Description: "External IdP account provenance. Sensitive aspect-type " +
-				"(Contract #11 §3.3): stored as vtx.identity.<NanoID>.idpBinding, sensitive=true, " +
+				"(Contract #11 §11.3): stored as vtx.identity.<NanoID>.idpBinding, sensitive=true, " +
 				"identity-anchored, the crypto-shred unit — shredding the identity's DEK severs the " +
 				"IdP-account linkage. Written only by ProvisionConsumerIdentity, and only for an opaque-mode " +
-				"token (Contract #11 §3.2); a nanoid-mode/dev-provisioned actor never gets this aspect. The " +
+				"token (Contract #11 §11.3); a nanoid-mode/dev-provisioned actor never gets this aspect. The " +
 				"audit/support answer to \"which IdP account is this identity?\" — the derivation " +
 				"(SHA256NanoID) is one-way, so without this aspect the question is unanswerable.",
 			Script: sensitiveAspectDDLScript,
@@ -1463,7 +1463,7 @@ def execute(state, op):
                           "localName": "holdsRole", "data": {}}},
         ]
 
-        # Optional IdP provenance (Contract #11 §3.3): present only for an
+        # Optional IdP provenance (Contract #11 §11.3): present only for an
         # opaque-mode token (a real external IdP); a nanoid-mode/dev token
         # carries neither, so this whole block is skipped for dev-provisioned
         # actors — exactly the "absent for nanoid-mode" behavior the DDL

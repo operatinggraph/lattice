@@ -39,7 +39,7 @@ type Tracker struct {
 	// SupersedesRevision, when non-nil, is the Core KV revision of a residual
 	// tracker value the step-2 dedup lookup observed on this requestId's
 	// subject — an operator-tombstoned tracker (in-body isDeleted: true,
-	// Contract #4 §4.5's retry signal). The step-8 tracker write is then
+	// Contract #4 §4.4's retry signal). The step-8 tracker write is then
 	// conditioned on this revision instead of create-only: the subject still
 	// carries a message, so an expected-last-subject-sequence-of-0 create can
 	// never succeed there, while a revision-conditioned write preserves the

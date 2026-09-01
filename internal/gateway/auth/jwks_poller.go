@@ -73,7 +73,7 @@ type JWKSPoller struct {
 // NewJWKSPoller builds a poller for url, hot-swapping verifier's trusted keys
 // on each successful fetch. Every kid this poller FETCHES is opaque-mode,
 // pinned to issuer (a live JWKS endpoint is by definition an external IdP —
-// Contract #11 §3.2 — issuer is required, not optional: a live key source
+// Contract #11 §11.3 — issuer is required, not optional: a live key source
 // with no declared issuer would allow cross-issuer subject replay, finding
 // A8). staticKeys/staticSpecs (both may be nil) are operator-configured keys
 // (dev/break-glass) ALWAYS merged into every swap, layered under the

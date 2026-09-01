@@ -54,7 +54,7 @@
 //	NATS_NKEY / NATS_CREDS    Gateway's own NATS credential (the #75 "gateway" user)
 //	GATEWAY_JWT_KEYS_DIR      directory of <kid>.pem trusted public keys (static IdP snapshot)
 //	GATEWAY_JWT_KEYS_DIR_ISSUER required whenever GATEWAY_JWT_KEYS_DIR is set — the single issuer every
-//	                          kid loaded from that dir is pinned to (Contract #11 §3.2: a configured
+//	                          kid loaded from that dir is pinned to (Contract #11 §11.3: a configured
 //	                          external source is always opaque-mode and MUST declare its expected iss)
 //	GATEWAY_JWKS_URL          IdP JWKS endpoint (https://…) — polled for kid-keyed key rotation
 //	GATEWAY_JWKS_ISSUER       required whenever GATEWAY_JWKS_URL is set — same per-source issuer pin,
@@ -183,7 +183,7 @@ func run(logger *slog.Logger) error {
 		}
 		if jwksIssuer == "" {
 			return errors.New("GATEWAY_JWKS_URL is set but GATEWAY_JWKS_ISSUER is not — a live external key " +
-				"source MUST pin an expected iss (Contract #11 §3.2)")
+				"source MUST pin an expected iss (Contract #11 §11.3)")
 		}
 		fetchCtx, cancel := context.WithTimeout(ctx, initialJWKSFetchTimeout)
 		jwksKeys, jwksKeyAlgs, skipped, ferr := auth.FetchJWKS(fetchCtx, jwksURL, nil)
@@ -551,7 +551,7 @@ func parseDurationEnv(key string, def time.Duration) (time.Duration, error) {
 }
 
 // loadTrustedKeys builds the kid→public-key map the Verifier trusts, and the
-// matching per-kid BindingSpec (Contract #11 §3.2): every GATEWAY_JWT_KEYS_DIR
+// matching per-kid BindingSpec (Contract #11 §11.3): every GATEWAY_JWT_KEYS_DIR
 // kid is opaque-mode pinned to keysDirIssuer (required whenever the dir is
 // set — refusing to silently trust an unpinned external source), the dev key
 // is nanoid-mode (never operator-selectable). See the package doc for the
@@ -563,7 +563,7 @@ func loadTrustedKeys(devMode bool, keysDirIssuer string, logger *slog.Logger) (m
 	if dir := os.Getenv("GATEWAY_JWT_KEYS_DIR"); dir != "" {
 		if keysDirIssuer == "" {
 			return nil, nil, errors.New("GATEWAY_JWT_KEYS_DIR is set but GATEWAY_JWT_KEYS_DIR_ISSUER is not — " +
-				"a configured external source MUST pin an expected iss (Contract #11 §3.2)")
+				"a configured external source MUST pin an expected iss (Contract #11 §11.3)")
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {

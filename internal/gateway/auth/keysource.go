@@ -39,7 +39,7 @@ type KeySourceConfig struct {
 	// (a static IdP snapshot).
 	KeysDir string
 	// KeysDirIssuer is the single issuer every kid loaded from KeysDir is
-	// pinned to (Contract #11 §3.2: a configured external source is always
+	// pinned to (Contract #11 §11.3: a configured external source is always
 	// opaque-mode and MUST declare its expected iss). Required whenever
 	// KeysDir is set — LoadTrustedKeys refuses to start without it (an
 	// unpinned issuer would allow cross-issuer subject replay, finding A8).
@@ -56,7 +56,7 @@ type KeySourceConfig struct {
 // <kid>.pem under KeysDir, plus the checked-in dev key under DevKeyID when
 // DevMode is set) and the matching per-kid BindingSpec map: every KeysDir kid
 // gets ModeOpaque pinned to cfg.KeysDirIssuer; the dev key gets ModeNanoID
-// (never operator-selectable — Contract #11 §3.2, finding MAJOR-4). warn
+// (never operator-selectable — Contract #11 §11.3, finding MAJOR-4). warn
 // receives the dev-mode advisory message (nil-safe: a nil warn is a no-op) —
 // callers pass e.g. func(msg string) { logger.Warn(msg) }.
 //

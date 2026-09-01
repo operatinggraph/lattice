@@ -165,7 +165,7 @@ func idpAuthenticator(logger *slog.Logger, envPrefix string, revocationChecker a
 	issuer := os.Getenv(envPrefix + "_JWT_ISSUER")
 	if strings.TrimSpace(issuer) == "" {
 		return nil, fmt.Errorf("%s_JWT_ISSUER is required alongside %s_JWT_PUBLIC_KEY "+
-			"(a configured external IdP source MUST pin an expected iss — Contract #11 §3.2)", envPrefix, envPrefix)
+			"(a configured external IdP source MUST pin an expected iss — Contract #11 §11.3)", envPrefix, envPrefix)
 	}
 	kid := os.Getenv(envPrefix + "_JWT_KID")
 	if strings.TrimSpace(kid) == "" {

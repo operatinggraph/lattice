@@ -39,7 +39,7 @@ type DedupResult struct {
 }
 
 // CheckDedup performs the step-2 tracker lookup for envelope.RequestID.
-// Per Contract #4 §4.5:
+// Per Contract #4 §4.4:
 //
 //   - not present              → DedupNotFound
 //   - present, isDeleted=false → DedupDuplicate

@@ -578,7 +578,7 @@ func TestVerifier_Info_DefaultsAndOverride(t *testing.T) {
 
 // TestNewVerifier_SpecLessKidErrors — a kid in Keys with no KeyInfo entry (or
 // an entry with a zero-value Spec) is a construction error, never a silent
-// default (Contract #11 §3.2, finding A2).
+// default (Contract #11 §11.3, finding A2).
 func TestNewVerifier_SpecLessKidErrors(t *testing.T) {
 	kp := newRSA(t)
 	_, err := NewVerifier(Config{Keys: map[string]crypto.PublicKey{testKID: kp.pub}})
@@ -657,7 +657,7 @@ func TestVerifier_SetKeysWithInfo_SpecLessKidRejectedAtomically(t *testing.T) {
 	}
 }
 
-// --- Subject binding (Contract #11 §3.2) ---
+// --- Subject binding (Contract #11 §11.3) ---
 
 // opaqueVerifier builds a single-kid Verifier with kid pinned opaque-mode to
 // issuer, clocked at fixedNow, with no Config.Issuer/Audience (those are the
@@ -675,7 +675,7 @@ func opaqueVerifier(t *testing.T, kid string, pub crypto.PublicKey, issuer strin
 	return v
 }
 
-// TestVerify_OpaqueDerivesGoldenVector is the frozen Contract #11 §3.2 golden
+// TestVerify_OpaqueDerivesGoldenVector is the frozen Contract #11 §11.3 golden
 // vector: iss=https://accounts.google.com, sub=110169484474386276334 derives
 // a specific ActorID. expected is computed via the SAME primitive Verify
 // uses (substrate.SHA256NanoID) rather than hardcoded — the test is

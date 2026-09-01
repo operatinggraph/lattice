@@ -10,7 +10,7 @@ import (
 
 // TestSupervisor_MaxAckPending threads the spec's MaxAckPending into the created
 // JetStream consumer (1 ⇒ server-side serialization for the Processor meta lane,
-// Contract #2 §3.7) and leaves it at the JetStream default when unset.
+// Contract #2 §2.3) and leaves it at the JetStream default when unset.
 func TestSupervisor_MaxAckPending(t *testing.T) {
 	t.Parallel()
 	c, ctx := newTestConn(t)

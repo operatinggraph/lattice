@@ -93,7 +93,7 @@ Lanes drain on independent pumps, so an `urgent` op never queues behind a
 `default` backlog (priority isolation), and each lane's durable carries its own
 backlog so Contract #5 §5.4 `lane_lag.{default,urgent,system,meta}` is per-lane
 real (`lane_lag_total` is their sum). The `meta` lane — DDL mutations — is pinned
-to a single pump **and** `MaxAckPending=1` (Contract #2 §3.7), so a meta-vertex
+to a single pump **and** `MaxAckPending=1` (Contract #2 §2.3), so a meta-vertex
 commit and its synchronous DDL-cache invalidation never race a second concurrent
 DDL mutation; non-`meta` lanes run concurrently with `meta` and stay safe via the
 RWMutex-guarded value-copy DDL-cache snapshot + step-8 OCC. On startup the

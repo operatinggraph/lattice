@@ -228,7 +228,7 @@ func TestJWKSPoller_IntervalClamping(t *testing.T) {
 
 // TestNewJWKSPoller_NoIssuerErrors — a live external key source with no
 // declared issuer is a construction error: it is always opaque-mode and MUST
-// pin an expected iss (Contract #11 §3.2, finding A8).
+// pin an expected iss (Contract #11 §11.3, finding A8).
 func TestNewJWKSPoller_NoIssuerErrors(t *testing.T) {
 	v := verifierFor(t, map[string]crypto.PublicKey{"seed": newRSA(t).pub})
 	if _, err := NewJWKSPoller("https://example.test", v, nil, nil, "", 0, nil); err == nil {

@@ -325,9 +325,9 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	}
 
 	// Tracker op — create-only with 24h TTL (Contract #4 §4.3). "Create" here
-	// carries the KV Create() semantics Contract #4 §4.5 names: when step 2
+	// carries the KV Create() semantics Contract #4 §4.4 names: when step 2
 	// observed an operator-tombstoned tracker value still occupying the subject
-	// (SupersedesRevision non-nil, the §4.5 retry signal), the write is
+	// (SupersedesRevision non-nil, the §4.4 retry signal), the write is
 	// conditioned on that revision — a raw expected-last-subject-sequence-of-0
 	// create can never succeed against a subject that still carries a message,
 	// which would brick the contracted tombstone-then-resubmit path. Either

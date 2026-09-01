@@ -189,7 +189,7 @@ type ConsumerSpec struct {
 	// MaxAckPending caps the number of un-acked messages JetStream keeps in
 	// flight to this consumer. Zero leaves the JetStream default. Setting it to
 	// 1 forces server-side serialization independent of how the pump drains —
-	// the Processor's `meta` lane uses this to satisfy Contract #2 §3.7 ("`meta`
+	// the Processor's `meta` lane uses this to satisfy Contract #2 §2.3 ("`meta`
 	// lane consumer is configured with `MaxAckPending=1`").
 	MaxAckPending int
 	// Workers is the number of concurrent pump goroutines that bind the same

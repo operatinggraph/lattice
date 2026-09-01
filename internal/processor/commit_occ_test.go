@@ -718,7 +718,7 @@ func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
 	}
 }
 
-// An operator-tombstoned tracker (in-body isDeleted: true — Contract #4 §4.5's
+// An operator-tombstoned tracker (in-body isDeleted: true — Contract #4 §4.4's
 // tombstone-then-resubmit retry signal) still occupies its subject, so the
 // re-execution's tracker write must supersede it by revision rather than
 // attempt a create-only write that can never succeed there.
@@ -805,7 +805,7 @@ func TestCheckDedup_TombstonedTrackerCarriesRevision(t *testing.T) {
 		t.Fatalf("CheckDedup: %v", err)
 	}
 	if got.Outcome != DedupNotFound {
-		t.Fatalf("Outcome = %v, want DedupNotFound (§4.5 retry signal)", got.Outcome)
+		t.Fatalf("Outcome = %v, want DedupNotFound (§4.4 retry signal)", got.Outcome)
 	}
 	if got.TombstonedRevision == nil || *got.TombstonedRevision != rev {
 		t.Fatalf("TombstonedRevision = %v, want %d", got.TombstonedRevision, rev)

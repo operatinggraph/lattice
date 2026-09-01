@@ -32,7 +32,7 @@ func NewAcker(msg jetstream.Msg, logger *slog.Logger) *AckerImpl {
 
 // Ack implements Acker (step 9). It calls jetstream.Msg.Ack and surfaces ack
 // errors. If ack fails, the durable consumer redelivers — step-2 tracker dedup
-// short-circuits safely (Contract #4 §4.5).
+// short-circuits safely (Contract #4 §4.4).
 func (a *AckerImpl) Ack(ctx context.Context) error {
 	_ = ctx // jetstream.Msg.Ack does not take a ctx in the v1.x API
 	if a.Msg == nil {

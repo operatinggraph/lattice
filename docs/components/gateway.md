@@ -136,7 +136,7 @@ below may be configured; the trusted set is their union.
 - None configured (and the initial JWKS fetch, if attempted, fails) → `run()` returns an error before
   the HTTP listener starts.
 
-**Subject binding (Contract #11 §3.2).** Every trusted kid carries a per-source `BindingSpec{mode,
+**Subject binding (Contract #11 §11.3).** Every trusted kid carries a per-source `BindingSpec{mode,
 issuer}`, fixed at load time — a spec-less kid is a construction error, never a silent default.
 `GATEWAY_JWT_KEYS_DIR` and `GATEWAY_JWKS_URL` are always **`opaque`**: the verified `sub` is IdP-native,
 so the actor id is derived as `SHA256NanoID("idpsub:"+len(iss)+":"+iss+":"+sub)`, and the token's `iss`

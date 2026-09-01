@@ -20,7 +20,7 @@ The data contracts define the exact wire shapes, key patterns, and behavioral ru
 | [contracts/05-health-kv.md](./contracts/05-health-kv.md) | Health KV convention — bucket/key pattern, document shape, status enum, heartbeat cadence |
 | [contracts/06-capability-kv.md](./contracts/06-capability-kv.md) | Capability KV shape (SECURITY-CRITICAL) — per-actor projection, platformPermissions, serviceAccess, ephemeralGrants, scope enum |
 | [contracts/07-primordial-bootstrap.md](./contracts/07-primordial-bootstrap.md) | `make up` seeding inventory, bootstrap config, idempotence, readiness gate |
-| [contracts/08-package-install.md](./contracts/08-package-install.md) | Capability-package install/uninstall as Processor-routed kernel ops (`InstallPackage`/`UninstallPackage`) — thin-script/fat-manifest, guardrails, cache coherence, kernel protection |
+| [contracts/08-package-install.md](./contracts/08-package-install.md) | Capability-package install/uninstall as Processor-routed kernel ops (`InstallPackage`/`UninstallPackage`) — pre-computed payload model, guardrails, cache coherence, kernel protection |
 | [contracts/09-identity-claim-flow.md](./contracts/09-identity-claim-flow.md) | Identity claim flow (client-minted claim secret; Lattice never holds plaintext) + the frozen reply shape (closed `response` schema, `primaryKey`) |
 | [contracts/10-orchestration-surfaces.md](./contracts/10-orchestration-surfaces.md) | Phase 2 orchestration surfaces (Loom/Weaver: task placement, target-Lens output, operational KV namespaces, ADR-51 scheduling subjects) |
 

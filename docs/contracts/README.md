@@ -24,6 +24,13 @@ These contracts specify **what exactly** the data looks like. Architecture expla
 **Authoring principle (locked):**
 > The platform's meta-model is expressed using the same primitives the platform offers to its users — vertices, aspects, and links. The key is an opaque address; meaning lives in the document. Validation is permissive by default; declarations enable enforcement.
 
+**Authoring rule — the public-contract posture (locked, 2026-08-25; swept 2026-08-31):**
+> Contracts are **public contracts of a private codebase**. A clause states an *observable promise* —
+> wire shapes, authoring grammar, invariants, refusal and failure semantics a consumer can rely on —
+> never internal file/function/constant names, pipeline narration, or mechanism detail. The litmus: a
+> sentence that would become false under a pure refactor (no observable change) is implementation
+> detail and belongs in `docs/components/` or the owning design doc, not here.
+
 **Authoring rule — the leanness norm (locked, 2026-08-08):**
 > A contract states the **shape and the rule** — what an implementer builds against. It does not state
 > why the rule was chosen, what was considered instead, when it landed, or which story built it: that

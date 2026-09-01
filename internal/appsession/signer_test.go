@@ -139,7 +139,7 @@ func TestNewAuthenticators_IdPPosture_ForeignIssuerRejected(t *testing.T) {
 
 // TestNewAuthenticators_IdPPosture_IssuerRequired: a configured external
 // source with no pinned iss is a hard misconfiguration, not a silent
-// unpinned-issuer posture (Contract #11 §3.2).
+// unpinned-issuer posture (Contract #11 §11.3).
 func TestNewAuthenticators_IdPPosture_IssuerRequired(t *testing.T) {
 	_, pubPEM := idpKeyPair(t)
 	t.Setenv("TESTAPP_JWT_PUBLIC_KEY", pubPEM)
