@@ -1194,6 +1194,44 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   would have permanently wedged the vendor retry it was supposed to leave alone. Deliberate freshness is a
   requirement wearing the costume of an accident.
 
+- **A REFUSAL added to a store is also a change to every predicate that reads the store — an
+  "absent" answer now means two things, and the code that tests presence cannot tell them apart.**
+  Every reflex above interrogates what a design does with the thing it admits; this one is about the
+  thing it turns away. A cap, a quota, a dedup skip, an allow-list — each converts *"not present"*
+  from "hasn't happened" into "hasn't happened **or** was refused", and any predicate elsewhere that
+  reads presence to decide something silently takes the first branch. The tell is that the new
+  behaviour appears exactly when the system is worst off, so no test and no quiet-day operator ever
+  sees it. (Trialed 2026-09-01, Weaver's per-target issue budget: the cap refuses a new per-row key,
+  and **two** log seams derive their level from the cache's own presence tests — `alertStanding` asks
+  `standingAs` "is this fact already on the board" and `alertPaced` asks `pacedRaise` for the key's
+  clock. For a refused key both answer "no", forever: the exhausted-gap raise, re-derived by the sweep
+  every minute for the life of the retry budget, logs at **Error** on every pass — precisely the flood
+  `alertStanding` exists to prevent — while the template fault logs at **Debug** forever and leaves
+  both planes. The cap's own design reviewed its effect on the latch and on `aggregateStatus`, and
+  never on the two functions that read the latch to decide loudness.) **The check:** grep every reader
+  of the store you are bounding, and for each one that branches on presence/absence, evaluate it on a
+  *refused* key as a third state — then decide, per reader, whether refused should read as present, as
+  absent, or as its own answer. Corollary: a refusal counter incremented per RAISE rather than per
+  distinct fact becomes a cadence meter the moment any refused fact is re-derived on a schedule —
+  check what re-raises before you put its number in an operator-facing message.
+
+- **A shared BUDGET is a claim that the things sharing it obey the same cardinality law — name each
+  population's law before you touch the number or the admission policy.** When demand arrives as
+  "the cap is too small" / "the wrong thing wins the budget" / "admission should be ranked", the
+  framing has already accepted that one budget over one population is the right shape. Test that
+  first: write down, per member family, **what the entry count grows with**. If one family's
+  population is *open work* (a backlog, a queue, an in-flight set — large and large-on-purpose when
+  the system is healthy) and another's is *faults* (large only when something is wrong), they are two
+  populations and no admission policy over the union can be right: the healthy one starves the
+  diagnostic one at exactly the moment the diagnostic matters. (Trialed in the same fire: the row
+  prescribed "re-derivability-ranked admission". Grounding refuted it three ways — the named filler
+  turned out to be in the *same* re-derivability class as the fact it crowded out; the contract fact
+  the row invoked to justify the ranking is re-derived every minute and so would be the policy's
+  *first* casualty; and ranking implies eviction, whose thrash manufactures the flood above. Splitting
+  the workload population out of the store — one entry per column with a count, riding a key shape the
+  existing membership test already excludes — deleted the problem instead of arbitrating it, and cost
+  less memory than it replaced.) The tell: a filed row whose fix is a *policy* over a bound.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
