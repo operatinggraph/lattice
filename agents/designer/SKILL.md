@@ -1173,6 +1173,27 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   own sentence is indistinguishable from having verified it — brief the falsifying census against your
   *own* filed rows the same way you would against a stranger's.
 
+- **RUN every census you put in the doc, during the fire — and read the FULL argument list of any
+  derivation you propose to re-seed.** §3 already requires each count to ship as the command that derives
+  it plus the expected result; that obligation is worthless if you write the command and eyeball a grep for
+  the number. A census you only *specify* has never disagreed with you, and the one that decides whether a
+  platform mechanism clears the bar is exactly the one you will be most confident about. (Trialed
+  2026-09-01, the duplicate-human-task fire: I wrote a §census asserting four governed gap declarations from
+  reading `targets.go`. Run properly it is **one** — two of the four are externalTask-only, one resolves
+  through a column that is `entityKey` under another name, and one is a planned-mode target whose leg is
+  chosen per row at dispatch. With the governed set at 1, the demand-side alternative wins outright and the
+  whole platform mechanism dissolves. A second census in the same draft said "8 remaining applicants" where
+  the live answer was 56, which turned the structural case from 20% of the population into 3.4%.) **Two
+  companion checks, both cheap and both missed in that draft.** (1) When your design's move is *"the same
+  derivation, seeded from X instead of Y"*, open the derivation and read **every** argument — mine also
+  hashed the per-row `entityID`, so sharing the token collapsed nothing and the design was a no-op on its
+  own headline defect. This is the *"just pass X in"* reflex pointed at a function signature. (2) Before you
+  propose that N callers SHARE an identity, grep whether any caller deliberately mints a **fresh** one —
+  two of my governed gaps re-mint on reclaim on purpose, with the reason in-comment ("preserving the old
+  claimId would seed the fresh dispatch with the SAME already-terminal identity"), so the shared register
+  would have permanently wedged the vendor retry it was supposed to leave alone. Deliberate freshness is a
+  requirement wearing the costume of an accident.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
