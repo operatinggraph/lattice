@@ -549,6 +549,18 @@ func (p *Pipeline) needsFootprintValidation() bool {
 // exactly those relations and compared by matched edge identities. A node
 // carrying both records is compared both ways.
 func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootprint) (bool, error) {
+	// A torn footprint is rejected without reading anything. The evaluation
+	// itself observed two values for one key — a multi-walk lens's branches
+	// disagreeing across their separate memos (mergeFootprints) — so the row
+	// already blends two instants and the merged maps hold only one value per
+	// key. Any re-read would compare current state against a value that was
+	// never the whole truth, and would pass whenever the graph has since gone
+	// quiet: reading is not just useless here, it is the fail-OPEN direction.
+	// Rejecting costs nothing and lands in the ordinary drift path — one
+	// immediate re-execution, and failure.ErrEvalDrift on sustained churn.
+	if fp.Torn {
+		return false, nil
+	}
 	for key, wantRev := range fp.NodeRevisions {
 		gotRev, err := p.currentNodeRevision(ctx, key)
 		if err != nil {

@@ -79,12 +79,17 @@ type ProjectionResult struct {
 // EvalFootprint is the read-surface certificate one full-engine ExecuteWith
 // call produces: every Core KV key (vertex, aspect, or link) the evaluation read,
 // paired with the KV revision observed (0 for a key that was absent), and
-// every adjacency node it read, paired with the fingerprint
-// adjacency.Neighbors returned for it. A validating caller re-reads every
-// entry after the evaluation and compares against the recorded value to
-// detect a mid-evaluation write to anything the row depended on — an
-// absence flipping to present (or the reverse) counts as a moved value,
-// since 0 is itself a recorded revision, not a missing map entry.
+// every adjacency node it read, paired with the fingerprint the read returned.
+// A validating caller re-reads every entry after the evaluation and compares
+// against the recorded value to detect a mid-evaluation write to anything the
+// row depended on — an absence flipping to present (or the reverse) counts as
+// a moved value, since 0 is itself a recorded revision, not a missing map
+// entry.
+//
+// One footprint may cover several evaluations: a multi-walk lens evaluates
+// each branch separately, with its own read memo, and the branch footprints
+// are merged into one certificate. Torn is what that merge reports when the
+// branches disagreed.
 type EvalFootprint struct {
 	// NodeRevisions maps a Core KV key the evaluation point-read — a vertex, an
 	// aspect, or a link whose payload a lens dereferenced off a bound
@@ -135,6 +140,21 @@ type EvalFootprint struct {
 	//     validating caller reports drift rather than validating a node it
 	//     has no comparison for.
 	EdgeSelectors map[string]EdgeSelectorFootprint
+	// Torn reports that the EVALUATION ITSELF observed two different values
+	// for one footprinted key: a multi-walk lens's branches run one after
+	// another, each with its own read memo, and two of them read one Core KV
+	// key at different revisions, one adjacency node at different
+	// fingerprints, or one (node, selector) to different matched edge
+	// identities. The row those branches composed therefore blends two
+	// instants, and the merged maps hold only one value per key — so no
+	// re-read can decide anything: a validating caller must reject the
+	// footprint outright, without reading. Every other field stays populated
+	// and honest about what was read; Torn says only that the certificate
+	// cannot certify.
+	//
+	// Zero value = not torn, which is the answer for every single-branch
+	// evaluation: one memo cannot disagree with itself.
+	Torn bool
 }
 
 // EdgeSelector is one (relation type, direction) pair a traversal filtered

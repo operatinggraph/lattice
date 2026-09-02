@@ -1111,7 +1111,16 @@ untyped hop crossed is compared by whole fingerprint **and** by the matched sets
 of any typed hops that preceded that hop on it: those observed their relation at
 an earlier instant than the whole read, and only re-deriving them catches a
 write that landed in between. A node on that coarse path with no fingerprint at
-all is malformed and reports drift rather than passing unchecked. If nothing moved,
+all is malformed and reports drift rather than passing unchecked.
+
+One footprint can cover several evaluations. A multi-walk lens runs each branch
+separately, with its own read memo, and the branch footprints are merged; two
+branches that read one key at different revisions, or one node's selector to
+different edge identities, have already watched a write land between them. The
+merged certificate carries that as **torn**, and a torn footprint is rejected
+without any re-read: the row already blends two instants, the merged maps hold
+one value per key, and a re-read of a graph that has since settled would compare
+equal and pass. If nothing moved,
 the row proceeds unchanged. If something moved, the evaluation re-executes
 once against current state and validates again; if it still diverges
 (sustained churn), the pipeline returns a typed transient failure

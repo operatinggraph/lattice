@@ -291,9 +291,34 @@ func serializeRowKey(key map[string]any) string {
 	return s
 }
 
-// mergeFootprints unions N branches' read-surface footprints into one
-// certificate — a validating caller must catch drift on ANY key any branch
-// depended on, not just branch 0's.
+// mergeFootprints folds N branches' read-surface footprints into one
+// certificate, so a validating caller catches drift on ANY key any branch
+// depended on and not just branch 0's. The branches ran one after another,
+// each with its own read memo, so the fold answers two different questions:
+//
+//   - What did the evaluation read? Every key any branch touched enters the
+//     merged maps: revisions last-wins, matched edge-identity sets unioned,
+//     Fallback sticky. That union is the surface a validating caller re-reads.
+//   - Did the branches AGREE about it? Two branches carrying different
+//     revisions for one Core KV key, different fingerprints for one adjacency
+//     node, or different matched sets for one (node, selector) have already
+//     observed the write between them — the row they composed blends two
+//     instants, and the merged maps can hold only one value per key, so
+//     nothing a later re-read finds could tell that apart from an unchanged
+//     graph. That disagreement sets Torn, and Torn is the whole of what
+//     validation can do with it (see EvalFootprint.Torn).
+//
+// Equal values are not a disagreement, and neither is a key only one branch
+// read. Nor is one branch reading a node WHOLE (an EdgeRevisions fingerprint)
+// while another read it only at a relation scope (EdgeSelectors alone): those
+// are two different units, not two answers to one question, and each is
+// validated on its own terms. Only two values for the SAME key or the SAME
+// (node, selector) conflict.
+//
+// A branch whose own footprint is already Torn carries that through — a
+// nested merge must not launder it — and detection never short-circuits: the
+// merged maps stay complete, because an operator reading a rejected
+// footprint still wants to know what it covered.
 func mergeFootprints(footprints []ruleengine.EvalFootprint) ruleengine.EvalFootprint {
 	out := ruleengine.EvalFootprint{
 		NodeRevisions: map[string]uint64{},
@@ -301,10 +326,19 @@ func mergeFootprints(footprints []ruleengine.EvalFootprint) ruleengine.EvalFootp
 		EdgeSelectors: map[string]ruleengine.EdgeSelectorFootprint{},
 	}
 	for _, fp := range footprints {
+		if fp.Torn {
+			out.Torn = true
+		}
 		for k, v := range fp.NodeRevisions {
+			if prev, seen := out.NodeRevisions[k]; seen && prev != v {
+				out.Torn = true
+			}
 			out.NodeRevisions[k] = v
 		}
 		for k, v := range fp.EdgeRevisions {
+			if prev, seen := out.EdgeRevisions[k]; seen && prev != v {
+				out.Torn = true
+			}
 			out.EdgeRevisions[k] = v
 		}
 		for k, v := range fp.EdgeSelectors {
@@ -320,6 +354,13 @@ func mergeFootprints(footprints []ruleengine.EvalFootprint) ruleengine.EvalFootp
 				if !ok {
 					m = map[string]struct{}{}
 					existing.Matched[sel] = m
+				} else if !edgeIDSetsEqual(m, ids) {
+					// Two branches derived different identities for one
+					// selector on one node. Unioning them below keeps the
+					// merged surface complete, but the union is not what
+					// either branch saw, so the disagreement has to be
+					// recorded before it is dissolved.
+					out.Torn = true
 				}
 				for id := range ids {
 					m[id] = struct{}{}
