@@ -294,8 +294,8 @@ collide with read-template hits), so the censuses ship as a **Go test**, not she
 walks every package `Definition`'s `Dispatch.Reads`/`Dispatch.OptionalReads` **structurally** (the same
 walk the validator does) and asserts:
 
-- client-only placeholders in `OptionalReads`: exactly **3** entries, all cafe-domain `{me.leaseapp:id}`
-  (Charge ×1, Settle ×2) — as of `654d5924`;
+- client-only placeholders in `OptionalReads`: exactly **2** entries, all cafe-domain `{me.leaseapp:id}`
+  (Charge ×1, Settle ×1 — the staff-Settle path confirms `chargedTo` by a live `kv.Links` read, so it templates no lease);
 - client-only placeholders in `Reads`: **0**;
 - `{entity.*}`, `{scopedTo}`, or `?`-marked entries in either read list: **0**;
 - mid-segment client-only fragments: **0**.

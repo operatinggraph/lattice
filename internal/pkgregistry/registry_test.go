@@ -208,7 +208,7 @@ func TestOpDispatchTemplateCensus(t *testing.T) {
 	}
 
 	const (
-		wantClientOnlyOptional   = 3
+		wantClientOnlyOptional   = 2
 		wantClientOnlyRequired   = 0
 		wantEntityHits           = 0
 		wantScopedToHits         = 0
@@ -216,7 +216,7 @@ func TestOpDispatchTemplateCensus(t *testing.T) {
 		wantMidSegmentClientOnly = 0
 	)
 	if clientOnlyOptional != wantClientOnlyOptional {
-		t.Errorf("client-only ({me.*}) placeholders in OptionalReads: got %d, want %d (descriptor-floor-template-coverage-design.md §6, pinned at 654d5924, live in cafe-domain Charge/Settle) — a package's read-template shape changed; fix the package, or move this pinned number deliberately if the new shape is intended",
+		t.Errorf("client-only ({me.*}) placeholders in OptionalReads: got %d, want %d (descriptor-floor-template-coverage-design.md §6, pinned at 654d5924, moved to 2 when a staff Settle stopped templating its lease; live in cafe-domain Charge + Settle self-path) — a package's read-template shape changed; fix the package, or move this pinned number deliberately if the new shape is intended",
 			clientOnlyOptional, wantClientOnlyOptional)
 	}
 	if clientOnlyRequired != wantClientOnlyRequired {
