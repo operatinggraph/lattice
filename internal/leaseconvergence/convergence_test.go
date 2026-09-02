@@ -421,21 +421,22 @@ func TestLeaseConvergence_FR58_RetriedExternalCall_AtMostOnce(t *testing.T) {
 }
 
 // TestLeaseConvergence_BgcheckFreshness_EagerReopen is AC #2 (second clause),
-// asserting the FULL eager chain end-to-end (the MarkExpired DDL re-touches the
-// entity so the stale-freshness gap re-opens eagerly): after convergence the lens projects the
-// bgcheck's validUntil as the scalar freshUntil; Weaver's temporal lane arms the
+// asserting the FULL eager chain end-to-end: after convergence the
+// backgroundCheckFreshness lens projects the check's own validUntil as the scalar
+// freshUntil on the INSTANCE's row; Weaver's temporal lane arms the
 // per-target-per-entity @at schedule at that instant; the short window lapses;
-// the NATS scheduler republishes to the fired subject; Weaver converts the
-// firing into a MarkExpired op; the generic freshnessMarker DDL writes the marker
-// aspect on the application (an UNCONDITIONED update); Refractor reprojects the
-// row with a fresh $now; missing_bgcheck re-opens; Weaver re-dispatches the
-// bgcheck externalTask; the live bridge re-completes it with exactly ONE new
-// external call; the row re-converges.
+// the NATS scheduler republishes to the fired subject; Weaver converts the firing
+// into a MarkExpired op; the generic freshnessMarker DDL records the lapse under
+// that target's key in the instance's marker; the instance is a providedTo
+// neighbour of the application, so the marker write reprojects the application
+// row; missing_bgcheck re-opens because the readiness fragment now reads a
+// recorded lapse; Weaver re-dispatches the bgcheck externalTask; the live bridge
+// re-completes it with exactly ONE new external call; the row re-converges.
 //
 // It then runs a SECOND freshness cycle (C2): lapse → re-open → re-converge,
 // again with exactly ONE new external call — proving the eager re-open is not a
-// one-shot (the unconditioned marker write overwrites cleanly on the second
-// lapse, where a create-based marker would conflict and silently stop reprojecting).
+// one-shot. The second cycle marks a DIFFERENT instance (the re-dispatch mints a
+// fresh check), which is what the witness below is built to follow.
 //
 // Runs ONLY under -tags leaseshortwindow (the gate), where the freshness window
 // is short enough to watch two lapses in bounded wall-clock.
@@ -447,39 +448,47 @@ func TestLeaseConvergence_BgcheckFreshness_EagerReopen(t *testing.T) {
 	if !shortFreshnessWindow {
 		t.Skip("eager-freshness leg requires -tags leaseshortwindow (a window short enough to watch a lapse)")
 	}
-	h := newHarness(t)
+	// backgroundCheckFreshness is not optional here: it is the target that ARMS
+	// the freshness timer (the application's own row carries no freshUntil), so
+	// without it activated no @at is ever scheduled and no lapse is ever recorded.
+	h := newHarness(t, withExtraLenses("backgroundCheckFreshness"))
 	appKey, appID, applicantKey := h.seedApplicant()
 	applicantID := applicantKey[len("vtx.identity."):]
 
-	// Persistently count MarkExpired ops for this app across BOTH cycles, from
-	// before the first converge. A per-cycle non-durable subscription would miss a
-	// firing published between two cycle assertions; one standing subscription
-	// never does.
-	marks := h.startMarkExpiredCounter(appKey)
+	// Persistently count MarkExpired ops for the freshness target across BOTH
+	// cycles, from before the first converge. A per-cycle non-durable subscription
+	// would miss a firing published between two cycle assertions; one standing
+	// subscription never does.
+	marks := h.startMarkExpiredCounter("backgroundCheckFreshness")
 
 	h.driveApplicantSteps(appKey, applicantKey)
 	h.decideLandlord(appKey, "approved")
 	h.drainUntilConverged(appID, 30*time.Second)
 
-	// The converged row carries freshUntil (the bgcheck's validUntil) — the column
-	// Weaver's temporal lane schedules the @at from. Distinguishes eager from lazy:
-	// without this scalar there is nothing to arm a timer on.
-	row := h.readRow(appID)
-	require.NotNil(t, row)
-	freshUntil, _ := row["freshUntil"].(string)
-	require.NotEmpty(t, freshUntil, "the converged row must carry a freshUntil scalar (the eager-arm input)")
+	// The check's OWN row carries freshUntil (its validUntil) — the column Weaver's
+	// temporal lane schedules the @at from, on the entity whose window it is.
+	// Distinguishes eager from lazy: without this scalar there is nothing to arm a
+	// timer on.
+	bgHandles := h.bgcheckHandles(applicantID)
+	require.Len(t, bgHandles, 1, "exactly one bgcheck instance after the initial converge")
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("backgroundCheckFreshness", bgHandles[0])
+		if row == nil {
+			return false
+		}
+		freshUntil, _ := row["freshUntil"].(string)
+		return freshUntil != ""
+	}, 30*time.Second, 200*time.Millisecond,
+		"the completed check's own row must carry a freshUntil scalar (the eager-arm input)")
 
 	// One bgcheck call so far (the initial converge).
 	require.Equal(t, 1, h.countBgcheckOutcomes(applicantID), "exactly one bgcheck outcome after the initial converge")
 	require.Equal(t, 1, h.totalBgcheckSideEffects(applicantID), "exactly one bgcheck external call after the initial converge")
 
 	// Two full freshness cycles, each: lapse → MarkExpired → re-open → re-dispatch
-	// → re-converge, each adding EXACTLY ONE new bgcheck call. The second cycle is
-	// the C2 assertion: the eager re-open is NOT a one-shot (the unconditioned
-	// marker write overwrites cleanly on the second lapse, where a create-based
-	// marker would conflict and silently stop reprojecting).
-	h.assertEagerReopenCycle(appKey, appID, applicantID, 1)
-	h.assertEagerReopenCycle(appKey, appID, applicantID, 2)
+	// → re-converge, each adding EXACTLY ONE new bgcheck call.
+	h.assertEagerReopenCycle(appID, applicantID, 1)
+	h.assertEagerReopenCycle(appID, applicantID, 2)
 
 	// At least one MarkExpired per cycle drove the re-opens (the @at → MarkExpired
 	// dispatch path actually fired — not an incidental CDC touch). Counted on the
@@ -498,36 +507,40 @@ func TestLeaseConvergence_BgcheckFreshness_EagerReopen(t *testing.T) {
 // being rejected):
 //
 //   - CAUSAL (H2/H3): the freshnessExpiry MARKER aspect that MarkExpired commits
-//     onto the application must ADVANCE this cycle — its KV revision strictly
-//     increases (every committed marker write bumps it) AND its data.expiredAt
-//     advances to this cycle's later fireAt. A LAZY re-open (an incidental CDC
+//     onto the background-check INSTANCE must ADVANCE this cycle — its KV revision
+//     strictly increases (every committed marker write bumps it) AND the instant
+//     recorded under the backgroundCheckFreshness key advances to this cycle's
+//     later fireAt. The lapse is recorded where it happens, so this is the marker
+//     the readiness fragment actually reads; a LAZY re-open (an incidental CDC
 //     touch re-running the cypher) never submits MarkExpired, so it could NOT move
-//     the marker — confounding the old count-only witness. This proves THIS
-//     cycle's MarkExpired actually COMMITTED (not merely submitted to ops.system).
+//     it — confounding a count-only witness. This proves THIS cycle's MarkExpired
+//     actually COMMITTED (not merely submitted to ops.system).
 //   - the bgcheck-call COUNT then increments by exactly +1: a new external call
 //     can only happen if the marker-triggered reprojection re-opened the gap and
 //     Weaver re-dispatched the externalTask exactly once (no storm — FR58). The
 //     count is durable KV state, never missed.
-func (h *harness) assertEagerReopenCycle(appKey, appID, applicantID string, cycle int) {
+func (h *harness) assertEagerReopenCycle(appID, applicantID string, cycle int) {
 	h.t.Helper()
 	prior := cycle // bgcheck calls before this cycle == the cycle number
 
 	// Snapshot the committed marker BEFORE this cycle's lapse. Cycle 1 starts with
-	// no marker ("", 0); later cycles carry the prior fire's marker.
-	beforeExpiredAt, beforeRev := h.freshnessMarker(appKey)
+	// no marker ("", 0); later cycles carry the prior fire's marker, which sits on
+	// the instance THAT cycle marked rather than the one this cycle will.
+	beforeExpiredAt, beforeRev := h.bgcheckFreshnessMarker(applicantID)
 
-	// Weaver re-arms the @at from the (re-)projected freshUntil each converge.
-	schedSubject := "schedule.weaver.timer.leaseApplicationComplete." + appID
+	// Weaver arms the @at from the freshly projected freshUntil on the current
+	// check's own row.
 	require.Eventuallyf(h.t, func() bool {
-		return h.scheduleArmed(schedSubject)
-	}, 30*time.Second, 200*time.Millisecond, "cycle %d: Weaver must arm the @at freshness schedule", cycle)
+		return h.bgcheckFreshnessArmed(applicantID)
+	}, 30*time.Second, 200*time.Millisecond, "cycle %d: Weaver must arm the @at freshness schedule on the check", cycle)
 
 	// The window lapses → fired subject → Weaver submits MarkExpired → the generic
-	// freshnessMarker DDL COMMITS the marker aspect (an unconditioned update,
-	// bumping its revision + writing a later expiredAt) → Refractor
-	// reprojects with a fresh $now → the lapsed validUntil makes missing_bgcheck
-	// re-open → Weaver re-dispatches the bgcheck externalTask → the live bridge
-	// re-completes it. The @at fires one freshness window after the prior converge,
+	// freshnessMarker DDL COMMITS the marker aspect on the check (bumping its
+	// revision and recording that firing under the target's own byTarget key) → the
+	// check is a providedTo neighbour, so Refractor reprojects the application row
+	// → the recorded lapse makes missing_bgcheck re-open → Weaver re-dispatches the
+	// bgcheck externalTask → the live bridge re-completes it. The @at fires one
+	// freshness window after the prior converge,
 	// so the wait budget is the window plus a generous margin (the freshness window
 	// is bgcheckFreshnessWindow under -tags leaseshortwindow; the budget must absorb
 	// the full window and CI scheduling variance under the load of the engines +
@@ -538,10 +551,10 @@ func (h *harness) assertEagerReopenCycle(appKey, appID, applicantID string, cycl
 	// if MarkExpired→commit is broken, this Eventually times out and the test fails
 	// here, before the (potentially lazy) bgcheck count is consulted.
 	require.Eventuallyf(h.t, func() bool {
-		gotExpiredAt, gotRev := h.freshnessMarker(appKey)
+		gotExpiredAt, gotRev := h.bgcheckFreshnessMarker(applicantID)
 		return gotRev > beforeRev && gotExpiredAt != "" && gotExpiredAt > beforeExpiredAt
 	}, 240*time.Second, 500*time.Millisecond,
-		"cycle %d: the freshnessExpiry marker must advance (a NEW MarkExpired must COMMIT this cycle — revision bump + later expiredAt); before rev=%d expiredAt=%q",
+		"cycle %d: the check's freshnessExpiry marker must advance (a NEW MarkExpired must COMMIT this cycle — revision bump + later recorded lapse); before rev=%d recorded=%q",
 		cycle, beforeRev, beforeExpiredAt)
 
 	// Then the bgcheck re-dispatch + re-completion the committed marker triggered.

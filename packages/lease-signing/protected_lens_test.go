@@ -295,12 +295,38 @@ func TestLeaseApplicationsRead_MissingDecisionOpensWhenQualifiedAndUndecided(t *
 	require.Equal(t, false, v["declined"])
 }
 
-// TestLeaseApplicationsRead_BgcheckFreshnessRequired — a STALE completed
-// background check (validUntil in the past) does not count toward
-// missing_bgcheck's closure, mirroring the convergence lens's freshness
-// predicate (the same `inst.outcome.data.validUntil > $now` term, shared via
-// readinessWithItems).
+// TestLeaseApplicationsRead_BgcheckFreshnessRequired — a LAPSED completed
+// background check (its freshnessExpiry marker records the backgroundCheckFreshness
+// timer firing at its validUntil) does not count toward missing_bgcheck's
+// closure, mirroring the convergence lens's freshness predicate (the same
+// recorded-lapse term, shared via readinessWithItems).
+//
+// The Postgres read models carry no freshUntil, no target and no timer of their
+// own; the fact they read is written on the instance by the instance's own
+// target, which is what lets this lens ask the same question as the convergence
+// lens without a clock.
 func TestLeaseApplicationsRead_BgcheckFreshnessRequired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	// A FUTURE deadline with a recorded lapse against it: only the recorded fact
+	// can close this check out, so the vector fails on any clock-reading form.
+	const validUntil = farFutureValidUntil
+	bgFreshnessFixture(t, f, validUntil)
+	recordBgcheckLapse(t, f, "bg1", validUntil)
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["missing_bgcheck"], "a lapsed completed bgcheck must not count toward the gate")
+}
+
+// TestLeaseApplicationsRead_NoMarkerReadsFresh is the positive vector for the
+// negation's polarity on the Postgres read model: an instance no timer has ever
+// fired on carries no marker, the comparison against nil answers false, and the
+// negation counts it. Without this the test above could pass for the wrong
+// reason (a predicate that never counts anything).
+func TestLeaseApplicationsRead_NoMarkerReadsFresh(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -309,7 +335,8 @@ func TestLeaseApplicationsRead_BgcheckFreshnessRequired(t *testing.T) {
 
 	rows := f.projectRead(t)
 	require.Len(t, rows, 1)
-	require.Equal(t, true, rows[0].Values["missing_bgcheck"], "a stale completed bgcheck must not count toward the gate")
+	require.Equal(t, false, rows[0].Values["missing_bgcheck"],
+		"no recorded lapse -> the check is current, whatever the wall clock says about its validUntil")
 }
 
 // TestLeaseApplicationsRead_DeclinedBgcheckProjects — a FAILED background check

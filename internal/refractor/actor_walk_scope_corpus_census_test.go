@@ -103,6 +103,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"applicantOnboarding":               "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|task:forOperation,scopedTo|unit:appliesToUnit|any:forOperation",
 	"appointmentReminders":              "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"augurDispatchPending":              "none",
+	"backgroundCheckFreshness":          "none",
 	"cafeStaleTabSettlement":            "none",
 	"cafeTabSettlement":                 "cafetransaction:settles|leaseapp:chargedTo,openFor|tab:chargedTo,openFor,settles",
 	"capability":                        "identity:holdsRole|role:holdsRole",

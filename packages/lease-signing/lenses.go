@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -90,6 +90,35 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "identity",
 				OutputKeyPattern: "applicantOnboarding.{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_onboarding", "inflight_onboarding", "applicant", "entityKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			// backgroundCheckFreshness — the SERVICE-INSTANCE-anchored freshness
+			// window. It projects no gap column and its target dispatches
+			// nothing; what it exists for is the @at Weaver arms from freshUntil,
+			// because a fired timer marks the row's own anchor and a background
+			// check's window belongs to the check. The four readers of that
+			// window in this package (readinessWithItems' freshBgComplete, spliced
+			// into three lenses, plus renewalComplete's bgcheckValidUntil) all
+			// reach the instance across a providedTo hop from a different anchor,
+			// so they read the recorded lapse rather than hosting it.
+			//
+			// Same shared weaver-targets bucket as every other target here, rows
+			// namespaced by OutputKeyPattern, with the targetId as that prefix.
+			CanonicalName:  "backgroundCheckFreshness",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           backgroundCheckFreshnessSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "service",
+				OutputKeyPattern: "backgroundCheckFreshness.{actorSuffix}",
+				BodyColumns:      []string{"violating", "entityKey", "freshUntil"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -512,43 +541,39 @@ func Lenses() []pkgmgr.LensSpec {
 // FRESHNESS (the freshness PREDICATE — bgcheck-only; payment ever-completed).
 //
 //   - missing_bgcheck counts a completed bgcheck toward convergence ONLY while
-//     its op-stamped validUntil is still in the future
-//     (inst.outcome.data.validUntil > $now). A STALE bgcheck (validUntil ≤ $now)
-//     stops counting and missing_bgcheck re-opens whenever the row is
-//     (re)evaluated — a stale background check IS a missing background check. The
-//     freshness test lives inside the count CASE on the single providedTo fan
-//     (no second match, no WHERE), so it cannot drop the anchor. validUntil is
-//     computed by the replyOp as completedAt + bgcheckFreshnessWindow (Starlark
-//     time.rfc3339_add — no clock read), the §10.2 "the freshness rule lives in
-//     the cypher" convention. The `>` on these canonical-UTC RFC3339 strings is
-//     lexicographic = chronological (ruleengine/full executor.go compareAny
-//     string branch); $now is the projection-supplied param (Refractor's
-//     executeFullForActor sets params["now"] = time.Now().UTC().Format(time.RFC3339)).
+//     no timer has recorded THAT check's own window lapsing. The lapse is a FACT
+//     on the instance — the freshnessExpiry marker's byTarget entry for the
+//     backgroundCheckFreshness target — so the predicate is
+//     NOT (inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness >=
+//     inst.outcome.data.validUntil): a comparison between two stored values,
+//     with no clock in it. A LAPSED bgcheck stops counting and missing_bgcheck
+//     re-opens whenever the row is (re)evaluated — a stale background check IS a
+//     missing background check. The test lives inside the count CASE on the
+//     single providedTo fan (no second match, no WHERE), so it cannot drop the
+//     anchor. validUntil is computed by the replyOp as completedAt +
+//     bgcheckFreshnessWindow (Starlark time.rfc3339_add — no clock read), the
+//     §10.2 "the freshness rule lives in the cypher" convention. The `>=` on
+//     these canonical-UTC RFC3339 strings is lexicographic = chronological
+//     (ruleengine/full executor.go compareAny string branch).
+//   - The NEGATION is what makes an unmarked instance read FRESH, and it is the
+//     opposite polarity from a gap test. compareAny answers FALSE whenever
+//     either operand is nil, for every ordering operator, so an instance no
+//     timer has ever fired on evaluates (null >= validUntil) = false and
+//     NOT(false) counts it — which is the default a never-lapsed check needs.
+//     The explicit (validUntil <> null) conjunct is the other half of that same
+//     nil-false: an outcome carrying no validUntil has no window to lapse, and
+//     without the conjunct it would read permanently fresh instead of never
+//     fresh.
+//   - The window is armed on the INSTANCE, by this package's
+//     backgroundCheckFreshness lens + target: that row carries the instance's
+//     own freshUntil, Weaver's temporal lane schedules the @at from it, and the
+//     fired timer's MarkExpired records the lapse on the instance — the entity
+//     whose window actually lapsed. The instance is a providedTo neighbour of
+//     this anchor, so the marker write reprojects this row and missing_bgcheck
+//     re-opens at the lapse instant, eagerly, without waiting for an incidental
+//     CDC touch and without this lens carrying a timer of its own.
 //   - missing_payment is ever-completed: a completed payment counts forever,
 //     validUntil ignored.
-//
-// EAGER auto-reopen-at-expiry — the §10.2 freshUntil column.
-//
-//   - The lens projects a single scalar freshUntil per anchor: the LATEST
-//     validUntil among the applicant's completed, still-fresh bgchecks. Weaver's
-//     temporal lane reads it (freshUntilColumn) and schedules an @at one-shot at
-//     that instant; when the timer fires it marks the row expired, the row
-//     reprojects, and the freshness predicate re-opens missing_bgcheck the moment
-//     freshness lapses — eagerly, not waiting for an incidental CDC touch.
-//   - freshUntil is a max() aggregator on the SAME single no-WHERE providedTo fan
-//     that drives the missing_* counts — max(validUntil) over the completed-fresh
-//     bgcheck CASE, folded inside the aggregation WITH. So it is aggregated, not
-//     re-expanded: an applicant with N completed-fresh bgchecks (multiple
-//     applications on one identity, or accumulated freshness re-dispatches —
-//     providedTo is on the identity, not the application) yields exactly one row,
-//     not N (guardOutputKeyCollision stays satisfied — no separate, unaggregated
-//     match to multiply the anchor). When no fresh bgcheck exists every CASE is
-//     null and max() folds to null, so freshUntil projects as a genuine null
-//     (Weaver clears any standing @at — no deadline to arm) and the anchor never
-//     drops. Picking the LATEST (max, not min/first) is required: the @at re-open
-//     timer must not fire while a later-expiring fresh bgcheck still counts toward
-//     missing_bgcheck. max() over canonical-UTC RFC3339 strings is lexicographic =
-//     chronological (ruleengine/full aggregate.go extremeFold → compareAny).
 //
 // DISPATCH SUPPRESSION — the per-gap inflight_<g> companion + maxretries_<g> cap.
 //
@@ -728,8 +753,54 @@ func Lenses() []pkgmgr.LensSpec {
 const readinessOptionalMatch = `OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)`
 
 const readinessWithItems = `id.ssn.data AS ssnVal,
-  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.key ELSE null END) AS freshBgComplete,
+  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil <> null AND NOT (inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness >= inst.outcome.data.validUntil) THEN inst.key ELSE null END) AS freshBgComplete,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete`
+
+// backgroundCheckFreshnessSpec anchors on the background-check INSTANCE — the
+// entity whose freshness window it is. It exists so that window has a timer of
+// its own: Weaver's temporal lane arms an @at from a row's freshUntil, and the
+// fired timer's MarkExpired carries the row's anchor as the entity to mark, so
+// the marker can only land on the entity the row is anchored on. Every reader of
+// bgcheck freshness in this package — readinessWithItems (spliced into
+// leaseApplicationComplete, leaseApplicationsRead and
+// landlordLeaseApplicationsRead) and renewalCompleteSpec's bgcheckValidUntil
+// aggregate — resolves that window off a service instance reached across a
+// providedTo hop, so none of them can host the marker; this lens is where the
+// instance hosts it itself, and the four read the fact it records.
+//
+// The anchor MATCH filters on class + a completed outcome, so a payment or
+// docGen instance (same `service` key type, different envelope class) and a
+// dispatched-but-unanswered bgcheck project no row at all — EmptyBehavior
+// "delete" removes any row a previously-qualifying instance left behind.
+//
+//   - freshUntil is the instance's own outcome.validUntil while no timer has
+//     recorded this target's window lapsing, and null once one has. Null is what
+//     stops the re-arm: a lapsed instance's past deadline would otherwise fire
+//     immediately on every delivery, and there is nothing left to wait for —
+//     the lapse is already recorded. The comparison is between two stored
+//     values (the marker's byTarget entry for this target, and the deadline),
+//     so the row is a pure function of the subgraph.
+//   - violating is projected an explicit FALSE rather than omitted. Weaver reads
+//     the column off the row body, and an absent column and a declared false are
+//     different inputs; this target dispatches nothing, so the answer is always
+//     false and it says so.
+//
+// The target declares no gaps (weaverTargets in targets.go): the freshness
+// bookkeeping leg runs on every delivery, before any gap column is read, which
+// is the whole reason a gap-less target is a coherent thing to declare.
+const backgroundCheckFreshnessSpec = `
+MATCH (inst:service {key: $actorKey})
+  WHERE inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed'
+WITH
+  inst.key AS entityKey,
+  inst.outcome.data.validUntil AS validUntil,
+  inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness AS lapsedAt
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  CASE WHEN lapsedAt >= validUntil THEN null ELSE validUntil END AS freshUntil,
+  False AS violating
+`
 
 // leaseApplicationCompleteSpec is built once at package init: the retry caps
 // (maxBgcheckRetries / maxPaymentRetries) bake into the constant maxretries_<g>
@@ -793,8 +864,7 @@ WITH
   count(DISTINCT CASE WHEN sigOp.data.operationType = 'SignLease' THEN sigTask.key ELSE null END) AS sigTaskOpen,
   count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen,
   count(DISTINCT CASE WHEN leaseDocObj.key <> null THEN leaseDocObj.key ELSE null END) AS leaseDocAttachedCount,
-  count(DISTINCT mgr.key) AS managerCount,
-  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.outcome.data.validUntil ELSE null END) AS freshUntil
+  count(DISTINCT mgr.key) AS managerCount
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -820,7 +890,6 @@ RETURN
   hasGuarantor,
   guarantorIncomeToRentMet,
   (profileSubmittedAt <> null) AS profileSubmitted,
-  freshUntil,
   signedAt,
   landlordDecision,
   declineReason,

@@ -156,6 +156,20 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_onboarding": {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
 		},
+	}, {
+		// backgroundCheckFreshness declares NO gaps, and that is its whole shape:
+		// it dispatches nothing. Weaver's row handler runs the freshness
+		// bookkeeping leg — arm / re-arm / clear the @at from the row's freshUntil
+		// — on every delivery, before it reads any gap column, so a target with an
+		// empty playbook still gets its timer. What the timer buys is the
+		// MarkExpired that records the lapse on the background-check instance,
+		// which is this target's anchor; the readers of that fact (this package's
+		// readiness fragment and renewalComplete's bgcheck aggregate) are anchored
+		// elsewhere and could never have hosted it.
+		TargetID: "backgroundCheckFreshness",
+		Description: "A completed background check's freshness window is recorded on the check itself when it " +
+			"lapses, so every view asking whether a check is still current reads a recorded fact rather than a clock.",
+		LensRef: "backgroundCheckFreshness",
 	}}
 	return append(targets, RenewalTargets()...)
 }

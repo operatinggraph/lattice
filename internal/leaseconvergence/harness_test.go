@@ -906,19 +906,23 @@ func (h *harness) scheduleArmed(subject string) bool {
 	return msg.Header.Get(substrate.ScheduleHeader) != ""
 }
 
-// markExpiredCounter is a persistent observer of MarkExpired ops for one
-// application. A fresh, per-cycle non-durable subscription could miss an op
-// published while it is not subscribed (fatal across multiple freshness cycles);
-// this subscribes ONCE and counts every MarkExpired for the app for the lifetime
-// of the harness context, so a firing between two cycle assertions is never lost.
+// markExpiredCounter is a persistent observer of MarkExpired ops for one Weaver
+// target. A fresh, per-cycle non-durable subscription could miss an op published
+// while it is not subscribed (fatal across multiple freshness cycles); this
+// subscribes ONCE and counts every matching MarkExpired for the lifetime of the
+// harness context, so a firing between two cycle assertions is never lost.
 type markExpiredCounter struct {
 	sub   *nats.Subscription
 	count *int64
 }
 
 // startMarkExpiredCounter subscribes to ops.system and counts MarkExpired ops
-// targeting appKey from now until ctx ends. The count is read with .seen().
-func (h *harness) startMarkExpiredCounter(appKey string) *markExpiredCounter {
+// carrying targetID from now until ctx ends. It keys on the TARGET rather than
+// the entity because the entity a freshness fire marks is the background-check
+// instance, and a fresh instance is minted on every re-dispatch — an entity-keyed
+// counter would stop counting after the first cycle. The count is read with
+// .seen().
+func (h *harness) startMarkExpiredCounter(targetID string) *markExpiredCounter {
 	h.t.Helper()
 	var n int64
 	c := &markExpiredCounter{count: &n}
@@ -930,7 +934,7 @@ func (h *harness) startMarkExpiredCounter(appKey string) *markExpiredCounter {
 		if json.Unmarshal(msg.Data, &env) != nil {
 			return
 		}
-		if env.OperationType == "MarkExpired" && env.Payload["entityKey"] == appKey {
+		if env.OperationType == "MarkExpired" && env.Payload["targetId"] == targetID {
 			atomic.AddInt64(c.count, 1)
 		}
 	})
@@ -942,35 +946,83 @@ func (h *harness) startMarkExpiredCounter(appKey string) *markExpiredCounter {
 
 func (c *markExpiredCounter) seen() int { return int(atomic.LoadInt64(c.count)) }
 
-// freshnessMarker reads the freshnessExpiry marker aspect written on the
-// application by MarkExpired (vtx.leaseapp.<appID>.freshnessExpiry). It returns
-// the marker's data.expiredAt (the per-fire instant the marker carries) and the
-// aspect's KV revision — the two causal witnesses the eager-reopen test uses:
+// bgcheckFreshnessMarker reads the freshnessExpiry marker MarkExpired commits on
+// the BACKGROUND-CHECK INSTANCE — the entity whose window lapsed, and so the
+// entity the backgroundCheckFreshness target anchors on and the fired timer's
+// payload names. It returns the LATEST instant recorded under that target's own
+// byTarget key across the applicant's bgcheck instances, and the KV revision of
+// the marker carrying it: the two causal witnesses the eager-reopen test uses.
 //
-//   - expiredAt ADVANCES only when a NEW firing's MarkExpired COMMITS (each
-//     cycle's @at fires one window later, so a later fireAt → a later expiredAt
-//     on the overwritten marker);
+//   - the recorded instant ADVANCES only when a NEW firing's MarkExpired COMMITS
+//     (each cycle's @at fires one window later);
 //   - the KV revision bumps on every committed marker write.
 //
-// A LAZY re-open (an incidental CDC touch re-running the cypher) would NOT bump
-// either — it never submits MarkExpired — so an advance here is causal proof that
-// THIS cycle's MarkExpired→commit→reproject chain ran, not merely that the
-// bgcheck count incremented (which a lazy path could also produce). Returns
-// ("", 0) when the marker is absent (no MarkExpired has committed yet).
-func (h *harness) freshnessMarker(appKey string) (expiredAt string, revision uint64) {
-	entry, err := h.conn.KVGet(h.ctx, bootstrap.CoreKVBucket, appKey+".freshnessExpiry")
-	if err != nil {
-		return "", 0
+// A LAZY re-open (an incidental CDC touch re-running the cypher) would move
+// neither — it never submits MarkExpired — so an advance here is causal proof
+// that THIS cycle's MarkExpired→commit→reproject chain ran, not merely that the
+// bgcheck count incremented (which a lazy path could also produce).
+//
+// It reads data.byTarget.backgroundCheckFreshness rather than the marker's
+// entity-wide data.expiredAt maximum because that entry IS the fact the lens
+// reads. expiredAt would advance identically here (a bgcheck instance carries no
+// other target's timer), so witnessing it would pass without ever proving THIS
+// target's fire landed where the readers look.
+//
+// The maximum is taken ACROSS instances because each freshness cycle re-opens the
+// gap and Weaver dispatches a fresh check: the lapse is recorded where it
+// happens, so cycle 2's marker sits on a different instance than cycle 1's. Core
+// KV is a JetStream KV bucket whose revision is the underlying stream sequence,
+// bucket-global rather than per key, so a marker written later carries a strictly
+// higher revision whatever key it lands on — which is what keeps the
+// strict-advance witness meaningful across that key change. Returns ("", 0) when
+// no MarkExpired has committed yet.
+func (h *harness) bgcheckFreshnessMarker(applicantID string) (expiredAt string, revision uint64) {
+	for _, svcKey := range h.serviceOutcomes(applicantID) {
+		if !h.isBgcheckInstance(svcKey) {
+			continue
+		}
+		entry, err := h.conn.KVGet(h.ctx, bootstrap.CoreKVBucket, svcKey+".freshnessExpiry")
+		if err != nil || entry == nil {
+			continue
+		}
+		var env struct {
+			Data struct {
+				ByTarget map[string]string `json:"byTarget"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(entry.Value, &env) != nil {
+			continue
+		}
+		if got := env.Data.ByTarget["backgroundCheckFreshness"]; got > expiredAt {
+			expiredAt, revision = got, entry.Revision
+		}
 	}
-	var env struct {
-		Data struct {
-			ExpiredAt string `json:"expiredAt"`
-		} `json:"data"`
+	return expiredAt, revision
+}
+
+// bgcheckHandles returns every bgcheck service instance providedTo the applicant
+// (bgcheckHandle's plural — after a freshness cycle the applicant holds the
+// lapsed instance AND the freshly dispatched one).
+func (h *harness) bgcheckHandles(applicantID string) (handles []string) {
+	for _, svcKey := range h.serviceOutcomes(applicantID) {
+		if h.isBgcheckInstance(svcKey) {
+			handles = append(handles, svcKey[len("vtx.service."):])
+		}
 	}
-	if json.Unmarshal(entry.Value, &env) != nil {
-		return "", 0
+	return handles
+}
+
+// bgcheckFreshnessArmed reports whether ANY of the applicant's bgcheck instances
+// currently has an @at armed on the backgroundCheckFreshness target. Any, not
+// all: a lapsed instance's row projects a null freshUntil and Weaver clears its
+// schedule, so only the current check carries one.
+func (h *harness) bgcheckFreshnessArmed(applicantID string) bool {
+	for _, handle := range h.bgcheckHandles(applicantID) {
+		if h.scheduleArmed("schedule.weaver.timer.backgroundCheckFreshness." + handle) {
+			return true
+		}
 	}
-	return env.Data.ExpiredAt, entry.Revision
+	return false
 }
 
 // bgcheckHandle returns the bare handle of the bgcheck service instance providedTo

@@ -72,7 +72,6 @@ type applicationRow struct {
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
 	SignedAt           string   `json:"signedAt"`
-	FreshUntil         string   `json:"freshUntil"`
 	// Applicant qualification profile — the DERIVED signals the landlord decides
 	// on (SetApplicantProfile; the raw financials are never projected). All
 	// pointers so an application with no .profile yet stays absent rather than

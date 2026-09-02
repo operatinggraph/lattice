@@ -89,10 +89,39 @@ func (f *lensFixture) edge(t *testing.T, name, fromName, toName string) {
 }
 
 // farFutureValidUntil is a validUntil far enough ahead that a bgcheck stamped
-// with it is FRESH regardless of when the suite runs (the cypher's
-// `validUntil > $now` holds for any realistic wall clock). Used by the
+// with it reads FRESH in any fixture recording no lapse against it. Used by the
 // gap-closure tests that care about completeness, not the freshness boundary.
+// Freshness reads no clock, so the distance from the wall clock buys nothing on
+// its own — what makes an instance fresh is the ABSENCE of a lapse recorded at
+// or after this instant.
 const farFutureValidUntil = "2099-01-01T00:00:00Z"
+
+// recordBgcheckLapse writes the freshnessExpiry marker MarkExpired commits onto
+// a background-check instance when the backgroundCheckFreshness target's @at
+// fires: `at` is the deadline the timer fired for, recorded under that target's
+// own key in byTarget, with expiredAt carrying the entity-wide maximum (the same
+// instant on a single-target entity). A marker at or after the instance's
+// validUntil is a recorded lapse; one before it is a fire for an earlier
+// deadline the current one has outrun.
+func recordBgcheckLapse(t *testing.T, f *lensFixture, instName, at string) {
+	t.Helper()
+	f.aspect(t, instName, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": at,
+		"byTarget":  map[string]any{"backgroundCheckFreshness": at},
+	})
+}
+
+// recordSiblingLapse writes a marker carrying ONLY another target's entry — the
+// isolation vector. byTarget is keyed per target precisely so one target's fire
+// cannot be read as another's, and a bare presence test on the marker aspect
+// would miss that.
+func recordSiblingLapse(t *testing.T, f *lensFixture, instName, siblingTargetID, at string) {
+	t.Helper()
+	f.aspect(t, instName, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": at,
+		"byTarget":  map[string]any{siblingTargetID: at},
+	})
+}
 
 func (f *lensFixture) project(t *testing.T, appName string) []ruleengine.ProjectionResult {
 	t.Helper()
@@ -533,9 +562,10 @@ func TestLeaseApplicationComplete_ProjectsDeclineReason(t *testing.T) {
 // AND landlord approval. A landlord-APPROVED application whose applicant is NOT fully
 // qualified (one applicant fact removed) must NOT open the listing gap — the unit must
 // never lease to an unqualified applicant, whether the landlord approved prematurely
-// or a bgcheck went STALE after approval. Each subtest approves the landlord, then
-// omits exactly one of the four applicant facts (a stale bgcheck is modeled by an
-// already-past validUntil, which the freshness predicate excludes → freshBgComplete 0).
+// or a bgcheck LAPSED after approval. Each subtest approves the landlord, then
+// omits exactly one of the four applicant facts (a lapsed bgcheck is modeled by a
+// recorded freshnessExpiry marker at its validUntil, which the freshness
+// predicate excludes → freshBgComplete 0).
 func TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEvenWhenApproved(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -556,10 +586,12 @@ func TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEve
 			}
 			f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 			if omit == "bgcheck-stale" {
-				// A completed bgcheck that has gone STALE after approval: validUntil is
-				// already past $now, so the freshness predicate excludes it (the
-				// post-approval-stale race the old form mishandled).
-				f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": "2026-06-17T23:55:00Z"})
+				// A completed bgcheck that has LAPSED after approval: its own timer
+				// fired and recorded the lapse at its validUntil, so the freshness
+				// predicate excludes it (the post-approval-stale race).
+				const lapsedValidUntil = farFutureValidUntil
+				f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": lapsedValidUntil})
+				recordBgcheckLapse(t, f, "bg1", lapsedValidUntil)
 			} else {
 				f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
 			}
@@ -686,8 +718,9 @@ func TestLeaseApplicationComplete_WinnerBgcheckGap_ReopensAfterOwnUnitLeases(t *
 	}
 	f := newLensFixture(t)
 	const now = "2026-06-18T00:00:00Z"
-	const staleValidUntil = "2020-01-01T00:00:00Z" // long before now → stale
-	app := bgFreshnessFixture(t, f, staleValidUntil)
+	const lapsedValidUntil = farFutureValidUntil
+	app := bgFreshnessFixture(t, f, lapsedValidUntil)
+	recordBgcheckLapse(t, f, "bg1", lapsedValidUntil)
 	f.vtx(t, "unit1", "unit")
 	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
 	f.edge(t, "appliesToUnit", "app", "unit1")
@@ -699,7 +732,7 @@ func TestLeaseApplicationComplete_WinnerBgcheckGap_ReopensAfterOwnUnitLeases(t *
 	v := rows[0].Values
 	require.Equal(t, "leased", v["unitStatus"], "this IS the applicant whose unit leased")
 	require.Equal(t, "approved", v["landlordDecision"], "this row is the winner, not a rival")
-	require.Equal(t, true, v["missing_bgcheck"], "a stale bgcheck reopens even on the winner's own already-leased unit")
+	require.Equal(t, true, v["missing_bgcheck"], "a lapsed bgcheck reopens even on the winner's own already-leased unit")
 	require.Equal(t, true, v["violating"], "the reopened bgcheck gap must still be violating so Weaver re-dispatches")
 }
 
@@ -1001,42 +1034,149 @@ func TestLeaseApplicationComplete_FailedPayment(t *testing.T) {
 	require.Equal(t, true, v["violating"], "missing_payment alone keeps the application violating")
 }
 
-// TestLeaseApplicationComplete_StaleBgcheck (freshness predicate case b — the
-// core of the refinement). A completed bgcheck whose validUntil is AT/BEFORE $now
-// no longer counts: missing_bgcheck RE-OPENS to true whenever the row is
-// (re)evaluated (a stale background check is a missing background check). The
-// eager auto-reopen-at-expiry via a §10.2 freshUntil column is exercised by the
-// lease-convergence e2e; here we prove the predicate alone re-opens the gap at the injected $now.
-func TestLeaseApplicationComplete_StaleBgcheck(t *testing.T) {
+// TestLeaseApplicationComplete_LapsedBgcheck_RecordedMarkerReopensGap (freshness
+// predicate case b). A completed bgcheck whose own timer has fired — the
+// backgroundCheckFreshness marker records an instant at or after its validUntil —
+// no longer counts: missing_bgcheck RE-OPENS whenever the row is (re)evaluated (a
+// lapsed background check is a missing background check).
+//
+// The deadline is deliberately in the FAR FUTURE, which is what makes this vector
+// discriminating: under the clock-reading form the check would still be counted
+// fresh, and only the recorded lapse closes it out. A past deadline here would
+// pass under either form and pin nothing.
+func TestLeaseApplicationComplete_LapsedBgcheck_RecordedMarkerReopensGap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newLensFixture(t)
-	const now = "2026-06-18T00:00:00Z"
-	const validUntil = "2026-06-17T23:55:00Z" // 5 minutes BEFORE now → stale
+	const validUntil = farFutureValidUntil
 	app := bgFreshnessFixture(t, f, validUntil)
+	recordBgcheckLapse(t, f, "bg1", validUntil)
 
-	rows := f.projectAt(t, app, now)
+	rows := f.project(t, app)
 	require.Len(t, rows, 1)
 	v := rows[0].Values
-	require.Equal(t, true, v["missing_bgcheck"], "stale bgcheck (validUntil <= now) → gap RE-OPENS")
-	require.Equal(t, false, v["missing_payment"], "payment unaffected by bgcheck staleness")
-	require.Equal(t, true, v["violating"], "re-opened bgcheck gap → violating again")
+	require.Equal(t, true, v["missing_bgcheck"], "a recorded lapse at the deadline -> gap RE-OPENS")
+	require.Equal(t, false, v["missing_payment"], "payment carries no freshness window")
+	require.Equal(t, true, v["violating"], "re-opened bgcheck gap -> violating again")
 }
 
-// TestLeaseApplicationComplete_StaleBgcheck_BoundaryEqualsNow pins the boundary:
-// validUntil EXACTLY equal to $now is stale (the cypher's strict `>` excludes the
-// equal instant), so the gap is open.
-func TestLeaseApplicationComplete_StaleBgcheck_BoundaryEqualsNow(t *testing.T) {
+// TestLeaseApplicationComplete_UnlapsedBgcheck_ReadsFreshWithoutAClock is the
+// POSITIVE vector for the negation's polarity, and it is the one that would go
+// red if the comparison were written without NOT. The deadline is in the past
+// relative to any wall clock the suite ever runs at, and NO timer has recorded a
+// lapse against it — compareAny answers false on the nil marker, the negation
+// counts the check, and the gap stays closed. A never-lapsed instance reading
+// FRESH is the required default; without this vector the lapse test above passes
+// for a predicate that counts nothing.
+func TestLeaseApplicationComplete_UnlapsedBgcheck_ReadsFreshWithoutAClock(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newLensFixture(t)
-	const now = "2026-06-18T00:00:00Z"
-	app := bgFreshnessFixture(t, f, now) // validUntil == now
+	app := bgFreshnessFixture(t, f, "2020-06-01T00:00:00Z")
 
-	v := f.projectAt(t, app, now)[0].Values
-	require.Equal(t, true, v["missing_bgcheck"], "validUntil == now is NOT fresh (strict > boundary)")
+	v := f.project(t, app)[0].Values
+	require.Equal(t, false, v["missing_bgcheck"],
+		"no recorded lapse -> the check counts, however long ago its validUntil passed")
+	require.Equal(t, false, v["violating"], "every gap closed -> not violating")
+}
+
+// TestLeaseApplicationComplete_LapsedBgcheck_BoundaryEquals pins the boundary the
+// `>=` chooses: a marker recorded EXACTLY at validUntil is a lapse (the timer
+// fired for that deadline, and it is that firing the marker records), so the gap
+// opens. The strictly-earlier marker in the re-arm test is the other side of it.
+func TestLeaseApplicationComplete_LapsedBgcheck_BoundaryEquals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const validUntil = farFutureValidUntil
+	app := bgFreshnessFixture(t, f, validUntil)
+	recordBgcheckLapse(t, f, "bg1", validUntil)
+
+	v := f.project(t, app)[0].Values
+	require.Equal(t, true, v["missing_bgcheck"], "marker == validUntil IS a lapse (>= boundary)")
+}
+
+// TestLeaseApplicationComplete_ReArmedBgcheck_MarkerBehindDeadlineIsFresh is the
+// RE-ARM vector, and it is the argument for comparing against the deadline
+// instead of testing the marker's presence. The marker is PERMANENT — nothing
+// clears it — so a re-checked instance whose new validUntil sits past the
+// recorded instant must read fresh again with NO clearing write anywhere. A
+// presence test would strand it lapsed forever.
+func TestLeaseApplicationComplete_ReArmedBgcheck_MarkerBehindDeadlineIsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	app := bgFreshnessFixture(t, f, farFutureValidUntil)
+	recordBgcheckLapse(t, f, "bg1", "2026-06-18T00:00:00Z") // the PRIOR window's fire
+
+	v := f.project(t, app)[0].Values
+	require.Equal(t, false, v["missing_bgcheck"],
+		"a recorded lapse the current deadline has outrun is not a lapse of THIS window")
+}
+
+// TestLeaseApplicationComplete_SiblingTargetLapseIsNotThisOne is the ISOLATION
+// vector. The marker is one aspect shared by every target that fires on the
+// entity, keyed per target in byTarget for exactly this reason: another target's
+// recorded fire — even one well past this deadline — says nothing about the
+// background check's own window, and reading the marker's presence (or its
+// entity-wide expiredAt maximum) instead of this target's own entry would close
+// the check out on someone else's timer.
+func TestLeaseApplicationComplete_SiblingTargetLapseIsNotThisOne(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	app := bgFreshnessFixture(t, f, farFutureValidUntil)
+	recordSiblingLapse(t, f, "bg1", "leaseExpiry", "2100-01-01T00:00:00Z")
+
+	v := f.project(t, app)[0].Values
+	require.Equal(t, false, v["missing_bgcheck"],
+		"another target's fire is not this target's lapse (byTarget is keyed per target)")
+}
+
+// TestLeaseApplicationComplete_NewInstanceReadsFreshBesideALapsedOne is the
+// re-dispatch shape the live loop actually produces: Weaver re-opens the gap, a
+// FRESH instance is minted, and the lapsed one is never touched again (its marker
+// is permanent). The count is per instance, so the new one closes the gap while
+// the old one keeps its recorded lapse.
+func TestLeaseApplicationComplete_NewInstanceReadsFreshBesideALapsedOne(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const lapsedDeadline = "2099-01-01T00:00:00Z"
+	app := bgFreshnessFixture(t, f, lapsedDeadline)
+	recordBgcheckLapse(t, f, "bg1", lapsedDeadline)
+	f.vtxWithClass(t, "bg2", "service", "service.backgroundCheck.instance")
+	f.aspect(t, "bg2", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-18T00:00:00Z", "validUntil": "2100-01-01T00:00:00Z"})
+	f.edge(t, "providedTo", "bg2", "alice")
+
+	rows := f.project(t, app)
+	require.Len(t, rows, 1, "still one row per anchor across the two-instance fan-out")
+	require.Equal(t, false, rows[0].Values["missing_bgcheck"],
+		"the fresh re-check closes the gap while the lapsed instance keeps its marker")
+}
+
+// TestLeaseApplicationComplete_CompletedBgcheckWithNoValidUntil pins the explicit
+// (validUntil <> null) conjunct. Under the negation the engine's nil-false lands
+// on the FRESH side, so an outcome with no window at all would count forever
+// without that conjunct — the opposite of the shipped meaning, where a check with
+// no validUntil never satisfied `validUntil > $now`.
+func TestLeaseApplicationComplete_CompletedBgcheckWithNoValidUntil(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	app := bgFreshnessFixture(t, f, farFutureValidUntil)
+	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z"})
+
+	v := f.project(t, app)[0].Values
+	require.Equal(t, true, v["missing_bgcheck"],
+		"a completed outcome with no validUntil has no window to be current within")
 }
 
 // TestLeaseApplicationComplete_PaymentIgnoresValidUntil (freshness case c). A
@@ -1104,11 +1244,11 @@ func TestLeaseApplicationComplete_NoCompletedBgcheck(t *testing.T) {
 // guard for the FR58 double-act path the freshness design must NOT reintroduce.
 // The applicant has a COMPLETED payment instance and NO bgcheck instance at all —
 // the real transient convergence window (payment's instanceOp commits + reprojects
-// before bgcheck's). freshUntil is a max() fold over the single no-WHERE providedTo
-// fan, so with no bgcheck every fresh-bgcheck CASE is null and freshUntil folds to
-// null WITHOUT dropping the anchor — the payment instance keeps the providedTo fan
+// before bgcheck's). The bgcheck predicate is a count fold over the single
+// no-WHERE providedTo fan, so with no bgcheck every CASE is null and the count is
+// zero WITHOUT dropping the anchor — the payment instance keeps the providedTo fan
 // non-empty and the leaseapp projects exactly one row. A design that instead read
-// freshUntil from a separate WHERE-filtered bgcheck match could drop the anchor here
+// the bgcheck from a separate WHERE-filtered match could drop the anchor here
 // (Weaver would read an entity deletion, clear the gap marks, and on row
 // re-appearance re-dispatch a SECOND bgcheck Loom instance — a second external
 // call). One row, missing_bgcheck true, missing_payment false.
@@ -1134,47 +1274,16 @@ func TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop(t *testing.T) 
 	v := rows[0].Values
 	require.Equal(t, true, v["missing_bgcheck"], "no bgcheck instance → gap open")
 	require.Equal(t, false, v["missing_payment"], "completed payment → gap closed")
-	// With no bgcheck instance the freshUntil max() folds over a fan that carries
-	// only the payment → every fresh-bgcheck CASE is null → freshUntil null (no timer
-	// for Weaver to arm), and the payment keeps the anchor's providedTo fan non-empty
-	// so the row never drops.
-	require.Nil(t, v["freshUntil"], "no fresh bgcheck → freshUntil is null (anchor preserved, no @at armed)")
 }
 
-// TestLeaseApplicationComplete_FreshUntilProjected pins the eager-freshness column
-// (§10.2): a completed FRESH bgcheck projects its validUntil as the scalar
-// freshUntil so Weaver's temporal lane schedules an @at at that instant. The
-// column is the bgcheck outcome's validUntil verbatim, projected once per anchor.
-func TestLeaseApplicationComplete_FreshUntilProjected(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	f := newLensFixture(t)
-	const now = "2026-06-18T00:00:00Z"
-	const validUntil = "2026-06-18T00:05:00Z" // fresh: 5m after now
-	app := bgFreshnessFixture(t, f, validUntil)
-
-	rows := f.projectAt(t, app, now)
-	require.Len(t, rows, 1, "exactly one row per anchor (bgcheck+payment fan-out, freshUntil aggregated via max)")
-	v := rows[0].Values
-	require.Equal(t, validUntil, v["freshUntil"],
-		"a fresh completed bgcheck projects its validUntil as the scalar freshUntil column")
-	require.Equal(t, false, v["missing_bgcheck"], "fresh bgcheck → gap closed")
-	// freshUntil is a string scalar (not a list) so Weaver's scheduleFreshness
-	// parses it as RFC3339 and arms the @at.
-	_, isString := v["freshUntil"].(string)
-	require.True(t, isString, "freshUntil must be a scalar string, not a list")
-}
-
-// TestLeaseApplicationComplete_MultipleFreshBgchecks is the regression guard for
-// the row-collision bug: providedTo is on the IDENTITY, not the application, so an
-// applicant can accumulate >1 completed-fresh bgcheck (multiple applications on one
-// identity, or freshness re-dispatches). The old freshUntil came from a SEPARATE,
-// unaggregated bgcheck OPTIONAL MATCH that expanded one row per fresh bgcheck → >1
-// row per anchor → guardOutputKeyCollision tripped (lens errors, goes yellow). The
-// fix folds freshUntil with max() into the SAME aggregation as the counts, so the
-// anchor stays one row and freshUntil is the LATEST validUntil (the @at re-open
-// timer must not fire while a later-expiring bgcheck still counts).
+// TestLeaseApplicationComplete_MultipleFreshBgchecks is the row-collision guard:
+// providedTo is on the IDENTITY, not the application, so an applicant can
+// accumulate >1 completed-fresh bgcheck (multiple applications on one identity, or
+// freshness re-dispatches). Every bgcheck fact this lens derives is folded into the
+// SAME aggregation over the single no-WHERE providedTo fan, so the anchor stays one
+// row however many instances hang off the identity; a separate, unaggregated
+// bgcheck match would expand one row per instance and trip
+// guardOutputKeyCollision (the lens errors and goes yellow).
 func TestLeaseApplicationComplete_MultipleFreshBgchecks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -1204,37 +1313,14 @@ func TestLeaseApplicationComplete_MultipleFreshBgchecks(t *testing.T) {
 	rows := f.projectAt(t, "app", now)
 	require.Len(t, rows, 1, "two fresh bgchecks on one identity must still project ONE row (no guardOutputKeyCollision)")
 	v := rows[0].Values
-	require.Equal(t, later, v["freshUntil"],
-		"freshUntil must be the LATEST validUntil among fresh bgchecks (max), so the @at re-open timer waits for the last one")
 	require.Equal(t, false, v["missing_bgcheck"], "a fresh bgcheck counts → gap closed")
 	require.Equal(t, false, v["violating"], "all gaps closed → not violating")
 }
 
-// TestLeaseApplicationComplete_FreshUntilNullWhenStale: a STALE bgcheck (its
-// validUntil already past $now) fails the fresh-completed CASE inside the
-// freshUntil max(), so it folds to null (Weaver clears any standing @at — there is
-// no future deadline to arm) and the gap re-opens. One row, anchor preserved.
-func TestLeaseApplicationComplete_FreshUntilNullWhenStale(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	f := newLensFixture(t)
-	const now = "2026-06-18T00:00:00Z"
-	const validUntil = "2026-06-17T23:55:00Z" // stale: 5m before now
-	app := bgFreshnessFixture(t, f, validUntil)
-
-	rows := f.projectAt(t, app, now)
-	require.Len(t, rows, 1)
-	v := rows[0].Values
-	require.Nil(t, v["freshUntil"], "a stale bgcheck is filtered → freshUntil null (no @at to arm)")
-	require.Equal(t, true, v["missing_bgcheck"], "stale bgcheck → gap re-opens")
-}
-
-// TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding: with all gaps open
-// (no PII, no bgcheck, no payment, no signature) freshUntil is null and the
-// anchor still projects exactly one row — the eager column never drops the
-// fresh-application row.
-func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
+// TestLeaseApplicationComplete_AllGapsOpenProjectsOneRow: with all gaps open (no
+// PII, no bgcheck, no payment, no signature) the anchor still projects exactly one
+// row — a brand-new application is never dropped by the freshness derivation.
+func TestLeaseApplicationComplete_AllGapsOpenProjectsOneRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -1248,7 +1334,6 @@ func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
 	rows := f.project(t, "app")
 	require.Len(t, rows, 1, "a fresh all-gaps-open application projects exactly one row")
 	v := rows[0].Values
-	require.Nil(t, v["freshUntil"], "no completed bgcheck → freshUntil null")
 	require.Equal(t, true, v["violating"])
 	require.Equal(t, false, v["missing_bgcheck"], "missing_bgcheck requires onboarding (ssnVal <> null) first — not yet applicable before PII is recorded")
 }

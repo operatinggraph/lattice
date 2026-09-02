@@ -77,15 +77,16 @@ const (
 // ruleengine/full's TestAnchorHopIndex_WithScope, which does not need a lens to
 // be written badly in order to cover them.
 var corpusAnchorIndexVerdicts = map[string]string{
-	"appointmentReminders":    hopIndexed,
-	"augurDispatchPending":    hopIndexed,
-	"cafeStaleTabSettlement":  hopIndexed,
-	"cafeTabSettlement":       hopIndexed,
-	"capability":              hopIndexed,
-	"capabilityAuthorPending": hopIndexed,
-	"capabilityEphemeral":     hopIndexed,
-	"capabilityRead":          hopIndexed,
-	"capabilityRoles":         hopIndexed,
+	"appointmentReminders":     hopIndexed,
+	"augurDispatchPending":     hopIndexed,
+	"backgroundCheckFreshness": hopIndexed,
+	"cafeStaleTabSettlement":   hopIndexed,
+	"cafeTabSettlement":        hopIndexed,
+	"capability":               hopIndexed,
+	"capabilityAuthorPending":  hopIndexed,
+	"capabilityEphemeral":      hopIndexed,
+	"capabilityRead":           hopIndexed,
+	"capabilityRoles":          hopIndexed,
 	// The auth plane's `cap.svc.<actor>` producer, and the one anchored lens the
 	// pipeline acts on across a ranged hop: both of its `containedIn*0..` walks
 	// are indexed, so an event derives the affected anchors instead of

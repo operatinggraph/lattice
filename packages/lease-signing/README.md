@@ -149,37 +149,45 @@ re-open → re-dispatch → re-converge chain across multiple freshness cycles).
   `validUntil` on **every** outcome; the value on a payment outcome is harmless and
   unused — the freshness rule lives in the lens cypher.
 - The lens applies freshness to **bgcheck only**:
-  `missing_bgcheck = NOT(a completed bgcheck with validUntil > $now)`. A **stale**
-  bgcheck (validUntil ≤ `$now`) stops counting and the gap **re-opens** whenever the
-  row is (re)evaluated — a stale background check IS a missing background check.
-  **`missing_payment` is ever-completed** (a completed payment counts forever; its
-  validUntil is ignored).
+  `missing_bgcheck = NOT(a completed bgcheck whose window has not been recorded as
+  lapsed)`. The lapse is a **fact on the check**, not a clock reading — the
+  `freshnessExpiry` marker's `byTarget.backgroundCheckFreshness` entry, written by
+  `MarkExpired` when that target's timer fires — so the predicate is
+  `validUntil <> null AND NOT (marker >= validUntil)`. A **lapsed** bgcheck stops
+  counting and the gap **re-opens** whenever the row is (re)evaluated: a stale
+  background check IS a missing background check. **`missing_payment` is
+  ever-completed** (a completed payment counts forever; its validUntil is ignored).
+- The **negation** is what makes an unmarked check read fresh, and it is the opposite
+  polarity from a gap test. `compareAny` answers false when either operand is nil, so
+  a check no timer has fired on evaluates `null >= validUntil` = false and the
+  negation counts it. The explicit `validUntil <> null` conjunct is the other half of
+  that same nil-false: an outcome with no window at all would otherwise read
+  permanently fresh.
 - The freshness test lives **inside the count `CASE`** on the single
   `OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)` fan-out — **one** providedTo
   match, **no** filtering `WHERE`. It binds every service neighbor and discriminates
   family + freshness inside the `CASE`, so a fully-filtered optional can never drop
-  the anchor row. `$now` is the projection-supplied param (`executeFullForActor`
-  sets `params["now"] = time.Now().UTC().Format(time.RFC3339)`); the `>` on
-  canonical-UTC RFC3339 strings is lexicographic = chronological.
+  the anchor row. The `>=` on canonical-UTC RFC3339 strings is lexicographic =
+  chronological.
 
-**Eager auto-reopen-at-expiry — the §10.2 `freshUntil` column.**
-The lens projects a single scalar `freshUntil` per anchor (the completed, still-fresh
-bgcheck's `validUntil`). Weaver's temporal lane reads it (`freshUntilColumn`), schedules
-an `@at` one-shot at that instant, and converts the firing into a `MarkExpired` op — so
-`missing_bgcheck` re-opens the moment freshness lapses (eagerly), not waiting for an
-incidental CDC touch. `freshUntil` is a **`max()` aggregator on the same single no-`WHERE`
-`providedTo` fan** that drives the `missing_*` counts — `max(validUntil)` over the
-completed-fresh bgcheck `CASE`, folded inside the aggregation `WITH`. Because it is
-aggregated (not a separate match), an applicant with N completed-fresh bgchecks
-(`providedTo` is on the identity, not the application — multiple applications on one
-identity, or accumulated freshness re-dispatches) still yields **exactly one row**, never
-N (`guardOutputKeyCollision` stays satisfied). When no fresh bgcheck exists every `CASE`
-is null and `max()` folds to null, so `freshUntil` projects as a genuine null (Weaver
-clears any standing `@at` — no deadline to arm) and the anchor never drops. Picking the
-**latest** (`max`, not `min`/first) is required: the `@at` re-open timer must not fire
-while a later-expiring fresh bgcheck still counts toward `missing_bgcheck`. `max()` over
-canonical-UTC RFC3339 strings is lexicographic = chronological
-(`internal/refractor/ruleengine/full/executor.go` `reduceExtreme` → `compareAny`).
+**Eager auto-reopen-at-expiry — the `backgroundCheckFreshness` target.**
+The timer lives on the **background-check instance**, because a fired `@at` marks the
+row's own anchor and a check's freshness window belongs to the check. `backgroundCheckFreshness`
+is a service-anchored convergence lens + target that projects one row per completed
+check carrying `freshUntil = validUntil` while no lapse is recorded and `null` once one
+is; the target declares **no gaps** and dispatches nothing — Weaver's row handler runs
+the freshness bookkeeping leg on every delivery, before it reads any gap column, so an
+empty playbook still gets a timer. When the `@at` fires, Weaver converts the firing into
+`MarkExpired` on the instance, the marker records the instant under that target's key,
+and — because the instance is a `providedTo` neighbour of the application —
+`leaseApplicationComplete` reprojects and `missing_bgcheck` re-opens eagerly, not waiting
+for an incidental CDC touch. `null`-once-lapsed is load-bearing: a past deadline
+projected verbatim would re-arm an overdue `@at` on every delivery.
+
+The same recorded fact is read by the two Postgres read models (through the shared
+`readinessWithItems` fragment) and by `renewalComplete`'s `bgcheckValidUntil` aggregate.
+None of those anchors could host the marker — they all reach the check across a
+`providedTo` hop — which is exactly why the check hosts it itself.
 
 The `bgcheckFreshnessWindow` is a **compile-time** constant baked into the replyOp DDL
 script at package-init time (the value is interpolated into `leaseServiceReplyDDLScript`
@@ -190,8 +198,9 @@ it can watch lapse in bounded wall-clock.
 
 The `TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop` rule-engine test guards
 that the lens never drops the anchor in the payment-before-bgcheck window;
-`TestLeaseApplicationComplete_FreshUntil*` pin the `freshUntil` projection (the value when
-fresh, null when stale/absent).
+`TestBackgroundCheckFreshness_*` pin the instance lens's arming behaviour (deadline
+projected when unlapsed, null once lapsed, re-armed when a later deadline outruns the
+recorded instant, and untouched by another target's fire).
 
 ## Scalar convergence columns through the actorAggregate projection
 

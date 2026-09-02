@@ -363,11 +363,11 @@ func TestLandlordLeaseApplicationsRead_ProjectsQualified(t *testing.T) {
 	require.Equal(t, false, unqualified["qualified"], "no ssn, no service instances -> not qualified")
 }
 
-// TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck — a STALE
-// completed background check (validUntil in the past) does not count toward
-// qualified, mirroring leaseApplicationCompleteSpec's missing_bgcheck freshness
-// predicate (the SAME `inst.outcome.data.validUntil > $now` term, shared via
-// readinessWithItems).
+// TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck — a LAPSED
+// completed background check (a marker recording that the backgroundCheckFreshness
+// timer fired at or after its validUntil) does not count toward qualified,
+// mirroring leaseApplicationCompleteSpec's missing_bgcheck freshness predicate
+// (the SAME recorded-lapse term, shared via readinessWithItems).
 func TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -376,7 +376,10 @@ func TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck(t *testing.
 	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
-	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2020-01-01T00:00:00Z", "validUntil": "2020-06-01T00:00:00Z"})
+	// A FUTURE deadline with a recorded lapse against it: only the recorded fact
+	// can close this check out, so the vector fails on any clock-reading form.
+	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2020-01-01T00:00:00Z", "validUntil": farFutureValidUntil})
+	recordBgcheckLapse(t, f, "bg1", farFutureValidUntil)
 	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "providedTo", "bg1", "alice")
@@ -384,7 +387,7 @@ func TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck(t *testing.
 
 	rows := f.projectLandlordRead(t)
 	require.Len(t, rows, 1)
-	require.Equal(t, false, rows[0].Values["qualified"], "a stale bgcheck must not count toward qualified")
+	require.Equal(t, false, rows[0].Values["qualified"], "a lapsed bgcheck must not count toward qualified")
 }
 
 // TestLandlordLeaseApplicationsRead_QualifiedWithRealVaultCiphertext seeds

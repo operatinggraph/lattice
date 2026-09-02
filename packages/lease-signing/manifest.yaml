@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.16
+version: 0.31.17
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -35,6 +35,10 @@ description: |
   underwritingRecord custody as .profile) copying those three aspects as they
   stood at that moment — the fair-housing preservation record of what the
   landlord actually saw, since SetApplicantProfile stays freely re-submittable.
+  A completed background check's freshness window gets its own timer on the
+  check itself, via the service-anchored backgroundCheckFreshness lens and its
+  gap-less target: the fired timer records the lapse on the instance, and every
+  view of bgcheck freshness reads that recorded fact instead of a clock.
   Also the lease-renewal chain: a create-only .tenancy aspect stamped by
   DecideLeaseApplication's first approve, the renewal vertex type + its five
   ops (OpenRenewal / SetRenewalTerms / VerifyGuarantor / SignRenewal /
@@ -82,6 +86,10 @@ declares:
       bucket: weaver-targets
       engine: full
     - canonicalName: applicantOnboarding
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: backgroundCheckFreshness
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -177,6 +185,8 @@ declares:
       lensRef: leaseApplicationComplete
     - targetId: applicantOnboarding
       lensRef: applicantOnboarding
+    - targetId: backgroundCheckFreshness
+      lensRef: backgroundCheckFreshness
     - targetId: leaseExpiry
       lensRef: leaseExpiry
     - targetId: renewalComplete

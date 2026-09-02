@@ -195,9 +195,18 @@ RETURN
 //     (null = False is ALSO False, not vacuously true), permanently stranding
 //     missing_renewalComplete regardless of bgcheck/terms/signature.
 //   - bgcheckValidUntil is the freshest COMPLETED bgcheck's validUntil,
-//     null-when-stale (the SAME freshness posture leaseApplicationCompleteSpec
+//     null-when-lapsed (the SAME freshness posture leaseApplicationCompleteSpec
 //     uses on its own providedTo fan, re-derived here since this lens walks a
-//     different anchor and cannot cross-reference that lens's row).
+//     different anchor and cannot cross-reference that lens's row). "Lapsed"
+//     is a recorded fact, not a clock reading: the backgroundCheckFreshness
+//     target arms the instance's own @at and its fired MarkExpired writes the
+//     instant into the instance's freshnessExpiry marker under that target's
+//     key, so the CASE compares two stored values. compareAny answers false
+//     when either side is nil, so an instance no timer has fired on reads
+//     NOT(false) = fresh — the default a never-lapsed check needs. An instance
+//     with no validUntil folds to null through the THEN branch either way, so
+//     this aggregate needs no explicit null guard (the count in
+//     readinessWithItems does, and carries one).
 //   - freshUntil re-arms ONLY while the cycle is open (a completed/cancelled
 //     cycle's bgcheck lapsing later must not resurrect a closed row's timer).
 //   - guarantorVerifiedAt / termsSetAt / signedAt are the renewal's own
@@ -231,7 +240,7 @@ WITH
   rn.terms.data.setAt                     AS termsSetAt,
   rn.terms.data.termMonths                AS termsTermMonths,
   rn.renewalSignature.data.signedAt       AS signedAt,
-  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil
+  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND NOT (inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness >= inst.outcome.data.validUntil) THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil
 RETURN
   entityKey AS actorKey,
   entityKey,

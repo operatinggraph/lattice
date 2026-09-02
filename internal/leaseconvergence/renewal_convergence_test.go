@@ -237,7 +237,11 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
-	h := newHarness(t, withExtraLenses("leaseExpiry", "renewalComplete"))
+	// backgroundCheckFreshness rides along because it is what RECORDS a bgcheck's
+	// lapse: renewalComplete's bgcheckValidUntil reads that recorded fact, so
+	// without this target's timer arming on the instance no check ever goes stale
+	// and refreshBgcheck never reaches tenant A's plan.
+	h := newHarness(t, withExtraLenses("leaseExpiry", "renewalComplete", "backgroundCheckFreshness"))
 
 	// --- Tenant A: guarantor, bgcheck allowed to go stale ---
 	appKeyA, applicantA, unitA := h.seedRenewableApplication("A")
@@ -253,6 +257,11 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	require.Equalf(t, processor.ReplyStatusAccepted, profileReply.Status, "SetApplicantProfile(A): %+v", profileReply.Error)
 
 	appIDA := appKeyA[len("vtx.leaseapp."):]
+	applicantIDA := applicantA[len("vtx.identity."):]
+	// The ORIGINAL onboarding check, named before any re-dispatch can mint a
+	// second one — it is THIS instance whose lapse the wait below is about.
+	originalBgcheckA := h.bgcheckHandle(applicantIDA)
+	require.NotEmptyf(t, originalBgcheckA, "tenant A's onboarding bgcheck instance must exist before the renewal legs run")
 	renewalKeyA := h.findRenewalKey(appIDA, 30*time.Second)
 	require.NotEmpty(t, renewalKeyA, "Target A must open a renewal cycle for tenant A (renewalOpensAt is already past)")
 	renewalIDA := renewalKeyA[len("vtx.renewal."):]
@@ -267,9 +276,15 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	preSignFreshUntilA, _ := preSignRowA["freshUntil"].(string)
 
 	// Let tenant A's ORIGINAL onboarding bgcheck (25s window) lapse before doing
-	// anything else on the renewal — forcing refreshBgcheck onto the plan by the
-	// time signRenewal's remainder-pre is checked.
-	time.Sleep(30 * time.Second)
+	// anything else on the renewal. The lapse is a RECORDED fact now, not a clock
+	// reading, so sleeping past the window proves nothing: wait for that
+	// instance's own backgroundCheckFreshness row to go null, which happens only
+	// once its @at fired and MarkExpired committed the lapse onto it.
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("backgroundCheckFreshness", originalBgcheckA)
+		return row != nil && row["freshUntil"] == nil
+	}, 90*time.Second, 300*time.Millisecond,
+		"tenant A's ORIGINAL onboarding bgcheck must be RECORDED lapsed before the renewal legs run")
 
 	// Drive the landlord legs directly (the ephemeral task-grant UI path is out of
 	// scope for this platform-mechanics proof; the operator-model direct-op path
@@ -318,7 +333,6 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	// (Weaver's planner may refresh it before any poll observes the null
 	// window, since the refresh is dispatched autonomously the moment the
 	// goal search finds bgcheckValidUntil unmet, not on this test's schedule).
-	applicantIDA := applicantA[len("vtx.identity."):]
 	require.Eventuallyf(t, func() bool {
 		return h.countBgcheckOutcomes(applicantIDA) >= 2
 	}, 30*time.Second, 300*time.Millisecond,

@@ -169,14 +169,14 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 //     its pair (Contract #8 §8.1). Seven ops carry both an operator scope=any
 //     grant and a consumer scope=self one; losing a self row would remove
 //     self-service while a count-only pin still matched.
-//   - Three of the six lenses are PROTECTED Postgres read models. A lens quietly
+//   - Three of the eight lenses are PROTECTED Postgres read models. A lens quietly
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 14; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 7; got != want {
+	if got, want := len(Package.Lenses), 8; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 23; got != want {
@@ -188,7 +188,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 4; got != want {
+	if got, want := len(Package.WeaverTargets), 5; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 4; got != want {
@@ -237,6 +237,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	}{
 		{"leaseApplicationComplete", "nats-kv", false},
 		{"applicantOnboarding", "nats-kv", false},
+		{"backgroundCheckFreshness", "nats-kv", false},
 		{"leaseApplicationsRead", "postgres", true},
 		{"landlordLeaseApplicationsRead", "postgres", true},
 		{"leaseExpiry", "nats-kv", false},
