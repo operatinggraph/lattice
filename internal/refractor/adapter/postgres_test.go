@@ -591,6 +591,51 @@ func TestBuildListKeysSQL_Guarded_ExcludesDeleted(t *testing.T) {
 	)
 }
 
+// ── buildGetRowSQL unit tests (no real Postgres needed) ──────────────────────
+
+func TestBuildGetRowSQL_SingleKey_Hard(t *testing.T) {
+	a := newTestAdapterMode(t, "occupancy_view", []string{"agreement_id"}, DeleteModeHard)
+	assert.Equal(t, `SELECT * FROM "occupancy_view" WHERE "agreement_id" = $1`, a.buildGetRowSQL())
+}
+
+func TestBuildGetRowSQL_CompositeKey_Hard(t *testing.T) {
+	a := newTestAdapterMode(t, "read_landlord_lease_applications", []string{"app_id", "landlord_id"}, DeleteModeHard)
+	assert.Equal(t,
+		`SELECT * FROM "read_landlord_lease_applications" WHERE "app_id" = $1 AND "landlord_id" = $2`,
+		a.buildGetRowSQL(),
+	)
+}
+
+func TestBuildGetRowSQL_Soft_ExcludesDeleted(t *testing.T) {
+	a := newTestAdapterMode(t, "occupancy_view", []string{"agreement_id"}, DeleteModeSoft)
+	assert.Equal(t,
+		`SELECT * FROM "occupancy_view" WHERE "agreement_id" = $1 AND NOT "is_deleted"`,
+		a.buildGetRowSQL(),
+	)
+}
+
+// TestBuildGetRowSQL_Guarded_ExcludesDeleted proves a guarded (protected)
+// adapter's GetRow excludes a tombstoned row even though its declared
+// deleteMode is the default DeleteModeHard — the guarded Delete path always
+// soft-tombstones (buildDeleteSQL), so "present" must be derived from
+// a.guarded, not from deleteMode alone, exactly as buildListKeysSQL already
+// derives "live" for ListKeys.
+func TestBuildGetRowSQL_Guarded_ExcludesDeleted(t *testing.T) {
+	a := newTestAdapter(t, "read_lease_applications", []string{"app_id"})
+	a.SetGuarded(true)
+	assert.Equal(t,
+		`SELECT * FROM "read_lease_applications" WHERE "app_id" = $1 AND NOT "is_deleted"`,
+		a.buildGetRowSQL(),
+	)
+}
+
+func TestBuildGetRowSQL_MissingKeyField(t *testing.T) {
+	a := newTestAdapter(t, "t", []string{"id", "tenant"})
+	_, _, err := a.GetRow(context.Background(), map[string]any{"id": 1}) // "tenant" absent
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant")
+}
+
 func TestPostgresAdapter_ListKeys_CompositeKey_Integration(t *testing.T) {
 	dsn := skipIfNoPostgres(t)
 
@@ -644,6 +689,198 @@ func TestPostgresAdapter_ListKeys_Soft_ExcludesDeleted_Integration(t *testing.T)
 	got, err := a.ListKeys(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, []map[string]any{{"id": "keep"}}, got)
+}
+
+// ── GetRow integration tests (require real Postgres) ─────────────────────────
+
+func TestPostgresAdapter_GetRow_AbsentKey_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_absent_test (id TEXT PRIMARY KEY, name TEXT)`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_absent_test", []string{"id"}, 5*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "nope"})
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, row)
+}
+
+func TestPostgresAdapter_GetRow_RoundTrip_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_roundtrip_test (id TEXT PRIMARY KEY, name TEXT, count BIGINT)`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_roundtrip_test", []string{"id"}, 5*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+
+	require.NoError(t, a.Upsert(ctx,
+		map[string]any{"id": "abc"},
+		map[string]any{"name": "Acme", "count": int64(3)},
+		0))
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "abc"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "Acme", row["name"])
+	assert.Equal(t, int64(3), row["count"])
+	_, hasID := row["id"]
+	assert.False(t, hasID, "GetRow must not echo the key column back into the row")
+
+	// A second Upsert changes the stored value; GetRow must reflect it.
+	require.NoError(t, a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme Corp", "count": int64(4)}, 0))
+	row, ok, err = a.GetRow(ctx, map[string]any{"id": "abc"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "Acme Corp", row["name"])
+	assert.Equal(t, int64(4), row["count"])
+}
+
+func TestPostgresAdapter_GetRow_CompositeKey_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_composite_test (app_id TEXT, landlord_id TEXT, name TEXT, PRIMARY KEY (app_id, landlord_id))`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_composite_test", []string{"app_id", "landlord_id"}, 5*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+
+	require.NoError(t, a.Upsert(ctx, map[string]any{"app_id": "app1", "landlord_id": "lord1"}, map[string]any{"name": "A"}, 0))
+	require.NoError(t, a.Upsert(ctx, map[string]any{"app_id": "app2", "landlord_id": "lord2"}, map[string]any{"name": "B"}, 0))
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"app_id": "app1", "landlord_id": "lord1"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "A", row["name"])
+
+	row2, ok, err := a.GetRow(ctx, map[string]any{"app_id": "app2", "landlord_id": "lord2"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "B", row2["name"], "a composite key must not read back its sibling's row")
+}
+
+func TestPostgresAdapter_GetRow_SoftDeletedRowReadsAsAbsent_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_soft_test (id TEXT PRIMARY KEY, name TEXT, is_deleted BOOLEAN NOT NULL DEFAULT false, deleted_at TIMESTAMPTZ)`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_soft_test", []string{"id"}, 5*time.Second, DeleteModeSoft)
+	require.NoError(t, err)
+
+	require.NoError(t, a.Upsert(ctx, map[string]any{"id": "gone"}, map[string]any{"name": "G"}, 0))
+	require.NoError(t, a.Delete(ctx, map[string]any{"id": "gone"}, 0))
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "gone"})
+	require.NoError(t, err)
+	require.False(t, ok, "a soft-delete tombstone must read as absent, not as a live row")
+	require.Nil(t, row)
+}
+
+// TestPostgresAdapter_GetRow_GuardedTombstoneReadsAsAbsent_Integration is the
+// divergence audit's own correctness requirement: a guarded (protected) lens's
+// Delete retains the row as a seq-guarded tombstone rather than removing it
+// (TestPostgresAdapter_GuardedDelete_PreventsStaleReplayResurrection), so
+// GetRow must derive "present" from is_deleted rather than from row existence,
+// or a retracted row would read back as still live.
+func TestPostgresAdapter_GetRow_GuardedTombstoneReadsAsAbsent_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_guarded_test (
+		id TEXT PRIMARY KEY, name TEXT,
+		projection_seq BIGINT NOT NULL DEFAULT 0,
+		is_deleted BOOLEAN NOT NULL DEFAULT false,
+		deleted_at TIMESTAMPTZ)`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_guarded_test", []string{"id"}, 5*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+	a.SetGuarded(true)
+
+	require.NoError(t, a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme"}, 10))
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "abc"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "Acme", row["name"])
+	_, hasSeq := row["projection_seq"]
+	assert.False(t, hasSeq, "GetRow must strip the platform projection_seq column")
+	_, hasDeleted := row["is_deleted"]
+	assert.False(t, hasDeleted, "GetRow must strip the platform is_deleted column")
+
+	require.NoError(t, a.Delete(ctx, map[string]any{"id": "abc"}, 20))
+
+	row, ok, err = a.GetRow(ctx, map[string]any{"id": "abc"})
+	require.NoError(t, err)
+	require.False(t, ok, "a guarded delete's soft tombstone must read as absent")
+	require.Nil(t, row)
+}
+
+// TestPostgresAdapter_GetRow_JSONBColumn_Integration pins the shape the
+// divergence audit's comparison depends on: a jsonb column must decode to the
+// same native Go shape (map[string]any / []any) coerceForPgx encodes on the
+// way in, not raw bytes or a JSON-text string, or every row carrying one would
+// read as permanently divergent against the engine's own in-memory value.
+func TestPostgresAdapter_GetRow_JSONBColumn_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Exec(ctx, `CREATE TEMP TABLE getrow_jsonb_test (id TEXT PRIMARY KEY, tags JSONB, meta JSONB)`)
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, "getrow_jsonb_test", []string{"id"}, 5*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+
+	require.NoError(t, a.Upsert(ctx,
+		map[string]any{"id": "row1"},
+		map[string]any{"tags": []any{"alpha", "beta"}, "meta": map[string]any{"source": "test", "version": float64(2)}},
+		0,
+	))
+
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "row1"})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	tags, ok := row["tags"].([]any)
+	require.True(t, ok, "tags must decode as []any, got %T", row["tags"])
+	assert.Equal(t, []any{"alpha", "beta"}, tags)
+
+	meta, ok := row["meta"].(map[string]any)
+	require.True(t, ok, "meta must decode as map[string]any, got %T", row["meta"])
+	assert.Equal(t, "test", meta["source"])
+	assert.Equal(t, float64(2), meta["version"])
 }
 
 func TestBuildDeleteSQL_MissingKeyField(t *testing.T) {

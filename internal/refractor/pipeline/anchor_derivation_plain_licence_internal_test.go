@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
@@ -207,6 +208,38 @@ func TestPlainDerivationLicence_Conjuncts(t *testing.T) {
 		licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
 		require.False(t, licensed)
 		require.Contains(t, refusal, "cannot read a row back")
+	})
+
+	t.Run("a Protected Postgres adapter is licensed", func(t *testing.T) {
+		// Swapped in the same way the negative case above does — AFTER
+		// enrolment, so the auditor conjunct still passes and only the
+		// RowReader check changes. leaseApplicationsRead
+		// (packages/lease-signing/lenses.go) activates through exactly this
+		// wrapper — Protected: true and plain (non-actorAggregate) — so its
+		// RowReader status comes from ProtectedAdapter.GetRow delegating to
+		// the inner *adapter.PostgresAdapter, not from a bare PostgresAdapter
+		// directly (adapter.ProtectedAdapter wraps by a named field, not
+		// embedding, so this is not implied by the base adapter's own
+		// GetRow and needs its own coverage).
+		//
+		// The pool is a syntactically-valid but unreachable DSN — this gate
+		// only type-asserts adapter.RowReader, never calls GetRow — so no
+		// live Postgres is needed.
+		f := licenceFixture(t, seedUnitsSpec)
+		pool, err := pgxpool.New(context.Background(), "host=fake user=test")
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+		base, err := adapter.NewPostgresAdapter(pool, "licence_pg_test", []string{"key"}, 0, adapter.DeleteModeHard)
+		require.NoError(t, err)
+		protected, err := adapter.NewProtectedAdapter(base, nil, nil)
+		require.NoError(t, err)
+		require.NoError(t, f.p.HotReloadInto(protected))
+		_, isReader := f.p.currentAdapter().(adapter.RowReader)
+		require.True(t, isReader, "adapter.ProtectedAdapter must satisfy adapter.RowReader")
+
+		licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
+		require.True(t, licensed, "refusal: %s", refusal)
+		require.Empty(t, refusal)
 	})
 
 	t.Run("a Secure Lens refuses", func(t *testing.T) {

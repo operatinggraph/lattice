@@ -575,3 +575,57 @@ func TestVerifyGrantTable_NoUniqueConstraint_Fails(t *testing.T) {
 	require.Error(t, err, "a grant table missing its ON CONFLICT arbiter index must fail closed")
 	assert.Contains(t, err.Error(), "unique index/constraint")
 }
+
+// TestPostgresAdapter_GetRow_BypassesRLS pins the finding
+// refractor-hub-walk-and-periodic-load-design.md §5.2 depends on: GetRow reads
+// through a.pool — the same connection Upsert/Delete already use, never a
+// per-actor RLS-scoped session — and Contract #6 §6.14's generated policy is
+// FOR SELECT only, so whether that connection sees a row it holds no grant for
+// is a property of the ROLE it connects as, not of GetRow's own SQL (rls.go:
+// "writes stay governed by table GRANTs + the trusted projector posture").
+//
+// docker-compose.yml's POSTGRES_USER creates the connecting role, and the
+// Postgres image always makes POSTGRES_USER a superuser, which bypasses row
+// security unconditionally regardless of FORCE ROW LEVEL SECURITY — the same
+// property rls_test.go's own integration tests rely on ("the dev/CI superuser
+// bypasses RLS", hence their SET LOCAL ROLE to a dedicated non-superuser
+// reader). This is proven by contrast: a role-scoped, actor-less reader sees
+// zero rows for a table with no grants at all, while GetRow — no role switch —
+// reads the row back over the same pool.
+func TestPostgresAdapter_GetRow_BypassesRLS(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	tbl := "rls_verify_getrow_" + sanitize(t.Name())
+	body := []ColumnDef{{Name: "status", Type: "text"}}
+	clean := func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) }
+	clean()
+	t.Cleanup(clean)
+
+	provisionProtected(t, pool, tbl, []string{"id"}, body)
+
+	role, visibleAs := rlsReaderHarness(t, pool)
+	_, err = pool.Exec(ctx, fmt.Sprintf(`GRANT SELECT ON "%s","actor_read_grants" TO %s`, tbl, role))
+	require.NoError(t, err)
+
+	a, err := NewPostgresAdapter(pool, tbl, []string{"id"}, 10*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+	a.SetGuarded(true)
+
+	require.NoError(t, a.Upsert(ctx, map[string]any{"id": "row1"}, map[string]any{"status": "submitted"}, 1))
+
+	// No actor_read_grants row names any anchor for this table at all — a
+	// role-scoped, RLS-subject reader must see nothing.
+	require.Equal(t, 0, visibleAs(tbl, "some-actor-with-no-grant"),
+		"sanity: an actor holding no grant must see nothing under RLS")
+
+	// GetRow runs on the writer's own pool — no SET LOCAL ROLE, no
+	// lattice.actor_id — and must see the row anyway.
+	row, ok, err := a.GetRow(ctx, map[string]any{"id": "row1"})
+	require.NoError(t, err)
+	require.True(t, ok, "the writer's own connection must read the row back — it is not an RLS subject")
+	assert.Equal(t, "submitted", row["status"])
+}

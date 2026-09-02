@@ -12,13 +12,14 @@ import (
 )
 
 // Compile-time check that PostgresAdapter satisfies Adapter, Truncater,
-// KeyLister, SeqGuarded, OutcomeUpserter and OutcomeDeleter.
+// KeyLister, SeqGuarded, OutcomeUpserter, OutcomeDeleter and RowReader.
 var _ Adapter = (*PostgresAdapter)(nil)
 var _ Truncater = (*PostgresAdapter)(nil)
 var _ KeyLister = (*PostgresAdapter)(nil)
 var _ SeqGuarded = (*PostgresAdapter)(nil)
 var _ OutcomeUpserter = (*PostgresAdapter)(nil)
 var _ OutcomeDeleter = (*PostgresAdapter)(nil)
+var _ RowReader = (*PostgresAdapter)(nil)
 
 // PostgresAdapter writes materialized rows to a Postgres table.
 // It uses a shared pgxpool.Pool (owned by PoolManager) so connection count
@@ -396,6 +397,131 @@ func (a *PostgresAdapter) ListKeys(ctx context.Context) ([]map[string]any, error
 		return nil, fmt.Errorf("postgres list keys: %w", err)
 	}
 	return out, nil
+}
+
+// buildGetRowSQL constructs the key-scoped SELECT for GetRow: every column of
+// the table (so a reader can never fall behind a writer's own column list —
+// there is no separate declared-columns record for GetRow to go stale
+// against), filtered to the one row a.keyOrder identifies, and to live rows
+// only under the exact condition buildListKeysSQL already uses for "currently
+// live": a soft tombstone (unguarded DeleteModeSoft, or a.guarded, which
+// always soft-tombstones on Delete regardless of the declared deleteMode)
+// must read as absent, the same posture ListKeys takes.
+func (a *PostgresAdapter) buildGetRowSQL() string {
+	clauses := make([]string, len(a.keyOrder))
+	for i, k := range a.keyOrder {
+		clauses[i] = fmt.Sprintf("%s = $%d", quoteIdent(k), i+1)
+	}
+	sqlStr := fmt.Sprintf(`SELECT * FROM "%s" WHERE %s`, a.table, strings.Join(clauses, " AND "))
+	if a.deleteMode == DeleteModeSoft || a.guarded {
+		sqlStr += ` AND NOT "is_deleted"`
+	}
+	return sqlStr
+}
+
+// getRowPlatformColumns are the columns GetRow strips from a returned row so
+// it can never disagree with EvalResult.Row — the freshly computed row the
+// divergence audit and Reproject's reconciliation both compare it against
+// (pipeline/audit.go's rowsComparable, reproject.go's canonicalJSON,
+// whose own volatileEnvelopeFields doc already states "projectionSeq is
+// already stripped by adapter.RowReader.GetRow" as this interface's cross-
+// adapter contract). No lens's compiled RETURN ever projects these three:
+// buildUpsertSQL filters them out of a guarded write on the way in, and on an
+// unguarded table they exist at all only under DeleteModeSoft, where they are
+// written solely by Delete's literal SET, never by a lens's own row.
+//
+// AuthzAnchorsColumn is deliberately NOT here: a Protected lens's compiled
+// query projects it like any other RETURN column
+// (lens.translatePostgresColumns), so it IS real row content EvalResult.Row
+// also carries (buildUpsertSQL never filters it out either) — stripping it
+// here would make every row of every protected lens read as permanently
+// divergent.
+var getRowPlatformColumns = map[string]struct{}{
+	ProjectionSeqColumn: {},
+	IsDeletedColumn:     {},
+	DeletedAtColumn:     {},
+}
+
+// GetRow reads back the row previously written at keys (adapter.RowReader),
+// mirroring NatsKVAdapter.GetRow. The key predicate is built the same way
+// buildUpsertSQL/buildDeleteSQL build theirs — from a.keyOrder — so this
+// method can never disagree with the writer about which columns identify a
+// row. Returns (nil, false, nil) when no row matches the key, OR when the
+// matching row is a soft-delete tombstone (buildGetRowSQL's AND NOT
+// is_deleted): both read as "nothing to compare against," the same posture
+// ListKeys already takes for "currently live," and the one
+// NatsKVAdapter.GetRow's own isDeleted check takes for its target.
+//
+// Every column is read back (SELECT *, scanned generically by name via
+// FieldDescriptions — the same pattern internal/gateway/read.go's
+// queryReadModel uses for its own actor-scoped reads) and decoded to its
+// native Go value by pgx's default codec: text/numeric/bool columns pass
+// through as their Go equivalents, and jsonb unmarshals to map[string]any /
+// []any — symmetric with coerceForPgx's write-side encoding of those same
+// shapes. Key columns and the three platform-owned columns
+// (getRowPlatformColumns) are dropped, so what remains is exactly
+// EvalResult.Row's shape: the lens's own non-key projected columns.
+//
+// The read runs over a.pool — the same connection Upsert/Delete already use,
+// not a per-actor RLS-scoped session. Contract #6 §6.14's generated policy is
+// FOR SELECT only and governs the actor-scoped read boundary (rls.go: "writes
+// stay governed by table GRANTs + the trusted projector posture"); in this
+// deployment the pool connects as the role docker-compose.yml's POSTGRES_USER
+// creates, which the Postgres image always makes a superuser, and a superuser
+// bypasses row security unconditionally regardless of FORCE ROW LEVEL
+// SECURITY (rls_test.go's own "the dev/CI superuser bypasses RLS" comment;
+// TestPostgresAdapter_GetRow_BypassesRLS pins it for this method specifically).
+// So on a protected table GetRow sees every row, not only the ones some actor
+// currently holds a grant for — the same posture ListKeys and the diff
+// retraction it feeds already rely on for the same reason.
+func (a *PostgresAdapter) GetRow(ctx context.Context, keys map[string]any) (map[string]any, bool, error) {
+	ctx, cancel := a.withTimeout(ctx)
+	defer cancel()
+
+	args := make([]any, len(a.keyOrder))
+	for i, k := range a.keyOrder {
+		v, ok := keys[k]
+		if !ok {
+			return nil, false, fmt.Errorf("postgres get row: key field %q absent from keys map", k)
+		}
+		args[i] = coerceForPgx(v)
+	}
+
+	rows, err := a.pool.Query(ctx, a.buildGetRowSQL(), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("postgres get row: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, false, fmt.Errorf("postgres get row: %w", err)
+		}
+		return nil, false, nil
+	}
+
+	fields := rows.FieldDescriptions()
+	vals, err := rows.Values()
+	if err != nil {
+		return nil, false, fmt.Errorf("postgres get row: %w", err)
+	}
+
+	keySet := make(map[string]struct{}, len(a.keyOrder))
+	for _, k := range a.keyOrder {
+		keySet[k] = struct{}{}
+	}
+
+	row := make(map[string]any, len(fields))
+	for i, f := range fields {
+		if _, isKey := keySet[f.Name]; isKey {
+			continue
+		}
+		if _, platform := getRowPlatformColumns[f.Name]; platform {
+			continue
+		}
+		row[f.Name] = vals[i]
+	}
+	return row, true, nil
 }
 
 // buildTruncateSQL constructs the truncate statement. The target table name is

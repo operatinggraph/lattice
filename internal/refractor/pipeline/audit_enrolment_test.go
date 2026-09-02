@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,31 @@ func (a notARowReader) Close() error                    { return a.inner.Close()
 // anchor.
 func TestAuditEnrolment_PositiveCase(t *testing.T) {
 	f := newAuditFixture(t, seedUnitsSpec, nil)
+	plan, refusal := enrolAudit(f.p, false)
+	require.Empty(t, refusal)
+	require.Equal(t, "unit", plan.AnchorLabel)
+}
+
+// TestAuditEnrolment_PostgresAdapterRowReader_Enrols is
+// TestAuditEnrolment_PositiveCase's Postgres twin: the same lens shape enrols
+// when its target is a plain (unguarded) *adapter.PostgresAdapter, not only
+// the NATS-KV adapter above — the RowReader conjunct this fixture would
+// otherwise refuse on (see "a target that cannot read a row back" below) now
+// passes for both adapter families
+// (refractor-hub-walk-and-periodic-load-design.md §5.2).
+//
+// The pool is built against a syntactically-valid but unreachable DSN:
+// pgxpool.New never dials until a query runs, and this gate only
+// type-asserts adapter.RowReader — it never calls GetRow — so no live
+// Postgres is needed.
+func TestAuditEnrolment_PostgresAdapterRowReader_Enrols(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "host=fake user=test")
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	pg, err := adapter.NewPostgresAdapter(pool, "audit_pg_test", []string{"key"}, 0, adapter.DeleteModeHard)
+	require.NoError(t, err)
+
+	f := newAuditFixture(t, seedUnitsSpec, func(adapter.Adapter) adapter.Adapter { return pg })
 	plan, refusal := enrolAudit(f.p, false)
 	require.Empty(t, refusal)
 	require.Equal(t, "unit", plan.AnchorLabel)

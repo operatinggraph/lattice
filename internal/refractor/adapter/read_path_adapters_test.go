@@ -254,6 +254,19 @@ func TestReadPathSeam_Integration(t *testing.T) {
 		fmt.Sprintf(`SELECT count(*) FROM "%s", unnest(authz_anchors) a WHERE a=$1`, tbl), anchor).Scan(&n))
 	assert.Equal(t, 1, n, "authz_anchors stored as a text[] array")
 
+	// GetRow (adapter.RowReader) reads through pa itself — the writer's own
+	// pool, no role switch, no lattice.actor_id — and must see the row even
+	// though no actor holds a grant for it yet: the divergence audit and the
+	// plain-arm neighbour derivation both need this true for a Protected lens,
+	// not only for a bare PostgresAdapter's unprotected table.
+	row, ok, err := pa.GetRow(ctx, map[string]any{"id": "row1"})
+	require.NoError(t, err)
+	require.True(t, ok, "ProtectedAdapter.GetRow must read a row back before any actor is granted it")
+	assert.Equal(t, "submitted", row["status"])
+	assert.ElementsMatch(t, []string{anchor}, row["authz_anchors"], "GetRow must return authz_anchors as real row content")
+	assert.NotContains(t, row, ProjectionSeqColumn, "GetRow must strip the platform ordering token")
+	assert.NotContains(t, row, "id", "GetRow must not echo the key column back into the row")
+
 	visibleAs := func(actorID string) int {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)

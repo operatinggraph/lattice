@@ -263,6 +263,7 @@ var (
 	_ Truncater       = (*ProtectedAdapter)(nil)
 	_ KeyLister       = (*ProtectedAdapter)(nil)
 	_ SeqGuarded      = (*ProtectedAdapter)(nil)
+	_ RowReader       = (*ProtectedAdapter)(nil)
 	_ OutcomeUpserter = (*ProtectedAdapter)(nil)
 	_ OutcomeDeleter  = (*ProtectedAdapter)(nil)
 )
@@ -421,4 +422,25 @@ func (p *ProtectedAdapter) Truncate(ctx context.Context) error { return p.inner.
 // landlordUnitsRead and landlordLeaseApplicationsRead.
 func (p *ProtectedAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) {
 	return p.inner.ListKeys(ctx)
+}
+
+// GetRow delegates to the base adapter's read-back (adapter.RowReader). No
+// array re-encoding is needed on the way out: encodeArrays exists only to
+// turn the engine's []any into the []string pgx needs to WRITE a text[]
+// column, and a value GetRow reads back already comes decoded through pgx's
+// own array codec — a Go value ready for canonicalJSON's comparison exactly
+// as the base adapter returns it.
+//
+// Re-declaring it is what makes it reachable: the inner adapter is a named
+// field, not embedded, so a wrapper satisfies only the optional interfaces it
+// re-declares (the same reason ListKeys above and DeleteWithOutcome before it
+// exist). Without this method a Protected lens's own adapter type-asserts as
+// a non-RowReader regardless of what the base PostgresAdapter implements, so
+// the divergence audit could never enrol it and the plain-arm neighbour
+// derivation could never narrow it. leaseApplicationsRead
+// (packages/lease-signing/lenses.go) is exactly this shape — Protected: true
+// and plain (non-actorAggregate) — so it activates through this wrapper, not
+// a bare PostgresAdapter, and its enrolment depends on this method existing.
+func (p *ProtectedAdapter) GetRow(ctx context.Context, keys map[string]any) (map[string]any, bool, error) {
+	return p.inner.GetRow(ctx, keys)
 }
