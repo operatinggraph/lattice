@@ -1,8 +1,8 @@
 # Refractor — the descriptor-hub walk, and the periodic load that never idles
 
-**Status:** ✅ Winston-ratified — build-ready (2026-09-01). Implementation design; no frozen-contract change, no
-architectural fork. Ratified by Winston under the 2026-08-20 split; the auth-plane enumeration change (§5.1) is
-posture-changing and gets a cold adversarial review at close.
+**Status:** ✅ BUILT and live-verified (2026-09-01) — `4e11c9b3` (§5.2) · `3b32c745` (rebuild race) · `db7792c3` (§5.3) ·
+`1fca25cf` (§5.1, cold-reviewed). Implementation design; no frozen-contract change, no architectural fork. Ratified by
+Winston under the 2026-08-20 split. Residual classes and their rows: §8.
 **Board row:** `backlog/lattice.md` — *[Refractor] Two Postgres-target lenses made zero net progress for 3 days
 while KV-target siblings drain* (the row names two lenses; the census below finds 24).
 **Principal's ask (verbatim, clause by clause):** *"Take this item: [Refractor] Two Postgres-target lenses made
@@ -96,8 +96,27 @@ A = X₀ –h₁– X₁ – … –h_k– X_k = V where every hᵢ is a pattern
 admits `type(Xᵢ)` (a variable-length hop expands to a chain of same-relation edges through unlabeled
 intermediates). The BFS runs that path in reverse: standing on Xᵢ it follows hᵢ to Xᵢ₋₁. So a walk that, at a
 vertex of type T, follows only relations of hops incident to some position admitting T still reaches A. This is
-§4.2's relation conjunct applied per hop, and it carries §17.6's label-vs-body-class caveat unchanged (already
-filed).
+§4.2's relation conjunct applied per hop. (The §17.6 label-vs-body-class caveat does not apply: the executor binds a
+pattern label on the vertex KEY type only — `full/executor.go` `nodeMatches`, pinned by `label_key_type_binding_test.go` —
+so the scope's type keys and the walk's vertex types are the same binding.)
+
+**What the scope does NOT remove (cold review, 2026-09-01).** The scope is keyed by vertex TYPE, so a pattern that
+binds `instanceOf` between two `service` positions — `edgeInstances`, `edgeProviderQueue`,
+`edgeManifestProviderReadGrants`, `capabilityServiceAccess` — still walks instance → template → every sibling
+instance → their holders on an instance event. That is an over-approximation, never a missed anchor, and no per-type
+(or per-direction) scope can remove it: only the pattern-DIRECTED walk (the anchor derivation, `HopIndex.Dist`
+toward the anchor) answers "is V in this anchor's bound subgraph" exactly, and §4.4 refuses it for personal lenses.
+The corpus measured here links instances `instanceOf → vtx.meta` directly (a service instance's adjacency is
+`{instanceOf → meta, providedTo → identity}`), so the pruned leg is the one live; a corpus with many instances per
+`vtx.service` template keeps a proportional fan-out on those four lenses. The follow-on that closes it is a
+derivation licence for personal lenses (the board row filed at close) — §4.4 names the two out-of-pattern inputs
+any such argument must clear, and both now have their own change edges (the grant-change edge + `PersonalSweeper`;
+hydration for the Interest Set).
+
+**Operator lever.** `REFRACTOR_WALK_SCOPE=off` restores the relation-blind walk (default `on`), the containment
+knob both sibling narrowings carry. `REFRACTOR_ANCHOR_DERIVATION=off` alone no longer does — it returns the
+enumerator, which is scoped unless this knob is off too; shadow mode compares the derivation against the
+relation-blind walk explicitly so its `NarrowedAnchors` / `DivergentEvents` keep their stated meaning.
 
 **Mechanism.** A `walkScope` published on `ruleState` next to `reprojectRelations` (`pipeline/ruleinstall.go:150-200,
 :365-385`), derived from **every branch's** `AnchorHopIndex()` (not `rs.anchorHops`, which is single-walk only —
@@ -131,7 +150,13 @@ same connection the writer uses (the writer role is not an RLS subject — verif
 relying on it, and add the test if it is not already pinned). With a reader, `AuditPlan` enrols
 (`audit.go:968` no longer refuses), the plain derivation's licence admits the lens, and a neighbour event
 seeds the one affected application instead of the corpus. `landlordLeaseApplicationsRead` stays refused (diff
-retraction, structural) — its cost drops only through the smaller graph reads of §5.1's siblings; record it.
+retraction, structural). **Observed after Inc 2 went live (2026-09-01):** `leaseApplicationsRead` is STILL refused —
+the reader moved its refusal to the next conjunct: its row returns `$now` (`freshBgComplete` /
+`freshUntil` compare `inst.outcome.data.validUntil > $now`), which a recomputation cannot reproduce, so the audit
+cannot enrol and the derivation keeps the corpus rescan. Inc 2 unlocks the audit and the derivation for every
+Postgres lens WITHOUT a `$now` column; for this pair the per-message cost falls only through §5.1 removing the NATS
+contention that made a two-endpoint corpus rescan cost minutes. `$now`-dependent rows are the freshness-marker
+plane's (§4.4 of the auth-plane design), not this mechanism's.
 
 ### 5.3 Idle-aware periodic loops (fixes C)
 
@@ -201,4 +226,25 @@ a load-generator artefact (noted for the Vertical PO in the commit).
 - 2026-09-01 · Inc 2 (§5.2 Postgres `GetRow`) landed `4e11c9b3`. Brief gap: `ProtectedAdapter` wraps the inner adapter as a named field, so the reader had to be re-declared on the wrapper for `leaseApplicationsRead` to satisfy `RowReader` at all — the builder caught it; the corpus census verifies which lenses now enrol.
 - 2026-09-01 · CI on the Inc 2 push failed in `TestNarrowedFilter_RebuildRecomputesLabelSet` (untouched by Inc 2): Run creates the durable server-side before the supervisor manages it, and a rebuild in that window is told "not managed". Fixed at the source `3b32c745` — the rebuild takes Pause/Resume's `awaitStarted` guard while the consumer is unmanaged — with a mutation-proven regression test.
 - 2026-09-01 · Inc 3 (§5.3) landed `db7792c3`. Deviation from §5.3: the idle deep verify runs every 5th tick, not every 10th — the 10th-tick cadence collided with the heartbeater's 10-interval sweep-stall alert (an idle lens would have flapped `sweep-stalled` forever); `pipeline.IdleSweepBackoffEvery` is pinned at half `health.DefaultCapabilitySweepStallCycles` by a cross-package test. The projection-write counter covers every adapter write site, not only `results.go`'s (the sweep's own heals write through `reproject.go`).
-- Inc 1 (§5.1) built with §4.2's standing-healer conjunct (sweep plan, or the personal plane's `PersonalSweeper` + grant-change edge); cold adversarial review in flight.
+- 2026-09-01 · Inc 1 (§5.1) landed `1fca25cf` (+ auth-plane §17.5 rollback amendment `4b210b38`). Cold review (opus): soundness held on every attack; two blockers fixed in the same commit — `REFRACTOR_WALK_SCOPE=off` kill switch (the documented `REFRACTOR_ANCHOR_DERIVATION=off` rollback alone no longer reaches the relation-blind walk), and the same-label `instanceOf` residual named in code, census and §5.1; shadow mode compares against the relation-blind walk by construction; the healer-arming pair extracted into `cmd/refractor` `registerPersonalHealer` so the wiring test pins the production seam. `make verify-kernel`: all assertions passed. Rebuilt every binary linking the changed packages (`bin/{refractor,lattice,lattice-pkg,bridge,chronicler,loupe}`); only `refractor` was cycled — the others link the packages without a behaviour change.
+
+**Live verification (2026-09-01, `sample-nats.sh` over 20 s against `:8222/connz`; backlog from `nats consumer report KV_core-kv`):**
+
+| | old binary (2026-08-30) | §5.2+§5.3 only | all increments, +2 min |
+|---|---|---|---|
+| refractor req/s → NATS | 5,932 | 11,132 | 4,094 |
+| refractor msgs/s ← NATS | 16,181 | 28,562 | 17,015 |
+| backlogged consumers | 24 / 1.14 M | 25 / 1.27 M | 25 / 1.24 M and **falling** |
+| fastest stuck lens | 1 msg / 21 s | — | 8 personal lenses at 10–25 msg/s; `capabilityServiceAccess` 24 msg/s |
+
+The PO's 20 s sample (589 req/s / 2,871 msgs/s) under-read the load by an order of magnitude: the 41-hour average was 27,800 msgs/s, and the profile placed it in the stuck handlers' hub drains, not the timers. The timer savings (§5.3) are real but invisible while 1.2 M messages drain — re-measure once the backlog is gone.
+
+**Residual after the fire — every stuck consumer sits in a named class with a named closer:**
+- `edgeManifestReadGrants` / `edgeManifestStaffReadGrants` (90k / 57k): scope refused on the `WITH`-scope rebind → the varlength design's Inc 2, whose revive trigger this fire met (row revived).
+- `edgeCatalog` (128k), `edgeInstances` (75k, draining at 3/min): the pattern genuinely crosses a descriptor / same-label hub — only the pattern-directed derivation removes it; personal lenses are refused it by §4.4 → 📐 row *derivation licence for personal lenses*.
+- `objectLiveness` / `objectAttachments` (40k each): an untyped hop at an unlabeled position (`(o)-[r]->(owner)`, by design — objects attach over several relations) → nil scope; same 📐 row's territory (an untyped hop needs the directed walk).
+- `leaseApplicationsRead` (50k) / `landlordLeaseApplicationsRead` (18k) / `renewalComplete` (10k): the corpus rescan and actor reprojections expand a hub identity through the executor's whole-node `Neighbors` — the §4 non-goal now has a number (1–3 messages per 4 min) → 📋 row *executor relation-scoped marked-node reads*.
+
+**Close-pass classification (per `agents/steward/SKILL.md` §4):** design-gap ×2 (the same-label leg a per-type scope cannot express; the missing kill switch on a posture-changing narrowing — both Refractor); brief-gap ×2 (`ProtectedAdapter` does not promote the inner adapter's methods; the sweep's own heals write through `reproject.go`, not `results.go`); implementation-bug ×1 pre-existing (rebuild-before-registration race, fixed at source); convention ×1 (idle cadence colliding with the stall window — caught by the builder's own report). Candidate dossier line (cap of 12 reached; recorded here until a second sighting): *a per-type relation scope keeps every same-label leg, and a benefit claim on a hub needs the hub's actual link shape censused — instance→meta vs instance→template are different hubs; a narrowing on the auth plane ships with its kill switch and the documented rollback re-verified.*
+
+**Observed once, not reproduced (20 local runs), recorded with its falsification recipe:** the cold reviewer saw `TestNeighbors_MarkedNodeIsNeverQuietlyShort` fail its completeness assertion once under default parallelism. Mechanism hypothesis: `drainDirectGetFallback`'s only success exit is `info.NumPending == 0` on the FIRST `cons.Info` after `CreateConsumer` (`internal/substrate/kv_multi.go`), which for a `DeliverLastPerSubject` consumer over 1,024+ subjects could report before the pending count is settled — a silently short marked-node read, the frozen-wrong answer the latch exists to prevent. Recipe: `go test ./internal/refractor/adjacency/ -run TestNeighbors_MarkedNodeIsNeverQuietlyShort -count=50` under `go test ./internal/refractor/... -p 4` load. Row filed for the Whetstone.
