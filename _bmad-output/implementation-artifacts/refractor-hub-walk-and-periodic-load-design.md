@@ -110,8 +110,12 @@ The corpus measured here links instances `instanceOf → vtx.meta` directly (a s
 `{instanceOf → meta, providedTo → identity}`), so the pruned leg is the one live; a corpus with many instances per
 `vtx.service` template keeps a proportional fan-out on those four lenses. The follow-on that closes it is a
 derivation licence for personal lenses (the board row filed at close) — §4.4 names the two out-of-pattern inputs
-any such argument must clear, and both now have their own change edges (the grant-change edge + `PersonalSweeper`;
-hydration for the Interest Set).
+any such argument must clear. **Corrected 2026-09-01** (`personal-lens-derivation-licence-design.md` §2 G7/G8):
+only the FIRST has a change edge (the grant-change edge + `PersonalSweeper`). The Interest Set has none —
+`personal.register`/`personal.deregister` write the bucket and return, and "hydration" is a device-initiated pull
+on attach whose own client API (`edge/sync/sync.go:506-520`) documents that it deliberately does not hydrate a
+newly-widened scope. Its only coverage is the sweeper. The licence design builds the missing edge; do not reuse
+the original claim.
 
 **Operator lever.** `REFRACTOR_WALK_SCOPE=off` restores the relation-blind walk (default `on`), the containment
 knob both sibling narrowings carry. `REFRACTOR_ANCHOR_DERIVATION=off` alone no longer does — it returns the
@@ -242,7 +246,7 @@ The PO's 20 s sample (589 req/s / 2,871 msgs/s) under-read the load by an order 
 **Residual after the fire — every stuck consumer sits in a named class with a named closer:**
 - `edgeManifestReadGrants` / `edgeManifestStaffReadGrants` (90k / 57k): scope refused on the `WITH`-scope rebind → the varlength design's Inc 2, whose revive trigger this fire met (row revived).
 - `edgeCatalog` (128k), `edgeInstances` (75k, draining at 3/min): the pattern genuinely crosses a descriptor / same-label hub — only the pattern-directed derivation removes it; personal lenses are refused it by §4.4 → 📐 row *derivation licence for personal lenses*.
-- `objectLiveness` / `objectAttachments` (40k each): an untyped hop at an unlabeled position (`(o)-[r]->(owner)`, by design — objects attach over several relations) → nil scope; same 📐 row's territory (an untyped hop needs the directed walk).
+- `objectLiveness` / `objectAttachments` (40k each): an untyped hop at an unlabeled position (`(o)-[r]->(owner)`, by design — objects attach over several relations) → nil scope. **Corrected 2026-09-01:** NOT the personal-lens row's territory — both are `actorAggregate` plain lenses (`packages/objects-base/lenses.go:32,:48`) for which `driver.go:502` already asserts pattern closure; they are refused on `AnchorHopIndex`'s `"pattern carries an untyped relationship"` alone → their own 📐 row.
 - `leaseApplicationsRead` (50k) / `landlordLeaseApplicationsRead` (18k) / `renewalComplete` (10k): the corpus rescan and actor reprojections expand a hub identity through the executor's whole-node `Neighbors` — the §4 non-goal now has a number (1–3 messages per 4 min) → 📋 row *executor relation-scoped marked-node reads*.
 
 **Close-pass classification (per `agents/steward/SKILL.md` §4):** design-gap ×2 (the same-label leg a per-type scope cannot express; the missing kill switch on a posture-changing narrowing — both Refractor); brief-gap ×2 (`ProtectedAdapter` does not promote the inner adapter's methods; the sweep's own heals write through `reproject.go`, not `results.go`); implementation-bug ×1 pre-existing (rebuild-before-registration race, fixed at source); convention ×1 (idle cadence colliding with the stall window — caught by the builder's own report). Candidate dossier line (cap of 12 reached; recorded here until a second sighting): *a per-type relation scope keeps every same-label leg, and a benefit claim on a hub needs the hub's actual link shape censused — instance→meta vs instance→template are different hubs; a narrowing on the auth plane ships with its kill switch and the documented rollback re-verified.*

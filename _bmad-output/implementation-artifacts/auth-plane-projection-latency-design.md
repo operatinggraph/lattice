@@ -197,8 +197,9 @@ Increment 0 is independently valuable and independently shippable: it hardens na
 
 - **Personal (nats-subject) lenses — excluded.** Two out-of-pattern inputs, not one: the **D1 read gate**
   (`capabilityread.IsReadable` reading `cap-read.<domain>.<actor>` from capability-kv,
-  `personal.go:172-184`) and the **Interest Set** (`personalinterest.IsRelevant` on
-  `personal-lens-interest`, `:186-195`). Concretely for the first: an actor granted a new *role* that
+  `personal.go:172-190`, the call at `:183`) and the **Interest Set** (`personalinterest.IsRelevant` on
+  `personal-lens-interest`, `:192-201`, the call at `:194` — *citations re-pinned 2026-09-01; a posture comment
+  inserted at `:177-182` had pushed the second range onto D1's own code*). Concretely for the first: an actor granted a new *role* that
   widens their read grants gets their rows today because the broad filter delivers the `role` event and
   the BFS reaches them; under a filter narrowed from a data lens's `{booking, …}` labels that event
   never arrives, and rows the actor is now entitled to would not appear until the sweep or the next

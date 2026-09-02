@@ -106,7 +106,8 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor] Derivation licence for personal lenses — clear §4.4's two out-of-pattern inputs** | The pattern-scoped walk still crosses hubs a pattern genuinely binds (`edgeCatalog`, `edgeInstances`, the untyped-hop object lenses); only the pattern-directed derivation removes it, and §4.4 refuses it for personal lenses. Both inputs now have change edges. | ★★★ | M | 📐 needs designer pass · no-pattern: derivation licence clearing §4.4's two inputs by their change edges · [design](../../implementation-artifacts/refractor-hub-walk-and-periodic-load-design.md) §8 |
+| **[Refractor] Derivation licence for personal lenses** | The pattern-directed derivation is refused for every personal lens, so `edgeCatalog`/`edgeInstances` still expand a descriptor hub per event. Three refusals, not one: the two out-of-pattern inputs (only D1 has an edge — the Interest Set has none), a healer conjunct reading `sweeper` alone where `standingHealerInstalled` already exists, and a multi-walk lens handed no hop index at all. | ★★★ | L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/personal-lens-derivation-licence-design.md) |
+| **[Refractor] Two `objects-base` lenses are underivable — an untyped hop at an unlabeled position** | `objectLiveness`/`objectAttachments` bind `OPTIONAL MATCH (o)-[r]->(owner)` by design (objects attach over several relations), so `AnchorHopIndex` refuses them and every neighbour event runs the relation-blind walk; 40k backlogged each. Not the personal-lens licence's territory — both are actorAggregate plain lenses already asserting pattern closure. | ★★ | M | 📐 needs designer pass · no-pattern: anchor derivation across an untyped relationship at an unlabeled position |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
