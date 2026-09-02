@@ -1037,14 +1037,24 @@ async function loadFrontDesk() {
   // reduction is needed here. Best-effort, same degrade-to-hidden posture
   // as the joins above.
   let balancesByLease = {};
+  let balancesList = [];
   try {
     const bal = await appGet("/api/frontdesk-balances");
-    (bal.balances || []).forEach((b) => { balancesByLease[b.leaseAppKey] = b; });
-  } catch (_) { /* balances unreachable — badge just doesn't show */ }
+    balancesList = bal.balances || [];
+    balancesList.forEach((b) => { balancesByLease[b.leaseAppKey] = b; });
+  } catch (_) { /* balances unreachable — badge + arrears list just don't show */ }
 
   // Same resident-name/unit-address join the lease pickers use
-  // (loadLeasePickerContext) — the card's "who" + rent/term lines.
+  // (loadLeasePickerContext) — the card's "who" + rent/term lines, and the
+  // standalone arrears list's own resident-name resolution below. Called
+  // once and reused for both, rather than once per renderer.
   const { residentsByLease, leaseDetailsByLease } = await loadLeasePickerContext();
+
+  // The standalone arrears list — every lease that owes money, whether or
+  // not it currently has an open tab. Rendered regardless of tabs.length:
+  // arrears must stay visible even when every tab has settled, unlike the
+  // per-tab balance badge below which only exists on an open tab's card.
+  renderFrontDeskArrears(balancesList, residentsByLease);
 
   summary.textContent = tabs.length + " open tab" + (tabs.length === 1 ? "" : "s");
   if (!tabs.length) {
@@ -1096,6 +1106,54 @@ function frontDeskBalanceBadge(balance) {
     return '<div class="meta">Owes ' + money(balance.balanceCents) + ", due " + due + "</div>";
   }
   return "";
+}
+
+// frontDeskArrearsLine renders one arrears row's dueDate/isOverdue/
+// daysOverdue fields as a compact inline banner for the standalone arrears
+// list — mirrors wellness-app's arrearsLine(), a small inline <span> rather
+// than statementLine()'s <p> block, since a list row needs one line, not a
+// paragraph.
+function frontDeskArrearsLine(row) {
+  const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString() : "?";
+  if (row.isOverdue) {
+    const days = row.daysOverdue || 0;
+    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
+  }
+  return "Due " + due;
+}
+
+// renderFrontDeskArrears populates the front desk's standalone arrears list
+// (#frontdesk-arrears) — every lease that currently owes money
+// (/api/frontdesk-balances), worst-first, whether or not it has an open tab.
+// A resident who has settled their tab but still owes the house money would
+// otherwise be invisible the moment the tab closes (frontDeskBalanceBadge
+// only renders on an open tab's card) — this list is the fix. Sorted
+// client-side (café's Go handler is unchanged) with the same comparator
+// wellness-app's handleFrontDeskArrears uses server-side: isOverdue desc,
+// then daysOverdue desc, then balanceCents desc.
+function renderFrontDeskArrears(balances, residentsByLease) {
+  const list = document.getElementById("frontdesk-arrears");
+  const empty = document.getElementById("frontdesk-arrears-empty");
+  if (!list || !empty) return;
+  const rows = (balances || []).slice().sort((a, b) => {
+    if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
+    if (a.daysOverdue !== b.daysOverdue) return (b.daysOverdue || 0) - (a.daysOverdue || 0);
+    return (b.balanceCents || 0) - (a.balanceCents || 0);
+  });
+  list.innerHTML = "";
+  if (!rows.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  for (const row of rows) {
+    const bookerKey = residentsByLease[row.leaseAppKey];
+    const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(row.leaseAppKey);
+    const li = document.createElement("li");
+    li.className = "ledger-entry arrears-row";
+    li.innerHTML = escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row);
+    list.append(li);
+  }
 }
 
 function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {

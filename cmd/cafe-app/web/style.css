@@ -181,6 +181,9 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-entry.debit { color: var(--red); }
 .ledger-entry.credit { color: var(--green); }
 
+.arrears-row { cursor: default; padding: 4px 6px; border-radius: 4px; }
+.arrears-row .arrears-overdue { color: var(--red); font-weight: 600; }
+
 .items-list { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .item-line { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .item-line .item-desc { flex: 1; }

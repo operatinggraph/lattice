@@ -596,6 +596,41 @@ func TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace(t *testing.T) {
 	}
 }
 
+// TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace_BuildingAndUnitLevelDuplicate_BothShown
+// proves dedupeMostSpecific does NOT apply to the staff Manage Menu grid
+// (no leaseAppKey): a building-level "Croissant" and a unit-level
+// "Croissant" both cover this staffer's workplace, and unlike the
+// leaseAppKey offer-picker (which collapses to the more specific row), the
+// grid must show both independently — staff need to see, reprice, and
+// retire the building-level item even though a unit-level duplicate exists.
+func TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace_BuildingAndUnitLevelDuplicate_BothShown(t *testing.T) {
+	const unit = "vtx.unit.4b"
+	staff := "AAAAAAAAAAAAAAAAAAAA"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.building", map[string]any{
+		"menuItemKey": "vtx.menuitem.building", "name": "Croissant", "priceCents": 350,
+		"servedAt": staffWorkplace, "coveringLocations": []string{staffWorkplace},
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.unit", map[string]any{
+		"menuItemKey": "vtx.menuitem.unit", "name": "Croissant", "priceCents": 350,
+		"servedAt": unit, "coveringLocations": []string{unit, staffWorkplace},
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 2 {
+		t.Fatalf("menu = %+v, want both the building-level and unit-level items, not collapsed", body.Menu)
+	}
+}
+
 // TestHandleMenu_NoLeaseAppKey_RoleLessWorksAt_StillConfined: handleMenu's
 // no-leaseAppKey branch gates confinement on isStaff (workplace alone), NOT
 // isFrontDesk — unlike every PII/write surface, there is no refusal branch
