@@ -106,7 +106,10 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
   and don't fold it into an in-flight implementation commit). **When the edit is paired with a design doc
   awaiting ratification, Winston commits it once Andrew ratifies that design** — the contract edit + the
   design-doc status + the board row in one scoped commit, promptly (not held "until the build"; a dangling
-  ratified edit just makes every fire dance around the dirty shared tree). A standalone contract edit with no
+  ratified edit just makes every fire dance around the dirty shared tree). **Exception (Andrew, 2026-09-01): a clause that asserts behaviour the runtime does not
+  yet have — a refusal, an admission rule — lands with the build's commit and is held out of the tree until
+  then, its text of record in the design; contracts carry observable promises only, so never a transitional
+  note.** A standalone contract edit with no
   paired design stays UNCOMMITTED for Andrew. A needed contract change is **never** a reason to skip the work:
   build everything around it, stage the contract edit uncommitted, and flag it.
 - **Planning artifacts** under `_bmad-output/planning-artifacts/*` (epics, prd, lattice-architecture,
