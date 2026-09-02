@@ -1506,6 +1506,18 @@ greenfield redesign. Cover, as the feature warrants:
     read surfaces (lenses, derivations) before calling anything undeclarable; when a rule fixes a
     cardinality, grep the domain vocabulary for the plural and ask the principal.
 
+  - **Size a KV bucket in SUBJECTS and bytes, tombstones included — never in records — and re-measure
+    before a fork is put to the principal.** (Trialed 2026-09-01, `loom-state`: the design priced a
+    permanent trace at "~300 B and one subject per instance" from the cursor's shape; the live bucket held
+    74,032 subjects and 13.5 MB for 12,339 instances, because every deleted sub-key leaves a permanent DEL
+    tombstone and nothing purges deletes — ~6 subjects and ~1.1 KB per instance, and the primitive the fork
+    asked to defer would have touched a sixth of the growth. A subject-filtered listing still receives every
+    tombstone: nats.go applies `ignoreDeletes` client-side, so "O(running)" was 2×/6×. And "Loupe is
+    unaffected" had read the decoder, not `flowLiveness`, the function that consumes the map — which
+    branches on absence before status.) **Three checks:** `nats stream info` / `/jsz` for subjects and
+    bytes, and count the DEL markers; for any filtered-watch claim, say what the SERVER delivers; for any
+    "consumer unaffected", open the function that consumes the value, not the one that decodes it.
+
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly. Two obligations: **every test the
   design prescribes is OWNED by a named increment** (an unowned test is built by nobody — trialed 2026-08-09:
