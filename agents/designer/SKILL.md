@@ -1299,6 +1299,50 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   *predicate* (which can check less); and when the design also carries a soundness bound, ask whether
   the gate you are editing is the thing that keeps the corpus inside it.
 
+- **When you EXEMPT something from a change, you have made a claim about its STORAGE and its
+  READERS — not about its purpose. Check the storage.** A design that converts a mechanism almost
+  always carves out one piece, and the carve-out is argued from what that piece is *for* ("it is an
+  instruction to the engine, not a fact about the world"; "it is provenance, not meaning"; "it is
+  internal, not projected"). Purpose is not a property the consumer can see. Open the declaration and
+  ask: **is it stored? is it inside the comparison / the hash / the diff / the filter that the design's
+  payoff depends on?** (Trialed 2026-09-01, the `$now` lens sweep: I exempted `freshUntil` from
+  conversion because it is "an instruction to a timer, consumed by the engine and never read as truth
+  by an application" — every word true, and irrelevant. It is a declared `BodyColumns` entry, so it is
+  a stored column inside `classifyDivergence`; and every lens computes it from the *same deadline* as
+  the gap column with the *complementary* comparison, so it flips at the **identical instant**.
+  Converting the gap column and leaving it left the sweep diverging at exactly the same moments — the
+  design's entire payoff was zero, and the adversarial pass led with it.) **The check is two greps:
+  the declaration that lists it, and the comparison the payoff names.** The tell is an exemption
+  justified by a sentence about intent rather than a citation about storage.
+
+- **A conversion from COMPUTED to RECORDED must be evaluated on the population where nothing ever
+  recorded it — and that population is usually created by the very expression you are converting.**
+  Replacing a derived value with a stored fact ("read the marker instead of the clock", "read the
+  cached verdict instead of recomputing", "read the stamped column instead of re-deriving") silently
+  assumes a writer ran. The assumed-producer reflex above asks *does the writer exist?*; this asks the
+  harder question, *is there an input for which the writer structurally never runs?* — and the answer
+  is often yes, because the same predicate that gates the reader also gates the writer's trigger.
+  (Same fire: the fix was "read the recorded lapse instead of comparing to `$now`", and the lapse is
+  written by a timer armed off `freshUntil`, which every lens nulls when the deadline is *already
+  past*. So for a deadline past at first projection — a same-day appointment, a rescheduled-earlier
+  booking, a late-advanced series — no timer ever arms, no lapse is ever recorded, and the converted
+  gap would **never open**: a reminder never sent, a no-show never swept. My state-lifetime table had
+  rows for re-arm, revive, replay and rebuild, and none for *never*.) **The check:** write the
+  never-written row into the state table explicitly, and trace what arms the writer for the boundary
+  values of the thing being converted. **And note the payoff:** in that fire, converting the exempted
+  piece (the reflex above) turned out to be exactly what closed this hole too, because an overdue
+  timer fires immediately by design — the two findings had one fix, which is a strong signal the
+  carve-out was the error rather than a second defect.
+
+- **A warning you write into your own document is not a check you have run.** Twice in one session I
+  wrote a methodological caution into a design's census section — *"doc-comment hits are excluded;
+  that exclusion is where the row's wrong number came from"* — and then committed exactly that error
+  one section later, naming two lenses whose `$now` was a doc comment introducing the *next* const,
+  and omitting two that carry it in cypher. The prose does not execute. **Any census you describe in a
+  design must be RUN and its raw output pasted, in the same fire** — §3 already requires the command
+  and the expected result; this adds that a census you wrote a caveat about is the one most likely to
+  have been eyeballed, because writing the caveat feels like having applied it.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
