@@ -45,7 +45,8 @@ The designs may have been authored by a different model/session. Re-verify, don'
   behavior in the present tense; an author building to it is silently ignored), which makes the
   implementing increment top-priority, not a footnote. Grep `packages/` for premature adopters too — one
   turns it from a scheduling question into a live bug. If the build genuinely can't happen soon, the
-  answer is a transitional note on the clause, never silence.
+  answer is to hold the clause OUT of the contract until its build lands (text of record in the design's
+  contract section) — never a transitional note, which is implementation prose (Andrew, 2026-09-01).
 - **Banner-vs-build**: when a design's DEMAND cites shipped code, check that code against the
   ratification banner of the design that shipped it — a demand grounded on a banner-withdrawn shape is
   a SYMPTOM (the hard-delete/hasBooking case). Read banners FIRST; they supersede bodies.
@@ -93,8 +94,11 @@ when he pushes back, re-derive from "what does it need".
 - **Ratified-and-shelved** (sound design, no live consumer / capacity says not now): banner records the
   decisions **plus the named revive trigger and the why**; board row → `🗄️ shelved (revive: <trigger>)`,
   **never** a bare `✅ ratified` (the Steward selects ratified-build-ready first and would pull capacity);
-  a paired contract edit still **commits at ratification** (build-to target — add a transitional note when
-  the live wire format lags it); deferred-by-choice contract additions ride the revive fire instead.
+  a paired contract edit that is true design-wise regardless of build (a shape, a vocabulary) still
+  **commits at ratification**; a clause that asserts behaviour the runtime does not yet have (a refusal, an
+  admission rule) lands with the build's commit and is held out of the tree until then — never a
+  transitional note, which is implementation prose (Andrew, 2026-09-01); deferred-by-choice contract
+  additions ride the revive fire instead.
 - **Held / redesigned**: revert that proposal's staged contract hunks (`git apply -R`), shelve the
   design with a reasoning banner (revive conditions explicit), file the replacement row, and fold the
   generalized lesson into the relevant skill(s) + a feedback memory.
