@@ -1,6 +1,7 @@
 # Untyped-hop anchor derivation — lifting `AnchorHopIndex`'s third false refusal
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-01 · Stream 2 (Lattice) ·
+**Status: ✅ ANDREW-RATIFIED 2026-09-01** — build-ready; the Lattice Steward builds it in the
+increment order of §13. · Designer fire 2026-09-01 · Stream 2 (Lattice) ·
 board row: *[Refractor] Three lenses are underivable — an untyped `-[r]->` matches any relation*
 
 ---
@@ -24,8 +25,8 @@ rule that a mechanism-level fork is not forwarded.
 internal Refractor derivation; the cypher surface, the lens declaration surface (Contract #10 §10.2),
 and every wire shape are unchanged. Nothing in this design is staged uncommitted.
 
-**Why it is flagged for you anyway** (the run parameter, and an honest reading of §0's
-"when in doubt, it is a fork"): the thing being lifted is a **fail-closed completeness conjunct**
+**Why it was flagged for Andrew** (ratified 2026-09-01; kept because it is what the builder must
+carry into the fire): the thing being lifted is a **fail-closed completeness conjunct**
 whose false answers are, in the mechanism's own words, *"a revocation that never fires."* The
 predicate is shared by the auth plane. §6 evaluates every one of its six consumers against a
 wildcard hop **and** against Increment 1's zero-hop index, and finds no consumer whose answer moves in
