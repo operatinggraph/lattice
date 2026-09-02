@@ -1260,6 +1260,45 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   at the gate, so with the edits as specified every lens still refused at the untouched conjunct and the
   design's own acceptance criterion was unreachable.
 
+- **A MULTI-INCREMENT design hands its consumers more than one input shape — run the consumer census
+  ONCE PER INCREMENT, and never let the headline increment's verdict stand in for the other's.** The
+  reflexes above ask whether a consumer census is complete. This asks a question the completeness
+  check cannot see: *which of my increments was each row evaluated against?* A design whose whole
+  argument is one mechanism naturally builds its blast-radius table against that mechanism — and the
+  cheap, obviously-safe increment beside it quietly hands the same consumers a **different** shape,
+  which nobody re-walks because the table already exists and looks thorough. (Trialed 2026-09-01, the
+  untyped-hop derivation: §6 evaluated all six `Complete` readers against a **wildcard-hop** index and
+  wrote "Increment 1 is not posture-changing on the derivation." Increment 1 deletes a whole pattern
+  position, so its index has **zero** hops — a different shape, not a special case. Deleting a
+  position moves `PositionsBinding`, so the lens gained `ActorTypeBindsAnchorOnly`'s **one-key
+  answer**, the narrowest answer in the system; the walk scope flipped from nil-allows-everything to
+  empty-allows-nothing; and the derivation armed. All three were sound, and none was declared — and
+  the sentence denying them was what sized the review.) **The check:** for each increment, write down
+  the concrete artefact it hands the shared consumers (index shape, filter shape, row shape) and run
+  the table against each. **The tell:** a blast-radius section whose heading names one mechanism
+  ("…against a wildcard hop") while the design ships two. And note the direction of the error — the
+  increment that gets skipped is always the one you priced as "cheap, package-only, no platform
+  surface", because that framing is about *where the edit lands*, not about *what reads the result*.
+
+- **When a design WIDENS a population, any edit it makes to the gate over that population must be
+  proven NO WEAKER — and the safe default is DELETING a skip, never replacing it.** A design that
+  admits new members to a set almost always has to touch the census/gate that guards the set, because
+  the gate's exemption was written for the members that no longer exist. That edit arrives late, feels
+  like bookkeeping, and gets the least scrutiny of anything in the document — while being the one line
+  that decides whether the widened population is guarded at all. (Trialed in the same fire: the gate
+  skipped any lens with a non-exhaustive relation set, justified by "an untyped or variable-length hop
+  refuses the index on its own conjunct" — a sentence the design falsifies. I proposed replacing the
+  skip with *"a non-exhaustive lens passes iff its index carries a wildcard hop"*, which admits a lens
+  carrying a wildcard hop **and** a separate typed relation the index failed to record — reinstating
+  verbatim the skipped reprojection the gate exists to catch. The correct edit was to **delete the
+  skip** and leave the per-member loop unconditional. Worse, the same pass found a soundness caveat
+  that only a ≥3-position wildcard lens can reach — exactly what the weakened gate would have stopped
+  catching. A design that widens a population and weakens its gate in the same commit compounds.)
+  **The checks:** state the gate's rule before and after and name a member admitted by the new one and
+  refused by the old; prefer removing a *skip* (which can only check more) over writing a new
+  *predicate* (which can check less); and when the design also carries a soundness bound, ask whether
+  the gate you are editing is the thing that keeps the corpus inside it.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
