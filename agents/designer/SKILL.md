@@ -1232,6 +1232,34 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   existing membership test already excludes — deleted the problem instead of arbitrating it, and cost
   less memory than it replaced.) The tell: a filed row whose fix is a *policy* over a bound.
 
+- **"X has a change edge / is covered" is a claim about a SET of producers — find out how the CONSUMER
+  discovers that set, and if it discovers them by WILDCARD the set is open by construction and no runtime
+  conjunct can assert coverage. And a coverage conjunct must read a VERDICT, not a heartbeat.** Two halves of
+  one failure, both blocking in one pass (2026-09-01, the personal-lens derivation licence). (1) I wrote a
+  licence conjunct meaning *"input 1 has an edge"*, having censused the four producers that exist. The reader
+  answers by `ListKeysFilter("cap-read.*.<actor>.<anchor>")` — its own package doc says *"package names are
+  not enumerable statically"* — so the census is a fact about today and the conjunct is a standing claim about
+  every vertical anyone will ever ship. Worse, the sink that makes a producer announce is wired inside one
+  install path behind four predicates, so a lens that writes live grants through a *different* path gets no
+  sink, no refusal and no log, and the licence still reads "covered". **The repair is not a better conjunct:
+  it is a gate that CLOSES the set** — refuse, at install and in `lint-*.go`, any lens writing into the
+  consumer's key space that is not a sink-armed producer. Same lint doctrine as always, pointed at the
+  producer end rather than the reader end; and note the tell — my draft had already shipped a reader-side gate
+  and reproduced the exact asymmetry it was written to end. (2) The same licence's healer conjunct read a
+  `LastProgressAt` the sweeper stamps **unconditionally after its batch loop**, while the loop's per-item
+  failure path *logs and continues*. So a Capability-KV outage failing every reprojection of every actor still
+  advanced it every 60 s and the licence read "healthy" through a total healer failure. **For any conjunct of
+  the form "something is still repairing this", open the publisher and ask what it publishes on the FAILURE
+  path** — if the answer is "the same thing", you have a heartbeat, and a heartbeat is not a verdict. The
+  precedent was in the sibling I was mirroring: the plain licence reads `AuditStatus`'s pass *result* plus
+  suppression plus staleness, and its zero-value case explicitly refuses. Two further corollaries from the
+  same pass, both cheap: **run `go list -deps` on the importing package before you specify plumbing between
+  two of them** (I proposed two edges, and both were import cycles — the design named the packages and never
+  checked the arrows); and **when your design deliberately keeps a flag FALSE and adds a disjunction beside
+  it, write the gate edit out** — mine described the licence in four sections and never once showed the line
+  at the gate, so with the edits as specified every lens still refused at the untouched conjunct and the
+  design's own acceptance criterion was unreachable.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
