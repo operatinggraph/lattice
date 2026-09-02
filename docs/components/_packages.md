@@ -558,3 +558,15 @@ mechanizes it (name the gate, strike the entry).
 - **Contract #6** §6.2 — Capability KV envelope shape (reached via Lens projection, never written directly).
 - [`processor.md`](./processor.md#package-install--uninstall) — Processor-side commit + cache-coherence behavior.
 - [`refractor.md`](./refractor.md) — the consumer of new Lens meta-vertices.
+- **A lens that reads a RECORDED fact depends on whoever arms the timer that records it — couple the two
+  populations in one fragment, and never host a neighbour's window on an anchor nothing reads.** Two shapes
+  in one item (expiry-as-a-recorded-fact, 2026-09-02). (a) `appointmentReminders` closed its gap on
+  `pastDueAppointments`' recorded end but excluded one terminal status where the past-due lens excluded
+  three, so a `completed`/`noShow` never-reminded appointment held a gap no timer could ever close —
+  `GapBudgetExhausted` per row, forever (found by the close pass; the lens tests exercised `scheduled` ×12).
+  (b) `leaseApplicationComplete` and `renewalComplete` each projected a `freshUntil` computed from the
+  background-check INSTANCE's window, so their own timers marked the wrong vertex and, once the instance
+  recorded its own lapse, fired into a marker no cypher read. Check: for every `byTarget.<t>` a lens reads,
+  name the lens that projects `freshUntil` for target `t`, assert both gate on ONE shared status fragment
+  (pin it on the shipped specs, not on the constant), and for every `freshUntil` a lens projects, name the
+  reader of the marker it will produce — none ⇒ delete the column.

@@ -1380,6 +1380,14 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   boundary from the CONSUMERS the refusal was protecting, and expect the true limit to sit somewhere inside
   the old one. Corollary from the same fire: a refuted reason lives in more documents than the one you are
   building, so grep it — this one was normative text in three sibling designs, one of them the parent.
+  **Third sighting (expiry-as-a-recorded-fact, 2026-09-02): a lifted refusal reveals the conjunct behind it,
+  and a GRANTED licence logs nothing.** The design's "`$now` is the last conjunct refusing
+  `leaseApplicationsRead`" was true of the log line and false of the licence: once the audit enrolled and
+  reached a verdict the licence refused at `ProjectsOneRowPerAnchor` — a shape fact no clock edit could
+  move — and the only evidence either way was a refusal line whose absence proves nothing. Check: a payoff
+  claimed as "refusal X gone" is proved by the licence's POSITIVE verdict (enrolment log / audit verdict /
+  a tally that acts), read live after the fix; and a design lifting conjunct N reads conjuncts N+1..end
+  against the lens before it promises the payoff.
 - **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in

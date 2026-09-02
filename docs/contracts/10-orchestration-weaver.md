@@ -109,8 +109,10 @@ its own `authContext`.
 
 **Retraction (per D4, settled).** Gap closes → `violating` / `missing_*` flip via **upsert**. True
 entity deletion → row deleted (`IsDeleted` path). **Deferred:** true emit-only-when-violating requires
-Refractor negative/filter-retraction projection. Freshness rules live in the **target cypher**
-(`missing_bgcheck = NOT EXISTS(check WHERE date > now − window)`).
+Refractor negative/filter-retraction projection. Freshness rules live in the **target cypher** and read
+recorded facts, never the clock (`missing_bgcheck = NOT EXISTS(check WHERE no recorded lapse reaches
+check.validUntil)`); the lapse itself is recorded by the temporal lane (§10.4) on the entity whose window
+passed.
 
 ---
 
