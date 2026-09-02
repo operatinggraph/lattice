@@ -69,7 +69,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-09-02 · `<pending>` · A corrected clinic no-show now reverses its stranded fee — `clinicNoShowSettlement`'s new `missing_reversal` gap auto-credits it back once `CorrectAppointmentStatus` moves the appointment off `noShow`.
+- 2026-09-02 · `46268dee` · A corrected clinic no-show now reverses its stranded fee — `clinicNoShowSettlement`'s new `missing_reversal` gap auto-credits it back once `CorrectAppointmentStatus` moves the appointment off `noShow`.
 
 - 2026-09-02 · `70c73ac1` · A corrected wellness no-show now refunds its fee — `SetBookingAttendance` mints a wellnessrefund marker on a noShow→attended re-mark, mirroring `ReleaseOrphanedBooking`.
 
