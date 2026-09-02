@@ -3,8 +3,8 @@
 **Status:** ✅ BUILT and live-verified (2026-09-01) — `4e11c9b3` (§5.2) · `3b32c745` (rebuild race) · `db7792c3` (§5.3) ·
 `1fca25cf` (§5.1, cold-reviewed). Implementation design; no frozen-contract change, no architectural fork. Ratified by
 Winston under the 2026-08-20 split. Residual classes and their rows: §8. **Fire 2 (§9, the executor's marked-hub
-reads): 🏗️ building 2026-09-01** — the §8 residual row *[Refractor] The executor reads a marked hub whole on every
-typed hop*, Winston-ratified under the same split.
+reads): ✅ BUILT 2026-09-01, landed `8a2cee97`** — the §8 residual row *[Refractor] The executor reads a marked hub
+whole on every typed hop*, Winston-ratified under the same split; live verification in §9.4.
 **Board row:** `backlog/lattice.md` — *[Refractor] Two Postgres-target lenses made zero net progress for 3 days
 while KV-target siblings drain* (the row names two lenses; the census below finds 24).
 **Principal's ask (verbatim, clause by clause):** *"Take this item: [Refractor] Two Postgres-target lenses made
@@ -251,7 +251,7 @@ The PO's 20 s sample (589 req/s / 2,871 msgs/s) under-read the load by an order 
 - `edgeManifestReadGrants` / `edgeManifestStaffReadGrants` (90k / 57k): scope refused on the `WITH`-scope rebind → the varlength design's Inc 2, whose revive trigger this fire met (row revived).
 - `edgeCatalog` (128k), `edgeInstances` (75k, draining at 3/min): the pattern genuinely crosses a descriptor / same-label hub — only the pattern-directed derivation removes it; personal lenses are refused it by §4.4 → 📐 row *derivation licence for personal lenses*.
 - `objectLiveness` / `objectAttachments` (40k each): an untyped hop at an unlabeled position (`(o)-[r]->(owner)`, by design — objects attach over several relations) → nil scope. **Corrected 2026-09-01:** NOT the personal-lens row's territory — both are `actorAggregate` plain lenses (`packages/objects-base/lenses.go:32,:48`) for which `driver.go:502` already asserts pattern closure; they are refused on `AnchorHopIndex`'s `"pattern carries an untyped relationship"` alone → their own 📐 row.
-- `leaseApplicationsRead` (50k) / `landlordLeaseApplicationsRead` (18k) / `renewalComplete` (10k): the corpus rescan and actor reprojections expand a hub identity through the executor's whole-node `Neighbors` — the §4 non-goal now has a number (1–3 messages per 4 min) → 📋 row *executor relation-scoped marked-node reads*.
+- `leaseApplicationsRead` (50k) / `landlordLeaseApplicationsRead` (18k) / `renewalComplete` (10k): the corpus rescan and actor reprojections expand a hub identity through the executor's whole-node `Neighbors` — the §4 non-goal now has a number (1–3 messages per 4 min) → 📋 row *executor relation-scoped marked-node reads*. **Built as Fire 2 (§9); the drain is removed and the pair's cost is the corpus rescan itself, closed by the ratified `$now` sweep (§9.4).**
 
 **Close-pass classification (per `agents/steward/SKILL.md` §4):** design-gap ×2 (the same-label leg a per-type scope cannot express; the missing kill switch on a posture-changing narrowing — both Refractor); brief-gap ×2 (`ProtectedAdapter` does not promote the inner adapter's methods; the sweep's own heals write through `reproject.go`, not `results.go`); implementation-bug ×1 pre-existing (rebuild-before-registration race, fixed at source); convention ×1 (idle cadence colliding with the stall window — caught by the builder's own report). Candidate dossier line (cap of 12 reached; recorded here until a second sighting): *a per-type relation scope keeps every same-label leg, and a benefit claim on a hub needs the hub's actual link shape censused — instance→meta vs instance→template are different hubs; a narrowing on the auth plane ships with its kill switch and the documented rollback re-verified.*
 
@@ -288,14 +288,33 @@ selector-less node by whole-fingerprint equality.
    fingerprint, whole bool, err)`: one `readNodeState`; an UNMARKED node answers with its whole document
    (`whole=true`, fingerprint = document revision, comparable with `Neighbors`') — the document is one key, so
    narrowing it saves nothing and would cost one read per relation per node; a MARKED node answers with only `rels`'
-   links (`whole=false`, `neighborsFromCoreKV(rels)`, the scoped fingerprint). `NeighborsByRelation` becomes
-   `NeighborsScoped` + `filterEdgesByRelation` on the whole arm — one read path, its contract unchanged.
+   links (`whole=false`, `neighborsFromCoreKV(rels)`, a fingerprint over exactly the relations asked for — a read
+   widened by a relation name that is not one subject token still hashes only the surviving entries). An empty `rels`
+   is an ERROR, never a silent empty answer (the marked arm would otherwise be fail-quiet on the one node class where
+   completeness matters); `NeighborsByRelation` keeps its own empty-set convenience in front of the delegation.
+   `NeighborsByRelation` becomes `NeighborsScoped` + `filterEdgesByRelation` on the whole arm — one read path, its
+   contract unchanged. A context-keyed read observer (`adjacency.WithReadObserver`, the `footprintCapturedHook` shape)
+   reports every `Neighbors` / `NeighborsScoped` read's (node, relations, marked, whole) so a test can pin WHICH read
+   happened rather than inferring it from a footprint's shape.
 2. **The executor memoizes by what it read.** `fetchEdges(node, rel)`: a whole memo (`ex.edges`) serves every hop on
    the node, filtered by the caller exactly as today. A typed hop on a node with no whole memo reads
    `NeighborsScoped(node, {rel})`: `whole` → memoize whole (an unmarked node is byte-identical to today: one batched
    read per node per evaluation however many relations cross it); else memoize under `(node, rel)` in a new
-   `ex.hubEdges`. An untyped hop always reads whole via `Neighbors`, as today. Repeatable read holds per KEY — `node`
-   for a whole read, `(node, rel)` for a hub read — so the same hop over the same hub twice is one read.
+   `ex.hubEdges`. An untyped hop always reads whole via `Neighbors`, as today. **The memo key is the relation, and a
+   whole read is a union of per-relation reads:** a whole read installed on a node that already holds hub reads is
+   COMPOSED — the whole list's edges of every memoized relation are replaced by that relation's hub entry — so every
+   hop's view of a relation is the first hop's view, whatever order the hops came in and whatever the node's mark did
+   in between (cold review, 2026-09-01: without the composition an untyped hop after a typed one re-read the typed
+   hop's relation at a later instant, and a later typed hop was then served the newer list). **And the composition
+   records its own pin:** for every relation it substitutes it writes a `"both"`-direction selector holding that
+   relation's pinned edge identities into the node's `EdgeSelectors` record — written by the composition itself, so
+   `recordEdgeSelector`'s stop-after-Fallback cannot skip it — because the whole read's fingerprint is the LATER
+   instant's and the typed hop's own selector covers only the direction it walked: without the pin an inbound write
+   to the substituted relation between the two hops was neither seen by the untyped hop nor detected by validation
+   (cumulative close pass, 2026-09-01; pre-fire the fingerprint was the earlier instant's, so this was a fail-open
+   regression confined to the composed state). A typed-only hub node keeps its exact directional selectors; the pin
+   exists only from the moment a whole read consumed the composed relation. The same typed hop over the same hub
+   twice is one read.
 3. **A hub read is footprinted as its Matched sets, never as a fingerprint.** `EdgeRevisions` carries whole reads
    only; a hub read's fingerprint is discarded — `NeighborsByRelation`'s contract says it is not comparable with
    `Neighbors`', and the Matched set `recordEdgeSelector` records right after every `fetchEdges` is already the unit
@@ -308,7 +327,9 @@ selector-less node by whole-fingerprint equality.
    its set can catch that; `recordEdgeSelector` stops recording once Fallback is set, so the sets present are exactly
    the earlier-instant ones. *Selector path* (typed hops only): `NeighborsByRelation(node, relations(Matched))` — one
    scoped read covering every selector on the node, exact for marked and unmarked alike — then the matched-set
-   comparison unchanged. The §13.4 property (a write to an unrelated relation on a shared node is not drift) is kept:
+   comparison unchanged; a selector record with NO selectors on this path is malformed and reports drift, the mirror
+   of the coarse path's missing-fingerprint guard (a nil-Matched branch input to the merge is one shape away from
+   it). The §13.4 property (a write to an unrelated relation on a shared node is not drift) is kept:
    the whole fingerprint is compared on the coarse path only, as today.
 
 **Kill switch** (precedent `REFRACTOR_WALK_SCOPE`, §5.1): `REFRACTOR_HUB_READ_SCOPE` — `on` (default) / `off` — read
@@ -317,17 +338,25 @@ in `ruleengine/full` (`SetDefaultHubReadScopeMode` / `DefaultHubReadScopeMode` /
 per-engine `WithHubReadScopeMode` copy for tests, which never mutate package state), with the `defaultWalkScopeMode`
 LIFETIME rule copied verbatim (`pipeline/walkscope.go:492-503`: written at boot, never re-derived at rebuild, replay,
 reconnect, tombstone or hot-reload). `off` = every `fetchEdges` reads whole — today's path and today's footprint
-shape; the validator's selector path is scope-independent and needs no switch. `Makefile`: `REFRACTOR_HUB_READ_SCOPE
-?=` beside `REFRACTOR_WALK_SCOPE` (`:108-119`) and pass-through on both refractor launch lines (`:249`, `:273`).
+shape. The validator needs no switch and keeps its new body under `off`: the selector path is scope-independent, and
+the coarse path's set re-derivation is verdict-identical to the fingerprint when every set came from the same whole
+read the fingerprint pins (a hash collision aside) — `off` restores the READ path and the footprint shape, not the
+validator's text. `Makefile`: `REFRACTOR_HUB_READ_SCOPE ?=` beside `REFRACTOR_WALK_SCOPE` (`:108-119`) and pass-through
+on both refractor launch lines (`:249`, `:273`).
 
 **Soundness.** (i) *Completeness:* the marked arm is `neighborsFromCoreKV(rels)`, exact by construction — the
 in-memory relation filter runs over whatever the subject filters matched, and a relation name that is not one subject
 token widens the read, never the answer (`adjacency/relationscope_test.go` pins it); `traverseRel` consumes only
 `rel.Type` edges on a typed hop, so a scoped list and a whole list bind identically. (ii) *Repeatable read:* per key,
-rule 2; the one cross-key exposure is typed-then-untyped on one MARKED node in one evaluation — the corpus has none
-(the two untyped-hop lenses, `objectLiveness` / `objectAttachments`, `packages/objects-base/lenses.go:105,:164`, share
-no node position with a typed hop) — and rule 4's coarse-path set comparison detects it for a validating lens; for a
-non-validating lens it is a relation-at-t1 / whole-at-t2 view, no wider than today's cross-node non-snapshot reads.
+rule 2, and the composition rule makes it hold across a whole read too, so no hop order can show one relation at two
+instants; what remains is that two DIFFERENT relations on one node may be observed at different instants, no wider
+than today's cross-node non-snapshot reads, and rule 4's coarse-path set comparison detects a write between those
+instants for a validating lens. The corpus context (not the guarantee — the mechanism is): three lenses carry an
+untyped hop, `objectLiveness` / `objectAttachments` (`packages/objects-base/lenses.go:105,:164`) and
+`objectIdentityAttachmentsRead` (`packages/loftspace-domain/lenses.go:295`), each with a single hop whose from-node is
+the object vertex — the executable census is the two pin tables, `anchor_hopindex_corpus_census_test.go:140-141`
+(actor-aggregate) and `plain_scanroot_corpus_census_test.go:154` (plain); the 2026-09-01 count of two read only the
+first, and a count is the wrong kind of claim here.
 (iii) *Detection never weakens:* every set compared today is compared after; the coarse path compares strictly more;
 nothing here makes `footprintValid` pass more readily (the dossier's direction test). (iv) *Cost:* unmarked nodes are
 unchanged; a marked hub costs one scoped drain per (hub, relation) per evaluation in place of one whole drain per hub
@@ -348,7 +377,9 @@ matched set); `footprintValid` returns false at once when set. Reachability is b
 
 **Scope sentence:** the row, verbatim in §9. **Green bar:** on the live stack after `make cycle-refractor`, no handler
 in the goroutine profile sits in `neighborsFromCoreKV` under `full.(*executor).fetchEdges`, and `leaseApplicationsRead`
-/ `landlordLeaseApplicationsRead` / `renewalComplete` each move faster than one message per minute.
+/ `landlordLeaseApplicationsRead` / `renewalComplete` each move faster than one message per minute. **Outcome
+(2026-09-01, §9.4):** the first half held, the second did not — the pair's cost is the unseeded corpus rescan, not the
+hub read; the green bar's second clause had inherited the row's premise instead of measuring it.
 
 **Touch-list (verified live 2026-09-01):** `internal/refractor/adjacency/store.go:52-121` (`Neighbors`,
 `NeighborsByRelation`, `filterEdgesByRelation`; `neighborsFromCoreKV` `:158-252` unchanged) ·
@@ -422,4 +453,49 @@ single-direction relations — nothing to save, and a new adjacency filter shape
 
 ### 9.4 Build note / checkpoint
 
-- 2026-09-01 · brief committed; worktree `steward-hub-read-scope`; next: Inc 1.
+- 2026-09-01 · brief committed `33902f3e`; worktree `steward-hub-read-scope`.
+- 2026-09-01 · Inc 1 (§9.1 rules 1–4 + switch) · Inc 2 (§9.2 `Torn`) · Inc 1b (cold-review fixes) landed as
+  `7d149c71` · `63d6d441` · `635d1d22` · `7e3b701e` (Inc 1c, the cumulative close pass's blocker: the composition pins every substituted relation in both directions, and the selector path refuses a record with no selectors). Two cold reviewers over Inc 1 agreed on one MAJOR: a whole read landing after
+  a hub read shadowed it, so one evaluation could see one relation at two instants — closed by the composition rule
+  (rule 2 as amended: the memo key is the relation, a whole read is a union of per-relation reads), revert-proven.
+  The rest of the fix batch: `NeighborsScoped` refuses an empty relation set (the marked arm was fail-quiet), a widened
+  scoped read fingerprints only its scope, the malformed-footprint test moved to the one fixture where the guard is
+  load-bearing (a document-less node, fingerprint 0), a read observer pins WHICH read happened, tests stopped
+  depending on the package posture, `Fallback`'s variable-length claim struck, `off` documented as restoring the read
+  path and footprint shape (the validator keeps its body; the verdict is identical under whole reads).
+- Deviation from §9.3: `NeighborsScoped` does not subsume `Neighbors` — a nil-vs-empty distinction would be load-bearing
+  for a hub's completeness — only `NeighborsByRelation` is re-expressed on it. §9.2's reachability is pinned as the
+  GUARDS (multi-walk ⇒ Personal ⇒ NATS-subject target ⇒ not auth-plane; only the actor-aggregate install arm arms
+  validation), not as a zero-row corpus table that would pass vacuously while the guard was removed.
+- Live verification (2026-09-01 22:38–22:48 PDT, `make cycle-refractor` from the main checkout, `bin/refractor` built
+  22:38:39 from `8a2cee97`, boot log `hub read-scope mode=on`; `bin/{bridge,lattice,lattice-pkg,loupe}` rebuilt, not
+  cycled). **The hub drain is gone:** three goroutine samples hold 0 handlers inside `neighborsFromCoreKV` (2–3 before,
+  every one under `full.(*executor).fetchEdges`); the only `adjacency.Neighbors` frames left are the actor enumerator's
+  unmarked-node reads. **The pair did not speed up:** messages processed in the 10 minutes before vs after the cycle —
+  `leaseApplicationsRead` 8 → 6, `landlordLeaseApplicationsRead` 12 → 10, `renewalComplete` 37 → 28 — and the
+  after-window ran under a 92k-message drain (`capabilityServiceAccess`'s consumer was recreated by a resumed rebuild
+  at the restart, ack floor reset, draining at ≈150 msg/s with the derivation acting on every message; not this
+  fire's mechanism). The pair's per-message cost is the unseeded whole-corpus evaluation, grounded live: since the
+  cycle the lens logs *"plain anchor derivation cannot act on this lens; using today's unseeded evaluation"* (the §5.2
+  `$now` refusal chain) and every message it processed was a `vtx.service` / `lnk.service` neighbour event. The row's
+  premise — that the executor's hub expansion dominated the pair's cost — is refuted by measurement; the drain was
+  real and is removed, but the closer for the pair is the ratified `$now` sweep
+  (`expiry-as-a-recorded-fact-design.md`, Andrew-ratified 2026-09-01, Shape B), the board's own next fire. No new row.
+- Board neighbour reconcile on ship: the `$now` sweep row is the pair's named closer (unchanged, ratified); §8's
+  `leaseApplicationsRead` / `landlordLeaseApplicationsRead` / `renewalComplete` class now reads "hub drain removed;
+  cost is the corpus rescan" rather than "expand a hub identity through the executor's whole-node `Neighbors`".
+
+**Close-pass classification (`agents/steward/SKILL.md` §4):** design-gap ×2 (Refractor — a memo re-keyed to a narrower
+unit did not state how a wider read composes with entries already held, found by both cold reviewers; the multi-walk
+footprint merge's stated contract was violated as written — the arbitration design's fold, latent by construction);
+brief-gap ×1 (the untyped-hop census counted two lenses, the pinned census holds three across two tables — a count
+where the mechanism-level invariant was the claim); test-quality ×3 (a fail-closed guard pinned on a fixture where it
+could never bind; footprint-shape assertions that hold under a whole read; posture resolved from package state);
+doc ×3 (a `Fallback` trigger the code never had; "written by tests"; `off` overstated as restoring the validator's
+text). Second sighting of the census-shaped-claim class (parent fire §8 candidate: *a benefit claim on a hub needs the
+hub's actual link shape censused*) → promoted: `docs/components/refractor.md`'s standing rule now binds a design's
+soundness argument the same way it binds a per-lens analysis — a "the corpus has N / none of shape X" claim cites
+the executable pin or ships one; the candidate dossier line retires into it. Candidate dossier line from this fire
+(cap of 12 reached; recorded here until a second sighting): *a memo re-keyed to a narrower unit must state how a
+wider read composes with the entries it already holds — a whole read after a scoped one is a second view of the
+scoped key unless composed; and a guard is pinned only on the fixture where deleting it changes the verdict.*

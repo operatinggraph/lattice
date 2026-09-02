@@ -1,5 +1,15 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-25 · `f12c428` · [rbac/Pkgmgr] grant-edge provenance CLOSED — the `grantedBy` edge stamps origin at both channels; five-class reconciler + CI gate on the edge plane; kernel-regrant rule not keyed on the stamp; 3 cold reviews
+- 2026-08-25 · `ffd7769` · [Weaver] the `data:` latch's clears re-paired to facts CLOSED — template fact split off the gap column's read, retirement at all three close legs, clock-keyed log pacing that dates the issue; 6 MAJORs over 3 reviews
+- 2026-08-25 · `ad15f91` · [CI] unit-1/unit-3 shard rebalance SHIPPED — refractor growth made unit-1 the pole (332s vs 154s summed); moved 84s of whole-package globs to unit-3; unit-1 277s→170s, run 282s→198s
+- 2026-08-25 · `866f623` · [Weaver] a migrated `surface` gap's stranded state acted on by three legs CLOSED — `handleRow` skipped the column and silenced its Surface issue; `escalateExhaustedGap` guarded inside, `reclaim` leaves the mark to TTL
+- 2026-08-25 · `057286f` · [Weaver] exhausted-gap durable stop + un-park CLOSED — alert re-derived from the budget that suppresses it, re-arm narrowed to a zeroed budget, operator verb + its capability verb; 6 review rounds
+- 2026-08-25 · `d835bdf9` · [Bootstrap] prior-epoch operator-role detection CLOSED — the cross-epoch orphan class the `vtx.meta.>` census cannot reach; ranked by what it confers, hard gate only in verify-kernel; 3 cold reviews + close pass
+- 2026-08-25 · `c69aa4a4` · [Processor/facet] NFR-S6 declared-read set CLOSED — descriptor-named keys only, refused at step-4 head; grammar-checked, union-attributed, over-deny made audible; facet's self-key padding removed; 3 cold reviews
+- 2026-08-24 · `b9121e8` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
+- 2026-08-24 · `3a35bde` · [Weaver] inflight_<g> suppression-vs-reclaim contract CLOSED — the error fired on a contract-legal declaration; class+key+prefix retired, verdict and two-leg suppression unchanged; cold review clean
+- 2026-08-24 · `624d445` · [Processor/identity-domain] claim-rejection timing oracle CLOSED — n=3000 overturned the same-day n=40 "no gap"; quantized release from receipt, NFR-S6 op set, reply key-echo closed; 3 cold reviews
 - 2026-08-24 · `c44216c` · [Refractor] CapabilityRepairBlocked names its class — BlockedClass across fold/sweep/health; content+retraction error-on-sight, provenance stays warning, business-lens ceiling held; guard untouched; 3 cold reviews
 - 2026-08-24 · `87cb2bb` · [Processor/identity-domain] NFR-S6 descriptor-floor drift gated — hostile probe derived from the descriptor, floored set pinned independently; 3 revert-proofs
 - 2026-08-23 · `5a85ad7` · [Tooling] this-fire narration gate CLOSED — 5 phrases admitted on measurement, matched across a wrapped comment block; 160 sites swept, 113 AST-proven comment-only

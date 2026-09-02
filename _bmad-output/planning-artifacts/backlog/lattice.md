@@ -120,7 +120,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Refractor/Weaver] Expiry is a fact on the CHECK, not a clock in the lens — sweep the `$now` lenses** | 16 lenses read `$now`, so their stored rows are claims about a past instant and the convergence sweep — their only verifier — cannot tell a broken projection from a moving clock. Fix: read the lapse `MarkExpired` already records, keyed per target, `freshUntil` included. | ★★★ | L | 📐 awaiting-Andrew (scope fork) · [design](../../implementation-artifacts/expiry-as-a-recorded-fact-design.md) |
-| **[Refractor] The executor reads a marked hub whole on every typed hop** | `fetchEdges` drains a marked node's whole link keyspace even for a typed hop, so a hub identity is expanded per evaluation and the plain Postgres pair still moves 1–3 messages per 4 min after the walk fix. Mirror `adjacency.NeighborsByRelation` + the selector-scoped footprint; the validator re-read takes the same scope. | ★★ | M | 🏗️ building · owner: steward-hub-read-scope · [design](../../implementation-artifacts/refractor-hub-walk-and-periodic-load-design.md) §9 · next: Inc 1 scoped hub read |
 | **Typed relation signatures — `containedIn: location→location`** | Declare a relation's endpoint types against the taxonomy, enforced at step 6 fail-closed; a signed variable-length hop contributes its endpoint expansion rather than clearing exhaustiveness. Held 2026-08-13: the payoff shrank to 2 lenses, both convertible by a single-hop rewrite (replacement row on verticals). | ★★ | L | 🗄️ shelved (revive: an intermediate containment level, or rewrite-unreachable varlength census) · [design](../../implementation-artifacts/typed-relation-signatures-design.md) |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
 
@@ -141,6 +140,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
 - 2026-09-01 · `1fca25cf` · [Refractor] pattern-scoped actor walk + Postgres `GetRow` + idle-aware periodic loops + rebuild registration race — 8 stuck personal lenses drain at 10–25 msg/s
 - 2026-09-01 · (triage, no code) · [orchestration-base] duplicate-human-task row retired — the prescribed work-scoped dedup is REFUTED (3 shapes, code-cited); cause is an anchor-vs-work granularity mismatch, package fix filed on verticals
 - 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
@@ -168,15 +168,5 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-08-26 · `8d039bdb` · [Contracts] six 🔭 contract-text flags adjudicated — #2 + #10 amendments ratified as public contracts; #9 timing + three #2 clauses rejected as implementation prose
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-25 · `f12c428` · [rbac/Pkgmgr] grant-edge provenance CLOSED — the `grantedBy` edge stamps origin at both channels; five-class reconciler + CI gate on the edge plane; kernel-regrant rule not keyed on the stamp; 3 cold reviews
-- 2026-08-25 · `ffd7769` · [Weaver] the `data:` latch's clears re-paired to facts CLOSED — template fact split off the gap column's read, retirement at all three close legs, clock-keyed log pacing that dates the issue; 6 MAJORs over 3 reviews
-- 2026-08-25 · `ad15f91` · [CI] unit-1/unit-3 shard rebalance SHIPPED — refractor growth made unit-1 the pole (332s vs 154s summed); moved 84s of whole-package globs to unit-3; unit-1 277s→170s, run 282s→198s
-- 2026-08-25 · `866f623` · [Weaver] a migrated `surface` gap's stranded state acted on by three legs CLOSED — `handleRow` skipped the column and silenced its Surface issue; `escalateExhaustedGap` guarded inside, `reclaim` leaves the mark to TTL
-- 2026-08-25 · `057286f` · [Weaver] exhausted-gap durable stop + un-park CLOSED — alert re-derived from the budget that suppresses it, re-arm narrowed to a zeroed budget, operator verb + its capability verb; 6 review rounds
-- 2026-08-25 · `d835bdf9` · [Bootstrap] prior-epoch operator-role detection CLOSED — the cross-epoch orphan class the `vtx.meta.>` census cannot reach; ranked by what it confers, hard gate only in verify-kernel; 3 cold reviews + close pass
-- 2026-08-25 · `c69aa4a4` · [Processor/facet] NFR-S6 declared-read set CLOSED — descriptor-named keys only, refused at step-4 head; grammar-checked, union-attributed, over-deny made audible; facet's self-key padding removed; 3 cold reviews
-- 2026-08-24 · `b9121e8` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
-- 2026-08-24 · `3a35bde` · [Weaver] inflight_<g> suppression-vs-reclaim contract CLOSED — the error fired on a contract-legal declaration; class+key+prefix retired, verdict and two-leg suppression unchanged; cold review clean
-- 2026-08-24 · `624d445` · [Processor/identity-domain] claim-rejection timing oracle CLOSED — n=3000 overturned the same-day n=40 "no gap"; quantized release from receipt, NFR-S6 op set, reply key-echo closed; 3 cold reviews
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `5a85ad7`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `f12c428`)*

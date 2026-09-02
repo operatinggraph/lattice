@@ -1328,7 +1328,11 @@ fire**, reusing `forEachCorpusCypher` rather than sweeping its own way — enume
 rule body through the *real* analysis (never a grep of cypher text, and never a reimplementation of the
 predicate, which would agree with a broken gate), pin the per-lens verdict, and assert the population is
 exactly these names with a floor on the count so an empty enumeration cannot read as a table of unchanged
-rows.
+rows. **The same rule binds a design's soundness argument:** a claim of the form *"the corpus has N / none
+of shape X"* cites the executable pin that holds it (or ships one) — never a count read off a grep. Seen
+twice (the hub-walk fire's benefit claim on a hub whose link shape was never censused; the hub-read-scope
+fire's "two untyped-hop lenses" when the pinned census held three across two tables), so the count is the
+wrong kind of claim: state the mechanism-level invariant and point at the pin.
 
 - **A removal verdict's premises are the whole mechanism — check the PROBED ARTIFACT, not the precedent's
   shape.** Two ways this fire nearly shipped a reconciler that deleted live state. (a) **A probe artifact
