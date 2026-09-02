@@ -1252,7 +1252,17 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   the form "something is still repairing this", open the publisher and ask what it publishes on the FAILURE
   path** — if the answer is "the same thing", you have a heartbeat, and a heartbeat is not a verdict. The
   precedent was in the sibling I was mirroring: the plain licence reads `AuditStatus`'s pass *result* plus
-  suppression plus staleness, and its zero-value case explicitly refuses. Two further corollaries from the
+  suppression plus staleness, and its zero-value case explicitly refuses. **And when a reviewer hands you a finding, it is a claim about a CLASS — run it back across every
+  SIBLING predicate in the same design before you call the fold done.** The pass caught (2) in conjunct 3;
+  I fixed conjunct 3. Andrew, at ratification, found the identical failure sitting in **conjunct 1** of the
+  same six-row table: it tested *"a reprojector is wired in this process"*, which every instance of a
+  multi-instance deployment satisfies while the edge reaches none of the others — a predicate reading
+  healthy through the very condition it exists to detect, the same sentence as the heartbeat, one row up.
+  A fold that touches only the row the reviewer named leaves the class shipped. The repair also generalizes:
+  where a design's premise can **expire** (single-instance, one writer, a corpus property), a risk row naming
+  the expiry is not enough — give the mechanism a conjunct that **revokes itself** when the premise goes, and
+  a build-time gate that refuses the transition, so the next author is bound by the tree rather than by
+  having read your §9. Two further corollaries from the
   same pass, both cheap: **run `go list -deps` on the importing package before you specify plumbing between
   two of them** (I proposed two edges, and both were import cycles — the design named the packages and never
   checked the arrows); and **when your design deliberately keeps a flag FALSE and adds a disjunction beside

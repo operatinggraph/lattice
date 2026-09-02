@@ -1,8 +1,10 @@
 # The personal plane earns the pattern-directed derivation — three refusals, one licence
 
-**Status:** 📐 awaiting-Andrew (ratification) — Designer fire, 2026-09-01. Author: Winston.
+**Status: ✅ RATIFIED — Andrew, 2026-09-01.** One condition folded at ratification and now part of the
+design: the licence must **revoke itself** when Refractor becomes multi-instance rather than relying on
+prose (§4.4 conjunct 5 + the build-time gate, §9 R4). Author: Winston (Designer fire, 2026-09-01).
 **§13 adversarial pass ✅ RUN + findings FOLDED** (3 blocking, 8 major, 6 minor; none deferred). No pre-build
-gate is left open — the Steward may build this the moment it is ratified.
+gate is left open — **the Steward may build this now.**
 **Component:** Refractor — `internal/refractor/{pipeline,projection,grantchange,control,personalinterest}` + `cmd/refractor` wiring.
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → *Edge & personal lenses* →
 *[Refractor] Derivation licence for personal lenses — clear §4.4's two out-of-pattern inputs* (★★★, M).
@@ -50,11 +52,32 @@ at all**) — which is where the 128k-message backlog actually lives.
    the set at install instead: a lens writing a `cap-read.` key that is not a sink-armed read-grant producer
    is **refused**, which is what makes conjunct 1 mean anything.
 
-**The one judgement worth your eye (not a fork, but say so if you disagree):** this narrowing trades an
-*accidental* reprojection for a *mechanised* one on the Edge/personal plane, which is user-visible convergence
-latency for a device. §4.2 exists precisely so the trade is edge-for-edge rather than edge-for-sweeper. If you
-would rather not narrow the personal plane at all until HA/multi-instance Refractor lands (the grant-change
-edge is **in-process only** — §9 R4), say so and this design shelves cleanly behind that trigger.
+**The judgement, and how it was resolved (2026-09-01).** This narrowing trades an *accidental* reprojection
+for a *mechanised* one on the Edge/personal plane — user-visible convergence latency for a device — and §4.2
+exists precisely so the trade is edge-for-edge rather than edge-for-sweeper. The open question put to Andrew
+was whether to narrow the personal plane at all before HA/multi-instance Refractor lands, given the
+grant-change edge is **in-process only**.
+
+**Resolved: narrow now, and make the licence revoke itself at the transition.** His question — *"will some of
+this need redoing when Refractor runs multiple instances?"* — exposed that my conjunct 1 tested *"a reprojector
+is wired in this process"*, which stays **true on every instance** while the edge stops spanning the
+deployment: a fail-open at exactly the moment the premise expires. Shelving the design was the wrong answer
+because the payoff is real today and most of it is transport-independent (below); the right answer was to stop
+narrating the hazard in a risk row and enforce it. Hence §4.4's conjunct 5 and the build-time gate.
+
+**What survives multi-instance, and what does not** — the reason "shelve until HA" was not the answer:
+
+| Increment | Delivers the performance win? | At multi-instance |
+|---|---|---|
+| 1a shred announces · 1b Interest Set edge | no — safety preconditions | **re-plumbed, not redesigned**: the decisions survive, the sink under them changes |
+| 1c/1d the two gates | no | **survive untouched** — transport-independent |
+| 2 the licence | yes — 12 single-walk personal lenses | machinery survives; conjuncts 1 and 3 are re-derived, and conjunct 5 turns the whole thing off until they are |
+| 3 the multi-walk union | yes — `edgeCatalog` **128 k**, `edgeTasks`, `edgeEntitySessions` | **entirely unaffected** — per-process computation over shared adjacency |
+
+The largest single win is multi-instance-neutral, and nothing is thrown away. Note also that the debt is
+**pre-existing**: the in-process edge shipped 2026-08-14 and HA already owed it a durable-signal replacement.
+What this design changes is that the edge stops being an improvement and becomes load-bearing for a
+narrowing — which is exactly why conjunct 5 exists.
 
 ---
 
@@ -342,6 +365,7 @@ conjunct so the static-refusal log can latch one.
 | 1 | the D1 read gate is wired for this pipeline (`capKV != nil`) **and** a grant-change reprojector is wired in this process | an unwired gate means the lens runs open; no reprojector means input 1 has no edge *here*. The claim that every **producer** announces is not a runtime conjunct — Inc 1d makes it an install-time property | `"the D1 read gate is not wired"` / `"no grant-change reprojector is wired"` |
 | 2 | the Interest Set edge is armed **or** `interestKV == nil` | a lens with no interest filter has only one out-of-pattern input | `"the Interest Set has no change edge"` |
 | 3 | the personal-plane healer's **last pass verdict is clean and recent** | see below | `"the personal-plane healer has never completed a pass"` / `"…last pass failed"` / `"…could not enumerate its population"` / `"…last pass is older than N intervals"` |
+| 5 | **the deployment is single-instance** — a live count of Refractor instances ≤ 1, and the count itself readable | the whole edge is an in-process function call (G4). On a second instance a producer's announcement never reaches a personal pipeline hosted elsewhere, and **conjunct 1 stays true on every instance while the edge silently stops spanning the deployment** — a fail-open at exactly the transition (Andrew, at ratification). See below for why the staleness direction is the whole difficulty | `"more than one Refractor instance is live"` / `"the instance count is unreadable"` |
 | 4 | the compiled rule references neither `$now` nor `$projectedAt`, and its label set is exhaustive enough to prove it | a row that moves with wall-clock alone is the purest out-of-pattern input there is, and after this increment only the sweeper refreshes it. No shipped personal lens uses either, so the conjunct is latent — which is exactly why it must exist before one does (§13 M11) | `"the lens's row depends on $now"` |
 
 **Conjunct 3 is a VERDICT, not a progress stamp.** My first draft read a `LastProgressAt`, and the adversarial
@@ -367,6 +391,31 @@ matters: a new identity has no projected rows yet, so a lost signal there under-
 over-grants. **(ii)** A population that cannot be listed refuses the licence for the *whole* plane, dropping
 all 15 lenses back onto the enumerator. That is the correct direction and it is a real availability cliff —
 §9 R6.
+
+**Conjunct 5's difficulty is the STALENESS DIRECTION, not the count.** Health KV is keyed
+`health.<component>.<instance>`, so an instance count is derivable today with no new state and no vendor
+question. But the two staleness directions are not symmetric:
+
+- a **crashed** instance leaving a stale entry over-counts ⇒ refuses the licence ⇒ pessimisation, safe;
+- a **newly started** second instance that has not yet written its entry under-counts ⇒ the licence stays on
+  while the edge no longer spans the deployment ⇒ **fail open**, which is the exact hazard the conjunct
+  exists to close.
+
+So the count is a **backstop with a bounded exposure window**, not the primary defence, and the design must
+say which is which rather than letting the runtime read carry an argument it cannot hold. Read it off the
+same clock as conjunct 3's verdict (never per event), refuse on unreadable, and state the window.
+
+**The primary defence is a build-time gate**, per the standing lint doctrine — the thing that binds the
+author who makes Refractor multi-instance, who will not be reading this document. It fails the moment the
+deployment gains a second-instance affordance (a queue-group consumer spec, a replica count, an instance-id
+config) while the personal licence's edge is still process-local, and its message names this design and the
+durable-signal alternative (§8 #6) as the precondition. A narrowing that revokes itself when its premise
+expires is worth more than a risk row asking someone to remember.
+
+*(A sharper runtime signal may exist — a pipeline could ask the server how many consumers are bound to its
+own durable — but that is a claim about NATS behaviour at our pinned version, so the builder grounds it in
+`docs/vendors.md`'s upstream sources before substituting it. The Health-KV count is the shape that needs no
+vendor question; treat the consumer-bound route as a permitted sharpening, not an open fork.)*
 
 **Where it is asserted.** `InstallPersonalLens` cannot know what the host wired, so — exactly like
 `SetPersonalPlaneHealer` — the host asserts conjuncts 0–2 at `registerPersonalHealer`, and the zero value is
@@ -530,7 +579,7 @@ the compiled indexes, not of the author's cypher style.
 | R1 | The derivation under-approximates on a personal lens → a device keeps stale rows. | The bad direction, and on the personal plane a stale row is a **read the actor may no longer be entitled to**. | Every unresolvable shape falls back (§4.7's superset invariant, unchanged); conjunct 3's healer is the standing repair; the knob bounds the window. The differential test (§10) is the acceptance. |
 | R2 | Inc 3's per-branch union has a branch-specific seeding bug that the single-walk tests cannot see. | Missed anchors on exactly the three biggest lenses. | The differential test runs **per branch and for the union**, against the enumerator, over the real corpus — not against a hand-built graph. |
 | R3 | Inc 1b makes a flapping device's registrations a reprojection storm. | Availability, not correctness. | The dirty set coalesces per identity and is bounded at 10 000 with drop accounting (`reprojector.go:53`, `:338-341`); an interest change enqueues the *same* key a grant change would. |
-| R4 | **The grant-change edge is in-process only** — with multiple Refractor instances, a producer on instance A never reaches a personal pipeline on instance B, and the licence's conjunct 1 would be asserting an edge that does not span the deployment. | Silent, and in the over-grant direction. | Today Refractor is single-instance, and HA-NATS multi-instance is a 🚧-sequenced item. **The licence must not outlive that assumption**: conjunct 1 is written to require the sink *for this process*, and the follow-on trigger is stated here — when multi-instance Refractor lands, alternative #6 (a durable signal) is a precondition, not an optimisation. Say this in `docs/components/refractor.md`, not only here. |
+| R4 | **The grant-change edge is in-process only** — with multiple Refractor instances a producer on instance A never reaches a personal pipeline on instance B. My first draft named this in prose and left conjunct 1 testing *"a reprojector is wired in this process"*, **which stays true on every instance while the edge stops spanning the deployment**. That is a fail-open at exactly the transition, in a design whose entire argument is fail-closed-by-default. | Silent, and in the over-grant direction. | **Now enforced, not narrated** (Andrew, at ratification — the same failure class the §13 adversarial pass caught in conjunct 3, which I did not then run back across its siblings). Conjunct 5 refuses the licence above one live instance; the build-time gate refuses the *transition* while the edge is still process-local. When multi-instance lands, alternative #6 (a durable signal) is a precondition of re-licensing, not an optimisation. Record it in `docs/components/refractor.md` too, not only here. |
 | R5 | The 2-minute registry-ready hold means the first grant-change signal after every boot waits (`reprojector.go:186-198`). | Latency at boot. | Pre-existing, unchanged, and now shared by the interest edge. Worth one line in the operator doc; not worth a mechanism. |
 | R6 | **Conjunct 3 is an availability cliff for the whole plane.** A Core-KV listing blip makes `ensurePopulation` fail, `Sweep` returns before recording a pass, and after `K` intervals **all 15** personal lenses drop back onto the relation-blind enumerator — the 20 s–190 s/message pathology §1.1 measured. | Pessimisation, in the safe direction, but abrupt and system-wide. | The direction is correct and must not be softened: a licence that survives its own healer being blind is not a licence. Bound the blast radius instead — `K` is generous (a listing blip is seconds, `K × 60 s` is minutes), the `off` knob is unaffected, and the cliff is an *operator-visible* refusal string, not a silent one. Named here rather than discovered live (§13 B3). |
 | R7 | **Two narrowings compose.** The D1 gate's own producer, `capabilityRead`, is *itself* acting on this derivation today (it clears every conjunct of `derivationIndexForAct`). If the producer under-approximates, no grant is rewritten, so no transition fires, so the personal edge is silent — and after Inc 2 the personal lens's BFS accident is no longer there to re-ask the gate. | The accident was quietly serving as the other plane's second line of defence. | **Closed, but only because the producer's own convergence sweep announces** — both heal legs call `notifyGrantChange` with the outcome key, and the code says why: *"a retraction either of them heals is as real a grant withdrawal as one the CDC path writes"* (G19, `reproject.go:535-545`, `:643-645`). So the chain is producer-sweep-heals → guarded write → transition → personal reprojection. What genuinely changes is the **latency**: the repair is now paced by the producer's sweep rather than by the personal lens's next unrelated event. Measure it at close; it is a number the fire owes, not an unknown. |
@@ -571,6 +620,12 @@ the compiled indexes, not of the author's cypher style.
   unguarded adapter announces once per actor rather than not at all. *Owner: Inc 1a.*
 - **`$now` conjunct** — a synthetic personal lens referencing `$now` is refused the licence (no corpus
   instance exists, so the vector is authored). *Owner: Inc 2.*
+- **Cardinality conjunct, both staleness directions** — two live instances refuse; an unreadable count
+  refuses; a stale entry from a crashed instance refuses (and that is asserted as *correct*, so a later
+  "optimisation" that trusts freshness has a test standing in front of it). *Owner: Inc 2.*
+- **The build-time gate's own vectors** — a synthetic queue-group/replica affordance fails the gate while the
+  edge is process-local, and passes once the durable signal replaces it. Run on every invocation, since the
+  tree ships no violating configuration for it to catch (the `lint-lens-anchors` precedent). *Owner: Inc 2.*
 - **Build-tagged harnesses**: adding a method to the healer/sink interfaces reaches them — enumerate with
   `grep -rl "^//go:build " --include=*_test.go internal/` and run the ones the touched interfaces reach.
 
@@ -650,3 +705,30 @@ It returned **3 blocking + 8 major + 6 minor**. All are folded above; none is de
 - **Inc 3's per-branch union is a genuine superset for `edgeCatalog`**, verified through `AnchorSideSeeds`'
   both-endpoint seeding and `executeBranches`' per-actor re-run of every branch.
 - **G1, G5 (as a census of today), G7, G8, G9, G12, G16, G17, G18** check out against the cited code.
+
+---
+
+## 14. Ratification (Andrew, 2026-09-01)
+
+**Ratified, with one condition, folded above rather than filed.**
+
+The question that carried it: *"this design, if implemented today, will help with performance of personal
+lenses — but some (all?) of it will need to be redone when Refractor runs multiple instances?"* The answer is
+in the For-Andrew table: it helps today, the perf-delivering half is largely transport-independent, and the
+re-derivation is two licence conjuncts plus three announcement sites.
+
+But answering it surfaced the defect. §9 R4 **named** the multi-instance hazard and conjunct 1 **did not test
+for it** — it asserted a reprojector wired *in this process*, which every instance of a multi-instance
+deployment satisfies while the edge reaches none of the others. A fail-open, in the over-grant direction, in a
+design whose whole argument is fail-closed-by-default.
+
+**What is now true:** conjunct 5 refuses the licence above one live instance (Health-KV derived, fail-closed
+on unreadable, with the two staleness directions distinguished — the fail-open one is why the count is only a
+backstop), and a **build-time gate** refuses the transition itself while the edge is still process-local. The
+narrowing revokes itself when its premise expires instead of depending on a future author reading §9.
+
+**The generalized lesson**, folded into `agents/designer/SKILL.md` §2 in the same commit: the §13 adversarial
+pass had already caught this exact class in conjunct 3 — a predicate that reads healthy through the very
+condition it exists to detect — and I fixed that one conjunct without running the finding back across its
+siblings in the same table. A finding is a claim about a *class*; the fold is not done until every sibling
+predicate has been evaluated against it.
