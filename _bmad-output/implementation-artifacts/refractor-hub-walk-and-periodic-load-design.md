@@ -199,4 +199,5 @@ a load-generator artefact (noted for the Vertical PO in the commit).
 ## 8. Build note / checkpoint
 
 - 2026-09-01 · Inc 2 (§5.2 Postgres `GetRow`) landed `4e11c9b3`. Brief gap: `ProtectedAdapter` wraps the inner adapter as a named field, so the reader had to be re-declared on the wrapper for `leaseApplicationsRead` to satisfy `RowReader` at all — the builder caught it; the corpus census verifies which lenses now enrol.
-- Inc 1 (§5.1) and Inc 3 (§5.3) in flight in their own worktrees.
+- 2026-09-01 · CI on the Inc 2 push failed in `TestNarrowedFilter_RebuildRecomputesLabelSet` (untouched by Inc 2): Run creates the durable server-side before the supervisor manages it, and a rebuild in that window is told "not managed". Fixed at the source `3b32c745` — the rebuild takes Pause/Resume's `awaitStarted` guard while the consumer is unmanaged — with a mutation-proven regression test.
+- Inc 1 (§5.1) and Inc 3 (§5.3) in flight in their own worktrees; Inc 1 amended to carry §4.2's standing-healer conjunct (sweep plan, or the personal plane's `PersonalSweeper` + grant-change edge).
