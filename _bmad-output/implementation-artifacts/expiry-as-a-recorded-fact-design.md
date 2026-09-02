@@ -1,13 +1,13 @@
 # Expiry is a fact on the check, not a clock in the lens
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-01 · Stream 2 (Lattice) ·
+**Status: ✅ RATIFIED by Andrew 2026-09-01 — §0.4 row 3: ONE fire, ordered Inc 1 (the per-target marker) → Inc 2 (the neighbour-hosted family: the background-check instance becomes its own anchor) → Inc 3 (the ten anchor-hosted declarations) → Inc 4 (the role-(c) guards). Size L. No frozen-contract edit. Winston's adjudications at ratification: one `freshnessExpiry` aspect carrying a `byTarget` map with `expiredAt` as its monotone maximum; the `>=` comparison over the presence test; `create`-when-absent / `update`-when-present, OCC-conditioned by the declared read; the engine-level 4-deep aspect pin lands in Inc 0 before any cypher converts; `capabilityEphemeral` and `cafeStaleTabSettlement` leave the design as their own rows (§15).** · Designer fire 2026-09-01 · Stream 2 (Lattice) ·
 board row: *[Refractor/Weaver] Expiry is a fact on the CHECK, not a clock in the lens — sweep every
 `$now` lens*
 
-> **Rewritten after its own adversarial pass returned five blockers against the first draft.**
-> Everything below is the corrected design; the refuted draft is not preserved above a banner, because
-> a superseded body is how a later fire builds the withdrawn shape. §14 records what was refuted —
-> three of the five are the reason the recommendation is what it is.
+> **Rewritten after two adversarial passes against it.** Everything below is the corrected design; no
+> refuted draft is preserved above a banner, because a superseded body is how a later fire builds the
+> withdrawn shape. §14 records what each pass refuted — several of those findings are the reason the
+> recommendation is what it is.
 
 ---
 
@@ -15,23 +15,52 @@ board row: *[Refractor/Weaver] Expiry is a fact on the CHECK, not a clock in the
 
 ### 0.1 Your ask, clause by clause
 
-> *"the fired timer records `expiredAt` on the service instance; lenses count `completed AND
-> expiredAt = null`; the application keeps its own lifecycle marker. 8 lens files."*
+Filed on the board as:
+
+> *"the fired timer records `expiredAt` on the service instance's outcome; lenses count `completed AND
+> expiredAt = null`; the application keeps its own lifecycle marker. Sweep the 8 `$now` lens files."*
+
+and fixed in direction by your own sentence in chat:
+
+> *"sweep all uses of $now in the lens files, prefer shape B (expiry belongs to the check, the
+> application may have its own expiration - cancel after inactivity, or something like that)"*
 
 | Clause | Answer |
 |---|---|
-| **"the fired timer records `expiredAt`…"** | **Already true, and unread.** `MarkExpired` writes `vtx.<type>.<id>.freshnessExpiry = {expiredAt}` today; nothing anywhere reads it (§2.4). The missing half is the read. |
-| **"…on the service instance"** | **Needs a mechanism the platform does not have.** The timer payload carries the lens's **anchor**, never the neighbour whose window lapsed (§2.5). The answer is to make the expiring entity its own anchor — but where the window lives on a neighbour that is a new lens *and* a new target, not a rename (§5.5). |
+| **"the fired timer records `expiredAt`…"** | **Already true, and read by one build-tagged harness only.** `MarkExpired` writes `vtx.<type>.<id>.freshnessExpiry = {expiredAt}` today; no cypher and no production Go reads it (§2.4). The missing half is the read *the lens* does. |
+| **"…on the service instance's outcome"** | **The two words I dropped in my first reading are the expensive ones.** `inst.outcome.data.validUntil`, on the **background-check instance** — a neighbour of every lens that reads it, not the anchor. The timer payload carries the lens's **anchor**, never the neighbour whose window lapsed (§2.5), so honouring this clause literally costs a **new convergence lens + a new Weaver target** so the check becomes its own anchor and records its own lapse (§5.5). That is the whole neighbour-hosted family — four lenses, and the family where every *measured* payoff sits (§0.2). It is buildable in this fire; it is not free, and it is the family the increments put **second or later**, because the per-target marker (§5.3) is its prerequisite. |
 | **"lenses count `completed AND expiredAt = null`"** | **Adopted in substance, departed from in form.** A presence test reads "expired" forever after a re-arm; `expiredAt >= <the deadline the row is about>` self-corrects with no clear (§5.2). |
-| **"the application keeps its own lifecycle marker"** | **Adopted, untouched.** |
-| **"8 lens files"** | **Low.** 16 lens declarations across 11 files (§2.1). |
+| **"the application keeps its own lifecycle marker"** | **Adopted, untouched** — and it is the half of Shape B that costs nothing: no vertical's `.status` moves (§10, alternative 5). |
+| **"sweep the 8 `$now` lens files"** | **Low by half.** 16 lens declarations across 11 files (§2.1). Fourteen of the sixteen are in scope; two leave the design with their own rows (§2.1, §15). |
 
 ### 0.2 What I have to correct — in the row, and in my own first draft
 
-**The row's harms.** *"No audit, no derivation"* is true for **one** lens (`leaseApplicationsRead`) and
-false for the other fifteen: `auditEnrolment` refuses actor-aggregate lenses at `audit.go:955`
-**before** the `$now` conjunct at `:989`, and the actor-aware derivation carries no `$now` conjunct at
-all. *"A corpus rescan per event"* has no code behind it keyed on `$now`.
+**The row's harms are all three real — and all three land on one lens.** *"No audit, no derivation, a
+corpus rescan per neighbour event"* is true, jointly and by measurement, for **`leaseApplicationsRead`**;
+it is false for the anchor-hosted majority, where `auditEnrolment` refuses actor-aggregate lenses at
+`audit.go:955` **before** the `$now` conjunct at `:989`, and the actor-aware derivation carries no `$now`
+conjunct at all.
+
+The rescan half is not a rhetorical flourish, and it is not retired. `plainDerivationLicence` refuses the
+per-anchor derivation on exactly this parameter —
+*"it returns $now, which a per-anchor evaluation reproduces differently from the whole-corpus rescan it
+replaces"* (`internal/refractor/pipeline/anchor_derivation_plain.go:332-339`) — and the licence's own doc
+records the consequence: a refusal *"keeps today's unseeded whole-corpus rescan"* (`:346-352`). The sibling
+design **observed it live on 2026-09-01**: after its Postgres `RowReader` landed,
+`refractor-hub-walk-and-periodic-load-design.md` §5.2 records `leaseApplicationsRead` **still refused** —
+the reader moved the refusal to the next conjunct, `$now` — and hands the `$now`-dependent Postgres rows to
+this design. The board's own Done-log entry for that fire says the same in five words: *"pair's cost is the
+`$now` rescan"* (`backlog/lattice.md:143`). `landlordLeaseApplicationsRead` stays refused **independently**
+of `$now` and is not unblocked by this design: it is `Protected` + `DiffRetraction` with three
+`SecureColumns` (`lease-signing/lenses.go:283-319`), and both the audit (`audit.go:963`, `:975`) and the
+plain licence (`anchor_derivation_plain.go:329`) refuse on those grounds first.
+
+**The consequence for how this design is sized, stated where it cannot be missed:** the anchor-hosted
+conversion buys a **verifiable sweep verdict at `warning` severity** — real, and the reason the row exists
+— but *every measured payoff* (audit enrolment, the plain per-anchor derivation, and the elimination of the
+whole-corpus rescan on the Postgres pair) lives in the **neighbour-hosted family**. A fire that converts
+only the anchor-hosted set ships the soundness repair and none of the measured cost reduction. §0.4 is
+therefore a scope question about which family, not whether.
 
 **My own first draft** then failed five ways (§14). Two changed the design, not the prose:
 
@@ -45,8 +74,11 @@ all. *"A corpus rescan per event"* has no code behind it keyed on `$now`.
 - **The marker cannot carry what I asked of it.** Timers are keyed `(targetId, entityId)`; the marker
   key is `entityKey + ".freshnessExpiry"` with **no target segment**, and `targetId` is documented
   *"provenance only — it is NOT used to construct any key"*. **`appointment` is the anchor of three
-  targets today**, `task` of three, `booking` and `leaseapp` of two. One slot, three deadlines,
-  unconditioned overwrite — the predicate reads another target's lapse. Shipping, not hypothetical.
+  targets today**, and `task`, `booking` and `leaseapp` of two each (`task`'s third target,
+  `orphanedTaskGrants`, declares neither `freshUntil` nor `$now` —
+  `orchestration-base/lenses.go:106` — so it holds no deadline and takes no marker). One slot, three
+  deadlines, unconditioned overwrite — the predicate reads another target's lapse. Shipping, not
+  hypothetical.
 
 ### 0.3 The corrected shape, and the finding that makes it work
 
@@ -65,26 +97,42 @@ conversion is not merely pointless — it silently breaks the short-notice path*
 `expiredAt >= deadline` is false forever: a reminder never sent, a no-show never swept. One edit closes
 the payoff gap and the regression together.
 
+That makes the anchor-hosted conversion's payoff **non-zero, and still the `warning`-severity half**: a
+sweep verdict that means something on ten declarations. The audit enrolment, the per-anchor derivation
+and the whole-corpus rescan are all on the other side of the census (§0.2), which is why §0.4's fork is
+about *which family first*, not about whether the sweep verdict is worth having.
+
 ### 0.4 The fork — scope
+
+The increments the work decomposes into (§15) are fixed, and Increment 0's premises gate all of them.
+The fork is **which of Increments 1–4 are one fire, and in what order**.
 
 | | Scope | Cost | My read |
 |---|---|---|---|
-| **1. Do not do this** | — | 0 | Genuine option, priced first in §10. The harm is narrower than the row claimed: a healer whose verdict is uninterpretable on 13 lenses, at **`warning`** severity, no over-grant. |
-| **2. The anchor-hosted majority** ✅ | 10 lenses whose deadline already sits on the anchor, plus a per-target marker key | **M** | The whole payoff for the lenses driving every reminder and past-due sweep. No new lens, no new target, no contract change. |
-| **3. Everything, incl. the neighbour-hosted windows** | + `leaseApplicationComplete` and the two Postgres FE read models that **share its cypher fragment**, via a new instance-anchored lens + target | **L–XL** | The three share `readinessWithItems` deliberately, *"so a readiness-rule change lands in ONE place"*. Two have no timer and no marker path, so they cannot take the conversion at all; forking the fragment re-opens the divergence hazard it was written to close. |
+| **1. Do not do this** | — | 0 | A genuine option, priced first in §10. The harm is narrower than the row's wording suggests on the anchor-hosted side: a healer whose verdict is uninterpretable, at **`warning`** severity, no over-grant. On the neighbour-hosted side it is not narrow — the Postgres pair keeps its whole-corpus rescan, measured live (§0.2). |
+| **2. The anchor-hosted set only** | Inc 1 (per-target marker) + Inc 3 (ten declarations) + Inc 4 (the role-(c) guards) | **M** | Ships the soundness repair for every lens driving a reminder or a past-due sweep, and **none** of the measured payoff. Leaves the `$now` rescan the sibling fire just handed us exactly where it is. |
+| **3. Everything, as ONE fire** ✅ | Inc 1 per-target marker → **Inc 2 the neighbour-hosted family** (the background-check instance becomes its own anchor; the shared `readinessWithItems` fragment is **one** edit read by three lenses; `renewalComplete` joins them on the same instance class) → Inc 3 the ten anchor-hosted declarations → Inc 4 the role-(c) guards | **L** | The whole sweep Andrew asked for, with the lapse recorded on the check. Inc 1 is the prerequisite of both families, so it is paid once either way; the only mechanism still open for Inc 2 is a Phase-0 registry check (§5.5), not a design gap. |
+| **4. Neighbour-hosted family first, anchor-hosted set later** | Inc 1 + Inc 2 now; Inc 3 + Inc 4 as a follow-on row | **M** | Buys the measured payoff first and defers the soundness repair. Defensible if the fire must be smaller than L — but it splits a sweep whose whole value to a reader is that no `$now` is left, and it pays Inc 1's review cost for two lenses. |
 
-**I recommend scope 2, with scope 3 filed as its own row** and the trigger *"scope 2 shipped and its
-sweep verdict verified live"*. The neighbour-hosted family is a larger problem wearing the same words;
-bundling it is what made my first draft unsizable.
+**Winston recommends row 3.** Andrew's directive was the *whole* sweep with the lapse recorded on the
+check's own outcome — row 3 is the only row that answers both halves of that sentence. The measured
+Refractor cost lives in the neighbour-hosted family (§0.2), so a fire that omits it ships no measurable
+improvement; Inc 1 is common to every row, so splitting only duplicates its posture review; the
+house rule is fewer, larger fires; and the one mechanism Inc 2 leaves open is a Phase-0 registry check
+(does the registry accept a target whose playbook declares no gaps entry — §5.5), not an unresolved
+design. Row 4 is the fallback if the fire must be capped at M.
+
+**Decision (Andrew, 2026-09-01): row 3.** Presented in the ratify session as "Option 2 — everything as one fire, ordered marker first, then the lease-signing family, then the ten, then the reminder-op guards"; his reply: *"agreed - Option 2"*. Rows 2 and 4 stay recorded as the alternatives he declined.
 
 ### 0.5 Fork / contract check
 
 - **Architectural fork: YES — §0.4, scope.**
-- **Frozen contract: NONE, either scope.** §10.2's `freshUntil` clause stays true verbatim (the
-  freshness rule stays in the cypher; the engine never computes the window). The marker's per-target
-  keying is `orchestration-base`'s own aspect shape. The merge's read is Contract #2 §2.5 class (d)
-  `optionalReads`, already sanctioned. Nothing is staged uncommitted. **This corrects my first draft,
-  which implied scope 3 would need a contract edit; it does not — it needs lenses.**
+- **Frozen contract: NONE, any row.** §10.2's `freshUntil` clause stays true verbatim (the freshness
+  rule stays in the cypher; the engine never computes the window). The marker's per-target keying is
+  `orchestration-base`'s own aspect shape. The merge's read is Contract #2 §2.5 class (d)
+  `optionalReads`, already sanctioned. Nothing is staged uncommitted. The neighbour-hosted family
+  needs **lenses, not a contract edit** — a new convergence lens, a new target spec, its own output
+  descriptor and package permissions (§5.5).
 
 ---
 
@@ -140,6 +188,18 @@ section later) and `cafeLeaseWorkplaces` (a plain lens with no `$now`; the real 
 (`internal/pkgmgr/anchorwalk.go:548-580`) emits only link/label/property patterns and a key-slice
 `RETURN`; no `$`-parameter can enter a generated body. **Primordials contribute zero.**
 
+**Scope membership — the sixteen split three ways, and the split is the design.**
+
+| Family | Count | Members | Treatment |
+|---|---|---|---|
+| **Anchor-hosted** | **10 declarations** | `pastDueAppointments`, `pastDueBookings`, `visitSeriesDue`, `followUpReminders`, `unroutedTasks`, `staleAssignedTasks`, `leaseExpiry`, the `remindAt` term of `appointmentReminders` and of `wellnessBookingReminders` (role (b)); `clauseSatisfaction` (role (a)) | Convert in place, gap column **and** `freshUntil`. Inc 3. |
+| **Neighbour-hosted** | **4 lenses** | `leaseApplicationComplete`, `leaseApplicationsRead`, `landlordLeaseApplicationsRead`, `renewalComplete` | The check becomes its own anchor; all four read its recorded lapse (§5.5). Inc 2. |
+| **Leaves the design** | **2 lenses** | `cafeStaleTabSettlement` (a shipped café bug this design must not paper over — §7); `capabilityEphemeral` (a set-inclusion filter with no fact to record — §2.6) | Two rows filed, neither converted here. |
+
+10 + 4 + 2 = 16. The membership test is **not** "where does the deadline live on the page" but *"is the
+deadline a single scalar the pattern binds, so the marker can land on the anchor the timer already
+names"* — §7 states it and shows why the wellness pair passes it while `renewalComplete` does not.
+
 ### 2.2 C2 — multiple targets share an anchor type, and the marker has no target segment
 
 ```bash
@@ -154,38 +214,72 @@ grep -rn "AnchorType:" packages/*/[a-z]*.go | grep -v '_test.go'
 | **`leaseapp`** | `leaseApplicationComplete`, `leaseExpiry` | `validUntil`, `renewalOpensAt` |
 
 Timers are keyed per `(targetId, entityId)` — *"two targets projecting a freshness deadline for the same
-entity hold independent timer slots"* (`temporal.go:16-22`). **The marker is not**: the key is
-`entity_key + ".freshnessExpiry"` (`mark_expired.go:212`), written unconditioned, with `targetId`
-*"provenance only"* (`:88`). **This is the finding that decides the design's shape** (§5.3).
+entity hold independent timer slots"* (`temporal.go:16-22`). **The marker is not**: the key is built as
+`entity_key + ".freshnessExpiry"` (`mark_expired.go:208`) and the mutation writes the whole document
+under it (`:216-220`), unconditioned, with `targetId` *"provenance only"* (`:88`). **This is the finding
+that decides the design's shape** (§5.3).
 
 ### 2.3 C3 — the derivation acts on the actor-aggregate members
 
 `anchor_hopindex_corpus_census_test.go` pins `hopIndexed` for them. (My first draft read this census
 against a lens list containing two names carrying no `$now` — corrected in §2.1.)
 
-### 2.4 C4 — nothing reads the marker
+### 2.4 C4 — one reader, and it is a build-tagged convergence harness
 
 ```bash
 grep -rn "freshnessExpiry" packages/ internal/ cmd/ --include="*.go" | grep -v '_test.go'
 ```
 
-Every hit outside `orchestration-base/mark_expired.go` is a doc comment. No cypher, no Go reader.
+Every hit outside `orchestration-base/mark_expired.go` is a doc comment: no cypher reads the marker, and
+no production Go reads it. **The grep's `-v '_test.go'` is the whole error in the marker's own
+justification, and in my first draft's.** Dropping the filter finds a reader that constrains the merge:
+
+- `internal/leaseconvergence/harness_test.go:945-972` — `freshnessMarker(appKey)` does a `KVGet` on
+  `<appKey>.freshnessExpiry` and decodes `data.expiredAt`, returning it with the aspect's KV revision;
+- `internal/leaseconvergence/convergence_test.go:540-546` — asserts, per cycle, that the revision bumps
+  **and** `gotExpiredAt > beforeExpiredAt`, as the *causal* proof that a new `MarkExpired` committed
+  rather than an incidental CDC touch re-running the cypher.
+
+It is `//go:build leaseshortwindow` (`make test-lease-convergence`), which is why `go test ./...` never
+compiles it and why a whole-tree grep with the conventional test filter reports zero readers. So
+`expiredAt` is retained for **compatibility with a shipped witness**, not for legibility, and §5.3's merge
+inherits a hard constraint: `expiredAt` must remain the **monotone maximum over `byTarget`**, or that
+harness's strict-advance assertion goes red for the wrong reason.
 
 ### 2.5 C5 — the timer payload carries the anchor
 
 `temporal.go:290-296` sends `{entityKey: p.EntityKey, targetId, expiredAt: p.FireAt}` where `EntityKey`
 is the row's **anchor**. No channel names the neighbour whose window lapsed.
 
-### 2.6 C6 — `capabilityEphemeral` is the thesis already proven
+### 2.6 C6 — `capabilityEphemeral` proves the placement argument, and is not convertible here
 
-The one `$now` lens with no `freshUntil`, no timer, no marker and no Weaver target. Its `$now` is a
-`WHERE` inclusion filter; its consumer is `internal/processor/step3_auth_capability.go`, which
-**re-checks the grant's own recorded `expiresAt` at authorization time** against an injectable clock
-(`:349-358`, *"Expired — Contract #6 §6.6: `expiresAt > now`"*). A stale projected grant is therefore
-**not** an over-grant: the authoritative clock read already lives in the operation.
+The one `$now` lens with no `freshUntil`, no timer, no marker and no Weaver target. Its consumer is
+`internal/processor/step3_auth_capability.go`, which **re-checks the grant's own recorded `expiresAt` at
+authorization time** against an injectable clock (`:349-358`, *"Expired — Contract #6 §6.6:
+`expiresAt > now`"*; the contract's own row: *"Processor enforces `expiresAt > now` at lookup time"*,
+`06-capability-kv.md:289`). A stale projected grant is therefore **not** an over-grant: the authoritative
+clock read already lives in the operation.
 
-That is this design's placement argument, already shipped, on the most security-sensitive lens in the
-corpus — and it makes lens 13 the cheapest member: it drops its `$now` with **no fact to record**.
+**That is this design's placement argument, already shipped, on the most security-sensitive lens in the
+corpus.** It is *not* an argument that this lens converts cheaply — and reading it that way is the error
+this section now exists to prevent.
+
+Its `$now` is a **set-inclusion filter**, not a gap column: all three arms of the grant fan-out are
+`WHERE task.data.status = 'open' AND task.data.expiresAt > $now`
+(`orchestration-base/lenses.go:427`, `:435`, `:448`), so `$now` decides **which tasks enter the
+`ephemeralGrants` array at all**. There is no complementary `missing_*` column to convert and no
+`freshUntil` to null out; dropping the conjunct with no replacement projects a grant for **every open
+task past its `expiresAt`, indefinitely**. That population is not empty by construction and never drains:
+an open task past its deadline persists by design — *"an open task the assignee has not completed past its
+deadline is flagged, not auto-cancelled — CompleteTask stays legal"* (`:237`). `cap.ephemeral.<actor>`
+would grow without bound on the auth plane — the one lens in the corpus where the sweep's escalation
+reaches `error` (§2.7), and the one whose row size is read on every dispatch.
+
+The fact this lens would need to read is a **recorded expiry on the task**, written by some other
+target's marker — a question about a different entity's convergence than any increment here answers.
+So `capabilityEphemeral` **leaves this design** and is filed as its own row (`📐 needs designer pass`).
+The tempting reading — that a lens with no fact to record is the cheapest one to convert — is exactly
+backwards: it is the one member whose conversion needs a design of its own.
 
 ### 2.7 C7 — the severity claim, corrected
 
@@ -194,9 +288,12 @@ the **capability** path. The business path is `evalLensSweep`, whose own doc sta
 (`health/lattice_heartbeater.go:2105-2112`): *"and — the substantive difference — never escalates past
 `warning`."* Escalation lives in the `CapabilityLensStatus` loop (`:1131-1137`); the
 `LensLivenessStatus` path raises a hardcoded `severity: "warning"` (`:1742-1746`). Every lens writing
-`weaver-targets` takes the warning path. **`capabilityEphemeral` is the only member for which the error
-escalation is reachable — the one my draft's census had dropped.** Citing a doc comment as a ledger
-fact, on the design's own severity argument, is the rule my skill states and I broke.
+`weaver-targets` takes the warning path. **`capabilityEphemeral` is the only lens in the census for which
+the error escalation is reachable — the one my draft's census had dropped, and the one that leaves the
+design (§2.6).** Citing a doc comment as a ledger fact, on the design's own severity argument, is the
+rule my skill states and I broke.
+
+The consequence for the fourteen that remain: **every severity this design improves is a `warning`.**
 
 ---
 
@@ -222,9 +319,10 @@ not re-derived until something writes again.
 ## 4. The harm — the sweep's verdict is a clock reading
 
 The convergence sweep is the standing healer for every actor-aggregate lens. Its deep verify re-executes
-the projection per anchor (`sweep.go:554` → `Reproject` → `executeFullForActorOnce`, which binds
-`"now": time.Now().UTC()` fresh on every evaluation, `evaluate.go:659-663`) and classifies the result
-against the stored row with only `projectedAt` excluded as volatile (`reproject.go:301`, `:361-375`).
+the projection per anchor (`sweep.go:554` → `Reproject` → `executeFullForActorOnce`,
+`internal/refractor/pipeline/evaluate.go:751`, which takes `time.Now().UTC()` at `:752` and binds it as
+the `"now"` parameter at `:759` — fresh on every evaluation) and classifies the result against the stored
+row with only `projectedAt` excluded as volatile (`reproject.go:302`, `:361-375`).
 
 Clock-derived columns — the gap flags **and `freshUntil`** — sit inside that comparison. So the sweep
 cannot distinguish *"this projection is broken"* from *"time passed"*, in either direction: it heals at
@@ -242,6 +340,16 @@ Both give up an incidental reprojection **in exchange for** that healer. On thes
 made against a healer that cannot form an opinion. **A soundness repair, not a performance one** — and
 per §2.7 a `warning`-severity one on the business plane, not an outage. That is the honest size.
 
+**And it is the honest size of the anchor-hosted half only.** The two mechanisms above are *licences on a
+healer*: making them honest is worth having, and it moves no measurement. The mechanisms that do move a
+measurement — `auditEnrolment` admitting a lens, `plainDerivationLicence` seeding one affected anchor
+instead of rescanning the corpus — refuse the **anchor-hosted** lenses on grounds this design does not
+touch (actor-aggregate shape, `audit.go:955`), and refuse **`leaseApplicationsRead`** on `$now` alone
+(`anchor_derivation_plain.go:332-339`), which this design does remove. So: **the anchor-hosted conversion
+buys a verifiable sweep verdict at `warning` severity, and every measured payoff — audit enrolment, the
+per-anchor derivation, the whole-corpus rescan on the Postgres pair — is in the neighbour-hosted family**
+(§0.2, §5.5). Both are worth building; only one of them shows up in a number.
+
 Two lenses are excluded even from the licence half: `leaseApplicationComplete` and `clauseSatisfaction`
 bind unlabeled variables, so their label sets are non-exhaustive and they take the **broad** filter
 regardless — there is no narrowing licence to make honest on those two.
@@ -258,10 +366,12 @@ regardless — there is no narrowing licence to make honest on those two.
 ```
 
 Both operands are stored graph data, so the row becomes a pure function of the subgraph — exactly what
-`patternClosedOutput` already asserts.
+`patternClosedOutput` already asserts. The right-hand shape is **four navigation hops deep**
+(`a.<aspect>.data.byTarget.<targetId>`), one deeper than anything the shipped corpus contains; the
+engine resolves it, but that is an argument, not a pin, and §12 makes it one before any cypher converts.
 
 **The null semantics are the ones the rewrite needs, verified rather than assumed.** `compareAny`
-(`ruleengine/full/values.go:167-169`) returns **`false`** whenever either operand is nil, for every
+(`ruleengine/full/values.go:170-173`) returns **`false`** whenever either operand is nil, for every
 ordering operator:
 
 | State | Predicate | Result | Matches today? |
@@ -278,8 +388,11 @@ than dropping the row (`values.go:73-79`), so `EmptyBehavior: "delete"` is not t
 
 Your form is a **presence** test on a marker whose lifetime is *"PERMANENT and OVERWRITTEN in place on
 every fire — never tombstoned"* (`mark_expired.go:52-61`), justified by *"the marker outliving a
-converged entity is harmless (it is read by nothing)"*. **This design makes that sentence false**, and
-it is rewritten in the increment that falsifies it.
+converged entity is harmless (it is read by nothing)"*. **That justification is already false today** —
+`internal/leaseconvergence`'s build-tagged harness reads `data.expiredAt` and asserts it advances (§2.4) —
+and this design makes it false a second time, for the lens. The comment is rewritten in the increment
+that falsifies it, and the harness's assertion becomes an acceptance criterion of that increment rather
+than a casualty of it.
 
 With `= null` a re-armed entity carries a stale marker and reads "expired" forever; closing that needs a
 clear on a path that has none, with its own ordering question against the re-arm. The comparison form
@@ -293,16 +406,39 @@ all**.
 target**, and it already receives `targetId` — today provenance-only.
 
 The marker's `data` becomes `{expiredAt: <latest any target>, byTarget: {<targetId>: <instant>}}`, and
-the lens reads `byTarget.<its own targetId>`. `expiredAt` is retained for operator legibility, not
-compatibility (nothing reads it, §2.4).
+the lens reads `byTarget.<its own targetId>`. **`expiredAt` is retained for compatibility, and its value
+is constrained, not decorative**: it must be the **monotone maximum over `byTarget`**, because
+`internal/leaseconvergence`'s harness asserts per cycle that it strictly advances (§2.4). A merge that
+left `expiredAt` as "whatever this fire wrote" would let a second target's earlier instant move it
+backwards and redden that harness.
 
 This makes the write a **read-modify-write**: `MarkExpired` must hydrate the marker to merge, which it
 does not do today (it hydrates only the entity root, `temporal.go:299`). The marker key goes into
 `contextHint.optionalReads` — absence is a legitimate branch on the first fire — which is Contract #2
-§2.5 class (d), already sanctioned, **no contract change**. The unconditioned-update posture stays: the
-merge is per-target-key, so two targets firing concurrently can lose each other's *latest* under a race
-but never write a *lower* value, and the monotone comparison makes a lost update **under-report**
-expiry, which is fail-closed. **§12 owns that vector; it is the sharpest test in the plan.**
+§2.5 class (d), already sanctioned, **no contract change**.
+
+**Declaring that read is also what conditions the write, and the shipped comment's unconditioned posture
+must go with it.** A declared `optionalReads` key is hydrated at step 4, and `applyHydratedRevisions`
+(`internal/processor/commit_path.go:632-666`) implements Contract #3 §3.2's default: every `update`
+mutation on a hydrated key with no explicit `expectedRevision` **gets one — the revision the key was read
+at**. So the moment the marker is read, the merge stops being an unconditioned overwrite; a concurrent
+second target's commit is a revision conflict, and `commitPipeline` absorbs it by re-hydrating and
+re-executing the script rather than bouncing `RevisionConflict` to the client (`:301-307`). The merge is
+therefore **serialized by construction**, not merely fail-closed under a race — and the current
+justification for the unconditioned write (`mark_expired.go:30-38`) is rewritten in the same increment
+as the *"read by nothing"* comments.
+
+The residual is the **first** fire, and it is a different shape than a lost merge. With the marker
+known-absent there is no revision to condition on; an unconditioned `update` would be the only
+unserialized write in the op, and the mutation writes the **whole document** (`:216-220`), so a genuinely
+lost write would **delete the sibling target's `byTarget` entry**, not "write a lower value". The
+prescription follows the shape of the retry the platform already licenses: **the script branches — a
+`create` when the marker is known-absent, an `update` when it is present.** `absentConditionedCreates`
+(`commit_path.go:668-690`) licenses the in-process retry for exactly a `create` on a declared-absent key,
+so a first-fire race resolves as the benign declared-dedup case: the loser re-hydrates, now sees the
+marker present, and takes the `update` branch. The `create`-conflicts-on-the-second-lapse hazard the
+shipped comment warns about does not return, because the `create` branch is taken only when step 4
+recorded the key absent. **§12 pins both branches.**
 
 The alternative that avoids the read-modify-write — a per-target aspect localName
 (`freshnessExpiry_<targetId>`) — is priced and rejected in §10.
@@ -320,19 +456,64 @@ The alternative that avoids the read-modify-write — a per-target aspect localN
   **immediately, by explicit design**. The short-notice appointment, the rescheduled-earlier booking and
   the late-advanced visit series all recover on their own.
 
-### 5.5 The neighbour-hosted family (scope 3 only)
+### 5.5 The neighbour-hosted family — the check becomes its own anchor
 
-`leaseApplicationComplete`, `leaseApplicationsRead` and `landlordLeaseApplicationsRead` share one cypher
-fragment, `readinessWithItems` (`lease-signing/lenses.go:730`), carrying
-`inst.outcome.data.validUntil > $now`. Its own comment says the sharing is deliberate — *"so a
-readiness-rule change lands in ONE place instead of drifting between two hand-copied lenses"*. Two of
-the three are Postgres FE read models with **no `freshUntil`, no target, no timer and no marker path**,
-so they cannot take the conversion at all; forking the fragment re-opens the divergence hazard it closes.
+**Four lenses, one window.** `leaseApplicationComplete`, `leaseApplicationsRead` and
+`landlordLeaseApplicationsRead` share one cypher fragment, `readinessWithItems`
+(`lease-signing/lenses.go:730`), carrying `inst.outcome.data.validUntil > $now`. Its own comment says the
+sharing is deliberate — *"so a readiness-rule change lands in ONE place instead of drifting between two
+hand-copied lenses"*. Two of the three are Postgres FE read models with **no `freshUntil`, no target, no
+timer and no marker path**, so they cannot take a conversion on their own anchor at all; forking the
+fragment re-opens the divergence hazard it closes. `renewalComplete` is the fourth: its
+`max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed'
+AND inst.outcome.data.validUntil > $now …)` (`lease-signing/renewal_lenses.go:234`) is an **aggregate over
+the same instance class**, so its window lives on the same neighbour even though its anchor is a renewal.
 
-The only coherent answer is scope 3: give the **background-check instance** its own convergence lens +
-target with `freshUntil = outcome.validUntil`, so the instance records its own lapse and all three
-readers read that fact. New lens, new target spec, own output descriptor, own package permissions —
-which is why it is a separate scope and a separate row, not a bullet.
+**The mechanism, stated.** Give the **background-check instance** its own convergence lens and Weaver
+target, anchored on the instance, projecting `freshUntil = inst.outcome.data.validUntil`. The instance's
+own timer arms; the fired `MarkExpired` carries the instance as `entityKey`, so the marker lands **on the
+instance** — the entity whose window lapsed — which is precisely the shape §2.5 says the payload cannot
+produce for a neighbour. The four readers then stop asking a clock and start reading that fact:
+
+```
+-  inst.outcome.data.validUntil > $now                                          -- "still fresh"
++  (inst.freshnessExpiry.data.byTarget.<bgcheckTargetId> >= inst.outcome.data.validUntil) = False
+```
+
+— **one** edit inside `readinessWithItems`, read by three lenses, and **one** edit to `renewalComplete`'s
+`max` aggregate. The shared fragment stays shared; the divergence hazard it was written to close stays
+closed.
+
+**The polarity is the opposite of §5.1's, and that is not cosmetic.** The anchor-hosted lenses convert a
+*gap* test, where `compareAny`'s nil-false is exactly the default the row needs (no marker ⇒ not expired).
+This family converts a *freshness* test, where the same nil-false lands on the wrong side: writing it as
+`inst.outcome.data.validUntil > <marker>` would read **not fresh** for every instance that has never
+lapsed. So the recorded-lapse comparison must keep the `>=` operand order and be **negated**, and the
+increment picks the negation form from the shipped corpus rather than inventing one — the same discipline
+§7 applies to the role-(c) guard. The lapse/fresh vector pair belongs in this increment's cypher units
+with the reason in the test name.
+
+**The new target arms a timer even though it never dispatches.** Weaver's row handler calls
+`scheduleFreshness` (`internal/weaver/evaluator.go:117` → `internal/weaver/temporal.go:97`) on **every**
+delivery, before it reads any gap column and even for a disabled target — the doc calls it the lane-3
+*"state-recording bookkeeping"* leg. So a target whose rows never open a gap still arms and re-arms its
+`@at`. What that leaves open is a **registry** question, not a runtime one: whether a target spec whose
+playbook declares **no gaps entry at all** installs and loads. The registry treats a `missing_*` column
+with no `gaps[col]` entry as the `unplannable` escalation trigger (`internal/weaver/registry.go:47`) and
+`reArmDeclines` answers a missing entry with a decline rather than a rejection
+(`internal/weaver/control.go:572`) — which reads as permissive, but that is an inference from two
+adjacent mechanisms. **Confirming it is this increment's Phase-0 check** (§13); the fallback if it
+refuses is a `surface` gap the target declares and never opens.
+
+The cost is honest: a new lens, a new target spec, its own output descriptor and its own package
+permissions. What it buys is the only measured payoff in the design (§0.2, §4) and the literal reading of
+Andrew's *"on the service instance's outcome"*.
+
+**One consumer to carry forward.** `internal/leaseconvergence`'s harness reads the marker on the
+**application** (`<appKey>.freshnessExpiry`, §2.4) as its causal witness. Moving the freshness window to
+the instance must either leave `leaseApplicationComplete`'s own leaseapp-anchored timer arming as it does
+today, or re-point that witness at the instance's marker — a decision this increment makes deliberately,
+with the reason in the test name, never by letting the assertion quietly stop advancing.
 
 ### 5.6 What is untouched
 
@@ -345,12 +526,12 @@ contract meaning; the `@at` keying; the deterministic requestId; the anti-storm 
 
 | Boundary | Today (unread) | After |
 |---|---|---|
-| created | first fire, unconditioned update | first fire, **merge** into `byTarget` (`optionalReads`, absent on first fire) |
-| updated | overwrite `expiredAt` | merge this target's entry; `expiredAt` keeps latest-any-target |
+| created | first fire, unconditioned update | first fire, **`create`** on a marker step 4 recorded absent (`optionalReads`) — conditioned on that observed absence, so a losing racer retries and takes the update branch (`absentConditionedCreates`) |
+| updated | overwrite `expiredAt` | **`update`, conditioned on the hydrated revision** (Contract #3 §3.2 default, applied because the key is now declared): merge this target's entry; `expiredAt` = the **monotone max over `byTarget`**, the constraint §2.4's harness imposes |
 | **re-arm** | irrelevant | **self-corrects** — the recorded instant falls behind the new deadline; no write |
 | **deadline moved EARLIER** | irrelevant | the recorded instant may now be **≥** the new deadline ⇒ reads expired. **Correct**: a timer did fire at or after it. §12 pins it. |
 | **two targets on one entity** | irrelevant | isolated by `byTarget` — the defect §0.2 names |
-| **concurrent fires, two targets** | irrelevant | the merge race can lose the *later* of two instants for one target; the next fire repairs it, and the monotone comparison makes a loss **under-report** expiry (fail-closed). §12. |
+| **concurrent fires, two targets** | irrelevant | **serialized, not merely fail-closed.** The declared read conditions the update on its hydrated revision, so the second writer conflicts and `commitPipeline` re-hydrates + re-executes against the merged document (`commit_path.go:301-307`). Neither `byTarget` entry is lost. On the **first** fire the two racers are `create`s on a declared-absent key: the loser's retry is licensed and lands as an update. §12 pins both. |
 | entity tombstoned | survives, harmless | harmless — a soft-deleted vertex does not bind, so no row |
 | entity revived, same deadline | survives | reads expired. **Correct** — the deadline did lapse. Pinned deliberately in §12. |
 | replay / redelivery | requestId collapses on the Contract #4 tracker | unchanged |
@@ -363,19 +544,41 @@ contract meaning; the `@at` keying; the deterministic requestId; the anti-storm 
 
 The unit of work is the **`$now` role**, not the file: one lens carries three.
 
-**Role (a) — freshness lapse** (`validUntil`, `chargeValidUntil`): `clauseSatisfaction` and
-`renewalComplete` convert in place. `leaseApplicationComplete` + the two FE read models are **scope 3**
-(§5.5).
+**The criterion that decides which family a role lands in.** Not *"the deadline sits on the anchor"* —
+that phrasing is wrong and would have mis-sorted two lenses. The test is: **is the deadline a single
+scalar the compiled pattern binds, so the marker can land on the anchor the timer already names?** The
+wellness pair reads its deadline off the **session neighbour** (`se.schedule.data.remindAt`,
+`wellness-reminders/lenses.go:87-88`; `se.schedule.data.endsAt`, `wellness-reminders/pastdue.go:103`) and
+converts perfectly well, because `se` is bound once per row and the marker still lands on the booking.
+What fails the test is an **aggregate over a set of neighbours** — `renewalComplete`'s
+`max(CASE WHEN inst.class = 'service.backgroundCheck.instance' … )` — where "the deadline" is not a scalar
+the anchor's own timer can be armed at. **The split is semantic, never syntactic.**
 
-**Role (b) — due date on the anchor** (`remindAt`, `endsAt`, `nextDueAt`, `followUpDate`, `expiresAt`,
-`staleAt`, `renewalOpensAt`): `pastDueAppointments`, `pastDueBookings`, `visitSeriesDue`,
-`followUpReminders`, `unroutedTasks`, `staleAssignedTasks`, `cafeStaleTabSettlement`, `leaseExpiry`, plus
-the `remindAt` term of the two reminder lenses. One predicate **pair** each — gap column **and**
-`freshUntil`.
+**Role (a) — freshness lapse** (`validUntil`, `chargeValidUntil`): `clauseSatisfaction` converts in place
+— one anchor, one bound scalar. `leaseApplicationComplete`, the two FE read models **and
+`renewalComplete`** are the neighbour-hosted family (§5.5): all four resolve their window off a
+background-check instance, and `renewalComplete` reaches it through an aggregate, which is exactly the
+shape the criterion rules out.
 
-`cafeStaleTabSettlement`'s `staleAt` reads syntactically like (a); its own comment calls it *"the
-café-domain analog of pastDueAppointments"*. **The (a)/(b) split is semantic — where the instant lives
-and who can move it — never syntactic.**
+**Role (b) — due date the pattern binds** (`remindAt`, `endsAt`, `nextDueAt`, `followUpDate`, `expiresAt`,
+`renewalOpensAt`): `pastDueAppointments`, `pastDueBookings`, `visitSeriesDue`, `followUpReminders`,
+`unroutedTasks`, `staleAssignedTasks`, `leaseExpiry`, plus the `remindAt` term of the two reminder lenses.
+One predicate **pair** each — gap column **and** `freshUntil`.
+
+**`cafeStaleTabSettlement` leaves the design, because converting it would close a shipped gap forever.**
+Its cypher computes `freshUntil` (`cafe-domain/lenses.go:366`) and its doc comment describes the intended
+behaviour — *"freshUntil arms a one-shot @at at staleAt while the tab is still open"* (`:334`) — but
+`StaleTabSettlementTarget`'s `BodyColumns` **omits `freshUntil`** (`:69`), and `BodyColumns` is a strict
+whitelist: the projection driver iterates it and nothing else (`internal/refractor/projection/driver.go:70-87`),
+so the column never reaches the row. Weaver's `scheduleFreshness` then takes its absent-column early
+return (`internal/weaver/temporal.go:102-108`) and **no `@at` is ever armed**. Today that is survivable
+because the gap column still reads `$now`, so any incidental CDC touch of the tab eventually opens
+`missing_settle`. Convert the gap column onto a marker that is **never written**, and the auto-settle
+never fires at all.
+
+That is a **shipped café bug** — the auto-settle timer does not arm, and settlement waits on an incidental
+reprojection — and it is not this design's to fix inside a platform sweep. **Filed as its own row on the
+verticals board**; the conversion follows the fix, not the other way round.
 
 **Role (c) — the guard** (`startsAt > $now`; `appointmentReminders`, `wellnessBookingReminders`): *"never
 remind for an appointment that has already started."* No timer arms at `startsAt`, and under §5.3 a
@@ -428,22 +631,40 @@ inventing.
 
 **"New state?"** One new field on an existing aspect (`byTarget`), with §6's lifetime.
 
-**In-flight check** (committed docs **and** the dirty tree): four uncommitted `docs/contracts/*` edits
-belong to Processor/Loom/Weaver designs; none touches §10.2 or §10.4. The **`[Weaver] One per-target
-issue budget`** design (📐 awaiting-Andrew) touches `temporal.go`'s sibling issue machinery, not the
-lane. A parallel fire is editing `refractor-hub-walk-and-periodic-load-design.md`; this design touches
-no Refractor code.
+**In-flight check** (committed docs **and** the dirty tree). The question is two-sided — *"does an
+in-flight design collide with this one"* and, the half that is easy to skip, *"does an in-flight design
+**depend** on this one"*.
+
+- **Collisions: none.** Four uncommitted `docs/contracts/*` edits belong to Processor/Loom/Weaver
+  designs; none touches §10.2 or §10.4. This design touches no Refractor code.
+- **A dependency, in the other direction.** `refractor-hub-walk-and-periodic-load-design.md` §5.2 hands
+  its unfinished business here explicitly: after its Postgres `RowReader` shipped, `leaseApplicationsRead`
+  is still refused on `$now`, and it names the remaining cost as *"the freshness-marker plane's, not this
+  mechanism's"*. That is this design's neighbour-hosted family (§0.2, §5.5), and it is why row 3 of §0.4
+  is a **continuation of a fire that just landed** rather than a new front.
+- **One in-flight interaction to note, not to fear.** The uncommitted `docs/contracts/10-orchestration-weaver.md`
+  edit (the `[Weaver] One per-target issue budget` design, 📐 awaiting-Andrew) rewrites the `surface`
+  action to raise **one** issue per (target, gap column) *"carrying the number of rows currently holding
+  the column open"*. `unroutedTasks` and `staleAssignedTasks` are both `surface` targets and both convert
+  here, so after both land that **count** becomes marker-latency-dependent: between a task's `expiresAt`
+  and its `MarkExpired` commit the count reads one lower than a clock would say. It converges on the next
+  fire, the severity is `warning`, and the count was already CDC-latency-dependent — worth stating,
+  not worth sequencing around.
 
 ---
 
 ## 10. Alternatives
 
-**Row 1 — do not do this.** The world unchanged: 16 lenses whose stored rows are claims about a past
-instant, whose only healer cannot form a verdict, and two narrowings licensed on that healer. The case
-against it is **narrower than the row claimed** — `warning` severity on the business plane, no outage,
-no over-grant (§2.6). What it costs is that the platform cannot tell a broken projection from a moving
-clock on the lenses driving every reminder and past-due sweep, and that `MarkExpired` stays a prosthesis
-for an assertion that is not true. A defensible "not now"; not a defensible "never".
+**Row 1 — do not do this.** The world unchanged: sixteen lens declarations whose stored rows are claims
+about a past instant, whose only healer cannot form a verdict, and two narrowings licensed on that
+healer. On the **anchor-hosted** side the case against it is narrower than the row's wording suggests —
+`warning` severity on the business plane, no outage, no over-grant (§2.6) — and what it costs is that the
+platform cannot tell a broken projection from a moving clock on the lenses driving every reminder and
+past-due sweep, while `MarkExpired` stays a prosthesis for an assertion that is not true. On the
+**neighbour-hosted** side it is not narrow at all: `leaseApplicationsRead` keeps its whole-corpus rescan,
+measured live last week and handed here by the fire that measured it (§0.2). The two rows that leave the
+design (§2.1) are filed either way. A defensible "not now" on the first half; not a defensible "never" on
+the second.
 
 **2 — Exclude clock-derived columns from `classifyDivergence`.** Treat the symptom. Rejected: the
 comparison would have to know which columns are clock-derived, which is not derivable without the
@@ -451,33 +672,50 @@ whole-lens `ReferencesParam` analysis that already refuses at lens granularity �
 sweep *blind* to real defects in those columns rather than able to judge them.
 
 **3 — Per-target aspect localName (`freshnessExpiry_<targetId>`) instead of a `byTarget` map.** Avoids
-§5.3's read-modify-write and its race entirely. Rejected: it mints an **unbounded aspect keyspace per
-entity keyed by a Weaver config value**, so adding a target silently adds an aspect to every entity of
-that type and no reader can enumerate them without knowing the target set. The merge's race is
-fail-closed and self-repairing; an unbounded keyspace is neither. **Re-open this if §12's concurrent-fire
-vector proves harder than it looks** — these two are the real trade, and I would rather the build
-discovers that with the alternative written down than re-derive it.
+§5.3's read-modify-write entirely. Rejected: it mints an **unbounded aspect keyspace per entity keyed by
+a Weaver config value**, so adding a target silently adds an aspect to every entity of that type and no
+reader can enumerate them without knowing the target set. It would also strand `expiredAt` — the field
+`internal/leaseconvergence`'s harness reads (§2.4) — with no document to live in. And the cost it avoids
+is smaller than it looks: declaring the marker read is what makes the update OCC-conditioned, so the
+merge is **serialized by the platform's own §3.2 default**, not merely fail-closed under a race (§5.3).
+**Re-open this only if §12 finds the script cannot branch `create`-when-known-absent from
+`update`-when-present** — that branch, not the concurrent-fire race, is the whole cost of the map form.
 
-**4 — Bundle the neighbour-hosted family (scope 3).** Rejected as scope, not as work: a new lens, a new
-target, and a change to a surface `cmd/loftspace-app` reads directly. Bundled, it made my first draft
-unsizable. Filed as its own row.
+**4 — Split the neighbour-hosted family out and ship the anchor-hosted set alone** (§0.4 row 2). This is
+the shape my first draft recommended, and it is the wrong one. Rejected: every measured payoff is in the
+family it defers (§0.2, §4), so the smaller fire ships a soundness repair with no number attached; the
+per-target marker (Inc 1) is the prerequisite of both families, so splitting pays its posture review
+twice; and the sibling fire has already handed this family over with the measurement attached (§9). The
+honest reason to take row 2 anyway is fire size, which is Andrew's to weigh, not mine — §0.4.
 
 **5 — Let `MarkExpired` flip the application's `.status`.** Rejected against your own clause: the
 application keeps its own lifecycle marker, and a lapsed freshness window is not an expired appointment.
 
 **Running each rejection back against the recommendation:** alternative 2 was rejected for blinding the
 sweep to a column class — the recommendation makes every column verifiable; alternative 3 was rejected
-for an unbounded keyspace — the recommendation adds one field to one existing aspect; alternative 5 was
-rejected for writing a vertical's lifecycle — the recommendation writes only the platform's marker.
+for an unbounded keyspace — the recommendation adds one field to one existing aspect; alternative 4 was
+rejected for shipping a payoff with no number — the recommendation's Inc 2 is the increment that carries
+the number, and it is ordered second, immediately behind its one prerequisite; alternative 5 was rejected
+for writing a vertical's lifecycle — the recommendation writes only the platform's marker.
 
 ---
 
 ## 11. Contract + document surface
 
-- **`docs/contracts/*` — untouched, both scopes.** §10.2's `freshUntil` clause stays true. The marker's
-  shape is `orchestration-base`'s own. The merge's read is Contract #2 §2.5 class (d) `optionalReads`.
-- **`packages/orchestration-base/mark_expired.go`** — *"read by NOTHING"* and *"harmless… it is read by
-  nothing"* become false and are rewritten in the increment that falsifies them.
+- **`docs/contracts/*` — untouched, every scope row.** §10.2's `freshUntil` clause stays true. The
+  marker's shape is `orchestration-base`'s own. The merge's read is Contract #2 §2.5 class (d)
+  `optionalReads`.
+- **`packages/orchestration-base/mark_expired.go`** — three shipped justifications become false and are
+  rewritten in the increment that falsifies them: *"read by NOTHING"* and *"harmless… it is read by
+  nothing"* (§2.4 shows the second was already false), and the **unconditioned-update rationale** at
+  `:30-38`, which the declared `optionalReads` read supersedes (§5.3).
+- **An observable column-meaning change, with no renderer today.** After conversion `freshUntil` carries
+  the deadline **verbatim** — so between the deadline passing and the marker landing it holds a **past**
+  instant, where today it holds `null`. That is a real change to what the column means to a consumer, and
+  it is deliberate (§5.4: an overdue `@at` is what closes the short-notice hole). The census of readers
+  is small and none renders it: `cmd/loftspace-app/applicationsource.go:75` decodes `freshUntil` into its
+  row struct and never displays it; Loupe has no reader. Recorded here so a future FE that surfaces the
+  column knows a past instant is meaningful, not stale.
 - **No new lint.** My draft proposed an `op.submittedAt` gate; §7 shows the idiom is shipped in ~15
   packages including `BookAppointment`, so that gate would fail on the existing corpus and its "narrow
   licence" framing was wrong. What remains is a **doc line** in `docs/components/weaver.md` recording
@@ -491,6 +729,24 @@ rejected for writing a vertical's lifecycle — the recommendation writes only t
 
 Every test owned by a named increment.
 
+- **The engine-level expressibility pin (Increment 0/1, before any cypher converts).** The read this
+  design puts in every lens — `a.<aspect>.data.byTarget.<targetId>` — is **four navigation hops deep**,
+  and **the corpus has no shipped precedent for it.** The mechanism is confirmed at the evaluator: a name
+  absent from a vertex's root body resolves as an **aspect point-read**, after which the aspect body is a
+  plain map and every further hop is ordinary map navigation
+  (`ruleengine/full/values.go:11-22` states exactly that; `resolveProperty` `:23-82`, `propertyOf`
+  `:86-105`), and the grammar puts no bound on the lookup chain
+  (`oC_Atom ( SP? oC_PropertyLookup )*`, `ruleengine/full/cypher/Cypher.g4:343`). But the deepest shape
+  the shipped corpus contains is `x.<aspect>.data.<leaf>` — and the two shapes that *are* pinned were
+  pinned in `ruleengine/full/aspect_expression_shapes_test.go` **after a live bug** whose two candidate
+  causes could not be separated without exactly such a test. **Add the sibling case there for the 4-deep
+  map read first.** An argument from the resolver is not a pin, and this is the one place in the design
+  where the difference has already cost something once.
+- **The OCC behaviour Increment 1 rests on (Increment 0).** Confirm on the running stack that a
+  present-marker revision conflict is **retry-absorbed** rather than surfaced — `commitPipeline`'s doc
+  says it re-hydrates and re-executes rather than bouncing `RevisionConflict`
+  (`internal/processor/commit_path.go:301-307`); §5.3's serialization claim is that sentence and nothing
+  else, so it is checked before it is built on.
 - **Per-lens cypher units** — marker absent / behind / at / ahead of the deadline. **Mandatory
   vectors**: the **re-arm** (record, move the deadline forward, assert not-expired **with no clearing
   write**) — the whole argument of §5.2; and §6's **deadline-moved-earlier** and
@@ -500,9 +756,19 @@ Every test owned by a named increment.
   projection; assert `freshUntil` carries the past instant, the timer arms, the gap opens. **This is the
   regression the first draft would have shipped**: it must FAIL on a version that converts only the gap
   column. Write it first and watch it go red.
-- **Concurrent two-target fire** (§5.3/§6) — two targets on one `appointment` firing in the same window;
-  assert both `byTarget` entries survive and that a lost update can only under-report.
-  **Mutation-proven**: make the merge an overwrite and it must go red.
+- **Concurrent two-target fire** (§5.3/§6) — two targets on one `appointment` firing in the same window.
+  **Both branches pinned, separately**: (i) *first fire* — both racers see the marker known-absent and
+  both emit `create`; assert the loser's retry lands as an `update` and both `byTarget` entries survive;
+  (ii) *steady state* — the marker is present, so both emit an `update` conditioned on the hydrated
+  revision; assert the conflict is retry-absorbed and neither entry is lost. Assert in both that
+  `expiredAt` equals the **max** over `byTarget` and never moves backwards.
+  **Mutation-proven**: make the merge a whole-document overwrite and both must go red — the overwrite
+  *deletes* the sibling target's entry, so a test that only checks "no lower value" would pass.
+- **The shipped witness stays green, deliberately** (Increment 1's acceptance criterion).
+  `make test-lease-convergence` exercises `internal/leaseconvergence`'s strict-advance assertion on
+  `<appKey>.freshnessExpiry`'s `data.expiredAt` (§2.4). It is not incidental coverage: it is the reason
+  `expiredAt` survives the merge as a monotone maximum, and Increment 1 is not done until it passes
+  unmodified.
 - **Sweep-verdict regression — the test that proves the payoff.** Two deep-verify passes straddling a
   deadline: on `main` the second classifies `divergenceContent`; after, `divergenceNone`. **Assert on the
   classification, not the row** — the row converges either way, which is what makes a row-only assertion
@@ -516,8 +782,13 @@ Every test owned by a named increment.
   header says a moved key *"forces a deliberate re-reading"* — so this is an assertion to move
   deliberately, with the reason recorded, **not a table to patch**. Re-run and pin `label_derivation`,
   `anchor_hopindex`, `actor_walk_scope`, `actor_onekey`, `branch_decomposition` ×2, `plain_scanroot`,
-  `rel_projection` and `ruleengine/full/grouping_corpus_lens_test.go` — **nine censuses, not the five my
-  draft named**. The label/relation/filter pins do **not** move (a `*ParameterRef` is an inert leaf,
+  `rel_projection`, `ruleengine/full/grouping_corpus_lens_test.go` — **and the two my second pass found
+  missing**: `internal/refractor/auth_plane_narrowing_census_test.go`, which names `capabilityEphemeral`
+  in a fixed list of auth-plane lenses that must stay broad (`:266-270`), and
+  `internal/refractor/multiwalk_footprint_reachability_census_test.go`, whose header says its pin
+  *"fails the moment either one moves"* rather than passing vacuously. **Eleven censuses — not the nine I
+  named, and not the five my first draft named.** The label/relation/filter pins do **not** move (a
+  `*ParameterRef` is an inert leaf,
   `labels.go:178-185`; `CoreKVVertexFilter`'s `vtx.<type>.>` already covers the marker aspect;
   `projectedFromRevisions` rejects 4-segment keys, `projection/freshness.go:70-75`) — **assert that, do
   not assume it.**
@@ -538,18 +809,33 @@ Every test owned by a named increment.
 | Short-notice reminder (deadline past at creation) | e2e | **still fires** — the regression guard |
 | Projected gap columns | `weaver-targets` | byte-identical at the same graph state and clock |
 | `MarkExpired` op volume | op stream | **unchanged** (§8) |
+| `leaseApplicationsRead`'s derivation refusal | refractor log | **gone** — the `$now` conjunct is the last one refusing it (§0.2); this is the measured payoff, and Increment 2 is not done without it |
+| `AuditPlan` enrolment for the Postgres pair | audit log | `leaseApplicationsRead` **enrols**; `landlordLeaseApplicationsRead` **still refuses**, on Secure + diff-retraction (§0.2) — assert both, so an enrolment that should not have happened is caught |
+| Per-message cost on the Postgres pair | msg/s at steady state | **falls off the corpus-rescan floor** the sibling fire measured on 2026-09-01 |
 
-**Premise to re-derive at Phase 0**: the sweep-divergence flapping is argued from code and has **not**
-been observed live in this fire. Confirm it on the running stack before Increment 1 — a converged
-reminder lens should show sweep heals at deadline crossings. If it does not, open `SweepStatus` and find
-out why before building; that signal is the design's headline.
+**Premises to re-derive at Phase 0**, each gating the increment that rests on it:
+
+1. **The sweep-divergence flapping** is argued from code and has **not** been observed live in this fire.
+   Confirm it on the running stack before Increment 1 — a converged reminder lens should show sweep heals
+   at deadline crossings. If it does not, open `SweepStatus` and find out why before building; that
+   signal is the design's headline.
+2. **§8's stuck-gap mitigation** — that the sweep's own re-projection re-arms the timer with a new fire
+   instant, and therefore a new requestId — is a hypothesis, not an assertion.
+3. **The registry accepts a target whose playbook declares no gaps entry** (§5.5). Inferred from two
+   adjacent mechanisms, not read off an install path. Gates Increment 2; the fallback is a declared
+   `surface` gap the target never opens.
+4. **A present-marker revision conflict is retry-absorbed** (§12) — the single sentence §5.3's
+   serialization claim rests on.
 
 ---
 
-## 14. Adversarial pass — run, and it reshaped the design
+## 14. Adversarial passes — both reshaped the design
 
-Five blockers and six majors against the first draft. All were mine; three changed the design rather
-than the prose.
+Two passes have been run against this document. Every finding in both was mine.
+
+### First pass — against the first draft
+
+Five blockers and six majors. Three changed the design rather than the prose.
 
 1. **The payoff was zero.** I exempted `freshUntil`, reasoning about its *purpose* and never checking
    its *storage*. It is a body column inside `classifyDivergence`, computed from the same deadline with
@@ -568,37 +854,114 @@ than the prose.
    section later. → §2.1.
 6. **The proposed lint would have failed on the shipped corpus**, and the "narrow licence" it protected
    is an idiom in ~15 packages. → §7, §11.
-7. Plus: the shared `readinessWithItems` fragment (→ scope 3); the rejected-`MarkExpired` stuck-gap
+7. Plus: the shared `readinessWithItems` fragment (→ §5.5); the rejected-`MarkExpired` stuck-gap
    residual (→ §8); the grouping-reduction census that does move (→ §12); the guard's fail-open on an
    optional payload field and its RFC3339Nano normalization (→ §7).
 
-**Claims that survived**: §4's mechanism links (deep verify → `Reproject` → fresh `$now` bind → columns
-inside the comparison); the two retirements in §0.2; §2.4; the null semantics; and that
-`ReferencedLabels`, the consumer filter, `projectedFromRevisions` and footprint validation are all
-unmoved by reading a new aspect.
+### Second pass — against the rewrite
+
+Eleven findings. Four of them moved a lens between families or out of the design; two inverted an
+argument I had made in the corrective direction and got backwards anyway.
+
+1. **I retired a harm that is true, and measured.** The row's *"corpus rescan per event"* is real for
+   `leaseApplicationsRead` — `plainDerivationLicence` refuses on `$now`
+   (`anchor_derivation_plain.go:332-339`), the sibling design observed the refusal live on 2026-09-01,
+   and the board's Done-log names the cost. Reinstated, and the payoff split it implies is now stated in
+   §0.2, §0.3 and §4: the anchor-hosted half buys a `warning`-severity sweep verdict, the neighbour-hosted
+   half carries every measured number.
+2. **I dropped two words of Andrew's ask and answered the wrong question.** *"On the service instance's
+   **outcome**"* names `inst.outcome.data.validUntil` — the neighbour-hosted family — which my first
+   recommendation deferred to a later row. → §0.1, §0.4.
+3. **The scope fork was framed as majority-vs-everything; it is an ordering question.** Four rows now,
+   with the recommended one building the whole sweep in one fire, neighbour-hosted family second. → §0.4.
+4. **The OCC argument was inverted, and I argued the harder case for a smaller problem.** Declaring the
+   marker in `optionalReads` **hydrates** it, and `applyHydratedRevisions` then conditions every update on
+   the read revision (`commit_path.go:632-666`) — so the write is serialized, not unconditioned. The real
+   residual is the **first** fire, where there is no revision to condition on, and the fix is a
+   `create`/`update` branch the platform already licenses a retry for (`:668-690`). → §5.3, §6, §10, §12.
+5. **"Nothing reads the marker" was my own grep's `-v '_test.go'` talking.**
+   `internal/leaseconvergence`'s build-tagged harness reads `data.expiredAt` and asserts it strictly
+   advances. `expiredAt` is a compatibility constraint, not operator legibility. → §2.4, §5.2, §5.3, §12.
+6. **`cafeStaleTabSettlement` must not be converted — its target never arms a timer.** The cypher
+   computes `freshUntil`; `BodyColumns` omits it (`cafe-domain/lenses.go:69`, `:366`); the projection
+   driver treats `BodyColumns` as a strict whitelist and Weaver early-returns on the absent column.
+   Converting the gap column would close a shipped café bug's last incidental escape. Out of the design,
+   filed on the verticals board. → §7, §15.
+7. **`capabilityEphemeral` is not the cheapest member; it is a different problem.** Its `$now` is a
+   set-**inclusion** filter, so dropping it grows `cap.ephemeral.<actor>` without bound on the auth plane.
+   Out of the design, its own designer row. → §2.6, §15.
+8. **`renewalComplete` is neighbour-hosted.** Its `max(CASE WHEN inst.class = 'service.backgroundCheck.instance' …)`
+   aggregates over the same instance class as `readinessWithItems`. → §7, §15.
+9. **The anchor-hosted criterion I wrote was wrong** — *"the deadline sits on the anchor"* would have
+   mis-sorted the wellness pair, which reads its deadline off the session neighbour and converts fine.
+   The test is a **single bound scalar**, and what fails it is an aggregate over a set. → §7.
+10. **The 4-deep read has no shipped precedent.** Confirmed at the evaluator, unpinned in the corpus, and
+    the sibling shapes that are pinned were pinned after a live bug. An engine-level pin lands in
+    Increment 0/1, before any cypher converts. → §12, §15.
+11. Plus: `task` carries **two** freshUntil-projecting targets, not three (`orphanedTaskGrants` declares
+    neither, `orchestration-base/lenses.go:106`); the census list is **eleven** files, not nine; the
+    in-flight check must ask what **depends** on this design, not only what collides with it; the
+    uncommitted Weaver `surface` clause makes two converted targets' issue counts marker-latency-dependent;
+    `freshUntil` changes meaning observably (a past instant where there was a null) with no renderer today;
+    and four citations were off (`evaluate.go`, `values.go`, `mark_expired.go`, `reproject.go`).
+
+**Claims that survived both passes**: §4's mechanism links (deep verify → `Reproject` → fresh `$now` bind
+→ columns inside the comparison); the *"no audit, no derivation"* retirement for the anchor-hosted
+majority in §0.2; the null semantics; §5.4's `freshUntil` conversion and the past-deadline hole it closes;
+and that `ReferencedLabels`, the consumer filter, `projectedFromRevisions` and footprint validation are
+all unmoved by reading a new aspect.
 
 ---
 
 ## 15. Decomposition for the Steward
 
-**Increment 0 — confirm the premises** *(XS)*: §13's live check, and §8's stuck-gap mitigation
-hypothesis. Gate on both.
+Ordered as **§0.4 row 3, ratified by Andrew 2026-09-01** — one fire, the neighbour-hosted family second.
+Rows 2 and 4 are recorded in §0.4 as the alternatives he declined.
 
-**Increment 1 — the per-target marker** *(S–M)*: `MarkExpired` merges `byTarget` under `optionalReads`;
-the `mark_expired.go` comment rewrite; the concurrent-fire test. **Ships alone, changes no lens**, and is
-the prerequisite every conversion depends on. Posture-changing — it changes an op's write shape.
+**Increment 0 — confirm the premises** *(XS)*: §13's four Phase-0 premises — the live sweep-flapping
+signal, §8's stuck-gap mitigation hypothesis, the registry's acceptance of a gaps-less target (§5.5), and
+the retry-absorption of a present-marker conflict (§12). Plus the one pin that is code rather than
+observation: the **engine-level 4-deep aspect read**, `a.<aspect>.data.byTarget.<targetId>`, as a sibling
+case in `ruleengine/full/aspect_expression_shapes_test.go` — landed before any cypher converts. Gate on
+all five.
 
-**Increment 2 — role (b), the anchor-hosted deadlines** *(M)*: the eight role-(b) lenses plus
-`capabilityEphemeral` (which needs no marker at all, §2.6). **Both the gap column and `freshUntil`**, per
-lens. Cypher units incl. the re-arm and past-deadline vectors; the sweep-verdict regression; the nine
-corpus censuses. Posture-changing.
+**Increment 1 — the per-target marker** *(S–M)*: `MarkExpired` declares the marker key in
+`contextHint.optionalReads` and merges `byTarget`, branching **`create` when the key is known-absent and
+`update` when present**, with `expiredAt` maintained as the monotone maximum over `byTarget`. Rewrites
+three shipped justifications in `mark_expired.go` — the two *"read by nothing"* comments and the
+unconditioned-update rationale at `:30-38` (§11). Tests: both concurrent-fire branches, mutation-proven
+against a whole-document overwrite. **Acceptance: `make test-lease-convergence` passes unmodified** — its
+strict-advance assertion on `data.expiredAt` is the shipped witness this increment must not break (§2.4).
+**Ships alone, changes no lens**, and is the prerequisite both families depend on. Posture-changing — it
+changes an op's write shape and its conditioning.
 
-**Increment 3 — role (a) in place** *(S)*: `clauseSatisfaction`, `renewalComplete`.
+**Increment 2 — the neighbour-hosted family** *(M–L)*: a new convergence lens + Weaver target anchored on
+the **background-check instance**, projecting `freshUntil = inst.outcome.data.validUntil`, with its own
+output descriptor and package permissions (§5.5). One edit to the shared `readinessWithItems` fragment,
+read by `leaseApplicationComplete`, `leaseApplicationsRead` and `landlordLeaseApplicationsRead`; one edit
+to `renewalComplete`'s `max` aggregate. Decide deliberately whether `internal/leaseconvergence`'s witness
+keeps reading the application's marker or re-points at the instance's, with the reason in the test name.
+**This is the increment that carries the measured payoff** — §13's derivation-refusal, audit-enrolment and
+per-message rows are its acceptance criteria. Posture-changing.
 
-**Increment 4 — role (c), the guard** *(S)*: the two reminder ops, following `BookAppointment`'s shipped
-idiom; the `.schedule` read declaration; normalization.
+**Increment 3 — the ten anchor-hosted declarations** *(M)*: the nine role-(b) declarations plus role (a)'s
+`clauseSatisfaction` (§2.1). **Both the gap column and `freshUntil`**, per lens — never one alone (§5.4).
+Cypher units including the re-arm, deadline-moved-earlier, revived-same-deadline and past-deadline
+vectors; the sweep-verdict regression; the **eleven** corpus censuses (§12). Posture-changing.
 
-**Not in scope — its own row**: the neighbour-hosted family (§5.5), trigger *"scope 2 shipped and its
-sweep verdict verified live"*.
+**Increment 4 — role (c), the guards** *(S)*: the two reminder ops' `startsAt` guards, following
+`BookAppointment`'s shipped `op.submittedAt` idiom; the `.schedule` read declaration that closes the
+fail-open; `time.rfc3339_utc` normalization (§7).
 
-Review depth beyond the two posture-changing increments is the Steward's sizing.
+**Two rows leave this design, neither converted here:**
+
+- **Café auto-settle never arms its timer** → the **verticals** board. `StaleTabSettlementTarget`'s
+  `BodyColumns` omits the `freshUntil` its cypher computes, so no `@at` is ever scheduled and settlement
+  waits on an incidental CDC touch (§7). A shipped bug with its own fix; converting
+  `cafeStaleTabSettlement` before it lands would close the gap permanently.
+- **`capabilityEphemeral`'s inclusion filter** → the **lattice** board, `📐 needs designer pass`. Its
+  `$now` decides set membership, not a gap, and it has no fact to read in its place; the fact it needs
+  would live on the task and be written by another target's marker (§2.6).
+
+Review depth across the three posture-changing increments (1, 2, 3) is the Steward's sizing; Increments 1
+and 2 carry the platform risk.
