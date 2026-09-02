@@ -183,19 +183,32 @@ RETURN
 //     ways. period<>'monthly' (oneTime, the default) keeps the exact Fire
 //     V1/V2 chargeCount=0 check above. period='monthly' instead mirrors
 //     lease-signing's bgcheck-freshness pattern: the gate is
-//     `chargeValidUntil = null OR chargeValidUntil <= $now` — a plain
-//     freshness decay read off c.status.data.chargeValidUntil (DebitAccount
+//     `chargeValidUntil = null OR a recorded lapse reaching chargeValidUntil`
+//     — a freshness decay read off c.status.data.chargeValidUntil (DebitAccount
 //     re-stamps it on every recurring charge), not a transaction count. This
 //     is why a monthly clause's .status aspect is NOT purely audit like the
 //     oneTime case (see clauseStatusAspectTypeDDL) — chargeValidUntil is the
 //     actual convergence signal for that archetype.
+//   - The lapse is a FACT on the clause, not a clock reading: when the @at this
+//     lens arms fires, MarkExpired records the instant in the clause's
+//     freshnessExpiry marker under this target's own key, and `lapsedAt` is
+//     that entry, carried through the aggregating WITH as a scalar beside
+//     chargeValidUntil. Both operands of the comparison are stored graph data,
+//     so the row is a pure function of the subgraph and two projections at
+//     different wall-clock instants over the same graph agree. compareAny
+//     answers false when either operand is nil, so a clause no timer has fired
+//     on reads unlapsed — and the explicit `chargeValidUntil = null` arm is
+//     what still opens the gap for a monthly clause that has never been
+//     charged and so has no window at all.
 //   - `freshUntil` arms Weaver's temporal lane (internal/weaver/temporal.go)
-//     the same way lease-signing's bgcheck does: while a monthly clause's
-//     chargeValidUntil is still in the future, freshUntil projects that same
-//     instant so an @at timer forces re-projection right when it lapses
-//     (nothing else would CDC-trigger a re-read at that exact moment); once
-//     it lapses (or for a oneTime clause, always) freshUntil is null — no
-//     timer armed, chargeCount/gap-driven dispatch owns it instead.
+//     the same way lease-signing's bgcheck does: while no recorded lapse
+//     reaches a monthly clause's chargeValidUntil, freshUntil projects that
+//     same instant so an @at fires right when it lapses (nothing else would
+//     CDC-trigger a re-read at that moment); once the lapse is recorded (or
+//     for a oneTime clause, always) freshUntil is null — no timer armed,
+//     chargeCount/gap-driven dispatch owns it instead. A chargeValidUntil
+//     already in the past is projected VERBATIM, so the overdue @at fires at
+//     once and records the lapse that opens the gap.
 //   - Proration needs NO lens change at all: a prorated clause's amountCents
 //     was computed ONCE by CreateClause (exact Starlark bignum integer
 //     arithmetic, ddls.go) and stored like any flat fee, so it flows through
@@ -215,6 +228,7 @@ WITH
   c.terms.data.conditioned AS conditioned,
   c.terms.data.period AS period,
   c.status.data.chargeValidUntil AS chargeValidUntil,
+  c.freshnessExpiry.data.byTarget.clauseSatisfaction AS lapsedAt,
   c.inspection.data.completed AS inspectionCompleted,
   count(t.key) AS chargeCount
 RETURN
@@ -228,15 +242,15 @@ RETURN
   chargeValidUntil,
   ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
    (((period <> 'monthly') AND (chargeCount = 0))
-    OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (chargeValidUntil <= $now))))
+    OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (lapsedAt >= chargeValidUntil))))
   ) AS missing_charge,
   ((inspectorKey <> null) AND (inspectionCompleted = null)) AS missing_inspection,
-  CASE WHEN (period = 'monthly') AND (chargeValidUntil <> null) AND (chargeValidUntil > $now)
+  CASE WHEN (period = 'monthly') AND (chargeValidUntil <> null) AND NOT (lapsedAt >= chargeValidUntil)
        THEN chargeValidUntil ELSE null END AS freshUntil,
   (
     ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
      (((period <> 'monthly') AND (chargeCount = 0))
-      OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (chargeValidUntil <= $now)))))
+      OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (lapsedAt >= chargeValidUntil)))))
     OR ((inspectorKey <> null) AND (inspectionCompleted = null))
   ) AS violating
 `

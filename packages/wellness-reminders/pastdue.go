@@ -13,7 +13,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // idiom: a mutable business timestamp IS the staleness threshold, no
 // separate marker needed).
 //
-//	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND endsAt<=$now gate)
+//	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND a recorded lapse at endsAt)
 //	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow", noShowFeeCents: json:0)
 //
 // Unlike clinic's MarkPastDueNoShow, this dispatches wellness-domain's own
@@ -72,18 +72,32 @@ func pastDueBookingsLens() pkgmgr.LensSpec {
 
 // pastDueBookingsSpec is the one-row-per-booking auto-no-show convergence
 // cypher. Like pastDueAppointmentsSpec, freshUntil binds DIRECTLY to the
-// session's .schedule.endsAt — no derived lead-offset deadline. While endsAt
-// is in the future the lens arms a one-shot @at at endsAt; once it passes,
-// the gap OPENS (the violating row drives dispatch, not a timer wake-up).
+// session's .schedule.endsAt — no derived lead-offset deadline. While this
+// target has recorded no lapse at endsAt the lens arms a one-shot @at at
+// endsAt; once the fired timer records that lapse, the gap OPENS (the
+// violating row drives dispatch, not a timer wake-up).
 //
-// The gate (status = 'booked' AND endsAt <= $now):
+// The deadline lives on the SESSION neighbour but the marker lands on the
+// BOOKING: `se` is bound once per row, and the @at Weaver arms from this row
+// names the booking as its entity, so the fired MarkExpired writes the marker
+// where the row is anchored. The lens reads no clock — both operands of the
+// comparison are stored graph data, so the row is a pure function of the
+// subgraph.
+//
+// The gate (status = 'booked' AND a recorded lapse at the session's endsAt):
 //
 //   - status = 'booked' — the seat was never resolved to attended or noShow.
 //     `waitlisted` never held a seat (no attendance to record); `attended` /
 //     `noShow` are already terminal — either way SetBookingAttendance's
 //     own re-mark path (not this lens) is what corrects a wrong call.
-//   - endsAt <= $now — the class's scheduled end has passed with no status
-//     update recorded.
+//   - freshnessExpiry.data.byTarget.pastDueBookings >= endsAt — a timer this
+//     target armed fired at or after the class's scheduled end, with no status
+//     update recorded. compareAny answers false when either operand is nil, so
+//     a booking no timer has fired on, and one whose session walk did not bind,
+//     both read not-due.
+//
+// freshUntil carries an endsAt already in the past VERBATIM rather than nulling
+// it: the overdue @at fires at once and that fire is what records the lapse.
 //
 // One-row-per-anchor: forSession / bookedBy are 0..1 (CreateBooking /
 // JoinWaitlist write exactly one of each), so the OPTIONAL walks do not fan
@@ -103,9 +117,9 @@ RETURN
   se.schedule.data.endsAt AS endsAt,
   b.status.data.value AS status,
   id.key AS bookerKey,
-  CASE WHEN (b.status.data.value = 'booked') AND (se.schedule.data.endsAt > $now) THEN se.schedule.data.endsAt ELSE null END AS freshUntil,
-  ((b.status.data.value = 'booked') AND (se.schedule.data.endsAt <= $now)) AS missing_noshow_transition,
-  ((b.status.data.value = 'booked') AND (se.schedule.data.endsAt <= $now)) AS violating`
+  CASE WHEN (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt) THEN se.schedule.data.endsAt ELSE null END AS freshUntil,
+  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS missing_noshow_transition,
+  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS violating`
 
 // pastDueBookingsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap →

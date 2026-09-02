@@ -36,7 +36,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
-			TargetID: "unroutedTasks",
+			TargetID: UnroutedTasksTarget,
 			Description: "Every task queued to a role is claimed before its grant expires. A task whose deadline " +
 				"passes unclaimed is flagged for an operator rather than quietly abandoned.",
 			LensRef: "unroutedTasks",
@@ -45,7 +45,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			},
 		},
 		{
-			TargetID: "staleAssignedTasks",
+			TargetID: StaleAssignedTasksTarget,
 			Description: "Every directly assigned task is completed before its grant expires. A task whose deadline " +
 				"passes unfinished is flagged for an operator, since a direct assignment has no queue to " +
 				"fall back into.",

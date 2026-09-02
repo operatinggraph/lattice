@@ -6,6 +6,15 @@ import (
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
+// The two deadline-driven §10.8 TargetIDs this package declares. Each is the
+// prefix of its lens's OutputKeyPattern (the §10.2↔§10.8 binding Weaver reads)
+// AND the key its lens reads the freshnessExpiry marker's byTarget entry under,
+// so both cypher and target spec are built from the one constant.
+const (
+	UnroutedTasksTarget      = "unroutedTasks"
+	StaleAssignedTasksTarget = "staleAssignedTasks"
+)
+
 // Lenses returns the package's Lens declarations. The single
 // `capabilityEphemeral` lens projects FR56 ephemeral task grants to the
 // disjoint key `cap.ephemeral.<actor-suffix>` (Contract #6 §6.6 Phase-2
@@ -200,15 +209,26 @@ var loomFlowHistorySource = &pkgmgr.SourceConfig{
 // answers the FR29 question in the form that matters operationally: "will
 // this lapse unrouted?" — so the staleness threshold IS expiresAt itself
 // (not an arbitrary elapsed-since-creation window), reusing existing state
-// rather than adding a new one. freshUntil re-arms Weaver's @at one-shot
-// timer for exactly that instant (RFC3339 UTC string comparison against
-// $now, the same lexical-compare idiom capabilityEphemeral/myTasks use); it
-// goes null once violating (the row's own CDC delivery drives re-evaluation
-// from there, like every other target).
+// rather than adding a new one. freshUntil arms Weaver's @at one-shot timer
+// for exactly that instant; it goes null once the fired timer has RECORDED
+// the lapse under this target's key in the task's freshnessExpiry marker,
+// and the gap opens off that same recorded fact (a lexical RFC3339 UTC
+// comparison between two stored values, so the row reads no clock and is a
+// pure function of the subgraph). From there the row's own CDC delivery
+// drives re-evaluation, like every other target.
+//
+// An expiresAt already past at first projection is carried VERBATIM rather
+// than nulled: Weaver publishes the overdue @at, NATS releases it at once,
+// and that fire is what records the lapse — nulling it would arm nothing and
+// the gap would never open.
+//
 // unroutedTasksSpec is built once at package init: the retry cap
 // (maxClaimRetries) bakes into the constant maxretries_claim column, the
 // §10.2 "the policy lives in the cypher" convention lease-signing's
-// leaseApplicationCompleteSpec established. The cypher carries no literal '%'.
+// leaseApplicationCompleteSpec established, and the target id is threaded
+// from UnroutedTasksTarget so the marker key the cypher reads and the
+// TargetID Weaver fires under cannot drift apart. The cypher carries no
+// literal '%'.
 var unroutedTasksSpec = fmt.Sprintf(`
 MATCH (t:task {key: $actorKey})-[:queuedFor]->(role:role)
 WHERE t.data.status = 'open'
@@ -218,11 +238,11 @@ RETURN
   nanoIdFromKey(t.key) AS entityId,
   role.key AS queuedRole,
   t.data.expiresAt AS expiresAt,
-  ($now > t.data.expiresAt) AS missing_claim,
-  ($now > t.data.expiresAt) AS violating,
-  (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil,
-  %d AS maxretries_claim
-`, maxClaimRetries)
+  (t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt) AS missing_claim,
+  (t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt) AS violating,
+  (CASE WHEN t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt THEN null ELSE t.data.expiresAt END) AS freshUntil,
+  %[2]d AS maxretries_claim
+`, UnroutedTasksTarget, maxClaimRetries)
 
 // staleAssignedTasksSpec is unroutedTasksSpec's mirror for the OTHER half of
 // task routing: a direct assignment (`-[:assignedTo]->`, not `queuedFor`)
@@ -237,6 +257,10 @@ RETURN
 // completed past its deadline is flagged, not auto-cancelled — CompleteTask
 // stays legal and still the assignee's to call at any time (scope=self,
 // permissions.go, independent of expiresAt).
+//
+// It reads its own target's byTarget entry, never the marker's entity-wide
+// expiredAt: a task can carry both this target's fire and unroutedTasks' in
+// one marker aspect, and only the per-target key tells them apart.
 var staleAssignedTasksSpec = fmt.Sprintf(`
 MATCH (t:task {key: $actorKey})-[:assignedTo]->(assignee:identity)
 WHERE t.data.status = 'open'
@@ -246,11 +270,11 @@ RETURN
   nanoIdFromKey(t.key) AS entityId,
   assignee.key AS assignee,
   t.data.expiresAt AS expiresAt,
-  ($now > t.data.expiresAt) AS missing_completion,
-  ($now > t.data.expiresAt) AS violating,
-  (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil,
-  %d AS maxretries_completion
-`, maxCompletionRetries)
+  (t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt) AS missing_completion,
+  (t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt) AS violating,
+  (CASE WHEN t.freshnessExpiry.data.byTarget.%[1]s >= t.data.expiresAt THEN null ELSE t.data.expiresAt END) AS freshUntil,
+  %[2]d AS maxretries_completion
+`, StaleAssignedTasksTarget, maxCompletionRetries)
 
 // orphanedTaskGrantsSpec is the convergence target for a task whose granted
 // operation died out from under it: `forOperation` is REQUIRED at CreateTask

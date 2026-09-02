@@ -11,6 +11,14 @@
 // lens's verdict — narrowing one that must stay broad, or dropping a type out
 // of a set the fan-out arms judge against — is an authorization change, and it
 // should fail here rather than in Capability KV.
+//
+// The tables below are hand-written, so what they cover is a claim; the
+// population they must cover is DERIVED, from the live registry through the same
+// predicate production uses (projection.IsAuthPlane over an actorAggregate lens),
+// and TestAuthPlaneCensus_CoversEveryAuthPlaneActorAggregate asserts the two
+// agree in both directions. Without that closure an auth-plane lens could ship
+// with no pinned verdict at all and every test in this file would still pass —
+// which is exactly how three of the six went uncovered.
 package refractor_test
 
 import (
@@ -23,7 +31,9 @@ import (
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
@@ -64,16 +74,39 @@ func narrowingPipeline(t *testing.T, lensID, cypher, anchorType string) *pipelin
 // root field or an aspect whose parent type is in the set, and the anchor type
 // is in the set — which is what makes the anchor's soft-delete undroppable.
 func TestAuthPlaneLenses_NarrowingVerdict(t *testing.T) {
-	cases := []struct {
-		lensID     string
-		cypher     string
-		anchorType string
-		wantLabels map[string]struct{}
-	}{
+	for _, tc := range narrowingCases(t) {
+		t.Run(tc.lensID, func(t *testing.T) {
+			labels, eligible := narrowingVerdict(t, tc.lensID, tc.cypher, tc.anchorType)
+			require.True(t, eligible,
+				"this lens's shipped cypher must still derive an exhaustive label set containing its anchor")
+			require.Equal(t, tc.wantLabels, labels,
+				"the fan-out arms judge every event against this set — a change here is an authorization change")
+		})
+	}
+}
+
+// narrowingCase is one lens's pinned (eligible, labels) verdict. lensName is the
+// canonical name it carries in the registry, or "" for a lens the package
+// registry does not hold; the coverage closure below reads it.
+type narrowingCase struct {
+	lensID     string
+	lensName   string
+	cypher     string
+	anchorType string
+	wantLabels map[string]struct{}
+}
+
+// narrowingCases is the ELIGIBLE half of this file's coverage: every auth-plane
+// actor-aggregate lens whose pattern derives an exhaustive label set, plus the
+// kernel capability lens.
+func narrowingCases(t *testing.T) []narrowingCase {
+	t.Helper()
+	return []narrowingCase{
 		{
 			// rbac-domain's role-derived grant projection — the lens the design
 			// is about.
 			lensID:     "CensusRbacRoLes99999",
+			lensName:   "capabilityRoles",
 			cypher:     rbacCapabilityRolesSpec(t),
 			anchorType: "identity",
 			wantLabels: map[string]struct{}{"identity": {}, "role": {}, "permission": {}},
@@ -82,20 +115,37 @@ func TestAuthPlaneLenses_NarrowingVerdict(t *testing.T) {
 			// The kernel cap.<actor> doc. Its grant set is a RETURN literal, not
 			// a grantedBy/permission walk, so `permission` is legitimately absent
 			// — core references no rbac permission vocabulary (Contract #7 §7.7).
+			//
+			// lensName is empty on purpose: this lens is declared by the kernel
+			// seeder, not by a package, and its declaration carries the bucket
+			// name `capability` rather than the auth-plane bucket, so the derived
+			// population does not contain it. It is covered here anyway, because
+			// what it projects IS the write-authorization surface.
 			lensID:     "CensusKerneLCap99999",
+			lensName:   "",
 			cypher:     bootstrap.CapabilityLensDefinition().CypherRule,
 			anchorType: "identity",
 			wantLabels: map[string]struct{}{"identity": {}, "role": {}},
 		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.lensID, func(t *testing.T) {
-			labels, eligible := narrowingVerdict(t, tc.lensID, tc.cypher, tc.anchorType)
-			require.True(t, eligible,
-				"this lens's shipped cypher must still derive an exhaustive label set containing its anchor")
-			require.Equal(t, tc.wantLabels, labels,
-				"the fan-out arms judge every event against this set — a change here is an authorization change")
-		})
+		{
+			// edge-manifest's PROVIDER read-grant producer, generated from the
+			// package's ReadGrantDomain walks. Every node in its three walks
+			// carries a label — (identity)<-[:identifiedBy]-(instructor)<-[:ledBy]-(session),
+			// (identity)<-[:identifiedBy]-(provider)<-[:withProvider]-(appointment)
+			// and (identity)<-[:identifiedBy]-(serviceprovider)<-[:providedBy]-(service)<-[:instanceOf]-(service)
+			// — so the derivation is exhaustive and the set is the seven types
+			// those patterns name. Its two siblings reach containment through
+			// UNLABELED nodes and stay broad; they are pinned in
+			// TestNonExhaustiveAuthPlaneLenses_StayBroad.
+			lensID:     "CensusEdgeProVider99",
+			lensName:   "edgeManifestProviderReadGrants",
+			cypher:     authPlaneActorAggregates(t)["edgeManifestProviderReadGrants"].cypher,
+			anchorType: "identity",
+			wantLabels: map[string]struct{}{
+				"identity": {}, "instructor": {}, "session": {}, "provider": {},
+				"appointment": {}, "serviceprovider": {}, "service": {},
+			},
+		},
 	}
 }
 
@@ -261,22 +311,131 @@ func natsSubjectMatches(filter, subject string) bool {
 	return len(f) == len(s)
 }
 
-// TestNonExhaustiveAuthPlaneLenses_StayBroad is the negative half: the auth-plane
-// lenses whose patterns carry an unlabeled node must never narrow, whatever else
-// their installation declares. capabilityEphemeral and myTasks each leave their
-// operation/target positions unlabeled; capabilityServiceAccess reaches
-// instanceOf/unavailableAt only through a negated WHERE.
+// stayBroadCases is the INELIGIBLE half of this file's coverage: lenses whose
+// patterns carry an unlabeled node and must never narrow.
+//
+// authPlane records whether the lens is one the derived population contains, so
+// the coverage closure can tell an auth-plane row from a companion. myTasks and
+// orphanedTaskGrants are companions: they project ordinary business buckets, not
+// the authorization surface, and they are exercised here because they carry the
+// same unlabeled-position shape and would regress the same way.
+var stayBroadCases = []struct {
+	name      string
+	authPlane bool
+	why       string
+}{
+	{"capabilityEphemeral", true, "leaves its operation/target positions unlabeled"},
+	{"capabilityServiceAccess", true, "reaches instanceOf/unavailableAt only through a negated WHERE"},
+	{"edgeManifestReadGrants", true, "walks residence containment through unlabeled (home)/(container) nodes"},
+	{"edgeManifestStaffReadGrants", true, "walks workplace containment through unlabeled (work)/(place) nodes"},
+	{"myTasks", false, "not auth-plane — a companion carrying the same unlabeled-position shape"},
+	{"orphanedTaskGrants", false, "not auth-plane — a companion carrying the same unlabeled-position shape"},
+}
+
+// TestNonExhaustiveAuthPlaneLenses_StayBroad is the negative half: a lens whose
+// pattern carries an unlabeled node must never narrow, whatever else its
+// installation declares — any type may bind there, so the fan-out arms cannot
+// skip an event on the strength of a label set.
 func TestNonExhaustiveAuthPlaneLenses_StayBroad(t *testing.T) {
-	for _, name := range []string{"capabilityEphemeral", "myTasks", "capabilityServiceAccess", "orphanedTaskGrants"} {
-		t.Run(name, func(t *testing.T) {
-			cypher, anchor, found := actorAggregateSpecByName(t, name)
+	for _, tc := range stayBroadCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cypher, anchor, found := authPlaneOrCorpusSpec(t, tc.name)
 			if !found {
-				t.Skipf("%s is not declared in the registry snapshot this test reads", name)
+				t.Skipf("%s is not declared in the registry snapshot this test reads", tc.name)
 			}
 			_, eligible := narrowingVerdict(t, "CensusBroad999999999", cypher, anchor)
-			require.False(t, eligible,
-				"a non-exhaustive pattern must keep the unconditional fan-out — any type may bind")
+			require.Falsef(t, eligible,
+				"a non-exhaustive pattern must keep the unconditional fan-out (%s)", tc.why)
 		})
+	}
+}
+
+// authPlaneLens is one enumerated lens's shipped cypher and anchor type.
+type authPlaneLens struct {
+	cypher     string
+	anchorType string
+}
+
+// authPlaneActorAggregates DERIVES the population this file must cover, from the
+// live registry through the same two conditions activation applies: the lens is
+// an actorAggregate, and projection.IsAuthPlane classifies its target as the
+// authorization surface. It enumerates through forEachCorpusCypher so a
+// read-grant producer generated at install time — which no package declares
+// literally, and which the earlier hand-written tables therefore missed — is in
+// the population the day its walk is declared.
+func authPlaneActorAggregates(t *testing.T) map[string]authPlaneLens {
+	t.Helper()
+	out := map[string]authPlaneLens{}
+	forEachCorpusCypher(t, func(name, spec string, rule *lens.Rule, aggregate, _ bool) {
+		if !aggregate || !projection.IsAuthPlane(rule) {
+			return
+		}
+		anchor := ""
+		if rule.Output != nil {
+			anchor = rule.Output.AnchorType
+		}
+		out[name] = authPlaneLens{cypher: spec, anchorType: anchor}
+	})
+	return out
+}
+
+// authPlaneOrCorpusSpec resolves a lens's shipped cypher by canonical name,
+// preferring the auth-plane enumeration (which sees install-time-generated
+// producers) and falling back to the package declarations for the companions.
+func authPlaneOrCorpusSpec(t *testing.T, name string) (cypher, anchorType string, found bool) {
+	t.Helper()
+	if l, ok := authPlaneActorAggregates(t)[name]; ok {
+		return l.cypher, l.anchorType, true
+	}
+	return actorAggregateSpecByName(t, name)
+}
+
+// TestAuthPlaneCensus_CoversEveryAuthPlaneActorAggregate is this file's coverage
+// closure, and the reason its header can claim to cover "every auth-plane
+// actor-aggregate lens" at all. The two tables above are hand-written; this
+// derives the population they must cover from the registry through the real
+// predicate and asserts set equality in BOTH directions.
+//
+// The uncovered direction is the dangerous one: a lens with no pinned verdict is
+// a lens whose narrowing can change without any test noticing, and a narrowing
+// that withholds an event is unrecoverable — no JetStream filter update rewinds a
+// consumer's cursor. The other direction matters too, more quietly: a row naming
+// a lens the predicate no longer classifies as auth-plane is a pin that has
+// stopped asserting what its name says.
+//
+// The floor is what keeps the equality honest. An enumeration that returned
+// nothing would satisfy set equality against an empty covered set on the day
+// someone deleted both tables, and would satisfy it silently.
+func TestAuthPlaneCensus_CoversEveryAuthPlaneActorAggregate(t *testing.T) {
+	population := authPlaneActorAggregates(t)
+	require.GreaterOrEqualf(t, len(population), 6,
+		"the auth-plane enumeration collapsed to %d lenses — this census is only worth what it covers", len(population))
+
+	covered := map[string]string{}
+	for _, tc := range narrowingCases(t) {
+		if tc.lensName != "" {
+			covered[tc.lensName] = "pinned narrowing verdict"
+		}
+	}
+	for _, tc := range stayBroadCases {
+		if tc.authPlane {
+			covered[tc.name] = "pinned as staying broad"
+		}
+	}
+
+	for name := range population {
+		_, ok := covered[name]
+		require.Truef(t, ok,
+			"auth-plane actor-aggregate lens %q has no pinned narrowing verdict in this file — "+
+				"derive its verdict by hand from its cypher, then add it to narrowingCases (if it narrows) "+
+				"or stayBroadCases (if a pattern node is unlabeled). An unpinned lens is one whose fan-out "+
+				"can silently start skipping events.", name)
+	}
+	for name, how := range covered {
+		_, ok := population[name]
+		require.Truef(t, ok,
+			"%q is %s here, but the registry no longer classifies it as an auth-plane actorAggregate — "+
+				"the row has stopped asserting what its name says; move or remove it deliberately", name, how)
 	}
 }
 

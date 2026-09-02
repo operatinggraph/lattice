@@ -12,7 +12,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // idiom, orchestration-base — a mutable business timestamp IS the staleness
 // threshold, no separate marker needed).
 //
-//	lens pastDueAppointments (weaver-target, full)  (freshUntil = endsAt; status non-terminal AND endsAt <= $now gate)
+//	lens pastDueAppointments (weaver-target, full)  (freshUntil = endsAt; status non-terminal AND a recorded lapse at endsAt)
 //	playbook missing_noshow_transition → directOp(MarkPastDueNoShow, appointmentKey: row.entityKey)
 //
 // MarkPastDueNoShow (clinic-domain, appointmentDDLScript) is a DEDICATED
@@ -63,11 +63,16 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 // deadline), this binds freshUntil DIRECTLY to .schedule.endsAt — the
 // unroutedTasks idiom (orchestration-base): the appointment's own end-of-visit
 // timestamp already IS the staleness threshold, so no separate marker/derived
-// field is needed. While endsAt is in the future the lens arms a one-shot @at at
-// endsAt; once it passes, the gap OPENS (not a timer wake-up — the violating row
-// itself drives dispatch, the appointmentReminders idiom).
+// field is needed. While this target has recorded no lapse at endsAt the lens
+// arms a one-shot @at at endsAt; once the fired timer records that lapse the gap
+// OPENS (not a timer wake-up — the violating row itself drives dispatch, the
+// appointmentReminders idiom).
 //
-// The three-term gate (status is non-terminal AND endsAt <= $now):
+// The lens reads NO clock: the recorded lapse and the stored endsAt are both
+// graph data, so the row is a pure function of the subgraph and re-projecting it
+// at any later instant reaches the same verdict.
+//
+// The three-term gate (status is non-terminal AND a recorded lapse at endsAt):
 //
 //   - status <> 'completed' AND status <> 'cancelled' AND status <> 'noShow' —
 //     the appointment has NOT already reached a terminal outcome. A staff status
@@ -76,11 +81,17 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 //     (TERMINAL_STATUSES are final, clinic-domain ddls.go); MarkPastDueNoShow
 //     itself also no-ops defensively against this exact race (a dispatch that
 //     lands after a legitimate terminal transition beat it here).
-//   - endsAt <= $now — the visit's scheduled end has passed with no terminal
-//     status recorded.
+//   - freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt — a timer this
+//     target armed fired at or after the visit's scheduled end, with no terminal
+//     status recorded. compareAny answers false when either operand is nil, so an
+//     appointment no timer has fired on — and one carrying no endsAt — reads
+//     not-due, which is the same answer the clock form gave.
 //
-// freshUntil = endsAt while endsAt > $now (arms the @at); once due, freshUntil is
-// null (the gap-dispatch path owns it, same as appointmentReminders). One-row-
+// freshUntil = endsAt while no such lapse is recorded (arms the @at); once the
+// lapse lands, freshUntil is null (the gap-dispatch path owns it, same as
+// appointmentReminders). An endsAt already in the past at first projection is
+// carried VERBATIM rather than nulled: Weaver publishes the overdue @at, NATS
+// releases it at once, and that fire is what records the lapse. One-row-
 // per-anchor: forPatient / withProvider are 0..1 (CreateAppointment writes
 // exactly one of each), so the OPTIONAL walks do not fan out. patientKey /
 // providerKey / status are INFORMATIONAL (operator/FE observability) — the
@@ -97,9 +108,9 @@ RETURN
   a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.schedule.data.endsAt > $now) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
-  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.schedule.data.endsAt <= $now)) AS missing_noshow_transition,
-  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.schedule.data.endsAt <= $now)) AS violating`
+  CASE WHEN (a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
+  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS missing_noshow_transition,
+  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS violating`
 
 // pastDueAppointmentsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap → directOp(MarkPastDueNoShow)

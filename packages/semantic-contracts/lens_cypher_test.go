@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -78,21 +77,58 @@ func (f *bcFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
-// projectAt runs the anchored clauseSatisfaction spec for one clause.
+// projectAt runs the anchored clauseSatisfaction spec for one clause. NO clock
+// parameter is supplied: the cypher references none — a monthly clause's
+// freshness is the recorded lapse of its own charge window, not a wall-clock
+// reading — and passing one would let a clock-reading regression pass unnoticed.
 func (f *bcFixture) projectAt(t *testing.T, clauseName string) []ruleengine.ProjectionResult {
 	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339)
 	eng := full.New()
 	cr, err := eng.Parse(clauseSatisfactionSpec)
 	require.NoError(t, err, "clauseSatisfaction cypher must parse on the full engine")
 	clauseKey := "vtx.clause." + f.ids[clauseName]
 	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
-		"actorKey":    clauseKey,
-		"now":         now,
-		"projectedAt": now,
+		"actorKey": clauseKey,
 	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
+}
+
+// mkMonthlyClause seeds one period=monthly computational clause with the given
+// charge window (empty = never charged), linked to a charged account.
+func (f *bcFixture) mkMonthlyClause(t *testing.T, name, chargeValidUntil string) {
+	t.Helper()
+	f.vtx(t, name, "clause")
+	f.aspect(t, name, "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 1500.0, "period": "monthly"})
+	status := map[string]any{"state": "active"}
+	if chargeValidUntil != "" {
+		status["chargeValidUntil"] = chargeValidUntil
+	}
+	f.aspect(t, name, "status", "clauseStatus", status)
+	f.vtx(t, name+"_acct", "account")
+	f.edge(t, "chargesTo", name, name+"_acct")
+}
+
+// recordLapse writes the freshnessExpiry marker MarkExpired commits when a
+// target's @at fires: the instant the timer fired for, recorded under that
+// target's own key in byTarget, with expiredAt carrying the entity-wide maximum.
+// A marker at or after the clause's chargeValidUntil is a recorded lapse of that
+// window; one before it is a fire for an earlier window the current one has
+// outrun.
+func (f *bcFixture) recordLapse(t *testing.T, name string, byTarget map[string]string) {
+	t.Helper()
+	entries := map[string]any{}
+	maxAt := ""
+	for target, at := range byTarget {
+		entries[target] = at
+		if at > maxAt {
+			maxAt = at
+		}
+	}
+	f.aspect(t, name, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": maxAt,
+		"byTarget":  entries,
+	})
 }
 
 // mkClause seeds one unconditioned computational clause with .terms{amountCents}
@@ -286,11 +322,7 @@ func TestClauseSatisfaction_Recurring_NeverCharged(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	f := newBcFixture(t)
-	f.vtx(t, "recurnew", "clause")
-	f.aspect(t, "recurnew", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 1500.0, "period": "monthly"})
-	f.aspect(t, "recurnew", "status", "clauseStatus", map[string]any{"state": "active"})
-	f.vtx(t, "recurnew_acct", "account")
-	f.edge(t, "chargesTo", "recurnew", "recurnew_acct")
+	f.mkMonthlyClause(t, "recurnew", "")
 
 	v := f.projectAt(t, "recurnew")[0].Values
 	require.Equal(t, true, v["missing_charge"], "never charged — due immediately")
@@ -298,47 +330,172 @@ func TestClauseSatisfaction_Recurring_NeverCharged(t *testing.T) {
 	require.Nil(t, v["freshUntil"], "no chargeValidUntil yet — nothing to arm")
 }
 
-// TestClauseSatisfaction_Recurring_Fresh — a period=monthly clause whose
-// chargeValidUntil is still in the future: missing_charge false (converged
-// for this period), freshUntil projects the same deadline to arm Weaver's
-// temporal lane for the next re-open.
+// TestClauseSatisfaction_Recurring_Fresh — a period=monthly clause no timer has
+// fired on: missing_charge false (converged for this period), freshUntil projects
+// the same deadline to arm Weaver's temporal lane for the next re-open. The
+// window is deliberately in the PAST relative to any wall clock the suite runs
+// at, so a clock-reading form would call this clause due — which is what makes
+// the vector discriminating.
 func TestClauseSatisfaction_Recurring_Fresh(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newBcFixture(t)
-	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
-	f.vtx(t, "recurfresh", "clause")
-	f.aspect(t, "recurfresh", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 1500.0, "period": "monthly"})
-	f.aspect(t, "recurfresh", "status", "clauseStatus", map[string]any{"state": "active", "chargeValidUntil": future})
-	f.vtx(t, "recurfresh_acct", "account")
-	f.edge(t, "chargesTo", "recurfresh", "recurfresh_acct")
+	const chargeValidUntil = "2020-06-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurfresh", chargeValidUntil)
 
 	v := f.projectAt(t, "recurfresh")[0].Values
-	require.Equal(t, false, v["missing_charge"], "chargeValidUntil is future — converged for this period")
+	require.Equal(t, false, v["missing_charge"], "no recorded lapse — the charge still counts, whatever the wall clock says")
 	require.Equal(t, false, v["violating"])
-	require.Equal(t, future, v["freshUntil"], "freshUntil must arm the same deadline")
+	require.Equal(t, chargeValidUntil, v["freshUntil"], "freshUntil must arm the same deadline")
 }
 
-// TestClauseSatisfaction_Recurring_Lapsed — a period=monthly clause whose
-// chargeValidUntil is in the past: missing_charge re-opens, freshUntil goes
-// null (the deadline already passed — gap-dispatch owns it now, not a timer).
+// TestClauseSatisfaction_Recurring_Lapsed — the @at this lens armed fired and its
+// lapse is recorded at chargeValidUntil: missing_charge re-opens, freshUntil goes
+// null (there is nothing left to wait for — gap-dispatch owns it now, not a
+// timer). The window is in the FAR FUTURE so only the recorded lapse can open the
+// gap.
 func TestClauseSatisfaction_Recurring_Lapsed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newBcFixture(t)
-	past := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
-	f.vtx(t, "recurlapsed", "clause")
-	f.aspect(t, "recurlapsed", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 1500.0, "period": "monthly"})
-	f.aspect(t, "recurlapsed", "status", "clauseStatus", map[string]any{"state": "active", "chargeValidUntil": past})
-	f.vtx(t, "recurlapsed_acct", "account")
-	f.edge(t, "chargesTo", "recurlapsed", "recurlapsed_acct")
+	const chargeValidUntil = "2099-01-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurlapsed", chargeValidUntil)
+	f.recordLapse(t, "recurlapsed", map[string]string{ClauseSatisfactionTarget: chargeValidUntil})
 
 	v := f.projectAt(t, "recurlapsed")[0].Values
-	require.Equal(t, true, v["missing_charge"], "chargeValidUntil lapsed — due again")
+	require.Equal(t, true, v["missing_charge"], "a recorded lapse at chargeValidUntil — due again")
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["freshUntil"], "a lapsed deadline is not re-armed")
+	require.Nil(t, v["freshUntil"], "a lapsed window is not re-armed")
+}
+
+// TestClauseSatisfaction_Recurring_ReChargedPastTheRecordedLapse is the RE-ARM
+// vector, and the whole argument for comparing the marker against the deadline
+// rather than testing its presence. Nothing clears the marker — MarkExpired never
+// tombstones it — so a clause DebitAccount re-stamped with a later window must
+// arm again off the stored comparison alone; a presence test would leave every
+// re-charged monthly clause permanently due and charge it on every delivery.
+func TestClauseSatisfaction_Recurring_ReChargedPastTheRecordedLapse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	const reCharged = "2099-06-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurrearmed", reCharged)
+	f.recordLapse(t, "recurrearmed", map[string]string{ClauseSatisfactionTarget: "2026-06-01T00:00:00Z"})
+
+	v := f.projectAt(t, "recurrearmed")[0].Values
+	require.Equal(t, false, v["missing_charge"], "a lapse the current window has outrun is not a lapse of THIS window")
+	require.Equal(t, reCharged, v["freshUntil"], "and the @at re-arms with no clearing write")
+}
+
+// TestClauseSatisfaction_Recurring_PastWindowProjectedVerbatim is the
+// PAST-DEADLINE-AT-FIRST-PROJECTION vector, and the one place a "null when the
+// deadline is already past" guard would be tempting. A clause whose charge window
+// lapsed while no target was watching carries no marker, so it counts as charged
+// to every consumer; the only thing that closes that is this row projecting the
+// past instant, Weaver publishing the overdue @at, and NATS releasing it
+// immediately. Nulling it here arms nothing and the clause is never re-charged.
+func TestClauseSatisfaction_Recurring_PastWindowProjectedVerbatim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	const longPast = "2020-06-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurstale", longPast)
+
+	v := f.projectAt(t, "recurstale")[0].Values
+	require.Equal(t, longPast, v["freshUntil"],
+		"an already-past chargeValidUntil with no recorded lapse projects VERBATIM — the overdue @at is the only path to recording it")
+	require.Equal(t, false, v["missing_charge"], "nothing has fired yet, so the gap is not open until the marker lands")
+
+	f.recordLapse(t, "recurstale", map[string]string{ClauseSatisfactionTarget: longPast})
+	v = f.projectAt(t, "recurstale")[0].Values
+	require.Equal(t, true, v["missing_charge"], "the recorded lapse opens the gap")
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestClauseSatisfaction_Recurring_BoundaryMarkerEqualsWindow pins which side of
+// the `>=` the equal instant falls on: the timer fires AT chargeValidUntil and
+// records that instant, so equality is the ordinary lapse rather than an edge
+// case that leaves the clause armed forever.
+func TestClauseSatisfaction_Recurring_BoundaryMarkerEqualsWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	const chargeValidUntil = "2099-01-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurboundary", chargeValidUntil)
+	f.recordLapse(t, "recurboundary", map[string]string{ClauseSatisfactionTarget: chargeValidUntil})
+
+	v := f.projectAt(t, "recurboundary")[0].Values
+	require.Equal(t, true, v["missing_charge"], "marker == chargeValidUntil is a lapse (>= boundary)")
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestClauseSatisfaction_Recurring_SiblingTargetLapseDoesNotOpenThisGap is the
+// isolation vector. A clause is also the anchor of leaseRentSettlement, and both
+// targets share one marker aspect, so reading the aspect's presence — or its
+// entity-wide expiredAt maximum — would charge a clause off an unrelated fire.
+func TestClauseSatisfaction_Recurring_SiblingTargetLapseDoesNotOpenThisGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	const chargeValidUntil = "2099-01-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recursibling", chargeValidUntil)
+	f.recordLapse(t, "recursibling", map[string]string{LeaseRentSettlementTarget: "2100-01-01T00:00:00Z"})
+
+	v := f.projectAt(t, "recursibling")[0].Values
+	require.Equal(t, false, v["missing_charge"], "another target's recorded fire is not this target's lapse")
+	require.Equal(t, chargeValidUntil, v["freshUntil"], "and it does not disarm this target's timer either")
+}
+
+// TestClauseSatisfaction_Recurring_MarkerWithNoByTargetMapReadsUnlapsed pins the
+// shape a marker written before byTarget existed carries. `expiredAt` alone says
+// which entity last lapsed, never which target, so a lens that read it would
+// answer for a sibling's fire. The four-hop read resolves to nil and compareAny
+// answers false: unlapsed, and the timer stays armed.
+func TestClauseSatisfaction_Recurring_MarkerWithNoByTargetMapReadsUnlapsed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	const chargeValidUntil = "2099-01-01T00:00:00Z"
+	f.mkMonthlyClause(t, "recurlegacy", chargeValidUntil)
+	f.aspect(t, "recurlegacy", "freshnessExpiry", "freshnessExpiry", map[string]any{"expiredAt": "2100-01-01T00:00:00Z"})
+
+	v := f.projectAt(t, "recurlegacy")[0].Values
+	require.Equal(t, false, v["missing_charge"], "a marker with no byTarget map names no target and lapses nothing here")
+	require.Equal(t, chargeValidUntil, v["freshUntil"])
+}
+
+// TestClauseSatisfaction_ReferencesNoClockParameter is the structural half of the
+// conversion, asserted on the compiled cypher rather than on any one row.
+func TestClauseSatisfaction_ReferencesNoClockParameter(t *testing.T) {
+	eng := full.New()
+	cr, err := eng.Parse(clauseSatisfactionSpec)
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull, "clauseSatisfaction must compile to the full engine")
+	for _, param := range []string{"now", "projectedAt"} {
+		referenced, exhaustive := fullCR.ReferencesParam(param)
+		require.Truef(t, exhaustive, "the query shape must be provably free of $%s", param)
+		require.Falsef(t, referenced,
+			"clauseSatisfaction must reference no $%s — expiry is a recorded fact, not a clock reading", param)
+	}
+}
+
+// TestClauseSatisfaction_ReadsItsOwnTargetsMarkerEntry binds the two halves that
+// can silently drift apart: the §10.8 TargetID Weaver fires a timer under, and
+// the byTarget key the lens compares against its window. A rename of one without
+// the other leaves the lens reading an entry nothing ever writes — a gap that can
+// never open, with every row still projecting and every seeded-marker test still
+// passing.
+func TestClauseSatisfaction_ReadsItsOwnTargetsMarkerEntry(t *testing.T) {
+	require.Contains(t, clauseSatisfactionSpec, "byTarget."+ClauseSatisfactionTarget,
+		"clauseSatisfaction must read the marker under its own target id — the timer that fires writes that entry and no other")
 }
 
 // TestClauseSatisfaction_OneTime_FreshUntilAlwaysNull — a converged oneTime

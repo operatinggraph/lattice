@@ -46,13 +46,15 @@ func Lenses() []pkgmgr.LensSpec {
 //
 //   - At CreateBooking/JoinWaitlist: the booking's session already carries
 //     .schedule.remindAt = startsAt − 24h, stamped by wellness-domain's
-//     CreateSession/CreateSessionSeries (write-time, canonical UTC). While
-//     the deadline is in the FUTURE the lens projects freshUntil = remindAt
-//     → Weaver arms an @at at remindAt. missing_reminder is false.
-//   - At remindAt: the @at fires → handleFiredTimer submits MarkExpired,
-//     whose freshnessExpiry marker write on THIS booking re-projects the row
-//     with a fresh $now → remindAt <= $now now holds → missing_reminder
-//     flips true AND freshUntil goes null (a one-shot wake-up, not re-armed).
+//     CreateSession/CreateSessionSeries (write-time, canonical UTC). While no
+//     timer has recorded a lapse at that deadline the lens projects
+//     freshUntil = remindAt → Weaver arms an @at at remindAt. missing_reminder
+//     is false.
+//   - At remindAt: the @at fires → handleFiredTimer submits MarkExpired, whose
+//     freshnessExpiry marker write on THIS booking records the fired instant
+//     under this target's byTarget key AND re-projects the row → the recorded
+//     lapse now reaches remindAt → missing_reminder flips true AND freshUntil
+//     goes null (a one-shot wake-up, not re-armed).
 //   - Weaver dispatches directOp(RecordBookingReminder) — driven by the
 //     missing_reminder violating row, NOT a timer — with
 //     Params{remindedFor: row.startsAt} so the op stamps .reminder =
@@ -61,9 +63,14 @@ func Lenses() []pkgmgr.LensSpec {
 //   - On a class time move (wellness-domain's ReassignSession rewrites the
 //     session's .schedule with a new startsAt + a re-derived remindAt):
 //     remindedFor (the OLD startsAt) now differs from the new startsAt →
-//     the gate re-opens → if the new remindAt is still future, freshUntil
-//     re-arms a fresh @at; if it is already past (a <24h move),
-//     missing_reminder is true at once.
+//     the gate re-opens → the new remindAt outruns any instant already
+//     recorded, so freshUntil re-arms a fresh @at with no clearing write at
+//     all; if the new remindAt is already past, the row projects it verbatim
+//     and the overdue @at fires immediately.
+//
+// The lens reads NO clock. Both operands of every time comparison are stored
+// graph data, so the row is a pure function of the subgraph and two
+// projections at different wall-clock instants over the same graph agree.
 //
 // A booking that is waitlisted, attended, or noShow is never violating —
 // only a `booked` seat gets reminded (a waitlisted booker has no confirmed
@@ -75,10 +82,19 @@ func Lenses() []pkgmgr.LensSpec {
 // gate — it is RecordBookingReminder's own guard
 // (time.rfc3339_utc(op.submittedAt) < startsAt, ddls.go), which refuses the
 // write once the class has begun. No timer arms at startsAt (§7 role (c): a
-// second deadline with no schedule slot to carry it), so a started,
-// never-reminded booked seat stays `missing_reminder` here — Weaver keeps
-// dispatching the directOp and the op keeps declining — rather than the gate
-// silently closing on a reminder that never went out.
+// second deadline with no schedule slot to carry it), so between startsAt and
+// endsAt a never-reminded booked seat stays `missing_reminder` here and the op
+// declines each dispatch — rather than the gate silently closing on a reminder
+// that never went out.
+//
+// "The class is OVER", by contrast, IS a term, and a recorded one: the sibling
+// pastDueBookings target arms its own @at at the session's endsAt on this same
+// booking anchor, so its fired marker entry is the evidence the class ended.
+// NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)
+// closes the gate at that point, which bounds the op's refusals by the class's
+// own length instead of letting them run until the retry budget escalates. The
+// nil-false lands on the right side: while nothing has fired, NOT(false) leaves
+// the gap open, which is the default a not-yet-ended class needs.
 //
 // One-row-per-anchor: forSession is 0..1 (CreateBooking writes exactly one,
 // deterministic keys), so the OPTIONAL walk does not fan out — a clean flat
@@ -98,6 +114,6 @@ RETURN
   b.reminder.data.sentAt AS reminderSentAt,
   b.reminder.data.remindedFor AS remindedFor,
   id.key AS bookerKey,
-  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt > $now) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now)) AS missing_reminder,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now)) AS violating`
+  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS missing_reminder,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS violating`

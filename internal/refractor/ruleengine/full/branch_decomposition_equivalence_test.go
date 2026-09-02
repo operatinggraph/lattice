@@ -505,8 +505,16 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	}
 	// leaseExpiry reads the tenancy aspect (no backfill — an application without
 	// one never enters that lens) and leaseRentSettlement the ledger account.
+	// Its cycle gate is a recorded lapse, not a clock: the freshnessExpiry marker
+	// carries the instant the leaseExpiry target's own @at fired, and without an
+	// entry at or after renewalOpensAt the gap column stays false and this lens's
+	// differential witness would compare two folded-empty branches.
 	putAspect(t, reg, coreKV, app, "tenancy", map[string]any{
 		"leaseEnd": "2020-01-01T00:00:00Z", "renewalOpensAt": "2019-12-01T00:00:00Z",
+	})
+	putAspect(t, reg, coreKV, app, "freshnessExpiry", map[string]any{
+		"expiredAt": "2019-12-01T00:00:00Z",
+		"byTarget":  map[string]any{"leaseExpiry": "2019-12-01T00:00:00Z"},
 	})
 	putAspect(t, reg, coreKV, app, "ledgerAccount", map[string]any{"accountKey": vtxKey(reg, acctName(p))})
 	for i := 0; i < s.Proposals; i++ {

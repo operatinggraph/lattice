@@ -126,15 +126,21 @@ func RenewalLenses() []pkgmgr.LensSpec {
 // WHERE on the OPTIONAL so a zero-landlord unit still keeps the anchor and
 // simply reads landlordCount=0 → not open).
 //
-// freshUntil is null-when-past (§4.2, the shipped signing-lens posture,
-// re-derived here rather than shared — see leaseApplicationCompleteSpec's
-// doc): a lapsed renewalOpensAt must not re-arm the @at timer on every
-// delivery (a past instant fires immediately at the engine, which is correct
-// EXACTLY once — the null guard prevents an infinite re-arm loop on every
-// subsequent reprojection of an already-open cycle).
+// freshUntil is null-once-LAPSED, not null-when-past: it carries
+// renewalOpensAt until a timer this target armed has RECORDED a fire at or
+// after it, in the leaseapp's freshnessExpiry marker under the leaseExpiry key.
+// A renewalOpensAt already in the past therefore projects VERBATIM, Weaver
+// publishes the overdue @at and NATS releases it at once — which is the only
+// path that records the lapse. What bounds the re-arm is the recorded fact, not
+// a clock: once the marker reaches renewalOpensAt, freshUntil goes null and
+// stays null however often the row is re-delivered.
 //
-// missing_renewalCycle requires $now >= renewalOpensAt (the cycle horizon
-// arrived) AND no LIVE (non-tombstoned) renewal exists whose cycleEnd equals
+// The marker read is carried through the aggregating WITH as a scalar, the same
+// way renewalOpensAt itself is, so the RETURN compares two carried values and
+// the cypher references no clock parameter at all.
+//
+// missing_renewalCycle requires the recorded lapse at renewalOpensAt (the cycle
+// horizon arrived) AND no LIVE (non-tombstoned) renewal exists whose cycleEnd equals
 // THIS tenancy's leaseEnd — counting a CANCELLED renewal (status='cancelled')
 // as satisfying the count (design §4.4: a landlord's recorded decline for this
 // term must not be reopened by the sweep on the next sweep tick; only a
@@ -153,14 +159,15 @@ WITH
   app.decision.data.value          AS landlordDecision,
   app.signature.data.signedAt      AS signedAt,
   u.key                            AS unitKey,
+  app.freshnessExpiry.data.byTarget.leaseExpiry AS lapsedAt,
   count(DISTINCT landlord.key)     AS landlordCount,
   count(DISTINCT CASE WHEN rn.data.cycleEnd = app.tenancy.data.leaseEnd THEN rn.key ELSE null END) AS cycleRenewalCount
 RETURN
   entityKey AS actorKey,
   entityKey,
-  CASE WHEN renewalOpensAt > $now THEN renewalOpensAt ELSE null END AS freshUntil,
-  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND ($now >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
-  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND ($now >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
+  CASE WHEN lapsedAt >= renewalOpensAt THEN null ELSE renewalOpensAt END AS freshUntil,
+  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
+  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
 `
 
 // renewalCompleteSpec anchors on EVERY renewal vertex, unfiltered by status

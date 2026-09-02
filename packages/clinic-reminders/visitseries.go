@@ -1070,16 +1070,25 @@ func visitSeriesDueLens() pkgmgr.LensSpec {
 //
 // The gate:
 //
-//   - freshUntil = nextDueAt WHILE active AND nextDueAt > $now (a future wake-up
-//     arming Weaver's @at temporal lane).
-//   - missing_series_advance = active AND nextDueAt <= $now (the violating row the playbook
-//     converges via AdvanceVisitSeries).
+//   - freshUntil = nextDueAt WHILE active AND this target has recorded no lapse
+//     reaching nextDueAt (a wake-up arming Weaver's @at temporal lane). A
+//     nextDueAt already in the past — a series whose cadence fell behind — is
+//     projected VERBATIM so the overdue @at fires at once and records the lapse,
+//     which is the only path that opens the gap.
+//   - missing_series_advance = active AND
+//     freshnessExpiry.data.byTarget.visitSeriesDue >= nextDueAt (the violating row
+//     the playbook converges via AdvanceVisitSeries). Both operands are stored
+//     graph data — the lens reads no clock, so the row is a pure function of the
+//     subgraph. compareAny answers false when either is nil, so a series no timer
+//     has fired on, and one carrying no nextDueAt, both read not-due.
 //
 // Unlike the one-shot reminders, convergence here does NOT clear the gate to
 // permanently false — AdvanceVisitSeries rewrites nextDueAt to a NEW future
 // deadline, so the row re-projects PENDING (not due, freshUntil re-armed) rather
 // than SENT. That is the "roll" — the series never fully converges while active;
-// it just keeps re-arming its own next wake-up.
+// it just keeps re-arming its own next wake-up. The marker needs no clearing
+// write for that: the advance moves nextDueAt PAST the recorded instant, so the
+// comparison reads not-due again on its own.
 //
 // '<> true' (not '= false') is the paused null-test: an absent .paused aspect
 // reads null, and null <> true is true in the full engine (the remindedFor <>
@@ -1102,9 +1111,9 @@ RETURN
   p.key AS patientKey,
   pr.key AS providerKey,
   ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil))) AS active,
-  CASE WHEN (s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.progress.data.nextDueAt > $now) THEN s.progress.data.nextDueAt ELSE null END AS freshUntil,
-  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.progress.data.nextDueAt <= $now)) AS missing_series_advance,
-  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.progress.data.nextDueAt <= $now)) AS violating`
+  CASE WHEN (s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND NOT (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt) THEN s.progress.data.nextDueAt ELSE null END AS freshUntil,
+  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt)) AS missing_series_advance,
+  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt)) AS violating`
 
 // visitSeriesReadLens is the PATIENT-anchored protected Postgres read model for
 // the recurring-visit-series view (D1.5, mirroring clinic-domain's

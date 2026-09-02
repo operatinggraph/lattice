@@ -26,14 +26,15 @@
 // wellness-ledger's wellnessNoShowSettlement fee never had a status to key
 // on (verticals.md "a past class never closes out").
 //
-//	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND endsAt<=$now gate)
+//	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND a recorded lapse at endsAt)
 //	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow")
 //
 // The reminder mechanism INVERTS lease-signing's freshness re-open, exactly
 // like clinic-reminders: it projects freshUntil = a deadline (the session's
 // .schedule.remindAt wellness-domain precomputes = startsAt − 24h) so
-// Weaver's @at temporal lane fires at the deadline → MarkExpired re-touches
-// the booking → the row re-projects with a fresh $now → the gap OPENS →
+// Weaver's @at temporal lane fires at the deadline → MarkExpired records that
+// lapse under the target's own byTarget key on the booking → the row
+// re-projects, the recorded lapse now reaches the deadline → the gap OPENS →
 // Weaver dispatches the directOp → the marker records the deadline it
 // reminded for → the gate (remindedFor = the deadline) closes. A
 // ReassignSession that moves the class's startsAt re-opens the gate and
@@ -56,7 +57,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-reminders",
-	Version: "0.3.4",
+	Version: "0.3.5",
 	Description: "Wellness class reminder (the wellness vertical's first orchestration): the .reminder marker aspect " +
 		"+ RecordBookingReminder op, the wellnessBookingReminders weaver-target convergence lens (freshUntil = the " +
 		"booking's session .schedule.remindAt deadline arms the @at timer; the gap opens at the deadline) — the " +

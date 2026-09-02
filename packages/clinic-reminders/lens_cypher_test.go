@@ -2,21 +2,28 @@ package clinicreminders
 
 // Rule-engine proof of the appointmentReminders convergence lens, driven through
 // the `full` engine (engine:"full") against an embedded NATS Core/Adjacency KV —
-// the same harness lease-signing / objects-base / clinic-domain use. With an
-// INJECTED $now it pins the time-gated convergence predicate deterministically:
+// the same harness lease-signing / objects-base / clinic-domain use.
 //
-//   - PENDING (remindAt > $now): not violating; freshUntil = remindAt (arms the
-//     @at timer) — the appointment is in the future, reminder not yet due.
-//   - DUE (remindAt <= $now < startsAt, not sent): violating; missing_reminder
-//     true — Weaver dispatches the directOp.
-//   - SENT (.reminder.sentAt present): not violating; freshUntil null (timer
-//     cleared) — converged.
-//   - CANCELLED / PAST: never violating; freshUntil null.
+// The predicate reads no clock: what decides whether the reminder is due is the
+// freshnessExpiry marker this appointment carries — the instant a timer armed by
+// a named target actually fired — compared against the stored deadline. So every
+// vector below seeds a marker (or deliberately omits one) rather than injecting
+// a projection instant, and no $now is supplied at all: the cypher references
+// none, and passing one would let a clock-reading regression pass unnoticed.
+//
+//   - PENDING (no recorded lapse at remindAt): not violating; freshUntil =
+//     remindAt (arms the @at timer) — the reminder is not yet due.
+//   - DUE (a lapse recorded at or after remindAt, not sent, the visit not yet
+//     ended): violating; missing_reminder true — Weaver dispatches the directOp.
+//   - SENT (.reminder.remindedFor = startsAt): not violating; freshUntil null
+//     (timer cleared) — converged.
+//   - CANCELLED / ENDED: never violating; freshUntil null.
 //   - one row per anchor even with patient + provider linked (0..1 × 0..1 = 1).
 
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +88,7 @@ func (f *remFixture) edge(t *testing.T, name, fromName, toName string) {
 
 // project runs an UNANCHORED spec (a full seed-scan, like clinic-domain's
 // clinicAppointmentsReadSpec) and returns every row — the shape a protected
-// Postgres read model uses, as opposed to projectAt's single-anchor
+// Postgres read model uses, as opposed to projectReminders' single-anchor
 // {key: $actorKey} convergence lenses.
 func (f *remFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {
 	t.Helper()
@@ -97,28 +104,50 @@ func (f *remFixture) project(t *testing.T, spec string) []ruleengine.ProjectionR
 	return out
 }
 
-// projectAt runs the anchored appointmentReminders spec for one appointment with
-// an INJECTED $now (the same param executeFullForActor supplies live).
-func (f *remFixture) projectAt(t *testing.T, apptName, now string) []ruleengine.ProjectionResult {
+// projectReminders runs the anchored appointmentReminders spec for one
+// appointment. NO clock parameter is supplied: the cypher references none, and
+// passing one would let a clock-reading regression pass unnoticed here.
+func (f *remFixture) projectReminders(t *testing.T, apptName string) []ruleengine.ProjectionResult {
 	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(appointmentRemindersSpec)
 	require.NoError(t, err, "appointmentReminders cypher must parse on the full engine")
 	apptKey := "vtx.appointment." + f.ids[apptName]
 	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
-		"actorKey":    apptKey,
-		"now":         now,
-		"projectedAt": now,
+		"actorKey": apptKey,
 	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
+}
+
+// recordLapse writes the freshnessExpiry marker MarkExpired commits onto an
+// entity when a target's @at fires: the instant the timer fired for, recorded
+// under that target's own key in byTarget, with expiredAt carrying the
+// entity-wide maximum. A marker at or after a stored deadline is a recorded
+// lapse of it; one before it is a fire for an earlier deadline the current one
+// has outrun. byTarget takes several entries because one appointment carries
+// three targets in one marker slot.
+func (f *remFixture) recordLapse(t *testing.T, name string, byTarget map[string]string) {
+	t.Helper()
+	entries := map[string]any{}
+	maxAt := ""
+	for target, at := range byTarget {
+		entries[target] = at
+		if at > maxAt {
+			maxAt = at
+		}
+	}
+	f.aspect(t, name, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": maxAt,
+		"byTarget":  entries,
+	})
 }
 
 // mkAppt seeds one appointment with a .schedule {startsAt, remindAt} + a .status,
 // optionally a .reminder {sentAt, remindedFor}. A sent reminder records the
 // startsAt it was for (remindedFor) — the gate converges on remindedFor = startsAt
 // and re-opens when a reschedule moves startsAt away from it. The anchor is named
-// so projectAt targets it.
+// so projectReminders targets it.
 func (f *remFixture) mkAppt(t *testing.T, name, startsAt, remindAt, status, sentAt, remindedFor string) {
 	t.Helper()
 	f.vtx(t, name, "appointment")
@@ -132,6 +161,17 @@ func (f *remFixture) mkAppt(t *testing.T, name, startsAt, remindAt, status, sent
 		}
 		f.aspect(t, name, "reminder", "appointmentReminder", marker)
 	}
+}
+
+// mkApptSpan seeds an appointment whose visit SPAN is explicit — startsAt and
+// endsAt differ — for the vectors that turn on "has the visit ended", which
+// mkAppt (endsAt = startsAt) cannot express.
+func (f *remFixture) mkApptSpan(t *testing.T, name, startsAt, endsAt, remindAt, status string) {
+	t.Helper()
+	f.vtx(t, name, "appointment")
+	f.aspect(t, name, "schedule", "appointmentSchedule", map[string]any{
+		"startsAt": startsAt, "endsAt": endsAt, "remindAt": remindAt})
+	f.aspect(t, name, "status", "appointmentStatus", map[string]any{"value": status})
 }
 
 // TestReminders_Pending — a future appointment whose remindAt has NOT passed: not
@@ -149,34 +189,37 @@ func TestReminders_Pending(t *testing.T) {
 	f.edge(t, "forPatient", "appt", "alice")
 	f.edge(t, "withProvider", "appt", "drsam")
 
-	rows := f.projectAt(t, "appt", remNow)
+	rows := f.projectReminders(t, "appt")
 	require.Len(t, rows, 1, "exactly one row per appointment even with patient + provider linked")
 	v := rows[0].Values
 	require.Equal(t, "vtx.appointment."+f.ids["appt"], v["entityKey"])
 	require.Equal(t, "vtx.appointment."+f.ids["appt"], v["actorKey"])
-	require.Equal(t, false, v["missing_reminder"], "remindAt is still in the future — not due")
+	require.Equal(t, false, v["missing_reminder"], "no timer has fired on this appointment — not due")
 	require.Equal(t, false, v["violating"])
 	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"], "freshUntil = remindAt arms the @at timer")
+	_, isString := v["freshUntil"].(string)
+	require.True(t, isString, "freshUntil must be a scalar string so scheduleFreshness can parse it as RFC3339")
 	require.Equal(t, "vtx.patient."+f.ids["alice"], v["patientKey"])
 	require.Equal(t, "vtx.provider."+f.ids["drsam"], v["providerKey"])
 }
 
-// TestReminders_Due — remindAt has passed, startsAt is still future, not yet sent:
-// the gap OPENS (missing_reminder + violating true). freshUntil is NULL once due —
-// the deadline is no longer in the future, so no timer is armed; the violating row
-// itself drives the dispatch (the gap-dispatch path, not a timer).
+// TestReminders_Due — the reminder timer has FIRED and its lapse is recorded at
+// remindAt, the reminder was never sent, and the visit has not ended: the gap
+// OPENS (missing_reminder + violating true). freshUntil is NULL once the lapse is
+// recorded — there is nothing left to wait for, so no timer is re-armed; the
+// violating row itself drives the dispatch (the gap-dispatch path, not a timer).
 func TestReminders_Due(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	// startsAt 3h out (future), remindAt yesterday (< now) — due.
 	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "", "")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T15:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, true, v["missing_reminder"], "remindAt passed + not sent + appointment future → due")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"], "a lapse recorded at remindAt + not sent + visit not ended → due")
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["freshUntil"], "already due → no future deadline → no armed timer (violating-path dispatches)")
+	require.Nil(t, v["freshUntil"], "the lapse is recorded → nothing to wait for → no armed timer (violating-path dispatches)")
 	require.Nil(t, v["reminderSentAt"])
 }
 
@@ -190,8 +233,9 @@ func TestReminders_Sent(t *testing.T) {
 	f := newRemFixture(t)
 	// Reminded FOR the current startsAt (remindedFor == startsAt) → converged.
 	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "2026-06-29T15:00:05Z", "2026-06-30T15:00:00Z")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T15:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
+	v := f.projectReminders(t, "appt")[0].Values
 	require.Equal(t, false, v["missing_reminder"], "remindedFor = startsAt → gap closed")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"], "freshUntil null once reminded for the current time — no timer re-arms")
@@ -199,96 +243,270 @@ func TestReminders_Sent(t *testing.T) {
 	require.Equal(t, "2026-06-30T15:00:00Z", v["remindedFor"])
 }
 
-// TestReminders_RescheduledAfterSent — a reminder was already sent FOR an earlier
-// startsAt, then the appointment was rescheduled to a new (later) time whose
-// remindAt is still in the future: remindedFor (old) <> startsAt (new) re-opens the
-// gate, and because the new remindAt is future, freshUntil = remindAt RE-ARMS the
-// @at for the new time (it is not yet violating — the reminder will fire at the new
-// deadline). This is the reschedule re-arm the remindedFor column enables.
+// TestReminders_RescheduledAfterSent is the RE-ARM vector, and the whole argument
+// for comparing the marker against the deadline rather than testing its presence.
+// A reminder already fired and was recorded for an earlier startsAt; the
+// appointment then moved to a later time whose remindAt OUTRUNS the recorded
+// instant. Nothing clears the marker — MarkExpired never tombstones it — so a
+// presence test would leave this appointment permanently "due" and never re-arm.
+// The comparison self-corrects with no clearing write at all.
 func TestReminders_RescheduledAfterSent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	// Now is 2026-06-30T12:00Z. New startsAt is 5 days out, new remindAt 4 days out
-	// (both future). remindedFor records an OLD startsAt the reminder already fired
-	// for.
+	// New startsAt 5 days past the old one, new remindAt 2026-07-04; the marker
+	// still records the fire for the OLD 2026-06-26 deadline.
 	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "2026-06-25T15:00:05Z", "2026-06-26T15:00:00Z")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-26T15:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, false, v["missing_reminder"], "new remindAt is still future → not yet due, but armed")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_reminder"], "the recorded lapse is BEHIND the new remindAt → not yet due")
 	require.Equal(t, false, v["violating"])
-	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"], "remindedFor <> new startsAt → freshUntil = new remindAt re-arms the @at")
+	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"], "a lapse the current deadline has outrun does not disarm it — the @at re-arms with no clearing write")
 }
 
-// TestReminders_RescheduledIntoWindow — a reminder was sent for an earlier startsAt,
-// then the appointment was moved to a time < 24h out (new remindAt already past):
-// remindedFor (old) <> startsAt (new) AND remindAt <= now → due immediately (the
-// violating-path dispatches a fresh reminder for the new time at once).
+// TestReminders_RescheduledIntoWindow is the DEADLINE-MOVED-EARLIER row of the
+// state table, and it is asserted deliberately rather than tolerated: a reminder
+// was sent for an earlier startsAt, then the appointment moved to a time < 24h
+// out so the new remindAt falls BELOW an instant this target already fired at.
+// That reads expired, which is CORRECT — a timer did fire at or after the new
+// deadline — and the row goes due immediately with no second fire.
 func TestReminders_RescheduledIntoWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	// New startsAt 3h out (future); new remindAt = startsAt − 24h = 21h ago (< now).
+	// The move put remindAt BEHIND the instant already recorded for this target, so
+	// the standing marker is a lapse of the new deadline too — the row is due at
+	// once with no further fire.
 	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "2026-06-25T15:00:05Z", "2026-06-26T15:00:00Z")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T18:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, true, v["missing_reminder"], "remindedFor <> new startsAt + new remindAt past → due now")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"], "remindedFor <> new startsAt + a recorded lapse past the new remindAt → due now")
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["freshUntil"], "already due → no armed timer (violating-path dispatches)")
+	require.Nil(t, v["freshUntil"], "already lapsed → no armed timer (violating-path dispatches)")
 }
 
-// TestReminders_Cancelled — a cancelled appointment is never reminded, even with a
-// passed remindAt; freshUntil null.
+// TestReminders_Cancelled — a cancelled appointment is never reminded, even with
+// the reminder lapse recorded; freshUntil null.
 func TestReminders_Cancelled(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
 	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "cancelled", "", "")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T15:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, false, v["missing_reminder"], "cancelled → never reminded")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_reminder"], "cancelled → never reminded, even with the lapse recorded")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"])
 }
 
-// TestReminders_PastAppointment — an appointment already in the past
-// (startsAt <= $now), never reminded, still projects the gap: the
-// `startsAt > $now` conjunct that used to suppress it here was struck (§7
-// role (c) — the guard moved into RecordAppointmentReminder's op, which
-// refuses to record a reminder once the appointment has started; the lens no
-// longer knows or cares). So missing_reminder / violating stay true — Weaver
-// keeps dispatching the directOp and the op keeps declining — and freshUntil
-// stays null (remindAt is also in the past; no timer to arm either way).
-// Revert-proof: restoring the struck conjunct on any one of the three
-// columns turns this back false and the test catches it.
-func TestReminders_PastAppointment(t *testing.T) {
+// TestReminders_StartedButNotEnded is the middle leg of the role-(c) guard's
+// three: the visit has begun, no reminder ever went out, and the class is NOT
+// over — the pastDueAppointments target's own @at at endsAt has not fired, so
+// nothing records the end. The gap therefore STAYS OPEN and the lens keeps
+// projecting the row; RecordAppointmentReminder's own guard
+// (time.rfc3339_utc(op.submittedAt) < startsAt) is what declines each dispatch.
+// The refusals are bounded by the visit's length, not by the retry budget —
+// TestReminders_EndedClosesTheGap is the other end of that bound.
+func TestReminders_StartedButNotEnded(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	// startsAt yesterday (< now), remindAt two days ago.
-	f.mkAppt(t, "appt", "2026-06-29T15:00:00Z", "2026-06-28T15:00:00Z", "scheduled", "", "")
+	f.mkApptSpan(t, "appt", "2026-06-30T09:00:00Z", "2026-06-30T09:30:00Z", "2026-06-29T09:00:00Z", "scheduled")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T09:00:00Z"})
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, true, v["missing_reminder"], "a started, never-reminded appointment still projects the gap — the op refuses, not the lens")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"],
+		"a started, never-reminded, not-yet-ended appointment still projects the gap — the op refuses, not the lens")
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["freshUntil"], "remindAt is also in the past, so no timer arms")
+	require.Nil(t, v["freshUntil"], "the reminder lapse is recorded, so no timer re-arms")
+}
+
+// TestReminders_EndedClosesTheGap is the closing term. "The appointment is over"
+// is a recorded fact, not a clock reading: the sibling pastDueAppointments target
+// arms its own @at at endsAt on this same anchor, and its fired marker entry is
+// the evidence. Once it lands, the reminder gate closes and Weaver stops
+// dispatching an op that could only be refused.
+func TestReminders_EndedClosesTheGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkApptSpan(t, "appt", "2026-06-30T09:00:00Z", "2026-06-30T09:30:00Z", "2026-06-29T09:00:00Z", "scheduled")
+	f.recordLapse(t, "appt", map[string]string{
+		AppointmentRemindersTarget: "2026-06-29T09:00:00Z",
+		PastDueAppointmentsTarget:  "2026-06-30T09:30:00Z",
+	})
+
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_reminder"], "the visit ENDED — a reminder is moot and the gate closes")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestReminders_SiblingPastDueLapseBeforeTheEndDoesNotClose is the isolation half
+// of the term above: the past-due timer may have fired for an EARLIER endsAt the
+// current schedule has outrun (a rescheduled visit). That recorded instant is not
+// a lapse of THIS endsAt, so the reminder gate stays open — a bare presence test
+// on the pastDueAppointments entry would close it wrongly.
+func TestReminders_SiblingPastDueLapseBeforeTheEndDoesNotClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkApptSpan(t, "appt", "2026-07-10T09:00:00Z", "2026-07-10T09:30:00Z", "2026-06-29T09:00:00Z", "scheduled")
+	f.recordLapse(t, "appt", map[string]string{
+		AppointmentRemindersTarget: "2026-06-29T09:00:00Z",
+		PastDueAppointmentsTarget:  "2026-06-30T09:30:00Z",
+	})
+
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"], "a past-due fire for an OUTRUN endsAt does not say this visit has ended")
+	require.Equal(t, true, v["violating"])
 }
 
 // TestReminders_LastMinuteBooking — booked < 24h out so remindAt is already past
-// at creation: reminds immediately (due now).
+// at creation. This is the PAST-DEADLINE-AT-FIRST-PROJECTION vector, and it is
+// what makes the conversion of freshUntil load-bearing rather than cosmetic: with
+// no marker yet the row must project that past instant VERBATIM so Weaver
+// publishes an overdue @at, NATS releases it at once, and THAT fire records the
+// lapse. Nulling a past deadline here (the shape the clock-reading form had) arms
+// nothing, so the gap would never open at all and the reminder would never go out.
 func TestReminders_LastMinuteBooking(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	// startsAt 6h out; remindAt = startsAt − 24h = 18h ago (< now) → due immediately.
-	f.mkAppt(t, "appt", "2026-06-30T18:00:00Z", "2026-06-29T18:00:00Z", "scheduled", "", "")
+	const remindAt = "2026-06-29T18:00:00Z"
+	f.mkAppt(t, "appt", "2026-06-30T18:00:00Z", remindAt, "scheduled", "", "")
 
-	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, true, v["missing_reminder"], "a <24h booking has a past remindAt → reminded immediately")
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, remindAt, v["freshUntil"],
+		"an already-past remindAt with no recorded lapse projects VERBATIM — the overdue @at is the only path to recording it")
+	require.Equal(t, false, v["missing_reminder"], "nothing has fired yet, so the gap is not open until the marker lands")
+
+	// The overdue @at fires and MarkExpired records it: the gap opens on the next
+	// delivery, which is the half a gap-only conversion cannot reach.
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: remindAt})
+	v = f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"], "the recorded lapse opens the gap")
 	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestReminders_SiblingTargetLapseAloneIsNotThisTargetsLapse is the per-target
+// isolation vector. One appointment carries THREE targets in ONE marker aspect
+// (appointmentReminders, followUpReminders, pastDueAppointments), so reading the
+// aspect's presence — or its entity-wide expiredAt maximum — would let another
+// target's timer open this gap.
+func TestReminders_SiblingTargetLapseAloneIsNotThisTargetsLapse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "", "")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2099-01-01T00:00:00Z"})
+
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_reminder"], "another target's recorded fire is not this target's lapse")
+	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"], "and it does not disarm this target's timer either")
+}
+
+// TestReminders_BoundaryMarkerEqualsDeadline pins which side of the `>=` the equal
+// instant falls on: the timer fires AT the deadline and records that instant, so
+// equality is the ordinary lapse rather than an edge case that leaves the row
+// armed forever.
+func TestReminders_BoundaryMarkerEqualsDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	const remindAt = "2026-07-04T15:00:00Z"
+	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", remindAt, "scheduled", "", "")
+	f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: remindAt})
+
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_reminder"], "marker == deadline is a lapse (>= boundary)")
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestReminders_MarkerWithNoByTargetMapReadsUnlapsed pins the shape a marker
+// written before byTarget existed carries. `expiredAt` alone says which entity
+// last lapsed, never which target, so a lens that read it would answer for a
+// sibling's fire. The four-hop read resolves to nil and compareAny answers false:
+// unlapsed, and the timer stays armed.
+func TestReminders_MarkerWithNoByTargetMapReadsUnlapsed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "", "")
+	f.aspect(t, "appt", "freshnessExpiry", "freshnessExpiry", map[string]any{"expiredAt": "2099-01-01T00:00:00Z"})
+
+	v := f.projectReminders(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_reminder"], "a marker with no byTarget map names no target and lapses nothing here")
+	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"])
+}
+
+// TestReminders_ReferencesNoClockParameter is the structural half of the
+// conversion, asserted on the compiled cypher rather than on any one row: a lens
+// that returns $now or $projectedAt reproduces a per-anchor evaluation
+// differently from the whole-corpus rescan it replaces, and its projected body is
+// a clock reading the sweep's deep verify cannot compare.
+func TestReminders_ReferencesNoClockParameter(t *testing.T) {
+	requireClockFree(t, "appointmentReminders", appointmentRemindersSpec)
+}
+
+// requireClockFree asserts a converted cypher references neither clock parameter
+// the projection pipeline supplies. It is the structural companion to the row
+// vectors: those prove the recorded fact decides the verdict, this proves no
+// clock is left to decide it differently on a re-projection.
+func requireClockFree(t *testing.T, name, spec string) {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoErrorf(t, err, "%s must parse on the full engine", name)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.Truef(t, isFull, "%s must compile to the full engine", name)
+	for _, param := range []string{"now", "projectedAt"} {
+		referenced, exhaustive := fullCR.ReferencesParam(param)
+		require.Truef(t, exhaustive, "%s: the query shape must be provably free of $%s", name, param)
+		require.Falsef(t, referenced,
+			"%s must reference no $%s — expiry is a recorded fact, not a clock reading", name, param)
+	}
+}
+
+// TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry binds the two halves that
+// can silently drift apart: the §10.8 TargetID Weaver fires a timer under, and
+// the byTarget key the lens compares against its deadline. A rename of one
+// without the other leaves a lens reading an entry nothing ever writes — a gap
+// that can never open, with every row still projecting and every test about a
+// seeded marker still passing. Derived from the shipped target specs, so a new
+// deadline-driven target is covered the day it lands rather than when someone
+// remembers to add a row.
+func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
+	specs := map[string]string{}
+	for _, l := range Lenses() {
+		specs[l.CanonicalName] = l.Spec
+	}
+	var checked int
+	for _, tgt := range WeaverTargets() {
+		spec, ok := specs[tgt.LensRef]
+		require.Truef(t, ok, "target %s names lens %s, which this package must declare", tgt.TargetID, tgt.LensRef)
+		if !strings.Contains(spec, "freshnessExpiry") {
+			continue
+		}
+		require.Containsf(t, spec, "byTarget."+tgt.TargetID,
+			"lens %s reads a freshness marker but not under its own target id %q — the timer that fires writes an entry this cypher never reads",
+			tgt.LensRef, tgt.TargetID)
+		checked++
+	}
+	require.Equal(t, 4, checked,
+		"appointmentReminders, followUpReminders, visitSeriesDue and pastDueAppointments each read a recorded lapse; a drop here is a lens that went back to a clock")
 }

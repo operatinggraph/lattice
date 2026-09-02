@@ -38,15 +38,16 @@
 //	playbook missing_series_site → directOp(BackfillVisitSeriesSite, seriesKey: row.entityKey)
 //
 //	op MarkPastDueNoShow{appointmentKey}  (clinic-domain — this package's ONLY caller; writes .status{noShow} + releases cells)
-//	lens pastDueAppointments (weaver-target, full)  (freshUntil = .schedule.endsAt DIRECTLY; status non-terminal AND endsAt <= $now gate; pastdue.go)
+//	lens pastDueAppointments (weaver-target, full)  (freshUntil = .schedule.endsAt DIRECTLY; status non-terminal AND a recorded lapse at endsAt; pastdue.go)
 //	playbook missing_noshow_transition → directOp(MarkPastDueNoShow, appointmentKey: row.entityKey)
 //
 // The reminder mechanism INVERTS lease-signing's freshness re-open. lease projects
 // freshUntil to RE-OPEN a converged gap at a deadline; these project freshUntil = a
 // deadline (the .schedule.remindAt clinic-domain precomputes = startsAt − 24h, or
 // the .documentation.followUpDate a documented visit requested) so Weaver's @at temporal
-// lane fires at the deadline → MarkExpired re-touches the appointment → the row
-// re-projects with a fresh $now → the gap OPENS → Weaver dispatches the directOp →
+// lane fires at the deadline → MarkExpired records that lapse under the target's
+// own byTarget key on the appointment → the row re-projects, the recorded lapse
+// now reaches the deadline → the gap OPENS → Weaver dispatches the directOp →
 // the marker records the deadline it reminded for → the gate (remindedFor = the
 // deadline) closes. A reschedule (appointment) or re-documentation (follow-up) that
 // moves the deadline re-opens the gate and re-arms the reminder. See
@@ -75,7 +76,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.10.7",
+	Version: "0.10.8",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +

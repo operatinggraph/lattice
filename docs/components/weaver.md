@@ -324,7 +324,11 @@ Lens projects the deadline: row column freshUntil = resolve + window (RFC3339)
   `time.rfc3339_utc(op.submittedAt)` against a deadline it read from state.
 - **Accepted Phase 2 bounds** (operator-visible, self-healing):
   - A `MarkExpired` **rejected at the Processor** is not re-attempted by Weaver (fire-and-forget,
-    nothing leases it) — the freshness flip then waits for the next CDC touch of the entity. An
+    nothing leases it), and a rejected operation lands **no idempotency tracker** — so the same
+    `requestId` is not a duplicate and re-executes. The row's `freshUntil` still carries the
+    deadline verbatim, so the next delivery of that row re-publishes the overdue `@at`, it fires
+    at once, and `MarkExpired` runs again. The freshness flip therefore waits for the next CDC
+    touch of the entity — the same trigger as any other reprojection, one hop longer. An
     op-*publish* failure IS retried (Nak → the same requestId).
   - With `MaxMsgsPerSubject: 1` on `core-schedules`, a **newer firing at the same fired subject
     rolls up an older one** the consumer has not yet processed — only the latest conversion is

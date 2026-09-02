@@ -56,14 +56,15 @@ func Lenses() []pkgmgr.LensSpec {
 // The reminder lifecycle for one appointment:
 //
 //   - At CreateAppointment: .schedule.remindAt = startsAt − 24h is stamped (by
-//     clinic-domain, write-time, canonical UTC). While the deadline is in the
-//     FUTURE the lens projects freshUntil = remindAt → Weaver arms an @at at
-//     remindAt. missing_reminder is false (nothing to do yet).
+//     clinic-domain, write-time, canonical UTC). While no timer has recorded a
+//     lapse at that deadline the lens projects freshUntil = remindAt → Weaver
+//     arms an @at at remindAt. missing_reminder is false (nothing to do yet).
 //   - At remindAt: the @at fires → handleFiredTimer submits MarkExpired, whose
-//     freshnessExpiry marker write on THIS appointment re-projects the row with a
-//     fresh $now → remindAt <= $now now holds → missing_reminder flips true AND
-//     freshUntil goes null (the deadline is no longer in the future; the timer was
-//     a one-shot wake-up and is not re-armed).
+//     freshnessExpiry marker write on THIS appointment records the fired instant
+//     under this target's byTarget key AND re-projects the row → the recorded
+//     lapse now reaches remindAt → missing_reminder flips true AND freshUntil
+//     goes null (the deadline has lapsed; the timer was a one-shot wake-up and
+//     is not re-armed).
 //   - Weaver dispatches directOp(RecordAppointmentReminder) — driven by the
 //     missing_reminder violating row, NOT a timer — with Params{remindedFor:
 //     row.startsAt} so the op stamps .reminder = {sentAt, remindedFor = the
@@ -72,18 +73,28 @@ func Lenses() []pkgmgr.LensSpec {
 //   - On RESCHEDULE (clinic-domain RescheduleAppointment rewrites .schedule with a
 //     new startsAt + a re-derived remindAt): remindedFor (the OLD startsAt) now
 //     differs from the new startsAt → the gate re-opens → if the new remindAt is
-//     still future, freshUntil = remindAt re-arms a fresh @at; if it is already
-//     past (a <24h move), missing_reminder is true at once. The new reminder
-//     dispatch stamps remindedFor = the new startsAt → converged again.
+//     unlapsed, freshUntil = the new remindAt arms a fresh @at; if the new
+//     remindAt is already past, the row projects it verbatim, Weaver publishes
+//     an overdue @at that fires at once, and the recorded lapse opens the gap on
+//     the next delivery. The new reminder dispatch stamps remindedFor = the new
+//     startsAt → converged again.
 //
-// freshUntil arms ONLY while remindAt > $now (a future wake-up). Once the deadline
-// has passed the gap is open and Weaver's gap-dispatch (violating) path owns it —
-// no timer is needed, so freshUntil projects null. This means exactly ONE @at fire
-// per (startsAt) reminder, and a <24h booking (remindAt already past) arms no
-// timer at all: it is violating on the creation CDC and dispatched at once.
+// The lens reads NO clock. Both operands of every time comparison are stored
+// graph data, so the row is a pure function of the subgraph and two projections
+// at different wall-clock instants over the same graph agree — which is what
+// makes the sweep's deep-verify comparison meaningful.
 //
-// The three-term gate (remindedFor <> startsAt AND remindAt <= $now AND
-// status <> 'cancelled'):
+// freshUntil arms while this target has recorded no lapse reaching remindAt.
+// Once the lapse is recorded the gap is open and Weaver's gap-dispatch
+// (violating) path owns it — no timer is needed, so freshUntil projects null.
+// That is exactly ONE @at fire per (startsAt) reminder. A <24h booking has a
+// remindAt already in the past and no marker, so it projects that past instant
+// verbatim: Weaver publishes an overdue @at, NATS releases it immediately, and
+// the lapse is recorded on the spot (internal/weaver/temporal.go). Nulling a
+// past deadline here would arm nothing and the gap would never open at all.
+//
+// The four-term gate (remindedFor <> startsAt AND a recorded lapse at remindAt
+// AND status <> 'cancelled' AND no recorded lapse at endsAt):
 //
 //   - remindedFor <> startsAt — NOT yet reminded for the CURRENT scheduled time.
 //     This single term subsumes never-reminded (no .reminder aspect → remindedFor
@@ -92,23 +103,31 @@ func Lenses() []pkgmgr.LensSpec {
 //     remindedFor → due again). A reminder sent for the current startsAt reads
 //     remindedFor = startsAt → false → converged. (sentAt stays as a purely
 //     informational "when did it fire" column; the gate keys on remindedFor.)
-//   - remindAt <= $now — the reminder deadline has passed. Lexical RFC3339 compare
-//     = chronological on canonical UTC (the proven validUntil > $now idiom).
+//   - freshnessExpiry.data.byTarget.appointmentReminders >= remindAt — a timer
+//     armed by THIS target fired at or after the reminder deadline. Lexical
+//     RFC3339 compare = chronological on canonical UTC. compareAny answers false
+//     whenever either operand is nil, so an appointment no timer has fired on,
+//     and one carrying no remindAt at all, both read not-due.
 //   - status <> 'cancelled' — a cancelled appointment is never reminded.
+//   - NOT (freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt) — the
+//     visit has not ended. "Never remind for an appointment that is over" is a
+//     recorded fact, not a clock reading: the sibling pastDueAppointments target
+//     arms its own @at at endsAt on this same anchor, and its fired marker is the
+//     evidence the appointment ended. The nil-false lands on the right side —
+//     while nothing has fired, NOT(false) leaves the gap open, which is the
+//     default a not-yet-ended appointment needs.
 //
-// "Never remind for an appointment that has already started" is NOT a term of
-// this gate — it is RecordAppointmentReminder's own guard
-// (time.rfc3339_utc(op.submittedAt) < startsAt, ddls.go), which refuses the
-// write once the appointment has begun. No timer arms at startsAt (§7 role
-// (c): a second deadline with no schedule slot to carry it), so a started,
-// never-reminded appointment stays `missing_reminder` here — Weaver keeps
-// dispatching the directOp and the op keeps declining — rather than the gate
-// silently closing on a reminder that never went out.
+// Between startsAt and endsAt the gap therefore stays open and
+// RecordAppointmentReminder's own guard (time.rfc3339_utc(op.submittedAt) <
+// startsAt, ddls.go) refuses each dispatch — the op declines, the lens keeps
+// projecting the row. Once the visit ends the past-due lapse closes the gate,
+// so the refusals are bounded by the visit's own length rather than running
+// until the retry budget escalates.
 //
-// Edge cases: a booking < 24h out has a past remindAt → reminds immediately; a
-// cancelled appointment is never violating and projects freshUntil null (no
-// armed timer); an old appointment with no remindAt (pre-feature) reads null
-// <= $now → false → silently no reminder. (A reminder recorded by a
+// Edge cases: a booking < 24h out has a past remindAt → reminds on the overdue
+// @at; a cancelled appointment is never violating and projects freshUntil null
+// (no armed timer); an old appointment with no remindAt (pre-feature) has
+// nothing to compare against and never reads due. (A reminder recorded by a
 // pre-`remindedFor` build carries no remindedFor → it reads as stale once and
 // is re-sent once on the next due projection, then sticks.)
 //
@@ -130,6 +149,6 @@ RETURN
   a.reminder.data.remindedFor AS remindedFor,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.status.data.value <> 'cancelled') AND (a.schedule.data.remindAt > $now) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.status.data.value <> 'cancelled')) AS missing_reminder,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.status.data.value <> 'cancelled')) AS violating`
+  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt) AND NOT (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS missing_reminder,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS violating`

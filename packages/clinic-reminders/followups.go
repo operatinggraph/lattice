@@ -260,7 +260,7 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 // provider's soft target).
 //
 // The four-term gate (remindedFor <> followUpDate AND followUpRequested = true AND
-// followUpDate <= $now AND status <> 'cancelled'):
+// a recorded lapse at followUpDate AND status <> 'cancelled'):
 //
 //   - remindedFor <> followUpDate — NOT yet reminded for the CURRENT follow-up date.
 //     Subsumes never-reminded (no .followUpReminder → remindedFor null → null <>
@@ -270,15 +270,23 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 //   - followUpRequested = true — the documented visit asked for a follow-up. When no
 //     visit is documented, or no follow-up was requested, .documentation.followUpDate
 //     is absent → the followUpDate terms are null → not due.
-//   - followUpDate <= $now — the follow-up deadline has arrived/passed (lexical
-//     RFC3339 compare = chronological on canonical UTC — clinic-domain normalizes
-//     the captured date-only followUpDate to a full RFC3339 instant).
+//   - freshnessExpiry.data.byTarget.followUpReminders >= followUpDate — a timer
+//     this target armed fired at or after the follow-up deadline (lexical RFC3339
+//     compare = chronological on canonical UTC — clinic-domain normalizes the
+//     captured date-only followUpDate to a full RFC3339 instant). compareAny
+//     answers false when either operand is nil, so an appointment no timer has
+//     fired on, and one with no followUpDate at all, both read not-due.
 //   - status <> 'cancelled' — a cancelled appointment is never reminded.
 //
-// freshUntil = followUpDate while followUpDate > $now (a future wake-up arming
-// Weaver's @at temporal lane); once the deadline passes the gap is open and the
-// gap-dispatch path owns it, so freshUntil is null — exactly ONE @at fire per
-// followUpDate. forPatient / withProvider are 0..1 so the OPTIONAL walks do not fan
+// The lens reads NO clock: both operands are stored graph data, so the row is a
+// pure function of the subgraph.
+//
+// freshUntil = followUpDate while this target has recorded no lapse reaching it
+// (a wake-up arming Weaver's @at temporal lane); once the lapse is recorded the
+// gap is open and the gap-dispatch path owns it, so freshUntil is null — exactly
+// ONE @at fire per followUpDate. A followUpDate documented in the past is
+// projected VERBATIM: the overdue @at fires at once and records the lapse, which
+// is the only path that opens the gap. forPatient / withProvider are 0..1 so the OPTIONAL walks do not fan
 // out (a clean flat projection). followUpDate / followUpReminderSentAt / remindedFor
 // / patientKey / providerKey are INFORMATIONAL columns; only entityKey + freshUntil
 // + the two bools are load-bearing for dispatch + the temporal lane.
@@ -295,9 +303,9 @@ RETURN
   a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND (a.documentation.data.followUpDate > $now) THEN a.documentation.data.followUpDate ELSE null END AS freshUntil,
-  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.documentation.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS missing_followup_reminder,
-  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.documentation.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS violating`
+  CASE WHEN (a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) THEN a.documentation.data.followUpDate ELSE null END AS freshUntil,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled')) AS missing_followup_reminder,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled')) AS violating`
 
 // followUpRemindersTarget returns the §10.8 playbook for the follow-up reminder: the
 // single missing_followup_reminder gap → directOp(RecordFollowUpReminder) over the

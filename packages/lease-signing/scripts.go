@@ -1552,8 +1552,9 @@ def execute(state, op):
         # read-free and cannot tell bgcheck from payment, so it stamps validUntil
         # on EVERY outcome (family-agnostic). The lens applies the freshness
         # policy to bgcheck only — it counts a completed bgcheck toward
-        # convergence solely while validUntil > $now, re-opening the gap once it
-        # lapses; payment ignores validUntil (ever-completed). So validUntil on a
+        # convergence solely while no recorded lapse reaches validUntil,
+        # re-opening the gap once one does; payment ignores validUntil
+        # (ever-completed). So validUntil on a
         # payment outcome is harmless and unused: the freshness rule lives in the
         # cypher (Contract #10 §10.2). The add is pure arithmetic on completed_at
         # — no clock read, so the op stays read-free and deterministic.

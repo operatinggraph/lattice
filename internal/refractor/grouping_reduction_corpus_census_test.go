@@ -60,6 +60,16 @@ type groupingVerdict struct {
 // residue are the only lenses that reduce anything; every other row records a
 // cypher that earns nothing, which is the half of the census the design's
 // eye-reading got wrong.
+//
+// clauseSatisfaction and leaseExpiry each carry ONE more scalar into their
+// aggregating WITH than this table once recorded: the freshnessExpiry marker
+// entry (lapsedAt) their gap column and freshUntil compare the stored deadline
+// against, in place of the $now parameter — a *ParameterRef is an inert leaf and
+// never entered a grouping key, while a property read is a carried value and
+// does. That move was reviewed rather than patched: the added item is a
+// per-anchor scalar (one marker aspect per vertex), functionally determined by
+// the anchor already in the key, so no row can cross a partition — the key is
+// wider by a value every row in a group already agreed on.
 var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"applicantRosterRead":               {"p", 0},
 	"appointmentReminders":              {"p", 0},
@@ -85,7 +95,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"capabilityRoleIndex":               {"key(operationType projectedAt)", 0},
 	"capabilityRoles":                   {"key(actorKey)", 0},
 	"capabilityServiceAccess":           {"key(actorKey)", 0},
-	"clauseSatisfaction":                {"key(accountKey amountCents chargeValidUntil condKey conditioned entityKey inspectionCompleted inspectorKey period) p!condKey", 0},
+	"clauseSatisfaction":                {"key(accountKey amountCents chargeValidUntil condKey conditioned entityKey inspectionCompleted inspectorKey lapsedAt period) p!condKey", 0},
 	"clinicAppointments":                {"p", 0},
 	"clinicAppointmentsRead":            {"p", 0},
 	"clinicEncountersRead":              {"p", 0},
@@ -141,7 +151,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"leaseAccounts":                     {"p", 0},
 	"leaseApplicationComplete":          {"key(applicant declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision profileSubmittedAt referenceCount signedAt ssnVal termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!profileSubmittedAt", 0},
 	"leaseApplicationsRead":             {"key(applicantKey declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision profileSubmitted referenceCount signedAt ssnVal termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitRegion unitRent unitStatus) p!applicantKey", 0},
-	"leaseExpiry":                       {"key(entityKey landlordDecision leaseEnd renewalOpensAt signedAt unitKey) p!landlordDecision", 0},
+	"leaseExpiry":                       {"key(entityKey landlordDecision lapsedAt leaseEnd renewalOpensAt signedAt unitKey) p!landlordDecision", 0},
 	"leaseRentSettlement":               {"key(accountKey decision entityKey requestedRent) p!decision", 0},
 	"ledgerHistory":                     {"p", 0},
 	"menuCatalog":                       {"p", 0},
