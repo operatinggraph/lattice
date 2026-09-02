@@ -401,8 +401,7 @@ staged one:
 > carrying the count of open rows that heartbeat's instance currently observes — a lower bound while rows
 > re-project after a restart, and per-instance where more than one Weaver runs
 
-**The lead applies that sentence to the contract at ratification**, with the board row's state; this
-document is where it is recorded until then. It stays at promise altitude — an observable wire shape, no
+**That sentence lands with the fire's commit**, not at ratification (Andrew, 2026-09-01: a promise the runtime does not yet keep is not committed ahead of its build, and never with a transitional note); this document is its text of record until then. It stays at promise altitude — an observable wire shape, no
 mechanism, no internal names — per the public-contract rule.
 
 **Affected consumers.**
@@ -715,7 +714,7 @@ rather than left as an erratum:
 1. **§6 — the contract's count clause.** The staged sentence promised *"the number of rows currently
    holding the column open"*, which the engine cannot keep: a surviving lane-1 durable resumes from its
    acked floor, and lane-1 durables are per target, so with more than one Weaver the rows shard. §6 now
-   carries the exact replacement clause of record; the lead applies it at ratification.
+   carries the exact replacement clause of record; it lands with the fire's commit.
 2. **§5 — the count went stale-high on every close but the last.** The retirement leg is a *remove*, so an
    entry written only on raise would sit at N while the set fell. The entry is rewritten on every
    membership change, add and remove alike, and §9 asserts the N−1 vector.
