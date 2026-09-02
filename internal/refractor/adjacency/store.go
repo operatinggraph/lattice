@@ -54,6 +54,7 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 	if err != nil {
 		return nil, 0, err
 	}
+	observeRead(ctx, nodeID, nil, st.marked, true)
 	if st.marked {
 		return neighborsFromCoreKV(ctx, coreKV, nodeID, nil)
 	}
@@ -80,9 +81,16 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 //     same node, and comparable with it.
 //   - Overflow-marked node: only rels' links, out of Core KV's link keyspace
 //     under per-relation Contract #1 subject filters, with the scoped
-//     fingerprint and whole=false. An EMPTY rels here reads nothing at all
-//     and answers with no edges — a caller that has proven it follows nothing
-//     does not need the hub, the same rule NeighborsByRelation applies.
+//     fingerprint and whole=false.
+//
+// rels must name at least one relation. An empty set is an ERROR rather than
+// an empty answer: on a marked node the difference between "this node has no
+// links of the relations you asked for" and "you asked for nothing" is exactly
+// the difference this function must never blur, and answering quietly would
+// hand a caller a short edge list for the one node class where a short list is
+// the failure the overflow latch exists to prevent. A caller that has genuinely
+// proven it follows nothing wants NeighborsByRelation, whose contract is to
+// read nothing and answer with no edges.
 //
 // whole is the discriminator a footprint depends on: a scoped fingerprint
 // covers only what THIS read matched and is not comparable with a whole read's
@@ -93,14 +101,15 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 // marked node with no Core KV handle is an error, never a silently short edge
 // list.
 func NeighborsScoped(ctx context.Context, kv, coreKV *substrate.KV, nodeID string, rels map[string]struct{}) ([]EdgeEntry, uint64, bool, error) {
+	if len(rels) == 0 {
+		return nil, 0, false, fmt.Errorf("adjacency: NeighborsScoped %s: at least one relation is required", nodeID)
+	}
 	st, err := readNodeState(ctx, kv, nodeID)
 	if err != nil {
 		return nil, 0, false, err
 	}
+	observeRead(ctx, nodeID, rels, st.marked, !st.marked)
 	if st.marked {
-		if len(rels) == 0 {
-			return []EdgeEntry{}, 0, false, nil
-		}
 		edges, fingerprint, cerr := neighborsFromCoreKV(ctx, coreKV, nodeID, rels)
 		return edges, fingerprint, false, cerr
 	}
@@ -221,6 +230,22 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 	// line per read, forever.
 	skipped := newSkipLog(nodeID)
 
+	// A scoped read's fingerprint must cover exactly the entries its ANSWER was
+	// derived from, or the two stop meaning the same thing: linkFiltersFor
+	// widens to the unscoped pair for a relation name that cannot be spelled as
+	// one subject token, and hashing everything those filters matched would pin
+	// relations the caller never asked for — reporting drift on a write the
+	// answer could not have depended on, and making one relation's fingerprint
+	// depend on whether some OTHER relation's name happened to be spellable.
+	// So a scoped read hashes only what passes the in-memory relation filter.
+	// An unscoped read (rels == nil) hashes every entry the filters matched,
+	// including keys this loop could not parse into an edge: nothing is out of
+	// scope there, so a change to any of them is a change to this node.
+	hashed := entries
+	if rels != nil {
+		hashed = make(map[string]*substrate.KVEntry, len(entries))
+	}
+
 	edges := make([]EdgeEntry, 0, len(entries))
 	for key, entry := range entries {
 		srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(key)
@@ -241,6 +266,10 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 			if _, wanted := rels[linkName]; !wanted {
 				continue
 			}
+			// In scope, so in the fingerprint — before the tombstone test
+			// below, since a link flipping isDeleted is drift this read's
+			// caller must see (see linkSetFingerprint).
+			hashed[key] = entry
 		}
 
 		// A soft-tombstoned link is still a live KV entry (the primitive drops
@@ -284,15 +313,23 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 		}
 	}
 	skipped.flush()
+	SortEdges(edges)
 
+	return edges, linkSetFingerprint(hashed), nil
+}
+
+// SortEdges orders an edge list in place by EdgeID, then by Direction — the
+// one total order a marked node's edges are returned in, so that a node's edge
+// order is stable across reads instead of following a map's iteration order,
+// and so that a caller assembling a list out of several reads of the same node
+// can put it in the order a single read would have produced.
+func SortEdges(edges []EdgeEntry) {
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].EdgeID != edges[j].EdgeID {
 			return edges[i].EdgeID < edges[j].EdgeID
 		}
 		return edges[i].Direction < edges[j].Direction
 	})
-
-	return edges, linkSetFingerprint(entries), nil
 }
 
 // linkFiltersFor returns the Contract #1 subject filters that match every link

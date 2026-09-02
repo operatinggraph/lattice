@@ -47,6 +47,12 @@ type ExecutionPlan struct {
 // Execute evaluates the lens for one bound actor against the live KV, returning
 // the projected RETURN rows. It is the same per-actor eval path the live
 // pipeline uses; the projection plan only references it.
+//
+// The engine is built fresh and carries no per-engine overrides, so it runs the
+// process-wide hub read-scope posture (full.DefaultHubReadScopeMode). Only
+// cmd/refractor's REFRACTOR_HUB_READ_SCOPE read ever moves that: any other
+// binary evaluating through this plan runs the built-in default with no lever
+// of its own.
 func (e *ExecutionPlan) Execute(ctx context.Context, params map[string]any, adjKV, coreKV *substrate.KV) ([]ruleengine.ProjectionResult, error) {
 	eng := full.New()
 	return eng.ExecuteWith(ctx, e.CompiledRule,

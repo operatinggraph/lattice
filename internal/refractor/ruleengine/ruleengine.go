@@ -172,9 +172,11 @@ type EdgeSelector struct {
 // and which edge identities passed each selector.
 //
 // Fallback is set when any hop on this node used an untyped selector
-// (RelType == "") that consumes every edge regardless of type, or a
-// variable-length hop whose expansion cannot be attributed to a single
-// relation name — validation then ALSO compares the node's whole-edge-set
+// (RelType == "") — a hop that consumes every edge regardless of type, and so
+// the one shape no per-relation set can stand for. It is the ONLY thing that
+// sets it: a variable-length hop that names its relation records ordinary
+// selectors at every level it expands to, and is validated by them like any
+// other typed hop. Validation ALSO compares the node's whole-edge-set
 // fingerprint (EvalFootprint.EdgeRevisions), coarser being the always-safe
 // direction. Recording stops once Fallback is set, so the Matched sets a
 // Fallback entry carries are exactly the typed hops that PRECEDED the untyped

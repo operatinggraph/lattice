@@ -52,7 +52,9 @@ func ParseHubReadScopeMode(s string) (HubReadScopeMode, error) {
 // pipeline is built, and threading a startup flag through every construction
 // site makes it possible to miss one.
 //
-// LIFETIME: written once at boot and by tests; read per evaluation, at
+// LIFETIME: written once at boot, by cmd/refractor's env read. Tests take the
+// per-engine WithHubReadScopeMode copy instead and leave this alone, so no test
+// can change the posture another test is running under. Read per evaluation, at
 // executor construction. It is an operator posture, not evaluation state, so
 // it is deliberately NOT reset or re-derived at rebuild, replay, reconnect,
 // tombstone or rule hot-reload — a rule swap silently re-arming a narrowing an

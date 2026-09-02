@@ -238,7 +238,9 @@ func TestExecutor_TraversesAnOverflowMarkedNode(t *testing.T) {
 	putLink(t, reg, coreKV, "queuedFor", "task1", "role")
 	putLink(t, reg, coreKV, "queuedFor", "task2", "role")
 
-	eng := New()
+	// The posture is named rather than inherited from package state: this
+	// test asserts what a SCOPED read footprints.
+	eng := New().WithHubReadScopeMode(HubReadScopeModeOn)
 	cr, err := eng.Parse(`MATCH (r:role {key: $k})<-[:queuedFor]-(t:task) RETURN t.key AS taskKey`)
 	require.NoError(t, err)
 

@@ -16,6 +16,14 @@ import (
 // rather than a bare struct literal. adjKV may be nil for a test that never
 // traverses a relationship.
 func newTestExecutor(adjKV, coreKV *substrate.KV) *executor {
+	return newScopedTestExecutor(adjKV, coreKV, HubReadScopeModeUnset)
+}
+
+// newScopedTestExecutor is newTestExecutor with the hub read-scope posture
+// named outright, for a test whose subject is the posture. Passing
+// HubReadScopeModeUnset resolves it the way New() would, which is what a test
+// indifferent to the posture wants.
+func newScopedTestExecutor(adjKV, coreKV *substrate.KV, mode HubReadScopeMode) *executor {
 	return &executor{
 		ctx:           context.Background(),
 		adjKV:         adjKV,
@@ -24,7 +32,7 @@ func newTestExecutor(adjKV, coreKV *substrate.KV) *executor {
 		edges:         map[string][]adjacency.EdgeEntry{},
 		edgeRevisions: map[string]uint64{},
 		hubEdges:      map[hubKey][]adjacency.EdgeEntry{},
-		hubReadScope:  DefaultHubReadScopeMode() == HubReadScopeModeOn,
+		hubReadScope:  New().WithHubReadScopeMode(mode).hubReadScopeEnabled(),
 	}
 }
 
