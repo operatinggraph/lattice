@@ -1005,6 +1005,62 @@ func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
 	}
 }
 
+// TestClinic_MarkPastDueNoShowSkipsProviderTimeOff proves the auto no-show
+// sweep does not blame the patient for a visit the provider was never
+// available for: a provider taking time off AFTER an appointment is already
+// booked leaves that appointment scheduled with nobody notified (the board's
+// live-observed bug), so once endsAt passes the sweep must no-op — not mark
+// noShow — for any appointment the time-off range covers.
+func TestClinic_MarkPastDueNoShowSkipsProviderTimeOff(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-pastdue-timeoff")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "topat0010", "TimeOff Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "toprv0010", "Dr. Blackout", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "toappt0010", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-20T09:00:00Z","endsAt":"2026-07-20T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+
+	// Time off declared AFTER the booking, covering it — the provider now
+	// cannot see this patient, and nothing about the existing appointment
+	// changes yet (SetProviderTimeOff only writes .timeOff, per the board row).
+	clSubmit(t, ctx, conn, cp, cons, "tooff0010", "SetProviderTimeOff", "provider",
+		`{"providerKey":"`+providerKey+`","ranges":[{"from":"2026-07-20T00:00:00Z","to":"2026-07-21T00:00:00Z","reason":"Out sick"}]}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+
+	// endsAt has "passed" (from Weaver's perspective) with no staff status
+	// update — the sweep dispatches, and must no-op rather than auto-no-show.
+	clSubmit(t, ctx, conn, cp, cons, "topastdue010", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`,
+		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "scheduled" {
+		t.Fatalf("status = %v, want scheduled (the sweep must not auto-no-show a provider-time-off-covered visit)", st["value"])
+	}
+	// No mutation this pass, so the held cells stay claimed too.
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+
+	// A DIFFERENT appointment for the same provider, outside the time-off
+	// range, still auto-no-shows normally.
+	apptID2 := clSubmit(t, ctx, conn, cp, cons, "toappt0011", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-22T09:00:00Z","endsAt":"2026-07-22T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey2 := "vtx.appointment." + apptID2
+	clSubmit(t, ctx, conn, cp, cons, "topastdue011", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey2+`"}`,
+		[]string{apptKey2, apptKey2 + ".schedule", apptKey2 + ".status"}, processor.OutcomeAccepted)
+	status2 := clReadDoc(t, ctx, conn, apptKey2+".status")
+	st2, _ := status2["data"].(map[string]any)
+	if st2["value"] != "noShow" {
+		t.Fatalf("status2 = %v, want noShow (outside the time-off range, the sweep still fires normally)", st2["value"])
+	}
+}
+
 // TestClinic_RecordEncounter proves the post-visit clinical-record path: a
 // RecordEncounter upserts two sibling aspects along the sensitivity boundary —
 // .encounter, SENSITIVE, carrying the RAW clinical content (summary / assessment

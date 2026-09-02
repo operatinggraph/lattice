@@ -480,8 +480,12 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"the orchestration-internal SetAppointmentStatus(noShow) counterpart clinic-reminders' pastDueAppointments " +
 			"Weaver target dispatches once a non-terminal appointment's .schedule.endsAt passes with no staff status " +
 			"update: a no-op if the appointment already reached a terminal status by dispatch time (an at-least-once " +
-			"race, never clobbers a legitimate completed/cancelled outcome), otherwise the SAME .status upsert + " +
-			"noShowFeeCents default (2500) + held-cell release as SetAppointmentStatus's terminal branch. It resolves " +
+			"race, never clobbers a legitimate completed/cancelled outcome) OR if the provider's .timeOff covers the " +
+			"visit (the missed visit is the provider's unavailability, not the patient's no-show, so front desk " +
+			"resolves it manually instead of the sweep silently blaming the patient), otherwise the SAME .status " +
+			"upsert (deliberately with NO noShowFeeCents — the automated sweep marks a documentation lapse, not a " +
+			"billed missed visit; only a staff-observed SetAppointmentStatus(noShow) bills) + held-cell release as " +
+			"SetAppointmentStatus's terminal branch minus the fee. It resolves " +
 			"provider/patient LIVE off the appointment's own withProvider/forPatient links (the bounded, exactly-one-link " +
 			"read appointment_provider/appointment_patient already use elsewhere in this script) rather than requiring " +
 			"them as caller-supplied + link-validated params like SetAppointmentStatus does — Weaver's directOp dispatch " +
@@ -629,11 +633,14 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>"},
 				ExpectedOutcome: "Validates the appointment is alive + class=appointment. If it already reached a terminal " +
 					"status (completed/cancelled/noShow) by dispatch time, no-ops (a legitimate at-least-once race — never " +
-					"clobbers a real outcome). Otherwise resolves provider/patient LIVE off the appointment's own " +
+					"clobbers a real outcome); likewise no-ops if the provider's .timeOff covers the visit (the provider " +
+					"was unavailable — front desk resolves it manually instead of the sweep blaming the patient). " +
+					"Otherwise resolves provider/patient LIVE off the appointment's own " +
 					"withProvider/forPatient links, upserts the .status aspect {value: noShow, note: \"Auto no-show: " +
-					"appointment ended without a status update\", noShowFeeCents: 2500}, and releases the held slot-claim " +
-					"cells — the same effect as a staff-submitted SetAppointmentStatus(noShow), minus the caller-supplied " +
-					"provider/patient params a human dispatcher would send. Emits clinic.appointmentStatusSet{auto: true}. " +
+					"appointment ended without a status update\"} (deliberately no noShowFeeCents — only a " +
+					"staff-observed SetAppointmentStatus(noShow) bills), and releases the held slot-claim " +
+					"cells — the same effect as a staff-submitted SetAppointmentStatus(noShow) minus the fee and the " +
+					"caller-supplied provider/patient params a human dispatcher would send. Emits clinic.appointmentStatusSet{auto: true}. " +
 					"Submitted under Weaver's service-actor authority only (clinic-reminders' pastDueAppointments target); " +
 					"no human/consumer caller.",
 			},
@@ -2379,25 +2386,25 @@ def enforce_hours(provider, starts_at, ends_at):
             return
     fail("OutsideHours: provider " + provider + " is not available at the requested time (UTC weekday " + str(sw) + ", " + str(ss) + "s-" + str(es) + "s of day); no matching availability window")
 
-def enforce_time_off(provider, starts_at, ends_at):
+def time_off_overlap(provider, starts_at, ends_at):
     # Opt-in provider date-specific time-off (Capability-KV §06 — the op's own
-    # Starlark logic). The blackout LAYER on top of enforce_hours: read the provider's
-    # .timeOff aspect on demand (kv.Read, §2.5 — config, not the booking serialization
-    # point). An absent / deleted aspect or ranges=[] means NO blackouts (backward-
-    # compatible with providers created before this capability). Otherwise the
-    # appointment's [start, end) must not overlap ANY blocked [from, to) range. Ranges
-    # are canonical-UTC RFC3339 (lexical == chronological); half-open overlap test
-    # (a.start < b.end AND b.start < a.end) — back-to-back (appt ending exactly at a
-    # range's from, or starting exactly at its to) does NOT overlap, so a booking up
-    # to the start of a blackout (or from its end) is allowed.
+    # Starlark logic): read the provider's .timeOff aspect on demand (kv.Read,
+    # §2.5 — config, not the booking serialization point) and return the first
+    # blocked [from, to) range overlapping [starts_at, ends_at), or None if none
+    # does. An absent / deleted aspect or ranges=[] means NO blackouts (backward-
+    # compatible with providers created before this capability). Ranges are
+    # canonical-UTC RFC3339 (lexical == chronological); half-open overlap test
+    # (a.start < b.end AND b.start < a.end) — back-to-back (appt ending exactly at
+    # a range's from, or starting exactly at its to) does NOT overlap, so a
+    # booking up to the start of a blackout (or from its end) is allowed.
     # read-posture: (c) config — deliberately unsnapshotted (out of OCC so a
     # time-off edit never conflicts a concurrent booking commit)
     off = kv.Read(provider + ".timeOff")
     if off == None or off.isDeleted:
-        return
+        return None
     ranges = off.data.get("ranges")
     if ranges == None or type(ranges) != type([]) or len(ranges) == 0:
-        return
+        return None
     for r in ranges:
         if type(r) != type({}):
             continue
@@ -2406,7 +2413,13 @@ def enforce_time_off(provider, starts_at, ends_at):
         if rf == None or rt == None:
             continue
         if starts_at < rt and rf < ends_at:
-            fail("ProviderUnavailable: provider " + provider + " is on time-off " + rf + "/" + rt + "; requested " + starts_at + "/" + ends_at)
+            return r
+    return None
+
+def enforce_time_off(provider, starts_at, ends_at):
+    r = time_off_overlap(provider, starts_at, ends_at)
+    if r != None:
+        fail("ProviderUnavailable: provider " + provider + " is on time-off " + r.get("from") + "/" + r.get("to") + "; requested " + starts_at + "/" + ends_at)
 
 def enforce_future(starts_at, submitted_at):
     # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic). The
@@ -3186,6 +3199,25 @@ def execute(state, op):
         if provider == None or patient == None:
             fail("MissingBinding: appointment " + appt_key + " has no bound provider/patient; cannot auto no-show")
 
+        # read-posture: (a) declared in contextHint.reads — same key SetAppointmentStatus's
+        # terminal branch reads, always needed here (MarkPastDueNoShow is always terminal).
+        schedule = kv.Read(appt_key + ".schedule")
+
+        # A provider time-off range covering this visit means the provider was
+        # never available to see the patient — the missed visit is not a
+        # documentation lapse the patient caused, and the sweep must not
+        # silently blame them for it. No-op cleanly (never guessing) rather
+        # than marking noShow, the same posture BackfillAppointmentSite takes
+        # for a gap it cannot resolve on its own: the gap stays open (Weaver
+        # keeps retrying, harmlessly) and front desk closes it via the normal
+        # SetAppointmentStatus / RescheduleAppointment ops once they've
+        # rebooked or otherwise resolved the visit.
+        if schedule != None and not schedule.isDeleted:
+            starts_at = schedule.data.get("startsAt")
+            ends_at = schedule.data.get("endsAt")
+            if starts_at != None and ends_at != None and time_off_overlap(provider, starts_at, ends_at) != None:
+                return {"mutations": [], "events": [], "response": {}}
+
         # No noShowFeeCents here, deliberately: the automated sweep marks a
         # documentation lapse, not a missed visit (PO ruling,
         # verticals.md), so only a staff-observed SetAppointmentStatus(noShow)
@@ -3194,9 +3226,7 @@ def execute(state, op):
         # change needed.
         status_data = {"value": "noShow", "note": "Auto no-show: appointment ended without a status update"}
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
-        # read-posture: (a) declared in contextHint.reads — same key SetAppointmentStatus's
-        # terminal branch reads, always needed here (MarkPastDueNoShow is always terminal).
-        mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
+        mutations = mutations + release_cells_mutations(provider, patient, schedule)
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": "noShow", "auto": True}}]
         return {"mutations": mutations, "events": events,
