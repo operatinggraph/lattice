@@ -198,4 +198,5 @@ a load-generator artefact (noted for the Vertical PO in the commit).
 
 ## 8. Build note / checkpoint
 
-_(amended per increment)_
+- 2026-09-01 · Inc 2 (§5.2 Postgres `GetRow`) landed `4e11c9b3`. Brief gap: `ProtectedAdapter` wraps the inner adapter as a named field, so the reader had to be re-declared on the wrapper for `leaseApplicationsRead` to satisfy `RowReader` at all — the builder caught it; the corpus census verifies which lenses now enrol.
+- Inc 1 (§5.1) and Inc 3 (§5.3) in flight in their own worktrees.
