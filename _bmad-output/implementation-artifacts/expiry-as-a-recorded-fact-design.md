@@ -345,7 +345,7 @@ healer*: making them honest is worth having, and it moves no measurement. The me
 measurement — `auditEnrolment` admitting a lens, `plainDerivationLicence` seeding one affected anchor
 instead of rescanning the corpus — refuse the **anchor-hosted** lenses on grounds this design does not
 touch (actor-aggregate shape, `audit.go:955`), and refuse **`leaseApplicationsRead`** on `$now` alone
-(`anchor_derivation_plain.go:332-339`), which this design does remove. So: **the anchor-hosted conversion
+(`anchor_derivation_plain.go:332-339`), which this design does remove — **but `$now` was not the last conjunct (falsified live at build, 2026-09-02):** once the audit enrolled and reached a verdict, the licence refused on the next one, *"its rows do not partition by anchor (no key column both resolves from the anchor alone and identifies it)"* (`:341-342`); the read model anchors on the identity and keys its rows by application, so it projects N rows per anchor and `ProjectsOneRowPerAnchor` is false by shape. The audit-enrolment payoff holds; the per-anchor payoff has its own designer row. So: **the anchor-hosted conversion
 buys a verifiable sweep verdict at `warning` severity, and every measured payoff — audit enrolment, the
 per-anchor derivation, the whole-corpus rescan on the Postgres pair — is in the neighbour-hosted family**
 (§0.2, §5.5). Both are worth building; only one of them shows up in a number.
@@ -813,9 +813,9 @@ Every test owned by a named increment.
 | Short-notice reminder (deadline past at creation) | e2e | **still fires** — the regression guard |
 | Projected gap columns | `weaver-targets` | byte-identical at the same graph state and clock |
 | `MarkExpired` op volume | op stream | **unchanged** (§8) |
-| `leaseApplicationsRead`'s derivation refusal | refractor log | **gone** — the `$now` conjunct is the last one refusing it (§0.2); this is the measured payoff, and Increment 2 is not done without it |
+| `leaseApplicationsRead`'s derivation refusal | refractor log | **the `$now` refusal is gone; the licence now refuses one conjunct further** — *rows do not partition by anchor* (`anchor_derivation_plain.go:341`), a shape fact of the read model, not a clock. Observed live 2026-09-02 03:05 after the first audit verdict. Its own designer row is filed; §0.2 amended. |
 | `AuditPlan` enrolment for the Postgres pair | audit log | `leaseApplicationsRead` **enrols**; `landlordLeaseApplicationsRead` **still refuses**, on Secure + diff-retraction (§0.2) — assert both, so an enrolment that should not have happened is caught |
-| Per-message cost on the Postgres pair | msg/s at steady state | **falls off the corpus-rescan floor** the sibling fire measured on 2026-09-01 |
+| Per-message cost on the Postgres pair | msg/s at steady state | **not reached by this fire** — the rescan is licensed away only when the partition conjunct above is satisfied; the pair drained ~1 msg/min at close (~64k pending each), the same rescan floor the sibling fire measured. Belongs to the filed designer row. |
 
 **Premises to re-derive at Phase 0**, each gating the increment that rests on it:
 
