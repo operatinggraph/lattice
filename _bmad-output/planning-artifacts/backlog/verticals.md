@@ -31,6 +31,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A corrected no-show leaves its no-show fee stranded, and the original wrong-call reason is destroyed** | `CorrectAppointmentStatus` writes only `.status`: a `noShow→completed` correction drops `noShowFeeCents` and never reverses an already-posted charge (no lens re-opens, gated on `status='noShow'`), and the mandatory correction note overwrites the original. | Clinic | pkg | ★ | S | 📋 ready · reverse/credit the stale fee on correction; consider projecting `correctedFrom` |
 | **Front desk has no way to see which booked appointments a provider's time off now conflicts with** | `SetProviderTimeOff` writes only `.timeOff` — nothing tells front desk which of a provider's existing bookings now need a reschedule call. | Clinic | pkg | ★ | S | 📋 ready · sketch: walk the provider's appointments (`kv.Links(providerKey,"withProvider","in")`) at `SetProviderTimeOff`, mark overlapping non-terminal ones, project the marker for an FE badge |
 | **The 4 stale cluster-A onboarding cards need a live CancelTask pass** | Inc 2 of the onboarding re-anchor: 4 open `RecordIdentityPII` tasks predate the Inc 1 fix and won't self-clear. Grounded 2026-09-01: the identity is a stranded pre-rotation fossil, not live admin — safe to cancel. | LoftSpace | platform | ★ | XS | 🚧 blocked-on: live-op execution · commands ready in [design](../../implementation-artifacts/duplicate-human-task-fanout-design.md) build note |
+| **A staff Settle is permanently unsettleable for every descriptor-driven client** | The `Settle` descriptor templates its `chargedTo` optionalRead on `{me.leaseapp}` — the CALLER's lease, not the tab's — so a staff settle hydrates nothing, the read-before-create branch fires against a live link, and every retry returns `RevisionConflict … wrong last sequence`. Live: 4 refusals, then committed naming the tab's own lease. | Café | pkg | ★★★ | XS–S | 📋 ready · template it on the tab's lease ([opmetas.go](../../../packages/cafe-domain/opmetas.go)) |
+| **The Manage Menu grid never lists the two items a third of the house is actually sold** | `dedupeMostSpecific` runs on the workplace-confined MANAGEMENT grid, not just the offer pickers, so a building-level item collapses behind a same-named unit-level one. Live: the grid shows 2 unit rows; the 22-of-62 leases outside that unit buy 2 building-level vertices no staffer can reprice or retire. | Café | FE | ★★ | XS | 📋 ready · collapse offer sets only ([menu.go](../../../cmd/cafe-app/menu.go:207)) |
+| **The front desk can only see who owes the café money while that person has an open tab** | `/api/frontdesk-balances` rides as a badge on open-tab cards ([app.js](../../../cmd/cafe-app/web/app.js:1055)) and nowhere else, so arrears vanish at exactly the moment the tab settles. Live: 5 residents owe $73.25, 3 overdue up to 18 days, 0 open tabs — the Front Desk renders "No open tabs" and nothing else. Wellness's `99233d11` is a standalone worst-first list. | Café | FE | ★★ | S | 📋 ready · give café the standalone arrears list wellness already has |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -50,10 +53,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×28, Clinic ×28, Café ×18, Wellness ×15.
+- **Rotation to date:** LoftSpace ×28, Clinic ×28, Café ×19, Wellness ×15.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-28:** Wellness — drove member/instructor/two staff hats live through schedule/book/roster/ledger; the auto no-show sweep still bills $25, 8 bookings never converge, one class remains; filed 3 + 1 platform.
 - **2026-08-28:** LoftSpace — drove applicant + landlord hats live through browse/apply/sign/decide/renew/statement; expired tasks read as live work, the one bill is 97 ungrouped lines, 33 of them quote an internal PO ruling; filed 3.
 - **2026-08-29:** Clinic — drove patient, provider + front-desk hats live through book/cancel/document/bill; staff writes time out ~1 in 10 while the same ops self-serve in a third the time, and the descriptors publish only the patient's slice; filed 2.
 - **2026-08-29:** Café — drove resident + front-of-house + backOfHouse hats live through menu/tab/charge/void/settle/pay; every staff write blows the 250ms script wall, the balance never becomes a bill; filed 2 + 1 platform.
@@ -64,7 +66,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-31:** Wellness — drove member/front-desk hats live through schedule/series/book/waitlist/promote/cancel/refund/bill; the waitlist bills before it seats and the desk can neither cancel a class nor see who owes; filed 4.
 - **2026-09-01:** LoftSpace — drove landlord + applicant hats live through listings/apply/decide/renew/tasks/ledger/one-bill/account; the attach KPI is dark and nothing names the sign-in you are on; filed 2 + 1 platform.
 - **2026-09-01:** Clinic — drove patient/provider/front-desk hats live through book/status/document/follow-up/time-off/ledger; a terminal status is uncorrectable and the follow-up net self-clears on no-shows; filed 3.
-- **Next:** Café.
+- **2026-09-02:** Café — drove front-of-house + resident hats live through menu/tab/charge/void/settle/ledger; a staff settle is unsettleable and arrears hide when the tab closes; filed 3.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
