@@ -732,3 +732,107 @@ pass had already caught this exact class in conjunct 3 — a predicate that read
 condition it exists to detect — and I fixed that one conjunct without running the finding back across its
 siblings in the same table. A finding is a claim about a *class*; the fold is not done until every sibling
 predicate has been evaluated against it.
+
+---
+
+## 15. Fire brief (build note, 2026-09-02)
+
+**Fire branch:** `fire/personal-lens-derivation-licence` · worktree under `/tmp/lattice-worktrees/`. **Landing
+shape:** each increment lands on `main` when green (§11) — every boundary is fail-closed to prior behaviour:
+Inc 1a–1c only *add* reprojection triggers, 1d refuses an install shape the tree does not ship, Inc 2's
+licence is refused until the host asserts conjuncts 0–2 and the healer reaches a verdict, and Inc 3 is
+unreachable until Inc 2 lands. Never cut between Inc 2 and Inc 3.
+
+### 15.1 Scope sentence (verbatim, §1.3 + §11)
+
+> Make the personal plane's derivation refusal say what it actually requires, satisfy those requirements, and
+> remove the two masked refusals — so a personal-lens event costs a handful of relation-filtered adjacency
+> reads instead of an undirected expansion through a 3,913-degree descriptor hub. One fire, four increments,
+> each landing on `main` when green and each fail-closed to prior behaviour.
+
+Green bar: the `anchor derivation cannot act` log line no longer names the 12 single-walk personal lenses
+(Inc 2) nor the three multi-walk ones (Inc 3); `edgeCatalog` / `edgeInstances` drain at ≥ 1 msg/s; the
+`anchor-derivation tally` reports `acted > 0` per personal lens; no personal-lens handler sits inside
+`neighborsFromCoreKV` for a descriptor hub.
+
+### 15.2 Verified touch-list (two haiku scouts, live at `ec3058d8`; every §2 claim holds — line drift only)
+
+| Inc | File | Anchor (live) | Edit |
+|---|---|---|---|
+| 1a | `internal/refractor/pipeline/pipeline.go` | `Delete` :1335-1336 (`p.currentAdapter().Delete`), `DeleteAllForActor` :1366-1383 (`adpt.Delete`) | guarded adapter → `DeleteWithOutcome` + `notifyGrantChange(outcome.Key, outcome.Transition)` per key; any other adapter → announce **once per actor** on `p.grantSink` with the shred call's `actorKey` (`Delete`'s doc-mode arm needs the actor: thread it from `Control.NullifyRow`'s caller, `keyshredded/manager.go:363`, which holds `ev.Payload.IdentityKey`) |
+| 1a | `internal/refractor/adapter/{adapter.go,natskv.go}` | `DeleteOutcome` :220-233, `OutcomeDeleter` :307-318, `DeleteWithOutcome` natskv :267, `guardedWrite` :354 | discriminator = the **sequence-guarded** adapter (derives `Transition` from the stored body), NOT `OutcomeDeleter` — `GrantWriterAdapter` (`read_path_adapters.go:37`, `:166-171`, `:199`) satisfies the interface with `Transition` zero |
+| 1a | `internal/refractor/pipeline/grantchange.go` | `notifyGrantChange` :135 (`p.grantSink == nil` guard :136), `truncateTarget` :184-199 | add the per-actor announce sibling; sink wired at `cmd/refractor/main.go:1446` only for `IsReadGrantProducer` |
+| 1b | `internal/refractor/control/service.go` | `personalRegister` :1214-1229, `personalDeregister` :1234-1248 | nullable `func(identityID string)` field; call after the KV write succeeds |
+| 1b | `internal/refractor/health/interest_reconciler.go` | orphan delete around :47+ | same nullable field; call per deleted registration's identity |
+| 1b | `internal/refractor/grantchange/reprojector.go` | `GrantChanged` :312 (parses an identity **key**), `registryIsReady` :218-263, `SetRegistryReady` :195, `dirty` :97 / `DefaultMaxDirtyActors` :53, `reprojectActor` :437-471 (no re-enqueue), `ReprojectNow` :472 | add an identity-**ID** enqueue entry point onto the same coalescing dirty set (`GrantChanged` minus the key parse); extend the ready check so every registered personal pipeline reports `Progress().LastAppliedSeq != 0` (`reproject_personal.go:177`, `ErrNoOrderingToken` :188-193), keeping the 2-min `holdMax` |
+| 1b | `cmd/refractor/main.go` | `grantchange.New()` :1371, `NewPersonalSweeper` :1382, `registerPersonalHealer` :1641, `cmd/refractor/personal_healer.go:20-22` | wire the two closures + the ready-check conjunct |
+| 1c | `scripts/lint-conventions.go` | `grantChangePostureShape` :565, `checkGrantChangePosture` :3119-3155 | symbol→annotation table `{capabilityread.IsReadable( → grant-change-posture, personalinterest.IsRelevant( → interest-change-posture}`; identical findings + self-tests |
+| 1c | `internal/refractor/projection/personal.go` | annotation :177-182, `IsReadable` :183, `IsRelevant` :194 | add `// interest-change-posture: (subscribed) …` above :194 |
+| 1d | `internal/refractor/projection/driver.go` + `cmd/refractor/main.go:1446` | `IsReadGrantProducer` :377-389, :446-447; `patternClosedOutput = true` :502 | converse refusal at registration: output key space begins `cap-read.` ∧ ¬`IsReadGrantProducer` (or no sink wired) ⇒ install error naming the reason. Authoring gate: new `scripts/lint-cap-read-producers.go` (mirror `lint-lens-anchors.go`'s corpus enumeration + self-vectors), wired in `ci.yml` `lint-build` + `Makefile` beside `lint-lens-anchors` |
+| 2 | `internal/refractor/pipeline/anchor_derivation_mode.go` | `derivationIndexForAct` :233-250; reason switch :202-215 | `if !p.patternClosedOutput && !p.personalDerivationLicensed()`; `p.sweeper == nil` → `!p.standingHealerInstalled()` (`walkscope.go:350-352`); licence refusal strings enter the switch **before** the `patternClosedOutput` default |
+| 2 | new `internal/refractor/pipeline/anchor_derivation_personal.go` (+ `_internal_test.go`) | mirror `plainDerivationLicence` `anchor_derivation_plain.go:282-345` + `TestPlainDerivationLicence_Conjuncts` (`…_plain_licence_internal_test.go:145`) | conjuncts 0–5 of §4.4(c), stable refusal strings, read live (never snapshotted onto `ruleState`); `$now`/`$projectedAt` via `fullCR.ReferencesParam` exactly as the plain licence (:330-338) |
+| 2 | `cmd/refractor/personal_healer.go` | `registerPersonalHealer` | assert conjuncts 0–2 + inject the verdict accessor (a `pipeline`-declared one-method value; `pipeline` cannot import `grantchange`, G21) |
+| 2 | `internal/refractor/grantchange/sweeper.go` | `Run` :129-144 (bare ticker), `Sweep` :150-188, `publishProgress` :287-308, `ensurePopulation` :200-243 | per-pass verdict `{completedAt, attempted, failed, populationReadable, instanceCount, instanceCountReadable}`; `ReprojectNow` must report failure (today `reprojectActor` logs-and-continues); `Run` sweeps once immediately; instance count from a Health-KV listing of `health.refractor.*` (reader precedent `cmd/loupe/component.go:192`, key shape `health/lattice_heartbeater.go:2657`) on the sweep clock |
+| 2 | `internal/refractor/health/idle_sweep_backoff_test.go:29` | `IdleSweepBackoffEvery*2 <= DefaultCapabilitySweepStallCycles` | pin `K` (verdict staleness intervals) the same way |
+| 2 | new `scripts/lint-refractor-single-instance.go` | greenfield — scout item 16 found no gate inspecting deploy/config for a multi-instance affordance | fails on a Refractor replica/scale/queue-group affordance (`docker-compose.yml`, `Makefile`, `deploy/`, `cmd/refractor` consumer specs) while `grantchange` declares its edge process-local (a named exported constant the durable-signal build flips); self-vectors every run; wired in `ci.yml` + `Makefile` |
+| 2 | `internal/refractor/personal_derivation_corpus_census_test.go` (new) | `forEachCorpusCypher` (`label_derivation_corpus_census_test.go:570`), verdict vocabulary `anchor_hopindex_corpus_census_test.go:45-66` | `TestCorpusPersonalDerivation`: per lens `(personal, staticLicence, indexReady, refusalReason)`; population exactly the 15 names, floor 15 |
+| 3 | `internal/refractor/pipeline/ruleinstall.go` | exclusion :400-433 (`len(branches) <= 1` arm), walk scope over `all` :448-455 | `anchorHopsPerBranch []full.HopIndex` on `ruleState` (`rulestate.go:16-80`, `anchorHops` :28), built per branch; refuse whole if any branch `!Complete` / unresolved expansion / anchor labels differ; named reason constant added to the census vocabulary |
+| 3 | `internal/refractor/pipeline/anchor_derivation.go` | `derivationIndex` :137-151, `walkToAnchors` :185-407 (locals `neighbours` :209, `reads` :211, `work` :244; `errDerivationTooWide` swallowed :376-378, :394-396), `affectedAnchors` :136 | thread one budget + shared memo through per-branch `walkToAnchors`; union; `seedAnchorLabels` / `rootHops` stay single-walk |
+| 3 | `internal/refractor/pipeline/branchmerge.go` | `executeBranches` :78-106 | unchanged — every branch re-runs per derived actor (the union's soundness rests on this; pin it) |
+| docs | `docs/components/refractor.md` :160-189, `auth-plane-projection-latency-design.md` §4.4 citations (G3), `refractor-hub-walk-and-periodic-load-design.md` | derivation + personal-plane rows; R4 recorded in the component doc |
+
+**Census corrections pinned at Phase 0:** §3.1's second command needs `| grep -v _test` — the 5 hits it
+returns today are all `internal/pkgmgr/*_test.go` fixtures; production population = 15, generated = 0. §3.2
+census green at head. §3.3 as designed (1 / 1 / 18 / 0). §3.4 hits classified exactly as the design lists
+(announce ×4, silent ×2, non-guarded fallback ×3, plus `results.go:71/:236` guarded and `:74/:239` fallbacks).
+
+### 15.3 Precedents to mirror
+
+- 1a announce-after-guarded-delete: `reproject.go:521-548` (the "as real a grant withdrawal" block).
+- 1b nullable host-injected callback: `Reprojector.SetRegistryReady` (`reprojector.go:195`) + `SetPersonalPlaneHealer` (`walkscope.go:342`).
+- 1c: `checkGrantChangePosture` itself — generalize, don't copy.
+- 1d refusal-at-registration: the `secureColumns`-on-nats_kv refusal `lens/corekv_source.go:1515` (loud, named); authoring gate: `scripts/lint-lens-anchors.go` (self-vectors on every invocation).
+- 2 licence + tests: `anchor_derivation_plain.go:282-345`, `anchor_derivation_plain_licence_internal_test.go:145`; refusal-latch `noteStaticPlainDerivationRefusal`.
+- 2 cross-package constant pin: `health/idle_sweep_backoff_test.go:29`.
+- 3 per-branch derivation: the walk scope's own `deriveWalkScope(…, all, …)` two paragraphs below the exclusion.
+
+### 15.4 Increment order + green checks
+
+1. **Inc 1 (a→b→c→d, one builder, opus — 1d is posture-changing):** `go test ./internal/refractor/... ./cmd/refractor/... -count=1`; `STRICT=1 go run ./scripts/lint-conventions.go` (self-tests incl. the new symbol); `go run ./scripts/lint-cap-read-producers.go`; tests per §10 rows *Shred announcement* (both arms + unguarded once-per-actor), *Interest-edge e2e*, *Ordering-token latch*, *Lint gate self-tests*, *Producer-closure refusal*. Cold adversarial review (opus) over the whole Inc 1 diff, briefed on 1d + the 1b latch.
+2. **Inc 2 (opus):** licence conjunct table, healer-verdict knock-outs, `$now` vector, cardinality both staleness directions, build-time gate vectors, `TestCorpusPersonalDerivation`; `go test ./internal/refractor/... -count=1`; all lint gates. Full cold adversarial pass.
+3. **Inc 3 (opus):** differential superset per branch + union over the corpus, empty-reason regression, `TestCorpusAnchorHopIndex` re-pinned; full cold pass.
+4. **Close:** cumulative cold pass over the whole diff; `make cycle-refractor` (or the Makefile's recipe) from main; live §11 verification + R7 latency number; dossier classification.
+
+Every increment: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, plus every other `scripts/lint-*.go` the `ci.yml` `lint-build` job runs. Build-tagged harnesses reached: `internal/edge/store/grant_retraction_frame_test.go` (personal frames) — run its tag if `PersonalPipeline`/frame shapes change.
+
+### 15.5 In-scope gotchas
+
+- CLAUDE.md: no history comments; keys 4/6-segment; `natsfixture` only; no `time.Sleep`; the `# read-posture` posture applies to Starlark only (none here).
+- `pipeline` ⇏ `grantchange`, `control` ⇒ `health` (G21): every cross-edge is a bare func/one-method value injected by `cmd/refractor`.
+- The licence is read **live** at every gate evaluation, never snapshotted onto `ruleState` (`walkscope.go:76-84`'s reasoning).
+- Refusal strings STABLE (no interpolated durations) — the latch logs once per reason.
+- A verdict, not a progress stamp (B3); `failed > 0` must be observable from `ReprojectNow`.
+- `oneKeyAnswerSound` (`actor_enumerator.go:394-402`) is the THIRD healer reader — **do not converge it** (§4.6, G22).
+- `patternClosedOutput` stays false for personal lenses (never set it).
+- New lint scripts must be wired in `ci.yml` AND the `Makefile`, self-vectored each run (`lint-lens-anchors` precedent) because the tree ships no violating fixture.
+- Health-KV instance count: fail-CLOSED on unreadable; a stale crashed-instance entry refusing is asserted correct.
+- **Refractor dossier (copied):** (1) a removal verdict's premises are the whole mechanism — a single-read verdict is sound only over an artifact never transiently absent; (2) new pipeline state without a declared lifetime — state table §5 is the record; (3) a soundness claim's stated reason is load-bearing; **a lifted refusal reveals the conjunct behind it, and a granted licence logs nothing** — prove the payoff by the POSITIVE verdict live; (4) an expansion sigil is fail-closed positive / fail-open negated; (5) a two-layer seam green at each layer and broken across it — interpose the real intervening step; (6) an upsert-only reprojection retracts nothing; (7) a SETTLED consumer has not finished — barrier on the effect; (8) fail-closed on delivery ≠ fail-closed on projection; (9) one latch guarding two states committing at different times; (10) an index read from one place and gated from another must agree about absence — `len(x)==0`, both vectors; (11) an authoring gate and its runtime resolver must agree — one shared predicate; (12) a liveness test must run the arm the consumer's `ProjectionKind` selects.
+- **Standing checklist (template):** state needs a LIFETIME · every census/citation is a premise · a negative test needs its positive vector, every fix revert-proven (plumbing hardest) · removal needs transport + observer, a demoted mechanism enumerates every obligation · one deterministic key one writer · precedent may carry debt.
+
+### 15.6 Adjacent finds (Phase 0)
+
+None beyond the design's own §4.6 non-goals. Nothing filed.
+
+### 15.7 Non-goals (drift fence)
+
+§4.6 verbatim: the delivery-side consumer-filter narrowing; the untyped-hop refusal (own ✅ row); the
+`WITH`-scope refusal (own 📋 row); `oneKeyAnswerSound`; multi-instance / HA Refractor (the gate refuses the
+transition, it does not build the durable signal).
+
+**Scope-diff gate:** every touch above traces to §1.3 / §11's four increments; no adjacent mechanism
+substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc 1's edges), Inc 2 → Inc 3
+(reachability). No unlisted load-bearing dependency found.
+
+### 15.8 Checkpoint
+
+*(amended per increment)* — next: open the worktree, Inc 1.
