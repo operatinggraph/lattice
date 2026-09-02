@@ -753,8 +753,8 @@ func Lenses() []pkgmgr.LensSpec {
 // per lens; that AND term is intentionally NOT folded into the shared fragment.
 const readinessOptionalMatch = `OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)`
 
-const readinessWithItems = `id.ssn.data AS ssnVal,
-  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil <> null AND NOT (inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness >= inst.outcome.data.validUntil) THEN inst.key ELSE null END) AS freshBgComplete,
+var readinessWithItems = `id.ssn.data AS ssnVal,
+  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil <> null AND NOT (inst.freshnessExpiry.data.byTarget.` + BackgroundCheckFreshnessTarget + ` >= inst.outcome.data.validUntil) THEN inst.key ELSE null END) AS freshBgComplete,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete`
 
 // backgroundCheckFreshnessSpec anchors on the background-check INSTANCE — the
@@ -772,7 +772,7 @@ const readinessWithItems = `id.ssn.data AS ssnVal,
 // The anchor MATCH filters on class + a completed outcome, so a payment or
 // docGen instance (same `service` key type, different envelope class) and a
 // dispatched-but-unanswered bgcheck project no row at all — EmptyBehavior
-// "delete" removes any row a previously-qualifying instance left behind.
+// "delete" removes any row a no-longer-qualifying instance left behind.
 //
 //   - freshUntil is the instance's own outcome.validUntil while no timer has
 //     recorded this target's window lapsing, and null once one has. Null is what
@@ -789,13 +789,13 @@ const readinessWithItems = `id.ssn.data AS ssnVal,
 // The target declares no gaps (weaverTargets in targets.go): the freshness
 // bookkeeping leg runs on every delivery, before any gap column is read, which
 // is the whole reason a gap-less target is a coherent thing to declare.
-const backgroundCheckFreshnessSpec = `
+var backgroundCheckFreshnessSpec = `
 MATCH (inst:service {key: $actorKey})
   WHERE inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed'
 WITH
   inst.key AS entityKey,
   inst.outcome.data.validUntil AS validUntil,
-  inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness AS lapsedAt
+  inst.freshnessExpiry.data.byTarget.` + BackgroundCheckFreshnessTarget + ` AS lapsedAt
 RETURN
   entityKey AS actorKey,
   entityKey,

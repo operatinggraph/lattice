@@ -457,8 +457,8 @@ func TestReminders_MarkerWithNoByTargetMapReadsUnlapsed(t *testing.T) {
 // TestReminders_ReferencesNoClockParameter is the structural half of the
 // conversion, asserted on the compiled cypher rather than on any one row: a lens
 // that returns $now or $projectedAt reproduces a per-anchor evaluation
-// differently from the whole-corpus rescan it replaces, and its projected body is
-// a clock reading the sweep's deep verify cannot compare.
+// differently from the whole-corpus rescan it stands in for, and its projected
+// body is a clock reading the sweep's deep verify cannot compare.
 func TestReminders_ReferencesNoClockParameter(t *testing.T) {
 	requireClockFree(t, "appointmentReminders", appointmentRemindersSpec)
 }
@@ -509,4 +509,61 @@ func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 	}
 	require.Equal(t, 4, checked,
 		"appointmentReminders, followUpReminders, visitSeriesDue and pastDueAppointments each read a recorded lapse; a drop here is a lens that went back to a clock")
+}
+
+// TestReminders_TerminalStatusNeverViolates is the agreement vector between the
+// two appointment-anchored deadline lenses, and it is a correctness test rather
+// than a tidiness one.
+//
+// appointmentReminders closes its gate on byTarget.pastDueAppointments — the
+// recorded END of the visit — and pastDueAppointments is the ONLY writer of that
+// entry, arming its @at only for a non-terminal appointment. So a status
+// pastDueAppointments excludes but appointmentReminders admits is a trap with no
+// exit: the reminder gap reads true, no past-due timer ever arms, no lapse is
+// ever recorded, RecordAppointmentReminder refuses every dispatch, and the
+// per-(target, entity, gap) GapBudgetExhausted warning stands for the life of
+// the appointment with nothing able to retire it.
+//
+// Both lenses splice the SAME nonTerminalAppointment fragment, so the lists
+// cannot drift; these vectors pin the behaviour that fragment buys, per status,
+// with the reminder lapse recorded so only the status term can decide the row.
+func TestReminders_TerminalStatusNeverViolates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, status := range []string{"completed", "cancelled", "noShow"} {
+		t.Run(status, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkApptSpan(t, "appt", "2026-06-30T09:00:00Z", "2026-06-30T09:30:00Z", "2026-06-29T09:00:00Z", status)
+			f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-06-29T09:00:00Z"})
+
+			v := f.projectReminders(t, "appt")[0].Values
+			require.Equalf(t, false, v["missing_reminder"],
+				"a %s appointment is never reminded — and it must not be, because pastDueAppointments arms no timer for it, so nothing could ever close this gap", status)
+			require.Equal(t, false, v["violating"])
+			require.Nilf(t, v["freshUntil"],
+				"and no reminder timer arms for a %s appointment either", status)
+		})
+	}
+}
+
+// TestAppointmentLenses_ShareOneTerminalStatusSet is the structural half of the
+// vector above: the same fragment reaches both cyphers. Asserted on the shipped
+// specs rather than on the constant, because what matters is that the SPLICE
+// happened in both — a lens that inlined its own copy would satisfy a test of
+// the constant alone while drifting freely from that moment on.
+func TestAppointmentLenses_ShareOneTerminalStatusSet(t *testing.T) {
+	for _, terminal := range []string{"completed", "cancelled", "noShow"} {
+		require.Containsf(t, nonTerminalAppointment, "<> '"+terminal+"'",
+			"clinic-domain's TERMINAL_STATUSES includes %s, so the shared fragment must exclude it", terminal)
+	}
+	for name, spec := range map[string]string{
+		"appointmentReminders": appointmentRemindersSpec,
+		"pastDueAppointments":  pastDueAppointmentsSpec,
+	} {
+		require.Containsf(t, spec, nonTerminalAppointment,
+			"%s must splice the SHARED nonTerminalAppointment fragment — the reminder gate closes on a marker "+
+				"only pastDueAppointments writes, and only for a non-terminal appointment, so a status one lens "+
+				"admits and the other excludes holds a gap open with no term that can ever close it", name)
+	}
 }

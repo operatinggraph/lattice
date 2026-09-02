@@ -1,6 +1,10 @@
 package semanticcontracts
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // ClauseSatisfactionTarget is the §10.8 TargetID == the clauseSatisfaction
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
@@ -213,7 +217,13 @@ RETURN
 //     was computed ONCE by CreateClause (exact Starlark bignum integer
 //     arithmetic, ddls.go) and stored like any flat fee, so it flows through
 //     the existing oneTime chargeCount=0 gate unchanged.
-const clauseSatisfactionSpec = `
+//
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
+// static reach; its advisory asks for a hand check for a narrowing range
+// bound inside a NEGATED pattern, and there is none — the cypher has no
+// negated relationship pattern at all, only scalar NOT comparisons.
+var clauseSatisfactionSpec = fmt.Sprintf(`
 MATCH (c:clause {key: $actorKey})
 OPTIONAL MATCH (c)-[:chargesTo]->(a:account)
 OPTIONAL MATCH (c)-[:conditionedOn]->(cond)
@@ -228,7 +238,7 @@ WITH
   c.terms.data.conditioned AS conditioned,
   c.terms.data.period AS period,
   c.status.data.chargeValidUntil AS chargeValidUntil,
-  c.freshnessExpiry.data.byTarget.clauseSatisfaction AS lapsedAt,
+  c.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   c.inspection.data.completed AS inspectionCompleted,
   count(t.key) AS chargeCount
 RETURN
@@ -253,4 +263,4 @@ RETURN
       OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (lapsedAt >= chargeValidUntil)))))
     OR ((inspectorKey <> null) AND (inspectionCompleted = null))
   ) AS violating
-`
+`, ClauseSatisfactionTarget)

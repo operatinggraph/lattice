@@ -4,30 +4,29 @@ package pipeline
 // proves the payoff, at the seam where the harm was.
 //
 // The sweep's deep verify recomputes a stored row and hands the pair to
-// classifyDivergence. While a convergence lens computed its gap column and its
-// freshUntil from $now, that verdict was a CLOCK READING: two passes over an
-// UNCHANGED graph, one before a deadline and one after, produced different rows,
-// so the sweep reported a divergence and "healed" a projection nothing had
-// broken. Every such heal is a write, an alert-shaped log line, and a claim
-// about correctness that carries no information.
+// classifyDivergence. A convergence lens that computes its gap column and its
+// freshUntil from $now makes that verdict a CLOCK READING: two passes over an
+// UNCHANGED graph, one before a deadline and one after, produce different rows,
+// so the sweep reports a divergence and "heals" a projection nothing broke.
+// Every such heal is a write, an alert-shaped log line, and a claim about
+// correctness that carries no information.
 //
 // This drives the REAL shipped pastDueAppointments cypher — the corpus, through
 // pkgregistry, not a fixture cypher — twice over one unchanged appointment, at
 // two wall-clock instants straddling its endsAt, and asserts the two rows
 // classify divergenceNone.
 //
-// BEFORE the conversion the same two passes classified divergenceContent. That
-// was measured, not assumed: run against a scratch copy of the cypher carrying
-// the pre-conversion clock form
+// The second test is the DISCRIMINATION half, and it is what stops the first
+// from degenerating into "any two rows are equal": a clock-reading form of the
+// same lens
 //
 //	(a.schedule.data.endsAt <= $now)                          -- gap column
 //	CASE WHEN … AND (a.schedule.data.endsAt > $now) THEN …    -- freshUntil
 //
-// the second pass flips missing_noshow_transition false→true AND freshUntil
-// endsAt→null, and classifyDivergence answers divergenceContent. That scratch
-// arm is reproduced below as the DISCRIMINATION half, so the assertion cannot
-// degenerate into "any two rows are equal": the same fixture, the same two
-// instants, the clock-reading form, must still diverge.
+// over the SAME fixture at the SAME two instants flips
+// missing_noshow_transition false→true AND freshUntil endsAt→null, and
+// classifyDivergence answers divergenceContent. Both halves are measured here,
+// so neither the recorded-fact verdict nor the comparator is taken on trust.
 
 import (
 	"context"
@@ -128,23 +127,21 @@ func TestSweepVerdict_StraddlingADeadlineIsNotADivergence(t *testing.T) {
 		"two deep-verify passes straddling a deadline, over an UNCHANGED graph, must agree — "+
 			"a lens that reads a clock reports a divergence here and the sweep 'heals' a projection nothing broke")
 
-	// Say out loud which columns the clock used to move, so a reader can see
-	// what the classification is standing in for.
+	// Name the columns a clock moves, so a reader can see what the classification
+	// is standing in for.
 	require.Equal(t, stored["missing_noshow_transition"], recomputed["missing_noshow_transition"],
 		"the gap column is a function of the subgraph, not of when the pass ran")
 	require.Equal(t, stored["freshUntil"], recomputed["freshUntil"],
 		"and so is freshUntil — converting only the gap column leaves this half moving")
 }
 
-// TestSweepVerdict_ClockReadingFormStillDiverges is the discrimination half, and
-// the evidence for the "before" the doc comment above records. It runs the same
-// fixture and the same two instants against a scratch copy of the cypher in its
-// pre-conversion clock-reading form; classifyDivergence must still answer
-// divergenceContent.
+// TestSweepVerdict_ClockReadingFormStillDiverges is the discrimination half. It
+// runs the same fixture and the same two instants against a clock-reading form
+// of the same lens; classifyDivergence must answer divergenceContent.
 //
-// Without it the assertion above proves nothing about the conversion: two rows
-// from a lens with no time-dependent column at all would satisfy it just as
-// well, and so would a comparator that had stopped comparing.
+// Without it the assertion above proves nothing: two rows from a lens with no
+// time-dependent column at all would satisfy it just as well, and so would a
+// comparator that had stopped comparing.
 func TestSweepVerdict_ClockReadingFormStillDiverges(t *testing.T) {
 	kvs := newTestKVs(t, "SWEEPADJ", "SWEEPCORE")
 	adjKV, coreKV := kvs[0], kvs[1]
@@ -164,12 +161,12 @@ RETURN
 	recomputed := projectAtInstant(t, clockReadingSpec, anchorKey, sweepAfter, adjKV, coreKV)
 
 	require.Equal(t, divergenceContent, classifyDivergence(stored, recomputed),
-		"the pre-conversion form must still diverge over an unchanged graph — otherwise the assertion "+
+		"a clock-reading form must diverge over an unchanged graph — otherwise the assertion "+
 			"in the sibling test is satisfied by a fixture with nothing time-dependent in it")
 	require.Equal(t, false, stored["missing_noshow_transition"])
 	require.Equal(t, true, recomputed["missing_noshow_transition"],
 		"the gap column flipped on the clock alone, with no write to the graph between the two passes")
 	require.Equal(t, sweepEndsAt, stored["freshUntil"])
 	require.Nil(t, recomputed["freshUntil"],
-		"and freshUntil flipped with it — which is why converting only the gap column healed nothing")
+		"and freshUntil flips with it — which is why a gap column alone is not the whole clock reading")
 }

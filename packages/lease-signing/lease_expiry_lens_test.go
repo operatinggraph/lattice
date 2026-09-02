@@ -97,8 +97,9 @@ func TestLeaseExpiry_ArmsWhileNoLapseRecorded(t *testing.T) {
 
 // TestLeaseExpiry_PastHorizonProjectedVerbatim is the
 // PAST-DEADLINE-AT-FIRST-PROJECTION vector, and the one place a "null when the
-// deadline is already past" guard would be tempting — the shipped cypher carried
-// exactly that guard. A tenancy whose renewal horizon arrived while no target was
+// deadline is already past" guard is most tempting, because a lapsed horizon
+// re-arming on every delivery looks like the fault it prevents. A tenancy whose
+// renewal horizon arrived while no target was
 // watching carries no marker, so the only path to recording the lapse is this row
 // projecting the past instant, Weaver publishing the overdue @at, and NATS
 // releasing it immediately. Nulling it arms nothing and the cycle never opens.

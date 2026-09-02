@@ -510,3 +510,56 @@ func TestBookingLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 	require.Equal(t, 2, checked,
 		"wellnessBookingReminders and pastDueBookings each read a recorded lapse; a drop here is a lens that went back to a clock")
 }
+
+// TestBookingLenses_AgreeOnTheStatusThatArmsTheEndTimer pins the wellness half of
+// the coupling clinic-reminders' nonTerminalAppointment fragment holds.
+//
+// wellnessBookingReminders closes its gate on byTarget.pastDueBookings — the
+// recorded end of the class — and pastDueBookings is the only writer of that
+// entry. A booking status the reminder lens admits but the past-due lens does
+// not would hold the reminder gap open with no term able to close it, so the op
+// would refuse every dispatch until the retry budget stood exhausted.
+//
+// Here the two agree by construction rather than by a shared exclusion list:
+// both require status = 'booked' EXACTLY, a positive equality on one value. That
+// is stronger than the appointment pair's agreement and cannot drift into a
+// partial overlap — but only while it stays an equality on the same literal,
+// which is what this pins.
+func TestBookingLenses_AgreeOnTheStatusThatArmsTheEndTimer(t *testing.T) {
+	for name, spec := range map[string]string{
+		"wellnessBookingReminders": wellnessBookingRemindersSpec,
+		"pastDueBookings":          pastDueBookingsSpec,
+	} {
+		require.Containsf(t, spec, "(b.status.data.value = 'booked')",
+			"%s must gate on status = 'booked' exactly — the reminder gate closes on a marker only "+
+				"pastDueBookings writes, and only for a booked seat", name)
+		for _, other := range []string{"attended", "noShow", "waitlisted"} {
+			require.NotContainsf(t, spec, "'"+other+"'",
+				"%s must decide on the positive 'booked' equality alone; naming %s would make the two lenses' "+
+					"status agreement a list that can drift", name, other)
+		}
+	}
+}
+
+// TestReminders_NonBookedNeverViolates is the row-level companion: with the
+// reminder lapse recorded, only the status term can decide, and every seat that
+// is not `booked` reads closed — the states for which pastDueBookings arms no
+// end timer, and so for which no recorded end could ever arrive.
+func TestReminders_NonBookedNeverViolates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, status := range []string{"waitlisted", "attended", "noShow"} {
+		t.Run(status, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkBookingSpan(t, "bk", status, "flow", "2026-06-30T09:00:00Z", "2026-06-30T10:00:00Z", "2026-06-29T09:00:00Z")
+			f.recordLapse(t, "bk", map[string]string{WellnessBookingRemindersTarget: "2026-06-29T09:00:00Z"})
+
+			v := f.projectReminders(t, "bk")[0].Values
+			require.Equalf(t, false, v["missing_reminder"],
+				"a %s seat is never reminded — and pastDueBookings arms no end timer for it, so nothing could close this gap", status)
+			require.Equal(t, false, v["violating"])
+			require.Nil(t, v["freshUntil"])
+		})
+	}
+}

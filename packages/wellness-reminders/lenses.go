@@ -1,6 +1,10 @@
 package wellnessreminders
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // WellnessBookingRemindersTarget is the §10.8 TargetID == the
 // wellnessBookingReminders lens's OutputKeyPattern prefix — the §10.2↔§10.8
@@ -27,7 +31,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: "wellnessBookingReminders.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "remindAt", "reminderSentAt", "remindedFor", "sessionKey", "bookerKey"},
+				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "endsAt", "remindAt", "reminderSentAt", "remindedFor", "status", "sessionKey", "bookerKey"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -91,10 +95,28 @@ func Lenses() []pkgmgr.LensSpec {
 // pastDueBookings target arms its own @at at the session's endsAt on this same
 // booking anchor, so its fired marker entry is the evidence the class ended.
 // NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)
-// closes the gate at that point, which bounds the op's refusals by the class's
-// own length instead of letting them run until the retry budget escalates. The
-// nil-false lands on the right side: while nothing has fired, NOT(false) leaves
-// the gap open, which is the default a not-yet-ended class needs.
+// closes the gate at that point. The nil-false lands on the right side: while
+// nothing has fired, NOT(false) leaves the gap open, which is the default a
+// not-yet-ended class needs.
+//
+// That open window is NOT free. This target declares no maxretries_reminder, so
+// Weaver applies defaultDirectOpRetryBudget = 3
+// (internal/weaver/evaluator.go:1379) against a 30-minute mark lease and a
+// 1-minute sweep (internal/weaver/reconciler.go:17,21): a class running much
+// past an hour spends the budget before it ends, and escalateExhaustedGap
+// (evaluator.go:1572) raises a standing per-(target, entity, gap)
+// GapBudgetExhausted warning. What the recorded end does is CLOSE the column,
+// and a closed column retires that latch — handleRow's closed-gap leg calls
+// retireClosedGapIssues (evaluator.go:1064), which clears
+// issueKeyGapEntity(targetId, entityId, gapColumn), the exact key the warning
+// stands on (evaluator.go:1191); the sweep legs retire through the same
+// function (reconciler.go:568, :792, :1237). So the standing ISSUE is bounded
+// by the class, and the DISPATCHES are bounded by the budget.
+//
+// Both booking lenses gate on status = 'booked', so — unlike the appointment
+// pair, which must agree on a terminal-status EXCLUSION list — the coupling here
+// is an equality on one value and cannot drift apart into a status this lens
+// admits and the marker-writing one does not.
 //
 // One-row-per-anchor: forSession is 0..1 (CreateBooking writes exactly one,
 // deterministic keys), so the OPTIONAL walk does not fan out — a clean flat
@@ -102,7 +124,12 @@ func Lenses() []pkgmgr.LensSpec {
 // startsAt / remindAt / reminderSentAt / remindedFor are INFORMATIONAL
 // columns (operator/FE observability); only entityKey + freshUntil + the two
 // bools are load-bearing for Weaver's dispatch + temporal lane.
-const wellnessBookingRemindersSpec = `MATCH (b:booking {key: $actorKey})
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
+// static reach; its advisory asks for a hand check for a narrowing range
+// bound inside a NEGATED pattern, and there is none — the cypher has no
+// negated relationship pattern at all, only scalar NOT comparisons.
+var wellnessBookingRemindersSpec = fmt.Sprintf(`MATCH (b:booking {key: $actorKey})
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
 RETURN
@@ -110,10 +137,13 @@ RETURN
   b.key AS entityKey,
   se.key AS sessionKey,
   se.schedule.data.startsAt AS startsAt,
+  se.schedule.data.endsAt AS endsAt,
   se.schedule.data.remindAt AS remindAt,
   b.reminder.data.sentAt AS reminderSentAt,
   b.reminder.data.remindedFor AS remindedFor,
+  b.status.data.value AS status,
   id.key AS bookerKey,
-  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS missing_reminder,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.wellnessBookingReminders >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS violating`
+  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
+	PastDueBookingsTarget, WellnessBookingRemindersTarget)

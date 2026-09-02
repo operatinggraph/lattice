@@ -1,10 +1,31 @@
 package clinicreminders
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // AppointmentRemindersTarget is the §10.8 TargetID == the appointmentReminders
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const AppointmentRemindersTarget = "appointmentReminders"
+
+// nonTerminalAppointment is the "this visit has not reached a terminal outcome"
+// test, as one cypher fragment spliced into BOTH appointment-anchored deadline
+// lenses (appointmentReminders here, pastDueAppointments in pastdue.go).
+//
+// The two must agree on the terminal set EXACTLY, and sharing the fragment is
+// what makes that structural rather than a convention. They are coupled through
+// the marker: appointmentReminders closes its gate on
+// byTarget.pastDueAppointments — the recorded end of the visit — and only
+// pastDueAppointments arms the timer that writes it. A status this fragment
+// excludes therefore projects no pastDueAppointments freshUntil, no @at is
+// armed, no lapse is ever recorded, and any reminder gate still open on that
+// appointment has no term left that can close it. The two lists agreeing is the
+// property; one list is how it is held.
+//
+// TERMINAL_STATUSES is clinic-domain's (ddls.go): completed, cancelled, noShow.
+const nonTerminalAppointment = `(a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')`
 
 // Lenses returns the package's weaver-target convergence lenses: appointmentReminders
 // (the ~24h-ahead appointment reminder), followUpReminders (the at-the-date
@@ -35,7 +56,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "appointment",
 				OutputKeyPattern: "appointmentReminders.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "remindAt", "reminderSentAt", "remindedFor", "patientKey", "providerKey"},
+				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "endsAt", "remindAt", "reminderSentAt", "remindedFor", "status", "patientKey", "providerKey"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -94,7 +115,7 @@ func Lenses() []pkgmgr.LensSpec {
 // past deadline here would arm nothing and the gap would never open at all.
 //
 // The four-term gate (remindedFor <> startsAt AND a recorded lapse at remindAt
-// AND status <> 'cancelled' AND no recorded lapse at endsAt):
+// AND a non-terminal status AND no recorded lapse at endsAt):
 //
 //   - remindedFor <> startsAt — NOT yet reminded for the CURRENT scheduled time.
 //     This single term subsumes never-reminded (no .reminder aspect → remindedFor
@@ -108,7 +129,12 @@ func Lenses() []pkgmgr.LensSpec {
 //     RFC3339 compare = chronological on canonical UTC. compareAny answers false
 //     whenever either operand is nil, so an appointment no timer has fired on,
 //     and one carrying no remindAt at all, both read not-due.
-//   - status <> 'cancelled' — a cancelled appointment is never reminded.
+//   - nonTerminalAppointment — a cancelled, completed or no-show appointment is
+//     never reminded. The list is the SHARED fragment, not a local one, because
+//     the term below closes this gate on a marker only pastDueAppointments
+//     writes and only for a non-terminal appointment: a status excluded there
+//     but admitted here would hold this gap open with no term left that could
+//     ever close it.
 //   - NOT (freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt) — the
 //     visit has not ended. "Never remind for an appointment that is over" is a
 //     recorded fact, not a clock reading: the sibling pastDueAppointments target
@@ -120,9 +146,21 @@ func Lenses() []pkgmgr.LensSpec {
 // Between startsAt and endsAt the gap therefore stays open and
 // RecordAppointmentReminder's own guard (time.rfc3339_utc(op.submittedAt) <
 // startsAt, ddls.go) refuses each dispatch — the op declines, the lens keeps
-// projecting the row. Once the visit ends the past-due lapse closes the gate,
-// so the refusals are bounded by the visit's own length rather than running
-// until the retry budget escalates.
+// projecting the row. That window is NOT free: this target declares no
+// maxretries_reminder, so Weaver applies defaultDirectOpRetryBudget = 3
+// (internal/weaver/evaluator.go:1379) against a 30-minute mark lease and a
+// 1-minute sweep (internal/weaver/reconciler.go:17,21), and a visit longer than
+// roughly an hour spends the budget before it ends — escalateExhaustedGap
+// (evaluator.go:1572) raises a standing per-(target, entity, gap)
+// GapBudgetExhausted warning.
+//
+// What the recorded end does is CLOSE the column, and a closed column retires
+// that latch: handleRow's closed-gap leg calls retireClosedGapIssues
+// (evaluator.go:1064), which clears issueKeyGapEntity(targetId, entityId,
+// gapColumn) — the exact key the budget warning stands on (evaluator.go:1191).
+// The sweep legs retire from the same function (reconciler.go:568, :792,
+// :1237). So the standing issue is bounded by the visit, and it is the
+// DISPATCHES that are bounded by the budget — not the other way round.
 //
 // Edge cases: a booking < 24h out has a past remindAt → reminds on the overdue
 // @at; a cancelled appointment is never violating and projects freshUntil null
@@ -137,18 +175,26 @@ func Lenses() []pkgmgr.LensSpec {
 // providerKey / startsAt / remindAt / reminderSentAt / remindedFor are INFORMATIONAL
 // columns (operator/FE observability); only entityKey + freshUntil + the two bools
 // are load-bearing for Weaver's dispatch + temporal lane.
-const appointmentRemindersSpec = `MATCH (a:appointment {key: $actorKey})
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
+// static reach; its advisory asks for a hand check for a narrowing range
+// bound inside a NEGATED pattern, and there is none — the cypher has no
+// negated relationship pattern at all, only scalar NOT comparisons.
+var appointmentRemindersSpec = fmt.Sprintf(`MATCH (a:appointment {key: $actorKey})
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
 RETURN
   a.key AS actorKey,
   a.key AS entityKey,
   a.schedule.data.startsAt AS startsAt,
+  a.schedule.data.endsAt AS endsAt,
   a.schedule.data.remindAt AS remindAt,
   a.reminder.data.sentAt AS reminderSentAt,
   a.reminder.data.remindedFor AS remindedFor,
+  a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt) AND NOT (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS missing_reminder,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.appointmentReminders >= a.schedule.data.remindAt) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS violating`
+  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) AND NOT (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_reminder,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget, AppointmentRemindersTarget)

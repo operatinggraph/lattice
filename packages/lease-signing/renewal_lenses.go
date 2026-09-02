@@ -1,6 +1,22 @@
 package leasesigning
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
+
+// LeaseExpiryTarget is the §10.8 TargetID == the leaseExpiry lens's
+// OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads, and the key
+// the lens reads its own recorded lapse under in the leaseapp's freshnessExpiry
+// marker. Both the target spec and the cypher are built from it so the timer
+// that fires and the entry the row compares cannot drift apart.
+const LeaseExpiryTarget = "leaseExpiry"
+
+// BackgroundCheckFreshnessTarget is the §10.8 TargetID == the
+// backgroundCheckFreshness lens's canonicalName; the cyphers that read that
+// target's recorded lapse splice it from here so the literal cannot drift.
+const BackgroundCheckFreshnessTarget = "backgroundCheckFreshness"
 
 // RenewalLenses returns the package's renewal lenses (design
 // loftspace-lease-renewal-goal-authored-target-design.md §4.2/§4.3/§4.5):
@@ -147,7 +163,12 @@ func RenewalLenses() []pkgmgr.LensSpec {
 // tombstoned renewal — never produced in v1, no revive op — would fail to
 // count). The renewal fan-out is walked INBOUND across the renews link
 // (renewal→leaseapp), the same inbound-traversal idiom the manages link uses.
-const leaseExpirySpec = `
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
+// static reach; its advisory asks for a hand check for a narrowing range
+// bound inside a NEGATED pattern, and there is none — the cypher has no
+// negated relationship pattern at all, only scalar NOT comparisons.
+var leaseExpirySpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
 OPTIONAL MATCH (u)<-[:manages]-(landlord:identity)
@@ -159,7 +180,7 @@ WITH
   app.decision.data.value          AS landlordDecision,
   app.signature.data.signedAt      AS signedAt,
   u.key                            AS unitKey,
-  app.freshnessExpiry.data.byTarget.leaseExpiry AS lapsedAt,
+  app.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   count(DISTINCT landlord.key)     AS landlordCount,
   count(DISTINCT CASE WHEN rn.data.cycleEnd = app.tenancy.data.leaseEnd THEN rn.key ELSE null END) AS cycleRenewalCount
 RETURN
@@ -168,7 +189,7 @@ RETURN
   CASE WHEN lapsedAt >= renewalOpensAt THEN null ELSE renewalOpensAt END AS freshUntil,
   ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
   ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
-`
+`, LeaseExpiryTarget)
 
 // renewalCompleteSpec anchors on EVERY renewal vertex, unfiltered by status
 // (design §4.3: an actorAggregate lens has no filter-retraction transport, so
@@ -236,7 +257,7 @@ RETURN
 //     "is there work to do" (a plain boolean the engine drives dispatch from),
 //     while Goal is the grammar the planner SEARCHES against — they must
 //     agree, and TestRenewalComplete_MissingGoalAgreement pins that they do.
-const renewalCompleteSpec = `
+var renewalCompleteSpec = `
 MATCH (rn:renewal {key: $actorKey})
 OPTIONAL MATCH (rn)-[:renews]->(app:leaseapp)
 OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
@@ -255,7 +276,7 @@ WITH
   rn.terms.data.setAt                     AS termsSetAt,
   rn.terms.data.termMonths                AS termsTermMonths,
   rn.renewalSignature.data.signedAt       AS signedAt,
-  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND NOT (inst.freshnessExpiry.data.byTarget.backgroundCheckFreshness >= inst.outcome.data.validUntil) THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil
+  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND NOT (inst.freshnessExpiry.data.byTarget.` + BackgroundCheckFreshnessTarget + ` >= inst.outcome.data.validUntil) THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil
 RETURN
   entityKey AS actorKey,
   entityKey,

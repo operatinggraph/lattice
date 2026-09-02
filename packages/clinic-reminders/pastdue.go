@@ -1,6 +1,10 @@
 package clinicreminders
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // The auto-no-show sibling of the appointment reminder: a past visit that never
 // got a staff status update sits open (and unbilled) forever, since
@@ -74,8 +78,10 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 //
 // The three-term gate (status is non-terminal AND a recorded lapse at endsAt):
 //
-//   - status <> 'completed' AND status <> 'cancelled' AND status <> 'noShow' —
-//     the appointment has NOT already reached a terminal outcome. A staff status
+//   - nonTerminalAppointment (lenses.go) — the appointment has NOT already
+//     reached a terminal outcome. The same fragment gates appointmentReminders,
+//     because a status excluded here arms no timer and so records no lapse, and
+//     a reminder gate closing on that lapse needs the two lists to be one list. A staff status
 //     update (checked in and completed, or cancelled) at any point before endsAt
 //     — or even after, racing the @at fire — converges the gate permanently
 //     (TERMINAL_STATUSES are final, clinic-domain ddls.go); MarkPastDueNoShow
@@ -98,7 +104,7 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 // playbook does not template them (MarkPastDueNoShow resolves them live); only
 // entityKey + freshUntil + the two bools are load-bearing for dispatch + the
 // temporal lane.
-const pastDueAppointmentsSpec = `MATCH (a:appointment {key: $actorKey})
+var pastDueAppointmentsSpec = fmt.Sprintf(`MATCH (a:appointment {key: $actorKey})
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
 RETURN
@@ -108,9 +114,10 @@ RETURN
   a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
-  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS missing_noshow_transition,
-  ((a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (a.freshnessExpiry.data.byTarget.pastDueAppointments >= a.schedule.data.endsAt)) AS violating`
+  CASE WHEN %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
+  (%[1]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_noshow_transition,
+  (%[1]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget)
 
 // pastDueAppointmentsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap → directOp(MarkPastDueNoShow)

@@ -400,8 +400,8 @@ func authPlaneOrCorpusSpec(t *testing.T, name string) (cypher, anchorType string
 // a lens whose narrowing can change without any test noticing, and a narrowing
 // that withholds an event is unrecoverable — no JetStream filter update rewinds a
 // consumer's cursor. The other direction matters too, more quietly: a row naming
-// a lens the predicate no longer classifies as auth-plane is a pin that has
-// stopped asserting what its name says.
+// a row naming a lens the predicate does not classify as auth-plane asserts
+// nothing its name promises.
 //
 // The floor is what keeps the equality honest. An enumeration that returned
 // nothing would satisfy set equality against an empty covered set on the day
@@ -434,8 +434,8 @@ func TestAuthPlaneCensus_CoversEveryAuthPlaneActorAggregate(t *testing.T) {
 	for name, how := range covered {
 		_, ok := population[name]
 		require.Truef(t, ok,
-			"%q is %s here, but the registry no longer classifies it as an auth-plane actorAggregate — "+
-				"the row has stopped asserting what its name says; move or remove it deliberately", name, how)
+			"%q is %s here, but the registry does not classify it as an auth-plane actorAggregate — "+
+				"the row asserts nothing its name promises; move or remove it deliberately", name, how)
 	}
 }
 

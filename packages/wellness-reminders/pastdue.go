@@ -1,6 +1,10 @@
 package wellnessreminders
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // The auto-no-show sibling of the class reminder: a class that has ended
 // with no staff status update leaves its booking sitting `booked` forever,
@@ -107,7 +111,7 @@ func pastDueBookingsLens() pkgmgr.LensSpec {
 // sessionKey + freshUntil + the two bools are load-bearing for dispatch +
 // the temporal lane (sessionKey doubles as the dispatched op's `session`
 // param).
-const pastDueBookingsSpec = `MATCH (b:booking {key: $actorKey})
+var pastDueBookingsSpec = fmt.Sprintf(`MATCH (b:booking {key: $actorKey})
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
 RETURN
@@ -117,9 +121,10 @@ RETURN
   se.schedule.data.endsAt AS endsAt,
   b.status.data.value AS status,
   id.key AS bookerKey,
-  CASE WHEN (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt) THEN se.schedule.data.endsAt ELSE null END AS freshUntil,
-  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS missing_noshow_transition,
-  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.pastDueBookings >= se.schedule.data.endsAt)) AS violating`
+  CASE WHEN (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) THEN se.schedule.data.endsAt ELSE null END AS freshUntil,
+  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_noshow_transition,
+  ((b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
+	PastDueBookingsTarget)
 
 // pastDueBookingsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap →

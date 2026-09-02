@@ -90,14 +90,14 @@ func MarkExpiredDDL() pkgmgr.DDLSpec {
 			"DDL admits MarkExpired so step-6 permits the write).",
 		Script: markExpiredDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"entityKey":{"type":"string","description":"vtx.<type>.<NanoID> — the entity whose deadline lapsed. Any vertex type; the freshnessExpiry marker aspect is written on it."},` +
+			`{"entityKey":{"type":"string","description":"vtx.<type>.<NanoID> — the entity whose deadline lapsed. Any vertex type; the freshnessExpiry marker aspect is written on it. The caller MUST list this key in contextHint.reads AND the marker key <entityKey>.freshnessExpiry in contextHint.optionalReads — the merge is a read-modify-write, so an undeclared marker leaves the script unable to see a sibling target's entry."},` +
 			`"targetId":{"type":"string","description":"The weaver-target id whose deadline fired. Keys this lapse's entry in the marker's byTarget map, which is what the target's own lens reads."},` +
 			`"expiredAt":{"type":"string","description":"RFC3339 instant the freshness deadline fired; normalized to canonical whole-second UTC and recorded as this target's byTarget entry."}},` +
 			`"required":["entityKey","targetId","expiredAt"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.<type>.<NanoID> of the entity carrying the marker (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"entityKey": "Full vtx.<type>.<NanoID> key of the entity whose deadline lapsed. The freshnessExpiry marker aspect is written on this key; the entity's type is read from the key, never named by the DDL.",
+			"entityKey": "Full vtx.<type>.<NanoID> key of the entity whose deadline lapsed. The freshnessExpiry marker aspect is written on this key; the entity's type is read from the key, never named by the DDL. The caller MUST list this key in contextHint.reads and MUST list <entityKey>.freshnessExpiry in contextHint.optionalReads: the script merges this target's byTarget entry into the standing marker, so it needs the hydrated document (and the revision Contract #3 §3.2 conditions its update on). Declared as an OPTIONAL read because absence on a first lapse is a legitimate branch — the script emits a create there — never a fault.",
 			"targetId":  "The weaver-target id whose deadline fired. Required: it keys this lapse's entry in the marker's byTarget map, and that entry is what the target's convergence lens reads. It forms no KV key (the entityKey is the sole key source).",
 			"expiredAt": "RFC3339 instant the freshness deadline fired. Normalized to canonical whole-second UTC so a lens compares it lexically against a stored deadline, and merged as the maximum for this target.",
 		},

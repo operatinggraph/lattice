@@ -240,7 +240,7 @@ func (h *harness) awaitLensWired(name string, deadline time.Duration) {
 // (Loom/Weaver) submit Processor-faithful envelopes that omit class and rely
 // on the operationType->class reverse index (RF#1, Story 14.6) — this harness
 // mirrors that, not a test-only shortcut.
-func (h *harness) submitOp(operationType, lane, actor string, payload map[string]any, reads []string) *processor.OperationReply {
+func (h *harness) submitOp(operationType, lane, actor string, payload map[string]any, reads []string, optionalReads ...string) *processor.OperationReply {
 	h.t.Helper()
 	payloadBytes, err := json.Marshal(payload)
 	require.NoError(h.t, err)
@@ -249,7 +249,8 @@ func (h *harness) submitOp(operationType, lane, actor string, payload map[string
 	env := &processor.OperationEnvelope{
 		RequestID: reqID, Lane: processor.Lane(lane), OperationType: operationType,
 		Actor: actor, SubmittedAt: time.Now().UTC().Format(time.RFC3339),
-		Payload: json.RawMessage(payloadBytes), ContextHint: &processor.ContextHint{Reads: reads},
+		Payload:     json.RawMessage(payloadBytes),
+		ContextHint: &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
 	}
 	envBytes, err := json.Marshal(env)
 	require.NoError(h.t, err)
@@ -278,12 +279,12 @@ func (h *harness) submitOp(operationType, lane, actor string, payload map[string
 // own residual-risk note: self-healing, engine submitters retry), so the
 // PROOF here is "authorizes once settled," not "authorizes on the very first
 // attempt racing the projector."
-func (h *harness) submitOpAccepted(operationType, lane, actor string, payload map[string]any, reads []string, deadline time.Duration) *processor.OperationReply {
+func (h *harness) submitOpAccepted(operationType, lane, actor string, payload map[string]any, reads []string, deadline time.Duration, optionalReads ...string) *processor.OperationReply {
 	h.t.Helper()
 	cut := time.Now().Add(deadline)
 	var last *processor.OperationReply
 	for time.Now().Before(cut) {
-		last = h.submitOp(operationType, lane, actor, payload, reads)
+		last = h.submitOp(operationType, lane, actor, payload, reads, optionalReads...)
 		if last.Status == processor.ReplyStatusAccepted {
 			return last
 		}
@@ -374,10 +375,18 @@ func TestSystemActorCapability_FourEnginePathsAuthorize(t *testing.T) {
 	identityKey := idReply.PrimaryKey
 
 	// --- 1. Weaver: MarkExpired (temporal lane, system-class) ---
+	//
+	// The declaration mirrors the real dispatcher's (internal/weaver/temporal.go):
+	// the entity root in Reads, and the freshnessExpiry marker in OptionalReads —
+	// its absence on a first lapse is a legitimate branch, and the script needs
+	// the hydrated document (and the revision it conditions its update on) to
+	// merge byTarget rather than overwrite it. Submitting with reads alone would
+	// exercise a shape no caller produces and would take the create branch on
+	// every fire.
 	mr := h.submitOpAccepted("MarkExpired", "system", bootstrap.WeaverIdentityKey, map[string]any{
 		"entityKey": identityKey, "targetId": "fixtureFreshness",
 		"expiredAt": time.Now().UTC().Format(time.RFC3339),
-	}, []string{identityKey}, 15*time.Second)
+	}, []string{identityKey}, 15*time.Second, identityKey+".freshnessExpiry")
 	require.Equalf(t, processor.ReplyStatusAccepted, mr.Status, "Weaver MarkExpired: %+v", mr.Error)
 
 	// --- 2. Loom: CreateTask (system lane; Loom submits under its

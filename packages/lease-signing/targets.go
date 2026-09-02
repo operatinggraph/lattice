@@ -166,16 +166,16 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		// which is this target's anchor; the readers of that fact (this package's
 		// readiness fragment and renewalComplete's bgcheck aggregate) are anchored
 		// elsewhere and could never have hosted it.
-		TargetID: "backgroundCheckFreshness",
+		TargetID: BackgroundCheckFreshnessTarget,
 		Description: "A completed background check's freshness window is recorded on the check itself when it " +
 			"lapses, so every view asking whether a check is still current reads a recorded fact rather than a clock. " +
 			"OPERATOR NOTE: this target dispatches nothing and declares no gap, so it has nothing to raise. If it is " +
 			"disabled, or its MarkExpired is rejected, expired checks keep reading as CURRENT everywhere — the " +
 			"application's bgcheck gap stays shut, the renewal's background-check atom stays satisfied, and no " +
-			"violation anywhere reports it. The same holds for any check whose window lapsed before this target " +
-			"existed, until its overdue timer fires and the marker lands. Freshness fails OPEN here; the recorded " +
-			"lapse is the only evidence.",
-		LensRef: "backgroundCheckFreshness",
+			"violation anywhere reports it. The same holds for any check whose window lapsed while no timer " +
+			"watched it, until its overdue timer fires and the marker lands. Freshness fails OPEN here; the " +
+			"recorded lapse is the only evidence.",
+		LensRef: BackgroundCheckFreshnessTarget,
 	}}
 	return append(targets, RenewalTargets()...)
 }

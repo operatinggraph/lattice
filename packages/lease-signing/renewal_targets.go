@@ -38,7 +38,7 @@ func RenewalTargets() []pkgmgr.WeaverTargetSpec {
 // row.<column>.<aspect> template form (hard case 4's row-templating extension).
 func leaseExpiryTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
-		TargetID: "leaseExpiry",
+		TargetID: LeaseExpiryTarget,
 		Description: "Every signed, landlord-approved lease opens a renewal cycle once its renewal window arrives. " +
 			"If the window passes with no renewal for that term, one is opened automatically.",
 		LensRef: "leaseExpiry",

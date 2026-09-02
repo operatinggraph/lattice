@@ -57,7 +57,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-reminders",
-	Version: "0.3.5",
+	Version: "0.3.6",
 	Description: "Wellness class reminder (the wellness vertical's first orchestration): the .reminder marker aspect " +
 		"+ RecordBookingReminder op, the wellnessBookingReminders weaver-target convergence lens (freshUntil = the " +
 		"booking's session .schedule.remindAt deadline arms the @at timer; the gap opens at the deadline) — the " +
