@@ -389,12 +389,37 @@ RETURN
 //     waitlisted booking whose class was called off out from under it is
 //     exactly as orphaned as a booked one; without it a JoinWaitlist entry on
 //     a tombstoned session would hold its .wl<n> slot and double-book guard
-//     forever, invisible to this convergence lens.
+//     forever, invisible to this convergence lens. `noShow` joined the same
+//     condition (verticals.md, 2026-09-02): the auto-no-show sweep
+//     (wellness-reminders' pastDueBookings) and TombstoneSession race
+//     independently — a booking can reach `noShow` before its class is
+//     called off, and from the member's own FE (`cancelled = !b.sessionName`,
+//     app.js) a dead session reads "the studio called off this class"
+//     regardless of which fired first. Without `noShow` here, that ordering
+//     accident permanently strands the booking: My Classes renders an
+//     un-cancellable "Class cancelled" card, and any no-show fee already
+//     posted for it is unreachable by any other convergence (2 of 26 live).
 //
-// A booking already attended/noShow, or one whose session is still live,
-// never violates — SetBookingAttendance and CancelBooking are the paths that
-// own those, this lens only ever answers for a class that was called off out
-// from under a still-`booked`/`waitlisted` seat or slot.
+// A booking already attended, or one whose session is still live, never
+// violates — SetBookingAttendance's attended value and CancelBooking are the
+// paths that own those; this lens only ever answers for a class that was
+// called off out from under a still-`booked`/`waitlisted`/`noShow` seat or
+// slot. Deliberately NOT widened to `attended`: unlike the three states
+// above, an attended booking is a member's genuine participation record —
+// wellness-app's My Classes reads it as history, so tombstoning it once its
+// session is later archived would trade real history away, not just release
+// stranded bookkeeping. (Its seat cell does go unreleased in that case, and
+// a standing no-show fee that a re-mark-to-attended left charged — the
+// settles link, still live per SetBookingAttendance's own carry-forward note
+// above — is not reachable by any automated reversal. It is still reachable
+// by a HUMAN one: the transaction itself is a permanent, independent record
+// (postedTo an account), so it stays visible in wellnessLedgerHistory and
+// front-desk-waivable via WellnessCreditAccount{reason:"waiver"} regardless
+// of whether the booking or session later disappear — the same manual
+// escape hatch every other discretionary credit in this package already
+// relies on. An automated reversal here would need its own mechanism, keyed
+// on the RE-MARK in SetBookingAttendance, not a release path that would
+// otherwise have to choose between a member's history and their money.)
 // orphanedBookingSettlementSpec is built once at package init: the retry cap
 // (maxReleaseRetries) bakes into the constant maxretries_release column, the
 // §10.2 "the policy lives in the cypher" convention lease-signing's
@@ -412,8 +437,8 @@ RETURN
   entityKey AS bookingKey,
   sessionKey,
   status,
-  (((status = 'booked') OR (status = 'waitlisted')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
-  (((status = 'booked') OR (status = 'waitlisted')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
+  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
+  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
   %d AS maxretries_release
 `, maxReleaseRetries)
 

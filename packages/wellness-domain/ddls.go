@@ -813,7 +813,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"it; a charge already posted before that re-mark stands (the settles audit link makes it permanent " +
 			"history, never reversed by a later status correction). It also " +
 			"rejects a session that has not begun (SessionNotStarted, the mirror of CreateBooking's " +
-			"SessionInPast). Its standing " +
+			"SessionInPast), and a booking that is still `waitlisted` (InvalidState — a waitlisted booker " +
+			"never held a confirmed seat, so there is no attendance to record; only a `booked` start, or a " +
+			"re-mark of an already-attended/noShow booking, is valid). Its standing " +
 			"guard mirrors TombstoneSession's: the operator passes unconditionally; a bound instructor may mark " +
 			"only a booking on a class THEY lead, the caller supplying the instructor param and the script " +
 			"requiring BOTH lnk.instructor.<iid>.identifiedBy.identity.<actor> AND " +
@@ -825,12 +827,17 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"session param — reads the booking's own .status.session anchor (stored by CreateBooking/JoinWaitlist, " +
 			"carried forward by SetBookingAttendance), confirms that session is genuinely dead (SessionStillLive " +
 			"otherwise — a live session must go through CancelBooking), then releases whichever cell its OWN " +
-			"status.value names — .status.seat's cell when still booked, .status.waitlistSlot's cell when still " +
-			"waitlisted, never both — and the double-book guard, soft-deleting the booking exactly as CancelBooking " +
-			"does (minus any promotion attempt: the session is dead, so there is no seat left to hand anyone). " +
-			"Dispatched by the wellnessOrphanedBookingSettlement Weaver target (targets.go) against the " +
-			"missing_release gap its convergence lens computes (now matching status=booked OR status=waitlisted, " +
-			"lenses.go); never client-invoked.",
+			"status.value names — .status.seat's cell when still booked OR already noShow (noShow only ever mints " +
+			"from booked), .status.waitlistSlot's cell when still waitlisted, never more than one — and the " +
+			"double-book guard, soft-deleting the booking exactly as CancelBooking does (minus any promotion " +
+			"attempt: the session is dead, so there is no seat left to hand anyone). Also reverses whichever " +
+			"charges the booking already carries at release time: a posted settlesClassPrice charge (any status — " +
+			"classPriceSettlementSpec bills unconditional on attendance) and, for an already-noShow booking, a " +
+			"posted no-show-fee charge (relation settles) too — the studio called off the class either way, so " +
+			"BOTH reverse unconditionally, the same posted-charge-always-reverses policy CancelBooking's own " +
+			"late-cancellation carve-out never applies here. Dispatched by the wellnessOrphanedBookingSettlement " +
+			"Weaver target (targets.go) against the missing_release gap its convergence lens computes (now " +
+			"matching status=booked OR status=waitlisted OR status=noShow, lenses.go); never client-invoked.",
 		Script: bookingDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"session":{"type":"string","description":"vtx.session.<NanoID> being booked or waitlisted (CreateBooking / JoinWaitlist; required, validated alive + class=session; on CancelBooking and SetBookingAttendance it must be the booking's actual session, validated via the forSession link)."},` +
@@ -1308,46 +1315,58 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 		// mutation instead of a literal .aspect key.
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking"},
-		Description: "Wellness class-price refund marker. Vertex shape: vtx.wellnessrefund.<NanoID>, " +
-			"class=wellnessrefund, root data = {} (minimal, D5 — the data lives in the .detail aspect). Minted " +
-			"by CancelBooking (booking vertexType DDL, ddls.go) when the booking being cancelled already carries " +
-			"a posted settlesClassPrice charge AND the cancellation lands more than two hours before the " +
-			"session's startsAt — inside that late-cancellation window the charge is forfeited rather than " +
-			"reversed, so no marker mints at all and the debit stands exactly as a no-show's does. Also minted " +
-			"by ReleaseOrphanedBooking under the same posted-charge condition, unconditionally: the member did " +
-			"nothing to cause a studio-initiated cancellation, so there is no late-cancellation window to check — " +
-			"a posted charge always reverses. A posted " +
+		Description: "Wellness refund marker — reverses either a class-price charge or a no-show fee, the " +
+			"two independent wellnesstransaction shapes a booking can carry. Vertex shape: " +
+			"vtx.wellnessrefund.<NanoID>, class=wellnessrefund, root data = {} (minimal, D5 — the data lives in " +
+			"the .detail aspect). Minted by CancelBooking (booking vertexType DDL, ddls.go) when the booking " +
+			"being cancelled already carries a posted settlesClassPrice charge AND the cancellation lands more " +
+			"than two hours before the session's startsAt — inside that late-cancellation window the charge is " +
+			"forfeited rather than reversed, so no marker mints at all and the debit stands exactly as a " +
+			"no-show's does. Also minted by ReleaseOrphanedBooking under the same posted-charge condition, " +
+			"unconditionally: the member did nothing to cause a studio-initiated cancellation, so there is no " +
+			"late-cancellation window to check — a posted charge always reverses, for BOTH shapes: a " +
+			"still-booked/waitlisted orphaned booking's settlesClassPrice charge, and an already-noShow orphaned " +
+			"booking's settles (no-show fee) charge — the studio called off the class either way, so the fee a " +
+			"member never had a chance to avoid reverses the same as the class price does. A posted " +
 			"charge is the one case wellness-ledger's own " +
-			"wellnessClassPriceSettlement lens cannot self-correct, since its `MATCH (bk:booking {key: " +
-			"$actorKey})` simply stops matching a tombstoned booking (no charge is ever posted for a booking " +
-			"cancelled BEFORE it was charged; that half of the gap needs no fix). Exists because the booking " +
-			"itself is tombstoned in the SAME mutation batch that discovers the charge — Contract #1's isDeleted " +
-			"read-filtering means no post-tombstone lens walk could ever find a marker written onto the booking's " +
-			"own aspects (the exact ReleaseOrphanedBooking .status.session precedent this mirrors, " +
-			"bookingStatusAspectTypeDDL above), so the marker must live on a vertex that survives the cancellation " +
-			"— a fresh one, not the booking. Carries the reverses link (wellnessrefund→wellnesstransaction, this " +
-			"refund is the later-arriving vertex — Contract #1 §1.1) to the original charge, which " +
-			"wellness-ledger's wellnessRefundSettlement lens (lenses.go) walks to converge the refund by " +
-			"dispatching WellnessCreditAccount{accountKey, amountCents, refundRef}. Also carries a className/" +
-			"classStartsAt snapshot, read off the cancelled booking's own .status (bookingStatusAspectTypeDDL " +
-			"above) at mint time — wellnessLedgerHistory reads them off THIS marker for a refund row, " +
-			"since by the time that lens runs the booking itself is already tombstoned.",
+			"wellnessClassPriceSettlement/wellnessNoShowSettlement lenses cannot self-correct, since their " +
+			"`MATCH (bk:booking {key: $actorKey})` simply stops matching a tombstoned booking (no charge is " +
+			"ever posted for a booking cancelled BEFORE it was charged; that half of each gap needs no fix). " +
+			"Exists because the booking itself is tombstoned in the SAME mutation batch that discovers the " +
+			"charge — Contract #1's isDeleted read-filtering means no post-tombstone lens walk could ever find " +
+			"a marker written onto the booking's own aspects (the exact ReleaseOrphanedBooking .status.session " +
+			"precedent this mirrors, bookingStatusAspectTypeDDL above), so the marker must live on a vertex " +
+			"that survives the cancellation — a fresh one, not the booking. Carries the reverses link " +
+			"(wellnessrefund→wellnesstransaction, this refund is the later-arriving vertex — Contract #1 §1.1) " +
+			"to the original charge, which wellness-ledger's wellnessRefundSettlement lens (lenses.go) walks to " +
+			"converge the refund by dispatching WellnessCreditAccount{accountKey, amountCents, refundRef}. Also " +
+			"carries a memo (which charge shape this reverses — the settlement lens projects it verbatim rather " +
+			"than a hardcoded label, since one marker type now serves two) and a className/classStartsAt " +
+			"snapshot, read off the cancelled booking's own .status (bookingStatusAspectTypeDDL above) at mint " +
+			"time — wellnessLedgerHistory reads them off THIS marker for a refund row, since by the time that " +
+			"lens runs the booking itself is already tombstoned.",
 		Script: refundDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
+			`{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"memo":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"accountKey":    "The wellnessaccount the class-price charge being reversed was posted to. Stored on the .detail aspect, not root data (D5).",
-			"amountCents":   "The exact amountCents of the original charge (read off its .entry aspect at CancelBooking time, not re-derived from the session's current price — the refund must match what was actually charged).",
-			"bookingKey":    "The cancelled booking this refund traces back to. Internal bookkeeping context only — the reverses link, not this field, carries the relationship to the original charge transaction.",
-			"className":     "The cancelled booking's own .status.className at CancelBooking time (bookkeeping only, not a relationship). wellness-ledger's wellnessLedgerHistory lens reads it for a refund row since the booking itself is tombstoned by the time that lens runs.",
-			"classStartsAt": "The cancelled booking's own .status.classStartsAt at CancelBooking time, the same snapshot idiom as className.",
+			"accountKey":    "The wellnessaccount the reversed charge was posted to. Stored on the .detail aspect, not root data (D5).",
+			"amountCents":   "The exact amountCents of the original charge (read off its .entry aspect at mint time, not re-derived from a current price/fee — the refund must match what was actually charged).",
+			"bookingKey":    "The cancelled/released booking this refund traces back to. Internal bookkeeping context only — the reverses link, not this field, carries the relationship to the original charge transaction.",
+			"memo":          "\"Class price refund\" or \"No-show fee refund\", set by the minting op to say which charge shape this marker reverses. wellness-ledger's wellnessRefundSettlement lens projects it verbatim onto the credit's own memo instead of a hardcoded label.",
+			"className":     "The booking's own .status.className at mint time (bookkeeping only, not a relationship). wellness-ledger's wellnessLedgerHistory lens reads it for a refund row since the booking itself is tombstoned by the time that lens runs.",
+			"classStartsAt": "The booking's own .status.classStartsAt at mint time, the same snapshot idiom as className.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "wellnessrefund — a class-price refund marker",
-				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "memo": "Class price refund", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID> (root {}) + .detail aspect; minted by CancelBooking when a settlesClassPrice charge already existed for the booking and the cancellation lands more than two hours before startsAt, or by ReleaseOrphanedBooking unconditionally on a posted charge. wellness-ledger's wellnessRefundSettlement lens converges it into a WellnessCreditAccount.",
+			},
+			{
+				Name:            "wellnessrefund — a no-show-fee refund marker",
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 2500, "bookingKey": "vtx.booking.<NanoID>", "memo": "No-show fee refund", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
+				ExpectedOutcome: "Minted by ReleaseOrphanedBooking when the booking it releases was already noShow and carries a posted no-show-fee charge (a settles link) — the studio called off the class after the auto-no-show sweep had already fired, so the fee reverses the same way a class-price charge does.",
 			},
 		},
 	}
@@ -1359,26 +1378,29 @@ func refundDetailAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking"},
 		Description: "Refund-marker detail aspect (wellness). Stored as vtx.wellnessrefund.<NanoID>.detail " +
-			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey, className?, classStartsAt?}. " +
-			"Non-sensitive. Written once, atomically alongside the wellnessrefund vertex it belongs to, by " +
-			"CancelBooking or ReleaseOrphanedBooking (booking vertexType DDL, ddls.go) — never updated " +
-			"afterward. className/classStartsAt are the cancelled booking's own .status snapshot at mint time, " +
-			"carried onto this marker because the booking itself is tombstoned in the same mutation batch. " +
-			"Declaration-only: no op handler of its own.",
+			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey, memo, className?, " +
+			"classStartsAt?}. Non-sensitive. Written once, atomically alongside the wellnessrefund vertex it " +
+			"belongs to, by CancelBooking or ReleaseOrphanedBooking (booking vertexType DDL, ddls.go) — never " +
+			"updated afterward. memo says which charge shape this reverses (\"Class price refund\" or " +
+			"\"No-show fee refund\") — wellness-ledger's wellnessRefundSettlement lens projects it verbatim " +
+			"instead of a hardcoded label, since one marker type now serves both. className/classStartsAt are " +
+			"the booking's own .status snapshot at mint time, carried onto this marker because the booking " +
+			"itself is tombstoned in the same mutation batch. Declaration-only: no op handler of its own.",
 		Script:       refundDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
+		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"},"memo":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"accountKey":    "The wellnessaccount the original class-price charge posted to.",
+			"accountKey":    "The wellnessaccount the original charge posted to.",
 			"amountCents":   "The exact amountCents of the original charge, read off its .entry aspect at mint time.",
-			"bookingKey":    "The cancelled booking this refund traces back to (bookkeeping only).",
-			"className":     "The cancelled booking's own .status.className at mint time (bookkeeping only).",
-			"classStartsAt": "The cancelled booking's own .status.classStartsAt at mint time (bookkeeping only).",
+			"bookingKey":    "The cancelled/released booking this refund traces back to (bookkeeping only).",
+			"memo":          "\"Class price refund\" or \"No-show fee refund\" — which charge shape this marker reverses.",
+			"className":     "The booking's own .status.className at mint time (bookkeeping only).",
+			"classStartsAt": "The booking's own .status.classStartsAt at mint time (bookkeeping only).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "wellnessrefund detail aspect",
-				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>", "memo": "Class price refund", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID>.detail; written once by CancelBooking or ReleaseOrphanedBooking alongside the wellnessrefund vertex it names.",
 			},
 		},
@@ -3923,7 +3945,7 @@ def execute(state, op):
             reverses_lnk = "lnk.wellnessrefund." + refund_id + ".reverses.wellnesstransaction." + charge_tx_id
             mutations.append(make_vtx(refund_key, "wellnessrefund", {}))
             mutations.append(make_aspect(refund_key, "detail", "wellnessRefundDetail",
-                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key, "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
+                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key, "memo": "Class price refund", "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
             mutations.append(make_link(reverses_lnk, refund_key, charge_tx_key, "reverses", "reverses", {}))
             events.append({"class": "wellness.classPriceRefundQueued", "data": {"bookingKey": book_key, "refundKey": refund_key, "accountKey": account_key, "amountCents": amount_cents}})
             break
@@ -4054,6 +4076,22 @@ def execute(state, op):
         status = kv.Read(status_key)
         if status == None or status.isDeleted:
             fail("InvalidState: " + status_key + " is missing; cannot record attendance")
+
+        # A waitlisted booking never held a confirmed seat, so there is no
+        # attendance to record for it (pastDueBookingsSpec's own status='booked'
+        # restriction already documents this — a waitlisted entry is invisible
+        # to the auto-no-show sweep for the identical reason). Closes a real gap:
+        # nothing above checks the CURRENT value, only that the NEW one is
+        # attended/noShow, and the carry-forward loop below does not carry
+        # waitlistSlot — so an unguarded transition would silently strand a
+        # waitlisted booking in a status with neither .seat nor .waitlistSlot,
+        # a shape ReleaseOrphanedBooking could never cleanly release. Re-marking
+        # attended<->noShow is still free (either value corrects the other);
+        # only a live 'waitlisted' start is refused.
+        current_value = status.data.get("value")
+        if current_value == "waitlisted":
+            fail("InvalidState: " + book_key + " is waitlisted, never held a seat; nothing to record attendance for")
+
         merged = {"value": value}
         for field in ["rate", "seat", "booker", "session", "className", "classStartsAt"]:
             carried = status.data.get(field)
@@ -4114,8 +4152,8 @@ def execute(state, op):
         if status == None or status.isDeleted:
             fail("InvalidState: " + book_key + ".status is missing; nothing to release")
         value = status.data.get("value")
-        if value != "booked" and value != "waitlisted":
-            fail("InvalidState: " + book_key + " is not in booked or waitlisted status; nothing to release")
+        if value != "booked" and value != "waitlisted" and value != "noShow":
+            fail("InvalidState: " + book_key + " is not in booked, waitlisted, or noShow status; nothing to release")
         session = status.data.get("session")
         if session == None:
             fail("InvalidState: " + book_key + ".status carries no session anchor; nothing to release")
@@ -4133,8 +4171,12 @@ def execute(state, op):
         if sess_doc != None and not sess_doc.isDeleted:
             fail("SessionStillLive: " + session + " has not been cancelled; use CancelBooking instead")
 
+        # A noShow booking mints from "booked" only (SetBookingAttendance never
+        # moves a waitlisted seat to noShow -- a waitlisted booker never held
+        # a confirmed seat), so it shares "booked"'s seat cell, never a
+        # waitlist slot.
         mutations = [make_tombstone(book_key)]
-        if value == "booked":
+        if value == "booked" or value == "noShow":
             seat_n = status.data.get("seat")
             if seat_n == None:
                 fail("InvalidState: " + book_key + ".status.seat is missing; cannot release")
@@ -4156,11 +4198,14 @@ def execute(state, op):
         # late-cancellation forfeiture branch: the booker did nothing to
         # cause this cancellation, the studio called off the class, so a
         # posted charge always reverses regardless of how close to class
-        # time TombstoneSession ran. Shared across both the "booked" and
-        # "waitlisted" branches above for the same reason CancelBooking
-        # shares it: a waitlisted booking can never carry a charge
-        # (wellness-ledger's classPriceSettlementSpec posts only once status
-        # is 'booked'), so this is a guaranteed no-op for it.
+        # time TombstoneSession ran. Shared across the "booked", "waitlisted",
+        # and "noShow" branches above: a waitlisted booking can never carry a
+        # charge (wellness-ledger's classPriceSettlementSpec posts only once
+        # status is 'booked'), so this is a guaranteed no-op for it, but a
+        # noShow booking genuinely can — classPriceSettlementSpec charges the
+        # class price unconditional on attendance, so a member who no-showed
+        # a class the studio then called off can carry BOTH a class-price
+        # charge (found here) and a no-show-fee charge (found below).
         # read-posture: (e) relation=settlesClassPrice epoch=none -- a
         # booking carries at most one live settlesClassPrice transaction
         # (wellnessClassPriceSettlement's own txCount=0 gate is single-fire).
@@ -4196,9 +4241,61 @@ def execute(state, op):
             reverses_lnk = "lnk.wellnessrefund." + refund_id + ".reverses.wellnesstransaction." + charge_tx_id
             mutations.append(make_vtx(refund_key, "wellnessrefund", {}))
             mutations.append(make_aspect(refund_key, "detail", "wellnessRefundDetail",
-                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key, "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
+                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key, "memo": "Class price refund", "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
             mutations.append(make_link(reverses_lnk, refund_key, charge_tx_key, "reverses", "reverses", {}))
             events.append({"class": "wellness.classPriceRefundQueued", "data": {"bookingKey": book_key, "refundKey": refund_key, "accountKey": account_key, "amountCents": amount_cents}})
+            break
+
+        # The no-show-fee sibling of the class-price lookup above: a booking
+        # this op releases while it is already "noShow" (the auto-no-show
+        # sweep fired before the studio tombstoned the class -- an ordering
+        # accident, not a meaningful distinction) may carry a posted no-show
+        # fee (relation "settles", written by wellness-ledger's
+        # WellnessDebitAccount{bookingRef}, wellnessNoShowSettlement's own
+        # missing_charge dispatch) -- the member never had a chance to avoid
+        # it either way, so it reverses on release exactly like the class
+        # price does: unconditionally, no late-window forfeiture. Guaranteed
+        # a no-op for "booked"/"waitlisted" (WellnessDebitAccount{bookingRef}
+        # is dispatched only once status is 'noShow'). A DISTINCT relation
+        # from settlesClassPrice (ddls.go's bookingRef/priceBookingRef split)
+        # so the two settlement gaps never collide in a count(), and a
+        # SEPARATE wellnessrefund marker from the one above -- a booking can
+        # owe both a class-price and a no-show-fee refund at once, and each
+        # marker's own reverses link must name its own distinct charge.
+        # read-posture: (e) relation=settles epoch=none -- a booking carries
+        # at most one live settles transaction (wellnessNoShowSettlement's
+        # own txCount=0 gate is single-fire, mirroring settlesClassPrice's).
+        noshow_charge_page, _ = kv.Links(book_key, "settles", "in", None, 1)
+        for nlk in noshow_charge_page:
+            if nlk.isDeleted:
+                continue
+            noshow_tx_key = nlk.sourceVertex
+            _, noshow_tx_id = parts_of(noshow_tx_key, "chargeTransactionKey", "wellnesstransaction")
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key).
+            noshow_entry = kv.Read(noshow_tx_key + ".entry")
+            if noshow_entry == None or noshow_entry.isDeleted:
+                continue
+            noshow_amount_cents = noshow_entry.data.get("amountCents")
+            if noshow_amount_cents == None:
+                continue
+            # read-posture: (e) relation=postedTo epoch=none -- same
+            # single-live-link guarantee as the class-price lookup above.
+            noshow_acct_page, _ = kv.Links(noshow_tx_key, "postedTo", "out", None, 1)
+            noshow_account_key = None
+            for nalk in noshow_acct_page:
+                if not nalk.isDeleted:
+                    noshow_account_key = nalk.targetVertex
+            if noshow_account_key == None:
+                continue
+            noshow_refund_id = nanoid.new()
+            noshow_refund_key = "vtx.wellnessrefund." + noshow_refund_id
+            noshow_reverses_lnk = "lnk.wellnessrefund." + noshow_refund_id + ".reverses.wellnesstransaction." + noshow_tx_id
+            mutations.append(make_vtx(noshow_refund_key, "wellnessrefund", {}))
+            mutations.append(make_aspect(noshow_refund_key, "detail", "wellnessRefundDetail",
+                {"accountKey": noshow_account_key, "amountCents": noshow_amount_cents, "bookingKey": book_key, "memo": "No-show fee refund", "className": status.data.get("className"), "classStartsAt": status.data.get("classStartsAt")}))
+            mutations.append(make_link(noshow_reverses_lnk, noshow_refund_key, noshow_tx_key, "reverses", "reverses", {}))
+            events.append({"class": "wellness.noShowFeeRefundQueued", "data": {"bookingKey": book_key, "refundKey": noshow_refund_key, "accountKey": noshow_account_key, "amountCents": noshow_amount_cents}})
             break
 
         # Release the per-(session, booker) double-book guard, the same

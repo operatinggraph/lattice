@@ -11,6 +11,7 @@ package wellnessdomain_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -59,6 +60,28 @@ func seedPostedClassPriceCharge(t *testing.T, ctx context.Context, conn *substra
 	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".settlesClassPrice.booking."+bookID,
 		txKey, bookingKey, "settlesClassPrice", "settlesClassPrice")
 	return acctKey, txKey
+}
+
+// seedPostedNoShowFeeCharge is settlesClassPrice's no-show-fee sibling —
+// exactly as WellnessDebitAccount{bookingRef} would have left it (relation
+// "settles", not "settlesClassPrice"). Posts to an EXISTING account (a
+// booker holds one account; both a class-price and a no-show-fee charge post
+// to it) rather than minting a fresh one.
+func seedPostedNoShowFeeCharge(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey, acctKey, txID string, amountCents float64) string {
+	t.Helper()
+	_, bookID, _ := substrate.ParseVertexKey(bookingKey)
+	_, acctID, _ := substrate.ParseVertexKey(acctKey)
+
+	txKey := "vtx.wellnesstransaction." + txID
+	seedVertex(t, ctx, conn, txKey, "wellnesstransaction", nil)
+	seedAspect(t, ctx, conn, txKey, "entry", "transactionEntry", map[string]any{
+		"type": "debit", "amountCents": amountCents, "postedAt": "2026-07-08T09:31:00Z",
+	})
+	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".postedTo.wellnessaccount."+acctID,
+		txKey, acctKey, "postedTo", "postedTo")
+	seedLink(t, ctx, conn, "lnk.wellnesstransaction."+txID+".settles.booking."+bookID,
+		txKey, bookingKey, "settles", "settles")
+	return txKey
 }
 
 // trackerEventClasses returns the op tracker's eventClasses list for reqID —
@@ -478,4 +501,126 @@ func TestReleaseOrphanedBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T
 	}
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.classPriceRefundQueued")
 	assertNoTrackerEvent(t, ctx, conn, releaseReqID, "wellness.lateCancelForfeited")
+}
+
+// TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes proves
+// the verticals.md gap fix (2026-09-02): a booking the auto-no-show sweep
+// already flipped to noShow before the studio called off its class is no
+// longer permanently stranded — ReleaseOrphanedBooking now accepts noShow
+// (previously InvalidState), releases its seat cell (not a waitlist slot —
+// noShow only ever mints from booked), and reverses BOTH an already-posted
+// class-price charge (settlesClassPrice — classPriceSettlementSpec bills
+// unconditional on attendance, so a no-show can carry one) and an
+// already-posted no-show fee (settles) in the SAME release, each its own
+// wellnessrefund marker with a memo naming which charge it reverses.
+func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphannoshow")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphannsstudio0001", "Priced Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdorphannssessio0001", studioKey, "Priced Vinyasa", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLURPHNSBKR1HJKM")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdorphannsbookin0001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	seat, _ := attendanceStatus(t, ctx, conn, bookingKey)["seat"].(float64)
+
+	// Operator marks the no-show 5 minutes after the 09:00 start — same
+	// timing TestSetBookingAttendance's own noShow cases use.
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdorphannsattend0001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "noShow" {
+		t.Fatalf("booking status = %q, want noShow", got)
+	}
+
+	acctKey, priceTxKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey,
+		"BBWELLURPHNSACT1HJKM", "BBWELLURPHNSPTX1HJKM", 1500.0)
+	_, priceTxID, _ := substrate.ParseVertexKey(priceTxKey)
+	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLURPHNSNTX1HJKM", 2500.0)
+	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
+
+	tombstoneReqID := testutil.GenReqID("wdorphannstombst0001")
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     tombstoneReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:35:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	releaseReqID := testutil.GenReqID("wdorphannsreleas0001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:40:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status", sessionKey,
+		}},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+	if seatCellKey := sessionKey + ".seat" + strconv.Itoa(int(seat)); keyExists(t, ctx, conn, seatCellKey) {
+		t.Fatalf("seat cell must be released: %s", seatCellKey)
+	}
+
+	refundIDs := nanoIDsFromRequestID(releaseReqID, 2)
+	priceRefundKey := "vtx.wellnessrefund." + refundIDs[0]
+	noShowRefundKey := "vtx.wellnessrefund." + refundIDs[1]
+
+	priceDetail := readDoc(t, ctx, conn, priceRefundKey+".detail")
+	pdata, _ := priceDetail["data"].(map[string]any)
+	if pdata["memo"] != "Class price refund" {
+		t.Fatalf("class-price refund memo = %v, want %q", pdata["memo"], "Class price refund")
+	}
+	if pdata["amountCents"] != 1500.0 {
+		t.Fatalf("class-price refund amountCents = %v, want 1500", pdata["amountCents"])
+	}
+	if pdata["accountKey"] != acctKey {
+		t.Fatalf("class-price refund accountKey = %v, want %v", pdata["accountKey"], acctKey)
+	}
+
+	noShowDetail := readDoc(t, ctx, conn, noShowRefundKey+".detail")
+	ndata, _ := noShowDetail["data"].(map[string]any)
+	if ndata["memo"] != "No-show fee refund" {
+		t.Fatalf("no-show-fee refund memo = %v, want %q", ndata["memo"], "No-show fee refund")
+	}
+	if ndata["amountCents"] != 2500.0 {
+		t.Fatalf("no-show-fee refund amountCents = %v, want 2500", ndata["amountCents"])
+	}
+	if ndata["accountKey"] != acctKey {
+		t.Fatalf("no-show-fee refund accountKey = %v, want %v", ndata["accountKey"], acctKey)
+	}
+
+	_, priceRefundID, _ := substrate.ParseVertexKey(priceRefundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+priceRefundID+".reverses.wellnesstransaction."+priceTxID) {
+		t.Fatalf("class-price reverses link must exist")
+	}
+	_, noShowRefundID, _ := substrate.ParseVertexKey(noShowRefundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+noShowRefundID+".reverses.wellnesstransaction."+noShowTxID) {
+		t.Fatalf("no-show-fee reverses link must exist")
+	}
+
+	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.classPriceRefundQueued")
+	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
 }

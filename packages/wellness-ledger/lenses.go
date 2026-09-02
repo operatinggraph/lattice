@@ -296,10 +296,14 @@ RETURN
 `, maxPriceChargeRetries)
 
 // refundSettlementSpec is the one-row-per-wellnessrefund convergence cypher
-// for the class-price REFUND gap: a wellnessrefund marker (wellness-domain's
-// CancelBooking, ddls.go — minted only when the booking being cancelled
-// already carried a posted settlesClassPrice charge) needs its credit posted
-// back onto the account it names, once.
+// for the REFUND gap: a wellnessrefund marker (wellness-domain's
+// CancelBooking/ReleaseOrphanedBooking, ddls.go — minted when a booking
+// already carries a posted settlesClassPrice charge, a posted no-show-fee
+// charge, or both) needs its credit posted back onto the account it names,
+// once. memo projects the marker's OWN detail.memo ("Class price refund" or
+// "No-show fee refund", set by whichever mint site wrote this marker)
+// verbatim rather than a hardcoded literal — one marker type now reverses
+// two different charge shapes, so the credit line must say which.
 //
 //   - `missing_refund` — the marker carries a live accountKey and a positive
 //     amountCents (always true for a well-formed marker — CancelBooking only
@@ -327,6 +331,7 @@ WITH
   rf.key AS entityKey,
   rf.detail.data.accountKey AS accountKey,
   rf.detail.data.amountCents AS amountCents,
+  coalesce(rf.detail.data.memo, 'Refund') AS refundMemo,
   count(tx.key) AS txCount
 RETURN
   entityKey AS actorKey,
@@ -334,7 +339,7 @@ RETURN
   entityKey AS refundKey,
   accountKey,
   amountCents,
-  'Class price refund' AS memo,
+  refundMemo AS memo,
   ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS missing_refund,
   ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS violating,
   %d AS maxretries_refund
