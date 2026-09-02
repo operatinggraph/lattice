@@ -131,10 +131,13 @@ type executor struct {
 	// node's link-set hash) — the adjacency half of the read-surface
 	// footprint a validating caller compares after evaluation. Its key set is
 	// exactly edges'. It is the whole READ's fingerprint, not the composed
-	// list's: a composed relation is pinned instead by its own Matched set,
-	// which the validator's coarse path re-derives alongside the fingerprint
-	// (pipeline.footprintValid). A relation-scoped read contributes no
-	// fingerprint of its own, being incomparable with a whole read's.
+	// list's, and on its own it says nothing about a substituted relation: a
+	// write to one lands after the instant the fingerprint pins, so what
+	// catches it is the both-direction Matched set the composition records
+	// (recordComposedPins), which the validator re-derives alongside the
+	// fingerprint (pipeline.footprintValid). A relation-scoped read
+	// contributes no fingerprint of its own, being incomparable with a whole
+	// read's.
 	edges         map[string][]adjacency.EdgeEntry
 	edgeRevisions map[string]uint64
 
@@ -152,6 +155,12 @@ type executor struct {
 	// composed whole entry is consulted first, so they are never read again,
 	// and they are the record of which relations in it came from an earlier
 	// instant.
+	//
+	// An entry covers its relation in BOTH directions, because that is what a
+	// relation-scoped read answers with, and the composition substitutes it
+	// entire. That is why the composition footprints each substituted relation
+	// under a both-direction selector of its own (recordComposedPins) rather
+	// than leaving it to the one direction a hop happened to walk.
 	//
 	// A hub read contributes no fingerprint: a scoped fingerprint is not
 	// comparable with a whole read's, and the unit that pins such a read is
@@ -900,16 +909,16 @@ func (ex *executor) readNode(key string) (*nodeRef, error) {
 //     traverseRel records right after this call is what pins that read.
 //   - An untyped hop, or any hop with scoping off, reads the node whole.
 //
-// Both whole-memo installs COMPOSE the read against any relation of that node
-// this evaluation already pinned (composeWholeRead), because a whole read is
-// simply the union of every relation's read and must not be allowed to
-// overwrite one that already has an answer. Without that, a typed hop on a
-// marked hub followed by an untyped hop on the same hub would leave the second
-// read's list in the whole memo, and a third hop on the FIRST relation would be
-// served an edge list from a later instant — the very defect the memo exists to
-// close. The same holds if the node stops being marked mid-evaluation (a bucket
-// wipe, the only way a mark clears), which is why the whole=true arm composes
-// too.
+// Both whole-memo installs go through memoizeWhole, which COMPOSES the read
+// against any relation of that node this evaluation already pinned and
+// footprints what it substituted. A whole read is simply the union of every
+// relation's read and must not be allowed to overwrite one that already has an
+// answer: without the composition, a typed hop on a marked hub followed by an
+// untyped hop on the same hub would leave the second read's list in the whole
+// memo, and a third hop on the FIRST relation would be served an edge list from
+// a later instant — the very defect the memo exists to close. The same holds if
+// the node stops being marked mid-evaluation (a bucket wipe, the only way a
+// mark clears), which is why the whole=true arm composes too.
 //
 // A read error is never memoized: it is transport, not a value. Mirrors
 // fetchNode's nil-map guard on both memos: the read-free key-resolution
@@ -946,15 +955,18 @@ func (ex *executor) fetchEdges(adjNodeID string, rel string) ([]adjacency.EdgeEn
 
 // memoizeWhole installs a whole read of adjNodeID as the node's memo entry and
 // returns the list every later hop on that node will be served, which is the
-// composition of this read with any relation already pinned by an earlier
-// relation-scoped read (composeWholeRead).
+// composition of this read with any relation an earlier relation-scoped read
+// already pinned (composeWholeRead).
 //
 // fingerprint is the READ's, recorded as-is: it is what a validating caller
 // re-derives by re-reading the node whole, and composing changed the list this
-// evaluation uses, not the state the read observed. A composed relation is
-// pinned by its own Matched set instead.
+// evaluation uses, not the state the read observed. What pins a substituted
+// relation instead is the both-direction selector recordComposedPins writes for
+// it — the two go together, and neither is sound without the other.
 func (ex *executor) memoizeWhole(adjNodeID string, edges []adjacency.EdgeEntry, fingerprint uint64) []adjacency.EdgeEntry {
-	composed := ex.composeWholeRead(adjNodeID, edges)
+	pinned := ex.pinnedRelations(adjNodeID)
+	composed := composeWholeRead(edges, pinned)
+	ex.recordComposedPins(adjNodeID, pinned)
 	if ex.edges != nil && ex.edgeRevisions != nil {
 		ex.edges[adjNodeID] = composed
 		ex.edgeRevisions[adjNodeID] = fingerprint
@@ -962,31 +974,42 @@ func (ex *executor) memoizeWhole(adjNodeID string, edges []adjacency.EdgeEntry, 
 	return composed
 }
 
-// composeWholeRead folds the relations of adjNodeID this evaluation already
-// read at a relation scope back into a whole read of the same node: every edge
-// of a pinned relation is dropped from whole and replaced by the pinned read's
-// own edges, and the result is put back into the order one read would have
-// produced (adjacency.SortEdges).
-//
-// A relation nothing pinned passes through untouched, so an evaluation that
-// never took a scoped read of this node gets its whole list back unchanged —
-// which is every evaluation that never crossed an overflow-marked hub, and the
-// reason the empty-memo case exits first.
+// pinnedRelations returns the relations of adjNodeID this evaluation has
+// already read at a relation scope, keyed by relation name — nil when there
+// are none, which is every evaluation that never crossed an overflow-marked
+// hub.
 //
 // The scan is over the whole hub memo rather than a per-node index because
 // that memo holds one entry per (marked hub, relation) this evaluation
 // actually crossed, which is a handful at most; a node-keyed index would buy
 // nothing at that size.
-func (ex *executor) composeWholeRead(adjNodeID string, whole []adjacency.EdgeEntry) []adjacency.EdgeEntry {
+func (ex *executor) pinnedRelations(adjNodeID string) map[string][]adjacency.EdgeEntry {
 	if len(ex.hubEdges) == 0 {
-		return whole
+		return nil
 	}
-	pinned := map[string][]adjacency.EdgeEntry{}
+	var pinned map[string][]adjacency.EdgeEntry
 	for hk, edges := range ex.hubEdges {
-		if hk.nodeID == adjNodeID {
-			pinned[hk.rel] = edges
+		if hk.nodeID != adjNodeID {
+			continue
 		}
+		if pinned == nil {
+			pinned = map[string][]adjacency.EdgeEntry{}
+		}
+		pinned[hk.rel] = edges
 	}
+	return pinned
+}
+
+// composeWholeRead folds pinned relations back into a whole read of the same
+// node: every edge of a pinned relation is dropped from whole and replaced by
+// the pinned read's own edges, in BOTH directions, since a relation-scoped read
+// answers with every link of that relation incident to the node whichever end
+// the node is. The result is sorted so it reads as one marked-node read would
+// have produced it (adjacency.SortEdges).
+//
+// A relation nothing pinned passes through untouched, so a whole read with no
+// pinned relations is returned unchanged.
+func composeWholeRead(whole []adjacency.EdgeEntry, pinned map[string][]adjacency.EdgeEntry) []adjacency.EdgeEntry {
 	if len(pinned) == 0 {
 		return whole
 	}
@@ -1002,6 +1025,46 @@ func (ex *executor) composeWholeRead(adjNodeID string, whole []adjacency.EdgeEnt
 	}
 	adjacency.SortEdges(composed)
 	return composed
+}
+
+// recordComposedPins footprints what the composition just did: for every
+// relation it substituted, the edge identities of that relation on this node,
+// under a BOTH-direction selector.
+//
+// It has to be the composition that writes this, and it has to be
+// direction-blind. A relation-scoped read answers in both directions, so the
+// composition substitutes the relation entire — but the only selector a typed
+// hop records is the one direction it walked, and recordEdgeSelector stops
+// recording altogether once an untyped hop has set Fallback. A link of that
+// relation arriving on the direction no hop walked would then sit in a
+// composed list that no recorded set covers, under a fingerprint taken at the
+// later instant, and validation would confirm a row assembled from a view no
+// instant of the graph ever held. The both-direction pin is what a validator
+// re-derives to catch exactly that: over the whole re-read on the coarse path,
+// and over a scoped re-read that now names this relation on the selector path.
+//
+// The pin is written ONLY here, so a node whose hops were all typed keeps its
+// exact directional selectors and pays nothing: it exists from the moment a
+// whole read consumed a composed relation, and not before.
+func (ex *executor) recordComposedPins(adjNodeID string, pinned map[string][]adjacency.EdgeEntry) {
+	if len(pinned) == 0 || ex.edgeSelectors == nil {
+		return
+	}
+	entry := ex.edgeSelectors[adjNodeID]
+	if entry == nil {
+		entry = &ruleengine.EdgeSelectorFootprint{}
+		ex.edgeSelectors[adjNodeID] = entry
+	}
+	if entry.Matched == nil {
+		entry.Matched = map[ruleengine.EdgeSelector]map[string]struct{}{}
+	}
+	for rel, edges := range pinned {
+		ids := make(map[string]struct{}, len(edges))
+		for _, e := range edges {
+			ids[e.EdgeID] = struct{}{}
+		}
+		entry.Matched[ruleengine.EdgeSelector{RelType: rel, Direction: DirBoth.String()}] = ids
+	}
 }
 
 // recordEdgeSelector records, for adjNodeID, the (rel.Type, rel.Direction)

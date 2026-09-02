@@ -308,3 +308,114 @@ func TestFootprintValid_CoarsePath_NoFingerprintIsMalformed(t *testing.T) {
 	require.NoError(t, verr)
 	require.False(t, valid, "a coarse node with no fingerprint is malformed and must fail closed")
 }
+
+// composedPinQuery crosses a marked hub twice: a typed holdsRole hop that
+// walks outbound, then an untyped hop that consumes every edge on the same
+// node. The typed hop takes the relation-scoped read; the untyped hop reads
+// whole, and the executor composes that read over the relation the first hop
+// pinned.
+const composedPinQuery = `MATCH (i:identity {key: $k})-[:holdsRole]->(r:role) ` +
+	`OPTIONAL MATCH (i)-->(x) ` +
+	`RETURN r.key AS roleKey, x.key AS anyKey`
+
+// TestFootprintValid_ComposedRelation_InboundWriteIsDrift is the end-to-end
+// proof of the composition's own pin, through the real engine rather than a
+// hand-built footprint.
+//
+// A relation-scoped read answers in BOTH directions, so the composition
+// substitutes holdsRole entire — while the typed hop that pinned it recorded
+// only the "out" direction, and the untyped hop that followed set Fallback and
+// recorded nothing more. A holdsRole link arriving INBOUND between the two
+// hops is therefore invisible to every other part of the certificate: it is
+// absent from the composed list the row was built from, absent from the
+// {holdsRole,out} set, and absent from the whole-read fingerprint, which was
+// taken AFTER it landed. Only the both-direction pin the composition writes
+// can catch it — and it must, or validation confirms a row assembled from a
+// view no instant of the graph ever held.
+func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+
+	// capture seeds a marked identity hub holding one outbound role, runs
+	// composedPinQuery over it with mutate() firing between the two hops, and
+	// returns the pipeline and the footprint the evaluation produced.
+	capture := func(t *testing.T, tag string, mutate func(coreKV *substrate.KV, hubID string)) (*Pipeline, ruleengine.EvalFootprint, string) {
+		t.Helper()
+		hubID := hubNanoID(t, tag)
+		p, coreKV, adjKV := markedHubKV(t, hubID)
+		writeCollisionVertex(t, coreKV, "vtx.identity."+hubID, "identity", nil)
+
+		roleID := hubNanoID(t, "rr"+tag)
+		writeCollisionVertex(t, coreKV, "vtx.role."+roleID, "role", nil)
+		seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", roleID)
+
+		eng := full.New().WithHubReadScopeMode(full.HubReadScopeModeOn)
+		cr, err := eng.Parse(composedPinQuery)
+		require.NoError(t, err)
+
+		// The mutation lands between the typed hop's scoped read of the hub
+		// and the untyped hop's whole read of it. The observer fires as soon
+		// as a read knows the node's state and BEFORE it enumerates, so the
+		// hook that lands the write is the WHOLE read's: by then the scoped
+		// read has finished and pinned holdsRole, and the whole read is about
+		// to enumerate a keyspace the write is already in.
+		fired := false
+		ctx, rec := observedCtx()
+		ctx = adjacency.WithReadObserver(ctx, func(obs adjacency.ReadObservation) {
+			rec.observe(obs)
+			if obs.NodeID == hubID && obs.Relations == nil && !fired {
+				fired = true
+				mutate(coreKV, hubID)
+			}
+		})
+
+		_, fp, err := eng.ExecuteWithFootprint(ctx, cr,
+			ruleengine.EventContext{Parameters: map[string]any{"k": "vtx.identity." + hubID}},
+			adjKV, coreKV)
+		require.NoError(t, err)
+		require.True(t, fired, "the whole read must have happened, with the mutation just ahead of it")
+
+		reads := rec.of(hubID)
+		require.Len(t, reads, 2, "the typed hop reads the hub scoped, then the untyped hop reads it whole")
+		require.Equal(t, map[string]struct{}{"holdsRole": {}}, reads[0].Relations)
+		require.Nil(t, reads[1].Relations)
+
+		sel, ok := fp.EdgeSelectors[hubID]
+		require.True(t, ok)
+		require.True(t, sel.Fallback, "the untyped hop falls the hub back to the coarse path")
+		require.Contains(t, fp.EdgeRevisions, hubID, "and records the whole read's fingerprint")
+		return p, fp, hubID
+	}
+
+	t.Run("inbound write between the hops is drift", func(t *testing.T) {
+		p, fp, hubID := capture(t, "cx1", func(coreKV *substrate.KV, hubID string) {
+			// The hub as TARGET: a holdsRole link on the direction the typed
+			// hop never walked.
+			seedHubLink(t, coreKV, "role", hubNanoID(t, "rzx"), "holdsRole", "identity", hubID)
+		})
+
+		// The whole-read fingerprint alone cannot see it — the read that
+		// produced it happened after the write. This is the control that makes
+		// the verdict below attributable to the composition's pin.
+		fingerprintOnly := ruleengine.EvalFootprint{
+			EdgeRevisions: map[string]uint64{hubID: fp.EdgeRevisions[hubID]},
+		}
+		valid, verr := p.footprintValid(context.Background(), fingerprintOnly)
+		require.NoError(t, verr)
+		require.True(t, valid, "nothing moved after the whole read, so the fingerprint compares equal")
+
+		valid, verr = p.footprintValid(context.Background(), fp)
+		require.NoError(t, verr)
+		require.False(t, valid,
+			"a link of a composed relation arriving on the unwalked direction must read as drift")
+	})
+
+	t.Run("no write between the hops validates", func(t *testing.T) {
+		p, fp, _ := capture(t, "cx2", func(*substrate.KV, string) {})
+
+		valid, verr := p.footprintValid(context.Background(), fp)
+		require.NoError(t, verr)
+		require.True(t, valid, "an untouched hub must still validate — the pin must not refuse everything")
+	})
+}

@@ -628,6 +628,17 @@ func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootpri
 		for selector := range sel.Matched {
 			rels[selector.RelType] = struct{}{}
 		}
+		// A selector entry naming no selector at all is malformed the same way
+		// a coarse node with no fingerprint is, and fails closed for the same
+		// reason: there is nothing to compare, the whole fingerprint is
+		// deliberately not compared on this path, and a scoped re-read of an
+		// empty relation set reads nothing — so validating here would confirm
+		// a node this pass never looked at. recordEdgeSelector never produces
+		// the shape (a typed hop always records its selector), but
+		// mergeFootprints mints an empty Matched map for every node it folds.
+		if len(rels) == 0 {
+			return false, nil
+		}
 		edges, _, err := adjacency.NeighborsByRelation(ctx, p.adjKV, p.coreKV, nodeID, rels)
 		if err != nil {
 			return false, err

@@ -614,10 +614,9 @@ func seedHubLink(t *testing.T, coreKV *substrate.KV, srcType, srcID, relation, d
 }
 
 // TestFootprintValid_MarkedNode_FallbackArm drives footprintValid's revision
-// arm with a marked node, so the §16.5 hash reaches its only consumer. An
-// untyped or variable-length hop records no selector, and validation then
-// compares the fingerprint — which for a marked node is the hash over its
-// link set, not a document revision.
+// arm with a marked node, so the §16.5 hash reaches its only consumer. A node
+// with no recorded selector is validated by comparing the fingerprint — which
+// for a marked node is the hash over its link set, not a document revision.
 func TestFootprintValid_MarkedNode_FallbackArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")

@@ -20,9 +20,12 @@ type ReadObservation struct {
 	// whether its edges came from Core KV's link keyspace rather than from an
 	// adjacency document.
 	Marked bool
-	// Whole reports whether the answer covers the node's whole edge list. It
-	// is false only for a scoped read that a marked node served, since an
-	// unmarked node answers whole however narrow the request was.
+	// Whole reports whether the READ covered the node's whole edge set — its
+	// entire adjacency document, or its entire Core KV link keyspace. It is
+	// false only for a scoped read a marked node served, whose Core KV
+	// enumeration was narrowed by relation. It says nothing about the answer
+	// handed back: NeighborsByRelation on an unmarked node reads the whole
+	// document (Whole=true) and then filters what it returns.
 	Whole bool
 }
 

@@ -157,11 +157,18 @@ type EvalFootprint struct {
 	Torn bool
 }
 
-// EdgeSelector is one (relation type, direction) pair a traversal filtered
-// an adjacency node's edge list by. Direction uses the SAME vocabulary
+// EdgeSelector is one (relation type, direction) pair an adjacency node's edge
+// list was filtered by. Direction uses the SAME vocabulary
 // full.Direction.String() already produces ("out"/"in"/"both") — represented
 // here as a plain string, not full.Direction, because this package is
 // engine-neutral and must not import the full engine's AST types.
+//
+// Most selectors come from a traversal and name the direction that hop walked.
+// A "both" selector may also be recorded by the engine itself, for a relation
+// it read at a relation scope and then folded into a later whole read of the
+// same node: a scoped read answers in both directions, so the pin on what it
+// contributed has to be direction-blind or a link arriving on the unwalked
+// direction would sit in the composed list uncovered.
 type EdgeSelector struct {
 	RelType   string
 	Direction string
@@ -180,9 +187,10 @@ type EdgeSelector struct {
 // fingerprint (EvalFootprint.EdgeRevisions), coarser being the always-safe
 // direction. Recording stops once Fallback is set, so the Matched sets a
 // Fallback entry carries are exactly the typed hops that PRECEDED the untyped
-// one; each observed its relation at an earlier instant than the whole read,
-// so validation re-derives those sets as well rather than letting the
-// fingerprint stand for them.
+// one, plus any both-direction pin the engine recorded for a relation it
+// folded into that whole read. Each observed its relation at an earlier instant
+// than the whole read, so validation re-derives those sets as well rather than
+// letting the fingerprint stand for them.
 type EdgeSelectorFootprint struct {
 	Fallback bool
 	Matched  map[EdgeSelector]map[string]struct{} // selector -> matched EdgeIDs

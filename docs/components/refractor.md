@@ -797,11 +797,22 @@ A hub read is memoized per `(hub, relation)` for the life of the evaluation, so 
 read holds per key exactly as the whole memo holds it per node. It is footprinted as its
 **Matched sets** and never as a fingerprint: a scoped fingerprint is not comparable with a
 whole read's, so such a node carries no `EdgeRevisions` entry and the validator re-reads it
-at the same relation scope (below). **`REFRACTOR_HUB_READ_SCOPE=off`** restores the whole
-read — every typed hop drains a marked hub again, and its footprint carries the whole
-fingerprint as before. Like the switches beside it, it is a containment lever for an
-operator who believes a lens is missing edges, not a posture to deploy in, and it bounds the
-next event rather than healing a row already stale.
+at the same relation scope (below).
+
+The relation is the memo key, and it stays the key even once the same node is read whole —
+by an untyped hop, or because the node stopped being marked mid-evaluation. Such a read is
+**composed** against the relations already pinned: each keeps the edges the hop that first
+crossed it saw, and only the rest of the node comes from the later read, so every hop's view
+of a relation is the first hop's view of that relation whatever order the hops arrive in.
+Because a scoped read answers in both directions, the composition footprints each relation
+it substituted under a **both-direction selector** of its own — the pin validation re-derives
+to catch a link arriving on a direction no hop walked, which the whole-read fingerprint,
+taken at the later instant, cannot see.
+
+**`REFRACTOR_HUB_READ_SCOPE=off`** restores the whole read — every typed hop drains a marked
+hub again, and its footprint carries the whole-read fingerprint. Like the switches beside it,
+it is a containment lever for an operator who believes a lens is missing edges, not a posture
+to deploy in, and it bounds the next event rather than healing a row already stale.
 
 ### Convergence sweep
 
@@ -1108,10 +1119,12 @@ edge identities, so a write to an unrelated relation on a shared hub is not
 drift — for a marked hub read at the hop's relation those identities are the
 node's whole footprint, since no comparable fingerprint exists. A node an
 untyped hop crossed is compared by whole fingerprint **and** by the matched sets
-of any typed hops that preceded that hop on it: those observed their relation at
-an earlier instant than the whole read, and only re-deriving them catches a
-write that landed in between. A node on that coarse path with no fingerprint at
-all is malformed and reports drift rather than passing unchecked.
+of any typed hops that preceded that hop on it, and by the both-direction pin
+recorded for any relation folded into that whole read: those observed their
+relation at an earlier instant than the whole read, and only re-deriving them
+catches a write that landed in between. A node on that coarse path with no
+fingerprint at all, or on the selector path with no selector at all, is
+malformed and reports drift rather than passing unchecked.
 
 One footprint can cover several evaluations. A multi-walk lens runs each branch
 separately, with its own read memo, and the branch footprints are merged; two

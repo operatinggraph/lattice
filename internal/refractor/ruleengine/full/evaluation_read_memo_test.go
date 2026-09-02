@@ -33,6 +33,7 @@ func newScopedTestExecutor(adjKV, coreKV *substrate.KV, mode HubReadScopeMode) *
 		edgeRevisions: map[string]uint64{},
 		hubEdges:      map[hubKey][]adjacency.EdgeEntry{},
 		hubReadScope:  New().WithHubReadScopeMode(mode).hubReadScopeEnabled(),
+		edgeSelectors: map[string]*ruleengine.EdgeSelectorFootprint{},
 	}
 }
 

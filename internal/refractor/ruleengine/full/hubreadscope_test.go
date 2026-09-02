@@ -81,7 +81,7 @@ func TestExecutor_HubRead_TypedHop_FootprintsSelectorsOnly(t *testing.T) {
 	markNodeOverflowed(t, adjKV, roleID)
 	queued1 := putLink(t, reg, coreKV, "queuedFor", "task1", "role")
 	queued2 := putLink(t, reg, coreKV, "queuedFor", "task2", "role")
-	granted := putLink(t, reg, coreKV, "grantedBy", "perm1", "role")
+	putLink(t, reg, coreKV, "grantedBy", "perm1", "role")
 
 	wantRows := []string{vtxKey(reg, "task1"), vtxKey(reg, "task2")}
 	ec := ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "role")}}
@@ -117,12 +117,7 @@ func TestExecutor_HubRead_TypedHop_FootprintsSelectorsOnly(t *testing.T) {
 	require.Len(t, sel.Matched, 1, "a typed hop records exactly the one selector it consulted")
 	matched := sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}]
 	require.Equal(t, map[string]struct{}{queued1: {}, queued2: {}}, matched,
-		"and exactly the identities that passed it")
-	require.NotContains(t, matched, granted)
-	for selector := range sel.Matched {
-		require.NotEqual(t, "grantedBy", selector.RelType,
-			"a relation no hop followed is recorded by no selector")
-	}
+		"and exactly the identities that passed it — the hub's grantedBy link is in neither")
 
 	// The way back: the same evaluation on the whole-node read.
 	whole := New().WithHubReadScopeMode(HubReadScopeModeOff)
@@ -311,13 +306,18 @@ func edgeIDs(edges []adjacency.EdgeEntry) []string {
 // memo-key invariant: the memo key is the RELATION, and a whole read is the
 // union of every relation's read rather than a value that may overwrite one.
 //
-// A typed hop pins relation A on a marked hub at t1. An untyped hop then reads
-// the same hub WHOLE at t2, and that read's own view of A is a later instant
-// than the one an earlier hop already bound rows from. Composing the whole read
-// against the pinned relation is what keeps the evaluation's view of A at t1
-// — without it the whole entry would shadow the hub memo and a third hop on A
-// would see t2, which is exactly the two-instants-in-one-evaluation defect the
-// memo exists to close.
+// A typed hop pins grantedBy on a marked hub at t1. An untyped hop then reads
+// the same hub WHOLE at t2, and that read's own view of grantedBy is a later
+// instant than the one an earlier hop already bound rows from. Composing the
+// whole read against the pinned relation is what keeps the evaluation's view of
+// grantedBy at t1 — without it the whole entry would shadow the hub memo and a
+// third hop on grantedBy would see t2, which is exactly the
+// two-instants-in-one-evaluation defect the memo exists to close.
+//
+// grantedBy is the pinned relation rather than queuedFor so the sort is load
+// bearing: the composition appends the pinned edges after the survivors, and a
+// `lnk.permission.…` edge appended after a surviving `lnk.task.…` one leaves
+// the list out of order until SortEdges puts it back.
 func TestExecutor_HubRead_WholeReadComposesOverPinnedRelations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -326,45 +326,45 @@ func TestExecutor_HubRead_WholeReadComposesOverPinnedRelations(t *testing.T) {
 	reg := newFixtureRegistry()
 	putVertex(t, reg, coreKV, "role", "role", nil)
 	putVertex(t, reg, coreKV, "task1", "task", nil)
-	putVertex(t, reg, coreKV, "task2", "task", nil)
 	putVertex(t, reg, coreKV, "perm1", "permission", nil)
+	putVertex(t, reg, coreKV, "perm2", "permission", nil)
 
 	roleID := reg.idByName["role"]
 	markNodeOverflowed(t, adjKV, roleID)
 	queued1 := putLink(t, reg, coreKV, "queuedFor", "task1", "role")
-	granted := putLink(t, reg, coreKV, "grantedBy", "perm1", "role")
+	granted1 := putLink(t, reg, coreKV, "grantedBy", "perm1", "role")
 
 	ex := newScopedTestExecutor(adjKV, coreKV, HubReadScopeModeOn)
 
-	// t1 — a typed hop pins queuedFor.
-	pinned, err := ex.fetchEdges(roleID, "queuedFor")
+	// t1 — a typed hop pins grantedBy.
+	pinned, err := ex.fetchEdges(roleID, "grantedBy")
 	require.NoError(t, err)
-	require.Equal(t, []string{queued1}, edgeIDs(pinned))
+	require.Equal(t, []string{granted1}, edgeIDs(pinned))
 
-	// A second queuedFor link commits between the two hops.
-	putLink(t, reg, coreKV, "queuedFor", "task2", "role")
+	// A second grantedBy link commits between the two hops.
+	putLink(t, reg, coreKV, "grantedBy", "perm2", "role")
 
-	// t2 — an untyped hop reads the hub whole. Its queuedFor subset must be
+	// t2 — an untyped hop reads the hub whole. Its grantedBy subset must be
 	// the t1 answer, and every other relation must be present as the whole
 	// read found it.
 	whole, err := ex.fetchEdges(roleID, "")
 	require.NoError(t, err)
-	require.Equal(t, []string{queued1}, edgeIDs(edgesOfRelation(whole, "queuedFor")),
+	require.Equal(t, []string{granted1}, edgeIDs(edgesOfRelation(whole, "grantedBy")),
 		"the whole read must not overwrite a relation this evaluation already pinned")
-	require.Equal(t, []string{granted}, edgeIDs(edgesOfRelation(whole, "grantedBy")),
+	require.Equal(t, []string{queued1}, edgeIDs(edgesOfRelation(whole, "queuedFor")),
 		"a relation nothing pinned comes through as the whole read found it")
 	require.True(t, sort.SliceIsSorted(whole, func(i, j int) bool {
 		if whole[i].EdgeID != whole[j].EdgeID {
 			return whole[i].EdgeID < whole[j].EdgeID
 		}
 		return whole[i].Direction < whole[j].Direction
-	}), "the composed list must be in the order one read would have produced")
+	}), "the composed list must be in the order one read of the node would have produced")
 
 	// A third hop on the pinned relation is served the same answer as the
 	// first, whichever memo now holds it.
-	again, err := ex.fetchEdges(roleID, "queuedFor")
+	again, err := ex.fetchEdges(roleID, "grantedBy")
 	require.NoError(t, err)
-	require.Equal(t, []string{queued1}, edgeIDs(edgesOfRelation(again, "queuedFor")),
+	require.Equal(t, []string{granted1}, edgeIDs(edgesOfRelation(again, "grantedBy")),
 		"every hop's view of a relation must equal the FIRST hop's view of that relation")
 
 	require.Contains(t, ex.edgeRevisions, roleID,
@@ -409,10 +409,14 @@ func TestExecutor_HubRead_TypedThenUntypedHop_Footprints(t *testing.T) {
 	sel, ok := fp.EdgeSelectors[roleID]
 	require.True(t, ok)
 	require.True(t, sel.Fallback, "the untyped hop consumes every edge, so the node falls back")
-	require.Len(t, sel.Matched, 1,
-		"recordEdgeSelector stops at Fallback, so the sets present are exactly the typed hops that preceded it")
+	require.Len(t, sel.Matched, 2,
+		"recordEdgeSelector stops at Fallback, so what remains is the typed hop that preceded it plus the composition's own pin")
 	require.Equal(t, map[string]struct{}{queued1: {}},
-		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}])
+		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}],
+		"the typed hop's own directional set")
+	require.Equal(t, map[string]struct{}{queued1: {}},
+		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "both"}],
+		"and the both-direction pin the composition wrote for the relation it substituted")
 	require.Contains(t, fp.EdgeRevisions, roleID,
 		"the untyped hop read the hub whole, so a comparable fingerprint IS recorded")
 
@@ -433,4 +437,59 @@ func edgesOfRelation(edges []adjacency.EdgeEntry, name string) []adjacency.EdgeE
 		}
 	}
 	return out
+}
+
+// TestExecutor_HubRead_CompositionPinsBothDirections is the composition's own
+// footprint pin. A relation-scoped read answers in BOTH directions, so the
+// composition substitutes the relation entire — but a typed hop records only
+// the direction it walked, and an untyped hop sets Fallback and records
+// nothing more. A link of that relation arriving on the unwalked direction
+// would then sit in the composed list covered by no recorded set, under a
+// fingerprint taken at the LATER instant that cannot see it either.
+//
+// So the composition writes its own both-direction selector for every relation
+// it substitutes, and that is what a validator re-derives.
+func TestExecutor_HubRead_CompositionPinsBothDirections(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "role", "role", nil)
+	putVertex(t, reg, coreKV, "task1", "task", nil)
+	putVertex(t, reg, coreKV, "task2", "task", nil)
+
+	roleID := reg.idByName["role"]
+	markNodeOverflowed(t, adjKV, roleID)
+	// The hub is the TARGET here, so this edge is inbound at the hub and the
+	// hop below walks it "in".
+	queued1 := putLink(t, reg, coreKV, "queuedFor", "task1", "role")
+
+	ex := newScopedTestExecutor(adjKV, coreKV, HubReadScopeModeOn)
+
+	// t1 — a typed hop walks queuedFor inbound and records that direction.
+	_, err := ex.fetchEdges(roleID, "queuedFor")
+	require.NoError(t, err)
+	ex.recordEdgeSelector(roleID, RelPattern{Type: "queuedFor", Direction: DirIn}, ex.hubEdges[hubKey{roleID, "queuedFor"}])
+
+	// A queuedFor link arrives on the OTHER direction: the hub is the source.
+	putLink(t, reg, coreKV, "queuedFor", "role", "task2")
+
+	// t2 — an untyped hop reads the hub whole, composing over queuedFor.
+	whole, err := ex.fetchEdges(roleID, "")
+	require.NoError(t, err)
+	ex.recordEdgeSelector(roleID, RelPattern{Type: "", Direction: DirBoth}, whole)
+
+	sel := ex.edgeSelectors[roleID]
+	require.NotNil(t, sel)
+	require.True(t, sel.Fallback, "the untyped hop falls the node back")
+	require.Equal(t, map[string]struct{}{queued1: {}},
+		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}],
+		"the typed hop's own directional set is unchanged")
+	require.Equal(t, map[string]struct{}{queued1: {}},
+		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "both"}],
+		"and the composition pins the relation in BOTH directions at the instant it was read — the new outbound link is absent")
+
+	require.NotContains(t, edgeIDs(whole), "lnk.role."+roleID+".queuedFor.task."+reg.idByName["task2"],
+		"the composed list holds the pinned relation as t1 saw it, in both directions")
 }

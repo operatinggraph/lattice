@@ -103,11 +103,11 @@ func TestMergeFootprints_MatchedSetDisagreement_IsTorn(t *testing.T) {
 // It also pins that the merged surface is exactly what the union has always
 // produced, so nothing but the flag changed.
 func TestMergeFootprints_NoDisagreement_IsNotTorn(t *testing.T) {
-	const sharedKey = "vtx.identity.TmfJdentityDdddddddd"
-	const branch0Key = "vtx.role.TmfJroLeAaaaaaaaaaaa"
-	const branch1Key = "vtx.role.TmfJroLeBbbbbbbbbbb"
-	const agreeNode = "TmfJdentityEeeeeeeee"
-	const splitNode = "TmfJdentityFffffffff"
+	sharedKey := "vtx.identity." + hubNanoID(t, "mfd")
+	branch0Key := "vtx.role." + hubNanoID(t, "mfra")
+	branch1Key := "vtx.role." + hubNanoID(t, "mfrb")
+	agreeNode := hubNanoID(t, "mfe")
+	splitNode := hubNanoID(t, "mff")
 
 	merged := mergeFootprints([]ruleengine.EvalFootprint{
 		{
@@ -165,9 +165,9 @@ func TestMergeFootprints_TornInputCarriesThrough(t *testing.T) {
 // for a single-branch lens, but the merge must not invent a conflict if it
 // ever is.)
 func TestMergeFootprints_SingleBranch_IsNeverTorn(t *testing.T) {
-	const nodeID = "TmfJdentityHhhhhhhhh"
+	nodeID := hubNanoID(t, "mfh")
 	merged := mergeFootprints([]ruleengine.EvalFootprint{{
-		NodeRevisions: map[string]uint64{"vtx.role.TmfJroLeCcccccccccc": 5},
+		NodeRevisions: map[string]uint64{"vtx.role." + hubNanoID(t, "mfrc"): 5},
 		EdgeRevisions: map[string]uint64{nodeID: 6},
 		EdgeSelectors: map[string]ruleengine.EdgeSelectorFootprint{
 			nodeID: selectorFP(false, holdsRoleOut, "lnk.a", "lnk.b"),
@@ -215,4 +215,43 @@ func TestFootprintValid_UntornFootprintOverNilKVs_WouldRead(t *testing.T) {
 	require.Panics(t, func() {
 		_, _ = p.footprintValid(context.Background(), fp)
 	}, "an untorn footprint must reach a KV read — otherwise the torn case proves nothing")
+}
+
+// TestFootprintValid_SelectorPathWithNoSelectors_IsMalformed pins the selector
+// path's own fail-closed guard, the twin of the coarse path's missing-
+// fingerprint one. An entry that is not Fallback and names no selector has
+// nothing to compare: the whole fingerprint is deliberately not compared on
+// this path, and a scoped re-read of an empty relation set reads nothing at
+// all — so validating would confirm a node the pass never looked at.
+//
+// recordEdgeSelector never produces the shape, but mergeFootprints mints an
+// empty Matched map for every node it folds, so it is one nil-Matched branch
+// input away.
+//
+// Nil Core and Adjacency KV handles prove no read happened: any read path
+// would nil-dereference, so a clean false can only mean the guard returned
+// first (TestFootprintValid_UntornFootprintOverNilKVs_WouldRead is the control
+// that a footprint reaching a read does panic).
+func TestFootprintValid_SelectorPathWithNoSelectors_IsMalformed(t *testing.T) {
+	p := &Pipeline{coreKV: nil, adjKV: nil}
+	nodeID := hubNanoID(t, "mfz")
+
+	for _, tc := range []struct {
+		name    string
+		matched map[ruleengine.EdgeSelector]map[string]struct{}
+	}{
+		{"empty Matched, the shape mergeFootprints mints", map[ruleengine.EdgeSelector]map[string]struct{}{}},
+		{"nil Matched", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := ruleengine.EvalFootprint{
+				EdgeSelectors: map[string]ruleengine.EdgeSelectorFootprint{
+					nodeID: {Fallback: false, Matched: tc.matched},
+				},
+			}
+			valid, err := p.footprintValid(context.Background(), fp)
+			require.NoError(t, err)
+			require.False(t, valid, "a selector entry naming no selector is malformed and must fail closed")
+		})
+	}
 }
