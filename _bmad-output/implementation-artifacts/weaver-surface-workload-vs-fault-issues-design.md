@@ -1,8 +1,8 @@
 # Weaver — separate the WORKLOAD population from the FAULT population in the issue cache
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-01 · Lattice lane
-Board row: *[Weaver] The per-row Health budget admits by ARRIVAL, so a routine `surface` family evicts
-non-re-derivable facts* (★★ · M).
+**Status: ✅ RATIFIED by Andrew 2026-09-02 — "agreed - take the trade": a `surface` gap raises one counted entry per (target, gap column); per-row identity stays in the target's projected row set. One fire, size M, Increment 1 first. Contract #10 §10.8's `surface` clause of record is in §6 and lands WITH the fire's commit (a cardinality promise the runtime does not yet keep is not committed ahead of its build — Andrew, 2026-09-01); nothing is staged. Winston's adjudications: the `gapOpen:` key family; nested per-(target, family) refusal counters with a heartbeat-boundary reset; the tombstone leg clears every column set; `since` on the per-column entry means when the column last went from no open rows to some.** · Designer fire 2026-09-01 · Lattice lane
+Board row: *[Weaver] One per-target issue budget is shared by the WORKLOAD and FAULT populations*
+(★★ · M).
 
 ---
 
@@ -13,49 +13,53 @@ with different cardinality laws: `surface` gap entries, one per *open row of bus
 other per-row entry, one per *broken row*. A healthy backlog of 500 unclaimed tasks fills the budget and
 every fault raised afterwards for that target is refused. This design takes the workload population out
 of the issue cache entirely — a `surface` gap raises **one** issue per (target, gap column) carrying the
-count of rows holding it open — so the budget bounds only the fault families it was sized for, and then
-repairs the two log seams a refusal currently inverts.
+count of open rows that instance observes — so the budget bounds only the fault families it was sized
+for, and then repairs the two log seams a refusal currently inverts.
 
 **One judgement call, and it is yours.** Inc 1 trades **per-row identity in Health-KV for a surface gap**
 for a per-column count. My recommendation is to take the trade: the identity is not lost, it is
 *relocated to where it is already authoritative* (the projected row set the surface gap is computed
-from), the only Health-side consumer already fails past 50 entries, and Loupe's entity page already
-renders the same fact from the row itself (§7.2). But "which rows are awaiting a decision" is a product
-question about what an operator reads on the Weaver page, so it is flagged rather than adjudicated.
+from), the one surface that loses it already fails past 50 entries, and Loupe's entity page already
+renders the same fact from the row itself. Loupe's other two issue surfaces and every other Health-KV
+reader improve or are unchanged (§7.2). But "which rows are awaiting a decision" is a product question
+about what an operator reads on the Weaver page, so it is flagged rather than adjudicated.
 
 **Frozen-contract change: yes, one clarifying sentence, staged UNCOMMITTED in `main`.**
 `docs/contracts/10-orchestration-weaver.md` §10.8, the `surface` action row. Today it reads
 *"raises a Contract #5 §5.5 `issues[]` entry keyed `issueCode`"* — singular, and on my reading already
-per gap column. The edit makes the cardinality explicit (one entry per target + gap column, carrying the
-count of rows currently holding the column open) so that what Inc 1 changes is a promise a reader can
-check rather than an implementation detail nobody wrote down. Affected consumers: §6.
+per gap column. The edit makes the cardinality explicit (one entry per target + gap column, carrying a
+count the contract bounds honestly rather than over-promises — §6 has the exact sentence) so that what
+Inc 1 changes is a promise a reader can check rather than an implementation detail nobody wrote down.
+Affected consumers: §6.
 
 **No architectural fork.** No new engine, no new plane, no Core-KV read, no lens. The one alternative
-that would have been a fork — a re-derivability-ranked admission policy, which is what the board row
-prescribed — is **refuted** in §8, on the row's own scenario.
+that would have been a fork — a re-derivability-ranked admission policy, which is what the filing
+prescribed — is **refuted** in §8, on the filing's own scenario.
 
 ---
 
 ## 1. Problem + intent
 
-### 1.1 What the row said, and what grounding changed
+### 1.1 What the filing said, and what grounding changed
 
 The row was filed by the `weaver-decline-retry-substrate-native` close pass
 (`_bmad-output/implementation-artifacts/weaver-decline-retry-substrate-native-design.md:1327-1344`),
 which stated the trade it was shipping rather than discovering it later. That filing was right about the
-mechanism and wrong about two of its consequences. Both corrections are load-bearing, so they are stated
-first.
+mechanism and wrong about three of its consequences. All three corrections are load-bearing, so they are
+stated first.
 
-| The row's claim | Verdict | Evidence |
+| The filing's claim | Verdict | Evidence |
 |---|---|---|
 | `rowIssueCapPerTarget` = 500 is **one** per-target budget over `gap:`/`data:`/`template:`/`sweep:`, admission-ordered | **Confirmed** | `health.go:62`; `rowIssueTarget` `evaluator.go:2075-2093`; `setSince` `health.go:236-257` |
-| Released only when the target's per-row set reaches **zero** | **Confirmed** | `releaseRowIssueLocked` `health.go:282-291` |
+| Released only when the target's per-row set reaches **zero** | **CONFLATES two things.** A *slot* is released on every `clear` of a tracked per-row entry, so admission resumes the moment the target is back under the cap. What waits for zero is the *overflow entry* and the refusal accounting behind it | `releaseRowIssueLocked` `health.go:282-291` (decrement, unconditional) vs `retireRowIssueOverflowLocked` `health.go:296-301` (called only at zero); `docs/observability/health-kv-schema.md:1035-1036` states both halves — slots free as entries retire, *"admission resumes as soon as the target is back under the cap"* |
 | A high-volume `surface` family fills it | **Confirmed**, and this is the whole mechanism | `evaluator.go:316-334`; §3 C1 |
 | A later `RowDataError` is refused and lost | **Confirmed** for the `data:` family and for `sweep:` `CorruptMark` | `evaluator.go:55-58`, `:101`; `temporal.go:120,137,158`; `reconciler.go:1152-1160` |
 | …**"voiding §10.8's exhaustion-raise for that target"** | **FALSE** | `GapBudgetExhausted` is re-derived every sweep pass — `escalateExhaustedGap` is called from `sweepCount` (`reconciler.go:634`) and `reclaim` (`reconciler.go:943`), not only from lane-1 (`evaluator.go:195`), and `defaultSweepInterval` is one minute (`reconciler.go:21`). A refused exhaustion raise is **delayed, not lost**: it is re-attempted every minute and lands whenever a slot frees. Contract #10-substrate:189-191 says as much in the contract text — the fact is *"re-derived for as long as the suppression lasts"*. |
 | "…**evicts** non-re-derivable facts" | **FALSE as worded** | `setSince` never evicts a tracked entry to admit a new one; it refuses the *new* key (`health.go:238-252`). There is no eviction anywhere in the cache. |
 
-The board row is corrected as part of this fire (§10).
+The lane row carries the corrected mechanism (`backlog/lattice.md:60`). Its one remaining inaccuracy is
+the same slot/overflow conflation row 2 above fixes — the row still reads *"released only at zero"* — and
+the lead corrects that phrase at ratification, with the contract edit and the row's state.
 
 ### 1.2 The defect, restated
 
@@ -85,8 +89,16 @@ level from cache state the cap has just made unreachable.
 | `issues.set` bare (`evaluator.go:331`) | `gap:` surface | Health entry, **no log at any level** | nothing, in either plane | **silent** |
 | `issues.set` after a `Warn` (`evaluator.go:55`, `:101`; `temporal.go:120`, `:137`) | `data:` | Warn + latch | Warn on that one delivery, then Ack — nothing re-raises | fact survives only in the log, for one line |
 | `alert` (`temporal.go:158`; `reconciler.go:1159`) | `data:` error, `sweep:` | Error + latch, every call | Error survives; latch lost. `deleteCorrupt` has already **deleted** the corrupt key, so nothing recreates the fault | fact survives only in the log |
-| `alertStanding` (`evaluator.go:1572`) | `gap:` `GapBudgetExhausted` | arrival at **Error**, continuation at **Debug** (`evaluator.go:1775-1781`) | `standingAs` is false for a key the cache never tracked, so **every** re-derivation logs at Error — one per sweep pass, ~1/min, for the life of the retry budget (≈128 h at the defaults) | **permanent Error flood**, arriving exactly when the target is worst off — the flood `alertStanding` exists to prevent |
+| `alertStanding` (`evaluator.go:1572`) | `gap:` `GapBudgetExhausted` | arrival at **Error**, continuation at **Debug** (`evaluator.go:1775-1781`) | `standingAs` is false for a key the cache never tracked, so **every** re-derivation that finds the target still at cap logs at Error — one per sweep pass, ~1/min | **Error flood** for as long as the target is at cap on each pass, arriving exactly when the target is worst off — the flood `alertStanding` exists to prevent |
 | `alertPaced` (`evaluator.go:708`) | `template:` | loud on arrival, then one loud record per `logPaceInterval` (1 h) | `pacedRaise` returns `loud=false` unconditionally for a refused key (`health.go:381-389`), so the fault logs at **Debug forever** | **permanent silence** in both planes |
+
+How long that flood runs is a property of the *filler*, not of the seam. Each repaired row hands a slot
+back (`releaseRowIssueLocked`), so on a target whose per-row entries churn the flood is intermittent —
+loud only on the passes that find the cap full. The surface population is the case with no churn: a
+static backlog of 500 open rows frees nothing until the work itself closes, so the flood runs for the
+life of that backlog, and for an exhaustion fact that is up to the retry budget's own span (≈128 h at
+the defaults). Unbounded is the worst case, not the general one — and it is exactly the case Inc 1
+removes.
 
 And a fourth, in the overflow entry itself: `c.refused[target]` counts **raises**, not distinct facts
 (`health.go:241`), so under the `alertStanding` row above it grows by one per minute per refused gap and
@@ -116,23 +128,30 @@ Every row is the code that *does* the thing, never a comment that describes it.
 |---|---|
 | The budget constant, 500, and its stated job | `internal/weaver/health.go:46-62` |
 | Admission decision + refusal + severity fold | `internal/weaver/health.go:236-257` |
-| Release only at zero | `internal/weaver/health.go:282-291` |
+| `setLocked` — the write past the cap decision; it PRESERVES an existing `since` | `internal/weaver/health.go:259-268` |
+| `clear` — retires the entry and DELETES its `since` (so a re-raise after the last close is a fresh arrival) | `internal/weaver/health.go:331-343` |
+| Slot released on every `clear`; only the OVERFLOW entry waits for zero | `releaseRowIssueLocked` `internal/weaver/health.go:282-291`; `retireRowIssueOverflowLocked` `:296-301`; `docs/observability/health-kv-schema.md:1035-1036` |
 | The separate pace budget, and its unconditional not-loud on refusal | `internal/weaver/health.go:372-389` |
 | The family membership test — key SHAPE, two separators below the target | `internal/weaver/evaluator.go:2034-2093` |
-| Family prefixes | `internal/weaver/evaluator.go:1836-1846` |
+| Family prefixes — **ten** of them | `internal/weaver/evaluator.go:1835-1846` |
 | The surface arm: raise + `Ack`, no log | `internal/weaver/evaluator.go:316-334` |
 | Surface has no mark and no `__count`, so no sweep leg revisits it | `internal/weaver/evaluator.go:585-587`; `reconciler.go:701-707` |
 | Exhaustion raise, and its three call sites | `internal/weaver/evaluator.go:1572`; `reconciler.go:634`, `:943`; `evaluator.go:195` |
 | Sweep cadence = 1 minute | `internal/weaver/reconciler.go:21` |
 | `alertStanding` arrival test | `internal/weaver/evaluator.go:1775-1781` |
 | `alertPaced` loudness | `internal/weaver/evaluator.go:1819-1830` |
-| Lane-1 consumer: `DeliverLastPerSubject`, `MaxAckPending` 1024, no explicit `AckWait` (30 s default) | `internal/weaver/engine.go:477-490`, `:49`; `internal/substrate/consumer_supervisor_pump.go:715` |
+| Lane-1 consumer: one durable PER TARGET under a shared name prefix, `DeliverLastPerSubject`, `MaxAckPending` 1024, no explicit `AckWait` (30 s default) | `internal/weaver/engine.go:477-490`, `:49`; `internal/substrate/consumer_supervisor_pump.go:715` |
+| `markCandidateColumns` on a TOMBSTONE yields the playbook's gap keys only — the row contributes nothing | `internal/weaver/evaluator.go:1696-1712` |
+| The `gap:` prefix clear on a tombstone, which retires an orphan-column entry no per-key clear can reach | `internal/weaver/evaluator.go:1009-1011` |
+| An Augur escalation dispatches (`actionDirectOp`), so it is never a `surface` arm | `internal/weaver/strategist.go:660-673` |
 | Long redelivery floor = 5 min | `internal/substrate/consumer.go:86` |
-| Surface entry retirement legs | `retireClosedGapIssues` `evaluator.go:1191-1194`; `clearClosedMarks` `evaluator.go:989`; prefix teardowns `evaluator.go:1911-1919` |
+| Surface entry retirement legs | `retireClosedGapIssues` `evaluator.go:1191-1194`, called from `clearClosedMarks`' candidate walk `evaluator.go:1064`; the `row == nil` prefix clears `evaluator.go:1009-1011`; prefix teardowns `evaluator.go:1911-1919` |
 | Shared latch: Surface / GapBudgetExhausted / GapEscalatedToAugur all sit at `issueKeyGapEntity` | `internal/weaver/evaluator.go:1526-1560` (the `surfaceOnlyGap` guard exists *because* of this) |
 | Listing tiers, and the test that forces a new family to be classified | `internal/weaver/health.go:944-1002` (`TestListingRank_EveryIssueFamilyIsClassified`) |
 | Document cap = 50, severity-first, honest truncation entry | `internal/weaver/health.go:36`, `:921-942` |
-| Loupe's per-entity issue attribution — substring match on the issue MESSAGE | `cmd/loupe/weaver.go:396-429`, called at `:1128` |
+| Loupe's issue attribution — whole-WORD match on the issue MESSAGE, three call sites | `issuesNaming` + `messageNamesToken` `cmd/loupe/weaver.go:388-428`, called at `:746` (target detail), `:1128` (entity detail), `:1244` (targets list) |
+| The targets-list chip and sort rank fed by that third call site | `cmd/loupe/web/js/views/weaver.js:104`; `cmd/loupe/web/js/logic/weaver.js:36` |
+| Loupe reports Weaver heartbeats **per instance** and deliberately never merges them | `cmd/loupe/weaver.go:315-318` |
 | Loupe's entity page already renders a surface gap's `open` state from the row | `cmd/loupe/weaver.go:1109-1119` |
 | Loupe deliberately does NOT duplicate the Health issue into `/api/tasks` | `_bmad-output/implementation-artifacts/loupe-f17-queue-observability-ux.md:56` |
 | `contractionStats` — the shipped precedent for a per-(target, entity) membership set with an honest lower-bound posture | `internal/weaver/contraction.go:18-76` |
@@ -179,6 +198,8 @@ grep -rn "UnroutedTasks\|StaleAssignedTask\|LeaseDecisionAwaiting\|issuesNaming"
 | Hit | Class | Survives Inc 1? |
 |---|---|---|
 | `cmd/loupe/weaver.go:1128` `d.Issues = issuesNaming(hbs, entityID)` | **the one live per-entity consumer** — matches the entity id as a whole word inside the issue *message* | Loses the surface entry. §7.2 prices it. |
+| `cmd/loupe/weaver.go:746` `Issues: issuesNaming(hbs, targetID)` | target detail's issue panel — matches the TARGET id | yes, and improves: a truncated sample of identical entries becomes one per column. §7.2 |
+| `cmd/loupe/weaver.go:1244` `issues := issuesNaming(hbs, t.TargetID)` → `Issues: len(issues)` | targets list — feeds the "N issues" chip (`web/js/views/weaver.js:104`) and the sort rank (`web/js/logic/weaver.js:36`) | yes — the count falls to one per column and the target may sort down. No code change needed. §7.2 |
 | `cmd/loupe/weaver.go:184`, `:347` | reads `issues[]` by code/severity/message | yes — code and severity unchanged |
 | `internal/unroutedconvergence/unroutedconvergence_test.go:247-252` | e2e: `hasIssue("UnroutedTasks")` / `issueCleared(...)` — asserts on the **code only** | yes, unchanged (build tag `unroutedconvergence`, `make test-unrouted-convergence`) |
 | `internal/weaver/evaluator_internal_test.go:1303-1332`, `:1471`, `:1577` | asserts the entry at a per-entity key | **must be migrated** — owned by Inc 1 |
@@ -223,17 +244,20 @@ one entry per open row, each counted against the 500-slot budget, each carrying 
 issue at a new target-scoped key:
 
 - key `gapOpen:<targetId>.<gapColumn>` — a **new family prefix**, `issuePrefixGapOpen`, added beside the
-  nine in `evaluator.go:1836-1846`.
+  ten in `evaluator.go:1835-1846`.
 - code and severity: the package's declared `issueCode` / `issueSeverity`, unchanged.
 - message: names the target, the column and the **count of rows this engine instance currently observes
   holding it open** — e.g. `target unroutedTasks: 137 rows have column missing_claim true`.
-- the entry is written when the set is non-empty and retired when it empties.
+- the entry is rewritten on **every** membership change, add and remove alike, so the count an operator
+  reads is the count the instance holds; only the remove that empties the set retires it (§5).
 
 Four properties fall out of the key shape and need no new code:
 
 1. **It is not counted against the budget.** `rowIssueTarget` (`evaluator.go:2075-2093`) requires two
    separators below the target; `gapOpen:<t>.<col>` has one. The workload population leaves the budget by
    construction, not by a new exemption — the same test that already excludes the `__capped` overflow entry.
+   Because the *shape* is what carries the property, §9 asserts the one input that would break it: a gap
+   column carrying a `.` gives the key two separators and would re-enter the budget.
 2. **The shared-latch collision disappears.** Surface, `GapBudgetExhausted` and `GapEscalatedToAugur`
    currently occupy one latch, which is why `escalateExhaustedGap` needs the `surfaceOnlyGap` bail
    (`evaluator.go:1526-1560`). After Inc 1 they are three separate keys. **The guard stays** — its
@@ -254,17 +278,27 @@ population, the question this set must answer. Reading it (per the mirrors-X rul
 new set inherits verbatim — only a *transition* changes the count, so a CDC redelivery of an unchanged row
 is a no-op; a row is admitted only once observed open, never on a first non-open sighting; and the count is
 an honest **lower bound** after a restart, because a lane-1 durable that survives resumes from its acked
-floor and `ReplayTarget` is the verb that re-derives it in full. That last point is not a regression: the
+floor and `ReplayTarget` is the verb that re-derives it in full (`contraction.go:25-32` states exactly
+that, for exactly this reason, about the count it already keeps). That last point is not a regression: the
 per-entity entries it replaces have the identical restart residual, already documented as such
 (`weaver-decline-retry-substrate-native-design.md:1346-1353`).
 
 **Raise and retire ride the call sites that already exist.** The raise is `evaluator.go:331`'s own line.
-The retirements are `retireClosedGapIssues` (`evaluator.go:1191-1194`, reached from `clearClosedMarks`
-when *this* entity's column goes false or the row is tombstoned) and the two prefix teardowns
-(`issueKeyTargetPrefixes`, `evaluator.go:1911-1919`, for a target leaving by Revoke or by
-`reconcileConsumers` removal). Each becomes a set-remove; the issue entry is retired by whichever remove
-empties the set. **The per-entity write and its clears are REMOVED, not left beside the new one** — a
-second mechanism next to the first would leave the budget filler exactly where it is.
+The retirements are `retireClosedGapIssues` (`evaluator.go:1191-1194`, reached from `clearClosedMarks`'
+candidate walk when *this* entity's column goes false), `clearClosedMarks`' own `row == nil` leg for a
+tombstoned entity (`evaluator.go:1009-1011`, where the `gap:` prefix clear already runs), and the two
+prefix teardowns (`issueKeyTargetPrefixes`, `evaluator.go:1911-1919`, for a target leaving by Revoke or by
+`reconcileConsumers` removal). Each becomes a set-remove — the tombstone one across all of the target's
+column sets, for the reason §5 gives — and the issue entry is retired by whichever remove empties a set.
+**The per-entity write and its clears are REMOVED, not left beside the new one** — a second mechanism next
+to the first would leave the budget filler exactly where it is.
+
+**One shipped doc comment is corrected in the same increment.** `rowIssueCapPerTarget`'s own comment says
+the cap bounds *"the `data:` and `template:` families together"* (`health.go:46-48`) while `rowIssueTarget`
+covers **four** — `gap:` and `sweep:` as well — and says so at length in its own comment
+(`evaluator.go:2034-2074`). A builder reading the constant is told the bound is narrower than it is, which
+is the exact misreading that makes the surface population look harmless. §7.4 names the same drift in the
+prior design doc; this fixes it where it is actually read.
 
 ### 4.2 Increment 2 — a refusal must not invert a seam's loudness
 
@@ -274,10 +308,13 @@ behave. Three changes, all small, all at the seam rather than in the cache:
 
 1. **`setSince` and `pacedRaise` report the refusal.** Both already take the decision; neither tells the
    caller. Return it.
-2. **`alertStanding` treats a refused key as standing.** Not tracked ⇒ `standingAs` is false ⇒ Error today,
-   forever, once a minute. The rule that restores the intent is: a refused raise is loud **once per
-   (target, family) per `logPaceInterval`**, and Debug otherwise. The arrival is still heard; the flood
-   ends. This needs one small counter beside `refused`, keyed the same way — bounded by targets, not rows.
+2. **`alertStanding` treats a refused key as standing.** Not tracked ⇒ `standingAs` is false ⇒ Error once
+   a minute for as long as the target sits at cap. The rule that restores the intent is: a refused raise is
+   loud **once per (target, family) per `logPaceInterval`**, and Debug otherwise. The arrival is still
+   heard; the flood ends. This needs one small clock beside `refused`, keyed per **(target, family)** — a
+   nested `map[target]map[family]…`, so `retireRowIssueOverflowLocked`'s existing `delete(m, target)`
+   (`health.go:296-301`) drains it whole and no new teardown leg is invented. Bounded by targets × the four
+   per-row families, not by rows.
 3. **`alertPaced` paces a refused key on the same (target, family) clock** rather than returning
    `loud=false` unconditionally. Today a refused `template:` fault is Debug for the life of the process;
    after, it is audible at least once an hour, which is what the seam promises everywhere else. Note the
@@ -287,7 +324,9 @@ behave. Three changes, all small, all at the seam rather than in the cache:
    those rows project again"*; C3 shows 3 of the 11 raise sites re-derive on their own (the 5-minute long
    floor and the 1-minute sweep). The message states what is true per family, and reports the refusal
    count as **refusals since the last heartbeat** rather than a monotone total that a re-derived fault
-   inflates by one a minute.
+   inflates by one a minute. That per-window count needs a boundary, and there is no existing one to
+   borrow: `snapshot()` (`health.go:504-517`) is a pure read with no reset leg. So the windowed counter is
+   reset where the heartbeat consumes it, and §5 carries its lifetime rather than treating it as free.
 
 ### 4.3 What this design does NOT do
 
@@ -307,9 +346,9 @@ column open. Lives in `internal/weaver/contraction.go` beside the structure it m
 |---|---|
 | **created** | lazily, at a target+column's first observed-open row |
 | **added** | in the `actionSurface` arm, on a *transition* to open only — a repeat delivery of an already-open row is a no-op (`contractionStats.observe`'s rule) |
-| **removed** | (a) that entity's column observed false — `clearClosedMarks`' candidate walk → `retireClosedGapIssues` (`evaluator.go:1064`); (b) the entity tombstoned — **the same candidate walk, not the entity prefix clear**: a `gapOpen:` key carries no entity segment, so `clearClosedMarks`' `row == nil` prefix clears (`evaluator.go:1009-1011`) cannot reach one. On an empty row `markCandidateColumns` yields the playbook's gap keys, which is a **superset** of every column a surface entry can exist at — the surface arm requires a playbook `gaps` entry (`evaluator.go:316`) — so every membership is removed by the walk. The orphan-column reason the `gap:` prefix clear exists does not apply to this family; (c) the target leaving — Revoke or `reconcileConsumers` removal, via `issueKeyTargetPrefixes` extended with the new prefix |
-| **issue entry** | written whenever the set is non-empty (message carries the live count); retired by whichever remove empties the set — never by a remove that merely shrinks it |
-| **carried across a `clear`** | n/a — unlike the `paced` map there is no clock here; the set *is* the fact, and a removal is evidence the row closed |
+| **removed** | (a) that entity's column observed false — `clearClosedMarks`' candidate walk → `retireClosedGapIssues` (`evaluator.go:1064`); (b) the entity tombstoned — on `row == nil`, the entity is removed from **every** column set of that target, which is the in-memory analogue of the `gap:` prefix clear the same leg already runs (`evaluator.go:1009-1011`). The candidate walk cannot carry this: on a tombstone `markCandidateColumns` yields `target.Gaps` alone (the empty row contributes nothing — `evaluator.go:1696-1712`), so a column the playbook has since **dropped** never yields, and a membership recorded while it was still declared would leak with the entity gone and no leg able to reach it. That is precisely the orphan-column hazard the `gap:` prefix clear exists for, and the same answer applies; (c) the target leaving — Revoke or `reconcileConsumers` removal, via `issueKeyTargetPrefixes` extended with the new prefix |
+| **issue entry** | rewritten on **every** membership change — add and remove alike — through `issues.set`, so the count is always the set's current size. `setLocked` preserves an existing `since` (`health.go:259-268`), so a rewrite restates the count without disturbing the entry's age. Only the remove that empties the set retires it |
+| **carried across a `clear`** | n/a for a clock — unlike the `paced` map there is none here; the set *is* the fact, and a removal is evidence the row closed. What a retirement does carry is the `since`: `clear` deletes `c.since[key]` (`health.go:331-343`), so when the last row closes and a new one later opens, the entry arrives with a **fresh** `since`. That is the intended reading — see §6 |
 | **ordering** | none needed: the set is a membership, not a sample, so there is no admission order to promise |
 | **crash / restart** | empty, like the latch it replaces. Rebuilt by whatever lane-1 delivers afterwards, so the count is a **lower bound** until every open row re-projects; `ReplayTarget` is the verb that re-derives it in full. Identical residual to the shipped per-entity entries |
 | **reconnect** | untouched — in-memory, no substrate dependency |
@@ -317,9 +356,26 @@ column open. Lives in `internal/weaver/contraction.go` beside the structure it m
 | **upgrade** | a live upgrade starts the set empty; the count climbs back as rows redeliver. The pre-existing per-entity entries do not survive the binary change either, so nothing is stranded |
 | **loss of the structure** | degrades to a missing/low count, never to a wrong verdict — nothing gates on it, exactly as for `contractionStats` |
 
-Inc 2's refusal counter: one integer per (target, family) beside `refused`/`refusedWorst`, created and
-retired on those maps' existing legs (`retireRowIssueOverflowLocked`, `health.go:294-301`) — no new
-lifetime.
+**Why the tombstone sweep over the target's own column sets is complete.** A membership can only be
+recorded at a column whose playbook entry declares `action: "surface"` (`evaluator.go:316`), so the sets
+of one target are bounded by its declared columns and the entity appears in no other. The one path that
+dispatches at a column the playbook does not name — an Augur escalation — returns `Action: actionDirectOp`
+(`strategist.go:660-673`), never `actionSurface`, so it can never open a membership behind the playbook's
+back. The raise side is airtight; only the *remove* side needed the orphan handling above, because the
+playbook may change between the two.
+
+**Inc 2 adds two pieces of state, and one of them has a real lifetime.**
+
+| State | Boundary | Rule |
+|---|---|---|
+| the refused-raise loud clock, per (target, family) | created | lazily, at that (target, family)'s first refused raise |
+| | read/written | `alertStanding` and `alertPaced` both consult it; loud once per `logPaceInterval`, Debug otherwise |
+| | retired | with the target's refusal accounting — a nested map under `target`, so `retireRowIssueOverflowLocked`'s `delete(m, target)` (`health.go:296-301`) drains it; no new teardown leg |
+| | restart | empty ⇒ the next refused raise is an arrival and is loud, which is the correct posture for a fresh process |
+| the windowed refusal count, per (target, family) | created | lazily, alongside the clock |
+| | **reset** | at the heartbeat boundary — the count is *"refusals since the last heartbeat"*, and `snapshot()` (`health.go:504-517`) is a pure read with no reset leg, so the reset is added where the heartbeat consumes the number, not inferred from a read |
+| | retired | as above, with the target |
+| | loss | the overflow message under-reports one window; the monotone `refused` total it replaces in the message is not the aggregate verdict, which rides `refusedWorst` and is untouched |
 
 ---
 
@@ -332,14 +388,41 @@ on my reading already promises one entry per gap, but the shipped implementation
 Inc 1's whole payoff is that cardinality. A promise a consumer's behaviour depends on should not be
 readable two ways.
 
-The edit stays at promise altitude — an observable wire shape, no mechanism, no internal names — per the
-public-contract rule.
+**The count clause must not over-promise, and the exact replacement text is this.** A contract sentence
+saying the entry carries *"the number of rows currently holding the column open"* is a promise the engine
+cannot keep, for two shipped reasons. A lane-1 durable that survives a restart resumes from its persisted
+ack floor, so a row already acked and not since re-projected is never re-counted — the count is a lower
+bound until every open row projects again. And lane-1 durables are per target under a shared name
+(`engine.go:477-490`), so with more than one Weaver the target's rows shard across instances and each
+instance's heartbeat carries its own count — which is why Loupe reports Weaver heartbeats per instance and
+deliberately refuses to merge them (`cmd/loupe/weaver.go:315-318`). The clause of record, replacing the
+staged one:
+
+> carrying the count of open rows that heartbeat's instance currently observes — a lower bound while rows
+> re-project after a restart, and per-instance where more than one Weaver runs
+
+**The lead applies that sentence to the contract at ratification**, with the board row's state; this
+document is where it is recorded until then. It stays at promise altitude — an observable wire shape, no
+mechanism, no internal names — per the public-contract rule.
 
 **Affected consumers.**
 
 - **Contract #5 §5.5 is unchanged.** A per-column entry is an ordinary issue record: `code`, `severity`,
-  `message`, `since`. Its "a resolved issue is simply absent" semantics (`05-health-kv.md:110`) is what
-  retires it when the set empties.
+  `message`, `since` — exactly the four fields §5.5 defines (`05-health-kv.md:92-105`), and exactly what
+  the shipped struct carries (`health.go:86-96`). Its "a resolved issue is simply absent" semantics
+  (`05-health-kv.md:110`) is what retires it when the set empties.
+- **`since` means "when this column last went from no open rows to some".** §5.5 defines `since` as when
+  the issue *"first arose"*, and for this entry that is what it is: a retirement deletes the key's `since`
+  (`health.go:331-343`), so the next open row after the last one closes arrives as a new issue with a fresh
+  stamp, while a count that merely changes leaves the stamp alone. That is the honest reading of "first
+  arose" for a level-reconciled per-column fact, it is what an operator wants (how long has this backlog
+  been non-empty, not how long since the count last moved), and it needs no contract wording beyond the
+  clause above.
+- **The count rides in `message`, and a machine-readable count would need a Contract #5 change.** §5.5's
+  record has no numeric field, so the number is prose — the same posture Loupe already reads Weaver's
+  target-scoped facts with, by parsing the message text (`cmd/loupe/weaver.go:388-395`). A future consumer
+  that wants the count programmatically is asking for a new §5.5 field, which is a Contract #5 amendment
+  and out of scope here. Naming it now is cheaper than having it discovered by whoever tries.
 - **`internal/unroutedconvergence`** — asserts the code, not the key. Unchanged.
 - **`cmd/loupe`** — §7.2.
 - **Package authors** — nothing to change. `issueCode` / `issueSeverity` keep their meaning; no package
@@ -361,12 +444,25 @@ the refusal survive** — and those work (§1.4). What was never addressed is th
 is two populations, and that a refusal changes what each seam logs. The prior work made the failure honest
 at the document level; it did not stop it happening.
 
-### 7.2 "Does this lose the operator something?" — the one real cost, priced
+### 7.2 "Does this lose the operator something?" — every surface, priced
 
-The per-entity surface entry has exactly one Health-side consumer: Loupe's entity detail page, which
-attributes issues to an entity by substring-matching the entity id inside the issue **message**
-(`cmd/loupe/weaver.go:396-429`, called at `:1128`). After Inc 1 a surface gap's entry no longer names an
-entity, so it stops appearing there. Three reasons that is the right trade:
+`issuesNaming` (`cmd/loupe/weaver.go:388-428`) attributes a heartbeat issue to a page by matching a token
+as a **whole word** inside the issue *message*. It has **three** call sites, and Inc 1 lands differently on
+each:
+
+| Loupe surface | Call site | What it shows today | After Inc 1 |
+|---|---|---|---|
+| **Entity detail** — the per-entity issue panel | `:1128` (`issuesNaming(hbs, entityID)`) | the row's own `gap:` entry, whose message names the entity | **the surface entry stops appearing** — the new message names the target and column, not an entity. This is the real cost, priced below |
+| **Target detail** — the target's issue panel | `:746` (`issuesNaming(hbs, targetID)`) | one entry per open row, up to the document cut | **one entry per gap column**, naming the count. Strictly better: the panel goes from a truncated sample of identical warnings to the whole fact |
+| **Targets list** — `Issues: len(issues)` + `frozenBy(issues)` | `:1244` | a count of matched entries, driving the "N issues" chip (`web/js/views/weaver.js:104`) and the sort rank `if (t.issues > 0) return 3` (`web/js/logic/weaver.js:36`) | the chip falls from a truncated ~50 to **one per gap column**. A target whose only issues were surface entries keeps a non-zero count, so it still ranks above the quiet ones — but it **may sort down** relative to a target carrying many fault entries, which is the correct ordering once the number means faults |
+
+**No Loupe code change is required for any of the three.** `messageNamesToken` matches the target id as a
+whole word, and the proposed message begins `"target unroutedTasks: …"` (§4.1) — the same
+`"target <targetId> …"` convention every target-scoped message already follows, and the convention
+`issuesNaming`'s own doc comment names as the attribution mechanism. A Loupe-lane row to re-tune the chip's
+wording or the sort rank for the new cardinality is **optional**, not a prerequisite, and is not filed here.
+
+**The one real loss is the entity panel, and three reasons it is the right trade:**
 
 - **It already fails at exactly the scale this design is about.** Loupe reads the *published* document,
   which is truncated to 50 entries severity-first with per-entity families ranked **last**
@@ -377,12 +473,24 @@ entity, so it stops appearing there. Three reasons that is the right trade:
   — no mark, no dispatches — that *is* the whole fact the Health entry restated.
 - **Loupe already ruled the same way once.** F17 explicitly declined to duplicate the `UnroutedTasks`
   Health issue into `/api/tasks`, on the grounds that it renders authoritatively on the Weaver component
-  page and *"the per-row flag is the drill-down"*
-  (`loupe-f17-queue-observability-ux.md:56`). Inc 1 makes the platform agree with that decision.
+  page: *"The inbox's per-row `stuck` flag is the actionable **drill-down** from that issue"*
+  (`loupe-f17-queue-observability-ux.md:55-59`). Inc 1 makes the platform agree with that decision.
 
 The residue worth naming: an operator who wants the *list* of open rows reads them from the target's row
 set — the projection the surface gap is computed from — which is where they are authoritative and complete,
 rather than from a truncated sample in a heartbeat.
+
+**Every other Health-KV reader of these issues, and what each sees.** None needs a change; the row exists so
+that "no other consumer" is a checked claim rather than an assumption.
+
+| Reader | What it reads | After Inc 1 |
+|---|---|---|
+| Loupe **component health page** | flattens each `issues[]` entry to `"[severity] Code: message"` and takes the worst severity (`cmd/loupe/health.go:131-189`) | N identical lines collapse to one per column — an improvement; severity rollup unchanged |
+| Loupe **system map** and **lenses** pages | the component node's status + issue lines from the same flattening (`cmd/loupe/systemmap.go:476`; `cmd/loupe/lenses.go:99`) | severity rollup only; unchanged |
+| `lattice health` **CLI** | `issueSeverities` — severity strings only (`cmd/lattice/health/health.go:210-227`) | unchanged |
+| **Lamplighter** skill | dedups candidate findings on the issue **code**, and is told explicitly not to dedup on identifiers that appear only in the message (`agents/lamplighter/SKILL.md:38,55,74`) | unchanged — the code is package-declared and Inc 1 does not touch it. Fewer duplicate entries to sift |
+| `internal/unroutedconvergence` | `hasIssue("UnroutedTasks")` / `issueCleared` — asserts the **code** only, one entity (`unroutedconvergence_test.go:186-250`) | **passes unchanged**, and is the e2e proof the contract promise still holds |
+| `internal/healthkv/completeness_test.go` | key presence only, `integration` tag | unchanged |
 
 ### 7.3 "Does this introduce new state we already keep?"
 
@@ -400,8 +508,23 @@ No — it completes it. That design stated its trade openly and filed the residu
 per-row issue budget that admits by re-derivability rather than by arrival"*; §8 shows why that particular
 shape does not work, on that design's own scenario. Two smaller drifts in it are corrected here as
 documentation, not code: its §5 state table says the overflow entry retires *"as soon as `rowIssues` falls
-back under the cap"* while the shipped code retires at **zero** (`health.go:282-291`), and its budget row
-lists **three** per-entity families where the shipped test is a key shape covering four.
+back under the cap"* while the shipped code retires it only at **zero** (`releaseRowIssueLocked`
+`health.go:282-291` calls `retireRowIssueOverflowLocked` `:296-301` on that condition alone — the *slot*
+is what frees under the cap), and its budget row lists **three** per-entity families where the shipped test
+is a key shape covering four. The second of those drifts also sits in the shipped `rowIssueCapPerTarget`
+comment, which is the copy a builder actually reads — Inc 1 fixes it there (§4.1), because a correction
+that lands only in a design doc does not reach the next person.
+
+### 7.5 "Does anything in flight change what the count means?"
+
+One thing, and it converges. `expiry-as-a-recorded-fact-design.md` (RATIFIED 2026-09-01) converts
+`unroutedTasks` and `staleAssignedTasks` — both `surface` targets, and the two whose backlog this design's
+worked example is built on — from reading `$now` in the lens to reading a **recorded** lapse. After both
+land, a task's membership in the per-column set begins at its expiry *marker*, not at its `expiresAt`
+instant, so between the two the count reads one lower than a wall clock would say. It closes on the next
+marker commit; the severity is `warning`; and the count is already CDC-latency-dependent, so this adds a
+second small latency to a number that was never instantaneous. The sibling design names the same
+interaction from its side. Neither increment needs to sequence around the other.
 
 ---
 
@@ -417,16 +540,16 @@ strings and the sort, not by membership — which is precisely why Inc 1 moves t
 `struct{}` set instead of arguing about the number 500. **A weaker version of this row is what Inc 1 is:
 delete the cap's *harder* half by deleting the population that fills it.**
 
-**Row 2 — re-derivability-ranked admission (what the board row prescribed). REFUTED.**
+**Row 2 — re-derivability-ranked admission (what the filing prescribed). REFUTED.**
 Three independent failures, any one fatal:
 
-- **The named filler is itself non-re-derivable.** The row's scenario is a `surface` backlog crowding out a
+- **The named filler is itself non-re-derivable.** The filing's scenario is a `surface` backlog crowding out a
   `RowDataError`. But the surface arm Acks (`evaluator.go:333`) and mints no mark or `__count`, so no sweep
   leg ever revisits it (`reconciler.go:701-707`) — it is in the *same* re-derivability class as the fact it
   is accused of crowding out. A ranking on re-derivability would not evict a single surface entry.
 - **The contract citation that motivated the ranking is false.** §10.8's exhaustion fact *is* re-derived,
   every minute, from `sweepCount`/`reclaim`. Under a re-derivability ranking it would be the **first** thing
-  refused — the policy would preferentially discard the one fact the row invoked the contract to protect.
+  refused — the policy would preferentially discard the one fact the filing invoked the contract to protect.
 - **Ranking implies eviction, and eviction thrashes.** An evicted re-derivable entry returns on its own
   cadence and is refused again; with `alertStanding` unchanged that is an Error log per eviction per minute,
   forever. The policy manufactures §1.3's worst row.
@@ -480,11 +603,22 @@ Every test below is **owned by a named increment**; none is left unowned.
   `gapOpen:<t>.<col>`, code/severity from the spec, message naming N; a second delivery of an
   already-open row does not change N (the transition rule); the entry retires only when the **last**
   entity's column closes, not the first.
+- **The count tracks every membership change, not just the last one.** With N entities open, one closing
+  leaves the entry standing with a message reading **N−1** — and its `since` unchanged. This is the vector
+  that separates the design from the obvious wrong implementation, in which a remove that merely shrinks
+  the set leaves a stale-high count on the board until the whole backlog drains.
+- **A gap column carrying a `.` stays out of the budget.** The key-shape guard is what keeps the workload
+  population out (§4.1 property 1), and a dotted column is the one input that would give
+  `gapOpen:<t>.<col>` a second separator below the target. Assert `rowIssues[target]` is **0** for it.
+  Two adjacent properties are free and need no assertion: `target.Gaps` is a map keyed by column, so one
+  column yields exactly one `issueCode`; and `"gapOpen:"` is not prefix-matched by `"gap:"`.
 - Budget non-interference — the point of the increment: with 600 entities holding a surface column open,
   `rowIssues[target]` is **0** and a subsequently raised `RowDataError` is **admitted**. This is the
   regression the board row describes, expressed as a test.
-- Teardown, one vector each: entity column closes; entity tombstone (prefix clear); target `Revoke`;
-  target unregistered via `reconcileConsumers`.
+- Teardown, one vector each: entity column closes; entity tombstone; target `Revoke`; target unregistered
+  via `reconcileConsumers`. Plus the vector the tombstone leg exists for — a membership recorded, the
+  **column then dropped from the playbook**, then the entity tombstoned: the set must still lose the
+  entity, because the candidate walk no longer yields that column (§5 removal leg (b)).
 - `TestListingRank_EveryIssueFamilyIsClassified` extended: `gapOpen:` classified tier 2, and a document
   containing one `gapOpen:` entry plus >50 per-row faults lists the `gapOpen:` entry.
 - Migrated fixtures (C2): `evaluator_internal_test.go`, `replay_internal_test.go`,
@@ -502,27 +636,41 @@ Every test below is **owned by a named increment**; none is left unowned.
 - A refused `alertPaced` raise is loud once per interval rather than never.
 - The overflow entry's count reflects refusals in the last heartbeat window and does not grow monotonically
   under a re-derived refusal.
+- **The window actually resets.** Two heartbeats with refusals only before the first: the second entry
+  reads **0** for the window. This is the assertion that catches the counter being wired to a read
+  (`snapshot()` has no reset leg) instead of to the boundary.
+- **The counter drains with its target.** Refusals recorded under two families of one target, then the
+  target's per-row set empties: `retireRowIssueOverflowLocked` leaves nothing behind for either family —
+  the nested keying's whole justification.
 - A mutation check on the first two: with the seam change reverted, the tests fail.
 
 **Gates.** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`,
 `go test ./internal/weaver/... ./cmd/loupe/...`, `make test-unrouted-convergence`, and every
-`scripts/lint-*.go`. No `packages/` content changes, so no manifest version bump.
+`scripts/lint-*.go`. `make test-unrouted-convergence` is the **only** build-tagged harness either
+increment's interfaces reach — the change is confined to the issue cache and the evaluator's raise/retire
+legs, and touches no engine or service interface a control-plane or convergence double implements. No
+`packages/` content changes, so no manifest version bump.
 
 ---
 
 ## 10. Decomposition for the Steward
 
+**One fire, size M, Inc 1 first.** Both increments land in the same two files (`internal/weaver/health.go`
+and `internal/weaver/evaluator.go`), share the same four fixture files, and Inc 2's seam repairs read the
+refusal branch Inc 1 stops reaching — so splitting them would mean two fires editing the same functions and
+the same test files, with the second re-deriving the first's premises. They are decomposed here for review
+order and gate depth, not for scheduling.
+
 | Inc | What | Size | Posture-changing? |
 |---|---|---|---|
-| **1** | Move the `surface` population out of the issue cache: new `gapOpen:` family, `surfaceStats` member set, raise/retire on the existing call sites, per-entity write and clears **removed**, `surfaceOnlyGap`'s dead latch rationale rewritten, listing classification, fixture migration, schema doc | S–M | **Yes** — it changes an observable Health-KV shape and carries the contract edit. Full review depth. |
-| **2** | Refusal-honest seams: `setSince`/`pacedRaise` report refusal; `alertStanding` and `alertPaced` keep their loudness discipline under refusal, paced per (target, family); overflow message corrected | S | No. Ordinary depth. |
+| **1** | Move the `surface` population out of the issue cache: new `gapOpen:` family, `surfaceStats` member set, raise/retire on the existing call sites, per-entity write and clears **removed**, tombstone removal across the target's column sets, `surfaceOnlyGap`'s dead latch rationale rewritten, `rowIssueCapPerTarget`'s family list corrected, listing classification, fixture migration, schema doc | S–M | **Yes** — it changes an observable Health-KV shape and carries the contract edit. Full review depth. |
+| **2** | Refusal-honest seams: `setSince`/`pacedRaise` report refusal; `alertStanding` and `alertPaced` keep their loudness discipline under refusal, paced per (target, family); overflow message corrected, with a windowed refusal count reset at the heartbeat boundary | S | No. Ordinary depth. |
 
-Inc 1 is independently shippable and realizes the whole payoff on its own (the budget stops being reached
-by healthy work). Inc 2 is independently shippable and improves the residual case whether or not Inc 1 has
-landed. Neither is dead scaffolding: both have a live consumer today.
-
-**Sequencing:** Inc 1 first — Inc 2's flood row is reached far less often once Inc 1 lands, and Inc 1's
-fixture migration touches the same test files.
+Neither is dead scaffolding: both have a live consumer today. Inc 1 realizes the whole payoff on its own
+(the budget stops being reached by healthy work) and goes first — Inc 2's flood row is reached far less
+often once it lands, and its fixture migration touches the same test files Inc 2's tests extend
+(`evaluator_internal_test.go`, `replay_internal_test.go`, `decline_retry_internal_test.go`,
+`health_internal_test.go`).
 
 ---
 
@@ -531,10 +679,10 @@ fixture migration touches the same test files.
 - **The count is a lower bound after a restart** until every open row re-projects, and `ReplayTarget` is
   the verb that fixes it. Inherited unchanged from the entries it replaces, and identical to
   `contractionStats`' shipped posture. Stated in the message wording so an operator is not misled.
-- **A message whose value changes every pass sits at one latch key.** Safe here and only here: the surface
-  arm uses bare `issues.set`, so it touches neither `standingAs` (which deliberately ignores messages) nor
-  `pacedRaise` (which would re-arrive on a changing count). If a later change routes this raise through a
-  pacing seam, the count must move to a metric. Worth a line in the code comment.
+- **A message whose value changes on every membership change sits at one latch key.** Safe here and only
+  here: the surface arm uses bare `issues.set`, so it touches neither `standingAs` (which deliberately
+  ignores messages) nor `pacedRaise` (which would re-arrive on a changing count). If a later change routes
+  this raise through a pacing seam, the count must move to a metric. Worth a line in the code comment.
 - **A surface column the PLAYBOOK drops, while rows still carry it true, leaves stale membership.**
   `markCandidateColumns` still yields the column from the row side, `boolColumnRead` reads it open, and
   the walk `continue`s without retiring — so the `gapOpen:` entry stands with a count that no longer
@@ -545,12 +693,58 @@ fixture migration touches the same test files.
   that observed the column itself go false may retire the fact, or it flaps. Inc 1 inherits it; it does
   not create it. What Inc 1 *does* change is visibility: one stale per-column entry is now listed at
   tier 2 rather than N per-entity entries truncated away at tier 3, which makes the residual easier to
-  notice, not harder.
+  notice, not harder. The *tombstone* half of the same hazard — a dropped column whose entity then goes
+  away — is closed outright by §5's removal leg (b), which is why that leg does not ride the candidate walk.
 - **`gapOpen:` must be added to `issueKeyTargetPrefixes`** or a revoked target strands its entries. The
   teardown test above is what catches it; `issueKeyTargetPrefixes`' own doc states the rule.
-- **Multi-instance Weaver:** each instance publishes its own heartbeat with its own count, and Loupe already
-  reports per-instance rather than merging (`cmd/loupe/weaver.go:319-337`, whose comment gives the reason).
-  Unchanged by this design; noted because the count invites a merge that would be wrong.
+- **Multi-instance Weaver:** lane-1 durables are per target under a shared name (`engine.go:477-490`), so
+  with more than one Weaver a target's rows shard across instances and each instance's heartbeat carries
+  the count *it* observes. Loupe already reports per-instance rather than merging
+  (`cmd/loupe/weaver.go:315-318`, whose comment gives the reason). Unchanged by this design; called out
+  because a count is exactly the kind of number that invites a merge, and the merge would be wrong. The
+  contract clause in §6 says so on the wire rather than leaving it to a reader's assumption.
 - **Not addressed:** what an operator does *with* 500 concurrently-broken rows on one target. After Inc 1
   the cap only fires in that state, the overflow entry says so honestly, and `ReplayTarget` re-derives.
   Raising the number without a measured fault distribution is a guess, so it is deliberately not done.
+
+### Ratification pass
+
+Due diligence against the pinned sources changed the following, and each is folded into the body above
+rather than left as an erratum:
+
+1. **§6 — the contract's count clause.** The staged sentence promised *"the number of rows currently
+   holding the column open"*, which the engine cannot keep: a surviving lane-1 durable resumes from its
+   acked floor, and lane-1 durables are per target, so with more than one Weaver the rows shard. §6 now
+   carries the exact replacement clause of record; the lead applies it at ratification.
+2. **§5 — the count went stale-high on every close but the last.** The retirement leg is a *remove*, so an
+   entry written only on raise would sit at N while the set fell. The entry is rewritten on every
+   membership change, add and remove alike, and §9 asserts the N−1 vector.
+3. **§7.2 — three Loupe surfaces, not one.** `issuesNaming` is called from entity detail, target detail and
+   the targets list; only the first was priced. All three are now, along with every other Health-KV reader
+   and what each sees. No Loupe code change is required.
+4. **§1.1 / §1.3 — "released only at zero" conflated the slot with the overflow entry.** A slot frees on
+   every clear; only the overflow entry waits for zero. The Error flood is therefore bounded by how long
+   the target stays at cap, which for a static surface backlog is the whole backlog's life — the worst
+   case, not the general one.
+5. **§4.2 / §5 — the windowed refusal count needed a lifetime.** `snapshot()` has no reset leg, so
+   "refusals since the last heartbeat" gets an explicit boundary; the counter and its loud clock are keyed
+   per (target, family) as a nested map, so the existing per-target teardown drains them.
+6. **§5 — removal leg (b) leaked a membership.** A column dropped from the playbook after a membership was
+   recorded never yields from the candidate walk on a tombstone. The leg now removes the entity from every
+   column set of the target, the in-memory analogue of the prefix clear it replaces.
+7. **§5 / §6 — `since` semantics named.** A retirement deletes the key's `since`, so a reopened column
+   arrives with a fresh stamp: the entry's `since` means *when this column last went from no open rows to
+   some*, and that is stated where a consumer reads it.
+8. **§4.1 / §7.4 — two slips.** There are **ten** family prefixes, not nine; and
+   `rowIssueCapPerTarget`'s own comment names two families where the key-shape test covers four. Inc 1
+   fixes the shipped comment, not just the design doc that first flagged it.
+9. **§9 — a dotted gap column** would give the `gapOpen:` key a second separator and re-enter the budget;
+   Inc 1 asserts it.
+10. **§10 — one fire.** Both increments land in the same two files and share the same four fixture files,
+    so they ship together, Inc 1 first, size M.
+11. **§7.5 — sibling interaction.** The ratified expiry-as-a-recorded-fact design converts both
+    `orchestration-base` surface targets to a recorded lapse, which makes the count marker-latency-
+    dependent between deadline and marker. It converges; neither design sequences around the other.
+12. **Two quotes now match their sources.** The header quotes the lane row's current title, and §10 no
+    longer carries a board item — the row correction landed with this design's own commit, and the one
+    phrase still outstanding is named in §1.1. §7.2's F17 citation is requoted verbatim.
