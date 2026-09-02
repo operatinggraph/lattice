@@ -83,19 +83,22 @@ func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) boo
 }
 
 // dedupeMostSpecific collapses same-named rows down to the most specific
-// covering item, for the caller-scoped views (a leaseAppKey picker or a
-// staffer's workplace-confined grid) where menu coverage is hierarchical: a
-// building-level item and a unit-level item can both cover the same lease or
-// workplace, and if they share a display name the picker shows "Croissant —
-// $3.50" twice with nothing to tell them apart. row is shadowed by other
-// when other's own location is strictly nested inside row's — i.e. row's
-// ServedAt shows up in other's ancestor chain (CoveringLocations) — so only
-// a genuine ancestor/descendant pair collapses. Two same-named rows at
-// unrelated locations (a staffer covering two separate buildings) share no
-// such relation and both stay, since a real containment match is required.
-// Not applied to the unscoped catalog (admit == nil, e.g. the operator's
-// Manage Menu view of everything): there every row is independently the
-// caller's business to see, not one lease's or one workplace's offer set.
+// covering item. It applies ONLY to the leaseAppKey offer-picker view (a
+// resident or staffer selecting what to charge against one lease), where
+// menu coverage is hierarchical: a building-level item and a unit-level item
+// can both cover the same lease, and if they share a display name the picker
+// shows "Croissant — $3.50" twice with nothing to tell them apart — the
+// picker must show one collapsed row, not two indistinguishable ones. row is
+// shadowed by other when other's own location is strictly nested inside
+// row's — i.e. row's ServedAt shows up in other's ancestor chain
+// (CoveringLocations) — so only a genuine ancestor/descendant pair
+// collapses. Two same-named rows at unrelated locations (a staffer covering
+// two separate buildings) share no such relation and both stay, since a
+// real containment match is required.
+// It must NOT apply to the staff Manage Menu grid (workplace-confined, no
+// leaseAppKey) or the unscoped operator catalog: both of those need to see
+// every item independently — including a building-level item that shares a
+// name with a unit-level one — so staff can reprice or retire either one.
 func dedupeMostSpecific(rows []menuItemRow) []menuItemRow {
 	byName := make(map[string][]menuItemRow, len(rows))
 	for _, r := range rows {
@@ -179,6 +182,7 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 
 	leaseAppKey := strings.TrimSpace(r.URL.Query().Get("leaseAppKey"))
 	var admit func(menuItemProjection) bool
+	dedupe := false
 	switch {
 	case leaseAppKey != "":
 		visible, err := s.visibleLeases(ctx, hats)
@@ -192,6 +196,7 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 		}
 		covering := s.leaseCoveringLocations(ctx, leaseAppKey)
 		admit = func(p menuItemProjection) bool { return covering[p.ServedAt] }
+		dedupe = true
 	case hats.isStaff() && !hats.isOperator:
 		admit = func(p menuItemProjection) bool { return hats.covers(p.CoveringLocations) }
 	}
@@ -203,7 +208,7 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeMenu(keys, s.kvGetter(ctx, cafedomain.MenuCatalogBucket), admit)
-	if admit != nil {
+	if dedupe {
 		rows = dedupeMostSpecific(rows)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"menu": rows})
