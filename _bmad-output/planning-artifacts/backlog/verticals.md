@@ -33,6 +33,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **The 4 stale cluster-A onboarding cards need a live CancelTask pass** | Inc 2 of the onboarding re-anchor: 4 open `RecordIdentityPII` tasks predate the Inc 1 fix and won't self-clear. Grounded 2026-09-01: the identity is a stranded pre-rotation fossil, not live admin — safe to cancel. | LoftSpace | platform | ★ | XS | 🚧 blocked-on: live-op execution · commands ready in [design](../../implementation-artifacts/duplicate-human-task-fanout-design.md) build note |
 | **The Manage Menu grid never lists the two items a third of the house is actually sold** | `dedupeMostSpecific` runs on the workplace-confined MANAGEMENT grid, not just the offer pickers, so a building-level item collapses behind a same-named unit-level one. Live: the grid shows 2 unit rows; the 22-of-62 leases outside that unit buy 2 building-level vertices no staffer can reprice or retire. | Café | FE | ★★ | XS | 📋 ready · collapse offer sets only ([menu.go](../../../cmd/cafe-app/menu.go:207)) |
 | **The front desk can only see who owes the café money while that person has an open tab** | `/api/frontdesk-balances` rides as a badge on open-tab cards ([app.js](../../../cmd/cafe-app/web/app.js:1055)) and nowhere else, so arrears vanish at exactly the moment the tab settles. Live: 5 residents owe $73.25, 3 overdue up to 18 days, 0 open tabs — the Front Desk renders "No open tabs" and nothing else. Wellness's `99233d11` is a standalone worst-first list. | Café | FE | ★★ | S | 📋 ready · give café the standalone arrears list wellness already has |
+| **A corrected no-show never gives the $25 back** | `SetBookingAttendance` is documented re-markable, but `noShowFeeCents` sits outside the carry-forward set and `wellnessNoShowSettlement` gates `missing_charge` on `status='noShow'` under `EmptyBehavior:"delete"` ([lenses.go:202](../../../packages/wellness-ledger/lenses.go:202)) — the flip to `attended` deletes the row, the debit stands, and the amount to refund is gone. | Wellness | pkg | ★★ | S | 📋 ready · sibling of the Clinic corrected-no-show row above |
+| **Two bookings have stood on called-off classes since July, each still billed $25** | `wellnessOrphanedBookingSettlement` matches only `booked`/`waitlisted` ([lenses.go:404](../../../packages/wellness-domain/lenses.go:404)), so a booking the sweep already moved to `noShow` is unreachable forever, and `pastDueBookings` cannot see it either. My Classes renders a permanent, un-cancellable "Class cancelled" card. Live: 2 of 26. | Wellness | pkg | ★★ | S | 📋 ready · widen the orphan gate past `booked`/`waitlisted`; refund a posted charge |
+| **The front desk is the only hat that sees "New instructor", and the op refuses it every time** | The instructors panel sits inside the Studios tab, gated `isStaff()` = worksAt + frontOfHouse ([app.js:270](../../../cmd/wellness-app/web/app.js:270)), while `CreateInstructor` is operator-only by design (mirroring clinic's `CreateProvider`). Live: 1 instructor for 2 studios, 31 of 48 sessions instructor-less. | Wellness | FE | ★ | XS | 📋 ready · hide it off an operator hat, or decide who registers instructors |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -52,10 +55,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×28, Clinic ×28, Café ×19, Wellness ×15.
+- **Rotation to date:** LoftSpace ×28, Clinic ×28, Café ×19, Wellness ×16.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-28:** LoftSpace — drove applicant + landlord hats live through browse/apply/sign/decide/renew/statement; expired tasks read as live work, the one bill is 97 ungrouped lines, 33 of them quote an internal PO ruling; filed 3.
 - **2026-08-29:** Clinic — drove patient, provider + front-desk hats live through book/cancel/document/bill; staff writes time out ~1 in 10 while the same ops self-serve in a third the time, and the descriptors publish only the patient's slice; filed 2.
 - **2026-08-29:** Café — drove resident + front-of-house + backOfHouse hats live through menu/tab/charge/void/settle/pay; every staff write blows the 250ms script wall, the balance never becomes a bill; filed 2 + 1 platform.
 - **2026-08-29:** Wellness — drove member/instructor/two staff hats live through schedule/book/roster/ledger/bill; nobody at the desk can mark attendance and 25 of 25 bookings are no-shows; filed 3.
@@ -66,7 +68,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-09-01:** LoftSpace — drove landlord + applicant hats live through listings/apply/decide/renew/tasks/ledger/one-bill/account; the attach KPI is dark and nothing names the sign-in you are on; filed 2 + 1 platform.
 - **2026-09-01:** Clinic — drove patient/provider/front-desk hats live through book/status/document/follow-up/time-off/ledger; a terminal status is uncorrectable and the follow-up net self-clears on no-shows; filed 3.
 - **2026-09-02:** Café — drove front-of-house + resident hats live through menu/tab/charge/void/settle/ledger; a staff settle is unsettleable and arrears hide when the tab closes; filed 3.
-- **Next:** Wellness.
+- **2026-09-02:** Wellness — drove member + front-desk hats through schedule/bookings/roster/attendance/ledger/arrears; a corrected no-show never refunds, two July bookings still bill for called-off classes; filed 3.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
