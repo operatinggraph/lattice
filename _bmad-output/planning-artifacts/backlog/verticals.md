@@ -70,7 +70,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-09-02 · `<pending>` · A corrected wellness no-show now refunds its fee automatically — `SetBookingAttendance` mints a wellnessrefund marker (mirroring `ReleaseOrphanedBooking`'s charge-lookup-and-mint) when a re-mark corrects `noShow` back to `attended`, guarded against double-crediting a repeated correction cycle.
+- 2026-09-02 · `70c73ac1` · A corrected wellness no-show now refunds its fee — `SetBookingAttendance` mints a wellnessrefund marker on a noShow→attended re-mark, mirroring `ReleaseOrphanedBooking`.
 
 - 2026-09-02 · (observation, no code) · The executed lease document's `AttachObject` grant fix (`2026-08-27` live) converged — Weaver's reclaim sweep has attached all known-affected leases, none failing since; no code change needed.
 
@@ -100,11 +100,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-08-30 · `d8cf4144` · The four vertical apps' projection-health check now catches a stalled (not just paused) lens — closes the false `projectionHealthy:true` PO found on LoftSpace.
 - 2026-08-30 · `c791574b` · Clinic/LoftSpace ledger reads fail loud on a KVGet error instead of silently dropping the row and skewing the balance.
 - 2026-08-30 · `a096df6f` · Portfolio's service-attach-rate counts usage in a 30-day window (startsAt/settledAt), not raw existence. front-desk 0.3.1 adds `frontDeskBookingHistory`.
-- 2026-08-30 · `de326532`+`9eee9bcd` · café/clinic/wellness's `/api/op-catalog` narrows via `?types=` to just the ops each app renders; loftspace stays unfiltered (task-bound ops can name any op meta).
-- 2026-08-30 · `5be4d4ee` · Facet's Me screen gets a demo-only reversible offline-pause toggle (`FACET_DEMO_CONTROLS`), env-gated. [Design §11](../../implementation-artifacts/facet-app-ux.md).
-- 2026-08-30 · `a5077b9a` · Front desk can finally mark a member present — `SetBookingAttendance` grants frontOfHouse, workplace-confined exactly like `CancelBooking`. wellness-domain 0.22.14.
-- 2026-08-29 · `75b05007`+`6f3b6212` · No-show ledger lines now name the class's date, not just its (repeating) name — classStartsAt was already served, just never rendered. wellness-app FE only.
-- 2026-08-29 · `02d007a2` · Wellness studio grid-dry warning (client-side, no lens change) + a bare-entity-key guard on every app's ledger-memo render fixes the live remediation memo with no data mutation.
-- 2026-08-29 · `681f36f1`+`71aba1b4` · Wellness front desk gets a debounced guest name-search + "＋ New guest" modal, replacing the raw identity-key input. wellness-domain 0.22.13.
-- 2026-08-29 · `b3af3268` · Café/clinic/wellness staff nav now hides front-desk tabs for a worksAt-only, non-frontOfHouse staffer instead of hard-403ing on click — new GET /api/staff-hats exposes the server-resolved hat.
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*

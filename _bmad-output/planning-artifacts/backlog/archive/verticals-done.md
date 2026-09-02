@@ -2,6 +2,13 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-30 · `de326532`+`9eee9bcd` · café/clinic/wellness's `/api/op-catalog` narrows via `?types=` to just the ops each app renders; loftspace stays unfiltered (task-bound ops can name any op meta).
+- 2026-08-30 · `5be4d4ee` · Facet's Me screen gets a demo-only reversible offline-pause toggle (`FACET_DEMO_CONTROLS`), env-gated. [Design §11](../../implementation-artifacts/facet-app-ux.md).
+- 2026-08-30 · `a5077b9a` · Front desk can finally mark a member present — `SetBookingAttendance` grants frontOfHouse, workplace-confined exactly like `CancelBooking`. wellness-domain 0.22.14.
+- 2026-08-29 · `75b05007`+`6f3b6212` · No-show ledger lines now name the class's date, not just its (repeating) name — classStartsAt was already served, just never rendered. wellness-app FE only.
+- 2026-08-29 · `02d007a2` · Wellness studio grid-dry warning (client-side, no lens change) + a bare-entity-key guard on every app's ledger-memo render fixes the live remediation memo with no data mutation.
+- 2026-08-29 · `681f36f1`+`71aba1b4` · Wellness front desk gets a debounced guest name-search + "＋ New guest" modal, replacing the raw identity-key input. wellness-domain 0.22.13.
+- 2026-08-29 · `b3af3268` · Café/clinic/wellness staff nav now hides front-desk tabs for a worksAt-only, non-frontOfHouse staffer instead of hard-403ing on click — new GET /api/staff-hats exposes the server-resolved hat.
 - 2026-08-29 · `361286fb` · wellnessClassPriceSettlement's exhausted missing_price_charge gap now escalates to Augur instead of parking behind an unread Health warning — mirrors lease-signing's renewalComplete. wellness-ledger 0.2.16.
 - 2026-08-29 · `71a4c245` · The Manage Menu grid badges an item whose place was retired and can Relocate it to the staffer's own workplace via the existing SetMenuItemLocation op. cmd/cafe-app only.
 - 2026-08-29 · `abd881cf` · The house tab now carries a due date and OVERDUE banner — FIFO-aged from the oldest unpaid debit, 15-day grace, no ledger schema change (balance stays derived). cmd/cafe-app only.
