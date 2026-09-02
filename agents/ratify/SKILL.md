@@ -112,5 +112,6 @@ when he pushes back, re-derive from "what does it need".
   stale-read failures mean a parallel commit landed.
 - `git status` before committing — a parallel session may have STAGED files; your commit sweeps the
   index. Add only your paths; if swept anyway, verify the extras are finished work and say so.
-- `.claude/` is gitignored — skills' tracked home is `agents/`; edit BOTH copies.
+- `.claude/skills/<role>` is a SYMLINK to `agents/<role>` (since 2026-08-20) — edit `agents/` once; a
+  "both copies" loop applies the edit twice to one file (it duplicated a designer-skill bullet, 2026-09-01).
 - Sub-agents never commit; Winston commits direct to main and watches CI (docs commits are paths-ignored).
