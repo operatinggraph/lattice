@@ -66,10 +66,9 @@ const freshnessExpiryAspectDDL = "freshnessExpiry"
 // exactly ONE marker aspect per entity regardless of how many freshness cycles
 // or targets it serves (the merge rewrites the standing aspect; only the
 // `byTarget` map grows, one entry per target). A marker outliving a converged
-// entity is inert rather than harmless-because-unread: the recorded instant
-// falls behind the entity's next deadline, so the comparison reads not-expired
-// with no clearing write at all — which is exactly how a re-armed entity
-// recovers.
+// entity is inert: the recorded instant falls behind the entity's next deadline,
+// so the comparison reads not-expired with no clearing write at all — which is
+// exactly how a re-armed entity recovers.
 func MarkExpiredDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     markExpiredDDL,
@@ -82,8 +81,9 @@ func MarkExpiredDDL() pkgmgr.DDLSpec {
 			"pure function of the subgraph; the write also bumps the entity's adjacency revision, so Refractor " +
 			"reprojects and the stale-freshness gap re-opens (the eager re-open, FR58). The marker is PER TARGET: " +
 			"the byTarget map isolates the several targets sharing one anchor, and expiredAt is the monotone " +
-			"maximum over it. The merge reads the marker through a declared optionalReads key, which conditions " +
-			"the update on the hydrated revision (Contract #3 §3.2) — a create on a known-absent marker, an " +
+			"maximum over byTarget and the marker's own standing value. The merge reads the marker through a " +
+			"declared optionalReads key, which conditions the update on the hydrated revision " +
+			"(Contract #3 §3.2) — a create on a known-absent marker, an " +
 			"update otherwise, so concurrent fires serialize and no target's entry is lost. Type-agnostic: the " +
 			"entity type is whatever entityKey carries; the script names no concrete type. Submitted under " +
 			"Weaver's service-actor authority. The marker aspect's class is freshnessExpiry (its own aspect-type " +
@@ -139,16 +139,16 @@ func FreshnessExpiryAspectDDL() pkgmgr.DDLSpec {
 			"vtx.<type>.<NanoID>.freshnessExpiry = {expiredAt, byTarget:{<targetId>:<instant>}}, non-sensitive, " +
 			"type-agnostic (attaches to any vertex). byTarget records the latest instant each weaver target's " +
 			"deadline lapsed on this entity — the entry a convergence lens reads; expiredAt is the monotone " +
-			"maximum over them. Written ONLY by MarkExpired (whose freshnessMarker vertexType DDL owns the " +
+			"maximum over byTarget and the marker's own standing value. Written ONLY by MarkExpired (whose freshnessMarker vertexType DDL owns the " +
 			"script); this aspect-type DDL exists so step-6's permittedCommands check, keyed on the mutation's " +
 			"class, admits the marker write. Declaration-only: it carries no op handler.",
 		Script: freshnessExpiryAspectDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"expiredAt":{"type":"string","description":"RFC3339 instant of the latest lapse recorded on this entity — the maximum over byTarget."},` +
+			`{"expiredAt":{"type":"string","description":"RFC3339 instant of the latest lapse recorded on this entity — the maximum over byTarget and the aspect's own standing value."},` +
 			`"byTarget":{"type":"object","description":"weaver-target id -> the RFC3339 instant that target's deadline last lapsed on this entity. The entry a target's convergence lens reads."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"expiredAt": "RFC3339 instant of the latest lapse recorded on this entity — the monotone maximum over byTarget.",
+			"expiredAt": "RFC3339 instant of the latest lapse recorded on this entity — the monotone maximum over byTarget and the aspect's own standing value.",
 			"byTarget":  "weaver-target id -> the RFC3339 instant that target's deadline last lapsed. Per-target so several targets sharing one anchor do not overwrite each other's verdict.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -162,7 +162,7 @@ func FreshnessExpiryAspectDDL() pkgmgr.DDLSpec {
 					},
 				},
 				ExpectedOutcome: "Stored as vtx.<type>.<NanoID>.freshnessExpiry; merged by MarkExpired one target entry at a time, " +
-					"with expiredAt held at the maximum over byTarget.",
+					"with expiredAt held at the maximum over byTarget and the aspect's own standing value.",
 			},
 		},
 	}
@@ -209,16 +209,99 @@ def parts_of(key, name, want_type):
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
+TARGET_ID_HEAD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+TARGET_ID_TAIL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789"
+
 def required_target_id(p):
     # The targetId keys this lapse's entry in the marker's byTarget map, and a
-    # lens reads that entry as a property hop
-    # (<anchor>.freshnessExpiry.data.byTarget.<targetId>). A dot would split the
-    # hop and make the entry unreadable by the very lens the record exists for,
-    # so it is refused rather than written where nothing can find it.
+    # lens reads that entry as a single cypher property hop
+    # (<anchor>.freshnessExpiry.data.byTarget.<targetId>). That position takes an
+    # IDENTIFIER — [A-Za-z_][A-Za-z0-9_]* — so anything else (a dot splitting the
+    # hop, a dash, a space) names an entry no lens can express a read for. Held
+    # to the grammar rather than written where nothing can find it.
     v = required_string(p, "targetId")
-    if v.find(".") >= 0:
-        fail("InvalidArgument: targetId: must not contain '.' (it is read as a single property hop); got " + v)
+    if TARGET_ID_HEAD.find(v[0]) < 0:
+        fail("InvalidArgument: targetId: must be a cypher identifier [A-Za-z_][A-Za-z0-9_]* (it is read as a single property hop); got " + v)
+    for i in range(1, len(v)):
+        if TARGET_ID_TAIL.find(v[i]) < 0:
+            fail("InvalidArgument: targetId: must be a cypher identifier [A-Za-z_][A-Za-z0-9_]* (it is read as a single property hop); got " + v)
     return v
+
+DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+DIGITS = "0123456789"
+
+def digits_at(s, start, n):
+    # The integer value of the n characters at s[start:], or None when they are
+    # not all ASCII digits. Starlark cannot catch a failing builtin, so every
+    # numeric read a guarded parse rests on has to be a predicate, not a cast.
+    v = 0
+    for i in range(start, start + n):
+        d = DIGITS.find(s[i])
+        if d < 0:
+            return None
+        v = v * 10 + d
+    return v
+
+def zone_ok(s):
+    # The tail after "<date>T<hh>:<mm>:<ss>": an optional fractional part, then
+    # either a Z or a ±hh:mm offset.
+    i = 19
+    if i < len(s) and s[i] == ".":
+        i = i + 1
+        n = 0
+        for j in range(i, len(s)):
+            if not s[j].isdigit():
+                break
+            n = n + 1
+        if n == 0:
+            return False
+        i = i + n
+    rest = s[i:]
+    if rest == "Z" or rest == "z":
+        return True
+    if len(rest) != 6 or rest[3] != ":":
+        return False
+    if rest[0] != "+" and rest[0] != "-":
+        return False
+    oh = digits_at(rest, 1, 2)
+    om = digits_at(rest, 4, 2)
+    return oh != None and om != None and oh <= 23 and om <= 59
+
+def rfc3339_or_none(v):
+    # Normalise a STORED instant to canonical whole-second UTC for comparison,
+    # or report it uncomparable. This is the guarded form of time.rfc3339_utc:
+    # that builtin FAILS the whole operation on a malformed instant, and a value
+    # written into the graph by something other than this op must never be able
+    # to do that — so the string is validated in full first (shape, field ranges,
+    # days-in-month, zone) and simply reported unusable otherwise. The caller
+    # then orders as though the value were absent, and carries it through
+    # verbatim rather than deleting it.
+    if type(v) != type("") or len(v) < 20:
+        return None
+    if v[4] != "-" or v[7] != "-" or (v[10] != "T" and v[10] != "t"):
+        return None
+    if v[13] != ":" or v[16] != ":":
+        return None
+    year = digits_at(v, 0, 4)
+    month = digits_at(v, 5, 2)
+    day = digits_at(v, 8, 2)
+    hour = digits_at(v, 11, 2)
+    minute = digits_at(v, 14, 2)
+    second = digits_at(v, 17, 2)
+    if year == None or month == None or day == None:
+        return None
+    if hour == None or minute == None or second == None:
+        return None
+    if month < 1 or month > 12 or hour > 23 or minute > 59 or second > 60:
+        return None
+    last_day = DAYS_IN_MONTH[month - 1]
+    if month == 2 and ((year % 4 == 0 and year % 100 != 0) or year % 400 == 0):
+        last_day = 29
+    if day < 1 or day > last_day:
+        return None
+    if not zone_ok(v):
+        return None
+    return time.rfc3339_utc(v)
 
 def vertex_alive(state, key):
     # Generic liveness on a vertex ROOT, by key — type-agnostic (entityKey may be
@@ -273,35 +356,53 @@ def execute(state, op):
         standing = None
         if marker_key in state:
             standing = state[marker_key]
+        standing_data = None
+        if standing != None and hasattr(standing, "data") and standing.data != None:
+            standing_data = standing.data
+        # A TOMBSTONED marker's per-target entries are stale by construction —
+        # whatever tombstoned it declared them gone — so they do not resurrect;
+        # only its expiredAt is folded on, to keep that field monotone across the
+        # revival. The mutation stays an update (the key still exists) and clears
+        # the tombstone.
+        standing_tombstoned = standing != None and hasattr(standing, "isDeleted") and standing.isDeleted
 
         by_target = {}
-        prior_expired_at = ""
-        if standing != None and hasattr(standing, "data") and standing.data != None:
-            existing = standing.data.get("byTarget")
+        if standing_data != None and not standing_tombstoned:
+            existing = standing_data.get("byTarget")
             if existing != None:
+                # Every entry is carried through VERBATIM, including one this
+                # cannot order: another target's record is not this operation's
+                # to edit or drop, and an unreadable value is a repair for
+                # whoever wrote it, not a deletion for whoever fires next.
                 for k in existing:
-                    v = existing[k]
-                    if type(v) == type("") and len(v) > 0:
-                        by_target[k] = v
-            pe = standing.data.get("expiredAt")
-            if type(pe) == type("") and len(pe) > 0:
+                    by_target[k] = existing[k]
+
+        prior_expired_at = ""
+        if standing_data != None:
+            pe = rfc3339_or_none(standing_data.get("expiredAt"))
+            if pe != None:
                 prior_expired_at = pe
 
         # Per target, keep the LATEST instant: a fire at or after the recorded
         # one advances the entry, an earlier one (a replay, a firing overtaken
-        # by a later cycle) leaves it alone.
-        recorded = by_target.get(target_id)
+        # by a later cycle) leaves it alone. The recorded value is normalised
+        # before the comparison — a stored offset form orders wrongly against a
+        # UTC one read byte for byte — and an uncomparable one orders as absent,
+        # so the firing's own instant takes the slot.
+        recorded = rfc3339_or_none(by_target.get(target_id))
         if recorded == None or expired_at > recorded:
             by_target[target_id] = expired_at
 
-        # expiredAt is the maximum over every recorded lapse — the entity-wide
-        # "latest anything expired here". Folding the standing value into the
-        # maximum makes the field monotone for any marker document, whatever
-        # its byTarget holds.
+        # expiredAt is the maximum over byTarget AND the marker's own standing
+        # value — the entity-wide "latest anything expired here". Folding the
+        # standing value in keeps the field monotone for any marker document,
+        # including one that carries no byTarget entry for a target that lapsed.
+        # An entry that does not normalise is skipped here and kept above.
         latest = prior_expired_at
         for k in by_target:
-            if by_target[k] > latest:
-                latest = by_target[k]
+            n = rfc3339_or_none(by_target[k])
+            if n != None and n > latest:
+                latest = n
 
         document = {"class": "freshnessExpiry", "vertexKey": entity_key,
                     "localName": "freshnessExpiry", "isDeleted": False,

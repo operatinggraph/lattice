@@ -251,6 +251,41 @@ RETURN
 	require.Equal(t, true, results[0].Values["fresh"])
 }
 
+// TestAspectExpr_ByTargetMapRead_MarkerWithNoByTargetMap is the migration
+// window: a marker aspect carrying `expiredAt` alone, with no `byTarget` object
+// at all. The four-deep read must resolve nil at the THIRD hop — never erroring,
+// and never falling through to the sibling scalar — so the comparison is false
+// and such an anchor reads not-expired until a fire records its own entry.
+func TestAspectExpr_ByTargetMapRead_MarkerWithNoByTargetMap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "appt", "appointment", nil)
+	putAspect(t, reg, coreKV, "appt", "freshnessExpiry", map[string]any{"expiredAt": expiryMarkerLapsed})
+	putAspect(t, reg, coreKV, "appt", "schedule", map[string]any{"remindAt": expiryMarkerDeadline})
+
+	results := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  a.freshnessExpiry.data.expiredAt AS entityWide,
+  a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` AS recordedLapse,
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "appt")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, expiryMarkerLapsed, results[0].Values["entityWide"],
+		"the sibling scalar is present — this vector is about the missing map, not a missing aspect")
+	require.Nil(t, results[0].Values["recordedLapse"],
+		"a missing byTarget object must resolve nil at that hop, never fall through to the sibling scalar")
+	require.Equal(t, false, results[0].Values["lapsed"],
+		"an entity-wide expiredAt with no per-target entry must NOT open this target's gap")
+	require.Equal(t, true, results[0].Values["fresh"])
+}
+
 // TestAspectExpr_ByTargetMapRead_NilSemantics pins compareAny's nil-false for
 // both operands of the four-deep read — the default the converted lenses rest
 // on. With the marker aspect entirely absent the row is not expired (matching

@@ -3,6 +3,7 @@ package orchestrationbase_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -508,6 +509,70 @@ func runMarkExpiredScript(t *testing.T, entityKey, targetID, expiredAt string, s
 	return res
 }
 
+// runMarkExpiredScriptErr is runMarkExpiredScript for the refusals: it returns
+// the script error instead of failing the test on it.
+func runMarkExpiredScriptErr(t *testing.T, entityKey, targetID, expiredAt string) error {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("MEbad00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "MarkExpired",
+		Actor:         otStaffActorKey,
+		SubmittedAt:   expiredAt,
+		Class:         "freshnessMarker",
+		Payload: json.RawMessage(`{"entityKey":"` + entityKey + `","targetId":` +
+			mustJSONString(t, targetID) + `,"expiredAt":"` + expiredAt + `"}`),
+		ContextHint: markExpiredContextHint(entityKey),
+	}
+	_, err := processor.NewStarlarkRunner(0, 0).Run(context.Background(), processor.ScriptContext{
+		Operation: env,
+		Hydrated: map[string]processor.VertexDoc{
+			entityKey: {Key: entityKey, Class: "leaseapp", Data: map[string]any{}, Revision: 3},
+		},
+		KnownAbsent:  map[string]struct{}{entityKey + ".freshnessExpiry": {}},
+		ScriptSource: orchestrationbase.MarkExpiredDDL().Script,
+		ScriptClass:  "freshnessMarker",
+	})
+	return err
+}
+
+func mustJSONString(t *testing.T, v string) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %q: %v", v, err)
+	}
+	return string(b)
+}
+
+// rawMarkerDoc is markerDoc for the shapes a hand-typed map cannot express: a
+// byTarget value that is not a string, a document with no byTarget at all, a
+// tombstoned marker.
+func rawMarkerDoc(entityKey string, data map[string]any, deleted bool) *processor.VertexDoc {
+	return &processor.VertexDoc{
+		Key:       entityKey + ".freshnessExpiry",
+		Class:     "freshnessExpiry",
+		VertexKey: entityKey,
+		LocalName: "freshnessExpiry",
+		IsDeleted: deleted,
+		Data:      data,
+		Revision:  11,
+	}
+}
+
+// mutationData returns the single proposed mutation's kind and data object.
+func mutationData(t *testing.T, res processor.ScriptResult) (string, map[string]any) {
+	t.Helper()
+	if len(res.Mutations) != 1 {
+		t.Fatalf("expected exactly one mutation, got %d", len(res.Mutations))
+	}
+	data, _ := res.Mutations[0].Document["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("mutation carries no data object: %+v", res.Mutations[0].Document)
+	}
+	return res.Mutations[0].Op, data
+}
+
 // assertMutation asserts the script proposed exactly one marker mutation of the
 // given kind, carrying the expected merged data.
 func assertMutation(t *testing.T, res processor.ScriptResult, wantOp, wantKey, wantExpiredAt string, wantByTarget map[string]string) {
@@ -524,4 +589,151 @@ func assertMutation(t *testing.T, res processor.ScriptResult, wantOp, wantKey, w
 	}
 	data, _ := m.Document["data"].(map[string]any)
 	assertMarkerData(t, data, wantExpiredAt, wantByTarget)
+}
+
+// --- stored-value handling: the marker is data written earlier, not input ---
+
+// TestMarkExpired_StoredOffsetInstant_ComparesAfterNormalisation: a byTarget
+// entry recorded in an offset form orders WRONGLY against a UTC one read byte
+// for byte — "…14:00:00+02:00" sorts above "…13:00:00Z" while denoting an hour
+// earlier. Both sides of the per-target comparison are normalised first, so the
+// later fire advances the entry.
+func TestMarkExpired_StoredOffsetInstant_ComparesAfterNormalisation(t *testing.T) {
+	entityKey := "vtx.leaseapp.BBmarkoffsetHJKMNPQ"
+	standing := markerDoc(entityKey, "2026-06-18T14:00:00+02:00", map[string]string{
+		meTargetA: "2026-06-18T14:00:00+02:00",
+	})
+	// Guard the vector itself: raw lexical order says the standing value wins.
+	if !("2026-06-18T14:00:00+02:00" > "2026-06-18T13:00:00Z") {
+		t.Fatal("vector is inert: the stored form must sort ABOVE the fire raw, or this proves nothing")
+	}
+
+	res := runMarkExpiredScript(t, entityKey, meTargetA, "2026-06-18T13:00:00Z", standing, false)
+	kind, data := mutationData(t, res)
+	if kind != "update" {
+		t.Fatalf("mutation kind = %q, want update", kind)
+	}
+	byTarget, _ := data["byTarget"].(map[string]any)
+	if got := byTarget[meTargetA]; got != "2026-06-18T13:00:00Z" {
+		t.Fatalf("byTarget[%s] = %v, want the later fire 2026-06-18T13:00:00Z — the stored +02:00 form "+
+			"denotes 12:00:00Z and must not hold the slot on a raw string compare", meTargetA, got)
+	}
+	if got := data["expiredAt"]; got != "2026-06-18T13:00:00Z" {
+		t.Fatalf("expiredAt = %v, want 2026-06-18T13:00:00Z", got)
+	}
+}
+
+// TestMarkExpired_UnparseableStoredValues_DegradeToAbsentAndSurvive: the marker
+// is data some earlier writer put there, so an entry this cannot ORDER must not
+// be able to fail the operation (time.rfc3339_utc fails the whole op on a
+// malformed instant) and must not be deleted either — another target's record is
+// not this operation's to edit. An unusable value for THIS target orders as absent,
+// so the firing's own instant takes the slot.
+func TestMarkExpired_UnparseableStoredValues_DegradeToAbsentAndSurvive(t *testing.T) {
+	entityKey := "vtx.leaseapp.BBmarkjunkHJKMNPQRS"
+	standing := rawMarkerDoc(entityKey, map[string]any{
+		"expiredAt": "not-an-instant",
+		"byTarget": map[string]any{
+			// Not a string at all (m3's vector), a string that is not an
+			// instant, and an instant with an impossible day — none of which
+			// time.rfc3339_utc would survive being handed.
+			"otherTgt":  float64(7),
+			"junkTgt":   "yesterday",
+			"febThirty": "2026-02-30T00:00:00Z",
+			meTargetA:   "garbage",
+		},
+	}, false)
+
+	res := runMarkExpiredScript(t, entityKey, meTargetA, "2026-06-18T13:00:00Z", standing, false)
+	kind, data := mutationData(t, res)
+	if kind != "update" {
+		t.Fatalf("mutation kind = %q, want update", kind)
+	}
+	byTarget, _ := data["byTarget"].(map[string]any)
+	if got := byTarget[meTargetA]; got != "2026-06-18T13:00:00Z" {
+		t.Fatalf("byTarget[%s] = %v, want the firing's own instant — an unorderable value for the firing "+
+			"target orders as absent", meTargetA, got)
+	}
+	// Compared as rendered values: a JSON number round-trips through Starlark as
+	// an integer, and pinning that incidental Go type would assert something
+	// this test is not about. What must hold is that the ENTRY survives.
+	for target, want := range map[string]string{
+		"otherTgt":  "7",
+		"junkTgt":   "yesterday",
+		"febThirty": "2026-02-30T00:00:00Z",
+	} {
+		got, present := byTarget[target]
+		if !present || fmt.Sprint(got) != want {
+			t.Fatalf("byTarget[%s] = %v (present=%v), want it carried through verbatim as %s — an entry "+
+				"this cannot order is a repair for whoever wrote it, never a deletion for whoever fires next",
+				target, got, present, want)
+		}
+	}
+	if got := data["expiredAt"]; got != "2026-06-18T13:00:00Z" {
+		t.Fatalf("expiredAt = %v, want the one orderable value 2026-06-18T13:00:00Z (an unparseable "+
+			"standing expiredAt contributes nothing to the maximum)", got)
+	}
+}
+
+// TestMarkExpired_TombstonedMarker_DoesNotResurrectStaleEntries: a tombstoned
+// marker's per-target entries were declared gone by whatever tombstoned it, so
+// they do not come back — but its expiredAt still folds into the maximum, which
+// is what keeps that field monotone across the revival. The mutation stays an
+// update (the key exists) and clears the tombstone.
+func TestMarkExpired_TombstonedMarker_DoesNotResurrectStaleEntries(t *testing.T) {
+	entityKey := "vtx.leaseapp.BBmarktombstnHJKMNP"
+	standing := rawMarkerDoc(entityKey, map[string]any{
+		"expiredAt": "2026-06-18T17:00:00Z",
+		"byTarget":  map[string]any{meTargetB: "2026-06-18T17:00:00Z"},
+	}, true)
+
+	res := runMarkExpiredScript(t, entityKey, meTargetA, "2026-06-18T09:00:00Z", standing, false)
+	kind, data := mutationData(t, res)
+	if kind != "update" {
+		t.Fatalf("mutation kind = %q, want update — a tombstoned marker's KEY still exists, so a create would conflict", kind)
+	}
+	if del, _ := res.Mutations[0].Document["isDeleted"].(bool); del {
+		t.Fatal("the merge must clear the tombstone (isDeleted false)")
+	}
+	byTarget, _ := data["byTarget"].(map[string]any)
+	if _, revived := byTarget[meTargetB]; revived {
+		t.Fatalf("a tombstoned marker's stale entries must not resurrect; byTarget = %v", byTarget)
+	}
+	if got := byTarget[meTargetA]; got != "2026-06-18T09:00:00Z" {
+		t.Fatalf("byTarget[%s] = %v, want the firing's own instant", meTargetA, got)
+	}
+	if got := data["expiredAt"]; got != "2026-06-18T17:00:00Z" {
+		t.Fatalf("expiredAt = %v, want the standing 2026-06-18T17:00:00Z folded on — the field is "+
+			"monotone across the revival even though the entries are not", got)
+	}
+}
+
+// TestMarkExpired_TargetIdMustBeACypherIdentifier: the targetId is read as a
+// single cypher property hop, so it is held to that position's grammar —
+// [A-Za-z_][A-Za-z0-9_]* — rather than to "no dots". Anything else names an
+// entry no lens can express a read for.
+func TestMarkExpired_TargetIdMustBeACypherIdentifier(t *testing.T) {
+	entityKey := "vtx.leaseapp.BBmarkidentHJKMNPQR"
+
+	// Every weaver target id shipped today — the grammar must not refuse one.
+	for _, ok := range []string{
+		"leaseApplicationComplete", "leaseExpiry", "pastDueAppointments", "followUpReminders",
+		"appointmentReminders", "visitSeriesDue", "unroutedTasks", "staleAssignedTasks",
+		"clauseSatisfaction", "wellnessBookingReminders", "pastDueBookings", "_private", "a1",
+	} {
+		if err := runMarkExpiredScriptErr(t, entityKey, ok, "2026-06-18T13:00:00Z"); err != nil {
+			t.Fatalf("targetId %q must be accepted (Weaver already registers ids of this shape): %v", ok, err)
+		}
+	}
+
+	// `required_string` strips surrounding whitespace before this runs, so a
+	// padded id is a valid one — the refusals below are all shapes no amount of
+	// trimming makes an identifier.
+	for _, bad := range []string{
+		"has space", "1leading", "dotted.id", "dash-ed", "", "brackets[0]", "a b",
+	} {
+		if err := runMarkExpiredScriptErr(t, entityKey, bad, "2026-06-18T13:00:00Z"); err == nil {
+			t.Fatalf("targetId %q must be refused — it cannot be read as a cypher property hop", bad)
+		}
+	}
 }

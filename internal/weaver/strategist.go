@@ -132,8 +132,8 @@ type plan struct {
 	// reads is the dispatched op's ContextHint.Reads: the BARE vertex keys the
 	// op's DDL script hydrates + validates (vertex_alive). The dispatcher
 	// declares them because it builds the payload and so knows the exact keys
-	// the op touches. Empty for read-free ops (StartLoomPattern, MarkExpired,
-	// most directOps). NO `.state` suffixes — the DDLs read bare keys.
+	// the op touches. Empty for read-free ops (StartLoomPattern, most
+	// directOps). NO `.state` suffixes — the DDLs read bare keys.
 	reads []string
 	// optionalReads, when non-nil, yields the dispatched op's
 	// ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
