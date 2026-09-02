@@ -240,9 +240,20 @@ walk	SetAppointmentSite	vtx.provider.<id> practicesAt out
 walk	SetAppointmentStatus	vtx.appointment.<id> atSite out
 walk	SetAppointmentStatus	vtx.appointment.<id> withProvider out
 walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
+# Mirrors ReleaseOrphanedBooking's identical settles/postedTo walk pair above
+# (line 223/226) — a re-mark from noShow to attended (verticals.md,
+# 2026-09-02) reverses the same already-posted no-show-fee charge, this time
+# because the mark itself was wrong, not because the class was called off.
+# `reverses in` is new: unlike CancelBooking/ReleaseOrphanedBooking (each
+# dispatched at most once per booking), SetBookingAttendance is re-markable,
+# so this walk is an idempotency check guarding against walking into the
+# same settles-linked transaction twice and double-crediting it.
+walk	SetBookingAttendance	vtx.booking.<id> settles in
 walk	SetBookingAttendance	vtx.building.<id> containedIn out
 walk	SetBookingAttendance	vtx.session.<id> atStudio out
 walk	SetBookingAttendance	vtx.studio.<id> locatedAt out
+walk	SetBookingAttendance	vtx.wellnesstransaction.<id> postedTo out
+walk	SetBookingAttendance	vtx.wellnesstransaction.<id> reverses in
 walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	SetRenewalTerms	vtx.renewal.<id> renews out
 walk	SetVisitSeriesSite	vtx.building.<id> containedIn out

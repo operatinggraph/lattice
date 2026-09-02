@@ -624,3 +624,118 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.classPriceRefundQueued")
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
 }
+
+// TestSetBookingAttendance_ReversesNoShowFeeOnCorrectionToAttended proves the
+// other half of the noShow<->attended correction (verticals.md, 2026-09-02):
+// when a no-show-fee charge already posted, marking the booking back to
+// attended reverses it — the fee was wrong, not merely forgiven — the same
+// settles-relation lookup-and-mint ReleaseOrphanedBooking uses.
+func TestSetBookingAttendance_ReversesNoShowFeeOnCorrectionToAttended(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendreverse")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattndrvstudio00001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattndrvsessio00001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDRV1HJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdattndrvbookin00001", sessionKey, bookerKey, "")
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattndrvattend00001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	acctKey := "vtx.wellnessaccount.BBWELLATTNDRVACTHJKM"
+	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
+	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLATTNDRVTXNHJKM", 2500.0)
+	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
+
+	correctLabel := "wdattndrvcorrct00001"
+	testutil.PublishOp(t, conn, attendanceEnv(t, correctLabel, bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:10:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	correctReqID := testutil.GenReqID(correctLabel)
+
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "attended" {
+		t.Fatalf("status.value = %q, want attended", got)
+	}
+
+	refundIDs := nanoIDsFromRequestID(correctReqID, 1)
+	refundKey := "vtx.wellnessrefund." + refundIDs[0]
+	detail := readDoc(t, ctx, conn, refundKey+".detail")
+	data, _ := detail["data"].(map[string]any)
+	if data["memo"] != "No-show fee refund" {
+		t.Fatalf("refund memo = %v, want %q", data["memo"], "No-show fee refund")
+	}
+	if data["amountCents"] != 2500.0 {
+		t.Fatalf("refund amountCents = %v, want 2500", data["amountCents"])
+	}
+	if data["accountKey"] != acctKey {
+		t.Fatalf("refund accountKey = %v, want %v", data["accountKey"], acctKey)
+	}
+
+	_, refundID, _ := substrate.ParseVertexKey(refundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+refundID+".reverses.wellnesstransaction."+noShowTxID) {
+		t.Fatalf("reverses link must exist")
+	}
+	assertTrackerEvent(t, ctx, conn, correctReqID, "wellness.noShowFeeRefundQueued")
+}
+
+// TestSetBookingAttendance_NoDoubleRefundOnRepeatedNoShowAttendedCycle proves
+// the idempotency guard: SetBookingAttendance is re-markable (unlike
+// CancelBooking/ReleaseOrphanedBooking, each dispatched at most once per
+// booking), so a second noShow->attended cycle over the SAME already-posted
+// charge (wellnessNoShowSettlement's txCount=0 gate means a real deployment
+// never posts a second one) must not mint a second refund for it.
+func TestSetBookingAttendance_NoDoubleRefundOnRepeatedNoShowAttendedCycle(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendnodouble")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattndnbstudio00001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattndnbsessio00001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDNB1HJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdattndnbbookin00001", sessionKey, bookerKey, "")
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattndnbattend00001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	acctKey := "vtx.wellnessaccount.BBWELLATTNDNBACTHJKM"
+	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
+	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLATTNDNBTXNHJKM", 2500.0)
+	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
+
+	firstCorrectLabel := "wdattndnbcorrct00001"
+	testutil.PublishOp(t, conn, attendanceEnv(t, firstCorrectLabel, bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:10:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	firstCorrectReqID := testutil.GenReqID(firstCorrectLabel)
+
+	firstRefundKey := "vtx.wellnessrefund." + nanoIDsFromRequestID(firstCorrectReqID, 1)[0]
+	if !keyExists(t, ctx, conn, firstRefundKey) {
+		t.Fatalf("first correction must mint a refund marker")
+	}
+
+	// Re-mark noShow (no new charge posts — wellness-ledger is not installed
+	// in this harness, and even live, the settles link from the FIRST charge
+	// already makes wellnessNoShowSettlement's txCount=0 gate stop matching),
+	// then correct back to attended a second time.
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattndnbreshow00001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:15:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	secondCorrectLabel := "wdattndnbrecorr00001"
+	testutil.PublishOp(t, conn, attendanceEnv(t, secondCorrectLabel, bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:20:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	secondCorrectReqID := testutil.GenReqID(secondCorrectLabel)
+
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "attended" {
+		t.Fatalf("status.value = %q, want attended", got)
+	}
+
+	secondRefundKey := "vtx.wellnessrefund." + nanoIDsFromRequestID(secondCorrectReqID, 1)[0]
+	if keyExists(t, ctx, conn, secondRefundKey) {
+		t.Fatalf("second noShow->attended cycle must NOT mint a second refund for the same already-reversed charge")
+	}
+	assertNoTrackerEvent(t, ctx, conn, secondCorrectReqID, "wellness.noShowFeeRefundQueued")
+
+	// Exactly one reverses link ever points at the original charge — the one
+	// the first correction minted.
+	_, refundID, _ := substrate.ParseVertexKey(firstRefundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+refundID+".reverses.wellnesstransaction."+noShowTxID) {
+		t.Fatalf("the first correction's reverses link must still be the only one")
+	}
+}

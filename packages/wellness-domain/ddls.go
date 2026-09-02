@@ -808,10 +808,11 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"member in) as distinct from a staff-observed no-show; a negative value is rejected. When present and " +
 			"positive, wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge " +
 			"against the booker's ledger account. It is re-markable — " +
-			"attended and noShow correct each other — and noShowFeeCents is NOT in the carry-forward field set " +
-			"(only rate/seat/booker/session/className/classStartsAt are), so re-marking a noShow booking back to attended silently drops " +
-			"it; a charge already posted before that re-mark stands (the settles audit link makes it permanent " +
-			"history, never reversed by a later status correction). It also " +
+			"attended and noShow correct each other. noShowFeeCents itself is NOT in the carry-forward field set " +
+			"(only rate/seat/booker/session/className/classStartsAt are), so a re-mark to attended drops it — and, " +
+			"if a no-show-fee charge already posted, reverses it too: the same settles-relation lookup " +
+			"ReleaseOrphanedBooking uses below mints a fresh wellnessrefund marker (memo \"No-show fee refund\"), " +
+			"guarded by an existing-reverses-link check so a later noShow<->attended cycle never double-credits. It also " +
 			"rejects a session that has not begun (SessionNotStarted, the mirror of CreateBooking's " +
 			"SessionInPast), and a booking that is still `waitlisted` (InvalidState — a waitlisted booker " +
 			"never held a confirmed seat, so there is no attendance to record; only a `booked` start, or a " +
@@ -917,6 +918,19 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "As the attended case, but upserts .status {value: noShow, noShowFeeCents: 2500, " +
 					"...} (the default, since noShowFeeCents was omitted) — wellness-ledger's wellnessNoShowSettlement " +
 					"lens reads it to post a DebitAccount charge against the booker's ledger account once one exists.",
+			},
+			{
+				Name: "SetBookingAttendance — correct a no-show back to attended",
+				Payload: map[string]any{
+					"bookingKey": "vtx.booking.<NanoID>",
+					"session":    "vtx.session.<NanoID>",
+					"status":     "attended",
+				},
+				ExpectedOutcome: "The re-mark itself is the same attended-case upsert (noShowFeeCents drops out of " +
+					"the carry-forward set). If a no-show-fee charge already posted for this booking (a live settles " +
+					"link), also mints a fresh vtx.wellnessrefund.<NanoID> + .detail (memo \"No-show fee refund\") " +
+					"reversing it — a no-op if no such charge exists yet, or if this exact charge was already " +
+					"reversed by an earlier correction.",
 			},
 			{
 				Name:    "ReleaseOrphanedBooking — drain a booking whose class was called off",
@@ -1314,7 +1328,7 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 		// DDL in this file already uses, just applied to a vertex-shaped
 		// mutation instead of a literal .aspect key.
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking"},
+		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking", "SetBookingAttendance"},
 		Description: "Wellness refund marker — reverses either a class-price charge or a no-show fee, the " +
 			"two independent wellnesstransaction shapes a booking can carry. Vertex shape: " +
 			"vtx.wellnessrefund.<NanoID>, class=wellnessrefund, root data = {} (minimal, D5 — the data lives in " +
@@ -1327,7 +1341,11 @@ func refundVertexTypeDDL() pkgmgr.DDLSpec {
 			"late-cancellation window to check — a posted charge always reverses, for BOTH shapes: a " +
 			"still-booked/waitlisted orphaned booking's settlesClassPrice charge, and an already-noShow orphaned " +
 			"booking's settles (no-show fee) charge — the studio called off the class either way, so the fee a " +
-			"member never had a chance to avoid reverses the same as the class price does. A posted " +
+			"member never had a chance to avoid reverses the same as the class price does. Also minted by " +
+			"SetBookingAttendance when a re-mark corrects a booking from noShow back to attended and a " +
+			"no-show-fee charge already posted — the fee was wrong, not merely forgiven, so it reverses the same " +
+			"way; guarded against minting twice for the same charge across a later noShow<->attended cycle by " +
+			"checking for an existing reverses link first (booking vertexType DDL, ddls.go). A posted " +
 			"charge is the one case wellness-ledger's own " +
 			"wellnessClassPriceSettlement/wellnessNoShowSettlement lenses cannot self-correct, since their " +
 			"`MATCH (bk:booking {key: $actorKey})` simply stops matching a tombstoned booking (no charge is " +
@@ -1376,12 +1394,12 @@ func refundDetailAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     refundDetailAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking"},
+		PermittedCommands: []string{"CancelBooking", "ReleaseOrphanedBooking", "SetBookingAttendance"},
 		Description: "Refund-marker detail aspect (wellness). Stored as vtx.wellnessrefund.<NanoID>.detail " +
 			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey, memo, className?, " +
 			"classStartsAt?}. Non-sensitive. Written once, atomically alongside the wellnessrefund vertex it " +
-			"belongs to, by CancelBooking or ReleaseOrphanedBooking (booking vertexType DDL, ddls.go) — never " +
-			"updated afterward. memo says which charge shape this reverses (\"Class price refund\" or " +
+			"belongs to, by CancelBooking, ReleaseOrphanedBooking, or SetBookingAttendance (booking vertexType " +
+			"DDL, ddls.go) — never updated afterward. memo says which charge shape this reverses (\"Class price refund\" or " +
 			"\"No-show fee refund\") — wellness-ledger's wellnessRefundSettlement lens projects it verbatim " +
 			"instead of a hardcoded label, since one marker type now serves both. className/classStartsAt are " +
 			"the booking's own .status snapshot at mint time, carried onto this marker because the booking " +
@@ -4111,9 +4129,8 @@ def execute(state, op):
         # value still defaults to 2500, the staff-observed default. Negative
         # values are rejected; positive values are stored as-is. Deliberately
         # NOT in the carry-forward loop above: a later re-mark to attended
-        # drops it (the field only matters while the booking IS a noShow),
-        # and a charge already posted before that re-mark stands regardless
-        # (the settles audit link makes it permanent, wellness-ledger-design.md).
+        # drops it (the field only matters while the booking IS a noShow) —
+        # and reverses whichever no-show-fee charge already posted, below.
         if value == "noShow":
             fee_cents = optional_number(p, "noShowFeeCents")
             if fee_cents == None:
@@ -4129,6 +4146,73 @@ def execute(state, op):
         mutations = [make_aspect_upsert_occ(book_key, "status", "bookingStatus", merged, status.revision)]
         events = [{"class": "wellness.attendanceRecorded",
                    "data": {"bookingKey": book_key, "session": session, "value": value}}]
+
+        # A re-mark from noShow to attended means the fee was wrong, not
+        # merely forgiven — reverse whichever no-show-fee charge already
+        # posted, the same settles-relation lookup-and-mint
+        # ReleaseOrphanedBooking uses below. Only this direction reverses
+        # anything: the opposite correction (attended to noShow) posts a
+        # fresh charge itself, through wellness-ledger's own
+        # wellnessNoShowSettlement lens, same as an original noShow mark.
+        if value == "attended" and current_value == "noShow":
+            # read-posture: (e) relation=settles epoch=none -- a booking
+            # carries at most one live settles transaction EVER
+            # (wellnessNoShowSettlement's txCount=0 gate never re-fires once
+            # one has posted, even across a later noShow re-mark) — the same
+            # single-live-link guarantee ReleaseOrphanedBooking's identical
+            # lookup below relies on.
+            noshow_charge_page, _ = kv.Links(book_key, "settles", "in", None, 1)
+            for nlk in noshow_charge_page:
+                if nlk.isDeleted:
+                    continue
+                noshow_tx_key = nlk.sourceVertex
+                _, noshow_tx_id = parts_of(noshow_tx_key, "chargeTransactionKey", "wellnesstransaction")
+                # read-posture: (e) relation=reverses epoch=none -- idempotency
+                # guard. Unlike CancelBooking/ReleaseOrphanedBooking (each
+                # dispatched at most once per booking, so refundSettlementSpec's
+                # own doc comment notes there is "no later re-violation to
+                # guard against"), SetBookingAttendance is re-markable: a
+                # second noShow->attended cycle would walk into the SAME
+                # settles-linked transaction (the gate above never lets a
+                # second one post) and, without this check, mint a second
+                # refund for money already credited back once.
+                already_refunded_page, _ = kv.Links(noshow_tx_key, "reverses", "in", None, 1)
+                already_refunded = False
+                for arlk in already_refunded_page:
+                    if not arlk.isDeleted:
+                        already_refunded = True
+                        break
+                if already_refunded:
+                    continue
+                # read-posture: (e) per-candidate follow-up read off the
+                # enumeration above (data-derived key) -- the exact amount
+                # actually charged.
+                noshow_entry = kv.Read(noshow_tx_key + ".entry")
+                if noshow_entry == None or noshow_entry.isDeleted:
+                    continue
+                noshow_amount_cents = noshow_entry.data.get("amountCents")
+                if noshow_amount_cents == None:
+                    continue
+                # read-posture: (e) relation=postedTo epoch=none -- same
+                # single-live-link guarantee as ReleaseOrphanedBooking's
+                # identical lookup below.
+                noshow_acct_page, _ = kv.Links(noshow_tx_key, "postedTo", "out", None, 1)
+                noshow_account_key = None
+                for nalk in noshow_acct_page:
+                    if not nalk.isDeleted:
+                        noshow_account_key = nalk.targetVertex
+                if noshow_account_key == None:
+                    continue
+                noshow_refund_id = nanoid.new()
+                noshow_refund_key = "vtx.wellnessrefund." + noshow_refund_id
+                noshow_reverses_lnk = "lnk.wellnessrefund." + noshow_refund_id + ".reverses.wellnesstransaction." + noshow_tx_id
+                mutations.append(make_vtx(noshow_refund_key, "wellnessrefund", {}))
+                mutations.append(make_aspect(noshow_refund_key, "detail", "wellnessRefundDetail",
+                    {"accountKey": noshow_account_key, "amountCents": noshow_amount_cents, "bookingKey": book_key, "memo": "No-show fee refund", "className": merged.get("className"), "classStartsAt": merged.get("classStartsAt")}))
+                mutations.append(make_link(noshow_reverses_lnk, noshow_refund_key, noshow_tx_key, "reverses", "reverses", {}))
+                events.append({"class": "wellness.noShowFeeRefundQueued", "data": {"bookingKey": book_key, "refundKey": noshow_refund_key, "accountKey": noshow_account_key, "amountCents": noshow_amount_cents}})
+                break
+
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     if ot == "ReleaseOrphanedBooking":

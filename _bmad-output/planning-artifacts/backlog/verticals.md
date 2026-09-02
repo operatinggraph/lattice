@@ -30,7 +30,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A corrected no-show leaves its no-show fee stranded, and the original wrong-call reason is destroyed** | `CorrectAppointmentStatus` writes only `.status`: a `noShow→completed` correction drops `noShowFeeCents` and never reverses an already-posted charge (no lens re-opens, gated on `status='noShow'`), and the mandatory correction note overwrites the original. | Clinic | pkg | ★ | S | 📋 ready · reverse/credit the stale fee on correction; consider projecting `correctedFrom` |
 | **Front desk has no way to see which booked appointments a provider's time off now conflicts with** | `SetProviderTimeOff` writes only `.timeOff` — nothing tells front desk which of a provider's existing bookings now need a reschedule call. | Clinic | pkg | ★ | S | 📋 ready · sketch: walk the provider's appointments (`kv.Links(providerKey,"withProvider","in")`) at `SetProviderTimeOff`, mark overlapping non-terminal ones, project the marker for an FE badge |
 | **The 4 stale cluster-A onboarding cards need a live CancelTask pass** | Inc 2 of the onboarding re-anchor: 4 open `RecordIdentityPII` tasks predate the Inc 1 fix and won't self-clear. Grounded 2026-09-01: the identity is a stranded pre-rotation fossil, not live admin — safe to cancel. | LoftSpace | platform | ★ | XS | 🚧 blocked-on: live-op execution · commands ready in [design](../../implementation-artifacts/duplicate-human-task-fanout-design.md) build note |
-| **A corrected no-show has no ONE-CLICK refund** | Re-grounded 2026-09-02: the "amount is gone" premise was false — the transaction is permanent, still front-desk-waivable via `WellnessCreditAccount{reason:"waiver"}` after a re-mark. Narrower real ask: auto-reverse ON the re-mark, in `SetBookingAttendance`. | Wellness | pkg | ★ | S | 📋 ready · mirror ReleaseOrphanedBooking's charge-lookup-and-mint, keyed on the re-mark |
 | **The front desk is the only hat that sees "New instructor", and the op refuses it every time** | The instructors panel sits inside the Studios tab, gated `isStaff()` = worksAt + frontOfHouse ([app.js:270](../../../cmd/wellness-app/web/app.js:270)), while `CreateInstructor` is operator-only by design (mirroring clinic's `CreateProvider`). Live: 1 instructor for 2 studios, 31 of 48 sessions instructor-less. | Wellness | FE | ★ | XS | 📋 ready · hide it off an operator hat, or decide who registers instructors |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -70,6 +69,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 ## Done log — verticals (newest first)
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
+
+- 2026-09-02 · `<pending>` · A corrected wellness no-show now refunds its fee automatically — `SetBookingAttendance` mints a wellnessrefund marker (mirroring `ReleaseOrphanedBooking`'s charge-lookup-and-mint) when a re-mark corrects `noShow` back to `attended`, guarded against double-crediting a repeated correction cycle.
 
 - 2026-09-02 · (observation, no code) · The executed lease document's `AttachObject` grant fix (`2026-08-27` live) converged — Weaver's reclaim sweep has attached all known-affected leases, none failing since; no code change needed.
 
