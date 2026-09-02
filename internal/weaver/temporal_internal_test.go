@@ -127,6 +127,23 @@ func TestHandleFiredTimer_RedeliveryDedup(t *testing.T) {
 	if payload["entityKey"] != entityKey || payload["targetId"] != targetID || payload["expiredAt"] != fireAt {
 		t.Fatalf("payload = %v, want {entityKey:%s targetId:%s expiredAt:%s}", payload, entityKey, targetID, fireAt)
 	}
+	// Both declared reads, with their opposite dispositions: the entity ROOT
+	// fail-closed (the parent-existence guard), the freshnessExpiry MARKER
+	// absence-tolerant. The optional one is what lets the DDL see the standing
+	// marker and merge this target's lapse into it rather than overwrite a
+	// sibling target's entry — and what conditions the write on the revision it
+	// was hydrated at.
+	hint, ok := first["contextHint"].(map[string]any)
+	if !ok {
+		t.Fatalf("MarkExpired carries no contextHint: %v", first)
+	}
+	if got := hint["reads"]; !oneStringEquals(got, entityKey) {
+		t.Fatalf("contextHint.reads = %v, want [%s]", got, entityKey)
+	}
+	wantMarker := entityKey + freshnessMarkerAspectSuffix
+	if got := hint["optionalReads"]; !oneStringEquals(got, wantMarker) {
+		t.Fatalf("contextHint.optionalReads = %v, want [%s]", got, wantMarker)
+	}
 
 	// Redelivery of the same firing: the same requestId again.
 	redelivered := msg
@@ -708,4 +725,16 @@ func TestScheduleFreshness_DataIssueIsPerEntity(t *testing.T) {
 		t.Fatalf("dropping the column repairs the row; its issue must retire, issues = %+v",
 			h.engine.issues.snapshot())
 	}
+}
+
+// oneStringEquals reports whether a JSON-decoded contextHint list is exactly the
+// one key `want`. The envelope decodes to []any, so a direct []string compare is
+// not available at this seam.
+func oneStringEquals(v any, want string) bool {
+	list, ok := v.([]any)
+	if !ok || len(list) != 1 {
+		return false
+	}
+	s, ok := list[0].(string)
+	return ok && s == want
 }

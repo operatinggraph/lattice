@@ -63,10 +63,12 @@ func TestPackage_DDLsLensesPermissions(t *testing.T) {
 }
 
 // TestPackage_MarkExpiredDDL pins the generic freshness-marker DDL (RF#3): a
-// vertexType DDL admitting only MarkExpired, an UNCONDITIONED-update marker
-// write (no expectedRevision in the script), a companion freshnessExpiry
-// aspect-type DDL that admits MarkExpired (the step-6 gate), a non-sensitive
-// marker aspect, an operator grant, and NO concrete type literal in the script.
+// vertexType DDL admitting only MarkExpired, a marker write that branches
+// create-on-known-absent / update-on-present and names NO explicit
+// expectedRevision (the Processor's Contract #3 §3.2 default supplies the
+// condition from the hydrated revision), a companion freshnessExpiry aspect-type
+// DDL that admits MarkExpired (the step-6 gate), a non-sensitive marker aspect,
+// an operator grant, and NO concrete type literal in the script.
 func TestPackage_MarkExpiredDDL(t *testing.T) {
 	var marker, aspect *pkgmgr.DDLSpec
 	for i := range Package.DDLs {
@@ -92,17 +94,22 @@ func TestPackage_MarkExpiredDDL(t *testing.T) {
 		t.Fatalf("freshnessMarker permittedCommands = %v, want [MarkExpired]", marker.PermittedCommands)
 	}
 
-	// The marker write must be an UNCONDITIONED update (no expectedRevision) so
-	// the eager re-open survives a SECOND lapse (C2). A create, or an
-	// expectedRevision, would conflict on the standing marker.
-	if !strings.Contains(marker.Script, `"op": "update"`) {
-		t.Error("freshnessMarker marker write must be an update")
+	// The marker write branches on what step 4 observed: a `create` only when the
+	// key was hydrated known-absent (conditioned on that absence, so a losing
+	// racer's retry re-branches), an `update` otherwise — which is what keeps the
+	// eager re-open working across a SECOND lapse. A create on a key already
+	// present would conflict and turn the re-open into a one-shot.
+	for _, branch := range []string{`kind = "update"`, `kind = "create"`} {
+		if !strings.Contains(marker.Script, branch) {
+			t.Errorf("freshnessMarker marker write must branch on the hydrated marker; %q missing", branch)
+		}
 	}
-	if strings.Contains(marker.Script, "expectedRevision") {
-		t.Error("freshnessMarker marker write must be UNCONDITIONED (no expectedRevision) — else the 2nd lapse conflicts")
-	}
-	if strings.Contains(marker.Script, `"op": "create"`) {
-		t.Error("freshnessMarker marker write must NOT be a create — it conflicts on the 2nd lapse")
+	// No EXPLICIT expectedRevision: the Processor conditions the update on the
+	// revision the declared optionalReads key was hydrated at (Contract #3 §3.2),
+	// and only a condition it supplied is retry-eligible on a conflict. A
+	// script-named one would surface the race to the caller instead.
+	if strings.Contains(starlarkCode(marker.Script), "expectedRevision") {
+		t.Error("freshnessMarker marker write must name no explicit expectedRevision — the §3.2 default is what makes a sibling target's conflict retry-absorbed")
 	}
 
 	// Type-agnostic: the script must name no concrete anchor type.
@@ -306,4 +313,19 @@ func TestPackage_TaskScriptNoScans(t *testing.T) {
 			t.Errorf("task script must not reference prefix-scan helper %q", forbidden)
 		}
 	}
+}
+
+// starlarkCode strips whole-line `#` comments from a Starlark source so a
+// substring assertion about what the script DOES is not answered by prose about
+// what it does not do.
+func starlarkCode(script string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }

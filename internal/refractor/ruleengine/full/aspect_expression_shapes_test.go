@@ -124,3 +124,185 @@ RETURN
 	require.Equal(t, "Riverside Building", entry["containerName"],
 		"a second-hop neighbour's aspect must resolve inside the same map literal")
 }
+
+// The per-target recorded-lapse shape: an aspect whose `data` carries a
+// `byTarget` map keyed by weaver-target id, read four navigation hops deep as
+// `x.<aspect>.data.byTarget.<targetId>`. One hop resolves the aspect, the rest
+// is ordinary map navigation (values.go's resolveProperty/propertyOf), and the
+// grammar bounds the lookup chain at nothing — but the corpus's deepest shipped
+// read is `x.<aspect>.data.<leaf>`, so the depth is pinned here rather than
+// argued from the resolver.
+//
+// The three positions a convergence lens puts the read in are pinned together
+// because they route through different evaluator arms: a scalar alias, an
+// ordering comparison against another aspect's leaf, and the CASE/NOT forms a
+// freshUntil column and a freshness (rather than lapse) predicate need.
+const (
+	expiryMarkerTargetID = "appointmentReminders"
+	expiryMarkerLapsed   = "2026-06-18T14:00:00Z"
+	expiryMarkerDeadline = "2026-06-18T13:00:00Z"
+)
+
+// TestAspectExpr_ByTargetMapRead_ScalarAliasAndComparison pins the four-deep
+// read in a scalar alias, inside a `>=` comparison against another aspect's
+// leaf, inside `CASE WHEN <that comparison> THEN null ELSE <deadline> END`, and
+// under `NOT (<comparison>)` — the negation form the corpus already uses
+// (visitseries.go's exclusion), never `= False`.
+func TestAspectExpr_ByTargetMapRead_ScalarAliasAndComparison(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "appt", "appointment", nil)
+	putAspect(t, reg, coreKV, "appt", "freshnessExpiry", map[string]any{
+		"expiredAt": expiryMarkerLapsed,
+		"byTarget":  map[string]any{expiryMarkerTargetID: expiryMarkerLapsed},
+	})
+	putAspect(t, reg, coreKV, "appt", "schedule", map[string]any{"remindAt": expiryMarkerDeadline})
+
+	results := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  a.key AS anchor,
+  a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` AS recordedLapse,
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  (CASE WHEN (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) THEN null ELSE a.schedule.data.remindAt END) AS freshUntil,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "appt")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, expiryMarkerLapsed, results[0].Values["recordedLapse"],
+		"a four-deep aspect read (aspect → data → byTarget → targetId) must resolve in scalar alias position")
+	require.Equal(t, true, results[0].Values["lapsed"],
+		"a recorded lapse at or after the deadline must compare true")
+	require.Nil(t, results[0].Values["freshUntil"],
+		"a lapsed row's freshUntil is null — the CASE arm the timer reads")
+	require.Equal(t, false, results[0].Values["fresh"],
+		"NOT over the lapse comparison is the freshness polarity, and it must invert")
+}
+
+// TestAspectExpr_ByTargetMapRead_DeadlineNotYetReached pins the other side of
+// the comparison with both operands present: a recorded lapse for a target
+// whose deadline has since moved past it reads not-lapsed, and freshUntil
+// carries the deadline verbatim. This is the re-arm vector — no clearing write
+// is involved, the deadline simply overtakes the recorded instant.
+func TestAspectExpr_ByTargetMapRead_DeadlineNotYetReached(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "appt", "appointment", nil)
+	putAspect(t, reg, coreKV, "appt", "freshnessExpiry", map[string]any{
+		"expiredAt": expiryMarkerDeadline,
+		"byTarget":  map[string]any{expiryMarkerTargetID: expiryMarkerDeadline},
+	})
+	putAspect(t, reg, coreKV, "appt", "schedule", map[string]any{"remindAt": expiryMarkerLapsed})
+
+	results := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  (CASE WHEN (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) THEN null ELSE a.schedule.data.remindAt END) AS freshUntil,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "appt")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, false, results[0].Values["lapsed"],
+		"a recorded lapse strictly before the deadline must compare false")
+	require.Equal(t, expiryMarkerLapsed, results[0].Values["freshUntil"],
+		"an unlapsed row's freshUntil carries the deadline verbatim — what arms the timer")
+	require.Equal(t, true, results[0].Values["fresh"])
+}
+
+// TestAspectExpr_ByTargetMapRead_OtherTargetsEntryIsIsolated pins the whole
+// reason the marker is keyed per target: a lapse recorded for a SIBLING target
+// on the same anchor must not read as this target's lapse.
+func TestAspectExpr_ByTargetMapRead_OtherTargetsEntryIsIsolated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "appt", "appointment", nil)
+	putAspect(t, reg, coreKV, "appt", "freshnessExpiry", map[string]any{
+		"expiredAt": expiryMarkerLapsed,
+		"byTarget":  map[string]any{"pastDueAppointments": expiryMarkerLapsed},
+	})
+	putAspect(t, reg, coreKV, "appt", "schedule", map[string]any{"remindAt": expiryMarkerDeadline})
+
+	results := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` AS recordedLapse,
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "appt")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Nil(t, results[0].Values["recordedLapse"],
+		"a sibling target's byTarget entry must not resolve under this target's key")
+	require.Equal(t, false, results[0].Values["lapsed"],
+		"a sibling target's lapse must not open this target's gap — the isolation the byTarget keying buys")
+	require.Equal(t, true, results[0].Values["fresh"])
+}
+
+// TestAspectExpr_ByTargetMapRead_NilSemantics pins compareAny's nil-false for
+// both operands of the four-deep read — the default the converted lenses rest
+// on. With the marker aspect entirely absent the row is not expired (matching
+// today's `deadline <= $now` before the deadline), and the negated form reads
+// fresh; with the deadline absent the comparison is false in the other
+// direction too, byte-identical to today.
+func TestAspectExpr_ByTargetMapRead_NilSemantics(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	// No freshnessExpiry aspect at all: nothing has ever fired for this anchor.
+	putVertex(t, reg, coreKV, "appt", "appointment", nil)
+	putAspect(t, reg, coreKV, "appt", "schedule", map[string]any{"remindAt": expiryMarkerDeadline})
+	// A second anchor carrying the marker but no deadline aspect.
+	putVertex(t, reg, coreKV, "noDeadline", "appointment", nil)
+	putAspect(t, reg, coreKV, "noDeadline", "freshnessExpiry", map[string]any{
+		"expiredAt": expiryMarkerLapsed,
+		"byTarget":  map[string]any{expiryMarkerTargetID: expiryMarkerLapsed},
+	})
+
+	noMarker := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` AS recordedLapse,
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  (CASE WHEN (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) THEN null ELSE a.schedule.data.remindAt END) AS freshUntil,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "appt")}},
+		adjKV, coreKV)
+
+	require.Len(t, noMarker, 1)
+	require.Nil(t, noMarker[0].Values["recordedLapse"],
+		"an absent marker aspect binds nil rather than dropping the row")
+	require.Equal(t, false, noMarker[0].Values["lapsed"],
+		"nil >= deadline must be FALSE — a never-fired anchor is not expired")
+	require.Equal(t, expiryMarkerDeadline, noMarker[0].Values["freshUntil"],
+		"with no marker the CASE takes the ELSE arm and the deadline arms the timer")
+	require.Equal(t, true, noMarker[0].Values["fresh"],
+		"NOT(nil-false) is TRUE — a never-lapsed anchor reads fresh, the polarity the freshness family needs")
+
+	noDeadline := parseExec(t, `
+MATCH (a:appointment {key: $anchorKey})
+RETURN
+  (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS lapsed,
+  NOT (a.freshnessExpiry.data.byTarget.`+expiryMarkerTargetID+` >= a.schedule.data.remindAt) AS fresh
+`, ruleengine.EventContext{Parameters: map[string]any{"anchorKey": vtxKey(reg, "noDeadline")}},
+		adjKV, coreKV)
+
+	require.Len(t, noDeadline, 1)
+	require.Equal(t, false, noDeadline[0].Values["lapsed"],
+		"marker >= nil must be FALSE — no stored deadline, no gap")
+	require.Equal(t, true, noDeadline[0].Values["fresh"])
+}

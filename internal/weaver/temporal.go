@@ -38,6 +38,13 @@ const firedToken = "fired"
 // in docs/components/weaver.md.
 const freshUntilColumn = "freshUntil"
 
+// freshnessMarkerAspectSuffix completes the Contract #1 aspect key of the
+// freshnessExpiry marker MarkExpired merges on the anchor —
+// vtx.<type>.<id>.freshnessExpiry. The temporal lane declares it as the op's
+// absence-tolerant read so the DDL can merge this target's lapse into the
+// standing per-target map rather than overwrite it.
+const freshnessMarkerAspectSuffix = ".freshnessExpiry"
+
 // temporalConsumerName is the lane-3 durable on core-schedules. It is a FIXED
 // durable (not per-instance): its ack floor IS the missed-while-down recovery —
 // fired messages persist in the stream under limits retention and the durable
@@ -295,14 +302,26 @@ func (e *Engine) handleFiredTimer(ctx context.Context, msg substrate.Message) su
 	}
 	// No authContext: MarkExpired is submitted under Weaver's service-actor
 	// authority (the target-less directOp posture); the op's DDL/grants are
-	// package data. ContextHint.Reads carries the entity ROOT key: the
-	// freshnessMarker DDL hydrates it to assert the target exists + is alive
-	// before writing the (non-sensitive) marker — a stale firing whose entity was
-	// deleted fails closed rather than minting a dangling marker. The marker
-	// write itself stays an UNCONDITIONED update (no expectedRevision); the read
-	// is a parent-existence guard, not OCC on the marker.
+	// package data.
+	//
+	// Two declared reads, with opposite dispositions (Contract #2 §2.5):
+	//
+	//   - reads — the entity ROOT. The freshnessMarker DDL hydrates it to assert
+	//     the parent exists + is alive before writing the (non-sensitive) marker,
+	//     so a stale firing whose entity was deleted fails closed rather than
+	//     minting a dangling marker.
+	//   - optionalReads — the freshnessExpiry MARKER. The DDL merges this
+	//     target's lapse into the standing per-target map, so it has to see the
+	//     standing document; and absence is a legitimate branch (the entity's
+	//     first lapse), which is what makes this the absence-tolerant declaration
+	//     rather than a required one. Declaring it is also what serializes the
+	//     merge: a hydrated marker carries a revision the Processor conditions
+	//     the update on, so two targets firing on one entity conflict and
+	//     re-execute against the merged document instead of one overwriting the
+	//     other's entry.
 	reads := []string{p.EntityKey}
-	if err := e.act.submit(ctx, requestID, opMarkExpired, "", payload, "", reads, nil, nil); err != nil {
+	optionalReads := []string{p.EntityKey + freshnessMarkerAspectSuffix}
+	if err := e.act.submit(ctx, requestID, opMarkExpired, "", payload, "", reads, optionalReads, nil); err != nil {
 		// Retryable publish failure (core-operations degraded): NakWithDelay on
 		// a bounded cadence, never a hot loop. The redelivery re-derives the
 		// same deterministic requestId, which collapses on the Contract #4

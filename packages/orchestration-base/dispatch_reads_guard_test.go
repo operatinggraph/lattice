@@ -3,6 +3,7 @@ package orchestrationbase
 import (
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,39 @@ var engineMarkExpiredReads = []string{"entityKey"}
 func TestMarkExpiredReads_MatchDDLScript(t *testing.T) {
 	got := vertexAlivePayloadFields(t, markExpiredDDLScript, "MarkExpired")
 	assertSameStringSet(t, "MarkExpired", engineMarkExpiredReads, got)
+}
+
+// engineMarkExpiredOptionalReadSuffix is the tail Weaver's temporal lane appends
+// to the entity key for the op's absence-tolerant read
+// (internal/weaver/temporal.go: optionalReads = []string{p.EntityKey +
+// freshnessMarkerAspectSuffix}). The script derives the same key to merge the
+// standing marker.
+const engineMarkExpiredOptionalReadSuffix = ".freshnessExpiry"
+
+// TestMarkExpiredOptionalReads_MatchDDLScript is the merge half of the drift
+// guard. The script's marker key is DERIVED (entity_key + a literal suffix)
+// rather than taken from a payload field, so nothing but this pins it against
+// the dispatcher's declaration — and a mismatch is silent in the worst way: the
+// key is never hydrated, so `marker_key in state` is false on every fire, the
+// script takes the create branch forever, and the second lapse is rejected on a
+// key that already exists.
+func TestMarkExpiredOptionalReads_MatchDDLScript(t *testing.T) {
+	branch := opBranch(t, markExpiredDDLScript, "MarkExpired")
+	want := `marker_key = entity_key + "` + engineMarkExpiredOptionalReadSuffix + `"`
+	if !strings.Contains(branch, want) {
+		t.Fatalf("the MarkExpired branch must derive its marker key as %q — the dispatcher declares "+
+			"entityKey + %q in contextHint.optionalReads, and an undeclared key is never hydrated",
+			want, engineMarkExpiredOptionalReadSuffix)
+	}
+	// And the merge must actually consult the hydrated document: a branch that
+	// never reads `state[marker_key]` would write a whole-document overwrite
+	// with the read declared and unused.
+	for _, needed := range []string{"marker_key in state", "state[marker_key]"} {
+		if !strings.Contains(branch, needed) {
+			t.Fatalf("the MarkExpired branch must consult the hydrated marker (%q missing) — "+
+				"without it the write is a whole-document overwrite that drops a sibling target's entry", needed)
+		}
+	}
 }
 
 // vertexAlivePayloadFields parses one op branch of a DDL script and returns the

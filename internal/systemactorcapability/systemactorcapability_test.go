@@ -375,7 +375,8 @@ func TestSystemActorCapability_FourEnginePathsAuthorize(t *testing.T) {
 
 	// --- 1. Weaver: MarkExpired (temporal lane, system-class) ---
 	mr := h.submitOpAccepted("MarkExpired", "system", bootstrap.WeaverIdentityKey, map[string]any{
-		"entityKey": identityKey, "expiredAt": time.Now().UTC().Format(time.RFC3339),
+		"entityKey": identityKey, "targetId": "fixtureFreshness",
+		"expiredAt": time.Now().UTC().Format(time.RFC3339),
 	}, []string{identityKey}, 15*time.Second)
 	require.Equalf(t, processor.ReplyStatusAccepted, mr.Status, "Weaver MarkExpired: %+v", mr.Error)
 
