@@ -859,10 +859,10 @@ func TestVoidCharge_RejectsAfterSettle(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -964,10 +964,10 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1043,10 +1043,10 @@ func TestSettle_BackfillsChargedToWhenMissing(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToKey},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1080,10 +1080,10 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1099,12 +1099,61 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 		},
 	}
 	testutil.PublishOp(t, conn, settleTwice)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestSettle_NoDeclaredChargedToRead_StillBackfillsIdempotently proves
+// Settle's chargedTo confirmation no longer depends on a caller-declared
+// OptionalRead keyed by the caller's own lease. A staff Settle has no
+// `{me.leaseapp}` of its own to declare that key by (the caller settles a
+// RESIDENT's tab, not their own), so a real staff dispatch's ContextHint
+// carries no chargedTo OptionalRead at all — omitting it here reproduces
+// that shape. Before the live kv.Links confirmation this shipped with,
+// the declared-state check saw the already-live chargedTo link (written
+// unconditionally by OpenTab) as absent and tried to recreate it, failing
+// every retry with RevisionConflict.
+func TestSettle_NoDeclaredChargedToRead_StillBackfillsIdempotently(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "staffsettlenodeclare")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTFSETLEASE")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdstaffsettab0000001", leaseKey)
+
+	settle := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdstaffsettle0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T13:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, settle)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("staff Settle with no declared chargedTo optionalRead outcome = %v, want Accepted", outcome)
+	}
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["value"].(string), "settled"; got != want {
+		t.Fatalf("status.value = %q, want %q", got, want)
+	}
+	chargedToDoc := readDoc(t, ctx, conn, chargedToOptionalRead(tabKey, leaseKey))
+	if isDeleted, _ := chargedToDoc["isDeleted"].(bool); isDeleted {
+		t.Fatalf("chargedTo link is tombstoned after Settle, want alive")
+	}
 }
 
 // TestOpenTab_WritesStaleAtTwentyFourHoursAhead pins the auto-settle
@@ -1215,10 +1264,10 @@ func TestSettleStaleTab_NoOpsIfAlreadySettled(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1339,10 +1388,10 @@ func TestCharge_RejectsAfterSettle(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1405,10 +1454,10 @@ func TestOpenTab_AllowsReopenAfterSettle(t *testing.T) {
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + firstTabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{firstTabKey, firstTabKey + ".status"},
-			OptionalReads: []string{chargedToOptionalRead(firstTabKey, leaseKey)},
+			Reads: []string{firstTabKey, firstTabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: firstTabKey, Relation: "chargedTo", Direction: "out"},
 			},
 		},
 	}
@@ -1572,7 +1621,10 @@ func TestSettle_ConsumerSelfScope_Allowed(t *testing.T) {
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{applicationForLnk, chargedToOptionalRead(tabKey, leaseKey)},
+			OptionalReads: []string{applicationForLnk},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -2271,6 +2323,12 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 	for _, r := range settleDispatch.OptionalReads {
 		settleOptional = append(settleOptional, substituteDispatch(r, domainConsumerKey, vars))
 	}
+	var settleEnumerations []processor.EnumerationHint
+	for _, e := range settleDispatch.Enumerations {
+		settleEnumerations = append(settleEnumerations, processor.EnumerationHint{
+			Hub: substituteDispatch(e.Hub, domainConsumerKey, vars), Relation: e.Relation, Direction: e.Direction,
+		})
+	}
 	// require_open_status needs the tab's .status aspect — a declaration the
 	// targetField fallback alone never produces.
 	if !slices.Contains(settleReads, firstTab+".status") {
@@ -2284,7 +2342,7 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         settleDispatch.Class,
 		Payload:       json.RawMessage(`{"` + settleDispatch.TargetField + `":"` + firstTab + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: settleReads, OptionalReads: settleOptional},
+		ContextHint:   &processor.ContextHint{Reads: settleReads, OptionalReads: settleOptional, Enumerations: settleEnumerations},
 		AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
 	})
 	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {

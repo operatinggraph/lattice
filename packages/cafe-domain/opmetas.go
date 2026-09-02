@@ -217,19 +217,22 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// declares the resident's own lease anchor — a caller naming
 				// someone else's tab simply won't have the matching composite
 				// key hydrated, and the script's kv.Read fails it closed.
-				// The chargedTo link is the class-(d) dedup read for Settle's
-				// own backfill (ddls.go) — it declares the SAME lease anchor
-				// as the ownership probe above, since the descriptor client's
-				// self path only ever settles its own tab, so `{me.leaseapp}`
-				// is that tab's real lease.
+				// (The chargedTo backfill dedup (ddls.go) is confirmed via a
+				// live kv.Links read, not a declared one — the tab's real
+				// lease is only known once its .status is read mid-script, so
+				// a staff Settle of another resident's tab has no
+				// `{me.leaseapp}` to declare it by.)
 				OptionalReads: []string{
 					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
-					"lnk.tab.{payload.tabKey:id}.chargedTo.leaseapp.{me.leaseapp:id}",
 				},
-				// The operator-role confinement probe (ddls.go
-				// actor_holds_operator, reached through require_workplace).
 				Enumerations: []pkgmgr.EnumerationSpec{
+					// The operator-role confinement probe (ddls.go
+					// actor_holds_operator, reached through require_workplace).
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					// The chargedTo backfill's live confirmation (ddls.go) — the
+					// hub is the tab being settled, known up front from the
+					// payload, so this is declared here rather than baselined.
+					{Hub: "{payload.tabKey}", Relation: "chargedTo", Direction: "out"},
 				},
 			},
 		},

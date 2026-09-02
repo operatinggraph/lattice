@@ -92,7 +92,9 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
 			"openFor link (so the tab leaves every resident's edgeEntityTabs read grant, which walks that hop and " +
 			"cannot see the .status aspect the lens tail filters on). chargedTo is deliberately left standing — the " +
-			"settlement convergence below anchors on it and runs AFTER this. Settling emits tab.settled " +
+			"settlement convergence below anchors on it and runs AFTER this; Settle confirms it via a bounded live " +
+			"kv.Links read keyed on the tab's own lease (never a caller-declared one), so a staff Settle of another " +
+			"resident's tab backfills correctly even though the staffer has no lease of their own. Settling emits tab.settled " +
 			"— the cafeTabSettlement lens (lenses.go) picks up a settled tab with totalCents>0 and dispatches the " +
 			"resident's café-ledger posting (opening a cafeaccount via CreateAccount on first use, then " +
 			"DebitAccount{tabRef}) through Weaver, never a direct cross-package write from this script. Charge, " +
@@ -105,9 +107,9 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"auto-settle twin of Settle, dispatched by cafeStaleTabSettlement (lenses.go) once an OPEN tab's own " +
 			"staleAt deadline passes with no staff Settle; it no-ops cleanly (rather than rejecting TabNotOpen) if a " +
 			"staff Settle already won the race. A dedicated operationType rather than a directOp against Settle " +
-			"itself, because Settle's chargedTo-backfill branch reads a LINK key a Weaver GapActionSpec's Reads " +
-			"cannot template (row.<column> only) — SettleStaleTab confirms chargedTo via a bounded kv.Links read " +
-			"instead of a declared one. " +
+			"itself, because Settle's own confinement checks (require_workplace, the applicationFor ownership " +
+			"probe) declare OptionalReads a Weaver GapActionSpec's Reads cannot template (row.<column> only) — " +
+			"none of which apply to Weaver's own service actor anyway. " +
 			"BackfillTabStaleAt{tabKey} (operator only, orchestration-internal) is the auto-remediation twin of " +
 			"OpenTab's staleAt write, dispatched by cafeStaleTabSettlement's missing_staleat gap for an OPEN tab " +
 			"whose .status carries no staleAt at all — every tab opened before the staleAt feature shipped, which " +
@@ -1305,19 +1307,35 @@ def execute(state, op):
             make_tombstone("lnk.tab." + tab_id + ".openFor.leaseapp." + lease_id),
         ]
 
-        # Settle GUARANTEES the tab carries a chargedTo link before it closes —
-        # a class-(d) read-before-create dedup (Contract #2 §2.5) declared in
-        # ContextHint.OptionalReads, same idiom as the .cafeOpenTab guard
-        # above. OpenTab always writes chargedTo today, so this is a no-op for
-        # every normally-opened tab; it only fires for a tab whose chargedTo
-        # link is absent for any reason (a schema gap the write path once had,
-        # or any other drift), which cafeTabSettlement's required MATCH on
-        # chargedTo would otherwise strand invisibly and unsettleably forever
-        # (lenses.go — no lens row means no tabKey any surface can act on).
-        # Backfilling here, rather than at read time, keeps the money-gap
-        # anchor a real, permanent write, not a read-side workaround.
+        # Settle GUARANTEES the tab carries a chargedTo link before it closes.
+        # OpenTab always writes chargedTo today, so this is a no-op for every
+        # normally-opened tab; it only fires for a tab whose chargedTo link is
+        # absent for any reason (a schema gap the write path once had, or any
+        # other drift), which cafeTabSettlement's required MATCH on chargedTo
+        # would otherwise strand invisibly and unsettleably forever (lenses.go
+        # — no lens row means no tabKey any surface can act on). Backfilling
+        # here, rather than at read time, keeps the money-gap anchor a real,
+        # permanent write, not a read-side workaround.
+        #
+        # Confirmed live — never via a declared ContextHint read: the tab's
+        # real lease (lease_id, above) is only known once its .status is read
+        # mid-script, so a caller-declared OptionalRead can key this only by
+        # something known BEFORE the script runs, e.g. the caller's own
+        # {me.leaseapp}. That coincides with the tab's real lease for a
+        # resident's self-Settle (a resident may only ever settle their own
+        # tab), but a staff Settle of someone else's tab has no {me.leaseapp}
+        # to key by at all — the declared read then never hydrates,
+        # vertex_alive reads that as absent, and every staff Settle would try
+        # to recreate an already-live link, failing OCC on every retry.
         charged_to_lnk = "lnk.tab." + tab_id + ".chargedTo.leaseapp." + lease_id
-        if not vertex_alive(state, charged_to_lnk):
+        has_charged_to = False
+        # read-posture: (e) relation=chargedTo epoch=none -- mirrors
+        # SettleStaleTab below; a tab carries at most one chargedTo link.
+        page, _ = kv.Links(tab_key, "chargedTo", "out", None, 1)
+        for lk in page:
+            if not lk.isDeleted:
+                has_charged_to = True
+        if not has_charged_to:
             mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
         events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}}]
         return {"mutations": mutations, "events": events,
