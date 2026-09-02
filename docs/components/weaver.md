@@ -317,6 +317,11 @@ Lens projects the deadline: row column freshUntil = resolve + window (RFC3339)
   producer; the fired message becomes a normal **op** (`MarkExpired`, payload
   `{entityKey, targetId, expiredAt}`, submitted under Weaver's service-actor authority with no
   `authContext`; the op's DDL/grants are package data).
+- **`submittedAt` is the dispatch instant, not a business clock**: every op Weaver submits — a
+  `directOp` gap remediation as much as `MarkExpired` — carries `SubmittedAt` set to the platform's
+  own wall clock at the moment of dispatch (RFC3339Nano, `internal/weaver/actuator.go:97`), which is
+  what lets a package DDL guard "has this deadline already passed" by comparing
+  `time.rfc3339_utc(op.submittedAt)` against a deadline it read from state.
 - **Accepted Phase 2 bounds** (operator-visible, self-healing):
   - A `MarkExpired` **rejected at the Processor** is not re-attempted by Weaver (fire-and-forget,
     nothing leases it) — the freshness flip then waits for the next CDC touch of the entity. An

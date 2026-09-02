@@ -257,11 +257,21 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 			t.Fatalf("targetId %q must prefix the %s lens OutputKeyPattern %q", wt.TargetID, wt.LensRef, pat)
 		}
 		checkRowRef := func(where, v string) {
-			if rest, ok := strings.CutPrefix(v, "row."); ok {
-				if !cols[rest] {
-					t.Errorf("%s references row.%s but %s projects no such BodyColumn (have %v)", where, rest, wt.LensRef, lens.Output.BodyColumns)
-				}
+			rest, ok := strings.CutPrefix(v, "row.")
+			if !ok {
+				return
 			}
+			if cols[rest] {
+				return
+			}
+			// A Reads-only derived-aspect form row.<col>.<aspect> (§13 hard
+			// case 4, strategist.go resolveReadKey): the BASE column must
+			// still be a lens BodyColumn even though the full dotted string
+			// isn't one.
+			if base, _, isSuffixed := strings.Cut(rest, "."); isSuffixed && cols[base] {
+				return
+			}
+			t.Errorf("%s references row.%s but %s projects no such BodyColumn (have %v)", where, rest, wt.LensRef, lens.Output.BodyColumns)
 		}
 		for gapKey, ga := range wt.Gaps {
 			if !cols[gapKey] {

@@ -82,8 +82,8 @@ func Lenses() []pkgmgr.LensSpec {
 // per (startsAt) reminder, and a <24h booking (remindAt already past) arms no
 // timer at all: it is violating on the creation CDC and dispatched at once.
 //
-// The four-term gate (remindedFor <> startsAt AND remindAt <= $now AND
-// startsAt > $now AND status <> 'cancelled'):
+// The three-term gate (remindedFor <> startsAt AND remindAt <= $now AND
+// status <> 'cancelled'):
 //
 //   - remindedFor <> startsAt — NOT yet reminded for the CURRENT scheduled time.
 //     This single term subsumes never-reminded (no .reminder aspect → remindedFor
@@ -94,16 +94,23 @@ func Lenses() []pkgmgr.LensSpec {
 //     informational "when did it fire" column; the gate keys on remindedFor.)
 //   - remindAt <= $now — the reminder deadline has passed. Lexical RFC3339 compare
 //     = chronological on canonical UTC (the proven validUntil > $now idiom).
-//   - startsAt > $now — the appointment is still in the future (never remind for a
-//     past appointment).
 //   - status <> 'cancelled' — a cancelled appointment is never reminded.
 //
-// Edge cases fall out of the same predicate: a booking < 24h out has a past
-// remindAt → reminds immediately; a cancelled/past appointment is never violating
-// and projects freshUntil null (no armed timer); an old appointment with no
-// remindAt (pre-feature) reads null <= $now → false → silently no reminder.
-// (A reminder recorded by a pre-`remindedFor` build carries no remindedFor → it
-// reads as stale once and is re-sent once on the next due projection, then sticks.)
+// "Never remind for an appointment that has already started" is NOT a term of
+// this gate — it is RecordAppointmentReminder's own guard
+// (time.rfc3339_utc(op.submittedAt) < startsAt, ddls.go), which refuses the
+// write once the appointment has begun. No timer arms at startsAt (§7 role
+// (c): a second deadline with no schedule slot to carry it), so a started,
+// never-reminded appointment stays `missing_reminder` here — Weaver keeps
+// dispatching the directOp and the op keeps declining — rather than the gate
+// silently closing on a reminder that never went out.
+//
+// Edge cases: a booking < 24h out has a past remindAt → reminds immediately; a
+// cancelled appointment is never violating and projects freshUntil null (no
+// armed timer); an old appointment with no remindAt (pre-feature) reads null
+// <= $now → false → silently no reminder. (A reminder recorded by a
+// pre-`remindedFor` build carries no remindedFor → it reads as stale once and
+// is re-sent once on the next due projection, then sticks.)
 //
 // One-row-per-anchor: forPatient / withProvider are 0..1 (CreateAppointment writes
 // exactly one of each, deterministic keys), so the OPTIONAL walks do not fan out —
@@ -123,6 +130,6 @@ RETURN
   a.reminder.data.remindedFor AS remindedFor,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.status.data.value <> 'cancelled') AND (a.schedule.data.startsAt > $now) AND (a.schedule.data.remindAt > $now) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.schedule.data.startsAt > $now) AND (a.status.data.value <> 'cancelled')) AS missing_reminder,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.schedule.data.startsAt > $now) AND (a.status.data.value <> 'cancelled')) AS violating`
+  CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.status.data.value <> 'cancelled') AND (a.schedule.data.remindAt > $now) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.status.data.value <> 'cancelled')) AS missing_reminder,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.schedule.data.remindAt <= $now) AND (a.status.data.value <> 'cancelled')) AS violating`

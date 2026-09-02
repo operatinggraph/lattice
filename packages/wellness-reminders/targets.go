@@ -15,14 +15,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     multi-step externalTask flow — mirroring clinic-reminders' identical
 //     appointmentReminders target.
 //
-// Params{bookingKey: row.entityKey, remindedFor: row.startsAt} routes the
-// candidate booking key + the startsAt this reminder is for into the op's
-// payload, and Reads[row.entityKey] routes the key into the op's
-// ContextHint.Reads (the liveness-guard hydration). remindedFor lets the op
-// record WHICH startsAt it reminded for, so a later ReassignSession time
-// move re-opens the gate and re-arms the reminder. Both entityKey and
-// startsAt are wellnessBookingReminders BodyColumns — the §10.2↔§10.8
-// column seam.
+// Params{bookingKey: row.entityKey, sessionKey: row.sessionKey, remindedFor:
+// row.startsAt} routes the candidate booking key, its session (already a
+// projected wellnessBookingReminders column — the row's OPTIONAL forSession
+// walk), and the startsAt this reminder is for into the op's payload, and
+// Reads[row.entityKey, row.sessionKey.schedule] routes the booking root
+// (the liveness-guard hydration) AND the session's .schedule aspect (the
+// already-started guard, ddls.go's RecordBookingReminder — §7 role (c); the
+// deadline lives on the session neighbour, not the booking) into the op's
+// ContextHint.Reads. remindedFor lets the op record WHICH startsAt it
+// reminded for, so a later ReassignSession time move re-opens the gate and
+// re-arms the reminder. entityKey, sessionKey and startsAt are all
+// wellnessBookingReminders BodyColumns — the §10.2↔§10.8 column seam.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -34,8 +38,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"missing_reminder": {
 					Action:    "directOp",
 					Operation: reminderOp,
-					Params:    map[string]string{"bookingKey": "row.entityKey", "remindedFor": "row.startsAt"},
-					Reads:     []string{"row.entityKey"},
+					Params:    map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "remindedFor": "row.startsAt"},
+					Reads:     []string{"row.entityKey", "row.sessionKey.schedule"},
 				},
 			},
 		},

@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,7 +248,7 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	// appointmentReminderOp vertexType handler; the appointmentReminder aspect DDL
 	// is excluded from that index).
 	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crrem0001", "RecordAppointmentReminder", "",
-		`{"appointmentKey":"`+apptKey+`","remindedFor":"2026-07-01T15:00:00Z"}`, []string{apptKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`","remindedFor":"2026-07-01T15:00:00Z"}`, []string{apptKey, apptKey + ".schedule"}, processor.OutcomeAccepted)
 
 	rem := crReadDoc(t, ctx, conn, apptKey+".reminder")
 	if rem["class"] != "appointmentReminder" {
@@ -270,7 +271,7 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	// create-only insert — a create-only second write would conflict on the existing
 	// .reminder key and be Rejected, failing this assertion.
 	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crrem0002", "RecordAppointmentReminder", "",
-		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey, apptKey + ".schedule"}, processor.OutcomeAccepted)
 	rem2 := crReadDoc(t, ctx, conn, apptKey+".reminder")
 	rd2, _ := rem2["data"].(map[string]any)
 	if s, _ := rd2["sentAt"].(string); s == "" {
@@ -331,6 +332,138 @@ func TestRecordAppointmentReminder_RejectsTombstonedAppointment(t *testing.T) {
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".reminder"); err == nil {
 		t.Fatalf("a reminder marker must NOT be written for a tombstoned appointment")
+	}
+}
+
+// crSeedStartedAppointment seeds a LIVE appointment + .schedule aspect whose
+// startsAt is already in the past relative to submittedAt — bypassing
+// CreateAppointment entirely, since clinic-domain's own enforce_future guard
+// would refuse to mint a past-startsAt appointment in the first place. The
+// appointmentReminders lens has no `startsAt > $now` term any more (§7 role
+// (c)), so nothing upstream of RecordAppointmentReminder stops a started
+// appointment from reaching it — this fixture is what a started, still-live
+// appointment looks like on the wire.
+func crSeedStartedAppointment(t *testing.T, ctx context.Context, conn *substrate.Conn, key, startsAt string) {
+	t.Helper()
+	doc := map[string]any{"class": "appointment", "isDeleted": false, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed appointment %s: %v", key, err)
+	}
+	sched := map[string]any{"class": "appointmentSchedule", "vertexKey": key, "localName": "schedule", "isDeleted": false,
+		"data": map[string]any{"startsAt": startsAt}}
+	sb, _ := json.Marshal(sched)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key+".schedule", sb); err != nil {
+		t.Fatalf("seed schedule %s: %v", key+".schedule", err)
+	}
+}
+
+// crSubmitReply drives one op as `actor` through a reply-capturing pipeline —
+// the discriminator a bare outcome cannot give (MessageOutcome collapses
+// every rejection kind into "rejected").
+func crSubmitReply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	actor, label, op, payload string, reads []string) (processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         actor,
+		SubmittedAt:   crSubmittedAnchor,
+		Payload:       json.RawMessage(payload),
+	}
+	if len(reads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads}
+	}
+	return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+}
+
+// TestRecordAppointmentReminder_RejectsStartedAppointment proves the
+// already-started guard itself (§7 role (c)): a LIVE appointment whose
+// .schedule.startsAt is before op.submittedAt is refused by name
+// (AppointmentAlreadyStarted), and — like every other refusal in this op —
+// writes no .reminder marker, leaving the gap open for Weaver to keep
+// retrying (harmlessly; the op always declines while the appointment stays
+// started).
+func TestRecordAppointmentReminder_RejectsStartedAppointment(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "remstart", Instance: "cr-remstart"})
+
+	apptKey := "vtx.appointment.CRstartApptMNPQRSTUV"
+	crSeedStartedAppointment(t, ctx, conn, apptKey, "2025-12-31T00:00:00Z") // before crSubmittedAnchor (2026-01-01T00:00:00Z)
+
+	outcome, reply := crSubmitReply(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crremstart01", "RecordAppointmentReminder",
+		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey, apptKey + ".schedule"})
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("started appointment: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AppointmentAlreadyStarted") {
+		t.Fatalf("want an AppointmentAlreadyStarted rejection, got %+v", reply.Error)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, apptKey+".reminder"); err == nil {
+		t.Fatalf("a reminder marker must NOT be written for a started appointment")
+	}
+}
+
+// TestRecordAppointmentReminder_NonWeaverActorRefusedBeforeClock proves the
+// GUARD ORDER §16.4 requires: the primordial actor-guard runs before the
+// already-started clock check, so a non-Weaver actor is refused on actor
+// grounds even when it names an appointment that HAS already started (which
+// would independently fail the clock guard too, if execution ever reached
+// it). Same started-appointment fixture as
+// TestRecordAppointmentReminder_RejectsStartedAppointment; only the actor
+// differs.
+func TestRecordAppointmentReminder_NonWeaverActorRefusedBeforeClock(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "remstartfg", Instance: "cr-remstartfg"})
+
+	apptKey := "vtx.appointment.CRstfgApptMNPQRSTUVW"
+	crSeedStartedAppointment(t, ctx, conn, apptKey, "2025-12-31T00:00:00Z")
+
+	outcome, reply := crSubmitReply(t, ctx, conn, cp, cons, crStaffActorKey, "crremstfg01", "RecordAppointmentReminder",
+		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey, apptKey + ".schedule"})
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("non-Weaver actor on a started appointment: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection (the actor guard, not the clock guard), got %+v", reply.Error)
+	}
+	if strings.Contains(reply.Error.Message, "AppointmentAlreadyStarted") {
+		t.Fatalf("the actor guard must fire BEFORE the clock is read; got the clock guard's message: %q", reply.Error.Message)
+	}
+}
+
+// TestRecordAppointmentReminder_FractionalSecondAlreadyStarted proves the
+// guard normalizes op.submittedAt (time.rfc3339_utc) before comparing —
+// without it a raw lexical compare mis-answers for the first second after an
+// instant: the byte '.' (0x2E) sorts BELOW 'Z' (0x5A), so the raw string
+// "2026-01-01T10:00:00.120Z" compares less than "2026-01-01T10:00:00Z" even
+// though 10:00:00.120 is 120ms AFTER 10:00:00.000 — a raw compare would
+// wrongly treat the appointment as still in the future. Normalizing
+// submittedAt to whole-second RFC3339 makes it equal to startsAt, and equal
+// fails the strict `<` guard, so this must be refused.
+func TestRecordAppointmentReminder_FractionalSecondAlreadyStarted(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "remfrac", Instance: "cr-remfrac"})
+
+	apptKey := "vtx.appointment.CRfracApptMNPQRSTUVW"
+	crSeedStartedAppointment(t, ctx, conn, apptKey, "2026-01-01T10:00:00Z")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("crremfrac01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordAppointmentReminder",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   "2026-01-01T10:00:00.120Z",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey, apptKey + ".schedule"}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("fractional-second-after-start: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AppointmentAlreadyStarted") {
+		t.Fatalf("want an AppointmentAlreadyStarted rejection (normalized compare), got %+v", reply.Error)
 	}
 }
 

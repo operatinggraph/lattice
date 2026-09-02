@@ -15,12 +15,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // Params{appointmentKey: row.entityKey, remindedFor: row.startsAt} routes the
 // candidate appointment key + the startsAt this reminder is for into the op's
-// payload, and Reads[row.entityKey] routes the key into the op's ContextHint.Reads
-// (the liveness-guard hydration). remindedFor lets the op record WHICH startsAt it
-// reminded for, so a later reschedule (startsAt moves) re-opens the gate and
-// re-arms the reminder. Both entityKey and startsAt are appointmentReminders
-// BodyColumns — the §10.2↔§10.8 column seam (cross-checked by
-// TestClinicReminders_PlaybookColumnsMatchLens).
+// payload, and Reads[row.entityKey, row.entityKey.schedule] routes the root
+// key (the liveness-guard hydration) AND the .schedule aspect (the
+// already-started guard, ddls.go's RecordAppointmentReminder — §7 role (c))
+// into the op's ContextHint.Reads. remindedFor lets the op record WHICH
+// startsAt it reminded for, so a later reschedule (startsAt moves) re-opens
+// the gate and re-arms the reminder. Both entityKey and startsAt are
+// appointmentReminders BodyColumns — the §10.2↔§10.8 column seam (cross-checked
+// by TestClinicReminders_PlaybookColumnsMatchLens).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -33,7 +35,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Action:    "directOp",
 					Operation: reminderOp,
 					Params:    map[string]string{"appointmentKey": "row.entityKey", "remindedFor": "row.startsAt"},
-					Reads:     []string{"row.entityKey"},
+					Reads:     []string{"row.entityKey", "row.entityKey.schedule"},
 				},
 			},
 		},

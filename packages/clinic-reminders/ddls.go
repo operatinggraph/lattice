@@ -42,8 +42,10 @@ func DDLs() []pkgmgr.DDLSpec {
 // recordReminderVertexTypeDDL owns the RecordAppointmentReminder script. The op is
 // the directOp the appointmentReminders playbook dispatches when missing_reminder
 // opens: it writes vtx.appointment.<id>.reminder = {sentAt} on a LIVE appointment.
-// It is read-guarded (ContextHint.Reads = [appointmentKey]) so it never marks a
-// reminder on an absent/tombstoned appointment, and the write is an UNCONDITIONED
+// It is read-guarded (ContextHint.Reads = [appointmentKey, appointmentKey.schedule])
+// so it never marks a reminder on an absent/tombstoned appointment, and never marks
+// one for an appointment that has already started (the .schedule read backs the
+// started-appointment guard — §7 role (c)). The write is an UNCONDITIONED
 // update (overwrite-if-present) — idempotent in effect (re-running re-stamps a
 // later sentAt; the gap stays closed once any sentAt is present), so a redelivery
 // or sweep reclaim is harmless without a revision condition (the MarkExpired
@@ -57,39 +59,43 @@ func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{reminderOp},
 		Description: "Appointment-reminder op handler (clinic-reminders). RecordAppointmentReminder{appointmentKey, remindedFor?} writes " +
-			"vtx.appointment.<NanoID>.reminder = {sentAt, remindedFor} on a LIVE appointment (class appointmentReminder), recording that " +
-			"the ~24h-ahead reminder fired for the startsAt in remindedFor. It is the directOp the appointmentReminders §10.8 playbook dispatches when the " +
-			"missing_reminder gap opens (the appointment's .schedule.remindAt deadline passed); the playbook supplies remindedFor = row.startsAt so a later " +
-			"reschedule (which moves startsAt) re-opens the gap and re-arms the reminder. Reads [appointmentKey] to " +
-			"liveness-guard the parent (never marks a reminder on an absent/tombstoned appointment). The write is an " +
+			"vtx.appointment.<NanoID>.reminder = {sentAt, remindedFor} on a LIVE, NOT-YET-STARTED appointment (class appointmentReminder), " +
+			"recording that the ~24h-ahead reminder fired for the startsAt in remindedFor. It is the directOp the appointmentReminders §10.8 " +
+			"playbook dispatches when the missing_reminder gap opens (the appointment's .schedule.remindAt deadline passed); the playbook " +
+			"supplies remindedFor = row.startsAt so a later reschedule (which moves startsAt) re-opens the gap and re-arms the reminder. " +
+			"Reads [appointmentKey, appointmentKey.schedule] to liveness-guard the parent (never marks a reminder on an absent/tombstoned " +
+			"appointment) and to refuse a reminder for an appointment that has already started " +
+			"(time.rfc3339_utc(op.submittedAt) < .schedule.data.startsAt, read from the hydrated aspect — never from the optional " +
+			"remindedFor payload field, which would fail open; mirrors clinic-domain's enforce_future). The write is an " +
 			"UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in effect and re-run-safe " +
 			"under at-least-once. Submitted under Weaver's service-actor authority. Mints NO vertex of its own type (the " +
 			"freshnessMarker idiom). It also emits external.notification off its own outbox (keyed on appointmentKey:" +
 			"remindedFor) so the bridge's \"notification\" adapter actually sends; see RecordAppointmentReminderNotification " +
 			"(notifications.go) for the replyOp that records the outcome. It guards liveness " +
-			"(isDeleted) but NOT status: an appointment cancelled in the narrow window between the gap opening and this " +
-			"op committing still gets a .reminder marker and a notification send. That is a rare-window best-effort gap, " +
-			"not a hard guarantee — the authoritative \"do not notify a cancelled/changed appointment\" check would need a " +
-			"live read at send time, which this read-guarded-once op does not repeat.",
+			"(isDeleted) and the already-started clock check, but nothing else about status: an appointment cancelled in the " +
+			"narrow window between the gap opening and this op committing still gets a .reminder marker and a notification " +
+			"send. That is a rare-window best-effort gap, not a hard guarantee — the authoritative \"do not notify a " +
+			"cancelled/changed appointment\" check would need a live read at send time, which this read-guarded-once op " +
+			"does not repeat.",
 		Script: recordReminderScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder fired for (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
-			`"remindedFor":{"type":"string","description":"The appointment startsAt (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.startsAt). Recorded so a reschedule re-arms the reminder."}},` +
+			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder fired for (required; validated alive and not yet started). The caller MUST list it AND its .schedule aspect in ContextHint.Reads."},` +
+			`"remindedFor":{"type":"string","description":"The appointment startsAt (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.startsAt). Recorded so a reschedule re-arms the reminder. NOT the source of the already-started guard — that reads .schedule.startsAt from state."}},` +
 			`"required":["appointmentKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder marker was written on."}}}`,
 		FieldDescription: map[string]string{
-			"appointmentKey": "Full vtx.appointment.<NanoID> key the reminder fired for. RecordAppointmentReminder validates it is alive and writes the .reminder aspect on it. The caller MUST list this key in ContextHint.Reads.",
+			"appointmentKey": "Full vtx.appointment.<NanoID> key the reminder fired for. RecordAppointmentReminder validates it is alive and not yet started, then writes the .reminder aspect on it. The caller MUST list this key AND its .schedule aspect in ContextHint.Reads.",
 			"remindedFor":    "The appointment startsAt (RFC3339, canonical UTC) this reminder is for. The appointmentReminders playbook supplies it as row.startsAt; stored on .reminder so the convergence gate (remindedFor <> startsAt) re-opens — and re-arms the reminder — when a reschedule moves startsAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "RecordAppointmentReminder — mark a reminder as sent for a startsAt",
 				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "remindedFor": "2026-07-01T15:00:00Z"},
-				ExpectedOutcome: "Validates the appointment is alive, then writes vtx.appointment.<NanoID>.reminder = {sentAt: " +
+				ExpectedOutcome: "Validates the appointment is alive and has not yet started, then writes vtx.appointment.<NanoID>.reminder = {sentAt: " +
 					"op.submittedAt (canonical UTC), remindedFor} as an unconditioned update (create-if-absent / overwrite-if-present), emits " +
 					"clinic.appointmentReminderSent, and returns primaryKey. Re-runs cleanly (idempotent in effect). Rejects with " +
-					"a ScriptError if the appointment is absent / tombstoned.",
+					"a ScriptError if the appointment is absent / tombstoned / already started.",
 			},
 		},
 	}
@@ -132,8 +138,12 @@ func reminderAspectTypeDDL() pkgmgr.DDLSpec {
 // recordReminderScript handles RecordAppointmentReminder. It reads the appointment
 // ROOT (the OCC read declared in ContextHint.Reads) to assert it exists + is alive
 // before writing the marker — without the guard the op would mint a .reminder
-// aspect (and a 4-segment aspect key) on an absent/tombstoned appointment. It names
-// the appointment type explicitly (the op is clinic-specific, unlike the
+// aspect (and a 4-segment aspect key) on an absent/tombstoned appointment. It also
+// reads the appointment's .schedule aspect (also declared in ContextHint.Reads) to
+// refuse a reminder for an appointment that has already started — §7 role (c) of
+// the expiry-as-a-recorded-fact design: no timer arms at startsAt, so the guard
+// lives in this op rather than in the appointmentReminders lens. It names the
+// appointment type explicitly (the op is clinic-specific, unlike the
 // type-agnostic MarkExpired). The write is UNCONDITIONED (no expectedRevision):
 // idempotent in effect for at-least-once delivery.
 const recordReminderScript = `
@@ -196,6 +206,28 @@ def execute(state, op):
         # sentAt is the op's own timestamp, normalized to canonical UTC so a
         # downstream lexical compare is sound (the lease-signing idiom).
         sent_at = time.rfc3339_utc(op.submittedAt)
+
+        # Already-started guard (§7 role (c)): never remind for an appointment
+        # that has already begun. .schedule is a declared read (ContextHint.Reads,
+        # the appointmentReminders target's Reads list), so this is a cache-first
+        # hydration, not a live round trip. startsAt is read from the hydrated
+        # aspect, NEVER from the optional remindedFor payload field below —
+        # remindedFor is absent on a bare manual call, which would fail this
+        # guard open. Mirrors clinic-domain's enforce_future (ddls.go) against
+        # op.submittedAt, using the already-normalized sent_at so the compare is
+        # sound to the second (a raw lexical compare mis-answers for the first
+        # second after the instant, e.g. "...00.12Z" sorting above "...00Z").
+        # read-posture: (a) declared in contextHint.reads — the appointmentReminders
+        # target's Reads list (targets.go) declares appointmentKey.schedule.
+        schedule = kv.Read(appt_key + ".schedule")
+        if schedule == None or schedule.isDeleted:
+            fail("MissingSchedule: " + appt_key + ".schedule is absent; cannot guard the reminder")
+        starts_at = schedule.data.get("startsAt")
+        if starts_at == None:
+            fail("MissingSchedule: " + appt_key + ".schedule carries no startsAt")
+        if not (sent_at < starts_at):
+            fail("AppointmentAlreadyStarted: " + appt_key + " startsAt " + starts_at +
+                 " is not after submittedAt " + sent_at + "; refusing to record a reminder")
 
         # remindedFor: the appointment startsAt this reminder is FOR (supplied by
         # the appointmentReminders playbook as Params{remindedFor: row.startsAt} —

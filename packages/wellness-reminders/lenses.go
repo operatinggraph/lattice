@@ -71,6 +71,15 @@ func Lenses() []pkgmgr.LensSpec {
 // `booked` means the class already happened or the booker was marked absent,
 // so a reminder is moot either way).
 //
+// "Never remind for a class that has already started" is NOT a term of this
+// gate — it is RecordBookingReminder's own guard
+// (time.rfc3339_utc(op.submittedAt) < startsAt, ddls.go), which refuses the
+// write once the class has begun. No timer arms at startsAt (§7 role (c): a
+// second deadline with no schedule slot to carry it), so a started,
+// never-reminded booked seat stays `missing_reminder` here — Weaver keeps
+// dispatching the directOp and the op keeps declining — rather than the gate
+// silently closing on a reminder that never went out.
+//
 // One-row-per-anchor: forSession is 0..1 (CreateBooking writes exactly one,
 // deterministic keys), so the OPTIONAL walk does not fan out — a clean flat
 // (no-WITH) projection like wellnessBookingsSpec. sessionKey / bookerKey /
@@ -89,6 +98,6 @@ RETURN
   b.reminder.data.sentAt AS reminderSentAt,
   b.reminder.data.remindedFor AS remindedFor,
   id.key AS bookerKey,
-  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.startsAt > $now) AND (se.schedule.data.remindAt > $now) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now) AND (se.schedule.data.startsAt > $now)) AS missing_reminder,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now) AND (se.schedule.data.startsAt > $now)) AS violating`
+  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt > $now) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now)) AS missing_reminder,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (se.schedule.data.remindAt <= $now)) AS violating`

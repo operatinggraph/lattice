@@ -43,12 +43,14 @@ func DDLs() []pkgmgr.DDLSpec {
 // recordReminderVertexTypeDDL owns the RecordBookingReminder script. The op
 // is the directOp the wellnessBookingReminders playbook dispatches when
 // missing_reminder opens: it writes vtx.booking.<id>.reminder = {sentAt} on
-// a LIVE booking. It is read-guarded (ContextHint.Reads = [bookingKey]) so
-// it never marks a reminder on an absent/tombstoned booking, and the write
-// is an UNCONDITIONED update (overwrite-if-present) — idempotent in effect
-// (re-running re-stamps a later sentAt; the gap stays closed once any sentAt
-// is present), so a redelivery or sweep reclaim is harmless without a
-// revision condition (the MarkExpired idiom, mirroring
+// a LIVE booking. It is read-guarded (ContextHint.Reads = [bookingKey,
+// sessionKey.schedule]) so it never marks a reminder on an absent/tombstoned
+// booking, and never marks one for a class that has already started (the
+// deadline lives on the booking's SESSION, not the booking itself — §7 role
+// (c)). The write is an UNCONDITIONED update (overwrite-if-present) —
+// idempotent in effect (re-running re-stamps a later sentAt; the gap stays
+// closed once any sentAt is present), so a redelivery or sweep reclaim is
+// harmless without a revision condition (the MarkExpired idiom, mirroring
 // recordReminderVertexTypeDDL in clinic-reminders/ddls.go). The script also
 // fires the actual notification send off its own transactional outbox to
 // the bridge's "notification" adapter (notifications.go) — no Loom pattern
@@ -58,39 +60,48 @@ func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 		CanonicalName:     reminderOpDDL,
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{reminderOp},
-		Description: "Booking-reminder op handler (wellness-reminders). RecordBookingReminder{bookingKey, remindedFor?} writes " +
-			"vtx.booking.<NanoID>.reminder = {sentAt, remindedFor} on a LIVE booking (class bookingReminder), recording that " +
-			"the ~24h-ahead class reminder fired for the startsAt in remindedFor. It is the directOp the wellnessBookingReminders " +
-			"§10.8 playbook dispatches when the missing_reminder gap opens (the booking's session's .schedule.remindAt deadline " +
-			"passed); the playbook supplies remindedFor = row.startsAt so a later class time move (ReassignSession, which moves " +
-			"startsAt) re-opens the gap and re-arms the reminder. Reads [bookingKey] to liveness-guard the booking (never marks " +
-			"a reminder on an absent/tombstoned/cancelled booking). The write is an UNCONDITIONED update (create-if-absent / " +
-			"overwrite-if-present), so it is idempotent in effect and re-run-safe under at-least-once. Submitted under Weaver's " +
-			"service-actor authority. Mints NO vertex of its own type (the freshnessMarker idiom). It also emits " +
-			"external.notification off its own outbox (keyed on bookingKey:remindedFor) so the bridge's \"notification\" " +
-			"adapter actually sends; see RecordBookingReminderNotification (notifications.go) for the replyOp that records the " +
-			"outcome. It guards liveness (isDeleted) but NOT status: a booking cancelled in the narrow window between the gap " +
-			"opening and this op committing still gets a .reminder marker and a notification send. That is a rare-window " +
-			"best-effort gap, not a hard guarantee, mirroring clinic-reminders' identical tradeoff.",
+		Description: "Booking-reminder op handler (wellness-reminders). RecordBookingReminder{bookingKey, sessionKey, " +
+			"remindedFor?} writes vtx.booking.<NanoID>.reminder = {sentAt, remindedFor} on a LIVE booking (class " +
+			"bookingReminder) for a class that has NOT yet started, recording that the ~24h-ahead class reminder fired " +
+			"for the startsAt in remindedFor. It is the directOp the wellnessBookingReminders §10.8 playbook dispatches " +
+			"when the missing_reminder gap opens (the booking's session's .schedule.remindAt deadline passed); the " +
+			"playbook supplies remindedFor = row.startsAt so a later class time move (ReassignSession, which moves " +
+			"startsAt) re-opens the gap and re-arms the reminder, and sessionKey = row.sessionKey (already a projected " +
+			"wellnessBookingReminders column) so the op can locate the session's .schedule aspect. Reads [bookingKey, " +
+			"sessionKey.schedule] to liveness-guard the booking (never marks a reminder on an absent/tombstoned/cancelled " +
+			"booking) and to refuse a reminder for a class that has already started " +
+			"(time.rfc3339_utc(op.submittedAt) < sessionKey.schedule.data.startsAt, read from the hydrated aspect — never " +
+			"from the optional remindedFor payload field, which would fail open; mirrors clinic-domain's enforce_future). " +
+			"The write is an UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in " +
+			"effect and re-run-safe under at-least-once. Submitted under Weaver's service-actor authority. Mints NO " +
+			"vertex of its own type (the freshnessMarker idiom). It also emits external.notification off its own outbox " +
+			"(keyed on bookingKey:remindedFor) so the bridge's \"notification\" adapter actually sends; see " +
+			"RecordBookingReminderNotification (notifications.go) for the replyOp that records the outcome. It guards " +
+			"liveness (isDeleted) and the already-started clock check, but nothing else about status: a booking cancelled " +
+			"in the narrow window between the gap opening and this op committing still gets a .reminder marker and a " +
+			"notification send. That is a rare-window best-effort gap, not a hard guarantee, mirroring clinic-reminders' " +
+			"identical tradeoff.",
 		Script: recordReminderScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> the reminder fired for (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
+			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> the booking is for (required; its .schedule aspect carries the deadline the already-started guard reads). The caller MUST list sessionKey.schedule in ContextHint.Reads."},` +
 			`"remindedFor":{"type":"string","description":"The session startsAt (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.startsAt). Recorded so a session time move re-arms the reminder."}},` +
-			`"required":["bookingKey"]}`,
+			`"required":["bookingKey","sessionKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the reminder marker was written on."}}}`,
 		FieldDescription: map[string]string{
 			"bookingKey":  "Full vtx.booking.<NanoID> key the reminder fired for. RecordBookingReminder validates it is alive and writes the .reminder aspect on it. The caller MUST list this key in ContextHint.Reads.",
+			"sessionKey":  "Full vtx.session.<NanoID> key of the class this booking is for. RecordBookingReminder reads its .schedule aspect to refuse a reminder once the class has started. The caller MUST list sessionKey.schedule in ContextHint.Reads.",
 			"remindedFor": "The session startsAt (RFC3339, canonical UTC) this reminder is for. The wellnessBookingReminders playbook supplies it as row.startsAt; stored on .reminder so the convergence gate (remindedFor <> startsAt) re-opens — and re-arms the reminder — when ReassignSession moves the class's startsAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "RecordBookingReminder — mark a reminder as sent for a startsAt",
-				Payload: map[string]any{"bookingKey": "vtx.booking.<NanoID>", "remindedFor": "2026-07-01T15:00:00Z"},
-				ExpectedOutcome: "Validates the booking is alive, then writes vtx.booking.<NanoID>.reminder = {sentAt: " +
+				Payload: map[string]any{"bookingKey": "vtx.booking.<NanoID>", "sessionKey": "vtx.session.<NanoID>", "remindedFor": "2026-07-01T15:00:00Z"},
+				ExpectedOutcome: "Validates the booking is alive and the class has not yet started, then writes vtx.booking.<NanoID>.reminder = {sentAt: " +
 					"op.submittedAt (canonical UTC), remindedFor} as an unconditioned update (create-if-absent / overwrite-if-present), " +
 					"emits wellness.bookingReminderSent, and returns primaryKey. Re-runs cleanly (idempotent in effect). Rejects " +
-					"with a ScriptError if the booking is absent / tombstoned.",
+					"with a ScriptError if the booking is absent / tombstoned / the class has already started.",
 			},
 		},
 	}
@@ -134,9 +145,16 @@ func reminderAspectTypeDDL() pkgmgr.DDLSpec {
 // ROOT (the OCC read declared in ContextHint.Reads) to assert it exists + is
 // alive before writing the marker — without the guard the op would mint a
 // .reminder aspect (and a 4-segment aspect key) on an absent/tombstoned
-// booking. The write is UNCONDITIONED (no expectedRevision): idempotent in
-// effect for at-least-once delivery. Mirrors clinic-reminders'
-// recordReminderScript exactly, substituting booking for appointment.
+// booking. It also reads the booking's SESSION's .schedule aspect (also
+// declared in ContextHint.Reads, keyed off the sessionKey payload field) to
+// refuse a reminder for a class that has already started — §7 role (c) of
+// the expiry-as-a-recorded-fact design: the deadline lives on the session
+// neighbour, not the booking, and no timer arms at startsAt, so the guard
+// lives in this op rather than in the wellnessBookingReminders lens. The
+// write is UNCONDITIONED (no expectedRevision): idempotent in effect for
+// at-least-once delivery. Mirrors clinic-reminders' recordReminderScript,
+// substituting booking for appointment and the session neighbour for the
+// appointment's own .schedule.
 const recordReminderScript = `
 def required_string(p, name):
     if not hasattr(p, name):
@@ -188,6 +206,8 @@ def execute(state, op):
 
         booking_key = required_string(p, "bookingKey")
         parts_of(booking_key, "bookingKey", "booking")
+        session_key = required_string(p, "sessionKey")
+        parts_of(session_key, "sessionKey", "session")
 
         # Liveness guard: never mark a reminder on an absent/tombstoned booking.
         # The op hydrates [bookingKey] (ContextHint.Reads), so the root is in state.
@@ -197,6 +217,32 @@ def execute(state, op):
         # sentAt is the op's own timestamp, normalized to canonical UTC so a
         # downstream lexical compare is sound (the lease-signing idiom).
         sent_at = time.rfc3339_utc(op.submittedAt)
+
+        # Already-started guard (§7 role (c)): never remind for a class that
+        # has already begun. The deadline lives on the booking's SESSION
+        # neighbour, not the booking itself, so this reads sessionKey.schedule
+        # rather than a schedule aspect on the booking. sessionKey.schedule is
+        # a declared read (ContextHint.Reads, the wellnessBookingReminders
+        # target's Reads list), so this is a cache-first hydration, not a live
+        # round trip. startsAt is read from the hydrated aspect, NEVER from
+        # the optional remindedFor payload field below — remindedFor is absent
+        # on a bare manual call, which would fail this guard open. Mirrors
+        # clinic-domain's enforce_future (ddls.go) against op.submittedAt,
+        # using the already-normalized sent_at so the compare is sound to the
+        # second (a raw lexical compare mis-answers for the first second
+        # after the instant, e.g. "...00.12Z" sorting above "...00Z").
+        # read-posture: (a) declared in contextHint.reads — the
+        # wellnessBookingReminders target's Reads list (targets.go) declares
+        # sessionKey.schedule.
+        schedule = kv.Read(session_key + ".schedule")
+        if schedule == None or schedule.isDeleted:
+            fail("MissingSchedule: " + session_key + ".schedule is absent; cannot guard the reminder")
+        starts_at = schedule.data.get("startsAt")
+        if starts_at == None:
+            fail("MissingSchedule: " + session_key + ".schedule carries no startsAt")
+        if not (sent_at < starts_at):
+            fail("ClassAlreadyStarted: " + session_key + " startsAt " + starts_at +
+                 " is not after submittedAt " + sent_at + "; refusing to record a reminder")
 
         # remindedFor: the session startsAt this reminder is FOR (supplied by
         # the wellnessBookingReminders playbook as Params{remindedFor:

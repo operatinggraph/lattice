@@ -142,12 +142,39 @@ func wrSeedBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, id s
 	return key
 }
 
-// wrSubmit drives one RecordBookingReminder as `actor`. Class is LEFT EMPTY,
-// exactly as Weaver's actuator dispatches a directOp (it relies on the
-// Processor's operationType→class reverse index, which resolves to the
-// bookingReminderOp vertexType handler).
+// wrSeedSession writes a live vtx.session.<id> root plus a .schedule aspect
+// (class sessionSchedule, wellness-domain's own class name) carrying only
+// startsAt — the one field RecordBookingReminder's already-started guard
+// reads. wellness-domain's real CreateSession stamps a richer document (name,
+// endsAt, capacity, remindAt); the op never reads any of that, so the
+// fixture carries the minimum the guard depends on, the same seeded-root
+// idiom wrSeedBooking uses for the booking.
+func wrSeedSession(t *testing.T, ctx context.Context, conn *substrate.Conn, id, startsAt string) string {
+	t.Helper()
+	key := "vtx.session." + id
+	doc := map[string]any{"class": "session", "isDeleted": false, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed session %s: %v", key, err)
+	}
+	schedKey := key + ".schedule"
+	sched := map[string]any{"class": "sessionSchedule", "vertexKey": key, "localName": "schedule", "isDeleted": false,
+		"data": map[string]any{"startsAt": startsAt}}
+	sb, _ := json.Marshal(sched)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, schedKey, sb); err != nil {
+		t.Fatalf("seed session schedule %s: %v", schedKey, err)
+	}
+	return key
+}
+
+// wrSubmit drives one RecordBookingReminder as `actor`, against the class
+// wrSeedSession seeds at wrRemindedFor (still in the future relative to
+// wrSubmittedAnchor). Class is LEFT EMPTY, exactly as Weaver's actuator
+// dispatches a directOp (it relies on the Processor's operationType→class
+// reverse index, which resolves to the bookingReminderOp vertexType
+// handler).
 func wrSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
-	actor, label, bookingKey string, want processor.MessageOutcome) (processor.MessageOutcome, *processor.OperationReply) {
+	actor, label, bookingKey, sessionKey string, want processor.MessageOutcome) (processor.MessageOutcome, *processor.OperationReply) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -155,8 +182,8 @@ func wrSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		OperationType: "RecordBookingReminder",
 		Actor:         actor,
 		SubmittedAt:   wrSubmittedAnchor,
-		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","remindedFor":"` + wrRemindedFor + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{bookingKey}},
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","sessionKey":"` + sessionKey + `","remindedFor":"` + wrRemindedFor + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{bookingKey, sessionKey + ".schedule"}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	if outcome != want {
@@ -192,14 +219,15 @@ func TestRecordBookingReminder_WeaverActorAccepted(t *testing.T) {
 	})
 
 	bookingKey := wrSeedBooking(t, ctx, conn, "WRbookAKHJKMNPQRSTVW")
+	sessionKey := wrSeedSession(t, ctx, conn, "WRsessAKHJKMNPQRSTVW", wrRemindedFor)
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("wrremok00001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "RecordBookingReminder",
 		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   wrSubmittedAnchor,
-		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","remindedFor":"` + wrRemindedFor + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{bookingKey}},
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","sessionKey":"` + sessionKey + `","remindedFor":"` + wrRemindedFor + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{bookingKey, sessionKey + ".schedule"}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	if outcome != processor.OutcomeAccepted {
@@ -266,7 +294,8 @@ func TestRecordBookingReminder_NonWeaverOperatorDenied(t *testing.T) {
 	})
 
 	bookingKey := wrSeedBooking(t, ctx, conn, "WRbookFGHJKMNPQRSTVW")
-	_, reply := wrSubmit(t, ctx, conn, cp, cons, wrStaffActorKey, "wrremfg00001", bookingKey, processor.OutcomeRejected)
+	sessionKey := wrSeedSession(t, ctx, conn, "WRsessFGHJKMNPQRSTVW", wrRemindedFor)
+	_, reply := wrSubmit(t, ctx, conn, cp, cons, wrStaffActorKey, "wrremfg00001", bookingKey, sessionKey, processor.OutcomeRejected)
 
 	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
 		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
@@ -279,5 +308,91 @@ func TestRecordBookingReminder_NonWeaverOperatorDenied(t *testing.T) {
 	// closed the gap on the strength of a forged send.
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, bookingKey+".reminder"); err == nil {
 		t.Fatalf("a denied reminder op must write NO .reminder marker")
+	}
+}
+
+// TestRecordBookingReminder_RejectsStartedSession proves the already-started
+// guard itself (§7 role (c)): a LIVE session whose .schedule.startsAt is
+// before op.submittedAt is refused by name (ClassAlreadyStarted), and — like
+// every other refusal in this op — writes no .reminder marker, leaving the
+// gap open for Weaver to keep retrying (harmlessly; the op always declines
+// while the class stays started). The deadline lives on the SESSION
+// neighbour, not the booking, which is what makes this a distinct vector
+// from clinic-reminders' single-anchor guard.
+func TestRecordBookingReminder_RejectsStartedSession(t *testing.T) {
+	ctx, conn := setupWellRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "wrremstart", Instance: "wr-remstart",
+	})
+
+	bookingKey := wrSeedBooking(t, ctx, conn, "WRbookSTHJKMNPQRSTVW")
+	sessionKey := wrSeedSession(t, ctx, conn, "WRsessSTHJKMNPQRSTVW", "2025-12-31T00:00:00Z") // before wrSubmittedAnchor
+	_, reply := wrSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "wrremstart01", bookingKey, sessionKey, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "ClassAlreadyStarted") {
+		t.Fatalf("want a ClassAlreadyStarted rejection, got %+v", reply.Error)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, bookingKey+".reminder"); err == nil {
+		t.Fatalf("a reminder marker must NOT be written for a started class")
+	}
+}
+
+// TestRecordBookingReminder_NonWeaverActorRefusedBeforeClock proves the
+// GUARD ORDER §16.4 requires: the primordial actor-guard runs before the
+// already-started clock check, so a non-Weaver actor is refused on actor
+// grounds even when it names a session that HAS already started (which would
+// independently fail the clock guard too, if execution ever reached it).
+// Same started-session fixture as
+// TestRecordBookingReminder_RejectsStartedSession; only the actor differs.
+func TestRecordBookingReminder_NonWeaverActorRefusedBeforeClock(t *testing.T) {
+	ctx, conn := setupWellRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "wrremstfg", Instance: "wr-remstfg",
+	})
+
+	bookingKey := wrSeedBooking(t, ctx, conn, "WRbookSFHJKMNPQRSTVW")
+	sessionKey := wrSeedSession(t, ctx, conn, "WRsessSFHJKMNPQRSTVW", "2025-12-31T00:00:00Z")
+	_, reply := wrSubmit(t, ctx, conn, cp, cons, wrStaffActorKey, "wrremstfg01", bookingKey, sessionKey, processor.OutcomeRejected)
+
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection (the actor guard, not the clock guard), got %+v", reply.Error)
+	}
+	if strings.Contains(reply.Error.Message, "ClassAlreadyStarted") {
+		t.Fatalf("the actor guard must fire BEFORE the clock is read; got the clock guard's message: %q", reply.Error.Message)
+	}
+}
+
+// TestRecordBookingReminder_FractionalSecondAlreadyStarted proves the guard
+// normalizes op.submittedAt (time.rfc3339_utc) before comparing — without it
+// a raw lexical compare mis-answers for the first second after an instant:
+// the byte '.' (0x2E) sorts BELOW 'Z' (0x5A), so the raw string
+// "2026-01-01T10:00:00.120Z" compares less than "2026-01-01T10:00:00Z" even
+// though 10:00:00.120 is 120ms AFTER 10:00:00.000 — a raw compare would
+// wrongly treat the class as still in the future. Normalizing submittedAt to
+// whole-second RFC3339 makes it equal to startsAt, and equal fails the
+// strict `<` guard, so this must be refused.
+func TestRecordBookingReminder_FractionalSecondAlreadyStarted(t *testing.T) {
+	ctx, conn := setupWellRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "wrremfrac", Instance: "wr-remfrac",
+	})
+
+	bookingKey := wrSeedBooking(t, ctx, conn, "WRbookFRHJKMNPQRSTVW")
+	sessionKey := wrSeedSession(t, ctx, conn, "WRsessFRHJKMNPQRSTVW", "2026-01-01T10:00:00Z")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wrremfrac01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordBookingReminder",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   "2026-01-01T10:00:00.120Z",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","sessionKey":"` + sessionKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{bookingKey, sessionKey + ".schedule"}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("fractional-second-after-start: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "ClassAlreadyStarted") {
+		t.Fatalf("want a ClassAlreadyStarted rejection (normalized compare), got %+v", reply.Error)
 	}
 }

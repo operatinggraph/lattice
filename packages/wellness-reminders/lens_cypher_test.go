@@ -248,8 +248,16 @@ func TestReminders_NoShowNeverReminded(t *testing.T) {
 	require.Nil(t, v["freshUntil"])
 }
 
-// TestReminders_PastSession — a class already in the past (startsAt <= $now)
-// is never reminded; freshUntil null.
+// TestReminders_PastSession — a class already in the past (startsAt <=
+// $now), never reminded, still projects the gap: the `startsAt > $now`
+// conjunct that used to suppress it here was struck (§7 role (c) — the guard
+// moved into RecordBookingReminder's op, which refuses to record a reminder
+// once the class has started; the lens no longer knows or cares). So
+// missing_reminder / violating stay true — Weaver keeps dispatching the
+// directOp and the op keeps declining — and freshUntil stays null (remindAt
+// is also in the past; no timer to arm either way). Revert-proof: restoring
+// the struck conjunct on any one of the three columns turns this back false
+// and the test catches it.
 func TestReminders_PastSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -258,9 +266,9 @@ func TestReminders_PastSession(t *testing.T) {
 	f.mkBooking(t, "bk", "booked", "flow", "2026-06-29T15:00:00Z", "2026-06-28T15:00:00Z", "", "")
 
 	v := f.projectAt(t, "bk", remNow)[0].Values
-	require.Equal(t, false, v["missing_reminder"], "past class (startsAt <= now) → never reminded")
-	require.Equal(t, false, v["violating"])
-	require.Nil(t, v["freshUntil"])
+	require.Equal(t, true, v["missing_reminder"], "a started, never-reminded booked seat still projects the gap — the op refuses, not the lens")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"], "remindAt is also in the past, so no timer arms")
 }
 
 // TestReminders_LastMinuteBooking — booked < 24h out so remindAt is already
