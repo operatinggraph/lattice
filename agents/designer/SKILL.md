@@ -1481,6 +1481,28 @@ greenfield redesign. Cover, as the feature warrants:
     the design, split it at every conjunction, and put a named section against each half — including
     the halves you intend to decline, with the reason.
 
+  - **A scope or sequencing fork carries a PAYOFF column, not a lens count.** For each row, name which of
+    the filed harms it retires and the mechanism that stops refusing (file:line, plus any live measurement);
+    a row that retires none of the measured harms says so in those words. (Trialed 2026-09-01, the `$now`
+    sweep: "the anchor-hosted majority first — 10 lenses" read as the payoff row, but every measured
+    payoff — audit enrolment, the plain derivation, the corpus rescan the hub-walk fire had observed live
+    that day — sat in the 4-lens family the table deferred; and my §0.1 quote had dropped the two words of
+    Andrew's row, "'s outcome", that named that family. Ratification chose the whole sweep once the census
+    was on the table.) Two corollaries: quote the ask from the commit that filed the row, never from a
+    memory summary; and run the in-flight check as a DEPENDENCY query ("which design hands work to this
+    one?") as well as a diff-overlap query.
+
+  - **A scope or sequencing fork carries a PAYOFF column, not a lens count.** For each row, name which of
+    the filed harms it retires and the mechanism that stops refusing (file:line, plus any live measurement);
+    a row that retires none of the measured harms says so in those words. (Trialed 2026-09-01, the `$now`
+    sweep: "the anchor-hosted majority first — 10 lenses" read as the payoff row, but every measured
+    payoff — audit enrolment, the plain derivation, the corpus rescan the hub-walk fire had observed live
+    that day — sat in the 4-lens family the table deferred; and my §0.1 quote had dropped the two words of
+    Andrew's row, "'s outcome", that named that family. Ratification chose the whole sweep once the census
+    was on the table.) Two corollaries: quote the ask from the commit that filed the row, never from a
+    memory summary; and run the in-flight check as a DEPENDENCY query ("which design hands work to this
+    one?") as well as a diff-overlap query.
+
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly. Two obligations: **every test the
   design prescribes is OWNED by a named increment** (an unowned test is built by nobody — trialed 2026-08-09:
