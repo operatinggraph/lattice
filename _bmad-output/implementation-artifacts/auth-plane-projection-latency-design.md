@@ -1432,6 +1432,10 @@ Recovery from a bad narrow is `Rebuild` or the convergence sweep, exactly as for
 value is that it bounds the damage to the window before it is turned, without a redeploy; §17.2's second
 conjunct is what guarantees the healer exists to finish the job.
 
+**Amended 2026-09-01** (refractor-hub-walk-and-periodic-load-design.md §5.1): `REFRACTOR_ANCHOR_DERIVATION=off`
+restores the **ActorEnumerator**, which is now itself pattern-scoped, so `off` alone no longer restores the
+relation-blind walk — a full rollback to pre-§5.1 behaviour needs `REFRACTOR_WALK_SCOPE=off` as well.
+
 ### 17.6 Adversarial review outcome — the flip found two live defects in the derivation it was flipping
 
 Three passes: superset soundness · wiring/edge-cases/test-integrity · corpus census. The soundness pass
