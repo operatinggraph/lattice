@@ -30,6 +30,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Front desk has no way to see which booked appointments a provider's time off now conflicts with** | `SetProviderTimeOff` writes only `.timeOff` — nothing tells front desk which of a provider's existing bookings now need a reschedule call. | Clinic | pkg | ★ | S | 📋 ready · sketch: walk the provider's appointments (`kv.Links(providerKey,"withProvider","in")`) at `SetProviderTimeOff`, mark overlapping non-terminal ones, project the marker for an FE badge |
 | **The 4 stale cluster-A onboarding cards need a live CancelTask pass** | Inc 2 of the onboarding re-anchor: 4 open `RecordIdentityPII` tasks predate the Inc 1 fix and won't self-clear. Grounded 2026-09-01: the identity is a stranded pre-rotation fossil, not live admin — safe to cancel. | LoftSpace | platform | ★ | XS | 🚧 blocked-on: live-op execution · commands ready in [design](../../implementation-artifacts/duplicate-human-task-fanout-design.md) build note |
 | **The front desk is the only hat that sees "New instructor", and the op refuses it every time** | The instructors panel sits inside the Studios tab, gated `isStaff()` = worksAt + frontOfHouse ([app.js:270](../../../cmd/wellness-app/web/app.js:270)), while `CreateInstructor` is operator-only by design (mirroring clinic's `CreateProvider`). Live: 1 instructor for 2 studios, 31 of 48 sessions instructor-less. | Wellness | FE | ★ | XS | 📋 ready · hide it off an operator hat, or decide who registers instructors |
+| **A tenant's inbox still asks for work they finished weeks ago** | Nothing cancels a userTask once its gap closes: 6 of 7 identities with a recorded `.ssn` still hold an open `RecordIdentityPII`, 4 of 8 signed leases an open `SignLease`, the one open renewal a satisfied `SetRenewalTerms`. `inflight_*` ([targets.go:81](../../../packages/lease-signing/targets.go:81)) suppresses re-dispatch, so a stale row wedges the reopen cycle. | LoftSpace | pkg | ★★★ | S–M | 📋 ready · `directOp CancelTask` off the lens's `sigTaskOpen`/`onbTaskOpen` counts |
+| **The landlord's portfolio card shows occupancy but not one cent of rent owed** | `/api/portfolio-pulse` projects occupancy + service-attach only, while $10,000 sits outstanding across the demo landlord's 4 leased units (one at $4,800 — two unpaid months), reachable only one lease-ledger key at a time. Clause-driven rent debits post automatically, so arrears accrue with no signal. | LoftSpace | FE + pkg | ★★ | S | 📋 ready · landlord-anchored worst-first balance column beside the pulse card · precedent `a03ca337` |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -49,10 +51,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×28, Clinic ×28, Café ×19, Wellness ×16.
+- **Rotation to date:** LoftSpace ×29, Clinic ×28, Café ×19, Wellness ×16.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-29:** Clinic — drove patient, provider + front-desk hats live through book/cancel/document/bill; staff writes time out ~1 in 10 while the same ops self-serve in a third the time, and the descriptors publish only the patient's slice; filed 2.
 - **2026-08-29:** Café — drove resident + front-of-house + backOfHouse hats live through menu/tab/charge/void/settle/pay; every staff write blows the 250ms script wall, the balance never becomes a bill; filed 2 + 1 platform.
 - **2026-08-29:** Wellness — drove member/instructor/two staff hats live through schedule/book/roster/ledger/bill; nobody at the desk can mark attendance and 25 of 25 bookings are no-shows; filed 3.
 - **2026-08-30:** LoftSpace — drove applicant + two landlord hats live through browse/apply/sign/decide/renew/bill; 4 of 8 signed leases never bill rent, a new application reaches neither party; filed 4 + 1 platform.
@@ -63,7 +64,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-09-01:** Clinic — drove patient/provider/front-desk hats live through book/status/document/follow-up/time-off/ledger; a terminal status is uncorrectable and the follow-up net self-clears on no-shows; filed 3.
 - **2026-09-02:** Café — drove front-of-house + resident hats live through menu/tab/charge/void/settle/ledger; a staff settle is unsettleable and arrears hide when the tab closes; filed 3.
 - **2026-09-02:** Wellness — drove member + front-desk hats through schedule/bookings/roster/attendance/ledger/arrears; a corrected no-show never refunds, two July bookings still bill for called-off classes; filed 3.
-- **Next:** LoftSpace.
+- **2026-09-02:** LoftSpace — drove landlord + applicant hats through listings/applications/renewals/tasks/ledger/one-bill/documents/search; finished work still sits in the inbox and the portfolio hides $10k of arrears; filed 2.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
