@@ -532,7 +532,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"assessment":{"type":"string","maxLength":4000,"description":"Clinical assessment / diagnosis (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only."},` +
 			`"plan":{"type":"string","maxLength":4000,"description":"Treatment plan / orders (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only. The clinical reason for any follow-up belongs here, not in the operational followUp fields."},` +
 			`"followUpRequested":{"type":"boolean","description":"Whether the visit calls for a follow-up (RecordEncounter; optional, default false). OPERATIONAL, non-PHI — stored on .documentation, projected (the existence of a follow-up, like an appointment time)."},` +
-			`"followUpDate":{"type":"string","format":"date","x-visibleWhen":{"field":"followUpRequested","equals":true},"description":"Suggested follow-up date, RFC3339 / date (RecordEncounter; optional). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true."}},` +
+			`"followUpDate":{"type":"string","format":"date","x-visibleWhen":{"field":"followUpRequested","equals":true},"description":"Suggested follow-up date, RFC3339 / date (RecordEncounter; required when followUpRequested is true, otherwise ignored). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the operation wrote."}}}`,
@@ -553,7 +553,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"assessment":        "Optional clinical assessment / diagnosis (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only.",
 			"plan":              "Optional treatment plan / orders (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only. The clinical reason for a follow-up lives here, not in the operational followUp fields.",
 			"followUpRequested": "Optional boolean (default false): does this visit need a follow-up (RecordEncounter)? OPERATIONAL, non-PHI — stored on .documentation, projected into clinicAppointments (the existence of a follow-up, like an appointment time, is not clinical content).",
-			"followUpDate":      "Optional suggested follow-up date (RFC3339 / date) (RecordEncounter). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true.",
+			"followUpDate":      "Suggested follow-up date (RFC3339 / date) (RecordEncounter; required when followUpRequested is true, MissingFollowUpDate otherwise). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -3380,7 +3380,12 @@ def execute(state, op):
                # projection into clinicEncountersRead for the treating provider only.
                "followUpRequested": optional_bool(p, "followUpRequested")}
         follow_date = optional_string(p, "followUpDate")
-        if doc["followUpRequested"] and follow_date != None:
+        if doc["followUpRequested"]:
+            # A follow-up with no target date can never come due, so
+            # followUpReminders (and the FE's own follow-up worklist) can
+            # never act on it — require the date whenever one is requested.
+            if follow_date == None:
+                fail("MissingFollowUpDate: followUpDate is required when followUpRequested is true")
             # Normalized to a full canonical-UTC RFC3339 instant so the optional
             # clinic-reminders follow-up reminder can arm an @at timer at it.
             doc["followUpDate"] = normalize_follow_up_date(follow_date)

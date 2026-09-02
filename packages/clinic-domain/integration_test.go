@@ -1013,7 +1013,8 @@ func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
 // operational signals (documentedAt = canonical-UTC op.submittedAt,
 // followUpRequested, followUpDate). A correction (re-run with
 // followUpRequested=false) overwrites both aspects and drops followUpDate
-// (unconditioned upsert). A non-appointment target is rejected (WrongClass).
+// (unconditioned upsert). followUpRequested=true with no followUpDate is
+// rejected (MissingFollowUpDate). A non-appointment target is rejected (WrongClass).
 func TestClinic_RecordEncounter(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
@@ -1109,6 +1110,13 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	// guard fails closed before any write).
 	clSubmit(t, ctx, conn, cp, cons, "enc0003", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+patientKey+`","summary":"x"}`, []string{patientKey}, processor.OutcomeRejected)
+
+	// followUpRequested=true with no followUpDate is rejected (MissingFollowUpDate):
+	// a follow-up with no target date can never come due, so followUpReminders (and
+	// the FE's own follow-up worklist) could never act on it.
+	clSubmit(t, ctx, conn, cp, cons, "enc0005", "RecordEncounter", "appointment",
+		`{"appointmentKey":"`+apptKey+`","summary":"No date given.","followUpRequested":true}`,
+		[]string{apptKey}, processor.OutcomeRejected)
 }
 
 // TestClinic_RescheduleAppointment proves the move-an-appointment path: a
