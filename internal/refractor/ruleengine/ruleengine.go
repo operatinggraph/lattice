@@ -92,26 +92,48 @@ type EvalFootprint struct {
 	// part: an entry is whatever key the evaluation asked for, validated by
 	// re-reading that key.
 	NodeRevisions map[string]uint64
-	// EdgeRevisions maps an adjacency NodeID to the fingerprint
-	// adjacency.Neighbors returned when the evaluation read that node's
-	// edges: an ordinary node's document revision, or — for a node whose
-	// edge count or document size has crossed adjacency's overflow
-	// threshold — a hash over the Core KV link set adjacency.Neighbors
-	// enumerated in place of a document (see adjacency.Neighbors). Either
-	// way the value is opaque to this package: a validating caller only
-	// ever compares it for equality against a fresh read.
+	// EdgeRevisions maps an adjacency NodeID the evaluation read WHOLE to the
+	// fingerprint that read returned: an ordinary node's document revision,
+	// or — for a node whose edge count or document size has crossed
+	// adjacency's overflow threshold — a hash over the Core KV link set
+	// enumerated in place of a document (see adjacency.Neighbors). Either way
+	// the value is opaque to this package: a validating caller only ever
+	// compares it for equality against a fresh whole read.
+	//
+	// A node the evaluation read only at a RELATION SCOPE has no entry here.
+	// A scoped read's fingerprint covers only the relations it asked for and
+	// is not comparable with a whole read's (adjacency.NeighborsByRelation),
+	// so it is discarded rather than recorded, and EdgeSelectors alone
+	// carries that node.
 	EdgeRevisions map[string]uint64
 	// EdgeSelectors maps an adjacency NodeID (same keyspace as EdgeRevisions)
 	// to the selector-scoped read-surface record (§13.4): which (relation
 	// type, direction) pairs the walk consulted on that node, and which edge
 	// identities passed each selector. A validating caller re-applies the
-	// recorded selectors to a fresh read instead of comparing the node's
-	// whole edge set, so a write to an UNRELATED relation on a shared hub
-	// node (a role, an op-meta, a location) does not read as drift.
-	// EdgeRevisions remains the fallback comparison for any node whose
-	// entry here has Fallback set (or is altogether absent — a defensive
-	// case, since every fetchEdges call goes through traverseRel's
-	// recording).
+	// recorded selectors to a fresh read at the scope this record names,
+	// instead of comparing the node's whole edge set, so a write to an
+	// UNRELATED relation on a shared hub node (a role, an op-meta, a
+	// location) does not read as drift.
+	//
+	// The two maps therefore do not have the same key set, and a validating
+	// caller walks their UNION:
+	//
+	//   - A node in both, with Fallback clear: typed hops only. Validated by
+	//     re-deriving each Matched set; the whole fingerprint is not compared.
+	//   - A node in both, with Fallback set: an untyped hop consumed every
+	//     edge on it, so the whole fingerprint is the comparison — plus any
+	//     Matched sets recorded before the untyped hop, which were observed
+	//     at an earlier instant than the whole read and are re-derived too.
+	//   - A node in EdgeSelectors only, Fallback clear: an overflow-marked hub
+	//     crossed by typed hops alone, read at each hop's relation. Its
+	//     Matched sets ARE its footprint.
+	//   - A node in EdgeRevisions only: a whole read with no selector
+	//     recorded — defensive, since every fetchEdges call goes through
+	//     traverseRel's recording. Validated by fingerprint.
+	//   - A node in EdgeSelectors only, Fallback set: malformed. An untyped
+	//     hop always reads whole, so a fingerprint must be present; a
+	//     validating caller reports drift rather than validating a node it
+	//     has no comparison for.
 	EdgeSelectors map[string]EdgeSelectorFootprint
 }
 
@@ -132,10 +154,13 @@ type EdgeSelector struct {
 // Fallback is set when any hop on this node used an untyped selector
 // (RelType == "") that consumes every edge regardless of type, or a
 // variable-length hop whose expansion cannot be attributed to a single
-// relation name — validation then falls back to comparing the node's whole-
-// edge-set fingerprint (EvalFootprint.EdgeRevisions) instead of this
-// narrower selector-scoped comparison, coarser being the always-safe
-// direction.
+// relation name — validation then ALSO compares the node's whole-edge-set
+// fingerprint (EvalFootprint.EdgeRevisions), coarser being the always-safe
+// direction. Recording stops once Fallback is set, so the Matched sets a
+// Fallback entry carries are exactly the typed hops that PRECEDED the untyped
+// one; each observed its relation at an earlier instant than the whole read,
+// so validation re-derives those sets as well rather than letting the
+// fingerprint stand for them.
 type EdgeSelectorFootprint struct {
 	Fallback bool
 	Matched  map[EdgeSelector]map[string]struct{} // selector -> matched EdgeIDs

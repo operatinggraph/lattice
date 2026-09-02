@@ -63,6 +63,53 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 	return st.doc.Edges, st.docRev, nil
 }
 
+// NeighborsScoped returns nodeID's edges read at the narrowest scope the
+// node's own shape rewards, and reports WHICH scope that was so a caller
+// memoizing the answer knows what key it may file it under.
+//
+// One node-state read decides the shape, and the two shapes answer
+// differently:
+//
+//   - Unmarked node (all but the rare hub): the whole adjacency document,
+//     unfiltered, with the document's KV revision as the fingerprint (0 when
+//     the document is absent) and whole=true. Narrowing an unmarked node buys
+//     nothing — the document is one key however many relations a caller
+//     follows — and would cost one read per relation instead of one per node,
+//     so rels is ignored here and the caller filters the answer it gets. The
+//     edges and the fingerprint are exactly what Neighbors returns for the
+//     same node, and comparable with it.
+//   - Overflow-marked node: only rels' links, out of Core KV's link keyspace
+//     under per-relation Contract #1 subject filters, with the scoped
+//     fingerprint and whole=false. An EMPTY rels here reads nothing at all
+//     and answers with no edges — a caller that has proven it follows nothing
+//     does not need the hub, the same rule NeighborsByRelation applies.
+//
+// whole is the discriminator a footprint depends on: a scoped fingerprint
+// covers only what THIS read matched and is not comparable with a whole read's
+// (see NeighborsByRelation), so a caller recording fingerprints records only
+// the whole=true ones and pins a whole=false read by some other unit.
+//
+// coreKV may be nil only for a caller that never reaches a marked node; a
+// marked node with no Core KV handle is an error, never a silently short edge
+// list.
+func NeighborsScoped(ctx context.Context, kv, coreKV *substrate.KV, nodeID string, rels map[string]struct{}) ([]EdgeEntry, uint64, bool, error) {
+	st, err := readNodeState(ctx, kv, nodeID)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if st.marked {
+		if len(rels) == 0 {
+			return []EdgeEntry{}, 0, false, nil
+		}
+		edges, fingerprint, cerr := neighborsFromCoreKV(ctx, coreKV, nodeID, rels)
+		return edges, fingerprint, false, cerr
+	}
+	if !st.docFound {
+		return []EdgeEntry{}, 0, true, nil
+	}
+	return st.doc.Edges, st.docRev, true, nil
+}
+
 // NeighborsByRelation returns only the edges of nodeID named by rels. It is
 // Neighbors narrowed to the relations a caller can prove it will follow, and it
 // exists for the node Neighbors is worst at: an overflow-marked hub, whose read
@@ -91,17 +138,17 @@ func NeighborsByRelation(ctx context.Context, kv, coreKV *substrate.KV, nodeID s
 	if len(rels) == 0 {
 		return []EdgeEntry{}, 0, nil
 	}
-	st, err := readNodeState(ctx, kv, nodeID)
+	edges, fingerprint, whole, err := NeighborsScoped(ctx, kv, coreKV, nodeID, rels)
 	if err != nil {
 		return nil, 0, err
 	}
-	if st.marked {
-		return neighborsFromCoreKV(ctx, coreKV, nodeID, rels)
+	// The marked arm narrowed the READ, so its answer is already exact; the
+	// unmarked arm answers with the whole document, and the narrowing to rels
+	// is this filter.
+	if whole {
+		return filterEdgesByRelation(edges, rels), fingerprint, nil
 	}
-	if !st.docFound {
-		return []EdgeEntry{}, 0, nil
-	}
-	return filterEdgesByRelation(st.doc.Edges, rels), st.docRev, nil
+	return edges, fingerprint, nil
 }
 
 // filterEdgesByRelation keeps the edges whose relation name rels holds,

@@ -1285,6 +1285,36 @@ func main() {
 	}
 	logger.Info("actor walk-scope mode", "mode", walkScope.String())
 
+	// REFRACTOR_HUB_READ_SCOPE is the way back from the full engine's
+	// relation-scoped marked-hub reads
+	// (refractor-hub-walk-and-periodic-load-design.md §9.1): `on` (the default)
+	// lets a typed relationship hop read an overflow-marked node at the hop's
+	// own relation, `off` puts every typed hop back on the whole-node read —
+	// the hub's entire Core KV link keyspace drained once per evaluation that
+	// crosses it, however few of its relations the pattern follows. Read here
+	// for the same reason the modes above are: engines are constructed wherever
+	// a pipeline is built and one of those sites could be missed.
+	//
+	// It is separate from REFRACTOR_WALK_SCOPE, which narrows which relations
+	// the actor fan-out's ENUMERATION follows before any evaluation runs; this
+	// one narrows what an evaluation's own traversal reads. `off` restores the
+	// per-evaluation hub expansion the scope exists to end, so it is a
+	// containment lever for an operator who believes a lens is missing edges,
+	// not a posture to deploy in — and like the others it bounds the next event
+	// rather than healing a row already stale, which is `lattice lens rebuild`'s
+	// job or the sweep's.
+	hubReadScope := full.DefaultHubReadScopeMode()
+	if v := os.Getenv("REFRACTOR_HUB_READ_SCOPE"); v != "" {
+		m, err := full.ParseHubReadScopeMode(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_HUB_READ_SCOPE; keeping the default", "value", v, "err", err)
+		} else {
+			full.SetDefaultHubReadScopeMode(m)
+			hubReadScope = m
+		}
+	}
+	logger.Info("hub read-scope mode", "mode", hubReadScope.String())
+
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0, which the

@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 )
 
 // TestExec_EdgeReadIsRepeatableWithinOneEvaluation pins the adjacency twin of
@@ -27,17 +25,10 @@ func TestExec_EdgeReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 	putVertex(t, reg, coreKV, "svcA", "service", nil)
 	putEdge(t, reg, adjKV, "providedTo", "svcA", "hub")
 
-	ex := &executor{
-		ctx:           t.Context(),
-		adjKV:         adjKV,
-		coreKV:        coreKV,
-		nodes:         map[string]*nodeRef{},
-		edges:         map[string][]adjacency.EdgeEntry{},
-		edgeRevisions: map[string]uint64{},
-	}
+	ex := newTestExecutor(adjKV, coreKV)
 
 	hubID := reg.idByName["hub"]
-	first, err := ex.fetchEdges(hubID)
+	first, err := ex.fetchEdges(hubID, "providedTo")
 	require.NoError(t, err)
 	require.Len(t, first, 1, "hub starts with one inbound providedTo edge")
 	firstRevision := ex.edgeRevisions[hubID]
@@ -46,7 +37,7 @@ func TestExec_EdgeReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 	putVertex(t, reg, coreKV, "svcB", "service", nil)
 	putEdge(t, reg, adjKV, "providedTo", "svcB", "hub")
 
-	second, err := ex.fetchEdges(hubID)
+	second, err := ex.fetchEdges(hubID, "providedTo")
 	require.NoError(t, err)
 	require.Len(t, second, 1,
 		"a second access inside ONE evaluation must observe the edge list the evaluation already saw")
@@ -55,15 +46,8 @@ func TestExec_EdgeReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 
 	// The memo is evaluation-scoped, never global: the NEXT evaluation must see
 	// the committed edge, or the read model would never catch up.
-	next := &executor{
-		ctx:           t.Context(),
-		adjKV:         adjKV,
-		coreKV:        coreKV,
-		nodes:         map[string]*nodeRef{},
-		edges:         map[string][]adjacency.EdgeEntry{},
-		edgeRevisions: map[string]uint64{},
-	}
-	fresh, err := next.fetchEdges(hubID)
+	next := newTestExecutor(adjKV, coreKV)
+	fresh, err := next.fetchEdges(hubID, "providedTo")
 	require.NoError(t, err)
 	require.Len(t, fresh, 2, "a fresh evaluation must observe both providedTo edges")
 }

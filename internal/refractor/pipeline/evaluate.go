@@ -542,6 +542,12 @@ func (p *Pipeline) needsFootprintValidation() bool {
 // conjunct: 0 is a recorded revision, not a missing map entry). There is no
 // header-only read in substrate (design §5), so each entry costs a full
 // re-read, paid honestly rather than approximated.
+//
+// The adjacency half re-reads each node at the scope the footprint names: a
+// node the evaluation read whole is re-read whole and compared by
+// fingerprint, a node it read only through typed relations is re-read at
+// exactly those relations and compared by matched edge identities. A node
+// carrying both records is compared both ways.
 func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootprint) (bool, error) {
 	for key, wantRev := range fp.NodeRevisions {
 		gotRev, err := p.currentNodeRevision(ctx, key)
@@ -552,51 +558,113 @@ func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootpri
 			return false, nil
 		}
 	}
-	for nodeID, wantRev := range fp.EdgeRevisions {
-		// §13.4: a node the walk consulted through a typed selector is
-		// validated by re-applying that selector to a fresh read and
-		// comparing the matched edge-identity set, not by comparing the
-		// node's whole-edge-set fingerprint — a sibling write to an
-		// UNRELATED relation on a shared hub node (a role, an op-meta, a
-		// location) does not read as drift. A node absent from
-		// EdgeSelectors entirely (defensive only — fetchEdges has exactly
-		// one caller, traverseRel, which always records a selector) or
-		// present with Fallback set (an untyped hop, which consumes every
-		// edge regardless of type) is validated by the coarser whole-set
-		// fingerprint comparison instead — coarser is always the safe
-		// direction.
+	// The two adjacency maps do not share a key set: a node read WHOLE has an
+	// EdgeRevisions fingerprint, a node read only at a relation scope (an
+	// overflow-marked hub every hop crossed by a typed relation) has none and
+	// is carried by its EdgeSelectors record alone. Validation therefore walks
+	// their union — order is immaterial, since any single node reporting drift
+	// invalidates the whole footprint.
+	for nodeID := range edgeFootprintNodes(fp) {
+		wantRev, hasWhole := fp.EdgeRevisions[nodeID]
 		sel, hasSelectors := fp.EdgeSelectors[nodeID]
+
 		if !hasSelectors || sel.Fallback {
-			_, gotRev, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, nodeID)
+			// The coarse path: an untyped hop consumed every edge on this
+			// node regardless of type (Fallback), or no selector was recorded
+			// at all (defensive only — fetchEdges' one caller, traverseRel,
+			// always records). Either way the sound comparison is the node's
+			// whole-edge-set fingerprint. An untyped hop always reads the node
+			// whole, so a fingerprint MUST be here; a node on this path
+			// without one is a malformed footprint with nothing to compare,
+			// and reports drift rather than validating unchecked.
+			if !hasWhole {
+				return false, nil
+			}
+			edges, gotRev, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, nodeID)
 			if err != nil {
 				return false, err
 			}
 			if gotRev != wantRev {
 				return false, nil
 			}
+			// A Fallback node may also carry Matched sets, and they are not
+			// redundant with the fingerprint: recordEdgeSelector stops
+			// recording once Fallback is set, so the sets present are exactly
+			// the TYPED hops that preceded the untyped one on this node. Each
+			// observed its relation at an earlier instant than the whole read
+			// the fingerprint pins, and only re-deriving the set can catch a
+			// write that landed between those two instants.
+			if hasSelectors && !edgeSelectorsUnchanged(sel, edges) {
+				return false, nil
+			}
 			continue
 		}
-		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, nodeID)
+
+		// §13.4, the selector path: every hop on this node was typed, so it
+		// is validated by re-applying each recorded selector to a fresh read
+		// and comparing the matched edge-identity set. A sibling write to an
+		// UNRELATED relation on a shared hub node (a role, an op-meta, a
+		// location) does not read as drift — which is why the node's whole
+		// fingerprint is deliberately NOT compared here even when one was
+		// recorded.
+		//
+		// The re-read takes the same scope the footprint names: one
+		// NeighborsByRelation over every relation the node's selectors name,
+		// so a marked hub is enumerated at those relations instead of drained
+		// whole, and an unmarked node is the one document read it always was.
+		rels := make(map[string]struct{}, len(sel.Matched))
+		for selector := range sel.Matched {
+			rels[selector.RelType] = struct{}{}
+		}
+		edges, _, err := adjacency.NeighborsByRelation(ctx, p.adjKV, p.coreKV, nodeID, rels)
 		if err != nil {
 			return false, err
 		}
-		for selector, wantIDs := range sel.Matched {
-			gotIDs := make(map[string]struct{}, len(wantIDs))
-			for _, e := range edges {
-				if e.Name != selector.RelType {
-					continue
-				}
-				if !adjacency.DirectionMatches(e.Direction, selector.Direction) {
-					continue
-				}
-				gotIDs[e.EdgeID] = struct{}{}
-			}
-			if !edgeIDSetsEqual(gotIDs, wantIDs) {
-				return false, nil
-			}
+		if !edgeSelectorsUnchanged(sel, edges) {
+			return false, nil
 		}
 	}
 	return true, nil
+}
+
+// edgeFootprintNodes returns every adjacency NodeID fp carries in either
+// adjacency map — the set footprintValid validates, since a node may appear in
+// EdgeRevisions (read whole), in EdgeSelectors (read at a relation scope), or
+// in both.
+func edgeFootprintNodes(fp ruleengine.EvalFootprint) map[string]struct{} {
+	nodes := make(map[string]struct{}, len(fp.EdgeRevisions)+len(fp.EdgeSelectors))
+	for nodeID := range fp.EdgeRevisions {
+		nodes[nodeID] = struct{}{}
+	}
+	for nodeID := range fp.EdgeSelectors {
+		nodes[nodeID] = struct{}{}
+	}
+	return nodes
+}
+
+// edgeSelectorsUnchanged re-applies every selector sel recorded to edges and
+// reports whether each one still matches exactly the edge identities the
+// footprint recorded for it. edges must cover at least the relations sel names;
+// a selector naming a relation edges does not cover would re-derive as empty
+// and read as drift, which is the safe direction but not the intended
+// comparison, so callers read at a scope wide enough for sel.
+func edgeSelectorsUnchanged(sel ruleengine.EdgeSelectorFootprint, edges []adjacency.EdgeEntry) bool {
+	for selector, wantIDs := range sel.Matched {
+		gotIDs := make(map[string]struct{}, len(wantIDs))
+		for _, e := range edges {
+			if e.Name != selector.RelType {
+				continue
+			}
+			if !adjacency.DirectionMatches(e.Direction, selector.Direction) {
+				continue
+			}
+			gotIDs[e.EdgeID] = struct{}{}
+		}
+		if !edgeIDSetsEqual(gotIDs, wantIDs) {
+			return false
+		}
+	}
+	return true
 }
 
 // edgeIDSetsEqual compares two edge-identity sets for equality — same size

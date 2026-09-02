@@ -30,7 +30,7 @@ Key sub-packages:
 | `pipeline/` | `Pipeline` struct; drives per-lens CDC-event → evaluate → adapt loop; `LatencyRingBuffer` (128-sample window) |
 | `lens/` | `CoreKVSource` (durable consumer over `vtx.meta.>` and `lnk.meta.*.subtypeOf.>`, routes `meta.lens` class to the lens loader and accumulates the dynamic type taxonomy from vertexType/canonicalName/subtypeOf events — dynamic-type-taxonomy-design.md §6.1); `Rule` type; `translateSpec` from `LensSpec` to `Rule`; engine selection via registry |
 | `adapter/` | `Adapter` interface; `nats_kv` adapter; Postgres adapter; `nats_subject` adapter (Personal Lens transport); `PoolManager` for Postgres connection pooling |
-| `adjacency/` | Adjacency KV read/write: `Build` (CAS upsert/remove, with the per-node overflow latch), `Neighbors` (the document read, or the Core-KV fallback read for an overflow-marked node), `EventsForLink` (the directional-event-pair constructor every link consumer shares) |
+| `adjacency/` | Adjacency KV read/write: `Build` (CAS upsert/remove, with the per-node overflow latch), `Neighbors` (the document read, or the Core-KV fallback read for an overflow-marked node), `NeighborsScoped` / `NeighborsByRelation` (the same read narrowed to named relations, and the flag saying whether the node answered whole), `EventsForLink` (the directional-event-pair constructor every link consumer shares) |
 | `consumer/` | `Bootstrapper` (builds the adjacency index from link CDC events). Per-lens durable JetStream consumers are owned by each `pipeline.Pipeline` via `substrate.ConsumerSupervisor` (see Lens lifecycle step 5). |
 | `control/` | `Service` — control plane on the NATS `micro.Service` framework; endpoints at `lattice.ctrl.refractor.<lensId>.<op>` |
 | `health/` | `LatticeHeartbeater`; `Reporter`; `AuditWriter` (subjects `lattice.refractor.audit.<lensId>`); `LagPoller` (subjects `lattice.refractor.metrics.<lensId>`) |
@@ -695,7 +695,7 @@ latch (`internal/refractor/adjacency/overflow.go`) is the structural answer.
 | Mark key | `adjmark.<nodeId>`, same bucket, a distinct key prefix from `adj.<nodeId>` so an older binary that has never heard of the latch cannot see it, let alone unmark a node by rewriting the document |
 | Thresholds | `3,072` edges **or** an `800 KiB` marshaled document, whichever comes first — entries are variable-length, so neither threshold bounds the other |
 | Latch effect | The `Build` call that carries a node past either threshold creates the mark (create-tolerating-conflict, so the several concurrent writers of one node's edges converge on one mark instead of racing), best-effort empties the node's document to reclaim the space, and becomes a no-op for every later event on that node — an added edge is not absorbed and a retracted one is not removed, because Core KV is now the node's authoritative record |
-| Read effect | `Neighbors` reads a node's document and its mark in one batched `KVGetMulti` call, so a node latching mid-read can never present the just-emptied document as a complete answer. An unmarked node's read is that same two-key batched request, returning the document's KV revision as the fingerprint. A marked node's read enumerates Core KV's `lnk.*` keyspace directly for both directions, drops soft-tombstoned links, and returns a fingerprint hashed over the matched `(key, revision)` set in place of a document revision |
+| Read effect | `Neighbors` reads a node's document and its mark in one batched `KVGetMulti` call, so a node latching mid-read can never present the just-emptied document as a complete answer. An unmarked node's read is that same two-key batched request, returning the document's KV revision as the fingerprint. A marked node's read enumerates Core KV's `lnk.*` keyspace directly for both directions, drops soft-tombstoned links, and returns a fingerprint hashed over the matched `(key, revision)` set in place of a document revision. A caller that can name the relations it will follow takes `NeighborsScoped` instead: one node-state read decides the shape, an unmarked node still answers whole (a document is one key however many relations are asked for) and a marked node's Core KV enumeration is filtered to those relations by subject. The returned `whole` flag says which happened, because a scoped fingerprint covers only what that read matched and is never comparable with a whole read's |
 | Freshness | A marked node's read is commit-fresh: Core KV holds a link the instant its write commits, so a marked node needs no help from the pipelines' link pre-apply (below) to see an edge that triggered the read. An unmarked node's document can still lag its own triggering CDC event by one write, which is exactly what the link pre-apply closes |
 | Cost | An unmarked node's read is a two-key batched request (the document plus the mark), roughly 2× a plain single-key `Get` (a multi-key request measures near 306 µs against a single `Get`'s 153 µs) — the same cost two sequential `Get`s would pay while also being non-atomic, so batching is the cheaper of those two ways to consult a mark on the read path, not a free one. A marked node's read is a further, larger Core KV enumeration: slower still, but complete, where a jammed write and a frozen, wrong edge set are not |
 | Lifetime | Created the first time a node's `Build` carries it past either threshold; never lifted — a node whose degree later shrinks keeps paying the fallback read rather than risk reintroducing the jam on its next growth spurt. Durable across restarts and reconnects (it is ordinary KV state); re-latched deterministically by the Bootstrapper's replay, which re-crosses the same threshold on the same edges; wiped only when the bucket itself is wiped |
@@ -781,6 +781,27 @@ follows that relation at every service, and so still expands the type descriptor
 per-type scope can separate "instance → its template" from "template → its other instances"
 when both ends are the same type; the position-directed affected-anchor derivation is what
 does, and it is the arm this scope is the fallback for.
+
+#### The full engine's own traversal reads a marked hub by the hop's relation
+
+The scope above narrows which relations the *enumeration* follows before an evaluation
+runs. Inside the evaluation, the full engine's executor applies the same idea to its own
+reads: a **typed** relationship hop standing on an overflow-marked node reads that node at
+the hop's relation (`adjacency.NeighborsScoped`) instead of draining the hub's whole Core KV
+link keyspace, so a lens that follows one relation of a hub's thousands pays for one
+relation. An **unmarked** node still answers whole and is memoized whole — its document is
+one key however many relations cross it — so nothing about the ordinary node changes. An
+untyped hop reads whole either way, since it consumes every edge regardless of type.
+
+A hub read is memoized per `(hub, relation)` for the life of the evaluation, so repeatable
+read holds per key exactly as the whole memo holds it per node. It is footprinted as its
+**Matched sets** and never as a fingerprint: a scoped fingerprint is not comparable with a
+whole read's, so such a node carries no `EdgeRevisions` entry and the validator re-reads it
+at the same relation scope (below). **`REFRACTOR_HUB_READ_SCOPE=off`** restores the whole
+read — every typed hop drains a marked hub again, and its footprint carries the whole
+fingerprint as before. Like the switches beside it, it is a containment lever for an
+operator who believes a lens is missing edges, not a posture to deploy in, and it bounds the
+next event rather than healing a row already stale.
 
 ### Convergence sweep
 
@@ -1079,7 +1100,18 @@ AND whose compiled cypher emits at least one multi-binding conjunct unit
 construction, since a torn *set* of individually-real entries is ordinary
 bounded staleness, not a fabricated combination), `pipeline.executeFullForActor`
 re-reads that footprint immediately after evaluation and before the row
-reaches the envelope/adapter. If nothing moved,
+reaches the envelope/adapter.
+
+Each adjacency node is re-read at the scope the footprint names. A node crossed
+only by typed hops is re-read at exactly those relations and compared by matched
+edge identities, so a write to an unrelated relation on a shared hub is not
+drift — for a marked hub read at the hop's relation those identities are the
+node's whole footprint, since no comparable fingerprint exists. A node an
+untyped hop crossed is compared by whole fingerprint **and** by the matched sets
+of any typed hops that preceded that hop on it: those observed their relation at
+an earlier instant than the whole read, and only re-deriving them catches a
+write that landed in between. A node on that coarse path with no fingerprint at
+all is malformed and reports drift rather than passing unchecked. If nothing moved,
 the row proceeds unchanged. If something moved, the evaluation re-executes
 once against current state and validates again; if it still diverges
 (sustained churn), the pipeline returns a typed transient failure

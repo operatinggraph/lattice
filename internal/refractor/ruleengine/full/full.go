@@ -23,6 +23,9 @@ const defaultMaxBindings = 1_000_000
 // Engine is the v2 engine. Satisfies ruleengine.RuleEngine.
 type Engine struct {
 	maxBindings int
+	// hubReadScope overrides the package-wide hub read-scope posture for this
+	// engine alone; HubReadScopeModeUnset (the zero value) takes the default.
+	hubReadScope HubReadScopeMode
 }
 
 // New returns a ready-to-register full engine.
@@ -35,6 +38,17 @@ func New() *Engine { return &Engine{maxBindings: defaultMaxBindings} }
 func (e *Engine) WithMaxBindings(n int) *Engine {
 	c := *e
 	c.maxBindings = n
+	return &c
+}
+
+// WithHubReadScopeMode returns a copy of the engine whose hub read-scope
+// posture is m; HubReadScopeModeUnset returns it to the package default. The
+// receiver is unchanged — an engine shared across lenses cannot be
+// reconfigured by a caller derived from it, and this is the form a test uses
+// so it never mutates package state.
+func (e *Engine) WithHubReadScopeMode(m HubReadScopeMode) *Engine {
+	c := *e
+	c.hubReadScope = m
 	return &c
 }
 

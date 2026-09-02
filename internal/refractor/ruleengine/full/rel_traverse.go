@@ -67,7 +67,7 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 			if _, nodeID, ok := substrate.ParseVertexKey(f.node.key); ok {
 				adjLookupID = nodeID
 			}
-			edges, err := ex.fetchEdges(adjLookupID)
+			edges, err := ex.fetchEdges(adjLookupID, rel.Type)
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)
 			}

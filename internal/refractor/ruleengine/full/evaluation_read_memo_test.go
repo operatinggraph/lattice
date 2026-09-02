@@ -23,6 +23,8 @@ func newTestExecutor(adjKV, coreKV *substrate.KV) *executor {
 		nodes:         map[string]*nodeRef{},
 		edges:         map[string][]adjacency.EdgeEntry{},
 		edgeRevisions: map[string]uint64{},
+		hubEdges:      map[hubKey][]adjacency.EdgeEntry{},
+		hubReadScope:  DefaultHubReadScopeMode() == HubReadScopeModeOn,
 	}
 }
 

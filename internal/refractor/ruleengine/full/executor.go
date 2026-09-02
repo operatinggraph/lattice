@@ -107,29 +107,58 @@ type executor struct {
 	// absent-then-created aspect splits a group exactly as a changed one does.
 	nodes map[string]*nodeRef
 
-	// edges memoizes adjacency.Neighbors by adjacency NodeID for the life of
-	// ONE evaluation — the link twin of nodes, closing the same class of
+	// edges memoizes a WHOLE adjacency read by adjacency NodeID for the life
+	// of ONE evaluation — the link twin of nodes, closing the same class of
 	// defect for relationship hops: without it, every hop through a given
 	// node reads live from Adjacency KV, so two hops through the same node
 	// inside one evaluation (a variable-length traversal revisiting a
 	// frontier node, or two separate MATCH clauses walking through it) could
-	// observe two different edge lists for it. edgeRevisions records the KV
-	// revision each memoized node's adjacency document was read at (0 =
-	// absent) — the adjacency half of the read-surface footprint a
-	// validating caller compares after evaluation.
+	// observe two different edge lists for it. A whole memo entry serves
+	// every hop on that node whatever relation each one follows, since it
+	// holds the node's complete edge list and the caller filters.
+	//
+	// edgeRevisions records the fingerprint each memoized node's WHOLE read
+	// returned (an adjacency document's KV revision, 0 = absent; or a marked
+	// node's link-set hash) — the adjacency half of the read-surface
+	// footprint a validating caller compares after evaluation. Its key set is
+	// exactly edges': a relation-scoped hub read's fingerprint covers only the
+	// relations it asked for and is not comparable with a whole read's, so it
+	// is discarded rather than recorded (see hubEdges).
 	edges         map[string][]adjacency.EdgeEntry
 	edgeRevisions map[string]uint64
+
+	// hubEdges memoizes a RELATION-SCOPED read of an overflow-marked node,
+	// keyed by (node, relation) — the unit a typed hop over such a node reads
+	// when hub read-scoping is on, in place of draining the hub's whole link
+	// keyspace out of Core KV. Repeatable-read holds per KEY, so the same
+	// typed hop crossing the same hub twice in one evaluation reads once, and
+	// two different relations on one hub are two reads of one relation each
+	// rather than two drains of everything.
+	//
+	// A hub read has no entry in edges/edgeRevisions and never gains one: its
+	// fingerprint is not comparable with a whole read's, and the unit that
+	// pins it is the Matched set recordEdgeSelector records for the same hop
+	// (see edgeSelectors). Lives for ONE evaluation, exactly like edges.
+	hubEdges map[hubKey][]adjacency.EdgeEntry
+
+	// hubReadScope is the resolved posture for this evaluation: whether a
+	// typed hop may take the relation-scoped hub read at all. Stamped at
+	// construction from the engine's own override or the package default, so
+	// one evaluation never straddles two postures.
+	hubReadScope bool
 
 	// edgeSelectors records, per adjacency node, the selector-scoped read
 	// surface §13.4 adds: which (relation type, direction) pairs traverseRel
 	// consulted on that node, and which edge identities passed each one —
 	// the narrower unit footprintValid compares against instead of the
 	// node's whole-document revision, so a write to an unrelated relation on
-	// a shared hub node no longer reads as drift. Populated alongside edges/
-	// edgeRevisions; never populated for a node this evaluation never
-	// traversed a typed relationship through (fetchEdges alone, with no
-	// traverseRel selector recording, leaves no entry here — footprint()
-	// falls back to whole-document comparison for it, same as Fallback).
+	// a shared hub node does not read as drift. For a node read whole it
+	// narrows what counts as drift; for a hub read it is the ONLY thing
+	// pinning the node, since no fingerprint was recorded. Never populated
+	// for a node this evaluation never traversed a typed relationship
+	// through (fetchEdges alone, with no traverseRel selector recording,
+	// leaves no entry here — a whole-read node then falls back to
+	// whole-document comparison, same as Fallback).
 	edgeSelectors map[string]*ruleengine.EdgeSelectorFootprint
 
 	// maxBindings caps the binding set any one stage of this evaluation may
@@ -165,6 +194,16 @@ type executor struct {
 	// took before the analysis existed.
 	branchStages   map[Clause]*stagePlan
 	branchDeferred map[*Match]struct{}
+}
+
+// hubKey identifies one relation-scoped read of an overflow-marked node: the
+// adjacency NodeID and the single relation name the read asked for. It is the
+// unit such a read is repeatable per — a hub read of relA and a hub read of
+// relB on one node are two independent answers, neither of them the node's
+// whole edge list.
+type hubKey struct {
+	nodeID string
+	rel    string
 }
 
 // branchPlanFor returns c's branch-decomposition plan, or nil when the rule
@@ -350,6 +389,8 @@ func (e *Engine) ExecuteWithStats(
 		nodes:             map[string]*nodeRef{},
 		edges:             map[string][]adjacency.EdgeEntry{},
 		edgeRevisions:     map[string]uint64{},
+		hubEdges:          map[hubKey][]adjacency.EdgeEntry{},
+		hubReadScope:      e.hubReadScopeEnabled(),
 		edgeSelectors:     map[string]*ruleengine.EdgeSelectorFootprint{},
 		maxBindings:       e.maxBindings,
 		labelExpansion:    compiled.LabelExpansion,
@@ -420,10 +461,15 @@ func (ex *executor) evalStats() ruleengine.EvalStats {
 }
 
 // footprint returns the read-surface certificate this evaluation observed —
-// every Core KV key it read (via the node memo, absent = revision 0) and
-// every adjacency node it read (via the edge memo, absent = revision 0). Both
-// memos are already populated for the life of the evaluation (see the nodes/
-// edges field docs), so building the footprint costs no extra reads.
+// every Core KV key it read (via the node memo, absent = revision 0), every
+// adjacency node it read WHOLE (via the edge memo, absent = revision 0), and
+// the selector-scoped record of every typed hop. A node read only at a
+// relation scope (an overflow-marked hub crossed by typed hops) carries no
+// EdgeRevisions entry and appears in EdgeSelectors alone: its scoped
+// fingerprint is not comparable with a whole read's, and its Matched sets are
+// what a validating caller re-derives. Every memo is already populated for
+// the life of the evaluation (see the nodes/edges/hubEdges field docs), so
+// building the footprint costs no extra reads.
 func (ex *executor) footprint() ruleengine.EvalFootprint {
 	nodeRevs := make(map[string]uint64, len(ex.nodes))
 	for key, ref := range ex.nodes {
@@ -815,14 +861,55 @@ func (ex *executor) readNode(key string) (*nodeRef, error) {
 	return &nodeRef{key: key, props: props, revision: entry.Revision}, nil
 }
 
-// fetchEdges returns adjNodeID's edge list, memoized for the life of this
-// evaluation — see executor.edges for why repeatable-read is a correctness
-// requirement here, mirroring fetchNode/nodes for adjacency reads. A read
-// error is never memoized: it is transport, not a value. Mirrors fetchNode's
-// nil-map guard: the read-free key-resolution executor (anchor_delete) never
-// traverses a relationship, so this only matters defensively.
-func (ex *executor) fetchEdges(adjNodeID string) ([]adjacency.EdgeEntry, error) {
+// fetchEdges returns the edges of adjNodeID this hop may consume, memoized for
+// the life of this evaluation — see executor.edges for why repeatable-read is a
+// correctness requirement here, mirroring fetchNode/nodes for adjacency reads.
+// rel is the hop's relation name, or "" for an untyped hop that consumes every
+// edge on the node regardless of type.
+//
+// The answer is a SUPERSET of what the hop consumes, never a subset, and the
+// caller filters either way:
+//
+//   - A whole memo entry (ex.edges) serves any hop on the node, typed or not.
+//   - A typed hop on a node with no whole entry, with hub read-scoping on,
+//     reads at the hop's relation. An UNMARKED node still answers with its
+//     whole document — one key however many relations cross it — so it is
+//     memoized whole and every later hop on it is served from that entry,
+//     exactly as an untyped hop's read would be. A MARKED node answers with
+//     that relation's links alone and is memoized under (node, relation) in
+//     ex.hubEdges; its scoped fingerprint is discarded rather than recorded,
+//     because it is not comparable with a whole read's — the Matched set
+//     traverseRel records right after this call is what pins that read.
+//   - An untyped hop, or any hop with scoping off, reads the node whole.
+//
+// A read error is never memoized: it is transport, not a value. Mirrors
+// fetchNode's nil-map guard on both memos: the read-free key-resolution
+// executor (anchor_delete) never traverses a relationship, so this only
+// matters defensively.
+func (ex *executor) fetchEdges(adjNodeID string, rel string) ([]adjacency.EdgeEntry, error) {
 	if edges, ok := ex.edges[adjNodeID]; ok {
+		return edges, nil
+	}
+	if rel != "" && ex.hubReadScope {
+		hk := hubKey{nodeID: adjNodeID, rel: rel}
+		if edges, ok := ex.hubEdges[hk]; ok {
+			return edges, nil
+		}
+		edges, fingerprint, whole, err := adjacency.NeighborsScoped(
+			ex.ctx, ex.adjKV, ex.coreKV, adjNodeID, map[string]struct{}{rel: {}})
+		if err != nil {
+			return nil, err
+		}
+		if whole {
+			if ex.edges != nil {
+				ex.edges[adjNodeID] = edges
+				ex.edgeRevisions[adjNodeID] = fingerprint
+			}
+			return edges, nil
+		}
+		if ex.hubEdges != nil {
+			ex.hubEdges[hk] = edges
+		}
 		return edges, nil
 	}
 	edges, revision, err := adjacency.Neighbors(ex.ctx, ex.adjKV, ex.coreKV, adjNodeID)
@@ -840,15 +927,23 @@ func (ex *executor) fetchEdges(adjNodeID string) ([]adjacency.EdgeEntry, error) 
 // selector this hop consulted against edges — the selector-scoped read-
 // surface unit (§13.4) a validating caller later re-applies to a fresh read
 // instead of comparing adjNodeID's whole adjacency-document revision, so a
-// write to an unrelated relation on a shared hub node no longer reads as
-// drift.
+// write to an unrelated relation on a shared hub node does not read as
+// drift. For a node fetchEdges read at the hop's relation rather than whole
+// (an overflow-marked hub), this Matched set is the node's ONLY footprint
+// entry: no fingerprint was recorded for it, so validation re-reads at the
+// same relation scope and compares these identities.
 //
 // An untyped selector (rel.Type == "") consumes every edge on the node
 // regardless of type — it marks the node's entry Fallback instead of
 // recording a Matched set, since whole-document revision comparison already
-// covers (and is the only sound comparison for) an untyped read. Once a
-// node's entry is Fallback, a later typed hop on the same node records
-// nothing further: the coarser comparison already subsumes it.
+// covers (and is the only sound comparison for) an untyped read; the same
+// hop reads the node whole, so a fingerprint is always there to compare.
+// Once a node's entry is Fallback, a later typed hop on the same node
+// records nothing further: the coarser comparison already subsumes it. The
+// sets an entry carries alongside Fallback are therefore exactly the typed
+// hops that PRECEDED the untyped one, each observed at its own earlier
+// instant — which is why validation re-applies them as well as comparing the
+// fingerprint.
 //
 // Called once per (node, hop-iteration) from traverseRel's per-node edge
 // loop; a node revisited via the same selector later in the same evaluation

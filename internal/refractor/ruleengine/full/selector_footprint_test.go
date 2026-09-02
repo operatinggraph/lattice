@@ -257,5 +257,6 @@ func TestExecutor_TraversesAnOverflowMarkedNode(t *testing.T) {
 	sel, ok := fp.EdgeSelectors[roleID]
 	require.True(t, ok, "the hop must still record its selector on a marked node")
 	require.False(t, sel.Fallback)
-	require.NotZero(t, fp.EdgeRevisions[roleID], "and carry the fallback's fingerprint")
+	require.NotContains(t, fp.EdgeRevisions, roleID,
+		"a typed hop reads a marked node at its own relation, and a scoped fingerprint is not comparable with a whole read's — the Matched set is the node's whole footprint")
 }

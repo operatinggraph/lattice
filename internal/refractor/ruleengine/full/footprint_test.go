@@ -30,7 +30,7 @@ func TestExecutor_Footprint_CapturesNodeAndEdgeRevisions(t *testing.T) {
 	require.NotNil(t, hubRef)
 
 	hubID := reg.idByName["hub"]
-	_, err = ex.fetchEdges(hubID)
+	_, err = ex.fetchEdges(hubID, "")
 	require.NoError(t, err)
 
 	absentRef, err := ex.fetchNode("vtx.identity.doesNotExistAAAAAAAAA")
