@@ -655,6 +655,119 @@ func TestDebitAccount_UnknownAppointmentRefRejected(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
+// TestCreditAccount_ReversesRefWritesReversesLink (mirrors
+// TestDebitAccount_AppointmentRefWritesSettlesLink). A ClinicCreditAccount
+// carrying reversesRef writes the reverses audit link (credit tx -> the
+// reversed debit tx) clinicNoShowSettlement's missing_reversal gap reads; a
+// plain ClinicCreditAccount with no reversesRef writes no such link.
+func TestCreditAccount_ReversesRefWritesReversesLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reversesref")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatrevref00000001", "Priya Nandakumar")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctrevref001", patientKey)
+
+	debitReqID := testutil.GenReqID("debitrevref00000001")
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     debitReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	debitTxKey := "vtx.clinictransaction." + nanoIDFromRequestID(debitReqID)
+
+	creditReqID := testutil.GenReqID("creditrevref0000001")
+	creditEnv := &processor.OperationEnvelope{
+		RequestID:     creditReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:05:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reason":"waiver","reversesRef":"` + debitTxKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, debitTxKey}},
+	}
+	testutil.PublishOp(t, conn, creditEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	reversesLnk := "lnk.clinictransaction." + nanoIDFromRequestID(creditReqID) + ".reverses.clinictransaction." + nanoIDFromRequestID(debitReqID)
+	if !keyExists(t, ctx, conn, reversesLnk) {
+		t.Fatalf("reverses link must exist: %s", reversesLnk)
+	}
+
+	// A plain ClinicCreditAccount (no reversesRef) writes no reverses link.
+	plainReqID := testutil.GenReqID("creditrevref0000002")
+	plainEnv := &processor.OperationEnvelope{
+		RequestID:     plainReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:10:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, plainEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	plainReversesLnk := "lnk.clinictransaction." + nanoIDFromRequestID(plainReqID) + ".reverses.clinictransaction." + nanoIDFromRequestID(debitReqID)
+	if keyExists(t, ctx, conn, plainReversesLnk) {
+		t.Fatalf("a plain ClinicCreditAccount with no reversesRef must write no reverses link, found %s", plainReversesLnk)
+	}
+}
+
+// TestCreditAccount_UnknownReversesRefRejected rejects a ClinicCreditAccount
+// whose reversesRef names a non-existent transaction (UnknownTransaction).
+func TestCreditAccount_UnknownReversesRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "unknownrevref")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpaturr00000000001", "Owen Delacroix")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctuur000001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("credituur0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reversesRef":"vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestDebitAccount_ReversesRefRejected rejects reversesRef on a
+// ClinicDebitAccount — reversal is a credit-only concept, mirroring
+// billedTo/expectedReimbursementCents being debit-only.
+func TestDebitAccount_ReversesRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "debitrevrefrej")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatdrr00000000001", "Selin Aydemir")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctdrr000001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitdrr0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reversesRef":"vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
 // ledgerSelfConsumerID/Key/Cap + ledgerSelfConsumerCapDoc grant the platform
 // permission ClinicCreditAccount's scope=self branch checks — mirrors
 // loftspace-ledger's ledgerSelfConsumerCapDoc.

@@ -124,7 +124,13 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"ClinicDebitAccount also accepts an optional appointmentRef (vtx.appointment.<NanoID>, validated alive when supplied — " +
 			"UnknownAppointment otherwise): when present, writes a settles audit link (transaction→appointment) that the " +
 			"clinicNoShowSettlement lens (targets.go) walks to converge the no-show-fee gap once posted. A plain " +
-			"human-submitted ClinicDebitAccount (no appointmentRef) is unaffected — the field mirrors cafe-ledger's tabRef shape.",
+			"human-submitted ClinicDebitAccount (no appointmentRef) is unaffected — the field mirrors cafe-ledger's tabRef shape. " +
+			"ClinicCreditAccount likewise accepts an optional reversesRef (vtx.clinictransaction.<NanoID> of the debit it " +
+			"reverses, validated alive when supplied — UnknownTransaction otherwise; rejected on a ClinicDebitAccount): when " +
+			"present, writes a reverses audit link (credit transaction→the reversed debit transaction) that " +
+			"clinicNoShowSettlement's missing_reversal gap walks — the reversal Weaver dispatches once a " +
+			"CorrectAppointmentStatus correction moves a charged no-show appointment off `noShow` (clinic-domain never touches " +
+			"the ledger directly; the lens converges the gap the correction leaves behind).",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> the transaction posts to (ClinicDebitAccount/ClinicCreditAccount; required, validated alive)."},` +
@@ -133,7 +139,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`"billedTo":{"type":"string","enum":["self","insurance"],"description":"ClinicDebitAccount only; who the charge is billed to. Optional, defaults to \"self\" when omitted. Rejected on ClinicCreditAccount."},` +
 			`"expectedReimbursementCents":{"type":"number","description":"ClinicDebitAccount only, and only when billedTo is \"insurance\": the amount expected back from the payer, in integer cents. Required when billedTo is \"insurance\" (rejected otherwise), must be > 0 and <= amountCents."},` +
 			`"appointmentRef":{"type":"string","description":"ClinicDebitAccount only; optional vtx.appointment.<NanoID> back-reference to the no-show appointment this charge settles. When supplied, validated alive (UnknownAppointment otherwise) and a settles audit link (transaction→appointment) is written — the clinicNoShowSettlement lens reads it to converge the gap. Mirrors cafe-ledger's tabRef."},` +
-			`"reason":{"type":"string","enum":["payment","waiver"],"description":"ClinicCreditAccount only; optional, defaults to \"payment\" when omitted. \"waiver\" records the credit as debt the clinic forgave rather than cash collected — both reduce the derived balance the same way, but the ledgerHistory lens projects reason so the two are never confused. Rejected on ClinicDebitAccount, and rejected on a self-scoped (patient) credit — a patient may pay down their own balance but never waive it."}},` +
+			`"reason":{"type":"string","enum":["payment","waiver"],"description":"ClinicCreditAccount only; optional, defaults to \"payment\" when omitted. \"waiver\" records the credit as debt the clinic forgave rather than cash collected — both reduce the derived balance the same way, but the ledgerHistory lens projects reason so the two are never confused. Rejected on ClinicDebitAccount, and rejected on a self-scoped (patient) credit — a patient may pay down their own balance but never waive it."},` +
+			`"reversesRef":{"type":"string","description":"ClinicCreditAccount only; optional vtx.clinictransaction.<NanoID> back-reference to the debit this credit reverses (e.g. a no-show fee posted before a CorrectAppointmentStatus correction moved the appointment off noShow). When supplied, validated alive (UnknownTransaction otherwise) and a reverses audit link (transaction→transaction) is written — the clinicNoShowSettlement lens reads it to converge the missing_reversal gap. Rejected on ClinicDebitAccount."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.clinictransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
@@ -145,6 +152,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"expectedReimbursementCents": "ClinicDebitAccount only, and only when billedTo is \"insurance\": the amount expected back from the payer, in integer cents (required then, must be > 0 and <= amountCents; rejected when billedTo is \"self\" or on a ClinicCreditAccount).",
 			"appointmentRef":             "ClinicDebitAccount only: optional full vtx.appointment.<NanoID> key of the no-show appointment this charge settles. Validated alive when supplied (UnknownAppointment otherwise); writes a settles link (transaction→appointment) the clinicNoShowSettlement lens walks to converge the gap.",
 			"reason":                     "ClinicCreditAccount only: \"payment\" or \"waiver\" (default \"payment\" when omitted). Stored on the .entry aspect; projected by the ledgerHistory lens. Rejected on ClinicDebitAccount, and rejected on a self-scoped (patient) credit — only front-desk staff / the operator may waive a charge.",
+			"reversesRef":                "ClinicCreditAccount only: optional full vtx.clinictransaction.<NanoID> key of the debit this credit reverses. Validated alive when supplied (UnknownTransaction otherwise); writes a reverses link (transaction→transaction) the clinicNoShowSettlement lens walks to converge the missing_reversal gap. Rejected on ClinicDebitAccount.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -185,6 +193,15 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"balance drops identically, but the ledgerHistory lens projects reason so a reader never mistakes forgiven debt for cash " +
 					"collected. Rejects AuthDenied if the caller is a self-scoped patient — only the operator/" +
 					"front-of-house scope=any grant may waive.",
+			},
+			{
+				Name:    "ClinicCreditAccount — Weaver-dispatched no-show reversal (reversesRef)",
+				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>", "amountCents": 2500, "memo": "No-show fee reversal (corrected)", "reason": "waiver", "reversesRef": "vtx.clinictransaction.<NanoID>"},
+				ExpectedOutcome: "Same as the waiver case, plus validates reversesRef is alive (UnknownTransaction otherwise) and writes " +
+					"lnk.clinictransaction.<id>.reverses.clinictransaction.<id> (credit→the reversed debit). This is the shape " +
+					"clinicNoShowSettlement's missing_reversal gap dispatches once CorrectAppointmentStatus moves a charged " +
+					"no-show appointment to a different terminal status — a human-submitted ClinicCreditAccount simply omits " +
+					"reversesRef and gets the plain waiver shape above.",
 			},
 		},
 	}

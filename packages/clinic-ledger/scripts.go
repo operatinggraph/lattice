@@ -214,6 +214,25 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
             if not vertex_alive(state, appt_key):
                 fail("UnknownAppointment: " + appt_key)
 
+    # reversesRef (ClinicCreditAccount only): the mirror of appointmentRef
+    # above, one level removed — an optional back-reference to the
+    # clinictransaction this credit reverses (a no-show fee that posted
+    # before a CorrectAppointmentStatus correction moved the appointment
+    # off noShow), written as a reverses link (credit tx -> the reversed
+    # tx). clinicNoShowSettlement's missing_reversal gap (lenses.go /
+    # targets.go) is this field's only caller; a human-submitted
+    # ClinicCreditAccount simply omits it and gets the plain shape.
+    reverses_key = None
+    reverses_id = None
+    if entry_type == "credit":
+        reverses_key = optional_string(p, "reversesRef")
+        if reverses_key != None:
+            _, reverses_id = parts_of(reverses_key, "reversesRef", "clinictransaction")
+            if not vertex_alive(state, reverses_key):
+                fail("UnknownTransaction: " + reverses_key)
+    elif hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+        fail("InvalidArgument: reversesRef: only valid on a credit (payment/waiver), not a debit (charge)")
+
     amount_cents = require_number(p, "amountCents")
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
@@ -374,6 +393,17 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     if appt_key != None:
         settles_lnk = "lnk.clinictransaction." + tx_id + ".settles.appointment." + appt_id
         mutations.append(make_link(settles_lnk, tx_key, appt_key, "settles", "settles", {}))
+
+    # reverses: the credit (later-arriving) is the source, the pre-existing
+    # debit transaction is the target (Contract #1 §1.1). Only written when
+    # the caller supplied reversesRef. clinicNoShowSettlement's
+    # missing_reversal gap walks this link the same way missing_charge
+    # walks settles: once posted, the reversal converges and stays
+    # converged (idempotency-by-existence, no separate guard needed since
+    # the gate is txCount=1 AND reversalCount=0).
+    if reverses_key != None:
+        reverses_lnk = "lnk.clinictransaction." + tx_id + ".reverses.clinictransaction." + reverses_id
+        mutations.append(make_link(reverses_lnk, tx_key, reverses_key, "reverses", "reverses", {}))
 
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]

@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.2.12
+version: 0.2.13
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
@@ -7,11 +7,14 @@ description: |
   ClinicCreditAccount, append-only entries linked to the account via postedTo; a
   debit entry carries a bounded billedTo self|insurance + optional
   expectedReimbursementCents payer dimension, and an optional appointmentRef
-  back-ref; a credit entry carries reason payment|waiver, default payment) +
+  back-ref; a credit entry carries reason payment|waiver, default payment, and
+  an optional reversesRef back-ref to the debit it reverses) +
   the clinicLedgerHistory read-model lens (one row per
   transaction) + the clinicPatientAccounts lens (patient -> account key
   lookup) + the clinicNoShowSettlement Weaver playbook (lazily opens the
-  account via ClinicCreateAccount, then auto-charges the no-show fee). All
+  account via ClinicCreateAccount, auto-charges the no-show fee, then
+  auto-reverses that charge via ClinicCreditAccount if a CorrectAppointmentStatus
+  correction later moves the appointment off noShow). All
   three ops grant front-of-house staff alongside the operator, unconfined.
   ClinicCreditAccount ALSO grants a patient scope=self (pay down their own
   balance, never waive it — reason:"waiver" is rejected server-side for a

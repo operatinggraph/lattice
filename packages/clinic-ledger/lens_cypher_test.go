@@ -16,6 +16,14 @@ package clinicledger
 //     clinictransaction settles this appointment yet — missing_charge true.
 //   - NOSHOW_CHARGED: noShow, carries a fee, account exists, a
 //     clinictransaction settles this appointment — converged.
+//   - CORRECTED_NO_REVERSAL: a CorrectAppointmentStatus correction moved a
+//     charged appointment off noShow, no credit reverses the charge yet —
+//     missing_reversal true.
+//   - CORRECTED_WITH_REVERSAL: same, but a credit already reverses the
+//     settling transaction — converged.
+//   - NEVER_CHARGED_NO_REVERSAL: an appointment that was never noShow (no
+//     settles link ever existed) never violates missing_reversal regardless
+//     of its current status.
 
 import (
 	"context"
@@ -182,6 +190,75 @@ func TestClinicNoShowSettlement_NoShowCharged_Converged(t *testing.T) {
 
 	v := f.projectAt(t, "chargedappt")[0].Values
 	require.Equal(t, false, v["missing_charge"], "a clinictransaction settles this appointment — converged")
+	require.Equal(t, false, v["missing_reversal"], "still noShow — nothing to reverse yet")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestClinicNoShowSettlement_CorrectedAwayNoReversal_MissingReversal proves
+// the gap the lens's own doc comment named as currently-undone: a
+// CorrectAppointmentStatus correction moved the appointment off noShow, a
+// clinictransaction already settled it, and no credit yet reverses that
+// transaction — missing_reversal true, and chargeTxKey/chargedAmountCents
+// carry the settling transaction's own key/amount for Weaver to dispatch
+// ClinicCreditAccount{reversesRef: chargeTxKey, amountCents: chargedAmountCents}.
+func TestClinicNoShowSettlement_CorrectedAwayNoReversal_MissingReversal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkAppointment(t, "correctedappt", "completed", 2500.0)
+	f.vtx(t, "correctedappt_acct", "clinicaccount")
+	f.edge(t, "heldFor", "correctedappt_acct", "correctedappt_patient")
+	f.vtx(t, "correctedappt_tx", "clinictransaction")
+	f.edge(t, "settles", "correctedappt_tx", "correctedappt")
+	f.aspect(t, "correctedappt_tx", "entry", "transactionEntry", map[string]any{
+		"type": "debit", "amountCents": 2500.0, "memo": "No-show fee", "postedAt": "2026-08-06T00:00:00Z",
+	})
+
+	v := f.projectAt(t, "correctedappt")[0].Values
+	require.Equal(t, "completed", v["status"], "corrected off noShow")
+	require.Equal(t, false, v["missing_charge"], "the original charge posted fine — not this gap")
+	require.Equal(t, true, v["missing_reversal"], "corrected away with a live settled charge and no reversal yet")
+	require.Equal(t, "vtx.clinictransaction."+f.ids["correctedappt_tx"], v["chargeTxKey"])
+	require.Equal(t, 2500.0, v["chargedAmountCents"])
+	require.Equal(t, true, v["violating"])
+}
+
+// TestClinicNoShowSettlement_CorrectedAwayWithReversal_Converged proves the
+// gap closes, and stays closed, once a credit reverses the settling
+// transaction — the same existence-idempotency missing_charge already
+// relies on for the original charge.
+func TestClinicNoShowSettlement_CorrectedAwayWithReversal_Converged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkAppointment(t, "reversedappt", "cancelled", 2500.0)
+	f.vtx(t, "reversedappt_acct", "clinicaccount")
+	f.edge(t, "heldFor", "reversedappt_acct", "reversedappt_patient")
+	f.vtx(t, "reversedappt_tx", "clinictransaction")
+	f.edge(t, "settles", "reversedappt_tx", "reversedappt")
+	f.vtx(t, "reversedappt_credit", "clinictransaction")
+	f.edge(t, "reverses", "reversedappt_credit", "reversedappt_tx")
+
+	v := f.projectAt(t, "reversedappt")[0].Values
+	require.Equal(t, false, v["missing_reversal"], "a credit already reverses the settling transaction")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestClinicNoShowSettlement_ScheduledNeverChargedNoReversal proves an
+// appointment that was NEVER noShow (no settling transaction at all) never
+// violates missing_reversal regardless of its current status — the gap
+// requires a live settles link, not merely status != noShow.
+func TestClinicNoShowSettlement_ScheduledNeverChargedNoReversal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkAppointment(t, "neverchargedappt", "cancelled", nil)
+
+	v := f.projectAt(t, "neverchargedappt")[0].Values
+	require.Equal(t, false, v["missing_reversal"], "no settles link ever existed — nothing to reverse")
 	require.Equal(t, false, v["violating"])
 }
 

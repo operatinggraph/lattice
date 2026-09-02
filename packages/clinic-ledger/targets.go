@@ -3,7 +3,7 @@ package clinicledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): clinicNoShowSettlement's two independent gaps, mirroring
+// #10 §10.8): clinicNoShowSettlement's three independent gaps, mirroring
 // cafe-domain/targets.go's cafeTabSettlement shape (missing_account →
 // directOp(CreateAccount) then missing_charge → directOp(DebitAccount)) but
 // self-contained inside clinic-ledger — it already depends on clinic-domain
@@ -18,6 +18,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     silently starved unopened patients' no-show fees of ever converging).
 //   - missing_charge → directOp(ClinicDebitAccount) over the now-real account,
 //     same as before.
+//   - missing_reversal → directOp(ClinicCreditAccount), reversing a charge a
+//     CorrectAppointmentStatus correction moved off `noShow` — the gap
+//     clinicNoShowSettlement's own doc comment (lenses.go) named as
+//     currently-undone (filed as a Clinic backlog row, verticals.md).
+//     clinic-domain's CorrectAppointmentStatus itself never touches the
+//     ledger; this target is what converges the reversal it leaves open.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -53,6 +59,27 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// executed and the gap never closed — confirmed live in processor.log
 					// against every one of this target's dispatches.
 					Reads: []string{"row.accountKey", "row.appointmentKey"},
+				},
+				"missing_reversal": {
+					Action:    "directOp",
+					Operation: "ClinicCreditAccount",
+					// ClinicCreditAccount's DDL is claimed by this package alone, but pin
+					// the vertexType DDL this target dispatches to anyway (MissingClass
+					// otherwise if ever shared) — same rationale as missing_charge above.
+					Class: "clinictransaction",
+					Params: map[string]string{
+						"accountKey":  "row.accountKey",
+						"amountCents": "row.chargedAmountCents",
+						"reason":      "waiver",
+						"reversesRef": "row.chargeTxKey",
+						"memo":        "No-show fee reversal (corrected)",
+					},
+					// Reads only the two bare vertex keys ClinicCreditAccount's
+					// vertex_alive() checks hydrate (accountKey, chargeTxKey) — reason and
+					// memo are literal free text, never vtx.* keys, and belong in Params
+					// only. Declaring either here would fail step4 hydrate the same way
+					// missing_charge's memo field already did (comment above).
+					Reads: []string{"row.accountKey", "row.chargeTxKey"},
 				},
 			},
 		},

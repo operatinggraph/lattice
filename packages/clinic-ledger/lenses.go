@@ -30,9 +30,9 @@ const NoShowSettlementTarget = "clinicNoShowSettlement"
 // negative for credit, over rows for a given patientKey/accountKey; the
 // ledger itself never stores a mutable running total), clinicPatientAccounts
 // (the patient -> account key lookup, since the account key is no longer
-// derivable), and clinicNoShowSettlement (the missing_account/missing_charge
-// convergence lens targets.go's WeaverTargets dispatches
-// ClinicCreateAccount/DebitAccount over). Prefixed like the
+// derivable), and clinicNoShowSettlement (the missing_account/missing_charge/
+// missing_reversal convergence lens targets.go's WeaverTargets dispatches
+// ClinicCreateAccount/DebitAccount/CreditAccount over). Prefixed like the
 // package's DDLs (ddls.go): a Lens canonicalName is global across every
 // installed package, and loftspace-ledger already owns the bare
 // `ledgerHistory` name.
@@ -65,7 +65,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "appointment",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status", "memo"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "missing_reversal", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status", "memo", "chargeTxKey", "chargedAmountCents"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -76,8 +76,10 @@ func Lenses() []pkgmgr.LensSpec {
 
 // noShowSettlementSpec is the one-row-per-appointment convergence cypher: a
 // noShow appointment carrying a positive noShowFeeCents needs its charge
-// posted onto the patient's clinic-ledger account, once — two independent
-// gaps, mirroring cafe-domain's cafeTabSettlement (lenses.go there):
+// posted onto the patient's clinic-ledger account, once, and — if a
+// CorrectAppointmentStatus correction later moves the appointment off
+// `noShow` — that charge reversed, once. Three independent gaps, the first
+// two mirroring cafe-domain's cafeTabSettlement (lenses.go there):
 //
 //   - `missing_account` — the appointment is a noShow, carries a fee, and the
 //     patient has no clinicaccount yet (accountKey null). Weaver dispatches
@@ -90,31 +92,44 @@ func Lenses() []pkgmgr.LensSpec {
 //     DebitAccount{accountKey, amountCents, appointmentRef} (targets.go) —
 //     the appointmentRef extension writes the settles audit link this
 //     OPTIONAL MATCH walks, so once posted the gap converges and stays
-//     converged. clinic-domain's CorrectAppointmentStatus CAN move a noShow
-//     to a different terminal status (e.g. a wrongly-marked no-show corrected
-//     to completed) — every predicate above is gated on `status = 'noShow'`,
-//     so a corrected appointment simply drops out of this lens's scope
-//     rather than re-opening missing_charge; it does NOT reverse an
-//     already-posted fee. That's a real, currently-undone gap, not a
-//     guarded one — filed as a Clinic backlog row (verticals.md).
+//     converged.
+//   - `missing_reversal` — a clinictransaction settles this appointment
+//     (txCount = 1) but the appointment's CURRENT status is no longer
+//     `noShow` (a CorrectAppointmentStatus correction moved it away — the
+//     only way status and a live settles link can disagree, since the
+//     charge itself is minted only while status IS noShow), and no credit
+//     yet `reverses` that transaction (reversalCount = 0). Weaver dispatches
+//     ClinicCreditAccount{accountKey, amountCents: chargedAmountCents,
+//     reason: "waiver", reversesRef: chargeTxKey} (targets.go) — the
+//     reversesRef extension writes the reverses audit link this OPTIONAL
+//     MATCH walks, so once posted the gap converges and stays converged,
+//     the same existence-idempotency missing_charge already relies on.
+//     chargeTxKey/chargedAmountCents use max() rather than collect()+index
+//     (unsupported by this engine) to pull the single settling transaction's
+//     key/amount out of the aggregate — safe because missing_charge's own
+//     txCount=0 gate never lets more than one live settles link exist.
 //
 // Once missing_account converges (ClinicCreateAccount writes the patient's
 // .ledgerAccount guard aspect), the next lens tick reads the now-real
 // accountKey and missing_charge takes over — the same lazy account-open
 // relay cafeTabSettlement uses. An appointment with no noShowFeeCents (a
-// noShow set before this lens existed) never violates either gap — a
-// non-goal for v1, not a gap this lens is meant to converge.
+// noShow set before this lens existed) never violates any gap — a non-goal
+// for v1, not a gap this lens is meant to converge.
 const noShowSettlementSpec = `MATCH (appt:appointment {key: $actorKey})
 MATCH (appt)-[:forPatient]->(pt:patient)
 OPTIONAL MATCH (pt)<-[:heldFor]-(a:clinicaccount)
 OPTIONAL MATCH (appt)<-[:settles]-(tx:clinictransaction)
+OPTIONAL MATCH (tx)<-[:reverses]-(credit:clinictransaction)
 WITH
   appt.key AS entityKey,
   appt.status.data.value AS status,
   appt.status.data.noShowFeeCents AS feeCents,
   pt.key AS patientKey,
   a.key AS accountKey,
-  count(tx.key) AS txCount
+  count(DISTINCT tx.key) AS txCount,
+  max(tx.key) AS chargeTxKey,
+  max(tx.entry.data.amountCents) AS chargedAmountCents,
+  count(DISTINCT credit.key) AS reversalCount
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -123,12 +138,16 @@ RETURN
   accountKey,
   feeCents,
   status,
+  chargeTxKey,
+  chargedAmountCents,
   'No-show fee' AS memo,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null)) AS missing_account,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
+  ((status <> 'noShow') AND (txCount = 1) AND (reversalCount = 0)) AS missing_reversal,
   (
     ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null))
     OR ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0))
+    OR ((status <> 'noShow') AND (txCount = 1) AND (reversalCount = 0))
   ) AS violating
 `
 
