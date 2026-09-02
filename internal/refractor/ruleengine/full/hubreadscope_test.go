@@ -314,10 +314,12 @@ func edgeIDs(edges []adjacency.EdgeEntry) []string {
 // third hop on grantedBy would see t2, which is exactly the
 // two-instants-in-one-evaluation defect the memo exists to close.
 //
-// grantedBy is the pinned relation rather than queuedFor so the sort is load
-// bearing: the composition appends the pinned edges after the survivors, and a
-// `lnk.permission.…` edge appended after a surviving `lnk.task.…` one leaves
-// the list out of order until SortEdges puts it back.
+// The pinned relation is grantedBy so that the sort is load bearing: the
+// composition appends the substituted edges after the survivors, and a
+// grantedBy link (`lnk.permission.…`) sorts BEFORE the surviving queuedFor one
+// (`lnk.task.…`), so the appended list is out of order until SortEdges puts it
+// back. Pinning the relation that already sorts last would leave the list
+// ordered by accident and the sort assertion unable to fail.
 func TestExecutor_HubRead_WholeReadComposesOverPinnedRelations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -458,22 +460,28 @@ func TestExecutor_HubRead_CompositionPinsBothDirections(t *testing.T) {
 	putVertex(t, reg, coreKV, "role", "role", nil)
 	putVertex(t, reg, coreKV, "task1", "task", nil)
 	putVertex(t, reg, coreKV, "task2", "task", nil)
+	putVertex(t, reg, coreKV, "task3", "task", nil)
 
 	roleID := reg.idByName["role"]
 	markNodeOverflowed(t, adjKV, roleID)
-	// The hub is the TARGET here, so this edge is inbound at the hub and the
-	// hop below walks it "in".
-	queued1 := putLink(t, reg, coreKV, "queuedFor", "task1", "role")
+	// The hub holds queuedFor on BOTH directions before any hop runs: as the
+	// link's target it is inbound, as its source it is outbound. That is what
+	// makes the two selectors below different sets, and so what makes this
+	// test able to tell a both-direction pin from the walked direction's own.
+	queuedIn := putLink(t, reg, coreKV, "queuedFor", "task1", "role")
+	queuedOut := putLink(t, reg, coreKV, "queuedFor", "role", "task2")
 
 	ex := newScopedTestExecutor(adjKV, coreKV, HubReadScopeModeOn)
 
 	// t1 — a typed hop walks queuedFor inbound and records that direction.
-	_, err := ex.fetchEdges(roleID, "queuedFor")
+	pinned, err := ex.fetchEdges(roleID, "queuedFor")
 	require.NoError(t, err)
-	ex.recordEdgeSelector(roleID, RelPattern{Type: "queuedFor", Direction: DirIn}, ex.hubEdges[hubKey{roleID, "queuedFor"}])
+	require.ElementsMatch(t, []string{queuedIn, queuedOut}, edgeIDs(pinned),
+		"a relation-scoped read answers in both directions, whichever one the hop will walk")
+	ex.recordEdgeSelector(roleID, RelPattern{Type: "queuedFor", Direction: DirIn}, pinned)
 
-	// A queuedFor link arrives on the OTHER direction: the hub is the source.
-	putLink(t, reg, coreKV, "queuedFor", "role", "task2")
+	// A THIRD queuedFor link arrives, outbound, after the hub was pinned.
+	putLink(t, reg, coreKV, "queuedFor", "role", "task3")
 
 	// t2 — an untyped hop reads the hub whole, composing over queuedFor.
 	whole, err := ex.fetchEdges(roleID, "")
@@ -483,13 +491,19 @@ func TestExecutor_HubRead_CompositionPinsBothDirections(t *testing.T) {
 	sel := ex.edgeSelectors[roleID]
 	require.NotNil(t, sel)
 	require.True(t, sel.Fallback, "the untyped hop falls the node back")
-	require.Equal(t, map[string]struct{}{queued1: {}},
-		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}],
-		"the typed hop's own directional set is unchanged")
-	require.Equal(t, map[string]struct{}{queued1: {}},
-		sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "both"}],
-		"and the composition pins the relation in BOTH directions at the instant it was read — the new outbound link is absent")
 
-	require.NotContains(t, edgeIDs(whole), "lnk.role."+roleID+".queuedFor.task."+reg.idByName["task2"],
+	walked := sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "in"}]
+	both := sel.Matched[ruleengine.EdgeSelector{RelType: "queuedFor", Direction: "both"}]
+
+	require.Equal(t, map[string]struct{}{queuedIn: {}}, walked,
+		"the typed hop's own directional set holds only the direction it walked")
+	require.Equal(t, map[string]struct{}{queuedIn: {}, queuedOut: {}}, both,
+		"the composition pins the relation ENTIRE, at the instant it was read — the later outbound link is absent")
+	require.Contains(t, both, queuedOut,
+		"a pin that only covered the walked direction would miss this link, and so would miss a write to it")
+	require.Greater(t, len(both), len(walked),
+		"the both-direction pin must be a strict superset, or it is indistinguishable from the walked direction's set")
+
+	require.NotContains(t, edgeIDs(whole), "lnk.role."+roleID+".queuedFor.task."+reg.idByName["task3"],
 		"the composed list holds the pinned relation as t1 saw it, in both directions")
 }

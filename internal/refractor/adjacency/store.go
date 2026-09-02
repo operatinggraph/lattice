@@ -319,14 +319,16 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 }
 
 // SortEdges orders an edge list in place by EdgeID, then by Direction — the
-// total order a MARKED node's edges are returned in, since they come out of a
-// map and would otherwise follow its iteration order. An unmarked node's edges
-// are not sorted: they come back in document order, which is the write path's
-// and is already stable.
+// canonical order, and the one a MARKED node's read produces, since those
+// edges come out of a map and would otherwise follow its iteration order. An
+// unmarked node's edges are not sorted here: they come back in document order,
+// which is the write path's and is already stable.
 //
-// A caller assembling one list out of several reads of a marked node applies
-// this to put the result in the order a single read of that node would have
-// produced.
+// A caller splicing several reads of one node into a single list applies this
+// to the result. That list has no single read whose order to reproduce — its
+// parts may come from a scoped read of the node while it was marked and a
+// document read after the mark cleared — so what SortEdges gives it is the
+// canonical order rather than any one read's.
 func SortEdges(edges []EdgeEntry) {
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].EdgeID != edges[j].EdgeID {

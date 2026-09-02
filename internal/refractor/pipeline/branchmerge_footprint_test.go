@@ -224,14 +224,18 @@ func TestFootprintValid_UntornFootprintOverNilKVs_WouldRead(t *testing.T) {
 // this path, and a scoped re-read of an empty relation set reads nothing at
 // all — so validating would confirm a node the pass never looked at.
 //
-// recordEdgeSelector never produces the shape, but mergeFootprints mints an
-// empty Matched map for every node it folds, so it is one nil-Matched branch
-// input away.
+// No engine-built footprint carries the shape: both producers of a selector
+// entry populate it (recordEdgeSelector because a typed hop always records its
+// selector, recordComposedPins because it runs only for a non-empty set of
+// substituted relations), and mergeFootprints copies what its branches held
+// rather than minting anything. This is defence in depth, pinned so the
+// fail-closed direction is not lost to a later edit.
 //
-// Nil Core and Adjacency KV handles prove no read happened: any read path
-// would nil-dereference, so a clean false can only mean the guard returned
-// first (TestFootprintValid_UntornFootprintOverNilKVs_WouldRead is the control
-// that a footprint reaching a read does panic).
+// The discriminator here is the VERDICT, not a panic: with the guard deleted
+// the scoped re-read is NeighborsByRelation over an empty relation set, which
+// short-circuits before touching either KV handle, so it would return true
+// with the handles still nil. The nil handles only keep the test honest about
+// the guard doing no work of its own.
 func TestFootprintValid_SelectorPathWithNoSelectors_IsMalformed(t *testing.T) {
 	p := &Pipeline{coreKV: nil, adjKV: nil}
 	nodeID := hubNanoID(t, "mfz")

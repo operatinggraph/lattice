@@ -633,9 +633,16 @@ func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootpri
 		// reason: there is nothing to compare, the whole fingerprint is
 		// deliberately not compared on this path, and a scoped re-read of an
 		// empty relation set reads nothing — so validating here would confirm
-		// a node this pass never looked at. recordEdgeSelector never produces
-		// the shape (a typed hop always records its selector), but
-		// mergeFootprints mints an empty Matched map for every node it folds.
+		// a node this pass never looked at.
+		//
+		// No engine-built footprint carries the shape. Both producers of a
+		// selector entry populate it — recordEdgeSelector because a typed hop
+		// always records its selector, recordComposedPins because it only runs
+		// for a non-empty set of substituted relations — and mergeFootprints
+		// copies whatever its branches held, so it can only pass the shape
+		// through, never mint it. This is defence in depth, and the direction
+		// it fails in is the one that costs a re-execution rather than the one
+		// that confirms an unchecked row.
 		if len(rels) == 0 {
 			return false, nil
 		}

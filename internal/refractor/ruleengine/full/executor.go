@@ -131,13 +131,16 @@ type executor struct {
 	// node's link-set hash) — the adjacency half of the read-surface
 	// footprint a validating caller compares after evaluation. Its key set is
 	// exactly edges'. It is the whole READ's fingerprint, not the composed
-	// list's, and on its own it says nothing about a substituted relation: a
-	// write to one lands after the instant the fingerprint pins, so what
-	// catches it is the both-direction Matched set the composition records
-	// (recordComposedPins), which the validator re-derives alongside the
-	// fingerprint (pipeline.footprintValid). A relation-scoped read
-	// contributes no fingerprint of its own, being incomparable with a whole
-	// read's.
+	// list's, and on its own it says nothing about a substituted relation. The
+	// write such a relation is exposed to landed BEFORE that read — between the
+	// scoped read that pinned the relation and the whole read that took the
+	// fingerprint — so the fingerprint already reflects it, and re-comparing it
+	// later finds nothing moved. What catches it is the both-direction Matched
+	// set the composition records (recordComposedPins), which holds the
+	// relation as the EARLIER read found it and which the validator re-derives
+	// alongside the fingerprint (pipeline.footprintValid). A relation-scoped
+	// read contributes no fingerprint of its own, being incomparable with a
+	// whole read's.
 	edges         map[string][]adjacency.EdgeEntry
 	edgeRevisions map[string]uint64
 
@@ -1004,8 +1007,12 @@ func (ex *executor) pinnedRelations(adjNodeID string) map[string][]adjacency.Edg
 // node: every edge of a pinned relation is dropped from whole and replaced by
 // the pinned read's own edges, in BOTH directions, since a relation-scoped read
 // answers with every link of that relation incident to the node whichever end
-// the node is. The result is sorted so it reads as one marked-node read would
-// have produced it (adjacency.SortEdges).
+// the node is. The result is sorted into adjacency.SortEdges' canonical order
+// (EdgeID, then Direction), which is the order a marked node's own read
+// produces. The composed list is several reads spliced together, and the whole
+// read it splices into may be a document read whose order is the document's, so
+// there is no single read whose order to reproduce — a canonical one is what
+// makes the result stable instead.
 //
 // A relation nothing pinned passes through untouched, so a whole read with no
 // pinned relations is returned unchanged.
@@ -1043,9 +1050,14 @@ func composeWholeRead(whole []adjacency.EdgeEntry, pinned map[string][]adjacency
 // re-derives to catch exactly that: over the whole re-read on the coarse path,
 // and over a scoped re-read that now names this relation on the selector path.
 //
-// The pin is written ONLY here, so a node whose hops were all typed keeps its
+// The pin is written ONLY here, so a node that is never COMPOSED keeps its
 // exact directional selectors and pays nothing: it exists from the moment a
-// whole read consumed a composed relation, and not before.
+// whole read consumed a substituted relation, and not before. Composition is
+// what the predicate turns on, not the hops' shape — a node whose hops are all
+// typed still gets a pin if its mark cleared mid-evaluation and a later typed
+// hop took the whole arm. That node keeps Fallback false, so validation takes
+// the selector path and compares the pin there, which is the same answer by a
+// different route.
 func (ex *executor) recordComposedPins(adjNodeID string, pinned map[string][]adjacency.EdgeEntry) {
 	if len(pinned) == 0 || ex.edgeSelectors == nil {
 		return

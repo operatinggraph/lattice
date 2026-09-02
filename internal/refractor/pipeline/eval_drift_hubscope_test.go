@@ -318,29 +318,34 @@ const composedPinQuery = `MATCH (i:identity {key: $k})-[:holdsRole]->(r:role) ` 
 	`OPTIONAL MATCH (i)-->(x) ` +
 	`RETURN r.key AS roleKey, x.key AS anyKey`
 
-// TestFootprintValid_ComposedRelation_InboundWriteIsDrift is the end-to-end
+// TestFootprintValid_ComposedRelation_UnwalkedDirectionRetractionIsDrift is the end-to-end
 // proof of the composition's own pin, through the real engine rather than a
 // hand-built footprint.
 //
-// A relation-scoped read answers in BOTH directions, so the composition
-// substitutes holdsRole entire — while the typed hop that pinned it recorded
-// only the "out" direction, and the untyped hop that followed set Fallback and
-// recorded nothing more. A holdsRole link arriving INBOUND between the two
-// hops is therefore invisible to every other part of the certificate: it is
-// absent from the composed list the row was built from, absent from the
-// {holdsRole,out} set, and absent from the whole-read fingerprint, which was
-// taken AFTER it landed. Only the both-direction pin the composition writes
-// can catch it — and it must, or validation confirms a row assembled from a
-// view no instant of the graph ever held.
-func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
+// The hub holds holdsRole on both directions before either hop runs, and the
+// typed hop walks only "out". A relation-scoped read answers in both
+// directions regardless, so the composition substitutes holdsRole entire and
+// the composed list the row is built from still carries the INBOUND link. When
+// that link is retracted between the two hops, every other part of the
+// certificate agrees the graph is quiet: the {holdsRole,out} set never covered
+// it, and the whole-read fingerprint was taken AFTER the retraction, so
+// re-comparing it finds nothing. Only the both-direction pin, which recorded
+// the relation as the scoped read found it, can see that the row was built
+// from an edge no longer there — and it must, or validation confirms a row
+// assembled from a view no instant of the graph ever held.
+func TestFootprintValid_ComposedRelation_UnwalkedDirectionRetractionIsDrift(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")
 	}
 
-	// capture seeds a marked identity hub holding one outbound role, runs
+	// capture seeds a marked identity hub holding holdsRole on BOTH directions
+	// — outbound as the link's source, inbound as its target — runs
 	// composedPinQuery over it with mutate() firing between the two hops, and
-	// returns the pipeline and the footprint the evaluation produced.
-	capture := func(t *testing.T, tag string, mutate func(coreKV *substrate.KV, hubID string)) (*Pipeline, ruleengine.EvalFootprint, string) {
+	// returns the pipeline, the footprint the evaluation produced, and the
+	// inbound link's key. The inbound link is what makes the two selectors
+	// different sets: the query walks "out", so a pin covering only the walked
+	// direction would never hold it.
+	capture := func(t *testing.T, tag string, mutate func(coreKV *substrate.KV, hubID, inboundKey string)) (*Pipeline, ruleengine.EvalFootprint, string) {
 		t.Helper()
 		hubID := hubNanoID(t, tag)
 		p, coreKV, adjKV := markedHubKV(t, hubID)
@@ -348,7 +353,11 @@ func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
 
 		roleID := hubNanoID(t, "rr"+tag)
 		writeCollisionVertex(t, coreKV, "vtx.role."+roleID, "role", nil)
-		seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", roleID)
+		heldOut := seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", roleID)
+
+		otherRoleID := hubNanoID(t, "ro"+tag)
+		writeCollisionVertex(t, coreKV, "vtx.role."+otherRoleID, "role", nil)
+		heldIn := seedHubLink(t, coreKV, "role", otherRoleID, "holdsRole", "identity", hubID)
 
 		eng := full.New().WithHubReadScopeMode(full.HubReadScopeModeOn)
 		cr, err := eng.Parse(composedPinQuery)
@@ -366,7 +375,7 @@ func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
 			rec.observe(obs)
 			if obs.NodeID == hubID && obs.Relations == nil && !fired {
 				fired = true
-				mutate(coreKV, hubID)
+				mutate(coreKV, hubID, heldIn)
 			}
 		})
 
@@ -385,19 +394,29 @@ func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
 		require.True(t, ok)
 		require.True(t, sel.Fallback, "the untyped hop falls the hub back to the coarse path")
 		require.Contains(t, fp.EdgeRevisions, hubID, "and records the whole read's fingerprint")
+
+		walked := sel.Matched[ruleengine.EdgeSelector{RelType: "holdsRole", Direction: "out"}]
+		both := sel.Matched[ruleengine.EdgeSelector{RelType: "holdsRole", Direction: "both"}]
+		require.Equal(t, map[string]struct{}{heldOut: {}}, walked,
+			"the typed hop records only the direction it walked")
+		require.Contains(t, both, heldIn,
+			"the composition's pin covers the inbound link too, which is the whole point of it being direction-blind")
+		require.Greater(t, len(both), len(walked),
+			"a pin equal to the walked direction's set would prove nothing here")
 		return p, fp, hubID
 	}
 
-	t.Run("inbound write between the hops is drift", func(t *testing.T) {
-		p, fp, hubID := capture(t, "cx1", func(coreKV *substrate.KV, hubID string) {
-			// The hub as TARGET: a holdsRole link on the direction the typed
-			// hop never walked.
-			seedHubLink(t, coreKV, "role", hubNanoID(t, "rzx"), "holdsRole", "identity", hubID)
+	t.Run("retracting the unwalked direction is drift", func(t *testing.T) {
+		p, fp, hubID := capture(t, "cx1", func(coreKV *substrate.KV, _, inboundKey string) {
+			// The holdsRole link on the direction the typed hop never walked
+			// is retracted, after the scoped read pinned it and before the
+			// whole read that takes the fingerprint.
+			seedSoftDeletedHubLink(t, coreKV, inboundKey)
 		})
 
 		// The whole-read fingerprint alone cannot see it — the read that
-		// produced it happened after the write. This is the control that makes
-		// the verdict below attributable to the composition's pin.
+		// produced it happened after the retraction. This is the control that
+		// makes the verdict below attributable to the composition's pin.
 		fingerprintOnly := ruleengine.EvalFootprint{
 			EdgeRevisions: map[string]uint64{hubID: fp.EdgeRevisions[hubID]},
 		}
@@ -408,11 +427,11 @@ func TestFootprintValid_ComposedRelation_InboundWriteIsDrift(t *testing.T) {
 		valid, verr = p.footprintValid(context.Background(), fp)
 		require.NoError(t, verr)
 		require.False(t, valid,
-			"a link of a composed relation arriving on the unwalked direction must read as drift")
+			"the row was built from a composed list still holding a retracted link; only the both-direction pin can see that")
 	})
 
 	t.Run("no write between the hops validates", func(t *testing.T) {
-		p, fp, _ := capture(t, "cx2", func(*substrate.KV, string) {})
+		p, fp, _ := capture(t, "cx2", func(*substrate.KV, string, string) {})
 
 		valid, verr := p.footprintValid(context.Background(), fp)
 		require.NoError(t, verr)
