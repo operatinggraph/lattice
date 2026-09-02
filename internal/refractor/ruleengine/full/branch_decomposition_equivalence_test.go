@@ -205,6 +205,10 @@ type branchCorpus struct {
 	// booleans expose their subtrees) — which masks that conjunct at every
 	// value of the count. This anchor exposes it.
 	onboardingActorKey string
+
+	// clinicNoShowApptKey anchors clinicNoShowSettlement on an appointment
+	// already corrected off noShow with its charge already reversed.
+	clinicNoShowApptKey string
 }
 
 // seedBranchCorpus writes one corpus of shape s. Every logical name is
@@ -637,13 +641,46 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	})
 	putEdge(t, reg, adjKV, "signedLease", obj, app)
 
+	// clinicNoShowSettlement anchors on ONE appointment already corrected off
+	// noShow, with its charge already posted AND already reversed — the shape
+	// that exercises the new [credit,tx] deferred subtree (missing_reversal)
+	// on both sides of the fold: a null credit would leave the reverses arm
+	// folding empty in both execution orders, the same vacuous-differential
+	// risk objectAttachments's comment above names. Always seeded, whatever
+	// the random shape drew, like the object above.
+	noShowAppt := name("noshowappt")
+	putVertex(t, reg, coreKV, noShowAppt, "appointment", nil)
+	putAspect(t, reg, coreKV, noShowAppt, "status", map[string]any{
+		"value": "completed", "note": "corrected", "noShowFeeCents": 2500.0, "correctedFrom": "noShow",
+	})
+	noShowPatient := name("noshowpatient")
+	putVertex(t, reg, coreKV, noShowPatient, "patient", nil)
+	putEdge(t, reg, adjKV, "forPatient", noShowAppt, noShowPatient)
+	noShowAcct := name("noshowacct")
+	putVertex(t, reg, coreKV, noShowAcct, "clinicaccount", nil)
+	putEdge(t, reg, adjKV, "heldFor", noShowAcct, noShowPatient)
+	noShowTx := name("noshowtx")
+	putVertex(t, reg, coreKV, noShowTx, "clinictransaction", nil)
+	putAspect(t, reg, coreKV, noShowTx, "entry", map[string]any{
+		"type": "debit", "amountCents": 2500.0, "memo": "No-show fee", "postedAt": future,
+	})
+	putEdge(t, reg, adjKV, "settles", noShowTx, noShowAppt)
+	noShowCredit := name("noshowcredit")
+	putVertex(t, reg, coreKV, noShowCredit, "clinictransaction", nil)
+	putAspect(t, reg, coreKV, noShowCredit, "entry", map[string]any{
+		"type": "credit", "amountCents": 2500.0, "reason": "waiver",
+		"memo": "No-show fee reversal (corrected)", "postedAt": future,
+	})
+	putEdge(t, reg, adjKV, "reverses", noShowCredit, noShowTx)
+
 	return branchCorpus{
-		actorKey:           vtxKey(reg, actor),
-		leaseAppKey:        vtxKey(reg, app),
-		renewalKey:         vtxKey(reg, renewal),
-		clauseKey:          vtxKey(reg, clause),
-		objectKey:          vtxKey(reg, obj),
-		onboardingActorKey: vtxKey(reg, onbActor),
+		actorKey:            vtxKey(reg, actor),
+		leaseAppKey:         vtxKey(reg, app),
+		renewalKey:          vtxKey(reg, renewal),
+		clauseKey:           vtxKey(reg, clause),
+		objectKey:           vtxKey(reg, obj),
+		onboardingActorKey:  vtxKey(reg, onbActor),
+		clinicNoShowApptKey: vtxKey(reg, noShowAppt),
 	}
 }
 
@@ -905,6 +942,27 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				require.Positive(t, listLen(row, "owners", "ownerKey"), "the owner-link branch folded empty")
 			},
 			content: func(row map[string]any) int { return listLen(row, "owners", "ownerKey") }},
+		// clinicNoShowSettlement's new deferred subtree is [credit,tx] — the
+		// settles hop off the appointment and the reverses hop off that
+		// transaction. chargeTxKey (max(tx.key)) witnesses the settles half;
+		// missing_reversal false (the reverses hop found a live credit)
+		// witnesses the other, since a folded-empty reverses arm would leave
+		// reversalCount at 0 and the gap reading unconverged.
+		{name: "clinicNoShowSettlement", spec: corpusSpec(t, "clinicNoShowSettlement"), anchor: c.clinicNoShowApptKey, rows: 1,
+			evidence: func(t *testing.T, row map[string]any) {
+				require.NotNilf(t, row["chargeTxKey"], "the settles half of the deferred subtree folded empty")
+				boolEvidence(t, row, "missing_reversal", false, "reverses")
+			},
+			content: func(row map[string]any) int {
+				n := 0
+				if row["chargeTxKey"] != nil {
+					n++
+				}
+				if !isTrue(row, "missing_reversal") {
+					n++
+				}
+				return n
+			}},
 
 		// The UNANCHORED read lenses: they bind every vertex of their head's type
 		// in the KV rather than one, which is the multi-base-row shape the
@@ -1067,7 +1125,8 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 	// cannot enumerate it, so the names are restated and the two must agree.
 	for _, name := range []string{
 		"applicantOnboarding",
-		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess", "clinicPatientsRead",
+		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess",
+		"clinicNoShowSettlement", "clinicPatientsRead",
 		"edgeIdentity", "edgeManifestProviderReadGrants", "edgeManifestReadGrants",
 		"edgeManifestStaffReadGrants", "identityAnchors", "identityErasureResidue",
 		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",

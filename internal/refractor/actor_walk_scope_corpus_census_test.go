@@ -113,7 +113,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"capabilityRoles":                   "identity:holdsRole|permission:grantedBy|role:grantedBy,holdsRole",
 	"capabilityServiceAccess":           "building:availableAt,containedIn,residesIn|identity:residesIn|property:availableAt,containedIn,residesIn|service:availableAt,instanceOf,permitsOperation,unavailableAt|unit:availableAt,containedIn,residesIn|any:containedIn,permitsOperation,unavailableAt",
 	"clauseSatisfaction":                "account:chargesTo|clause:authorizedBy,chargesTo,conditionedOn,requiresInspectionBy|identity:requiresInspectionBy|transaction:authorizedBy|any:conditionedOn",
-	"clinicNoShowSettlement":            "appointment:forPatient,settles|clinicaccount:heldFor|clinictransaction:settles|patient:forPatient,heldFor",
+	"clinicNoShowSettlement":            "appointment:forPatient,settles|clinicaccount:heldFor|clinictransaction:reverses,settles|patient:forPatient,heldFor",
 	"clinicSiteBackfill":                "appointment:atSite|building:atSite",
 	"edgeCatalog#0":                     "identity:residesIn|meta:permitsOperation|service:availableAt,permitsOperation|any:availableAt,containedIn,residesIn",
 	"edgeCatalog#1":                     "identity:holdsRole|meta:forOperation,permitsOperation|permission:forOperation,grantedBy|role:grantedBy,holdsRole|service:permitsOperation",
