@@ -325,7 +325,7 @@ func TestFlip_ReadCapFallsBackRatherThanTruncating(t *testing.T) {
 	f.p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
 	anchors, err := f.p.affectedAnchors(ctx, rs, scoped,
 		func() ([]string, bool, error) { return f.p.deriveAnchorsForLink(ctx, rs, scoped) },
-		func() ([]string, error) { return f.p.actorEnumerator.Enumerate(ctx, f.key("bk1"), "booking") })
+		func(bool) ([]string, error) { return f.p.actorEnumerator.Enumerate(ctx, f.key("bk1"), "booking") })
 	require.NoError(t, err)
 	require.Equal(t, []string{f.key("alice")}, anchors)
 	require.Equal(t, int64(1), f.p.AnchorDerivationShadow().FellBack)

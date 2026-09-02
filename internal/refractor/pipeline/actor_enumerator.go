@@ -100,6 +100,12 @@ const DefaultActorMaxSet = 10_000
 // outbound hop along, per the ActorEnumerator doc comment above.
 const actorHierarchyRelation = "reportsTo"
 
+// hierarchyRelationSet is actorHierarchyRelation as the adjacency store's own
+// relation-scope vocabulary, so the hierarchy hop reads that one relation
+// rather than the whole node. Package-level because it is a constant set read
+// once per found actor and never written.
+var hierarchyRelationSet = map[string]struct{}{actorHierarchyRelation: {}}
+
 // NewActorEnumerator constructs an enumerator with the given KV handles
 // and target actor type (e.g. "identity").
 func NewActorEnumerator(adjKV, coreKV *substrate.KV, actorType string) *ActorEnumerator {
@@ -125,13 +131,30 @@ func (e *ActorEnumerator) WithCaps(maxDepth, maxActors int) *ActorEnumerator {
 }
 
 // Enumerate returns the set of actor vertex keys reachable from
-// eventVertexKey by undirected adjacency BFS. The traversal is bounded
-// by maxDepth and maxActors. eventVertexType is the type segment of
+// eventVertexKey by undirected, relation-blind adjacency BFS. The traversal is
+// bounded by maxDepth and maxActors. eventVertexType is the type segment of
 // the event vertex; when it equals e.actorType the event vertex is
 // recorded as an affected actor in its own right AND the walk runs, so
 // the answer covers the anchors that bind it at a non-anchor position.
 // ctx is propagated to adjacency KV reads.
+//
+// It is the widest answer this type gives, and the baseline every narrowing is
+// measured against: enumerateScoped with a scope is a subset of it, and a lens
+// whose scope cannot be derived runs exactly this.
 func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVertexType string) ([]string, error) {
+	return e.enumerateScoped(ctx, eventVertexKey, eventVertexType, nil)
+}
+
+// enumerateScoped is Enumerate under a pattern-derived relation scope
+// (walkScope, refractor-hub-walk-and-periodic-load-design.md §5.1): standing on
+// a vertex of type T the walk follows only the relations of pattern hops
+// incident to a position admitting T. A nil scope is the relation-blind walk,
+// unchanged.
+//
+// Everything else is the same walk: the stop-at-the-first-actor rule, the depth
+// and actor-set caps, the event vertex's own membership, and the single
+// hierarchy hop.
+func (e *ActorEnumerator) enumerateScoped(ctx context.Context, eventVertexKey, eventVertexType string, scope *walkScope) ([]string, error) {
 	// Recover the event vertex's NanoID for the BFS frontier; adjacency
 	// is keyed by NanoID per `subjects.AdjKey`.
 	_, eventID, ok := substrate.ParseVertexKey(eventVertexKey)
@@ -176,8 +199,14 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 	// actor it reports to (an outbound actorHierarchyRelation edge) — the
 	// single, non-recursive hop the type doc comment describes. It does not
 	// itself call addHierarchyManager on what it finds.
+	//
+	// The read is scoped to that one relation whatever the walk's own scope is,
+	// because this hop follows nothing else: the loop below already discards
+	// every other edge, so asking the store for them was only ever cost — and
+	// on an overflow-marked identity it was a full link-keyspace drain per
+	// actor reached.
 	addHierarchyManager := func(reportID string) error {
-		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, e.coreKV, reportID)
+		edges, _, err := adjacency.NeighborsByRelation(ctx, e.adjKV, e.coreKV, reportID, hierarchyRelationSet)
 		if err != nil {
 			return fmt.Errorf("pipeline: actor enumerator: hierarchy neighbours of %q: %w", reportID, err)
 		}
@@ -196,11 +225,17 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 		if cur.depth >= e.maxDepth {
 			continue
 		}
-		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, e.coreKV, cur.nodeID)
+		edges, err := e.neighborsInScope(ctx, cur.nodeID, cur.nodeType, scope)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: actor enumerator: neighbours of %q: %w", cur.nodeID, err)
 		}
 		for _, edge := range edges {
+			// The scope is the RULE; neighborsInScope's narrowed read is only
+			// the saving. Applied here as well so a read that returns more than
+			// it was asked for can never widen the walk.
+			if !scope.allows(cur.nodeType, edge.Name) {
+				continue
+			}
 			other := edge.OtherNodeID
 			otherType := edge.OtherType
 			if otherType == "" {
@@ -244,6 +279,23 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 	return out, nil
 }
 
+// neighborsInScope reads the edges the walk may follow while standing on a
+// vertex of nodeType, asking the adjacency store for as few as the scope allows.
+//
+// A finite relation set — including the EMPTY one, which is what a vertex type
+// no pattern position admits earns — takes the relation-scoped read, so a
+// descriptor hub's link keyspace is never drained for edges the walk would
+// discard. Anything else (a nil scope, or a type an untyped hop made wildcard)
+// reads the whole node, exactly as the relation-blind walk always did.
+func (e *ActorEnumerator) neighborsInScope(ctx context.Context, nodeID, nodeType string, scope *walkScope) ([]adjacency.EdgeEntry, error) {
+	if rels, finite := scope.relationsAt(nodeType); finite {
+		edges, _, err := adjacency.NeighborsByRelation(ctx, e.adjKV, e.coreKV, nodeID, rels)
+		return edges, err
+	}
+	edges, _, err := adjacency.Neighbors(ctx, e.adjKV, e.coreKV, nodeID)
+	return edges, err
+}
+
 // enumerateAnchors is the pipeline's single entry to the ActorEnumerator BFS —
 // the three fan-out arms (vertex, link endpoint, aspect parent) all reach the
 // enumerator through here, so the one-key answer is licensed in one place or in
@@ -254,12 +306,36 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 // operator has turned the widening off. Everywhere else the enumerator walks —
 // the wider answer §4.7 requires, since an anchor the one-key shortcut omits is
 // a retraction that never reaches its holder.
+//
+// The walk runs under walkScopeFor's answer: this rule state's pattern-derived
+// walkScope where the operator has left the scope on and the lens has a standing
+// healer, and nil — the relation-blind walk, unchanged — where any of those
+// refuses. So a lens either walks the relations its patterns traverse, or walks
+// exactly as it always did.
 func (p *Pipeline) enumerateAnchors(ctx context.Context, rs ruleState, vertexKey, vertexType string) ([]string, error) {
+	return p.enumerateAnchorsWalk(ctx, rs, vertexKey, vertexType, true)
+}
+
+// enumerateAnchorsWalk is enumerateAnchors with the walk's posture named by the
+// caller. scoped == false forces the RELATION-BLIND walk whatever this lens's
+// scope says, and has exactly one caller: the derivation shadow's baseline
+// (affectedAnchors' DerivationModeShadow arm), whose whole measurement is the
+// derived set against the widest answer this pipeline can give. Every other
+// path passes true.
+//
+// The one-key answer is unaffected by the flag, deliberately: it is a different
+// narrowing with its own proof (oneKeyAnswerSound), and a shadow baseline that
+// silently disabled it would report a narrowing this flip is not making.
+func (p *Pipeline) enumerateAnchorsWalk(ctx context.Context, rs ruleState, vertexKey, vertexType string, scoped bool) ([]string, error) {
 	if vertexType == p.actorEnumerator.actorType &&
 		(!p.peerAnchorsEnabled() || p.oneKeyAnswerSound(rs)) {
 		return []string{vertexKey}, nil
 	}
-	return p.actorEnumerator.Enumerate(ctx, vertexKey, vertexType)
+	var scope *walkScope
+	if scoped {
+		scope, _ = p.walkScopeFor(rs)
+	}
+	return p.actorEnumerator.enumerateScoped(ctx, vertexKey, vertexType, scope)
 }
 
 // oneKeyAnswerSound reports whether an event on a vertex of the actor type may
@@ -309,13 +385,12 @@ func (p *Pipeline) enumerateAnchors(ctx context.Context, rs ruleState, vertexKey
 // that is the healer's problem, which is why the sweeper conjunct above and not
 // this one is what holds the personal corpus on the walk.
 //
-// It carries the same label/key-type caveat the rest of this unit does
-// (auth-plane-projection-latency-design.md §17.6): PositionsBinding matches a
-// pattern label against the vertex KEY TYPE, while the executor's nodeMatches
-// also binds on a body `class`/`label`. A vertex whose key type and body class
-// disagree — which Contract #1 does not permit and no gate enforces — could bind
-// a position this count does not see. That hole is one already-filed item across
-// every site that reads a label as a key type, not a new one here.
+// PositionsBinding reads a pattern label as a vertex KEY TYPE, and so does the
+// executor: nodeMatches parses ref.key and compares that type against the
+// pattern label (or against its taxonomy-resolved set), reading no body
+// `class`/`label` at all — full/label_key_type_binding_test.go pins it. So the
+// two agree about what a label binds, and this count sees every position the
+// executor would.
 func (p *Pipeline) oneKeyAnswerSound(rs ruleState) bool {
 	if p.actorEnumerator == nil {
 		return false

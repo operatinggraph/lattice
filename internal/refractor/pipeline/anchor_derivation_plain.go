@@ -705,11 +705,11 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		// outcome — mirroring affectedAnchors' own disposition.
 		slog.Warn("pipeline: plain anchor derivation failed; falling back to today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "err", err)
-		p.recordDerivationFellBack()
+		p.recordDerivationFellBack(p.walkIsScoped(rs))
 		return declined()
 	}
 	if !ok {
-		p.recordDerivationFellBack()
+		p.recordDerivationFellBack(p.walkIsScoped(rs))
 		return declined()
 	}
 	if cap := p.plainDerivedAnchorCap(); len(anchors) > cap {
@@ -718,10 +718,10 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		// than the declined answer they would replace.
 		slog.Warn("pipeline: plain anchor derivation exceeded the derived-anchor cap; using today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "derivedCount", len(anchors), "cap", cap)
-		p.recordDerivationFellBack()
+		p.recordDerivationFellBack(p.walkIsScoped(rs))
 		return declined()
 	}
-	p.recordDerivationActed(len(anchors))
+	p.recordDerivationActed(len(anchors), p.walkIsScoped(rs))
 	return p.evaluatePlainDerivedAnchors(ctx, rs, anchors, anchorLabel)
 }
 

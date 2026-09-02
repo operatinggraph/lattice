@@ -378,8 +378,8 @@ func (p *Pipeline) peerAnchorsOf(ctx context.Context, rs ruleState, vertexKey, v
 		func() ([]string, bool, error) {
 			return p.deriveAnchorsForVertex(ctx, rs, vertexKey, vertexType)
 		},
-		func() ([]string, error) {
-			return p.enumerateAnchors(ctx, rs, vertexKey, vertexType)
+		func(scoped bool) ([]string, error) {
+			return p.enumerateAnchorsWalk(ctx, rs, vertexKey, vertexType, scoped)
 		})
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: peer-anchor enumerate from %q: %w", vertexKey, err)
@@ -961,8 +961,8 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry rulee
 		func() ([]string, bool, error) {
 			return p.deriveAnchorsForVertex(ctx, rs, entry.CoreKVKey, eventType)
 		},
-		func() ([]string, error) {
-			return p.enumerateAnchors(ctx, rs, entry.CoreKVKey, eventType)
+		func(scoped bool) ([]string, error) {
+			return p.enumerateAnchorsWalk(ctx, rs, entry.CoreKVKey, eventType, scoped)
 		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
@@ -1019,12 +1019,12 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 		func() ([]string, bool, error) {
 			return p.deriveAnchorsForLink(ctx, rs, linkKey)
 		},
-		func() ([]string, error) {
+		func(scoped bool) ([]string, error) {
 			// Seed the actor enumeration from BOTH endpoint vertices and union
 			// the results. Either endpoint may be (or reach) an actor.
 			actorSet := map[string]struct{}{}
 			for _, ep := range []struct{ key, typ string }{{srcVtx, srcType}, {dstVtx, dstType}} {
-				actors, err := p.enumerateAnchors(ctx, rs, ep.key, ep.typ)
+				actors, err := p.enumerateAnchorsWalk(ctx, rs, ep.key, ep.typ, scoped)
 				if err != nil {
 					return nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
 				}
@@ -1076,8 +1076,8 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspec
 		func() ([]string, bool, error) {
 			return p.deriveAnchorsForAspect(ctx, rs, aspectKey)
 		},
-		func() ([]string, error) {
-			return p.enumerateAnchors(ctx, rs, parentVtx, parentType)
+		func(scoped bool) ([]string, error) {
+			return p.enumerateAnchorsWalk(ctx, rs, parentVtx, parentType, scoped)
 		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)

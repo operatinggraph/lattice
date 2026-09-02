@@ -723,6 +723,65 @@ edge that triggered it; the bootstrapper's later `Build` for the same edge is a
 no-op. A link whose endpoints reach no actor (e.g. a `book → author` link)
 enumerates to the empty set and is a correct no-op.
 
+#### The walk is scoped to the lens's own pattern relations
+
+The enumeration is not an undirected crawl of everything adjacent. Standing on a vertex of
+type `T`, the walk follows only the relations of pattern hops incident to a pattern position
+that admits `T` (`pipeline.walkScope`, derived per rule publication from **every** compiled
+branch's `AnchorHopIndex`; refractor-hub-walk-and-periodic-load-design.md §5.1). The
+argument is the pattern's: an actor whose row depends on the event vertex is joined to it by
+a path of pattern hops through positions admitting each intermediate's type, and the walk
+runs that path in reverse.
+
+Without it the walk crosses Contract #1's `instanceOf` descriptor edge. A type descriptor
+holds one link per instance of that type, so one event on one instance expanded every
+instance of that type — and then every actor attached to any of them — turning a single
+service write into a whole-tenant reprojection through an overflow-marked hub.
+
+Two consequences worth stating:
+
+- Where the relation set at a vertex type is finite, the adjacency read is scoped to it
+  (`adjacency.NeighborsByRelation`), so an overflow-marked hub's Core KV enumeration is
+  filtered by relation rather than drained whole. An **empty** set — a vertex type no
+  pattern position admits — costs no read at all. The fixed `reportsTo` hierarchy hop takes
+  that same scoped read unconditionally, since it never followed anything else.
+- The walk therefore no longer reprojects an actor merely because an out-of-pattern
+  neighbour changed. That incidental reprojection used to heal a row lost out of band, so
+  the scope carries auth-plane-projection-latency-design.md §4.2's second conjunct as well:
+  **a lens gives up the accident only where a standing healer will repair the row**. Two
+  healers count, one per plane — the convergence sweep below (`p.sweeper`, installed by
+  `InstallActorAggregate`'s enrolment gate, which may refuse warn-only) and the personal
+  plane's `grantchange.PersonalSweeper` plus the D1 grant-change edge (recorded on the
+  pipeline by `cmd/refractor` at its `grantReprojector.RegisterPersonal` call, since a
+  Personal Lens never receives a `SweepPlan`). An actor-aware lens with neither keeps the
+  relation-blind walk. The healer half is read per event, not snapshotted, because both
+  arms are installed after the rule is published.
+
+Every shape the scope cannot resolve keeps the relation-blind walk unchanged: no standing
+healer, a non-full engine, a branch that is not a compiled full rule, a pattern graph that
+is `Incomplete`, an unresolved `*` expansion, or an untyped relationship at an unlabeled
+position — the install-level refusals reported ahead of the cypher-level ones, since they
+hold for the life of the wiring. The per-lens verdicts are pinned by the corpus census
+(`internal/refractor/actor_walk_scope_corpus_census_test.go`), which supplies the same
+install production does and records which healer arm each lens landed on; the act-mode
+tally line carries `walkScoped` so an operator can see which posture a lens is running.
+
+**The way back is `REFRACTOR_WALK_SCOPE=off`**, which puts every lens on the relation-blind
+walk and reports `disabled by operator` through `WalkScopeRefusal()`, the tally and the
+census alike. It is a third switch, separate from the two beside it:
+`REFRACTOR_ANCHOR_DERIVATION=off` restores the *enumerator*, which is itself scoped, and
+`REFRACTOR_ACTOR_PEER_ANCHORS` governs only events on a lens's own actor type — so a full
+rollback to the pre-scope walk needs this knob as well. Like the others it bounds the next
+event and heals nothing already stale; that is `lattice lens rebuild`'s job or the sweep's.
+
+One residual the scope does **not** remove: `byType` is keyed by vertex type, so a lens
+whose own pattern binds `instanceOf` between two `service` positions — `edgeInstances`,
+`edgeProviderQueue`, `edgeManifestProviderReadGrants`, `capabilityServiceAccess` — still
+follows that relation at every service, and so still expands the type descriptor. No
+per-type scope can separate "instance → its template" from "template → its other instances"
+when both ends are the same type; the position-directed affected-anchor derivation is what
+does, and it is the arm this scope is the fallback for.
+
 ### Convergence sweep
 
 Both mechanisms above order and correct writes that **happen**. Neither can conjure a

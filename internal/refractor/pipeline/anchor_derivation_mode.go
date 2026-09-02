@@ -19,6 +19,13 @@ import (
 // for both walks to learn something, act pays for neither of the BFS's breadth.
 // `off` is the third because an operator needs a way back to the shipped
 // behaviour that costs nothing at all.
+//
+// What `off` restores is the ENUMERATOR, and since 2026-09-01 the enumerator is
+// itself pattern-scoped (walkscope.go): it follows only the relations of pattern
+// hops incident to a position admitting the type it is standing on. So `off`
+// alone no longer reaches the relation-blind walk — REFRACTOR_WALK_SCOPE=off is
+// the separate lever for that, and an operator rolling back to pre-§5.1
+// behaviour needs both.
 type DerivationMode int
 
 const (
@@ -110,7 +117,17 @@ const builtinDerivationMode = DerivationModeAct
 // derive is the pattern-directed walk; it reports ok == false when it declines,
 // which is never an error — it means the shape is one the derivation cannot
 // resolve and the caller must keep the shipped behaviour. enumerate is that
-// shipped behaviour, the ActorEnumerator BFS.
+// shipped behaviour, the ActorEnumerator BFS, and it takes the walk's posture:
+// true for the lens's own pattern-scoped walk, false for the relation-blind one.
+//
+// Only the SHADOW arm passes false, and it must. Shadow's whole output is the
+// derived set measured against the widest answer this pipeline can give —
+// NarrowedAnchors is "anchors the derivation spared" and DivergentEvents is "the
+// derivation reached an anchor the trusted superset did not". Measuring against
+// a walk that is itself narrowed would make the first understate the saving and
+// the second fire on anchors the scope pruned rather than on a real
+// disagreement. `act` and `off` both take the scoped walk, which is what the
+// pipeline really runs.
 //
 // The invariant across every path: an event is reprojected against the BFS's
 // answer unless the derivation produced one, and the derivation produces one
@@ -121,14 +138,18 @@ func (p *Pipeline) affectedAnchors(
 	rs ruleState,
 	eventKey string,
 	derive func() ([]string, bool, error),
-	enumerate func() ([]string, error),
+	enumerate func(scoped bool) ([]string, error),
 ) ([]string, error) {
 	mode := p.derivationMode()
 	switch mode {
 	case DerivationModeOff:
-		return enumerate()
+		return enumerate(true)
 	case DerivationModeShadow:
-		anchors, err := enumerate()
+		// The relation-blind walk, by construction — see the enumerate
+		// parameter's doc above. Shadow also ACTS on this wider answer, which is
+		// the safe direction and is what "the BFS's answer is what the pipeline
+		// acts on, unchanged" has always meant on this arm.
+		anchors, err := enumerate(false)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +164,7 @@ func (p *Pipeline) affectedAnchors(
 		// silently, so it resolves to the shipped one instead and says so.
 		slog.Warn("pipeline: unknown anchor-derivation mode; using the enumerator",
 			"ruleId", p.ruleID, "mode", int(mode))
-		return enumerate()
+		return enumerate(true)
 	}
 
 	if _, ready := p.derivationIndexForAct(rs); !ready {
@@ -154,7 +175,7 @@ func (p *Pipeline) affectedAnchors(
 		// reading. It is logged once instead, with the reason, so the lens is
 		// still accounted for.
 		p.noteStaticDerivationRefusal(rs)
-		return enumerate()
+		return enumerate(true)
 	}
 	derived, ok, err := derive()
 	if err != nil {
@@ -163,14 +184,14 @@ func (p *Pipeline) affectedAnchors(
 		// the BFS and let ITS error, if any, be the event's outcome.
 		slog.Warn("pipeline: anchor derivation failed; falling back to the enumerator",
 			"ruleId", p.ruleID, "eventKey", eventKey, "err", err)
-		p.recordDerivationFellBack()
-		return enumerate()
+		p.recordDerivationFellBack(p.walkIsScoped(rs))
+		return enumerate(true)
 	}
 	if !ok {
-		p.recordDerivationFellBack()
-		return enumerate()
+		p.recordDerivationFellBack(p.walkIsScoped(rs))
+		return enumerate(true)
 	}
-	p.recordDerivationActed(len(derived))
+	p.recordDerivationActed(len(derived), p.walkIsScoped(rs))
 	return derived, nil
 }
 

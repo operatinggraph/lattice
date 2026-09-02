@@ -19,10 +19,16 @@
 //     Personal Lens has — so it keeps the broad filter and the unconditional
 //     fan-out, which is the world before Increment 2.
 //
-// The control is not decoration. Without it, "the row stayed missing" is
-// satisfied by an event that would never have healed anything, and the test
-// would pin nothing at all. The control's row healing off the same event is the
-// positive vector that makes the narrowed lens's silence mean something.
+// A THIRD lens joins them, identical to the control but for a cypher that BINDS
+// the neighbour type the healing event lands on. It is what keeps the other two
+// honest: it heals off that event, so the incidental reprojection they lose is
+// demonstrably real rather than assumed. The three then separate the three
+// reasons a lens can stay silent — the event never arrived (the narrowed
+// filter), it arrived and the walk crossed nothing (the pattern-scoped walk of
+// refractor-hub-walk-and-periodic-load-design.md §5.1), or it arrived and the
+// walk did cross (the binding arm, which heals). Every arm carries its own
+// positive vector, so no silence is satisfied by a wedged consumer or a fixture
+// that delivers nothing.
 package pipeline_test
 
 import (
@@ -59,14 +65,32 @@ MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
 RETURN identity.key AS actorKey, role.data.name AS roleName
 `
 
-// healerRule builds the lens Rule for one of the two pipelines. Both get the
-// same cypher, the same anchor type, and the same guarded emptyBehavior; only
-// the rule ID, the target bucket, and the output key prefix differ, so the rows
-// of one never collide with the rows of the other.
-func healerRule(t *testing.T, ruleID, bucket, keyPrefix string) *lens.Rule {
+// healerBindingCypher is healerCypher plus a pattern position that BINDS the
+// neighbour type the healing event lands on. Its projected row is identical —
+// the OPTIONAL clause contributes no RETURN column — so the two lenses produce
+// the same row from the same graph, and the ONLY thing that differs is whether
+// the lens's own patterns can bind a `booking`.
+//
+// That is what makes it the positive vector for the incidental heal: its walk
+// stands on the changed booking, finds `bookedBy` among the relations its
+// patterns traverse, crosses to the identity, and reprojects it. A lens whose
+// patterns cannot bind `booking` has no such edge to cross
+// (refractor-hub-walk-and-periodic-load-design.md §5.1).
+const healerBindingCypher = `
+MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
+OPTIONAL MATCH (identity)<-[:bookedBy]-(booking:booking)
+RETURN identity.key AS actorKey, role.data.name AS roleName
+`
+
+// healerRule builds the lens Rule for one of the three pipelines. Each gets the
+// same anchor type and the same guarded emptyBehavior; the rule ID, the target
+// bucket and the output key prefix differ so the rows of one never collide with
+// another's, and the CYPHER differs only on the third arm, which is the one
+// thing that arm is there to vary.
+func healerRule(t *testing.T, ruleID, bucket, keyPrefix, cypher string) *lens.Rule {
 	t.Helper()
 	eng := full.New()
-	cr, err := eng.Parse(healerCypher)
+	cr, err := eng.Parse(cypher)
 	require.NoError(t, err)
 	return &lens.Rule{
 		ID:             ruleID,
@@ -104,9 +128,9 @@ type healerLens struct {
 // enrols the sweep), then compresses the sweep tick so the test exercises many
 // bounded passes instead of waiting out the production interval. Everything else
 // is what the driver just derived.
-func installHealerLens(t *testing.T, env *pipelineEnv, ruleID, bucket, keyPrefix string, logger *slog.Logger) *healerLens {
+func installHealerLens(t *testing.T, env *pipelineEnv, ruleID, bucket, keyPrefix, cypher string, logger *slog.Logger) *healerLens {
 	t.Helper()
-	rule := healerRule(t, ruleID, bucket, keyPrefix)
+	rule := healerRule(t, ruleID, bucket, keyPrefix, cypher)
 	targetKV, adpt := newTargetKV(t, env, bucket, []string{"key"})
 	reporter := newHealthReporter(t, env, ruleID)
 
@@ -196,9 +220,12 @@ func runHealerPipeline(t *testing.T, env *pipelineEnv, h *healerLens, filterSubj
 //  1. the lens really narrows — the exact subject set, not the broad fallback;
 //  2. the row projects normally and carries the traversed value;
 //  3. the row is removed out of band, the hole no CDC event will refill;
-//  4. an event the narrowed filter EXCLUDES arrives — proven excluded at the
-//     server (the consumer's own delivery counter never moves) and proven
-//     healing (the control lens's identical row comes back off it);
+//  4. an event the narrowed filter EXCLUDES arrives, and three arms separate
+//     the three reasons a lens can stay silent: a lens whose cypher BINDS the
+//     event vertex's type heals off it (the heal is real), the narrowed lens is
+//     never handed it (its counter never moves), and the control is handed it
+//     (its counter moves) and still does not heal, because its own patterns
+//     bind no position for that type;
 //  5. RunSweep restores the row, with the correct value.
 func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testing.T) {
 	env := startPipelineEnv(t)
@@ -223,16 +250,20 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	const (
 		narrowedRuleID = "narrowed-heal-lens"
 		controlRuleID  = "control-heal-lens"
+		bindingRuleID  = "binding-heal-lens"
 	)
-	narrowed := installHealerLens(t, env, narrowedRuleID, "narrowed-heal-target", "narrowedHeal.", logger)
-	control := installHealerLens(t, env, controlRuleID, "control-heal-target", "controlHeal.", logger)
+	narrowed := installHealerLens(t, env, narrowedRuleID, "narrowed-heal-target", "narrowedHeal.", healerCypher, logger)
+	control := installHealerLens(t, env, controlRuleID, "control-heal-target", "controlHeal.", healerCypher, logger)
+	binding := installHealerLens(t, env, bindingRuleID, "binding-heal-target", "bindingHeal.", healerBindingCypher, logger)
 
-	// The control's ONE difference from the narrowed lens: it declares no
+	// Both controls' ONE difference from the narrowed lens: they declare no
 	// pattern-closed output, the §4.4 shape whose row depends on an input
-	// outside its compiled pattern. That single failed conjunct is what puts it
-	// on the broad filter with its fan-out arms ungated — the pre-Increment-2
-	// world, reproduced by a real conjunct rather than by hand-editing a filter.
+	// outside its compiled pattern. That single failed conjunct is what puts
+	// them on the broad filter with their fan-out arms ungated — the
+	// pre-Increment-2 world, reproduced by a real conjunct rather than by
+	// hand-editing a filter.
 	control.pipeline.SetPatternClosedOutput(false)
+	binding.pipeline.SetPatternClosedOutput(false)
 
 	// --- STEP 1: the lens under test is ACTUALLY narrowed ---------------------
 	// A silent fall-back to the broad filter would make every later assertion
@@ -252,14 +283,19 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	}, narrowedSubjects,
 		"the vertex form per referenced label plus the one traversed relation in both link directions — nothing outside {identity, role} x {holdsRole}")
 
-	controlSubjects, controlBroad, controlDecision := control.pipeline.ConsumerFilter()
-	require.Empty(t, controlSubjects,
-		"the control must be on the broad filter — otherwise it is a second narrowed lens and proves nothing")
-	require.Equal(t, subjects.CoreKVFilter(coreKVBucket), controlBroad)
-	require.Equal(t, health.FilterModeBroad, controlDecision.Mode)
+	for _, h := range []*healerLens{control, binding} {
+		subs, broad, dec := h.pipeline.ConsumerFilter()
+		require.Emptyf(t, subs,
+			"%s must be on the broad filter — otherwise it is a second narrowed lens and proves nothing", h.rule.ID)
+		require.Equal(t, subjects.CoreKVFilter(coreKVBucket), broad)
+		require.Equal(t, health.FilterModeBroad, dec.Mode)
+	}
+	controlSubjects, controlBroad, _ := control.pipeline.ConsumerFilter()
+	bindingSubjects, bindingBroad, _ := binding.pipeline.ConsumerFilter()
 
 	runHealerPipeline(t, env, narrowed, narrowedSubjects, narrowedBroad)
 	runHealerPipeline(t, env, control, controlSubjects, controlBroad)
+	runHealerPipeline(t, env, binding, bindingSubjects, bindingBroad)
 
 	// --- STEP 2: the row projects normally ------------------------------------
 	// The graph: one identity holding one role (the lens's own pattern), plus a
@@ -286,8 +322,9 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 
 	narrowed.rowKey = narrowed.desc.BuildKey(identityKey)
 	control.rowKey = control.desc.BuildKey(identityKey)
+	binding.rowKey = binding.desc.BuildKey(identityKey)
 
-	for _, h := range []*healerLens{narrowed, control} {
+	for _, h := range []*healerLens{narrowed, control, binding} {
 		pollUntil(t, 30*time.Second, func() bool { return h.rowValue(t) != nil })
 		row := h.rowValue(t)
 		require.Equal(t, identityKey, row["actor"], "lens %s", h.rule.ID)
@@ -296,6 +333,7 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	}
 	settled := waitConsumerSettled(t, env, "refractor-"+narrowedRuleID)
 	waitConsumerSettled(t, env, "refractor-"+controlRuleID)
+	waitConsumerSettled(t, env, "refractor-"+bindingRuleID)
 
 	// The positive vector for the counter step 4 reads. A frozen
 	// Delivered.Consumer would satisfy step 4's inequality for any reason at all
@@ -307,13 +345,14 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	// off this write, so once both rows have advanced a revision, every event
 	// published so far has been APPLIED (a consumer delivers in order), and the
 	// purge cannot race an in-flight write back into the row it just removed.
-	narrowedRev, controlRev := narrowed.rowRevision(t), control.rowRevision(t)
+	narrowedRev, controlRev, bindingRev := narrowed.rowRevision(t), control.rowRevision(t), binding.rowRevision(t)
 	putNode(t, env.coreKV, roleKey, map[string]any{
 		"key": roleKey, "class": "role", "data": map[string]any{"name": "auditor"},
 		"lastModifiedAt": "2026-01-02T00:00:00Z",
 	})
 	pollUntil(t, 30*time.Second, func() bool { return narrowed.rowRevision(t) > narrowedRev })
 	pollUntil(t, 30*time.Second, func() bool { return control.rowRevision(t) > controlRev })
+	pollUntil(t, 30*time.Second, func() bool { return binding.rowRevision(t) > bindingRev })
 	inLabel := waitConsumerSettled(t, env, "refractor-"+narrowedRuleID)
 	require.Greater(t, inLabel.Delivered.Consumer, settled.Delivered.Consumer,
 		"a write on a type INSIDE the label set must still be delivered — this counter has to be able to move")
@@ -322,28 +361,64 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	// A restore, an errant purge — the class of hole no CDC event will ever
 	// refill, because the event that would have is in the past. Both lenses lose
 	// their row, so the only asymmetry left is the filter.
-	for _, h := range []*healerLens{narrowed, control} {
+	for _, h := range []*healerLens{narrowed, control, binding} {
 		require.NoError(t, h.targetKV.Purge(ctx, h.rowKey))
 		require.Nil(t, h.rowValue(t), "lens %s row must be absent before the healing question is asked", h.rule.ID)
 	}
 
-	// --- STEP 4: the incidental heal is GONE for the narrowed lens ------------
-	// A write to the booking vertex. Its type is outside the lens's label set,
-	// so the narrowed consumer is not subscribed to it at all — while the
-	// control, on the broad filter with an ungated fan-out, receives it,
-	// enumerates the actors adjacency reaches from the booking, and re-projects
-	// the identity. That re-projection is the accident §6 says narrowing
-	// removes, and the control healing off it is the proof it was real.
+	// --- STEP 4: three arms, three claims, one event -------------------------
+	// A write to the booking vertex. Each arm below asserts a DIFFERENT claim
+	// about that one event, and each carries its own positive vector, so no
+	// arm's silence can be satisfied by a wedged consumer or a fixture that
+	// delivers nothing:
+	//
+	//  a. BINDING (broad filter, cypher binds `booking`) — the event is
+	//     delivered AND it heals. This is the proof that the incidental heal is
+	//     REAL: without it, "the row stayed missing" everywhere else would be
+	//     satisfied by an event that never healed anything.
+	//  b. NARROWED (narrowed filter, cypher does not bind `booking`) — the event
+	//     is never HANDED to it; its delivery counter cannot move. This is D1's
+	//     server-side narrowing, and (a) is what makes it a real loss.
+	//  c. CONTROL (broad filter, same cypher as the narrowed lens) — the event
+	//     IS handed to it, its counter moves, and it still does not heal,
+	//     because the actor walk follows only the relations of pattern hops
+	//     incident to a position admitting the type it is standing on
+	//     (refractor-hub-walk-and-periodic-load-design.md §5.1) and no position
+	//     of THIS cypher admits `booking`. (a) and (c) differ by the cypher
+	//     alone, which is what isolates the walk from the filter.
+	//
+	// Both broad arms are scoped even though they fail §4.2's pattern-closure
+	// conjunct, and that is not an inconsistency: the walk scope carries §4.2's
+	// OTHER conjunct, the standing healer, and installHealerLens gives all three
+	// pipelines a SweepPlan (it asserts p.Sweeper() before setting one). An
+	// actor-aware lens with no healer at all keeps the relation-blind walk and
+	// its accident — walkScopeRefusalNoHealer, pinned in
+	// walkscope_internal_test.go.
 	narrowedBefore := waitConsumerSettled(t, env, "refractor-"+narrowedRuleID)
+	controlBefore := waitConsumerSettled(t, env, "refractor-"+controlRuleID)
+	bindingBefore := waitConsumerSettled(t, env, "refractor-"+bindingRuleID)
 	putNode(t, env.coreKV, bookingKey, map[string]any{
 		"key": bookingKey, "class": "booking", "data": map[string]any{"status": "cancelled"},
 		"lastModifiedAt": "2026-01-02T00:00:00Z",
 	})
 
-	pollUntil(t, 30*time.Second, func() bool { return control.rowValue(t) != nil })
-	require.Equal(t, "auditor", control.rowValue(t)["roleName"],
-		"the broad lens must be healed by the booking event — if it is not, this event never healed anything and step 4 proves nothing")
+	// (a) The heal is real.
+	pollUntil(t, 30*time.Second, func() bool { return binding.rowValue(t) != nil })
+	require.Equal(t, "auditor", binding.rowValue(t)["roleName"],
+		"a lens whose pattern binds `booking` must be healed by the booking event, with the traversed value — "+
+			"if it is not, this event never healed anything and the two silences below prove nothing")
+	bindingAfter := waitConsumerSettled(t, env, "refractor-"+bindingRuleID)
+	require.Greater(t, bindingAfter.Delivered.Consumer, bindingBefore.Delivered.Consumer)
 
+	// (c) Delivered, and still silent — the WALK's doing, not the filter's.
+	controlAfter := waitConsumerSettled(t, env, "refractor-"+controlRuleID)
+	require.Greater(t, controlAfter.Delivered.Consumer, controlBefore.Delivered.Consumer,
+		"the control must have been handed the booking event — otherwise its silence is the filter's")
+	require.Nil(t, control.rowValue(t),
+		"the control received the event and its walk crossed nothing: `booking` binds no position of ITS cypher, "+
+			"and the binding arm above shows the same event healing a lens whose cypher does bind it")
+
+	// (b) Never handed it at all — the server-side narrowing.
 	narrowedAfter := waitConsumerSettled(t, env, "refractor-"+narrowedRuleID)
 	require.Equal(t, narrowedBefore.Delivered.Consumer, narrowedAfter.Delivered.Consumer,
 		"the narrowed consumer must never have been HANDED the booking event — a client-side skip would still move this counter")

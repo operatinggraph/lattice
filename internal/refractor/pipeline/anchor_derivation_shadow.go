@@ -14,6 +14,16 @@ import (
 // with the BFS's, and the comparison is counted — while the BFS's answer is
 // what the pipeline acts on, unchanged.
 //
+// The BFS this arm runs is the RELATION-BLIND walk, by construction:
+// affectedAnchors' shadow branch calls enumerate(false), which forces the
+// unscoped walk whatever the lens's own walkScope says (walkscope.go's
+// pattern-scoped walk is what `act` and `off` run). That is not an accident of
+// wiring but the measurement's premise — both counters below are defined
+// against the WIDEST answer this pipeline can give, and a baseline that was
+// itself narrowed would understate NarrowedAnchors and would fire
+// DivergentEvents on anchors the scope pruned rather than on a real
+// disagreement about reachability.
+//
 // The measurement §4.7 asks for is the ratio between the two sets, and the two
 // directions of difference mean opposite things — which is the whole reason
 // they are counted apart:
@@ -22,10 +32,10 @@ import (
 //     entire point, not an alarm. Both sets are supersets of the truly-affected
 //     anchors; a tighter superset is the win, and its anchor delta is the
 //     latency saving being measured.
-//   - DIVERGENT (the derivation returned an anchor the BFS did not) is the
-//     anomaly. The BFS is the trusted superset, so an anchor outside it means
-//     the two disagree about reachability — logged loudly, with the anchors, on
-//     every occurrence.
+//   - DIVERGENT (the derivation returned an anchor the relation-blind BFS did
+//     not) is the anomaly. That BFS is the trusted superset, so an anchor
+//     outside it means the two disagree about reachability — logged loudly,
+//     with the anchors, on every occurrence.
 //
 // Neither direction can prove the superset invariant itself: "derived ⊇ truly
 // affected" is a claim about the projection, not about the BFS, and §9's
@@ -247,9 +257,10 @@ func (p *Pipeline) recordShadowComparison(eventKey string, bfsAnchors, derived [
 	p.logSummaryIfDue(snapshot)
 
 	if len(divergent) > 0 {
-		// The BFS is the trusted superset, so an anchor outside it means the
-		// two disagree about reachability. Logged with the anchors, capped, so
-		// the flip decision is made against evidence rather than a count.
+		// The relation-blind BFS is the trusted superset (this arm runs the
+		// unscoped walk — see the package doc), so an anchor outside it means
+		// the two disagree about reachability. Logged with the anchors, capped,
+		// so the flip decision is made against evidence rather than a count.
 		sort.Strings(divergent)
 		slog.Warn("pipeline: anchor-derivation shadow: derived set holds anchors the enumerator did not reach",
 			"ruleId", p.ruleID, "eventKey", eventKey,
@@ -283,21 +294,27 @@ func (p *Pipeline) logSummaryIfDue(st DerivationShadowStats) {
 // the derivation on every event, so there is no sampling to divide by, and a
 // lens that falls back every time still reaches the interval and reports that
 // it is doing so — which is precisely the case an operator needs told.
-func (p *Pipeline) recordDerivationActed(anchors int) {
+//
+// walkScoped is this lens's ENUMERATOR posture, read from the same rule
+// snapshot the event ran under — whether the fall-back walk is pattern-scoped
+// or relation-blind. It rides both recorders rather than the fall-back one
+// alone because the line is printed on whichever of them reaches the interval,
+// and a lens's posture does not depend on which event that was.
+func (p *Pipeline) recordDerivationActed(anchors int, walkScoped bool) {
 	p.derivShadow.mu.Lock()
 	p.derivShadow.stats.Acted++
 	p.derivShadow.stats.ActedAnchors += int64(anchors)
 	snapshot := p.derivShadow.stats
 	p.derivShadow.mu.Unlock()
-	p.logActSummaryIfDue(snapshot)
+	p.logActSummaryIfDue(snapshot, walkScoped)
 }
 
-func (p *Pipeline) recordDerivationFellBack() {
+func (p *Pipeline) recordDerivationFellBack(walkScoped bool) {
 	p.derivShadow.mu.Lock()
 	p.derivShadow.stats.FellBack++
 	snapshot := p.derivShadow.stats
 	p.derivShadow.mu.Unlock()
-	p.logActSummaryIfDue(snapshot)
+	p.logActSummaryIfDue(snapshot, walkScoped)
 }
 
 // recordDerivationRangedReads adds one walk's ranged-closure adjacency reads to
@@ -311,13 +328,21 @@ func (p *Pipeline) recordDerivationRangedReads(n int) {
 	p.derivShadow.mu.Unlock()
 }
 
-func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats) {
+func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats, walkScoped bool) {
 	total := st.Acted + st.FellBack
 	if total == 0 || total%derivationShadowSummaryEvery != 0 {
 		return
 	}
 	attrs := []any{"ruleId", p.ruleID,
 		"acted", st.Acted, "actedAnchors", st.ActedAnchors, "fellBack", st.FellBack}
+	// Carried for every actor-aware lens and for no other, in BOTH its states:
+	// on this arm `false` is the operator-relevant answer — the lens falls back
+	// to a relation-blind walk — so suppressing it the way the counters above
+	// are suppressed would hide exactly the lenses worth naming. A plain lens
+	// holds no enumerator and no walk, so the attribute would mean nothing.
+	if p.actorEnumerator != nil {
+		attrs = append(attrs, "walkScoped", walkScoped)
+	}
 	// Carried only when it has fired, so the actor-aware arm's tally — which can
 	// never reach the plain probe — is not padded with a permanent zero.
 	if st.PlainProbeUnreadable > 0 {

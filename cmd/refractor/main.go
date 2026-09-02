@@ -1258,6 +1258,33 @@ func main() {
 	}
 	logger.Info("actor peer-anchor mode", "mode", peerAnchors.String())
 
+	// REFRACTOR_WALK_SCOPE is the way back from the pattern-scoped actor walk
+	// (refractor-hub-walk-and-periodic-load-design.md §5.1): `on` (the default)
+	// lets the walk follow only the relations of pattern hops incident to a
+	// position admitting the type it is standing on, `off` puts every lens back
+	// on the relation-blind walk. Set here for the same reason the two modes
+	// above are — two places build pipelines and one of them could be missed.
+	//
+	// It is a THIRD switch, separate from both: REFRACTOR_ANCHOR_DERIVATION's
+	// `off` routes to the ActorEnumerator, which is the arm the scope narrows,
+	// and REFRACTOR_ACTOR_PEER_ANCHORS decides only whether an actor-type event
+	// reaches peers at all. Neither reaches this. `off` restores the descriptor-
+	// hub expansion the scope exists to end, so it is a containment lever for an
+	// operator who believes a lens is missing anchors, not a posture to deploy
+	// in — and like the others it bounds the next event rather than healing a
+	// row already stale, which is `lattice lens rebuild`'s job or the sweep's.
+	walkScope := pipeline.DefaultWalkScopeMode()
+	if v := os.Getenv("REFRACTOR_WALK_SCOPE"); v != "" {
+		m, err := pipeline.ParseWalkScopeMode(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_WALK_SCOPE; keeping the default", "value", v, "err", err)
+		} else {
+			pipeline.SetDefaultWalkScopeMode(m)
+			walkScope = m
+		}
+	}
+	logger.Info("actor walk-scope mode", "mode", walkScope.String())
+
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0, which the
@@ -1581,7 +1608,7 @@ func main() {
 			// from importing the pipeline package at all, and there is no
 			// iterator over it. This list is Refractor-internal and crosses
 			// nothing.
-			grantReprojector.RegisterPersonal(r.ID, p)
+			registerPersonalHealer(grantReprojector, r.ID, p)
 			// The syncgap gap-detection read (edge-syncgap-control-rpc-
 			// design.md §3.2): the "personal.syncgap" control RPC answers the
 			// Edge node's warm-resume freshness check off the control host's

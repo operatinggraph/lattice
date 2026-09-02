@@ -225,6 +225,17 @@ type Pipeline struct {
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
 
+	// walkScope bounds which relations the ActorEnumerator's BFS follows at
+	// each vertex type (refractor-hub-walk-and-periodic-load-design.md §5.1),
+	// and walkScopeRefusal names the conjunct that left it nil. Guarded by
+	// ruleMu and republished on every rule swap alongside anchorHops. Its zero
+	// value, nil, is the fail-closed answer: the relation-blind walk.
+	//
+	// Unlike anchorHops it is derived over EVERY branch, because one enumerator
+	// serves the whole lens rather than one walk.
+	walkScope        *walkScope
+	walkScopeRefusal string
+
 	// rootHops is the plain arm's OWN pattern graph — Increment 1's
 	// ScanRootHopIndex, terminated at the anchor PATTERN rather than at
 	// `{key: $actorKey}` (plain-lens-neighbour-anchor-derivation-design.md
@@ -309,6 +320,11 @@ type Pipeline struct {
 	// of the actor type may reach anchors other than that vertex. Zero is
 	// PeerAnchorModeUnset, i.e. take the package default (actor_enumerator.go).
 	peerAnchorMode atomic.Int64
+
+	// walkScopeMode is this pipeline's override of whether the actor walk runs
+	// pattern-scoped at all. Zero is WalkScopeModeUnset, i.e. take the package
+	// default (walkscope.go).
+	walkScopeMode atomic.Int64
 
 	// actorDeleteKey derives the Capability KV target key to delete when an
 	// actor disappears (tombstone shortcut and reprojectActors missing-actor
@@ -504,6 +520,22 @@ type Pipeline struct {
 	// for every other lens, which is what excludes the personal, plain,
 	// convergence, and operation-aggregate lenses structurally.
 	sweeper *Sweeper
+
+	// personalPlaneHealer records that this pipeline is registered with the
+	// PERSONAL plane's standing healer — grantchange.PersonalSweeper plus the
+	// D1 grant-change edge. It is the personal counterpart of sweeper: a
+	// Personal Lens never receives a SweepPlan, so sweeper is nil for one, and
+	// without this flag a lens that really is healed would read as unhealed.
+	//
+	// Set by the host at the registration site itself (cmd/refractor's
+	// grantReprojector.RegisterPersonal call), never inferred from the envelope
+	// or descriptor shape: registration is what makes the healer real, and a
+	// deployment that installs personal lenses without the reprojector must
+	// read as unhealed. Its zero value, false, is that fail-closed answer.
+	//
+	// Atomic because a host may register after Run has started, and every read
+	// of it is on the per-event path.
+	personalPlaneHealer atomic.Bool
 
 	// auditor is the plain-lens divergence audit, installed via InstallAudit
 	// and driven by RunAudit. Nil until InstallAudit has run; non-nil and

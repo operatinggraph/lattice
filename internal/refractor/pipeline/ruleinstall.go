@@ -443,6 +443,17 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			next.rootHops = fullCR.ScanRootHopIndex().WithLabelExpansion(expandedLabels)
 		}
 	}
+
+	// The relation scope the ActorEnumerator's BFS runs under
+	// (refractor-hub-walk-and-periodic-load-design.md §5.1). Derived over `all`
+	// — every branch — rather than from next.anchorHops, which is deliberately
+	// single-walk above: one enumerator serves the whole lens, so a scope taken
+	// from one branch of a multi-walk lens would prune the relations its other
+	// branches traverse, and an anchor those branches reach would never be
+	// reprojected. Derived unconditionally, like every field beside it, so a
+	// reload can never leave a previous rule body's scope armed.
+	next.walkScope, next.walkScopeRefusal = deriveWalkScope(next.engineKind, all, expandedLabels)
+
 	p.publishRuleState(next)
 	return nil
 }

@@ -55,7 +55,7 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 		return nil, 0, err
 	}
 	if st.marked {
-		return neighborsFromCoreKV(ctx, coreKV, nodeID)
+		return neighborsFromCoreKV(ctx, coreKV, nodeID, nil)
 	}
 	if !st.docFound {
 		return []EdgeEntry{}, 0, nil
@@ -63,18 +63,76 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 	return st.doc.Edges, st.docRev, nil
 }
 
-// neighborsFromCoreKV builds a marked node's edge list from Core KV itself,
-// the record the adjacency document is only ever a cache of.
+// NeighborsByRelation returns only the edges of nodeID named by rels. It is
+// Neighbors narrowed to the relations a caller can prove it will follow, and it
+// exists for the node Neighbors is worst at: an overflow-marked hub, whose read
+// enumerates the node's whole link keyspace out of Core KV. A caller that will
+// follow one relation of a hub's thousands pays for one relation's links here.
 //
-// Both directions are read in ONE request, under two Contract #1 link-key
-// filters: `lnk.*.<nodeID>.>` catches every link whose SOURCE is the node
-// (segment 3), `lnk.*.*.*.*.<nodeID>` every link whose TARGET is (segment 6).
-// Neither filter is a subject-subset of the other — the source form pins a
-// literal where the target form wildcards, and its trailing `>` sits where the
-// target form carries a literal — so they are a legal pair to hand to one
-// request even though they intersect on self-links. The read is also
-// commit-fresh, which the document is not: Core KV holds the link the moment
-// the write commits, so a marked node never needs the pipelines' link
+// An empty rels set returns no edges and reads nothing at all — a caller that
+// has proven it follows nothing does not need the node.
+//
+// The two node shapes narrow in different places, and both answers are exact:
+//
+//   - Unmarked node: the same one batched read Neighbors takes, with the
+//     document's edges filtered by name. The narrowing is in the answer, not in
+//     the read — a document is one key either way.
+//   - Overflow-marked node: per-relation Contract #1 subject filters, so Core
+//     KV matches only the named relations' links. The in-memory name filter
+//     still runs over what comes back, so the answer never depends on the
+//     filters being the tightest expressible.
+//
+// The returned fingerprint covers only what THIS read matched, so it is not
+// comparable with a fingerprint Neighbors produced for the same node: a
+// footprint that captured one and validated with the other would report drift
+// on every read. Callers that walk rather than capture (the actor enumerator)
+// discard it.
+func NeighborsByRelation(ctx context.Context, kv, coreKV *substrate.KV, nodeID string, rels map[string]struct{}) ([]EdgeEntry, uint64, error) {
+	if len(rels) == 0 {
+		return []EdgeEntry{}, 0, nil
+	}
+	st, err := readNodeState(ctx, kv, nodeID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if st.marked {
+		return neighborsFromCoreKV(ctx, coreKV, nodeID, rels)
+	}
+	if !st.docFound {
+		return []EdgeEntry{}, 0, nil
+	}
+	return filterEdgesByRelation(st.doc.Edges, rels), st.docRev, nil
+}
+
+// filterEdgesByRelation keeps the edges whose relation name rels holds,
+// returning a non-nil slice so an empty answer reads the same way Neighbors'
+// does.
+func filterEdgesByRelation(edges []EdgeEntry, rels map[string]struct{}) []EdgeEntry {
+	out := make([]EdgeEntry, 0, len(edges))
+	for _, e := range edges {
+		if _, ok := rels[e.Name]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// neighborsFromCoreKV builds a marked node's edge list from Core KV itself,
+// the record the adjacency document is only ever a cache of. A non-empty rels
+// narrows the read (and the answer) to those relation names; nil reads the
+// whole node.
+//
+// Both directions are read in ONE request, under Contract #1 link-key filters:
+// `lnk.*.<nodeID>.>` catches every link whose SOURCE is the node (segment 3),
+// `lnk.*.*.*.*.<nodeID>` every link whose TARGET is (segment 6). Neither filter
+// is a subject-subset of the other — the source form pins a literal where the
+// target form wildcards, and its trailing `>` sits where the target form
+// carries a literal — so they are a legal pair to hand to one request even
+// though they intersect on self-links. A scoped read pins the relation segment
+// in both forms and repeats the pair per relation, which keeps that property
+// (two filters naming different relations are disjoint at segment 4). The read
+// is also commit-fresh, which the document is not: Core KV holds the link the
+// moment the write commits, so a marked node never needs the pipelines' link
 // pre-apply.
 //
 // The request drops the point-in-time guarantee (GetMultiNoSnapshot, not
@@ -97,15 +155,12 @@ func Neighbors(ctx context.Context, kv, coreKV *substrate.KV, nodeID string) ([]
 //
 // The result is sorted, so a marked node's edge order is stable across reads
 // instead of following a map's iteration order.
-func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID string) ([]EdgeEntry, uint64, error) {
+func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID string, rels map[string]struct{}) ([]EdgeEntry, uint64, error) {
 	if coreKV == nil {
 		return nil, 0, fmt.Errorf("adjacency: node %s is overflow-marked and needs a Core KV handle to read", nodeID)
 	}
 
-	outbound := substrate.LinkPrefix + ".*." + nodeID + ".>"
-	inbound := substrate.LinkPrefix + ".*.*.*.*." + nodeID
-
-	entries, err := coreKV.GetMultiNoSnapshot(ctx, []string{outbound, inbound})
+	entries, err := coreKV.GetMultiNoSnapshot(ctx, linkFiltersFor(nodeID, rels))
 	if err != nil {
 		return nil, 0, fmt.Errorf("adjacency: enumerate links of %s: %w", nodeID, err)
 	}
@@ -128,6 +183,17 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 			// more, not the six-segment shape alone.
 			skipped.record("key is not a Contract #1 link key", key)
 			continue
+		}
+
+		// The scope again, in memory. The subject filters above already withhold
+		// the other relations, so this normally rejects nothing — but the
+		// filters are a READ narrowing (linkFiltersFor widens them for a
+		// relation name that cannot be spelled as one subject token) and this is
+		// what makes the ANSWER exact whatever they matched.
+		if rels != nil {
+			if _, wanted := rels[linkName]; !wanted {
+				continue
+			}
 		}
 
 		// A soft-tombstoned link is still a live KV entry (the primitive drops
@@ -180,6 +246,60 @@ func neighborsFromCoreKV(ctx context.Context, coreKV *substrate.KV, nodeID strin
 	})
 
 	return edges, linkSetFingerprint(entries), nil
+}
+
+// linkFiltersFor returns the Contract #1 subject filters that match every link
+// incident to nodeID, narrowed to rels when it is non-empty.
+//
+// The unscoped pair is `lnk.*.<nodeID>.>` (the node as source) and
+// `lnk.*.*.*.*.<nodeID>` (the node as target). The scoped form pins the
+// relation segment in each: `lnk.*.<nodeID>.<rel>.>` and
+// `lnk.*.*.<rel>.*.<nodeID>`, one pair per relation, sorted so the request is
+// deterministic.
+//
+// A relation name that is not a single subject token cannot be pinned at all —
+// a `.` would split into two segments and a wildcard would match links this
+// caller never asked for — so the whole read falls back to the unscoped pair.
+// That is the widening direction: the caller's in-memory filter still cuts the
+// answer to rels, and only the read is bigger than it needed to be.
+func linkFiltersFor(nodeID string, rels map[string]struct{}) []string {
+	unscoped := []string{
+		substrate.LinkPrefix + ".*." + nodeID + ".>",
+		substrate.LinkPrefix + ".*.*.*.*." + nodeID,
+	}
+	if len(rels) == 0 {
+		return unscoped
+	}
+	names := make([]string, 0, len(rels))
+	for rel := range rels {
+		if !isSubjectToken(rel) {
+			return unscoped
+		}
+		names = append(names, rel)
+	}
+	sort.Strings(names)
+	out := make([]string, 0, 2*len(names))
+	for _, rel := range names {
+		out = append(out,
+			substrate.LinkPrefix+".*."+nodeID+"."+rel+".>",
+			substrate.LinkPrefix+".*.*."+rel+".*."+nodeID)
+	}
+	return out
+}
+
+// isSubjectToken reports whether s can stand as one literal NATS subject
+// segment: non-empty, and free of the separator and both wildcards.
+func isSubjectToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '.', '*', '>', ' ', '\t', '\n', '\r':
+			return false
+		}
+	}
+	return true
 }
 
 // maxSkipWarningsPerRead bounds how many individual unusable keys one

@@ -26,6 +26,19 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// walkScope bounds which relations the ActorEnumerator's BFS follows at
+	// each vertex type, nil for the relation-blind walk — see walkScope.
+	//
+	// Derived over EVERY branch, not the single-walk anchorHops beside it: the
+	// enumerator serves the whole lens, so a scope taken from one branch of a
+	// multi-walk lens would prune the relations its other branches traverse.
+	walkScope *walkScope
+	// walkScopeRefusal names the conjunct that left walkScope nil, "" when a
+	// scope was derived. It rides the snapshot for the same reason
+	// narrowingBlocked does: it is a property OF this compiled rule, derived
+	// where the decision is made and read where it is reported, published
+	// atomically with the scope it explains.
+	walkScopeRefusal string
 	// rootHops is the plain arm's own scan-root pattern graph — see the
 	// Pipeline field of the same name, which this publishes into, and §10 of
 	// plain-lens-neighbour-anchor-derivation-design.md for its lifetime.
@@ -95,6 +108,8 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
+		walkScope:           p.walkScope,
+		walkScopeRefusal:    p.walkScopeRefusal,
 		rootHops:            p.rootHops,
 		declaresActorAnchor: p.declaresActorAnchor,
 		labelExpansion:      p.labelExpansion,
@@ -135,6 +150,8 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.walkScope = rs.walkScope
+	p.walkScopeRefusal = rs.walkScopeRefusal
 	p.rootHops = rs.rootHops
 	p.declaresActorAnchor = rs.declaresActorAnchor
 	p.labelExpansion = rs.labelExpansion

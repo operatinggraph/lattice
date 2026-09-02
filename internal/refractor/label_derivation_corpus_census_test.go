@@ -315,6 +315,17 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 // the install-completeness guard exists to refuse.
 func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule, rule *lens.Rule) string {
 	t.Helper()
+	_, _, dec := corpusInstalledPipeline(t, name, eng, cr, rule).ConsumerFilter()
+	return dec.Mode
+}
+
+// corpusInstalledPipeline is the install itself, shared by every census in this
+// package that has to ask a question of a RUNNING pipeline rather than of a
+// compiled cypher. Consumer-filter mode is one such question; the actor walk's
+// relation scope is another. One install for both is what keeps two censuses
+// from modelling two different deployments of the same lens.
+func corpusInstalledPipeline(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule, rule *lens.Rule) *pipeline.Pipeline {
+	t.Helper()
 	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
 	require.NoErrorf(t, err, "%s census adapter", name)
 	p, err := pipeline.New(rule.ID, "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
@@ -347,9 +358,16 @@ func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengi
 		require.Truef(t, projection.InstallPersonalLens(
 			p, rule, nil, nil, nil, nil, false, logger),
 			"%s is declared Personal but its own installer refuses it — the lens would never register", name)
+		// The personal plane's standing healer, set where cmd/refractor sets it
+		// (main.go's grantReprojector.RegisterPersonal call) rather than by the
+		// installer: registration is a HOST wiring decision, and a census that
+		// left it unset would model a deployment nobody runs — every personal
+		// lens reading as unhealed. The actor-aggregate arm needs no counterpart
+		// because InstallActorAggregate above installs its own SweepPlan when
+		// its enrolment gate passes, which is exactly what production does.
+		p.SetPersonalPlaneHealer(true)
 	}
-	_, _, dec := p.ConsumerFilter()
-	return dec.Mode
+	return p
 }
 
 // corpusLensRule builds the *lens.Rule the production installers take, from the
