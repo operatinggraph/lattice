@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 )
 
 // TestReporter_SetPeakBindingRows_OverwritesBecauseItIsAGauge pins the
@@ -95,6 +97,12 @@ func TestLagPoller_PublishesPeakBindingRows(t *testing.T) {
 // The positive vector runs first in the same test: the same poller, with the
 // same reporter, DOES publish while the source has a sample, so the assertion
 // below is proving suppression rather than a poller that never ran.
+//
+// "Several further poll cycles ran" is proved by the metrics publish, not by
+// Health-KV's lastUpdated: a quiet lag/progress/peak triple is exactly the
+// shape the unchanged-value skip (poll, lag_poller.go) now collapses to a
+// single Health-KV write, so lastUpdated advancing is no longer evidence the
+// poller kept ticking. The metrics publish stays unconditional every tick.
 func TestLagPoller_EmptyWindowNeverBlanksAStoredPeak(t *testing.T) {
 	env := startLagServer(t)
 
@@ -121,6 +129,11 @@ func TestLagPoller_EmptyWindowNeverBlanksAStoredPeak(t *testing.T) {
 		return 777, true
 	})
 
+	msgCh := make(chan *nats.Msg, 10)
+	sub, err := env.nc.ChanSubscribe(subjects.Metrics(ruleID), msgCh)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	_ = startPoller(lp, ctx)
@@ -134,25 +147,37 @@ func TestLagPoller_EmptyWindowNeverBlanksAStoredPeak(t *testing.T) {
 	haveSample = false
 	mu.Unlock()
 
-	// Let several further poll cycles run — proved by lastUpdated advancing,
-	// which every cycle's SetProjectionProgress write stamps — and confirm the
-	// stored peak is untouched throughout.
-	before, err := reporter.GetStatus(context.Background())
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		entry, gerr := reporter.GetStatus(context.Background())
-		if gerr != nil {
-			return false
+	// Drain whatever the positive vector already buffered, so the messages
+	// waited for next are genuinely post-flip cycles.
+	for len(msgCh) > 0 {
+		<-msgCh
+	}
+
+	// Let several further poll cycles run and confirm the stored peak is
+	// untouched throughout each one.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-msgCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for lag metric message #%d", i+1)
 		}
+		entry, gerr := reporter.GetStatus(context.Background())
+		require.NoError(t, gerr)
 		require.Equal(t, uint64(777), entry.PeakBindingRows,
 			"a window with no sample must leave the stored peak alone")
-		return entry.LastUpdated > before.LastUpdated
-	}, 3*time.Second, 10*time.Millisecond, "the poller must keep cycling with the peak source silent")
+	}
 }
 
 // TestLagPoller_NoPeakSourceLeavesTheFieldAbsent pins that a caller which never
 // wires the source is unchanged — the field stays absent rather than being
 // written as zero.
+//
+// "The poller runs its normal cycle" is proved by the metrics publish, not by
+// Health-KV's lastUpdated: with no peak source and a constant zero lag, every
+// SetProjectionProgress input is identical cycle over cycle, which the
+// unchanged-value skip (poll, lag_poller.go) now collapses to one write —
+// lastUpdated advancing is no longer evidence the poller kept ticking. The
+// metrics publish stays unconditional every tick.
 func TestLagPoller_NoPeakSourceLeavesTheFieldAbsent(t *testing.T) {
 	env := startLagServer(t)
 
@@ -162,20 +187,25 @@ func TestLagPoller_NoPeakSourceLeavesTheFieldAbsent(t *testing.T) {
 	const ruleID = "rule-peak-unwired"
 	reporter := health.New(env.healthKV, ruleID)
 	require.NoError(t, reporter.SetActive(context.Background()))
-	before, err := reporter.GetStatus(context.Background())
+
+	msgCh := make(chan *nats.Msg, 10)
+	sub, err := env.nc.ChanSubscribe(subjects.Metrics(ruleID), msgCh)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
 	_ = startPoller(lp, ctx)
 
-	require.Eventually(t, func() bool {
-		entry, gerr := reporter.GetStatus(context.Background())
-		if gerr != nil {
-			return false
+	for i := 0; i < 3; i++ {
+		select {
+		case <-msgCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for lag metric message #%d", i+1)
 		}
+		entry, gerr := reporter.GetStatus(context.Background())
+		require.NoError(t, gerr)
 		require.Zero(t, entry.PeakBindingRows)
-		return entry.LastUpdated > before.LastUpdated
-	}, 2*time.Second, 10*time.Millisecond, "the poller must run its normal cycle with no peak source wired")
+	}
 }

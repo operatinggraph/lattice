@@ -197,12 +197,16 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 	var frameKeys []map[string]any
 	for _, result := range results {
 		if result.Delete {
-			if err := adpt.Delete(ctx, result.Keys, revision); err != nil {
+			err := adpt.Delete(ctx, result.Keys, revision)
+			p.recordProjectionWrite()
+			if err != nil {
 				return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
 			}
 			continue
 		}
-		if err := adpt.Upsert(ctx, result.Keys, result.Row, revision); err != nil {
+		err := adpt.Upsert(ctx, result.Keys, result.Row, revision)
+		p.recordProjectionWrite()
+		if err != nil {
 			return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
 		}
 		frameKeys = append(frameKeys, result.Keys)

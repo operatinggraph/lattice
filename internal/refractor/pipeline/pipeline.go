@@ -57,6 +57,14 @@ var ProbeInterval = 10 * time.Second
 // The interval is captured into the Pipeline at construction time via New.
 var RebuildPollInterval = 500 * time.Millisecond
 
+// RebuildPollBackoffCap bounds how far watchRebuildCompletion's poll delay may
+// grow while a rebuild's outstanding count holds steady or climbs against
+// racing writes: the delay doubles from RebuildPollInterval on such a poll and
+// resets to it the instant outstanding strictly decreases, so a rebuild that
+// starts draining again is checked promptly right when a completion might be
+// near. Exported alongside RebuildPollInterval so a test can lower it too.
+var RebuildPollBackoffCap = 5 * time.Second
+
 // Pipeline processes Core KV messages for a single rule: evaluate → project → write.
 // Each rule runs its own Pipeline in an independent goroutine (NFR13).
 type Pipeline struct {
@@ -524,6 +532,18 @@ type Pipeline struct {
 	// Advances only on real output, so a caught-up-but-no-op consumer leaves it
 	// frozen even as lastAppliedSeq moves. Zero until the first projection.
 	lastProjectedAt time.Time
+
+	// projectionWrites counts every write this pipeline attempts against its
+	// target — writeResults' primary write loop and replayWrite's retry
+	// replay (results.go), across both the outcome-reporting and plain
+	// Upsert/Delete adapter calls. It is the sweep survey cache's second
+	// invalidation signal (sweep.go): the target key set can only move
+	// through a write this pipeline itself makes, so an unmoved counter since
+	// the last survey is proof the target side of that comparison cannot have
+	// changed. Counting every ATTEMPT rather than only a confirmed commit is
+	// deliberately conservative — it can force an unneeded re-survey, never
+	// miss a needed one.
+	projectionWrites atomic.Uint64
 }
 
 // ProjectionProgress is the lens's forward-progress snapshot for the health
@@ -585,6 +605,20 @@ func (p *Pipeline) recordProjected() {
 	p.progressMu.Lock()
 	p.lastProjectedAt = time.Now()
 	p.progressMu.Unlock()
+}
+
+// recordProjectionWrite marks one attempted adapter write against this
+// pipeline's target. Called from every site that calls into the adapter's
+// Upsert/Delete, with or without outcome reporting — see projectionWrites.
+func (p *Pipeline) recordProjectionWrite() {
+	p.projectionWrites.Add(1)
+}
+
+// ProjectionWrites returns the monotone count recordProjectionWrite has
+// reached. Read by the sweep survey cache (sweep.go); see projectionWrites'
+// doc for what it counts.
+func (p *Pipeline) ProjectionWrites() uint64 {
+	return p.projectionWrites.Load()
 }
 
 // EnvelopeFn rewrites a projection-row map into the on-wire shape the
@@ -1267,7 +1301,9 @@ func (p *Pipeline) RemoveConsumer(ctx context.Context) error {
 // stream. Safe to call from any goroutine; the adapter itself is idempotent
 // (deleting an absent row/key is a no-op).
 func (p *Pipeline) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
-	return p.currentAdapter().Delete(ctx, keys, projectionSeq)
+	err := p.currentAdapter().Delete(ctx, keys, projectionSeq)
+	p.recordProjectionWrite()
+	return err
 }
 
 // DeleteAllForActor removes every child key under actorKey's perEntry prefix
@@ -1312,7 +1348,9 @@ func (p *Pipeline) DeleteAllForActor(ctx context.Context, actorKey string, proje
 	var errs []error
 	deleted := 0
 	for _, keys := range existing {
-		if err := adpt.Delete(ctx, keys, projectionSeq); err != nil {
+		err := adpt.Delete(ctx, keys, projectionSeq)
+		p.recordProjectionWrite()
+		if err != nil {
 			errs = append(errs, fmt.Errorf("delete %v: %w", keys, err))
 			continue
 		}

@@ -16,7 +16,7 @@ const stallTestInterval = time.Minute
 
 // stallWindow is the staleness window the default cycle count yields for the
 // test interval — the tests express ages relative to it, not to a literal.
-var stallWindow = time.Duration(defaultCapabilitySweepStallCycles) * stallTestInterval
+var stallWindow = time.Duration(DefaultCapabilitySweepStallCycles) * stallTestInterval
 
 // sweepSnap is the lens as of beat time `at`, whose sweep last reached a verdict
 // sweptAgo before that. A suppression reason is stamped at `at` — the sweep

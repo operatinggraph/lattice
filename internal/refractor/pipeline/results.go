@@ -87,6 +87,7 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		} else {
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 		}
+		p.recordProjectionWrite()
 
 		if writeErr != nil {
 			cat := failure.Classify(writeErr)
@@ -229,6 +230,7 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 // there is nothing to audit either.
 func (p *Pipeline) replayWrite(ctx context.Context, result ruleengine.EvalResult) (committed bool, err error) {
 	a := p.currentAdapter()
+	p.recordProjectionWrite()
 	if result.Delete {
 		if od, ok := a.(adapter.OutcomeDeleter); ok {
 			outcome, derr := od.DeleteWithOutcome(ctx, result.Keys, result.ProjectionSeq)

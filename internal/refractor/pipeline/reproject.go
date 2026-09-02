@@ -519,6 +519,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			}
 			if reportsDelete {
 				outcome, derr := outcomeDeleter.DeleteWithOutcome(ctx, result.Keys, seq)
+				p.recordProjectionWrite()
 				if derr != nil {
 					errs = append(errs, fmt.Errorf("delete %v: %w", result.Keys, derr))
 					continue
@@ -544,7 +545,9 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				fold.add(retractionVerdict(retractionEvidenced))
 				continue
 			}
-			if derr := adpt.Delete(ctx, result.Keys, seq); derr != nil {
+			derr := adpt.Delete(ctx, result.Keys, seq)
+			p.recordProjectionWrite()
+			if derr != nil {
 				errs = append(errs, fmt.Errorf("delete %v: %w", result.Keys, derr))
 				continue
 			}
@@ -594,6 +597,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 
 		if reportsUpsert {
 			outcome, uerr := outcomeUpserter.UpsertWithOutcome(ctx, result.Keys, result.Row, seq)
+			p.recordProjectionWrite()
 			if uerr != nil {
 				errs = append(errs, fmt.Errorf("upsert %v: %w", result.Keys, uerr))
 				continue
@@ -642,7 +646,9 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			continue
 		}
 
-		if uerr := adpt.Upsert(ctx, result.Keys, result.Row, seq); uerr != nil {
+		uerr := adpt.Upsert(ctx, result.Keys, result.Row, seq)
+		p.recordProjectionWrite()
+		if uerr != nil {
 			errs = append(errs, fmt.Errorf("upsert %v: %w", result.Keys, uerr))
 			continue
 		}

@@ -45,7 +45,7 @@ const (
 // rows nothing is re-testing.
 //
 // It is 10 because the heartbeat's own audit-stall window is
-// defaultCapabilitySweepStallCycles = 10 (internal/refractor/health), and an
+// DefaultCapabilitySweepStallCycles = 10 (internal/refractor/health), and an
 // operator who has reasoned about how late an audit may run before the platform
 // says so expects the two signals to agree about the same lens. It is
 // deliberately a SEPARATE constant rather than a shared one: the heartbeat's

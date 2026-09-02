@@ -88,6 +88,7 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, highWater)
 			frameKeys = append(frameKeys, result.Keys)
 		}
+		p.recordProjectionWrite()
 		if writeErr != nil {
 			return 0, fmt.Errorf("pipeline: hydrate %q: write: %w", identityID, writeErr)
 		}

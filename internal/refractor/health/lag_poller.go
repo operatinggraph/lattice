@@ -11,11 +11,11 @@ import (
 )
 
 // MetricsInterval is the default polling interval for new LagPoller instances.
-// Set this before calling NewLagPoller to override the default (5 seconds).
+// Set this before calling NewLagPoller to override the default (30 seconds).
 // Exported so tests can override it to a short value without real sleeps.
 // The interval is captured into the LagPoller at construction time, so changes
 // after NewLagPoller returns have no effect on running pollers.
-var MetricsInterval = 5 * time.Second
+var MetricsInterval = 30 * time.Second
 
 // LagMetric is the JSON payload published to lattice.refractor.metrics.<lensId> on each poll.
 // All field names are camelCase per FR21 convention.
@@ -97,6 +97,46 @@ type LagPoller struct {
 	ackFloor           uint64
 	ackFloorSeen       bool
 	ackFloorProgressAt time.Time
+
+	// lastWritten is the SetProjectionProgress input tuple last actually
+	// written to Health KV, and lastWrittenSet reports whether any write has
+	// landed yet. poll skips the read-modify-write when every value would be
+	// identical to this tuple — the RMW costs a Health-KV round trip every
+	// cycle for a number that mostly does not move on a quiet lens. The
+	// metrics publish above it is unconditional; only this Health-KV mirror is
+	// skippable. Single dedicated goroutine (Start), so no lock.
+	lastWritten    projectionProgressTuple
+	lastWrittenSet bool
+
+	// lastPeakRows / lastPeakRowsSet are pollPeakRows' own mirror of the same
+	// idea, for its separate gauge and its separate "nothing to say" case.
+	// Single dedicated goroutine (Start), so no lock.
+	lastPeakRows    uint64
+	lastPeakRowsSet bool
+}
+
+// projectionProgressTuple is the SetProjectionProgress input set the LagPoller
+// compares poll-over-poll to decide whether the Health-KV write is needed at
+// all — see lastWritten.
+type projectionProgressTuple struct {
+	lag                uint64
+	lastProjectedAt    time.Time
+	lagProgressAt      time.Time
+	ackPending         uint64
+	ackFloorProgressAt time.Time
+}
+
+// equal reports whether t and o describe the same SetProjectionProgress call.
+// time.Time fields compare via Equal rather than ==: lastProjectedAt and
+// ackFloorProgressAt both originate from a stamp this same process took, but
+// nothing guarantees every path handing them here preserves the monotonic
+// reading == would otherwise be sensitive to.
+func (t projectionProgressTuple) equal(o projectionProgressTuple) bool {
+	return t.lag == o.lag &&
+		t.lastProjectedAt.Equal(o.lastProjectedAt) &&
+		t.lagProgressAt.Equal(o.lagProgressAt) &&
+		t.ackPending == o.ackPending &&
+		t.ackFloorProgressAt.Equal(o.ackFloorProgressAt)
 }
 
 // SetProgressFunc attaches the pipeline's projection-progress source. Must be
@@ -133,7 +173,7 @@ func NewLagPoller(conn *substrate.Conn, lag LagFunc, reporter *Reporter, ruleID 
 	}
 	iv := MetricsInterval
 	if iv <= 0 {
-		iv = 5 * time.Second // safe default if MetricsInterval was set to an invalid value
+		iv = 30 * time.Second // safe default if MetricsInterval was set to an invalid value
 	}
 	return &LagPoller{
 		conn:     conn,
@@ -199,10 +239,23 @@ func (lp *LagPoller) poll(ctx context.Context) {
 			lastProjectedAt = lp.progress()
 		}
 		ackPending, ackFloorProgressAt := lp.pollAckStats(ctx)
-		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt, lp.lagProgressAt, ackPending, ackFloorProgressAt); err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("lag poller: SetProjectionProgress failed",
-					"ruleId", lp.ruleID, "err", err)
+		tuple := projectionProgressTuple{
+			lag: lag, lastProjectedAt: lastProjectedAt, lagProgressAt: lp.lagProgressAt,
+			ackPending: ackPending, ackFloorProgressAt: ackFloorProgressAt,
+		}
+		// Written on the first poll unconditionally (lastWrittenSet false) and
+		// whenever any of the five values differs from what was last actually
+		// written; a lens sitting at a steady lag/progress costs reads only,
+		// mirroring the sweep survey cache's own reasoning in pipeline/sweep.go.
+		if !lp.lastWrittenSet || !tuple.equal(lp.lastWritten) {
+			if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt, lp.lagProgressAt, ackPending, ackFloorProgressAt); err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("lag poller: SetProjectionProgress failed",
+						"ruleId", lp.ruleID, "err", err)
+				}
+			} else {
+				lp.lastWritten = tuple
+				lp.lastWrittenSet = true
 			}
 		}
 		lp.pollPeakRows(ctx)
@@ -215,7 +268,9 @@ func (lp *LagPoller) poll(ctx context.Context) {
 // case: a nil source or an empty observation window writes nothing at all,
 // leaving whatever the entry already holds — the alternative, folding a
 // fabricated zero into the progress write, would erase a real peak every time a
-// lens went quiet.
+// lens went quiet. It applies the same unchanged-value skip as the progress
+// write: a peak that has not moved since the last successful write costs a
+// read, not a Health-KV round trip.
 func (lp *LagPoller) pollPeakRows(ctx context.Context) {
 	if lp.peakRows == nil {
 		return
@@ -224,12 +279,18 @@ func (lp *LagPoller) pollPeakRows(ctx context.Context) {
 	if !ok {
 		return
 	}
+	if lp.lastPeakRowsSet && rows == lp.lastPeakRows {
+		return
+	}
 	if err := lp.reporter.SetPeakBindingRows(ctx, rows); err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("lag poller: SetPeakBindingRows failed",
 				"ruleId", lp.ruleID, "err", err)
 		}
+		return
 	}
+	lp.lastPeakRows = rows
+	lp.lastPeakRowsSet = true
 }
 
 // pollAckStats reads the consumer's un-acked count and ack floor and stamps the

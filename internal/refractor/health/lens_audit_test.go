@@ -152,7 +152,7 @@ func TestEvalLenses_AuditStallRaisesWhenTheDetectorStopsTicking(t *testing.T) {
 	snap := lensAuditSnap("listedUnits", interval)
 	h := &LatticeHeartbeater{}
 	start := time.Now()
-	held := time.Duration(defaultCapabilitySweepStallCycles+1) * interval
+	held := time.Duration(DefaultCapabilitySweepStallCycles+1) * interval
 
 	metric, issues := auditedThenHeld(h, start, held, snap)
 	is, ok := issueByCode(issues, issueLensAuditStalled)
@@ -175,9 +175,9 @@ func TestEvalLenses_AuditStallNamesAFreshSuppressionReason(t *testing.T) {
 	now := time.Now()
 	snap := lensAuditSnap("listedUnits", interval)
 	snap.AuditSuppression = "rebuild in flight"
-	snap.AuditSuppressionAt = now.Add(time.Duration(defaultCapabilitySweepStallCycles+1) * interval)
+	snap.AuditSuppressionAt = now.Add(time.Duration(DefaultCapabilitySweepStallCycles+1) * interval)
 	h := &LatticeHeartbeater{}
-	_, issues := auditedThenHeld(h, now, time.Duration(defaultCapabilitySweepStallCycles+1)*interval, snap)
+	_, issues := auditedThenHeld(h, now, time.Duration(DefaultCapabilitySweepStallCycles+1)*interval, snap)
 
 	is, ok := issueByCode(issues, issueLensAuditStalled)
 	if !ok {
@@ -265,7 +265,7 @@ func TestEvalLenses_DivergedAndAuditStalledCombine(t *testing.T) {
 	snap.DivergentTotal = 1
 	h := &LatticeHeartbeater{}
 	start := time.Now()
-	held := time.Duration(defaultCapabilitySweepStallCycles+1) * interval
+	held := time.Duration(DefaultCapabilitySweepStallCycles+1) * interval
 
 	metric, issues := auditedThenHeld(h, start, held, snap)
 	if _, ok := issueByCode(issues, issueLensProjectionDiverged); !ok {

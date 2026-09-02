@@ -314,3 +314,141 @@ func TestLagPoller_ContinuesDuringPause(t *testing.T) {
 		}
 	}
 }
+
+// TestLagPoller_UnchangedValuesWriteHealthKVOnce pins the point of the skip
+// (poll, lag_poller.go): a lens sitting at a steady lag/progress/ack triple
+// costs the Health-KV read-modify-write once, not on every tick — the metrics
+// publish itself keeps firing unconditionally every tick regardless, which is
+// what proves several cycles actually ran here rather than the poller simply
+// never having ticked.
+func TestLagPoller_UnchangedValuesWriteHealthKVOnce(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 15 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-unchanged-skip"
+	rawKV, err := env.js.CreateKeyValue(context.Background(),
+		jetstream.KeyValueConfig{Bucket: "LAG_HEALTH_UNCHANGED", History: 20})
+	require.NoError(t, err)
+	kvh, err := env.conn.OpenKV(context.Background(), "LAG_HEALTH_UNCHANGED")
+	require.NoError(t, err)
+	reporter := health.New(kvh, ruleID)
+	require.NoError(t, reporter.SetActive(context.Background()))
+
+	msgCh := make(chan *nats.Msg, 20)
+	sub, err := env.nc.ChanSubscribe(subjects.Metrics(ruleID), msgCh)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+	wg := startPoller(lp, ctx)
+
+	for i := 1; i <= 5; i++ {
+		select {
+		case <-msgCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for lag metric message #%d", i)
+		}
+	}
+	cancel()
+	wg.Wait() // no poll can still be mid-write once Start has returned
+
+	hist, err := rawKV.History(context.Background(), ruleID)
+	require.NoError(t, err)
+	require.Len(t, hist, 2,
+		"SetActive's write, then exactly one SetProjectionProgress write for the whole steady run — "+
+			"not one per tick")
+}
+
+// TestLagPoller_LagChangeAlwaysWrites is the other half: a value that DOES
+// move must never be skipped, however many ticks it keeps moving for.
+func TestLagPoller_LagChangeAlwaysWrites(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 15 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-lag-change-writes"
+	rawKV, err := env.js.CreateKeyValue(context.Background(),
+		jetstream.KeyValueConfig{Bucket: "LAG_HEALTH_LAGCHANGE", History: 20})
+	require.NoError(t, err)
+	kvh, err := env.conn.OpenKV(context.Background(), "LAG_HEALTH_LAGCHANGE")
+	require.NoError(t, err)
+	reporter := health.New(kvh, ruleID)
+	require.NoError(t, reporter.SetActive(context.Background()))
+
+	var mu sync.Mutex
+	lag := uint64(100)
+	risingLag := func(context.Context) (uint64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		lag++ // a fresh value every tick: never the same twice
+		return lag, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lp := health.NewLagPoller(env.conn, risingLag, reporter, ruleID)
+	wg := startPoller(lp, ctx)
+
+	require.Eventually(t, func() bool {
+		entry, err := reporter.GetStatus(context.Background())
+		return err == nil && entry.ConsumerLag >= 105
+	}, 2*time.Second, 10*time.Millisecond, "at least 5 distinct lag values must have landed")
+
+	cancel()
+	wg.Wait()
+
+	hist, err := rawKV.History(context.Background(), ruleID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(hist), 6,
+		"SetActive's write plus one write per lag-changing poll — a moving value is never skipped")
+}
+
+// TestLagPoller_AckPendingChangeAlwaysWrites isolates ackPending as its own
+// invalidation signal: AckFloor holds fixed (so ackFloorProgressAt itself
+// stops moving after the first poll) while AckPending keeps changing, so only
+// the ackPending comparison can be forcing these writes.
+func TestLagPoller_AckPendingChangeAlwaysWrites(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 15 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-ackpending-change-writes"
+	rawKV, err := env.js.CreateKeyValue(context.Background(),
+		jetstream.KeyValueConfig{Bucket: "LAG_HEALTH_ACKCHANGE", History: 20})
+	require.NoError(t, err)
+	kvh, err := env.conn.OpenKV(context.Background(), "LAG_HEALTH_ACKCHANGE")
+	require.NoError(t, err)
+	reporter := health.New(kvh, ruleID)
+	require.NoError(t, reporter.SetActive(context.Background()))
+
+	var mu sync.Mutex
+	pending := uint64(0)
+	risingAckPending := func(context.Context) (substrate.AckStats, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		pending++
+		return substrate.AckStats{AckPending: pending, AckFloor: 1}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+	lp.SetAckStatsFunc(risingAckPending)
+	wg := startPoller(lp, ctx)
+
+	require.Eventually(t, func() bool {
+		entry, err := reporter.GetStatus(context.Background())
+		return err == nil && entry.AckPending >= 5
+	}, 2*time.Second, 10*time.Millisecond, "at least 5 distinct ackPending values must have landed")
+
+	cancel()
+	wg.Wait()
+
+	hist, err := rawKV.History(context.Background(), ruleID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(hist), 6,
+		"SetActive's write plus one write per ackPending-changing poll, with AckFloor never moving")
+}

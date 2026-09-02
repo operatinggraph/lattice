@@ -1027,3 +1027,164 @@ func TestSweepSurvey_AdapterThatCannotScopeItsListingIsRefused(t *testing.T) {
 	_, _, err := p.Sweeper().survey(context.Background())
 	require.ErrorIs(t, err, errSweepNoKeyLister)
 }
+
+// passNoForTest and idleEligibleForTest read the sweeper's idle-back-off state
+// under its own lock, mirroring hintMissesForTest's pattern above.
+func (s *Sweeper) passNoForTest() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.passNo
+}
+
+func (s *Sweeper) idleEligibleForTest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idleEligible
+}
+
+func TestSweepSurveyCache_ReusedWhenSignalsUnchanged(t *testing.T) {
+	adpt := &listingAdapter{keys: []string{sweepBuildKey(sweepActorA)}}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	anchors1, targets1, err := sw.surveyCached(ctx, 1)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 1, "the first call must always survey live")
+
+	anchors2, targets2, err := sw.surveyCached(ctx, 2)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 1,
+		"neither the applied sequence nor the write counter moved, so the second call must reuse the cache")
+	require.Equal(t, anchors1, anchors2)
+	require.Equal(t, targets1, targets2)
+}
+
+func TestSweepSurveyCache_RelistedWhenProjectionWritesMoves(t *testing.T) {
+	adpt := &listingAdapter{keys: []string{sweepBuildKey(sweepActorA)}}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	_, _, err := sw.surveyCached(ctx, 1)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 1)
+
+	p.recordProjectionWrite()
+
+	_, _, err = sw.surveyCached(ctx, 2)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 2,
+		"a write this pipeline made against its own target must force a fresh survey")
+}
+
+func TestSweepSurveyCache_RelistedWhenAppliedSeqMoves(t *testing.T) {
+	adpt := &listingAdapter{keys: []string{sweepBuildKey(sweepActorA)}}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	_, _, err := sw.surveyCached(ctx, 1)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 1)
+
+	p.recordAppliedSeq(42)
+
+	_, _, err = sw.surveyCached(ctx, 2)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 2, "a moved applied sequence must force a fresh survey")
+}
+
+func TestSweepSurveyCache_ForcedEveryNthPass(t *testing.T) {
+	adpt := &listingAdapter{keys: []string{sweepBuildKey(sweepActorA)}}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	// Neither signal ever moves across this whole run, so only the very first
+	// call (pass 1) and the forced pass (surveyForceEvery) may actually list.
+	for passNo := uint64(1); passNo < surveyForceEvery; passNo++ {
+		_, _, err := sw.surveyCached(ctx, passNo)
+		require.NoError(t, err)
+	}
+	require.Len(t, adpt.listedPrefixes, 1,
+		"passes 2..%d must all have reused the cache", surveyForceEvery-1)
+
+	_, _, err := sw.surveyCached(ctx, surveyForceEvery)
+	require.NoError(t, err)
+	require.Len(t, adpt.listedPrefixes, 2,
+		"the surveyForceEvery'th pass must re-list even with nothing changed, as insurance "+
+			"against a target mutation neither signal saw")
+}
+
+// TestSweepIdleBackoff_SkipsNonNthTicksThenPublishesSuppressionReason drives
+// the back-off end to end through pass: a converged, empty world (the
+// simplest possible clean lap, since a zero-anchor pass evaluates its lap
+// vacuously — see updateIdleCycle) reaches idleEligible after one pass, the
+// next IdleSweepBackoffEvery-1 ticks are skipped exactly like a suppressed one —
+// no passNo advance, the idle suppression reason published — and the
+// following tick runs for real.
+func TestSweepIdleBackoff_SkipsNonNthTicksThenPublishesSuppressionReason(t *testing.T) {
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	sw.pass(ctx)
+	require.Equal(t, uint64(1), sw.passNoForTest())
+	require.True(t, sw.idleEligibleForTest(), "an empty, converged world is a vacuously clean lap")
+	require.Empty(t, sw.Status().Suppression, "the tick that just ran must not itself read as suppressed")
+
+	for i := 0; i < IdleSweepBackoffEvery-1; i++ {
+		sw.pass(ctx)
+		require.Equal(t, uint64(1), sw.passNoForTest(),
+			"idle-skipped tick %d must not advance passNo", i+1)
+		require.Equal(t, idleSuppressionReason, sw.Status().Suppression)
+	}
+
+	// The IdleSweepBackoffEvery'th tick since eligibility runs for real.
+	sw.pass(ctx)
+	require.Equal(t, uint64(2), sw.passNoForTest(), "the Nth tick must run, not skip again")
+	require.Empty(t, sw.Status().Suppression, "a real tick clears the suppression reason")
+}
+
+// TestSweepIdleBackoff_SignalChangeResetsToEveryTick pins "any change...
+// resets to every tick": a signal moving mid-streak must be acted on the very
+// next tick, not waited out for the rest of the current IdleSweepBackoffEvery
+// window.
+func TestSweepIdleBackoff_SignalChangeResetsToEveryTick(t *testing.T) {
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	sw.pass(ctx)
+	require.True(t, sw.idleEligibleForTest())
+
+	sw.pass(ctx) // skip 1 of IdleSweepBackoffEvery-1
+	require.Equal(t, uint64(1), sw.passNoForTest())
+	sw.pass(ctx) // skip 2
+	require.Equal(t, uint64(1), sw.passNoForTest())
+
+	// A real change: an orphan row appears (its anchor never existed) and the
+	// pipeline applies something, giving Reproject's retraction a usable
+	// ordering token — the same shape TestSweepPass_HealsAnOrphanRowAndCountsIt
+	// proves the empty-fullCR test pipeline heals cleanly.
+	orphan := sweepBuildKey(sweepActorA)
+	adpt.keys = append(adpt.keys, orphan)
+	adpt.present = true
+	adpt.stored = map[string]any{"key": orphan}
+	p.recordAppliedSeq(123)
+
+	sw.pass(ctx)
+	require.Equal(t, uint64(2), sw.passNoForTest(),
+		"the change must be acted on immediately rather than waiting out the remaining skips")
+	require.Empty(t, sw.Status().Suppression, "a real tick clears the suppression reason")
+	require.Equal(t, uint64(1), sw.Status().Reconciled, "the newly-appeared orphan must actually be healed")
+	require.False(t, sw.idleEligibleForTest(),
+		"a lap that just healed something is dirty — eligibility does not resume on the strength of it")
+}

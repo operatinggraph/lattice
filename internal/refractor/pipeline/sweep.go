@@ -240,6 +240,42 @@ type Sweeper struct {
 	// state (see hintState and candidates).
 	coverage hintState
 	orphan   hintState
+
+	// surveyValid, surveyAnchors, surveyTargets, surveyAppliedSeq and
+	// surveyWrites are the cached result of the last real survey() call and
+	// the pipeline's two invalidation signals as of that call — see
+	// surveyCached. surveyValid is false until the first real survey runs, so
+	// a brand-new Pipeline (lastAppliedSeq and ProjectionWrites both zero)
+	// can never read as a cache hit against a Sweeper that has never actually
+	// surveyed.
+	surveyValid      bool
+	surveyAnchors    []string
+	surveyTargets    map[string]struct{}
+	surveyAppliedSeq uint64
+	surveyWrites     uint64
+
+	// idleEligible is sticky across ticks: true once a round-robin deep-verify
+	// lap (cycle) completes having healed nothing and found no divergence or
+	// failure, cleared the instant either survey-cache signal moves — even
+	// mid-lap — or a later lap finds work. idleSkipped counts consecutive
+	// ticks the idle back-off has skipped since idleEligible last went true or
+	// a skip last gave way to a real tick. See idleTick and updateIdleCycle.
+	idleEligible bool
+	idleSkipped  int
+	cycle        idleCycle
+}
+
+// idleCycle accumulates the round-robin deep verify's current lap: visited
+// counts how many anchors direction 3 of candidates has examined since the
+// lap began (a lap spans as many ticks as the population needs), and dirty
+// latches true the moment any tick within it heals something, finds a
+// Blocked/Unverified verdict, or leaves an actor failing. dirty is latched,
+// never cleared mid-lap — one divergent or failing tick condemns the whole
+// lap, because the point of the back-off is a lap that PROVED nothing needs
+// attention, not one that merely ended on a clean tick.
+type idleCycle struct {
+	visited int
+	dirty   bool
 }
 
 // hintState is one prefilter hint's rotation position and its standing record
@@ -286,6 +322,42 @@ const (
 	hintMissesBeforeFloor = 2
 	hintRetestPasses      = 8
 )
+
+// IdleSweepBackoffEvery is how many ticks separate one deep verify from the
+// next once a full round-robin lap of it has healed nothing and found no
+// divergence or failure: the other IdleSweepBackoffEvery-1 ticks are skipped
+// exactly like a suppressed one (see idleTick). Any movement in either
+// survey-cache signal ends the back-off on the very next tick, so this only
+// ever holds for a lens that has proven, on its own last full lap, that
+// nothing needs closer attention.
+//
+// Exported, and pinned deliberately small relative to the sweep-stall alert
+// window (health.DefaultCapabilitySweepStallCycles,
+// internal/refractor/health/lattice_heartbeater.go): a skipped idle tick
+// never advances the sweep's liveness clock (SweepStatus.LastPassAt) — only a
+// REAL pass does — so once back-off engages, real passes recur every
+// IdleSweepBackoffEvery ticks, and that recurrence must land well inside the
+// stall window or an idle, perfectly healthy lens ages toward its own
+// CapabilitySweepStalled/LensSweepStalled alert. At the 60s auth-plane
+// interval, 5 means a real pass every 5 minutes against a 10-minute stall
+// window (at the defaults); at the 5-minute BusinessSweepInterval it is 25
+// minutes against 50. health_test's
+// TestIdleSweepBackoffEvery_StaysInsideTheSweepStallWindow pins
+// IdleSweepBackoffEvery*2 <= DefaultCapabilitySweepStallCycles so the two
+// cannot drift back into collision unnoticed.
+const IdleSweepBackoffEvery = 5
+
+// surveyForceEvery bounds how long the survey cache (surveyCached) may go
+// un-refreshed: insurance against a target mutation neither invalidation
+// signal saw — see projectionWrites' doc for what "this pipeline's own
+// writes" covers, and what it does not.
+const surveyForceEvery = 30
+
+// idleSuppressionReason is the sweep-status suppression text an idle-skipped
+// tick publishes, distinct from every other suppression cause (rebuild in
+// flight, paused, unreadable) so an operator — or a log grep — can tell a
+// lens that is quiet because it is converged from one that is stalled.
+const idleSuppressionReason = "idle: no change since last verified cycle"
 
 // coverageExamineMultiple bounds how many anchors the coverage direction may
 // INSPECT per tick, as a multiple of how many it may select. A row-less
@@ -447,6 +519,13 @@ func (s *Sweeper) pass(ctx context.Context) {
 		s.noteSuppressed(reason)
 		return
 	}
+	if s.idleTick() {
+		// Exactly like any other suppressed tick: no passNo, no survey, no
+		// record — the cursor and every streak stand exactly as the last real
+		// pass left them (see idleTick and updateIdleCycle).
+		s.noteSuppressed(idleSuppressionReason)
+		return
+	}
 	s.noteSuppressed("")
 
 	s.mu.Lock()
@@ -454,12 +533,13 @@ func (s *Sweeper) pass(ctx context.Context) {
 	passNo := s.passNo
 	s.mu.Unlock()
 
-	anchors, targets, err := s.survey(ctx)
+	anchors, targets, err := s.surveyCached(ctx, passNo)
 	if err != nil {
 		// A pass that could not read both sides of the comparison verified
 		// nothing, so it must not read as a converged tick.
 		slog.Warn("pipeline: sweep: survey failed; retrying next tick",
 			"ruleId", s.p.ruleID, "err", err)
+		s.clearIdleEligible()
 		s.record(ctx, 0, err)
 		return
 	}
@@ -494,6 +574,7 @@ func (s *Sweeper) pass(ctx context.Context) {
 			// model exists to end.
 			slog.Info("pipeline: sweep: pass abandoned — rule swapped mid-pass",
 				"ruleId", s.p.ruleID, "actor", actor)
+			s.clearIdleEligible()
 			s.recordAbandoned(ctx, healed, "rule swapped mid-pass")
 			return
 		}
@@ -506,6 +587,7 @@ func (s *Sweeper) pass(ctx context.Context) {
 			// every Core KV event, including ack-and-skip).
 			slog.Warn("pipeline: sweep: pass abandoned — no ordering token yet",
 				"ruleId", s.p.ruleID, "actor", actor)
+			s.clearIdleEligible()
 			s.record(ctx, healed, rerr)
 			return
 		}
@@ -557,6 +639,7 @@ func (s *Sweeper) pass(ctx context.Context) {
 	s.noteHintOutcome("coverage", &s.coverage, coverageTried, coverageHits)
 	s.noteHintOutcome("orphan", &s.orphan, orphanTried, orphanHits)
 
+	s.updateIdleCycle(sel.deepVerifyExamined, len(anchors), healed)
 	s.record(ctx, healed, nil)
 }
 
@@ -847,6 +930,107 @@ func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[str
 	return anchors, targets, nil
 }
 
+// surveyCached returns this tick's anchor/target listing, reusing the
+// previous survey() result when NEITHER invalidation signal has moved since
+// it was taken: the pipeline's applied sequence (Progress().LastAppliedSeq)
+// and its projectionWrites counter (ProjectionWrites()). The anchor set can
+// only move on a Core KV write this consumer has applied — the anchor label
+// is always in a narrowed filter — and the target set only through a write
+// this pipeline itself made (projectionWrites' doc). Reading both signals is
+// cheap, in-memory, and safe to do every tick; it is survey()'s own two KV
+// listings this cache exists to avoid repeating. Every surveyForceEvery'th
+// pass re-lists regardless, as insurance against a target mutation neither
+// signal saw.
+func (s *Sweeper) surveyCached(ctx context.Context, passNo uint64) ([]string, map[string]struct{}, error) {
+	appliedSeq := s.p.Progress().LastAppliedSeq
+	writes := s.p.ProjectionWrites()
+
+	s.mu.Lock()
+	reuse := s.surveyValid &&
+		appliedSeq == s.surveyAppliedSeq &&
+		writes == s.surveyWrites &&
+		passNo%surveyForceEvery != 0
+	anchors, targets := s.surveyAnchors, s.surveyTargets
+	s.mu.Unlock()
+	if reuse {
+		return anchors, targets, nil
+	}
+
+	anchors, targets, err := s.survey(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.mu.Lock()
+	s.surveyValid = true
+	s.surveyAnchors, s.surveyTargets = anchors, targets
+	s.surveyAppliedSeq, s.surveyWrites = appliedSeq, writes
+	s.mu.Unlock()
+	return anchors, targets, nil
+}
+
+// idleTick reports whether this tick should be skipped by the idle back-off,
+// exactly like a suppressed one (see pass). It also owns clearing
+// idleEligible the instant either survey-cache signal has moved — "any
+// change... resets to every tick" — independent of whether the current skip
+// streak has run out, so a change is acted on the very next tick rather than
+// waited out for up to IdleSweepBackoffEvery-1 more ticks.
+func (s *Sweeper) idleTick() bool {
+	appliedSeq := s.p.Progress().LastAppliedSeq
+	writes := s.p.ProjectionWrites()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.surveyValid || appliedSeq != s.surveyAppliedSeq || writes != s.surveyWrites {
+		s.idleEligible = false
+		s.idleSkipped = 0
+		return false
+	}
+	if !s.idleEligible {
+		s.idleSkipped = 0
+		return false
+	}
+	if s.idleSkipped >= IdleSweepBackoffEvery-1 {
+		s.idleSkipped = 0
+		return false
+	}
+	s.idleSkipped++
+	return true
+}
+
+// clearIdleEligible forces the idle back-off off immediately and discards the
+// current lap's progress. Called on a pass that faulted or was abandoned
+// before it reached a verdict: such a pass proves nothing about the corpus,
+// so it must neither be read as evidence of a clean lap nor let a later lap's
+// completion be credited with visits it never actually made.
+func (s *Sweeper) clearIdleEligible() {
+	s.mu.Lock()
+	s.idleEligible = false
+	s.cycle = idleCycle{}
+	s.mu.Unlock()
+}
+
+// updateIdleCycle folds one normally-completed pass's deep-verify progress
+// and outcome into the current lap, and evaluates idleEligible once the lap
+// completes — anchorCount anchors examined in total since the lap began (a
+// lens with zero anchors has no lap to walk, so every such pass evaluates
+// immediately and vacuously). Read the failing/blocked/unverified sets here
+// rather than from anything the caller tallied, for the same reason record
+// does: a pass that re-examined only some of them must judge the lap on the
+// STANDING sets, not on this tick's slice.
+func (s *Sweeper) updateIdleCycle(examined, anchorCount, healed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cycle.visited += examined
+	if healed > 0 || len(s.blocked) > 0 || len(s.unverified) > 0 || len(s.failing) > 0 {
+		s.cycle.dirty = true
+	}
+	if anchorCount > 0 && s.cycle.visited < anchorCount {
+		return
+	}
+	s.idleEligible = !s.cycle.dirty
+	s.cycle = idleCycle{}
+}
+
 // candidates picks this tick's bounded actor set: the two prefilter hints, then
 // the round-robin deep verify continuing from the persisted cursor. The result
 // is deduplicated and capped at the batch size.
@@ -1065,7 +1249,9 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 	s.mu.Unlock()
 	start := resumeAt(anchors, cursor)
 	last := cursor
+	examined := 0
 	for i := 0; i < len(anchors) && len(out) < s.batch; i++ {
+		examined++
 		actor := anchors[(start+i)%len(anchors)]
 		last = actor
 		// The full batch, not a hint's share: this is the reserved remainder the
@@ -1077,17 +1263,24 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 	s.mu.Lock()
 	s.status.Cursor = last
 	s.mu.Unlock()
-	return selection{actors: out, fromCoverage: fromCoverage, fromOrphan: fromOrphan}
+	return selection{actors: out, fromCoverage: fromCoverage, fromOrphan: fromOrphan, deepVerifyExamined: examined}
 }
 
 // selection is one tick's candidate set plus which prefilter hint proposed each
 // actor, so the pass can test each hint's premise against what Reproject found.
 // The two hint sets are disjoint by construction: an orphan's recovered anchor
 // is absent from listedAnchors, which is exactly what makes it not an anchor.
+//
+// deepVerifyExamined is how many anchors direction 3's round-robin walk looked
+// at this tick (whether or not each was actually selected — a dup or a
+// backed-off actor is still examined), so the idle back-off can tell how much
+// of a full lap this tick advanced (updateIdleCycle). Zero when there were no
+// anchors to walk at all.
 type selection struct {
-	actors       []string
-	fromCoverage map[string]struct{}
-	fromOrphan   map[string]struct{}
+	actors             []string
+	fromCoverage       map[string]struct{}
+	fromOrphan         map[string]struct{}
+	deepVerifyExamined int
 }
 
 // resumeAt is where a cursored walk over a sorted key list continues: the first

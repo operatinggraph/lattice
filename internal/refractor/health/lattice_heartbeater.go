@@ -199,14 +199,23 @@ const (
 	capabilityRepairErrorStreak = 3
 )
 
-// defaultCapabilitySweepStallCycles is how many sweep intervals may elapse with
-// no verdict before CapabilitySweepStalled is raised — 10, so ~10 minutes at the
-// 60s sweep default. The window is scaled off the sweep's own cadence rather
-// than being a second independently-tuned duration, and it is generous on
-// purpose: a suppressed sweep is a *detector* outage, not a data outage, so
-// alerting inside one or two intervals would flag every ordinary rebuild.
-// Deployment-overridable via CapabilitySweepStallCycles.
-const defaultCapabilitySweepStallCycles = 10
+// DefaultCapabilitySweepStallCycles is how many sweep intervals may elapse
+// with no verdict before CapabilitySweepStalled is raised — 10, so ~10
+// minutes at the 60s sweep default. The window is scaled off the sweep's own
+// cadence rather than being a second independently-tuned duration, and it is
+// generous on purpose: a suppressed sweep is a *detector* outage, not a data
+// outage, so alerting inside one or two intervals would flag every ordinary
+// rebuild. Deployment-overridable via CapabilitySweepStallCycles.
+//
+// Exported so pipeline.IdleSweepBackoffEvery (pipeline/sweep.go) can be
+// pinned against it: health_test's
+// TestIdleSweepBackoffEvery_StaysInsideTheSweepStallWindow asserts
+// pipeline.IdleSweepBackoffEvery*2 <= DefaultCapabilitySweepStallCycles, so a
+// real sweep pass recurs well inside this window even once the idle back-off
+// has engaged (a skipped idle tick never advances SweepStatus.LastPassAt,
+// only a real pass does) — otherwise a converged, healthy lens would age
+// toward its own stall alert purely from ticking less often.
+const DefaultCapabilitySweepStallCycles = 10
 
 // capabilitySweepStallErrorMultiplier escalates a stall that has a named cause
 // from warning to error once it has lasted this many staleness windows — the
@@ -761,7 +770,7 @@ type LatticeHeartbeater struct {
 
 	// CapabilitySweepStallCycles is how many sweep intervals may elapse with no
 	// verdict before CapabilitySweepStalled is raised. Zero selects
-	// defaultCapabilitySweepStallCycles.
+	// DefaultCapabilitySweepStallCycles.
 	CapabilitySweepStallCycles uint64
 
 	// LensLagThreshold / LensLagRaiseCycles / LensLagClearThreshold are the
@@ -1064,7 +1073,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 
 	stallCycles := h.CapabilitySweepStallCycles
 	if stallCycles == 0 {
-		stallCycles = defaultCapabilitySweepStallCycles
+		stallCycles = DefaultCapabilitySweepStallCycles
 	}
 
 	snaps := h.CapabilityLensProvider()
@@ -2158,7 +2167,7 @@ func (h *LatticeHeartbeater) evalLensSweep(
 
 	stallCycles := h.CapabilitySweepStallCycles
 	if stallCycles == 0 {
-		stallCycles = defaultCapabilitySweepStallCycles
+		stallCycles = DefaultCapabilitySweepStallCycles
 	}
 	stallAfter := time.Duration(stallCycles) * s.SweepInterval
 	switch {
@@ -2359,7 +2368,7 @@ func (h *LatticeHeartbeater) evalAudit(
 
 	stallCycles := h.CapabilitySweepStallCycles
 	if stallCycles == 0 {
-		stallCycles = defaultCapabilitySweepStallCycles
+		stallCycles = DefaultCapabilitySweepStallCycles
 	}
 	stallAfter := time.Duration(stallCycles) * a.interval
 	switch {

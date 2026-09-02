@@ -502,15 +502,22 @@ func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
 	go p.watchRebuildCompletion(ctx, p.beginRebuild())
 }
 
-// watchRebuildCompletion polls the supervised consumer's outstanding count at
-// rebuildPollInterval. When it reaches zero, it transitions health KV from
-// "rebuilding" back to "active" (AC5).
+// watchRebuildCompletion polls the supervised consumer's outstanding count,
+// starting at rebuildPollInterval. When it reaches zero, it transitions health
+// KV from "rebuilding" back to "active" (AC5).
 //
 // Outstanding counts the un-delivered backlog *and* the delivered-but-unacked
 // messages: a message the pump has fetched leaves the backlog the instant it is
 // delivered, so a backlog-only check reads zero mid-flight and would publish
 // "active" over a rescan that has not drained — and that is not a transient
 // mislabel when the in-flight message then fails and is redelivered.
+//
+// The poll delay backs off (nextRebuildPollDelay) while outstanding holds
+// steady or climbs against racing writes, and resets to the floor the instant
+// it strictly decreases: a rebuild racing 10k–128k unprocessed events at one
+// message a minute (the PO's finding) no longer costs a consumer-info call
+// every rebuildPollInterval for the whole drain, but a rebuild that starts
+// actually moving is checked promptly again right when it might finish.
 func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSignal) {
 	// The rebuild window ends when this watcher exits for any reason, so the
 	// deferred endRebuild both releases the waiters on THIS rebuild and clears
@@ -520,21 +527,31 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSigna
 	// returns after a newer rebuild has already begun, would otherwise
 	// un-suppress the convergence sweep under a live rescan.
 	defer p.endRebuild(sig)
-	ticker := time.NewTicker(p.rebuildPollInterval)
-	defer ticker.Stop()
+	delay := p.rebuildPollInterval
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	// previousOutstanding and havePolled let a poll tell a genuine drain
+	// (outstanding fell) from one that merely held steady or grew — the same
+	// distinction recordRebuildProgress's own clock draws. havePolled gates the
+	// very first observation, which has nothing yet to compare against.
+	var previousOutstanding uint64
+	havePolled := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			outstanding, err := p.supervisor.OutstandingForConsumer(ctx, p.consumerCfg.Name)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				// Consumer may still be initializing or context cancelled; retry.
-				// No progress is recorded: this retries forever, so an error that
-				// never clears must read as wedged rather than as quietly fine.
+				// Consumer may still be initializing or context cancelled; retry
+				// at the same delay — an error observes no outstanding count, so
+				// it is neither progress nor its absence. No progress is
+				// recorded: this retries forever, so an error that never clears
+				// must read as wedged rather than as quietly fine.
+				timer.Reset(delay)
 				continue
 			}
 			p.recordRebuildProgress(outstanding)
@@ -556,8 +573,30 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSigna
 				}
 				return
 			}
+			decreased := havePolled && outstanding < previousOutstanding
+			delay = nextRebuildPollDelay(delay, p.rebuildPollInterval, RebuildPollBackoffCap, !havePolled, decreased)
+			previousOutstanding = outstanding
+			havePolled = true
+			timer.Reset(delay)
 		}
 	}
+}
+
+// nextRebuildPollDelay computes watchRebuildCompletion's next poll delay from
+// the outcome of the poll just taken. first is true only for the very first
+// observation, which has no prior count to compare against and so holds at
+// the floor rather than guessing progress either way. Thereafter a strict
+// decrease resets to the floor; anything else — steady, or grown against
+// racing writes — doubles the delay, clamped at cap.
+func nextRebuildPollDelay(current, floor, capDelay time.Duration, first, decreased bool) time.Duration {
+	if first || decreased {
+		return floor
+	}
+	doubled := current * 2
+	if doubled > capDelay {
+		return capDelay
+	}
+	return doubled
 }
 
 // recordRebuildProgress folds one poll of the un-drained count into the rebuild's
