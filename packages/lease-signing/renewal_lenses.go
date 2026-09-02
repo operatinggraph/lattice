@@ -52,7 +52,7 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				OutputKeyPattern: "renewalComplete.{actorSuffix}",
 				BodyColumns: []string{
 					"violating", "missing_renewalComplete", "entityKey", "tenant", "landlord",
-					"open", "leaseappAlive", "hasGuarantor", "bgcheckValidUntil", "freshUntil",
+					"open", "leaseappAlive", "hasGuarantor", "bgcheckValidUntil",
 					"guarantorVerifiedAt", "termsSetAt", "signedAt", "maxretries_renewalComplete",
 				},
 				EmptyBehavior: "delete",
@@ -207,8 +207,16 @@ RETURN
 //     with no validUntil folds to null through the THEN branch either way, so
 //     this aggregate needs no explicit null guard (the count in
 //     readinessWithItems does, and carries one).
-//   - freshUntil re-arms ONLY while the cycle is open (a completed/cancelled
-//     cycle's bgcheck lapsing later must not resurrect a closed row's timer).
+//   - This lens projects NO freshUntil, so it arms no timer. The window it reads
+//     is not its own: it belongs to a background-check instance the walk reaches
+//     across providedTo, and that instance carries its own backgroundCheckFreshness
+//     target whose @at fires on the entity the deadline is about. A timer here
+//     could only mark the RENEWAL, which is not where the lapse happens and not
+//     where anything reads it. The instance's marker write reprojects this row as
+//     an ordinary neighbour event, so bgcheckValidUntil drops to null and
+//     missing_renewalComplete re-opens at the lapse instant with no timer of this
+//     lens's own — and a completed or cancelled cycle, which arms nothing either
+//     way, cannot be resurrected by a later lapse.
 //   - guarantorVerifiedAt / termsSetAt / signedAt are the renewal's own
 //     aspect-real facts (goalColumns-bridged in the target, not root-mapped).
 //   - leaseappAlive gates a withdrawn/tombstoned leaseapp's renewal from
@@ -251,7 +259,6 @@ RETURN
   (status = 'open')                       AS open,
   hasGuarantor,
   bgcheckValidUntil,
-  CASE WHEN (status = 'open') THEN bgcheckValidUntil ELSE null END AS freshUntil,
   guarantorVerifiedAt,
   termsSetAt,
   signedAt,

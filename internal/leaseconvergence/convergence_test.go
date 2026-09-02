@@ -572,3 +572,96 @@ func (h *harness) assertEagerReopenCycle(appID, applicantID string, cycle int) {
 	// And it settles back to converged (no residual violation after the re-converge).
 	h.drainUntilConverged(appID, 30*time.Second)
 }
+
+// TestLeaseConvergence_BgcheckFreshness_LapsedBeforeTheTargetExisted drives the
+// DEPLOY WINDOW, which every other freshness test structurally cannot reach.
+//
+// Freshness is a recorded fact, so a check whose window lapsed while nothing was
+// watching carries NO marker — and a missing marker reads FRESH, by the same
+// nil-false the never-lapsed default depends on. Every existing freshness test
+// starts from a check the target was already watching, so its deadline is always
+// in the future when the timer arms; none of them ever sees a deadline that had
+// already passed at first projection. That is exactly the state of every standing
+// check on the day this target is deployed, and the whole recovery rests on one
+// platform behaviour: an overdue @at is published verbatim and fires immediately.
+//
+// The test asserts the window is real before asserting it closes, because a
+// recovery test that never observes the hazard proves only that the happy path
+// works:
+//
+//  1. converge normally, then let the window pass with the target NOT activated —
+//     the check is expired in wall-clock terms and carries no marker;
+//  2. missing_bgcheck is still FALSE. That is the fail-open, asserted rather than
+//     assumed, and it is what the target's operator note describes;
+//  3. the target arrives (a second CoreKVSource, DeliverLastPerSubject — what a
+//     freshly deployed Refractor sees), the row projects the ALREADY-PAST
+//     deadline, Weaver arms an overdue @at, NATS releases it at once and
+//     MarkExpired records the lapse on the check;
+//  4. the readers flip: missing_bgcheck re-opens and Weaver dispatches a SECOND
+//     check. The instance count is durable KV state — it cannot be missed by a
+//     poll the way a transient column flip can — and it can only increment if the
+//     recorded lapse reached the application's readiness predicate.
+//
+// Runs ONLY under -tags leaseshortwindow, where the window is short enough to
+// watch pass in bounded wall-clock.
+func TestLeaseConvergence_BgcheckFreshness_LapsedBeforeTheTargetExisted(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
+	}
+	if !shortFreshnessWindow {
+		t.Skip("deploy-window leg requires -tags leaseshortwindow (a window short enough to watch pass)")
+	}
+	// NO backgroundCheckFreshness at boot: the point is a deadline that lapses
+	// while nothing watches it.
+	h := newHarness(t)
+	appKey, appID, applicantKey := h.seedApplicant()
+	applicantID := applicantKey[len("vtx.identity."):]
+	marks := h.startMarkExpiredCounter("backgroundCheckFreshness")
+
+	h.driveApplicantSteps(appKey, applicantKey)
+	h.decideLandlord(appKey, "approved")
+	h.drainUntilConverged(appID, 30*time.Second)
+
+	handles := h.bgcheckHandles(applicantID)
+	require.Len(t, handles, 1, "exactly one bgcheck instance after the initial converge")
+	outcome := h.aspectData("vtx.service."+handles[0], "outcome")
+	require.NotNil(t, outcome, "the completed check must carry an .outcome aspect")
+	validUntil, _ := outcome["validUntil"].(string)
+	require.NotEmpty(t, validUntil, "the completed check must carry a validUntil deadline")
+
+	// (1) The deadline passes with no target watching. Polled against the RECORDED
+	// deadline rather than slept for a magic duration, so it tracks the window.
+	require.Eventuallyf(t, func() bool {
+		return time.Now().UTC().Format(time.RFC3339) > validUntil
+	}, 2*freshnessWindow+30*time.Second, 200*time.Millisecond,
+		"the check's window (validUntil %s) must pass before the target is activated", validUntil)
+
+	// (2) The fail-open, asserted: no marker exists, so the expired check still
+	// counts and the gap stays shut. Nothing in the graph reports the staleness.
+	require.Zero(t, marks.seen(), "no freshness timer can have fired: the target was never activated")
+	row := h.readRow(appID)
+	require.NotNil(t, row)
+	require.Falsef(t, rowBool(row, "missing_bgcheck"),
+		"an expired check with no recorded lapse reads FRESH — this is the deploy window the recovery has to close; row=%v", row)
+
+	// (3) The target arrives at a graph whose deadline has already passed.
+	h.activateActorAggregateLensNow(h.ctx, "backgroundCheckFreshness")
+
+	require.Eventuallyf(t, func() bool {
+		recorded, rev := h.bgcheckFreshnessMarker(applicantID)
+		return rev > 0 && recorded != ""
+	}, 60*time.Second, 300*time.Millisecond,
+		"the overdue @at must fire immediately on activation and MarkExpired must record the lapse on the check")
+	require.GreaterOrEqual(t, marks.seen(), 1, "the overdue firing must have produced a MarkExpired")
+
+	// (4) The readers flip, witnessed by durable state: the gap re-opened and
+	// Weaver dispatched a fresh check.
+	require.Eventuallyf(t, func() bool {
+		return len(h.bgcheckHandles(applicantID)) >= 2
+	}, 60*time.Second, 300*time.Millisecond,
+		"the recorded lapse must re-open missing_bgcheck and dispatch a SECOND check")
+
+	// And the application settles again on the fresh one.
+	h.drainUntilConverged(appID, 60*time.Second)
+}

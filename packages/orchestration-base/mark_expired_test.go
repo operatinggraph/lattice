@@ -717,7 +717,8 @@ func TestMarkExpired_TargetIdMustBeACypherIdentifier(t *testing.T) {
 
 	// Every weaver target id shipped today — the grammar must not refuse one.
 	for _, ok := range []string{
-		"leaseApplicationComplete", "leaseExpiry", "pastDueAppointments", "followUpReminders",
+		"leaseApplicationComplete", "leaseExpiry", "backgroundCheckFreshness",
+		"pastDueAppointments", "followUpReminders",
 		"appointmentReminders", "visitSeriesDue", "unroutedTasks", "staleAssignedTasks",
 		"clauseSatisfaction", "wellnessBookingReminders", "pastDueBookings", "_private", "a1",
 	} {

@@ -259,9 +259,17 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	appIDA := appKeyA[len("vtx.leaseapp."):]
 	applicantIDA := applicantA[len("vtx.identity."):]
 	// The ORIGINAL onboarding check, named before any re-dispatch can mint a
-	// second one — it is THIS instance whose lapse the wait below is about.
-	originalBgcheckA := h.bgcheckHandle(applicantIDA)
-	require.NotEmptyf(t, originalBgcheckA, "tenant A's onboarding bgcheck instance must exist before the renewal legs run")
+	// second one — it is THIS instance whose lapse the wait below is about. It is
+	// minted by the triggerLoom -> Loom -> externalTask -> bridge chain, which
+	// nothing before this point waits on (the preceding barrier is the shorter
+	// missing_listingLeased directOp leg), so the lookup polls rather than taking
+	// one scan of Core KV.
+	var originalBgcheckA string
+	require.Eventuallyf(t, func() bool {
+		originalBgcheckA = h.bgcheckHandle(applicantIDA)
+		return originalBgcheckA != ""
+	}, 30*time.Second, 200*time.Millisecond,
+		"tenant A's onboarding bgcheck instance must exist before the renewal legs run")
 	renewalKeyA := h.findRenewalKey(appIDA, 30*time.Second)
 	require.NotEmpty(t, renewalKeyA, "Target A must open a renewal cycle for tenant A (renewalOpensAt is already past)")
 	renewalIDA := renewalKeyA[len("vtx.renewal."):]
@@ -313,6 +321,18 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 		row := h.weaverTargetRow("renewalComplete", renewalIDA)
 		return row != nil && row["termsSetAt"] != nil
 	}, 15*time.Second, 150*time.Millisecond, "SetRenewalTerms(A) must settle before VerifyGuarantor(A) fires")
+
+	// renewalComplete arms NO freshness timer. The window it reports on belongs to
+	// a background-check instance reached across providedTo, and that instance
+	// carries its own target; a timer here could only mark the RENEWAL, which is
+	// neither where the deadline lapses nor where any reader looks. The wait above
+	// proves the row has reprojected at least twice under the current descriptor,
+	// so an armed schedule would already exist if the lens still projected one —
+	// and the window below spans the VerifyGuarantor reprojection too.
+	require.Neverf(t, func() bool {
+		return h.scheduleArmed("schedule.weaver.timer.renewalComplete." + renewalIDA)
+	}, 3*time.Second, 200*time.Millisecond,
+		"no @at may be armed on the renewal itself (renewalComplete projects no freshUntil); renewal=%s", renewalIDA)
 
 	verifyReplyA := h.submitOp("VerifyGuarantor", "renewal", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"renewalKey": renewalKeyA, "leaseApp": appKeyA, "applicant": applicantA, "method": "phone",

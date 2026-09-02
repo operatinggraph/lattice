@@ -77,6 +77,7 @@ type harness struct {
 	conn   *substrate.Conn
 	logger *slog.Logger
 
+	adjKV   *substrate.KV // refractor adjacency
 	coreKV  *substrate.KV
 	convKV  *substrate.KV // weaver-targets
 	bgFake  *bridge.FakeBackgroundCheck
@@ -277,6 +278,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	// --- Refractor: activate the leaseApplicationComplete lens + its actorAggregate
 	// projection through the production wiring (CoreKVSource watch +
 	// projection.InstallActorAggregate), exactly as the scalar e2e + cmd/refractor.
+	h.adjKV = adjKV
 	h.startAdjacencyBootstrapper(ctx, adjKV)
 	h.startRefractor(ctx, adjKV, coreKV, convKV, hc.extraLenses)
 
@@ -466,6 +468,48 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		// wrapping (cmd/refractor/main.go's activation switch falls through to
 		// nothing extra for this projection kind); just the adapter + pipeline.
 		h.runFlatLensPipeline(ctx, name, rule, fullEngine, adjKV, coreKV)
+	}
+}
+
+// activateActorAggregateLensNow activates ONE additional actor-aggregate lens
+// after the harness has been running, on a SECOND CoreKVSource. Each
+// CoreKVSource boot gets its own per-boot JetStream durable (harnessConfig's
+// extraLenses doc states this), so the second source is independent of the one
+// newHarness started and every already-wired pipeline keeps running.
+//
+// It exists for the deploy-window vector, which the boot-time path structurally
+// cannot produce: a lens active from boot arms its timer before any deadline it
+// watches can lapse, so a deadline that passed while NOTHING was watching only
+// arises when the lens arrives at a graph that already moved. The new pipeline's
+// consumer is DeliverLastPerSubject, so on activation it sees the standing
+// entities exactly as a freshly deployed Refractor would.
+func (h *harness) activateActorAggregateLensNow(ctx context.Context, name string) {
+	h.t.Helper()
+	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, "test-late-"+name, h.logger)
+	loaded := make(chan *lens.Rule, 16)
+	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
+	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
+	require.NoError(h.t, src.Start(ctx))
+
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		require.Truef(h.t, time.Now().Before(deadline), "lens %s was not activated within 25s", name)
+		select {
+		case r := <-loaded:
+			if r.CanonicalName != name {
+				continue
+			}
+			projectionRevision := func(k string) uint64 {
+				entry, gErr := h.coreKV.Get(ctx, k)
+				if gErr != nil || entry == nil {
+					return 0
+				}
+				return entry.Revision
+			}
+			h.runActorAggregatePipeline(ctx, name, r, full.New(), projectionRevision, h.adjKV, h.coreKV, h.convKV)
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 

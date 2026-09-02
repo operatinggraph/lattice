@@ -391,9 +391,12 @@ shared with `matchPatterns`'s no-match branch), not recovered from the expansion
 when the pattern matched only real neighbors, the expansion set holds no null row to
 recover, so an anchor whose sole neighbor is WHERE-filtered must be null-restored
 from the source. This is what makes a dedicated family-filtered `OPTIONAL MATCH …
-WHERE` (e.g. the lease lens's `freshUntil` bgcheck match) safe: a no-fresh-match anchor
-projects with the optional column null instead of dropping the row (a dropped
-convergence row reads to Weaver as an entity deletion).
+WHERE` safe: a no-match anchor projects with the optional column null instead of
+dropping the row (a dropped convergence row reads to Weaver as an entity deletion).
+The lease vertical is the worked example of the *other* way to stay safe — its
+background-check freshness discrimination lives inside a `count`/`max` `CASE` on one
+unfiltered `providedTo` fan, so there is no filtered optional to null-restore at all,
+and the deadline it compares against is a stored marker rather than `$now`.
 
 #### Anchor-tombstone retraction (plain projection lenses)
 

@@ -103,18 +103,19 @@ func MarkExpiredDDL() pkgmgr.DDLSpec {
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name: "MarkExpired — record a lapsed lease-application freshness window",
+				Name: "MarkExpired — record a lapsed background-check freshness window",
 				Payload: map[string]any{
-					"entityKey": "vtx.leaseapp.<applicationNanoID>",
-					"targetId":  "leaseApplicationComplete",
+					"entityKey": "vtx.service.<checkNanoID>",
+					"targetId":  "backgroundCheckFreshness",
 					"expiredAt": "2026-06-18T14:00:00Z",
 				},
-				ExpectedOutcome: "Merges vtx.leaseapp.<applicationNanoID>.freshnessExpiry to " +
-					"{expiredAt: 2026-06-18T14:00:00Z, byTarget: {leaseApplicationComplete: 2026-06-18T14:00:00Z}} — a create " +
+				ExpectedOutcome: "Merges vtx.service.<checkNanoID>.freshnessExpiry to " +
+					"{expiredAt: 2026-06-18T14:00:00Z, byTarget: {backgroundCheckFreshness: 2026-06-18T14:00:00Z}} — a create " +
 					"when the marker was hydrated known-absent, an update conditioned on its hydrated revision otherwise — " +
 					"emits orchestration.freshnessMarked, and returns primaryKey (the entity key). Any sibling target's " +
 					"byTarget entry survives the merge, and expiredAt stays the maximum over them. The write bumps the " +
-					"entity's adjacency revision, so Refractor reprojects the convergence row and the lens reads the " +
+					"entity's adjacency revision, so Refractor reprojects every convergence row that reads this entity — " +
+					"the check's own, and each neighbour anchored elsewhere that walks to it — and their lenses read the " +
 					"recorded lapse.",
 			},
 		},
@@ -157,8 +158,8 @@ func FreshnessExpiryAspectDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{
 					"expiredAt": "2026-06-18T14:00:00Z",
 					"byTarget": map[string]any{
-						"leaseApplicationComplete": "2026-06-18T14:00:00Z",
-						"leaseExpiry":              "2026-06-18T09:00:00Z",
+						"appointmentReminders": "2026-06-18T14:00:00Z",
+						"pastDueAppointments":  "2026-06-18T09:00:00Z",
 					},
 				},
 				ExpectedOutcome: "Stored as vtx.<type>.<NanoID>.freshnessExpiry; merged by MarkExpired one target entry at a time, " +

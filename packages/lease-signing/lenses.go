@@ -296,8 +296,8 @@ func Lenses() []pkgmgr.LensSpec {
 			// a manages-unassign (or any other drop) needs the target-diff path.
 			// The `qualified` WITH clause below does not touch this posture:
 			// ValidateUnanchoredForDiffRetraction walks a lens's WITH/RETURN only
-			// for `$actorKey` references (this WITH references `$now`, never
-			// `$actorKey`), and target-diff compares whole fresh-vs-stored
+			// for `$actorKey` references, and this WITH references no parameter at
+			// all — least of all `$actorKey`. Target-diff compares whole fresh-vs-stored
 			// row-sets, not a per-row derivation — it is indifferent to whether
 			// the cypher has a WITH. This lens was never eligible for anchor-self
 			// retraction's WITH exclusion in the first place (that gap is about a
@@ -622,8 +622,9 @@ func Lenses() []pkgmgr.LensSpec {
 //	  weaver-state, reads this cap off the row, and stops auto-dispatching once the
 //	  count reaches it — the operator-visible "needs human escalation" terminal. The
 //	  count is deleted when the gap closes, so a later renewal starts a fresh budget.
-//	  Keeping the cap a package-owned column (like freshUntil) leaves the policy in
-//	  the package with no contract change.
+//	  Keeping the cap a package-owned column (like maxretries_payment's sibling
+//	  columns, or unitStatus) leaves the policy in the package with no contract
+//	  change.
 //	  The two HUMAN userTask gaps (onboarding, signature) need NO maxretries_<g>
 //	  cap: duplicate userTask dispatch is now prevented at the source by the §10.3
 //	  GENERAL fix — Weaver derives the userTask's identity from the mark's stable
@@ -655,7 +656,7 @@ func Lenses() []pkgmgr.LensSpec {
 //	  decline (landlordDecision = 'declined'): the application carries at least one
 //	  standing rejection — a failed verification OR a landlord's explicit decline. It
 //	  is a presentation column the FE renders the terminal "declined" banner from,
-//	  like freshUntil / unitAddress. A verification-declined application keeps an
+//	  like declineReason / unitAddress. A verification-declined application keeps an
 //	  applicant gap open so it is also violating (Weaver keeps reconciling — a retry
 //	  may clear); a LANDLORD-declined application is terminal-not-violating (its
 //	  applicant gaps are closed and the decision is non-null, so missing_decision and

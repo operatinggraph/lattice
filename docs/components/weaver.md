@@ -229,9 +229,14 @@ Weaver does a **filtered `<targetId>.>` watch** per target it manages (lane 1) a
 deletion. (True "emit-only-when-violating" + Refractor negative/filter-retraction projection is a
 **deferred** scale-time capability.)
 
-The freshness rule lives **in the target cypher**, not the engine: `missing_bgcheck = NOT
-EXISTS(check WHERE date > now − window)`, and the cypher projects the next deadline as the optional
-`freshUntil` column the temporal lane arms a timer from (below).
+The freshness rule lives **in the target cypher**, not the engine, and it reads a **recorded fact
+rather than a clock**: the deadline is stored on the entity, and so is the instant a timer fired
+against it (the `freshnessExpiry` marker's `byTarget.<targetId>` entry), so a gap column compares two
+stored values — `missing_<g> = … AND (marker >= deadline)`, or its negation where the column asks for
+freshness rather than for a gap. The same cypher projects the deadline as the optional `freshUntil`
+column the temporal lane arms a timer from (below), which is what makes the marker appear. Reading
+`$now` instead makes the row a function of when it was evaluated, which the projection plane does not
+promise to hold stable.
 
 **Obligations from occurrences (authoring guidance).** A target predicate can only read what the
 graph holds *now* — the platform deliberately keeps no run-history memory. When an obligation follows
@@ -277,13 +282,29 @@ Lens projects the deadline: row column freshUntil = resolve + window (RFC3339)
   `resolve + window` and projects it as the engine-recognized **optional row column `freshUntil`**
   (RFC3339 string; a §10.2 free-form param column by carriage). The engine converts time→op only —
   a non-string/unparseable `freshUntil`, or one without an `entityKey`, surfaces a `RowDataError`
-  Health issue and skips scheduling; a **past** `freshUntil` never schedules (any previously-armed
-  firing is already durable in the stream; a Lens that only projects past deadlines is a package
-  bug that surfaces as "violation never flips").
-- **Level-driven scheduling, no edge detection**: every row delivery carrying a future
+  Health issue and skips scheduling. A **past** `freshUntil` is published **verbatim** and fires
+  **immediately** — nats-server stores an overdue `@at` and releases it at once, which is the correct
+  level reading (the deadline has passed, so the expiry is due now). This is what lets a deadline
+  that lapsed while nothing was watching still be recorded: an entity whose window expired before
+  its target existed carries no marker and therefore reads *fresh* to every consumer, and the
+  overdue firing is the only thing that closes that window. A lens must therefore project a past
+  deadline rather than nulling it — nulling it arms nothing and the gap never opens. The payload's
+  `fireAt` stays the **deadline**, not "now", so a re-projected past deadline derives the same
+  deterministic `requestId` and the Contract #4 tracker collapses the duplicate.
+- **Level-driven scheduling, no edge detection**: every row delivery carrying a
   `freshUntil` re-publishes the schedule — idempotent under one-schedule-per-subject replace —
   so re-doing the entity before expiry **replaces** the prior timer, and restart replay re-arms
-  for free. A schedule-publish failure Naks the row on the bounded delay cadence.
+  for free. A schedule-publish failure Naks the row on the bounded delay cadence. An **absent or
+  null** `freshUntil` re-arms nothing, but it does **not** cancel a schedule already published:
+  a standing timer fires once more and its `MarkExpired` records a lapse nothing re-arms.
+- **A target whose rows never open a gap still keeps time.** Scheduling is the row handler's
+  state-recording leg and runs on **every** delivery, before any gap column is read and even for a
+  disabled target, so a target may declare an empty playbook and exist purely to give a deadline a
+  timer on the entity that owns it. The trade is that such a target has **nothing to raise**: with
+  no gap, disabling it (or a `MarkExpired` the Processor rejects) leaves the lapse unrecorded, every
+  consumer reading the entity as still fresh, and no violation anywhere to say so. That failure is
+  silent by construction and is a deliberate accepted bound, not an oversight — a gap that can never
+  open would be no signal either.
 - **Per-target-per-entity timer slot**: the subject carries both dot-free tokens
   (`schedule.weaver.timer.<targetId>.<entityId>`), so two targets watching the same entity hold
   independent timers. The `fired` token is reserved in this subject space — a targetId literally

@@ -70,6 +70,28 @@ func TestBackgroundCheckFreshness_ProjectsDeadlineWhenNoLapseRecorded(t *testing
 	require.Equal(t, false, v["violating"], "a declared false, not an omitted column — Weaver reads it off the row body")
 }
 
+// TestBackgroundCheckFreshness_PastDeadlineProjectedVerbatim is the DEPLOY-WINDOW
+// input, and the one place a "null when the deadline is already past" guard would
+// be tempting. A check whose window lapsed while no target was watching carries no
+// marker, so it reads FRESH to every consumer; the only thing that closes that
+// window is this row projecting the past instant, Weaver publishing the overdue
+// @at, and NATS releasing it immediately. Nulling a past deadline here arms
+// nothing and the lapse is never recorded at all. The end-to-end recovery is
+// driven by internal/leaseconvergence's
+// TestLeaseConvergence_BgcheckFreshness_LapsedBeforeTheTargetExisted.
+func TestBackgroundCheckFreshness_PastDeadlineProjectedVerbatim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const longPast = "2020-06-01T00:00:00Z"
+	completedBgcheck(t, f, "bg1", longPast)
+
+	v := f.projectBgFreshness(t, "bg1")[0].Values
+	require.Equal(t, longPast, v["freshUntil"],
+		"an already-past deadline with no recorded lapse projects VERBATIM — the overdue @at is the only path to recording it")
+}
+
 // TestBackgroundCheckFreshness_NullOnceLapseRecorded is the disarm vector: once
 // the timer has fired and MarkExpired has recorded the instant under this
 // target's key, freshUntil goes null. That null is load-bearing — a past deadline
@@ -280,6 +302,40 @@ func TestRenewalComplete_BgcheckValidUntil_SiblingTargetLapse(t *testing.T) {
 	v := f.projectRenewalComplete(t, "rn")[0].Values
 	require.Equal(t, farFutureValidUntil, v["bgcheckValidUntil"],
 		"another target's recorded fire is not this target's lapse")
+}
+
+// TestRenewalComplete_ArmsNoTimerOfItsOwn pins that this lens projects no
+// freshUntil, in the cypher AND in the descriptor Weaver actually reads the row
+// through. The window it reports on belongs to a background-check instance
+// reached across providedTo, and that instance carries its own target: a timer
+// here could only mark the RENEWAL, which is neither where the deadline lapses
+// nor where any reader looks. Both halves are asserted because either alone is
+// insufficient — a column absent from the descriptor never reaches Weaver even
+// if the cypher returns it, and a column declared with no cypher term reaches it
+// as a null.
+func TestRenewalComplete_ArmsNoTimerOfItsOwn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	var cols []string
+	for _, l := range Lenses() {
+		if l.CanonicalName == "renewalComplete" {
+			cols = l.Output.BodyColumns
+		}
+	}
+	require.NotEmpty(t, cols, "renewalComplete must be declared")
+	require.NotContains(t, cols, "freshUntil",
+		"renewalComplete declares no freshUntil — Weaver's temporal lane must find no deadline to arm on the renewal")
+
+	f := newLensFixture(t)
+	seedRenewalWithBgcheck(t, f, farFutureValidUntil)
+
+	rows := f.projectRenewalComplete(t, "rn")
+	require.Len(t, rows, 1)
+	require.NotContains(t, rows[0].Values, "freshUntil",
+		"the cypher returns no freshUntil either, so the column cannot reappear through a descriptor edit alone")
+	require.Equal(t, farFutureValidUntil, rows[0].Values["bgcheckValidUntil"],
+		"the window is still REPORTED here — only the timer moved to the instance that owns it")
 }
 
 // TestRenewalComplete_BgcheckValidUntil_TakesTheLatestUnlapsed: the aggregate is
