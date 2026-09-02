@@ -3,6 +3,7 @@ package cafedomain
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -110,4 +111,26 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
 		}
 	}
+}
+
+// TestLenses_StaleTabSettlement_ProjectsFreshUntil pins that
+// cafeStaleTabSettlement's declared BodyColumns include "freshUntil" —
+// staleTabSettlementSpec (lenses.go) computes the column, but Weaver's
+// temporal lane (internal/weaver/temporal.go's freshUntilColumn) only ever
+// sees a row column the LensSpec declares; a cypher that computes it and a
+// BodyColumns list that omits it both compile clean, so nothing but this
+// pin catches the two falling out of sync (found live: the tab's own
+// staleAt deadline never armed a Weaver @at, and a stale tab settled only
+// on an incidental write re-projecting its row).
+func TestLenses_StaleTabSettlement_ProjectsFreshUntil(t *testing.T) {
+	for _, l := range Lenses() {
+		if l.CanonicalName != StaleTabSettlementTarget {
+			continue
+		}
+		if l.Output == nil || !slices.Contains(l.Output.BodyColumns, "freshUntil") {
+			t.Fatalf("%s BodyColumns = %v, must include \"freshUntil\"", StaleTabSettlementTarget, l.Output)
+		}
+		return
+	}
+	t.Fatalf("no lens named %q in Lenses()", StaleTabSettlementTarget)
 }

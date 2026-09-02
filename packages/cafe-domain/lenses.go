@@ -66,7 +66,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "tab",
 				OutputKeyPattern: StaleTabSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_settle", "missing_staleat", "entityKey", "tabKey", "status", "openedAt", "staleAt", "maxretries_settle"},
+				BodyColumns:      []string{"violating", "missing_settle", "missing_staleat", "entityKey", "tabKey", "status", "openedAt", "staleAt", "freshUntil", "maxretries_settle"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
