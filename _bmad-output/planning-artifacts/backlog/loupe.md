@@ -35,6 +35,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **A Weaver gap's flow artifact reads `Live: true` forever** | `weaverArtifactLive`'s `"flow"` arm returns `err == nil` on a bare presence GET of the Loom cursor, which persists after terminal by design — so every completed/failed Weaver-triggered flow renders live. Its `"task"` arm has the same shape over a soft-tombstoned vertex. | ★★ | XS | 📋 ready · filed by the Lattice designer · [why](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md) §2.1 |
+| **Flows-tab liveness must not read absence from the engine list as orphaned** | `flowLiveness` branches on absence before status, so once the control plane lists only running + failed instances, every completed flow flips from `stale-history` to `orphaned` during lens catch-up. Badge a still-running history row by id (`InspectInstance`), never by list membership. | ★★ | S | 📋 ready · seq: lands before the Loom enumeration fire's Inc 2 · [why](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md) §7.1 |
 
 ## Parked
 

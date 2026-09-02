@@ -121,6 +121,11 @@ component's own: `docs/components/loom.md` / `docs/components/weaver.md`.
 - **Engine replicas are interchangeable.** Completion correlation needs no in-memory state: any
   replica resolves any pending completion from the bucket alone, and engine state is rebuildable
   (D3) with no startup scan.
+- **A completed instance's record is permanent, and that is a decision.** It is retained as the
+  dedup evidence above, indefinitely and by design — not held pending some future retention window.
+  Anything that would expire, discard or sweep it removes the guarantee that a re-emitted trigger
+  collapses, so it is not a tuning knob; a design that bounds the retained-record set must first bound
+  the horizon over which a trigger can be re-emitted.
 
 ### `weaver-state` — anti-storm + re-fire promises (§10.8)
 
