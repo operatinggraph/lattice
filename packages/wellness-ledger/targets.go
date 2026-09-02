@@ -27,14 +27,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     priceBookingRef), writing a DIFFERENT settles/settlesClassPrice link, so
 //     the two never converge (or double-charge) each other's gap.
 //   - RefundSettlementTarget's missing_refund — reverses a class-price charge
-//     already posted before its booking was cancelled. Dispatches
-//     WellnessCreditAccount (not WellnessDebitAccount) with refundRef,
-//     anchored on wellness-domain's wellnessrefund marker vertex rather than
-//     the booking, which CancelBooking has already tombstoned by the time
-//     the marker exists. No missing_account gap here: a wellnessrefund only
-//     ever exists because CancelBooking already resolved a live accountKey
-//     off the original charge's postedTo link before minting it — unlike the
-//     two targets above, there is no "account might not exist yet" case here.
+//     and/or a no-show fee already posted before its booking was cancelled
+//     or released (wellness-domain's CancelBooking and ReleaseOrphanedBooking
+//     each mint a wellnessrefund per charge shape they find still posted —
+//     a booking can owe both at once). Dispatches WellnessCreditAccount (not
+//     WellnessDebitAccount) with refundRef, anchored on wellness-domain's
+//     wellnessrefund marker vertex rather than the booking, which is already
+//     tombstoned by the time the marker exists. memo templates off row.memo
+//     (the marker's OWN detail.memo — "Class price refund" or "No-show fee
+//     refund") rather than a literal, since one target now serves both
+//     shapes. No missing_account gap here: a wellnessrefund only ever exists
+//     because its minting op already resolved a live accountKey off the
+//     original charge's postedTo link before minting it — unlike the two
+//     targets above, there is no "account might not exist yet" case here.
 //
 // A booking re-marked away from noShow (SetBookingAttendance is re-markable,
 // unlike clinic's terminal appointment status) drops noShowFeeCents from its
@@ -133,11 +138,11 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: RefundSettlementTarget,
-			Description: "A class price paid for a booking that was later cancelled is credited back to the member's " +
-				"account exactly once.",
+			Description: "A class price or no-show fee paid for a booking that was later cancelled or released " +
+				"(its class called off) is credited back to the member's account exactly once.",
 			LensRef: RefundSettlementTarget,
 			// No missing_account gap: a wellnessrefund only ever exists
-			// because CancelBooking already resolved a live accountKey
+			// because its minting op already resolved a live accountKey
 			// off the original charge's postedTo link (wellness-domain/
 			// ddls.go) before minting it — unlike the two targets above,
 			// there is no "account might not exist yet" case here.

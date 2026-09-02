@@ -215,7 +215,12 @@ walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 # Mirrors CancelBooking's identical undeclared settlesClassPrice/postedTo
 # walk pair above (line 143/148) — ReleaseOrphanedBooking runs the same
 # already-posted-charge lookup, unconditionally, to mint the same
-# wellnessrefund marker on a studio-initiated cancellation.
+# wellnessrefund marker on a studio-initiated cancellation. `settles in` is
+# the no-show-fee sibling of settlesClassPrice: an already-noShow orphaned
+# booking (verticals.md, 2026-09-02) may carry a posted no-show fee that
+# reverses the same way — `postedTo out` above already covers both lookups
+# (same hub type vtx.wellnesstransaction.<id>).
+walk	ReleaseOrphanedBooking	vtx.booking.<id> settles in
 walk	ReleaseOrphanedBooking	vtx.booking.<id> settlesClassPrice in
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out

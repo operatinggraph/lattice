@@ -469,6 +469,13 @@ func (f *wlFixture) projectRefundAt(t *testing.T, refundName string) []ruleengin
 // seeds a real wellnessaccount vertex so accountKey resolves to a live key.
 func (f *wlFixture) mkRefund(t *testing.T, name string, accountName string, amountCents any) {
 	t.Helper()
+	f.mkRefundWithMemo(t, name, accountName, amountCents, "")
+}
+
+// mkRefundWithMemo is mkRefund plus an explicit detail.memo — the field is
+// omitted entirely (a marker that never carried one) when memo is "".
+func (f *wlFixture) mkRefundWithMemo(t *testing.T, name string, accountName string, amountCents any, memo string) {
+	t.Helper()
 	f.vtx(t, name, "wellnessrefund")
 	detail := map[string]any{}
 	if accountName != "" {
@@ -477,6 +484,9 @@ func (f *wlFixture) mkRefund(t *testing.T, name string, accountName string, amou
 	}
 	if amountCents != nil {
 		detail["amountCents"] = amountCents
+	}
+	if memo != "" {
+		detail["memo"] = memo
 	}
 	f.aspect(t, name, "detail", "wellnessRefundDetail", detail)
 }
@@ -495,6 +505,35 @@ func TestWellnessRefundSettlement_NoCredit_MissingRefund(t *testing.T) {
 	require.Equal(t, true, v["missing_refund"], "no wellnesstransaction settlesRefund this marker yet — violating")
 	require.Equal(t, true, v["violating"])
 	requireIntColumn(t, v, "maxretries_refund", maxRefundRetries)
+}
+
+// TestWellnessRefundSettlement_ProjectsMarkerOwnMemo proves memo comes off
+// the marker's own detail.memo rather than a hardcoded label — one target
+// now reverses both a class-price charge and a no-show fee, so the credit's
+// memo must say which.
+func TestWellnessRefundSettlement_ProjectsMarkerOwnMemo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkRefundWithMemo(t, "noshowrefund", "noshowrefund_acct", 2500.0, "No-show fee refund")
+
+	v := f.projectRefundAt(t, "noshowrefund")[0].Values
+	require.Equal(t, "No-show fee refund", v["memo"])
+}
+
+// TestWellnessRefundSettlement_MemoFallsBackWhenAbsent proves a marker with
+// no detail.memo at all still projects a usable (non-null) memo — the
+// coalesce fallback, never a bare null reaching WellnessCreditAccount.
+func TestWellnessRefundSettlement_MemoFallsBackWhenAbsent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkRefund(t, "nomemorefund", "nomemorefund_acct", 1500.0)
+
+	v := f.projectRefundAt(t, "nomemorefund")[0].Values
+	require.Equal(t, "Refund", v["memo"])
 }
 
 func TestWellnessRefundSettlement_Credited_Converged(t *testing.T) {

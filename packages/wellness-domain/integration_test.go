@@ -134,6 +134,23 @@ func nanoIDFromRequestID(requestID string) string {
 	return processor.DeterministicNanoID(pcg, substrate.NanoIDLength)
 }
 
+// nanoIDsFromRequestID returns the first n IDs a script's nanoid.new() calls
+// would produce for requestID, in call order — the same single PCG stream
+// nanoIDFromRequestID's one-call form draws from (starlark_builtins.go: "two
+// calls within the same invocation produce different IDs, the PRNG
+// advances"), needed when one op mints more than one NanoID in a single
+// execution (e.g. ReleaseOrphanedBooking minting a class-price AND a
+// no-show-fee wellnessrefund in the same batch).
+func nanoIDsFromRequestID(requestID string, n int) []string {
+	seed := processor.SeedFromRequestID(requestID)
+	pcg := rand.NewPCG(seed[0], seed[1])
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = processor.DeterministicNanoID(pcg, substrate.NanoIDLength)
+	}
+	return ids
+}
+
 func seedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string, data map[string]any) {
 	t.Helper()
 	if data == nil {
@@ -579,6 +596,38 @@ func TestSetBookingAttendance_RejectsBeforeTheClassBegins(t *testing.T) {
 	// instant, not some later cutoff.
 	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendontime000001", bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:00:00Z"))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestSetBookingAttendance_RejectsAWaitlistedBooking proves a waitlisted
+// entry can never be marked attended/noShow: it never held a confirmed seat,
+// so there is nothing to attend or miss, and — the concrete gap this closes
+// — SetBookingAttendance's own carry-forward list does not include
+// waitlistSlot, so an unguarded transition would silently strand a booking
+// with neither .seat nor .waitlistSlot, a shape ReleaseOrphanedBooking could
+// never cleanly release (verticals.md, 2026-09-02 review).
+func TestSetBookingAttendance_RejectsAWaitlistedBooking(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendwaitlisted")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendwstudio000001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattendwsessio000001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDWTLHJKMNP")
+	bookingKey, outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdattendwbookin000001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("joinWaitlist outcome = %v, want Accepted", outcome)
+	}
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		attendanceEnv(t, "wdattendwattend000001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("marking a waitlisted booking = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidState") {
+		t.Fatalf("rejection should be InvalidState, got %+v", reply.Error)
+	}
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "waitlisted" {
+		t.Fatalf("status.value = %q, want waitlisted (unchanged)", got)
+	}
 }
 
 // TestSetBookingAttendance_EitherValueCorrectsTheOther: a mis-marked member is
