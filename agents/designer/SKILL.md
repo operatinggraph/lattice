@@ -1381,6 +1381,15 @@ greenfield redesign. Cover, as the feature warrants:
   correctness), so the build's Phase-0 re-runs it mechanically instead of trusting prose (trialed 2026-08-09,
   taxonomy item 3: a ratified "four equality sites" was six). §2's census reflexes say how to *derive* one;
   this is the doc obligation that keeps the derivation **re-runnable** after the doc ships.
+  - **Open every member of your classifier's own ERROR bucket before reporting the table.** A census probe
+    has a "couldn't answer" outcome — *unmodelled*, *unresolvable*, *declined*, *n/a* — and that bucket is
+    where the payoff hides: a bug in the probe reads as a property of the subject, and it fails in the
+    direction that makes the design look smaller and safer, so nothing about the result feels wrong. Name the
+    shape that refused each member; a subject you expected to classify cleanly landing there is a probe bug,
+    not a finding. (Trialed 2026-09-02, WITH-alias anchor closure: the first classifier mapped a carried
+    binding `WITH p` to `p → p` and recursed to its depth cap, so **two of the three payoff lenses** reported
+    "key column unresolvable" — including the one whose cost removal was the largest in the fire. One probe
+    fix moved the population from 2 to 3.)
 - **Contract surface:** exactly which `docs/contracts/*` sections it touches (if any) and whether it needs a
   *change* vs. just *building to* them. **Contract prose is a PUBLIC contract of a PRIVATE codebase**
   (Andrew, repeated 2026-08-25): it states observable promises — wire shapes, invariants, refusal
