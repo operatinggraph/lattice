@@ -142,7 +142,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, the bgcheck instance is its own anchor, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff stops at the N-rows conjunct (📐 filed)
+- 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff 📐 filed
 - 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
 - 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
 - 2026-09-01 · `1fca25cf` · [Refractor] pattern-scoped actor walk + Postgres `GetRow` + idle-aware periodic loops + rebuild registration race — 8 stuck personal lenses drain at 10–25 msg/s
@@ -168,8 +168,6 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-08-27 · (triage, no code) · [Processor] Reads-template `:type` segment retired — DetachObject is served package-only by objects-base `derive_reads`; revive: a client-side type-extraction demand.
 - 2026-08-27 · (live-stack op run) · [Bootstrap] stranded operator epoch `b153d120` tooled but never run — 42 edges revoked, 5 packages reinstalled (the tool's derived set, not the design's guess); unblocks 2 verticals.md rows.
 - 2026-08-26 · `b558d163` · [CI] natsperm carved out of unit-4 into its own job — local build/vet/test green, CI-unproven (see flagged row)
-- 2026-08-26 · `b153d120` · [Bootstrap] re-bootstrap-stranded-grants CLOSED — revocation CLI + reserved-name guards (both mint paths); lens residue detect-only; 4 cold reviews, one HIGH found+fixed
-- 2026-08-26 · `8d039bdb` · [Contracts] six 🔭 contract-text flags adjudicated — #2 + #10 amendments ratified as public contracts; #9 timing + three #2 clauses rejected as implementation prose
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
