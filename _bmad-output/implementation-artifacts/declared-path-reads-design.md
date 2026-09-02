@@ -1,10 +1,27 @@
 # Declared-path reads — the declaration channel for a key that does not exist until a traversal runs
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-01 · Winston
-**Frozen-contract edits staged UNCOMMITTED in `main`:** `docs/contracts/02-operation-envelope.md` §2.5
-(class (e) wording; new class (h) + its declared-path paragraph; ceiling + replay-stability sentences) and
-`docs/contracts/10-orchestration-loom.md` §10.5 (the substantive clause — an externalTask step may declare
-subject-rooted paths). No architectural fork.
+**Status: 🗄️ HELD by Andrew 2026-09-01 — shelved; nothing below is a build instruction.** Designer fire
+2026-09-01 · Winston. The ratification due diligence broke the shape on three counts: (1) the path travels
+in the instanceOp's **payload** beside `params`, and the root is `payload.subjectKey`
+(`packages/lease-signing/leasedoc_scripts.go:161`), so *"the root is the surface's own subject, never a
+submitter-supplied value"* is a convention the Processor cannot check — committing it would be fail-open —
+and the rescue (gating resolution itself on the engine actor) is exactly what §10.1 deferred to the
+egress-authority sibling, whose predicate tests the declaration field, not a payload path; (2) resolution
+at step 4 runs the traversal and mints the ref **before** the one consumer's only guard, the script's
+step-5 actor check, so hop failures are a topology oracle; (3) §3.2 and §10.2 disagree on whether the
+script re-walks, and no channel carries a resolved key to a script. Inc 1's own §6.1 gate fired (42 class-B
+rows of the doc's 102, three structurally unretirable; the baseline is 112 today) — **dropped**. A lens
+already expresses this exact traversal and sensitive aspect (`lease-signing/lenses.go:1149-1151`,
+`applicant_name`), so §2.2's "undeclarable on every surface" held for write-path surfaces only.
+**Andrew's product answers close the one consumer without this primitive:** the executed lease takes a
+**point-in-time snapshot** of the party names onto the application (the `underwritingParties` idiom,
+`lease-signing/ddls.go:579`), egressed through the shipped subject-rooted template; and *"multiple
+applicant identities (roommates, cosigners) are definitely a thing"*, so an exactly-one hop rule was a dead
+end regardless. Re-filed as a LoftSpace package row on the verticals board; the lattice row is 🗄️ shelved.
+**Revive trigger:** a second traversal-discovered egress consumer that neither a subject-side snapshot nor
+a lens projection can serve, **and** a declaration that lives outside the payload with resolution gated on
+the engine actor. Both contract hunks reverted; nothing staged. The body below is the withdrawn proposal,
+kept for its grounding ledger (§2) and censuses (§6).
 
 > **This document was re-derived at its own adversarial close.** The draft put the declaration on the
 > **owning DDL** with a `{payload.<field>}` root. Two cold passes broke that shape on three blocking
@@ -199,6 +216,8 @@ or `cmd/edge`. So today a declaration buys static classification and the drift r
 ---
 
 ## 3. The shape
+
+> **Withdrawn (held 2026-09-01) — not a build instruction; see the status banner.**
 
 **One sentence: declare the PATH, not the key — and let the layer that can actually walk it do the walking.**
 
@@ -521,6 +540,8 @@ changes** — the descriptor surfaces, Weaver's gap grammar and the Edge are all
 ---
 
 ## 9. Decomposition for the Steward
+
+> **Withdrawn (held 2026-09-01) — not a build instruction; see the status banner.**
 
 Independently shippable and green. **Inc 1 is posture-changing (the ratchet's admission rule) and Inc 2 is
 posture-changing (an authorization boundary) — both take the Steward's full review depth; Inc 3 is

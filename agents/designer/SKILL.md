@@ -1492,16 +1492,19 @@ greenfield redesign. Cover, as the feature warrants:
     memory summary; and run the in-flight check as a DEPENDENCY query ("which design hands work to this
     one?") as well as a diff-overlap query.
 
-  - **A scope or sequencing fork carries a PAYOFF column, not a lens count.** For each row, name which of
-    the filed harms it retires and the mechanism that stops refusing (file:line, plus any live measurement);
-    a row that retires none of the measured harms says so in those words. (Trialed 2026-09-01, the `$now`
-    sweep: "the anchor-hosted majority first — 10 lenses" read as the payoff row, but every measured
-    payoff — audit enrolment, the plain derivation, the corpus rescan the hub-walk fire had observed live
-    that day — sat in the 4-lens family the table deferred; and my §0.1 quote had dropped the two words of
-    Andrew's row, "'s outcome", that named that family. Ratification chose the whole sweep once the census
-    was on the table.) Two corollaries: quote the ask from the commit that filed the row, never from a
-    memory summary; and run the in-flight check as a DEPENDENCY query ("which design hands work to this
-    one?") as well as a diff-overlap query.
+  - **"No surface can express X" is a census of the WRITE-path surfaces until you have opened the read
+    path too; and an exactly-one traversal rule is a product commitment wearing a mechanism's clothes.**
+    (Trialed 2026-09-01, declared-path reads — HELD at ratification. The design's premise, "every
+    declaration surface resolves its key at dispatch, so a link-reached key is undeclarable", was true of
+    the four write-path surfaces and false of the platform: a lens in the same package already projected
+    the exact traversal and sensitive aspect. Its hop rule "every hop resolves to exactly one live link"
+    was single-valued only because the creating op is create-only, and the package's own vocabulary
+    carried `coApplicantName`; Andrew: "multiple applicant identities (roommates, cosigners) are
+    definitely a thing". And "no wire change" + "the root is engine-owned" were mutually exclusive — the
+    path rode the payload. The consumer closed as a point-in-time snapshot on the subject, an XS package
+    row.) **Three checks:** name the CARRIER of every new declaration and who can write it; census the
+    read surfaces (lenses, derivations) before calling anything undeclarable; when a rule fixes a
+    cardinality, grep the domain vocabulary for the plural and ask the principal.
 
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly. Two obligations: **every test the
