@@ -362,6 +362,20 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		}
 	}
 
+	// Run registers the durable with the supervisor only after creating it
+	// server-side, so a rebuild arriving in that window — a MATCH hot-reload at
+	// boot, a control-plane Rebuild right after Run starts — would be told "not
+	// managed" by the reset below and abandon a rescan the lens needs. The same
+	// guard Pause/Resume use: wait, briefly, for Run to publish the consumer. A
+	// consumer that is not managed AFTER Run has registered is a different case
+	// — the durable removed from under a live pipeline, which the deleter does
+	// before cancelling the run — and that one must reach the reset below so the
+	// refusal it meets there is the one recorded.
+	if p.supervisor != nil && !p.supervisor.IsManaged(p.consumerCfg.Name) && !p.awaitStarted(ctx) {
+		return p.abandonRebuild(ctx, sig, fmt.Errorf(
+			"pipeline: rebuild: the supervised consumer %q is not registered yet", p.consumerCfg.Name))
+	}
+
 	// 2. Optional target-store truncation, after the guarded-target force rule
 	// (resolveTruncate) has had its say about what the request really means.
 	truncate = resolveTruncate(p.currentAdapter(), p.ruleID, truncate)

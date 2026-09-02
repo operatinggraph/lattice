@@ -715,6 +715,11 @@ func TestRebuild_AbandonedResetDescribesWhatWasAdopted(t *testing.T) {
 		require.NoError(t, err)
 		p.supervisor = substrate.NewConsumerSupervisor(nil)
 		p.consumerCfg = substrate.ConsumerSpec{Name: "never-managed"}
+		// Run has registered and the durable was removed from under the live
+		// pipeline since — the deleter's ordering — so the rebuild must reach
+		// the reset and record the refusal it meets there, not wait for a
+		// registration that already happened.
+		close(p.started)
 		return p, reporter
 	}
 
