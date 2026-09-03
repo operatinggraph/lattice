@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -16,6 +17,11 @@ import (
 // goroutine startPipeline's activation work already runs on), so a hang here
 // would stall every other lens's spec processing, not just this one's
 // removal — generous relative to the NATS round trips involved, but bounded.
+//
+// It is the default remover.timeout resolves to, not a value read directly:
+// exercising the teardown's own expiry is the only way to reach its failure
+// path with no supervisor behind the pipeline, and waiting out thirty real
+// seconds to do that is a fixed sleep standing in for synchronisation.
 const deleteTimeout = 30 * time.Second
 
 // pipelineDeleter implements control.Deleter for one lens: stops its
@@ -104,18 +110,20 @@ func (d pipelineDeleter) Delete(ctx context.Context) error {
 	return nil
 }
 
-// remover applies a lens tombstone (parent vertex deleted, or its .spec
-// aspect deleted) to the running pipeline registry: it stops the pipeline
-// and removes its durable consumer through the exact same pipelineDeleter
-// the operator "delete" control RPC uses, so a lens whose Core KV definition
-// disappears cannot strand a durable JetStream consumer just because no
-// operator happened to call delete first (every uninstalled lens did,
-// before this — the leak this type closes).
+// remover takes a lens out of the running pipeline registry: it stops the
+// pipeline and removes its durable consumer through the exact same
+// pipelineDeleter the operator "delete" control RPC uses. Its standing trigger
+// is a lens tombstone (parent vertex deleted, or its .spec aspect deleted), so a
+// lens whose Core KV definition disappears cannot strand a durable JetStream
+// consumer just because no operator happened to call delete first.
 //
-// Never invoked for a spec UPDATE — lens.CoreKVSource only calls the removal
-// callback from its two IsDeleted branches, never from dispatchSpec's update
-// path (which drives updateCB / reloader.update instead), so the hot-reload
-// and removal paths cannot be confused structurally.
+// lens.CoreKVSource itself calls the removal callback only from its two
+// IsDeleted branches, never from dispatchSpec's update path (which drives
+// updateCB / reloader.update instead), so a tombstone and a spec edit cannot be
+// confused structurally. The update path reaches remove on exactly one arm, and
+// deliberately: an Output-descriptor change, where reloader.reactivate composes
+// this removal with a fresh activation because the envelope, delete key and
+// sweep plan the descriptor shapes are installed only by activation.
 type remover struct {
 	logger *slog.Logger
 	// take looks up the registry entry for lensID and removes it in the same
@@ -149,14 +157,62 @@ type remover struct {
 	// lens that registered as a reprojection consumer and then failed a later
 	// activation step would otherwise stay on that list forever. May be nil.
 	dropGrantConsumer func(ruleID string)
+	// timeout bounds one teardown. Usable at its zero value — which resolves to
+	// deleteTimeout, so production wiring and every fixture that builds a bare
+	// &remover{} get the real bound with nothing to set. A test shortens it to
+	// reach the expiry branch deterministically, since that branch is the only
+	// teardown failure a pipeline with no supervisor can produce.
+	timeout time.Duration
 }
+
+// teardownTimeout is the bound one removal runs under: the configured value, or
+// the package default when none was set.
+func (rm *remover) teardownTimeout() time.Duration {
+	if rm.timeout > 0 {
+		return rm.timeout
+	}
+	return deleteTimeout
+}
+
+// errLensNotRunning reports that there was nothing to stop: no registry entry
+// for this lens ID. It is not a failure — a lens whose activation never reached
+// the registry, or one a concurrent operator `delete` already removed, is
+// exactly as stopped as one this call tore down — but it is not a teardown
+// either, and a caller about to start a replacement has to tell the two apart.
+var errLensNotRunning = errors.New("lens is not in the pipeline registry")
 
 // remove is lens.RemoveCallback. old is CoreKVSource's last-loaded snapshot
 // of the tombstoned rule; CoreKVSource never passes nil (the callback only
 // fires for a rule that previously reached the load callback).
+//
+// A tombstone has nothing left to decide on the outcome: the lens definition is
+// gone either way, and stop has already recorded a failed teardown on the lens's
+// own health entry. So this logs and returns, while the re-activation trigger
+// calls stop directly — it has something that must not happen if the stop
+// failed.
 func (rm *remover) remove(old *lens.Rule) {
+	if err := rm.stop(old, "tombstone"); err != nil && !errors.Is(err, errLensNotRunning) {
+		rm.logger.Error("remove tombstoned lens", "lensId", lensIDOf(old), "err", err)
+	}
+}
+
+// stop is the removal itself: it takes the lens out of the registry, tears the
+// pipeline down through pipelineDeleter, and reports whether the lens actually
+// STOPPED. trigger names why, for the log line.
+//
+// The error matters to a caller that intends to start something in this lens's
+// place. pipelineDeleter.Delete returns its "remove durable" failure BEFORE it
+// cancels the run context, so a failure there leaves the old pump alive — and
+// activating a replacement on the strength of a teardown that did not happen
+// puts two pipelines, two durables and two writers on one lens.
+//
+// The control-plane registration and the "removed" log both wait for a
+// successful Delete, for the same reason: a lens whose pump is still running
+// must stay addressable by the operator "delete" RPC, which drives the identical
+// idempotent pipelineDeleter and is the retry.
+func (rm *remover) stop(old *lens.Rule, trigger string) error {
 	if old == nil {
-		return
+		return errors.New("no rule to remove")
 	}
 	if rm.clearRefused != nil {
 		rm.clearRefused(old.ID)
@@ -168,15 +224,43 @@ func (rm *remover) remove(old *lens.Rule) {
 	if !ok {
 		// Never started (activation failed before the registry insert — the
 		// clearRefused call above is what actually matters for THAT case)
-		// or already removed by a concurrent delete — nothing else to tear
-		// down.
-		return
+		// or already removed by a concurrent delete. Nothing to tear down, and
+		// nothing to put in its place either: whoever removed it decided this
+		// lens ID is going away.
+		return errLensNotRunning
 	}
-	delCtx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
+	delCtx, cancel := context.WithTimeout(context.Background(), rm.teardownTimeout())
 	defer cancel()
 	if err := (pipelineDeleter{ruleID: old.ID, entry: entry, clearRefused: rm.clearRefused, dropGrantConsumer: rm.dropGrantConsumer}).Delete(delCtx); err != nil {
-		rm.logger.Error("remove tombstoned lens", "lensId", old.ID, "err", err)
+		// The health entry survives a failed teardown: Delete removes the durable
+		// FIRST and only reaches reporter.Delete once the pump has stopped, so a
+		// failure here leaves an entry that still describes a lens — one whose
+		// pump may well still be running. Recording the diagnosis on it is the
+		// only account an operator gets; the alternative is a lens that has
+		// silently left the registry while still writing.
+		if entry.reporter != nil {
+			// A FRESH context, deliberately: the commonest teardown failure is
+			// delCtx expiring while Delete waits for Run to return, and recording
+			// the diagnosis on the very context whose expiry IS the diagnosis
+			// would drop it silently.
+			recCtx, recCancel := context.WithTimeout(context.Background(), rm.teardownTimeout())
+			msg := fmt.Sprintf("lens teardown failed — %v; the pump may still be running; retry with the operator delete op", err)
+			if recErr := entry.reporter.RecordError(recCtx, msg); recErr != nil {
+				rm.logger.Error("record lens teardown failure in health", "lensId", old.ID, "err", recErr)
+			}
+			recCancel()
+		}
+		return err
 	}
 	rm.unregister(old.ID)
-	rm.logger.Info("lens pipeline removed (tombstone)", "lensId", old.ID, "canonicalName", old.CanonicalName)
+	rm.logger.Info("lens pipeline removed", "lensId", old.ID, "canonicalName", old.CanonicalName, "trigger", trigger)
+	return nil
+}
+
+// lensIDOf names a rule for a log line, tolerating the nil stop refuses.
+func lensIDOf(r *lens.Rule) string {
+	if r == nil {
+		return ""
+	}
+	return r.ID
 }

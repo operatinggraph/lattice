@@ -4,7 +4,7 @@ package pipeline
 // FilterSubjects eligibility/derivation (NarrowedFilterEligible,
 // ConsumerFilter) and the registration-error fallback
 // (registerWithFilterFallback), including its health-signal side effects
-// (RecordError on fallback, ClearLastError on a clean first attempt) —
+// (RecordError on fallback, ClearLastErrorIf on a clean first attempt) —
 // coverage independent of any real compiled rule or supervisor, using
 // registerWithFilterFallback's own register/applyBroad callback hooks rather
 // than a live consumer. The e2e proof that a narrowed consumer actually
@@ -481,7 +481,7 @@ func TestRegisterWithFilterFallback_BroadFilterNeverRetried(t *testing.T) {
 // newFallbackHealthReporter stands up an in-memory NATS server with a single
 // HEALTH KV bucket and returns a Reporter for ruleID — the minimal fixture the
 // tests below need to observe registerWithFilterFallback's real
-// RecordError/ClearLastError effects, with no Core/Adj KV, no supervisor, and
+// RecordError/ClearLastErrorIf effects, with no Core/Adj KV, no supervisor, and
 // no real consumer (mirrors output_collision_test.go's newCollisionKVs).
 func newFallbackHealthReporter(t *testing.T, ruleID string) *health.Reporter {
 	t.Helper()
@@ -507,9 +507,9 @@ func newFallbackHealthReporter(t *testing.T, ruleID string) *health.Reporter {
 // (health-kv-schema.md's "preserved across restarts" contract).
 func TestRegisterWithFilterFallback_CleanSuccessClearsStaleFault(t *testing.T) {
 	reporter := newFallbackHealthReporter(t, "rwff-clear")
+	require.NoError(t, reporter.RecordError(context.Background(), "an earlier, unrelated error"))
 	require.NoError(t, reporter.RecordError(context.Background(),
 		"narrowed Core KV filter registration failed, fell back to the broad filter: injected stale rejection"))
-	require.NoError(t, reporter.RecordError(context.Background(), "second stale error"))
 
 	p := &Pipeline{ruleID: "rwff-clear", reporter: reporter}
 	calls := 0
@@ -526,6 +526,30 @@ func TestRegisterWithFilterFallback_CleanSuccessClearsStaleFault(t *testing.T) {
 	require.NoError(t, gerr)
 	require.Nil(t, entry.LastError, "a clean registration must clear the stale latch")
 	require.Equal(t, uint64(2), entry.ErrorCount, "errorCount must survive the clear")
+}
+
+// TestRegisterWithFilterFallback_CleanSuccessKeepsAnotherWritersFault is the
+// boundary of the clear above, and it is a live seam rather than a hypothetical
+// one: an Output edit's re-activation records "could not clear the target" on
+// this same entry moments before the replacement pipeline registers, and Loupe's
+// fault conjunct needs a LIVE LastError. A clean registration proves the
+// REGISTRATION healthy and nothing else, so it may only retire the message it
+// itself wrote.
+func TestRegisterWithFilterFallback_CleanSuccessKeepsAnotherWritersFault(t *testing.T) {
+	reporter := newFallbackHealthReporter(t, "rwff-foreign")
+	const foreign = "re-activation could not clear the target before the replay — rows the new Output no longer addresses may survive"
+	require.NoError(t, reporter.RecordError(context.Background(), foreign))
+
+	p := &Pipeline{ruleID: "rwff-foreign", reporter: reporter}
+	err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+		t.Fatal("applyBroad must not be called on a clean first-attempt success")
+	}, func() error { return nil })
+	require.NoError(t, err)
+
+	entry, gerr := reporter.GetStatus(context.Background())
+	require.NoError(t, gerr)
+	require.NotNil(t, entry.LastError, "a clean registration must not retire a fault it did not raise")
+	require.Equal(t, foreign, *entry.LastError)
 }
 
 // TestRegisterWithFilterFallback_FallbackSuccessKeepsFreshError is the

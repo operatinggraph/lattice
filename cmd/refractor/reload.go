@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 
@@ -14,11 +15,12 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 )
 
-// reactivateRemedy names what an operator must actually do when a spec change
-// cannot be applied to a running pipeline. Deleting and re-creating the lens
-// definition is one way; for a package-installed lens, whose definition is
-// re-authored by an upgrade rather than by hand, re-activating Refractor is the
-// one that applies — activation reads the current spec and installs all of it.
+// reactivateRemedy names what an operator must actually do about one of the
+// pinned spec changes hotReloadRefusal still refuses. Deleting and re-creating
+// the lens definition is one way; for a package-installed lens, whose definition
+// is re-authored by an upgrade rather than by hand, re-activating Refractor is
+// the one that applies — activation reads the current spec and installs all of
+// it.
 const reactivateRemedy = "the lens must be re-activated (restart Refractor, or delete and re-create the lens definition)"
 
 // targetBuilder opens a rule's write target. The concrete implementation needs
@@ -78,13 +80,30 @@ func adapterIsGuarded(adpt adapter.Adapter) bool {
 // and A rides in unexamined.
 //
 // A hot reload swaps the adapter (INTO-only) or the compiled rule (MATCH), and
-// nothing else. So the refusals are exactly the changes neither swap can carry:
-// a change to what the pipeline decrypts, a change to the envelope and fan-out
-// wiring installed once at activation, and a change of the surface — or the
-// identity — a lens has already written keys to and can no longer retract.
-// Both kinds of update are held to all of them: a lens whose Output and cypher
-// change together reaches the MATCH path, where the envelope is re-installed
-// exactly as little as it is on the INTO path.
+// nothing else. What it refuses is the narrower set that an in-place swap cannot
+// carry AND that this path does not re-activate for: secureColumns, a secure
+// lens's table/dsn, grantTable, protected, a guarded lens's write surface, and
+// the authorization plane.
+//
+// The line between the two is what the edit does to rows that are already
+// written, or to read-path posture. Each pin above leaves something behind that
+// restarting the lens does not put right — grant rows no producer addresses
+// afterwards, an RLS posture no swap re-verified, a decrypt set that decides
+// which ciphertexts open — and the call about how to reconcile that belongs to
+// an OPERATOR, not to whichever package upgrade happened to commit the spec.
+// That is why the reason each returns names an operator action
+// (reactivateRemedy) rather than performing one.
+//
+// An Output-descriptor edit is deliberately NOT among them. It changes the
+// envelope, the delete-key derivation, the sweep plan and the guard predicate,
+// which are installed once at activation and which neither swap re-runs — but
+// the rows it leaves behind ARE reconcilable without a human: the purge and the
+// full re-projection reloader.reactivate performs are exactly the reconciliation,
+// and they are decidable from the two descriptors alone.
+//
+// Both kinds of update are held to every refusal below: a lens whose pinned
+// fields and cypher change together reaches the MATCH path, where none of that
+// installation is re-run either.
 func hotReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
 	// A live pipeline's secure decryptor is fixed at activation (installing one
 	// mid-run would race the handler), so changing secureColumns needs a lens
@@ -101,18 +120,6 @@ func hotReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
 		(entry.table != newLens.Into.Table || entry.dsn != newLens.Into.DSN) {
 		return "secure lens update changes table/dsn — not hot-reloadable (no RLS re-verify on swap); " + reactivateRemedy
 	}
-	// The §6.13 Output descriptor shapes the on-wire envelope, the delete-key
-	// derivation, the sweep plan and the guard predicate — all installed once,
-	// at activation, by InstallActorAggregate. An INTO-only update rebuilds the
-	// adapter and re-runs none of it, so accepting an Output edit would leave
-	// the live envelope emitting the activated empty-behavior into an adapter
-	// built for the new one. `output` is a separate aspect from `into`, so
-	// editing it alone reaches this path with the Match clause untouched — and
-	// editing it TOGETHER with the cypher reaches the MATCH path, which
-	// re-installs the envelope no more than the INTO path does.
-	if !outputDescriptorsEqual(entry.output, newLens.Output) {
-		return "lens Output descriptor changed — not hot-reloadable (the envelope, delete key and sweep plan are installed at activation); " + reactivateRemedy
-	}
 	// Whether a lens projects the shared actor_read_grants table is its
 	// identity, not its INTO config. Flipping it off strands every grant row
 	// the lens wrote — no producer addresses that grant_source afterwards, so
@@ -124,10 +131,18 @@ func hotReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
 	}
 	// `protected` is the fourth thing that decides whether the built adapter
 	// carries the §6.2 guard: NewProtectedAdapter forces it on the inner
-	// adapter, and a bare PostgresAdapter has it off. The other three — the
-	// auth-plane bucket, the Output descriptor's tombstone empty-behavior, and
-	// grantTable — are each pinned above, so pinning this one closes the set,
-	// and a guarded lens cannot be edited into an unguarded one.
+	// adapter, and a bare PostgresAdapter has it off. Two of the other three —
+	// the auth-plane bucket and grantTable — are pinned above; the fourth, the
+	// Output descriptor's tombstone empty-behavior, is not pinned at all.
+	//
+	// What the set is closed against is a SWAP: no edit can turn a live guarded
+	// pipeline into an unguarded one while it runs. The empty-behavior arm can
+	// genuinely retire the guard — `delete` edited to `emptyDoc` produces a lens
+	// that needs none — and that is correct, because it goes the long way round:
+	// re-activation purges the guarded rows the old watermarks ordered and then
+	// rebuilds the adapter from the new rule through buildAdapter, so the guard
+	// is re-derived from the spec rather than dropped out from under rows still
+	// carrying it.
 	//
 	// This is the pin that has no backstop underneath it. HotReloadInto refuses
 	// an unguarded replacement only once RequireGuardedAdapter has armed the
@@ -201,6 +216,52 @@ func outputDescriptorsEqual(a, b *lens.OutputDescriptorSpec) bool {
 		sameColumnSet(a.BodyColumns, b.BodyColumns) &&
 		stringsEqual(a.Lanes, b.Lanes) &&
 		sameColumnSet(a.StaticEmptyColumns, b.StaticEmptyColumns)
+}
+
+// replayCannotOverwrite reports whether the re-projection a re-activation runs
+// would leave rows of the OLD shape standing — the question that decides whether
+// the target must be purged first.
+//
+// Two ways it can. The keys can move, so the replay writes somewhere else
+// entirely and nothing it does reaches what is already stored. Or the new
+// descriptor can stop writing for an actor at all: emptyBehavior `skip` produces
+// no write for an empty result, where every other behavior writes a document or
+// a tombstone — so an actor that empties out keeps whatever the old descriptor
+// last left at its key, forever.
+//
+// nil is a shape of its own: a descriptor arriving or departing changes how
+// every key is derived.
+func replayCannotOverwrite(a, b *lens.OutputDescriptorSpec) bool {
+	if a == nil || b == nil {
+		return a != b
+	}
+	if outputKeyShapeChanged(a, b) {
+		return true
+	}
+	return b.EmptyBehavior == string(projection.EmptySkip) &&
+		a.EmptyBehavior != string(projection.EmptySkip)
+}
+
+// outputKeyShapeChanged reports whether two §6.13 Output descriptors ADDRESS
+// different keys.
+//
+// Four fields decide that, through two mechanisms. BuildKey renders the key from
+// OutputKeyPattern, substituting the actor suffix — which KeyColumn narrows from
+// `<type>.<id>` to the bare id. AnchorType and EntryKeyColumn do not reach
+// BuildKey at all: they decide which keys the lens CLAIMS, through AnchorFromKey
+// (whose vertex-type check is AnchorType) and through the per-entry split, which
+// appends one more trailing token to every key EntryEnvelopeFn writes.
+//
+// A lens activated on a moved key shape cannot name the rows it already wrote,
+// so no later delivery, sweep or tombstone will ever retract them.
+func outputKeyShapeChanged(a, b *lens.OutputDescriptorSpec) bool {
+	if a == nil || b == nil {
+		return a != b
+	}
+	return a.AnchorType != b.AnchorType ||
+		a.OutputKeyPattern != b.OutputKeyPattern ||
+		a.KeyColumn != b.KeyColumn ||
+		a.EntryKeyColumn != b.EntryKeyColumn
 }
 
 // actorFieldOf resolves the descriptor's top-level actor field to the value the
@@ -298,6 +359,7 @@ func newPipelineEntry(
 		grantSource:        r.Into.GrantSource,
 		grantTable:         r.Into.GrantTable,
 		output:             r.Output,
+		projectionKind:     r.ProjectionKind,
 		secureColumns:      r.Into.SecureColumns,
 		rule:               r,
 		taxExpansionLabels: labels,
@@ -358,6 +420,21 @@ type reloader struct {
 	// already registered, racing two pipelines for one lens ID.
 	activateForTaxonomy func(*lens.Rule)
 
+	// deactivate stops a running lens and takes it out of the registry through
+	// the exact removal a tombstone takes — remove the durable, cancel, wait for
+	// Run to return, forget the cap-read producer, delete the health entry,
+	// unregister from the control plane. main.go wires it to remover.stop, the
+	// same mechanism it hands CoreKVSource for a tombstone. reactivate composes
+	// it with activateForTaxonomy to carry an Output edit.
+	//
+	// It reports whether the lens actually STOPPED, and reactivate treats a
+	// non-nil error as an abort rather than a step to log past: the durable
+	// removal fails before the run context is cancelled, so a failed teardown
+	// leaves the old pump alive, and activating over it would put two pipelines,
+	// two durables and two writers on one lens ID. A nil deactivate is refused
+	// there for the same reason.
+	deactivate func(old *lens.Rule) error
+
 	// ruleKnown reports whether CoreKVSource still has ruleID loaded
 	// (src.Get's second return, ignoring the rule itself) — retryRefused's
 	// belt to remover.remove/pipelineDeleter.Delete's eviction braces: a
@@ -399,14 +476,22 @@ type reloader struct {
 // edit that did not land distinguishable from one that applied.
 func (rl *reloader) refuse(entry *pipelineEntry, lensID, reason string, attrs ...any) {
 	rl.logger.Error(reason, append([]any{"lensId", lensID}, attrs...)...)
+	// A lens with no health reporter still gets the log line. The guard is for
+	// the entry shapes a harness builds directly; production activation always
+	// supplies a reporter, so this can never silently downgrade a real refusal to
+	// a log-only one.
+	if entry.reporter == nil {
+		return
+	}
 	if err := entry.reporter.RecordError(rl.ctx, reason); err != nil {
 		rl.logger.Error("record hot-reload refusal in health", "lensId", lensID, "err", err)
 	}
 }
 
 // update applies a lens-definition change to the running pipeline: an
-// INTO-only update swaps the adapter, a MATCH change swaps the compiled rule.
-func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
+// INTO-only update swaps the adapter, a MATCH change swaps the compiled rule,
+// and an Output-descriptor change re-activates the lens in place.
+func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 	entry, ok := rl.lookup(newLens.ID)
 	if !ok {
 		// A lens can be "unknown" to the registry for two different reasons:
@@ -433,6 +518,26 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 	if reason := hotReloadRefusal(entry, newLens); reason != "" {
 		rl.refuse(entry, newLens.ID, reason,
 			"target", entry.target, "bucket", entry.bucket, "table", entry.table)
+		return
+	}
+	// An Output edit is carried by re-activation, not by either swap. It is
+	// decided AFTER the refusal check for the same reason both swaps are: a lens
+	// moving its Output together with something genuinely unswappable must still
+	// be refused, and tearing the pipeline down first would stop a lens the
+	// refusal meant to keep running. Both kinds arrive here — `output` is its own
+	// aspect, so editing it alone leaves the Match string untouched and
+	// classifies IntoOnly, while editing it beside the cypher classifies
+	// MatchChange — and both need the same treatment, since neither swap
+	// re-installs the envelope.
+	//
+	// projectionKind rides the same arm because it decides whether the descriptor
+	// is installed AT ALL: activation's install switch dispatches on
+	// projection.IsActorAggregate, so a lens edited into or out of the
+	// actor-aggregate kind with a byte-identical Output needs exactly the same
+	// re-installation, and no swap performs it.
+	if !outputDescriptorsEqual(entry.output, newLens.Output) ||
+		entry.projectionKind != newLens.ProjectionKind {
+		rl.reactivate(entry, old, newLens)
 		return
 	}
 	switch kind {
@@ -580,5 +685,213 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		markTaxonomyRebuildPending(entry, matchShrank)
 		rl.startTaxonomyRebuild(entry, newLens.ID,
 			"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set")
+	}
+}
+
+// reactivate carries an Output-descriptor or projectionKind edit the one way a
+// running lens can take one: it stops the lens and activates it again from the
+// new spec.
+//
+// The envelope, the delete-key derivation, the sweep plan and the guard
+// predicate the descriptor shapes are installed once, by
+// projection.InstallActorAggregate at activation, and activation is the only
+// path that owns them — the pipeline, this entry and the auditor each hold a
+// copy, read from the handler and audit goroutines while a reload runs on the
+// dispatch goroutine, so re-deriving them in place would be a data race rather
+// than a repair.
+//
+// Composing the two halves here is safe because both already run on THIS
+// goroutine: deactivate is the removal a tombstone drives and
+// activateForTaxonomy the activation a first load drives. The registry is keyed
+// by lens ID, so the old entry is gone before the new one can be inserted and
+// the two can never coexist. The durable activation creates is fresh and starts
+// at DeliverLastPerSubject, which is what makes this a full re-projection of the
+// current corpus rather than a re-compile only future events would see.
+func (rl *reloader) reactivate(entry *pipelineEntry, old, newLens *lens.Rule) {
+	// Both halves, plus the rule the removal is driven from. Anything missing is a
+	// REFUSAL rather than a skipped step: remover.stop reports "no rule to remove"
+	// for a nil rule exactly as an unwired deactivate cannot remove anything, and
+	// activating on the back of either would register a second pipeline for a lens
+	// ID whose first one is still running — two durables and two writers on one
+	// surface.
+	if rl.deactivate == nil || rl.activateForTaxonomy == nil || old == nil {
+		rl.refuse(entry, newLens.ID,
+			"lens Output edit refused — re-activation cannot be driven (the running rule or a registry half is missing); the lens keeps its activated spec")
+		return
+	}
+	if reason := reactivationPreflight(entry.target, newLens); reason != "" {
+		rl.refuse(entry, newLens.ID, "lens Output edit refused — "+reason+"; the lens keeps its activated spec")
+		return
+	}
+
+	// Read from the entry while it is still the live record of what the lens is
+	// running; the teardown below retires it. A guarded target purges whatever
+	// this answers (TruncateForReactivation's force rule), which is why the
+	// pre-flight above — not a second conjunct here — is what keeps a purge off
+	// a target that is not NATS-KV.
+	requested := replayCannotOverwrite(entry.output, newLens.Output)
+
+	if err := rl.deactivate(old); err != nil {
+		// Nothing was running under this ID. Whoever removed it — a concurrent
+		// operator delete, or an activation that never reached the registry —
+		// decided the lens is going away, so this edit has nothing to re-activate
+		// and no health entry to write to: update's own unknown-lens arm takes the
+		// same view, and re-creating a record for a lens a delete has just taken
+		// away would resurrect it in every operator view.
+		if errors.Is(err, errLensNotRunning) {
+			rl.logger.Warn("Output edit on a lens that is no longer running", "lensId", newLens.ID)
+			return
+		}
+		rl.refuse(entry, newLens.ID,
+			"lens Output edit refused — the running lens could not be stopped, so nothing may be started in its place; it keeps its activated spec",
+			"err", err)
+		return
+	}
+	// The teardown reported success, so Run has returned — pipelineDeleter.Delete
+	// waits for exactly that. Asserting it rather than assuming it is what keeps
+	// an old-shape write from landing after the purge, or a second pump from
+	// writing beside the new one: an unclosed channel here means the deactivation
+	// wired to this reloader is not the one that waits, which no amount of
+	// activation would repair.
+	select {
+	case <-entry.done:
+	default:
+		rl.recordDark(entry, newLens.ID,
+			"re-activation aborted — the lens was removed from the registry but its pipeline has not stopped, so no replacement was started; restart Refractor, or fix the spec and reinstall")
+		return
+	}
+	rl.logger.Info("lens deactivated for an Output change", "lensId", newLens.ID)
+
+	// Between Run returning and the replay starting — TruncateForReactivation's
+	// own doc carries both halves of that ordering, and the guarded-force,
+	// truncatability and ownership rules it applies. A failure is recorded and the
+	// activation still runs: the replay re-derives whatever a partial purge
+	// removed, while abandoning here would leave the lens dark AND its rows half
+	// gone.
+	// A descriptor ARRIVING is the one direction the purge cannot serve. The old
+	// adapter carries no key prefix — ApplyTruncateScope derives one only for an
+	// actor-aggregate lens — so the purge is declined as unconfined, and scoping
+	// it off the NEW descriptor would be wrong twice over: the stranded rows are
+	// the plain lens's, written under a key shape the new descriptor does not
+	// claim. The re-activation still lands; what it cannot do is retract what the
+	// plain lens left, which is the same thing a tombstone or a restart leaves
+	// behind.
+	if entry.output == nil && newLens.Output != nil {
+		rl.logger.Warn("lens gained an Output descriptor: rows the plain lens wrote are not addressable by the new descriptor and are not retracted; remove them by hand if the old key shape must not linger",
+			"lensId", newLens.ID, "outputKeyPattern", newLens.Output.OutputKeyPattern)
+	}
+	truncated, err := entry.pipeline.TruncateForReactivation(rl.ctx, requested)
+	if err != nil {
+		reason := "re-activation could not clear the target before the replay — rows the new Output no longer addresses may survive"
+		rl.logger.Error(reason, "lensId", newLens.ID, "err", err)
+		if recErr := entry.reporter.RecordError(rl.ctx, reason); recErr != nil {
+			rl.logger.Error("record re-activation truncate failure in health", "lensId", newLens.ID, "err", recErr)
+		}
+	}
+	rl.logger.Info("lens target cleared for re-activation", "lensId", newLens.ID, "truncated", truncated)
+
+	rl.activateForTaxonomy(newLens)
+
+	// A lens that is neither registered nor queued for a taxonomy retry is dark.
+	// A lens queued for taxonomy is NOT dark in this sense — it is refused pending
+	// an expansion the taxonomy has yet to supply, which retryRefused drives on
+	// its own, exactly as a first load would.
+	rl.refusedMu.Lock()
+	_, queued := rl.refused[newLens.ID]
+	rl.refusedMu.Unlock()
+	if _, live := rl.lookup(newLens.ID); !live && !queued {
+		rl.recordDark(entry, newLens.ID,
+			"re-activation after an Output change failed — the lens is dark; restart Refractor, or fix the spec and reinstall (the entry resumes on its own once a pipeline is behind it)")
+		return
+	}
+	rl.logger.Info("lens re-activated after an Output change", "lensId", newLens.ID)
+}
+
+// natsKVTarget is the Rule-side spelling of the NATS-KV target
+// (lens.translateSpec's `nats_kv` arm — the package DSL's own `nats-kv` is
+// normalized before a Rule ever exists).
+const natsKVTarget = "nats_kv"
+
+// reactivationPreflight runs the checks a re-activation must pass before
+// anything is torn down, and returns the reason it would be refused, or "".
+//
+// It exists so a malformed edit leaves the OLD lens running rather than stopping
+// it for an activation that was always going to refuse — and so that the purge
+// between the two halves can never run against a target this path has no
+// business clearing. Everything here is decidable from the running target and
+// the new rule alone; everything startPipeline refuses on that is NOT here is
+// about the substrate — a Vault backend, a target that will not open — which an
+// Output edit does not move.
+//
+// BOTH targets must be NATS-KV, and that is the whole of the guard rather than a
+// flag consulted later. The Output descriptor's only home is a NATS-KV bucket:
+// the write guard (EnableProjectionGuard fails closed on any other adapter), the
+// perEntry key listing (adapter.PrefixKeyLister), the row read-back
+// (adapter.RowReader) and the retraction and sweep transports built on that pair
+// are all NATS-KV capabilities. Checking only the NEW rule would leave the
+// dangerous direction open, because the purge runs on the OLD adapter and a
+// PROTECTED Postgres adapter answers yes to every question
+// TruncateForReactivation asks — NewProtectedAdapter forces the §6.2 guard on
+// it, so resolveTruncate FORCES the purge whatever the caller requested; it
+// implements Truncater; and having no key prefix it counts as owning its target
+// outright. A projectionKind flip OUT of actorAggregate on such a lens skips
+// every new-rule descriptor check and would truncate a live RLS table.
+func reactivationPreflight(oldTarget string, newLens *lens.Rule) string {
+	if oldTarget != natsKVTarget || newLens.Into.Target != natsKVTarget {
+		return "an Output descriptor lives only on a " + natsKVTarget +
+			" target (the write guard, the per-entry key listing and the row read-back are all NATS-KV capabilities), and re-activating across any other target would purge rows the replay could never re-derive — this lens runs on " +
+			targetName(oldTarget) + " and its edit declares " + targetName(newLens.Into.Target)
+	}
+	if projection.IsActorAggregate(newLens) {
+		if _, err := projection.Compile(newLens); err != nil {
+			return "the new descriptor does not compile: " + err.Error()
+		}
+	}
+	if refusal := projection.CapReadWriterRefusal(newLens); refusal != "" {
+		return refusal
+	}
+	return ""
+}
+
+// targetName renders a lens target for an operator-facing reason, naming an
+// unset one rather than leaving a blank in the sentence.
+func targetName(target string) string {
+	if target == "" {
+		return "(no target)"
+	}
+	return target
+}
+
+// recordDark reports a lens that is not running and has no pipeline behind it.
+//
+// It is two writes because the two say different things and both are read. The
+// error is the diagnosis, on the counter and latch `lattice health summary` and
+// Loupe's fault conjunct already consume. The pause is the STATE: without it
+// RecordError re-creates the entry a teardown deleted at its `active` default,
+// so a lens with nothing running would read healthy.
+//
+// The pause reason is INFRA, and the choice is about recovery rather than
+// severity. A structural pause is served by the supervisor's waitWhilePaused —
+// held until an operator issues `resume`, and restored across restarts by the
+// health sink, so a restart would not bring the lens back. An infra pause runs
+// the probe loop instead (substrate.ConsumerSupervisor's pump): the next
+// activation restores it, probes the target, passes and resumes on its own, and
+// the SetActive that follows clears the diagnosis with it. The remedy an
+// operator is told about — restart Refractor, or fix the spec and reinstall — is
+// then the remedy that actually works.
+//
+// entry is the RETIRED entry: its health record was deleted with the pipeline,
+// and both writes re-create it. That is the only reporter that outlives the
+// teardown.
+func (rl *reloader) recordDark(entry *pipelineEntry, lensID, reason string) {
+	rl.logger.Error(reason, "lensId", lensID)
+	if entry.reporter == nil {
+		return
+	}
+	if err := entry.reporter.RecordError(rl.ctx, reason); err != nil {
+		rl.logger.Error("record re-activation failure in health", "lensId", lensID, "err", err)
+	}
+	if err := entry.reporter.SetPaused(rl.ctx, health.PauseReasonInfra, reason); err != nil {
+		rl.logger.Error("record re-activation failure as a pause", "lensId", lensID, "err", err)
 	}
 }

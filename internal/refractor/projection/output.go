@@ -337,6 +337,39 @@ func (d OutputDescriptor) KeyOwnershipRoundTrips() bool {
 	return ok && recovered == sample
 }
 
+// OwnsKey reports whether a target key belongs to this lens — the exact test a
+// purge applies to the keys its prefix listing hands back, since one lens's
+// literal prefix contains another's.
+//
+// It is wider than AnchorFromKey by exactly one shape, and only for a perEntry
+// descriptor: the pre-flip LEGACY PARENT document at the bare parent key, with
+// no child suffix. A lens that flipped to per-entry keys wrote that document
+// itself, its migration transport still tombstones it on the actor's first
+// post-flip evaluation (Pipeline.multiEntryRetractions' §6 arm), and an orphaned
+// one is claimed by no sweep — so a purge that skipped it would leave a row
+// nothing else can ever reach. The doc-mode inverse is re-run WITHOUT the
+// per-entry split for that arm: same literal prefix and suffix, same
+// ParseVertexKey and AnchorType checks, so a sibling lens's key is no more
+// claimable here than it is through AnchorFromKey.
+//
+// Ownership, not addressability: OwnsKey says the lens is the only producer that
+// could have written the key, which is what licenses removing it. AnchorFromKey
+// stays the narrower question — which anchor a key that the lens WRITES belongs
+// to — and the sweep, whose orphan direction re-derives from live anchors, keeps
+// using that one.
+func (d OutputDescriptor) OwnsKey(targetKey string) bool {
+	if _, ok := d.AnchorFromKey(targetKey); ok {
+		return true
+	}
+	if d.EntryKeyColumn == "" {
+		return false
+	}
+	docMode := d
+	docMode.EntryKeyColumn = ""
+	_, ok := docMode.AnchorFromKey(targetKey)
+	return ok
+}
+
 // AnchorFromKey is the inverse of BuildKey: it recovers the anchor vertex key a
 // target key was built for, reporting false for any key this descriptor's
 // pattern did not produce. The convergence sweep

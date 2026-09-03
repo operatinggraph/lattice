@@ -40,17 +40,15 @@ func TestRefusedChange_CypherOnlyEditIsHotReloadable(t *testing.T) {
 	}
 }
 
-// The shipped shape this whole fire is about: b425c25b re-authored a lens's
-// cypher and bodyColumns together, which is refused whole.
-func TestRefusedChange_OutputDescriptorEditIsRefused(t *testing.T) {
+// The commonest package-lens edit there is. Refractor carries it by
+// re-activating the lens, so predicting a refusal here would send an operator to
+// a remedy for a change that has already applied — and train them to ignore the
+// warnings that still mean something.
+func TestRefusedChange_OutputDescriptorEditIsCarriedByReactivation(t *testing.T) {
 	edited := strings.Replace(baseSpec, `"bodyColumns": ["reminders"]`,
 		`"bodyColumns": ["reminders", "escalations"]`, 1)
-	got := reloadpin.RefusedChange([]byte(baseSpec), []byte(edited))
-	if !strings.Contains(got, "output") {
-		t.Fatalf("an Output descriptor edit must be predicted as refused, got %q", got)
-	}
-	if !strings.Contains(got, "activates") {
-		t.Fatalf("the warning must state the consequence, not the mechanism: %q", got)
+	if got := reloadpin.RefusedChange([]byte(baseSpec), []byte(edited)); got != "" {
+		t.Fatalf("an Output edit re-activates the lens and must not warn, got %q", got)
 	}
 }
 

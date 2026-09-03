@@ -50,30 +50,33 @@ func toAny(ss []string) []any {
 	return out
 }
 
-// The case the whole warning exists for: a package upgrade re-authors an
-// actor-aggregate lens's Output. Lens IDs are version-independent, so this
-// commits as an in-place update, Refractor refuses the hot reload, and without
-// this note `lattice-pkg apply` reports success over a lens still serving its
-// old spec.
-func TestReactivationNote_OutputEditOnALensSpecWarns(t *testing.T) {
+// The commonest package-lens edit there is: an upgrade re-authors an
+// actor-aggregate lens's Output. Refractor carries it live, by re-activating the
+// lens, so an apply that lands one has nothing to tell the operator — and a note
+// pointing at a remedy for a change that already applied would train them to
+// ignore the notes that still mean something.
+func TestReactivationNote_OutputEditOnALensSpecIsSilent(t *testing.T) {
 	old := specDoc(t, []string{"reminders"}, false)
 	new := specDoc(t, []string{"reminders", "escalations"}, false)
 
-	note := reactivationNote("vtx.meta.lens-1.spec", old, new)
+	if note := reactivationNote("vtx.meta.lens-1.spec", old, new); note != "" {
+		t.Fatalf("an Output edit re-activates the lens and must not warn: %q", note)
+	}
+}
+
+// The positive vector: flipping grantTable strands every row the lens wrote, and
+// no restart gives those rows back — so it is still refused, and the note is
+// still what carries that refusal to the operator who caused it.
+func TestReactivationNote_GrantTableFlipWarns(t *testing.T) {
+	note := reactivationNote("vtx.meta.lens-1.spec", specDoc(t, []string{"r"}, false), specDoc(t, []string{"r"}, true))
 	if note == "" {
-		t.Fatal("an Output edit committed by an upgrade must warn that the lens keeps serving its activated spec")
+		t.Fatal("flipping grantTable strands every row the lens wrote and must warn")
 	}
 	if !strings.Contains(note, "vtx.meta.lens-1.spec") {
 		t.Fatalf("the note must name the key so an operator can find the lens: %q", note)
 	}
 	if !strings.Contains(note, "re-activated") {
 		t.Fatalf("the note must name the remedy: %q", note)
-	}
-}
-
-func TestReactivationNote_GrantTableFlipWarns(t *testing.T) {
-	if note := reactivationNote("vtx.meta.lens-1.spec", specDoc(t, []string{"r"}, false), specDoc(t, []string{"r"}, true)); note == "" {
-		t.Fatal("flipping grantTable strands every row the lens wrote and must warn")
 	}
 }
 

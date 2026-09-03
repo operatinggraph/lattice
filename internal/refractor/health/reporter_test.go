@@ -2,6 +2,7 @@ package health_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,73 +360,73 @@ func TestReporter_ActiveSequence_ThreadSafe(t *testing.T) {
 	<-done
 }
 
-// TestReporter_ClearLastError_ClearsErrorPreservesCount verifies the core
-// contract: ClearLastError nils lastError but leaves the cumulative
+// TestReporter_ClearLastErrorIf_ClearsErrorPreservesCount verifies the core
+// contract: a clear the predicate admits nils lastError but leaves the cumulative
 // errorCount exactly as RecordError left it — mirroring SetActive's own
 // ErrorCount-preservation contract (TestReporter_SetActive_PreservesErrorCount)
 // without SetActive's Status/PauseReason side effects.
-func TestReporter_ClearLastError_ClearsErrorPreservesCount(t *testing.T) {
+func TestReporter_ClearLastErrorIf_ClearsErrorPreservesCount(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "narrowed Core KV filter registration failed, fell back to the broad filter: stale rejection"))
 	require.NoError(t, r.RecordError(context.Background(), "second stale error"))
 
-	require.NoError(t, r.ClearLastError(context.Background()))
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), anyLastError))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
-	assert.Nil(t, entry.LastError, "lastError must be nil after ClearLastError")
-	assert.Equal(t, uint64(2), entry.ErrorCount, "errorCount must survive ClearLastError")
-	assert.Equal(t, "active", entry.Status, "ClearLastError must not touch status")
+	assert.Nil(t, entry.LastError, "lastError must be nil after ClearLastErrorIf")
+	assert.Equal(t, uint64(2), entry.ErrorCount, "errorCount must survive ClearLastErrorIf")
+	assert.Equal(t, "active", entry.Status, "ClearLastErrorIf must not touch status")
 }
 
-// TestReporter_ClearLastError_PreservesPausedStatus verifies ClearLastError
+// TestReporter_ClearLastErrorIf_PreservesPausedStatus verifies ClearLastErrorIf
 // never writes Status/PauseReason, so a persisted pause survives the call
 // untouched — the exact guarantee that lets registerWithFilterFallback call it
 // at boot without racing (or fighting) the supervisor's
 // restore-paused-on-startup path (substrate.ConsumerSupervisor's restoreState,
 // Pipeline.Run's doc comment). An infra pause, whose lastError carries no
 // diagnosis the operator has to act on, still clears.
-func TestReporter_ClearLastError_PreservesPausedStatus(t *testing.T) {
+func TestReporter_ClearLastErrorIf_PreservesPausedStatus(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "first error"))
 	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonInfra, "target table absent"))
 
-	require.NoError(t, r.ClearLastError(context.Background()))
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), anyLastError))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, "paused", entry.Status, "ClearLastError must not flip a persisted pause active")
+	assert.Equal(t, "paused", entry.Status, "ClearLastErrorIf must not flip a persisted pause active")
 	require.NotNil(t, entry.PauseReason)
-	assert.Equal(t, health.PauseReasonInfra, *entry.PauseReason, "ClearLastError must not touch pauseReason")
+	assert.Equal(t, health.PauseReasonInfra, *entry.PauseReason, "ClearLastErrorIf must not touch pauseReason")
 	assert.Nil(t, entry.LastError, "lastError must still clear on a non-structural pause")
 	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must survive")
 }
 
-// TestReporter_ClearLastError_KeepsStructuralCause pins the one status
-// ClearLastError reads for a decision. A structural pause is held until a human
+// TestReporter_ClearLastErrorIf_KeepsStructuralCause pins the one status
+// ClearLastErrorIf reads for a decision. A structural pause is held until a human
 // reconciles it, and its lastError IS the diagnosis they have to work from —
 // while registration succeeds regardless of the pause, so every Pipeline.Run
 // and every Rebuild would otherwise erase the cause of a pause it did nothing
 // to resolve, leaving `paused/structural` with a null cause.
-func TestReporter_ClearLastError_KeepsStructuralCause(t *testing.T) {
+func TestReporter_ClearLastErrorIf_KeepsStructuralCause(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
 
 	const cause = `ERROR: column "row_kind" of relation "read_identity_credential_bindings" does not exist (SQLSTATE 42703)`
 	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, cause))
 
-	require.NoError(t, r.ClearLastError(context.Background()))
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), anyLastError))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "paused", entry.Status)
 	require.NotNil(t, entry.PauseReason)
 	assert.Equal(t, health.PauseReasonStructural, *entry.PauseReason)
-	require.NotNil(t, entry.LastError, "a structural pause's cause must survive ClearLastError")
+	require.NotNil(t, entry.LastError, "a structural pause's cause must survive ClearLastErrorIf")
 	assert.Equal(t, cause, *entry.LastError)
 }
 
@@ -465,15 +466,15 @@ func TestReporter_SetPaused_EmptyCauseOnActiveLensClearsIt(t *testing.T) {
 	assert.Nil(t, entry.LastError, "a first pause on an active lens must not adopt a stale error as its cause")
 }
 
-// TestReporter_ClearLastError_NoOpWhenAlreadyNil verifies ClearLastError skips
+// TestReporter_ClearLastErrorIf_NoOpWhenAlreadyNil verifies ClearLastErrorIf skips
 // the KV write entirely when there is nothing to clear — a fresh lens that has
 // never recorded an error must not gain a health entry (or a bumped
 // LastUpdated) merely from a clean boot's registration.
-func TestReporter_ClearLastError_NoOpWhenAlreadyNil(t *testing.T) {
+func TestReporter_ClearLastErrorIf_NoOpWhenAlreadyNil(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
 
-	require.NoError(t, r.ClearLastError(context.Background()))
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), anyLastError))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
@@ -773,4 +774,68 @@ func TestReporter_StatusTransitions_PreserveThePersonalSweepProgress(t *testing.
 	assertProgress(t, "SetRebuilding")
 	require.NoError(t, r.SetActive(ctx))
 	assertProgress(t, "SetActive after rebuild")
+}
+
+// anyLastError is the widest predicate there is — it owns whatever is stored.
+// The tests above are about the CLEAR itself (what it preserves, what it
+// refuses to touch), so they hand it the predicate that cannot be the reason
+// they pass; the scoping is its own test below.
+func anyLastError(string) bool { return true }
+
+// TestReporter_ClearLastErrorIf_ForeignErrorSurvives is the property the
+// predicate exists for. LastError is one latch many writers append to, and a
+// clean consumer registration proves the REGISTRATION healthy — nothing about
+// any other condition. A re-activation that cannot purge its target records its
+// diagnosis moments before the replacement pipeline registers, and Loupe's fault
+// conjunct reads a live LastError: an unscoped clear makes that fault invisible
+// seconds after it is raised.
+func TestReporter_ClearLastErrorIf_ForeignErrorSurvives(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	const foreign = "re-activation could not clear the target before the replay — rows the new Output no longer addresses may survive"
+	require.NoError(t, r.RecordError(context.Background(), foreign))
+
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), func(lastError string) bool {
+		return strings.HasPrefix(lastError, "narrowed Core KV filter registration failed")
+	}))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, entry.LastError, "a caller may only retire the message it itself wrote")
+	assert.Equal(t, foreign, *entry.LastError)
+	assert.Equal(t, uint64(1), entry.ErrorCount)
+}
+
+// And the message the predicate DOES own still clears, or the latch it exists to
+// retire outlives every process that could explain it.
+func TestReporter_ClearLastErrorIf_OwnedErrorClears(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(context.Background(),
+		"narrowed Core KV filter registration failed, fell back to the broad filter: stale rejection"))
+
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), func(lastError string) bool {
+		return strings.HasPrefix(lastError, "narrowed Core KV filter registration failed")
+	}))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, entry.LastError)
+	assert.Equal(t, uint64(1), entry.ErrorCount, "the cumulative count is the record that the condition happened")
+}
+
+// A nil predicate owns nothing. It is the fail-closed direction for a caller
+// that forgot to say what it wrote.
+func TestReporter_ClearLastErrorIf_NilPredicateClearsNothing(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(context.Background(), "someone else's diagnosis"))
+	require.NoError(t, r.ClearLastErrorIf(context.Background(), nil))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, entry.LastError)
 }

@@ -515,11 +515,24 @@ func (r *Reporter) SetFilterState(ctx context.Context, mode string, labelCount i
 	return nil
 }
 
-// ClearLastError nils LastError while preserving ErrorCount and every other
-// field on the entry — Status and PauseReason included, which this method
-// never writes. Its one caller is pipeline.registerWithFilterFallback: a
-// lens's Core KV consumer (re)registration that succeeds cleanly (no
-// narrowed-to-broad fallback) is this process proving the lens healthy right
+// ClearLastErrorIf nils LastError when owns reports the stored message as the
+// caller's own to retire, preserving ErrorCount and every other field on the
+// entry — Status and PauseReason included, which this method never writes.
+//
+// The predicate is the whole point, and it is not a convenience. A clean
+// registration proves the REGISTRATION healthy; it proves nothing about any
+// other condition, and LastError is one latch that many writers append to. An
+// unscoped clear therefore retires whichever diagnosis happens to be standing —
+// a re-activation that cannot purge its target records one moments before the
+// fresh pipeline registers, and Loupe's fault conjunct reads a LIVE LastError,
+// so such a clear makes that fault invisible seconds after it is raised. A
+// caller may only retire the message it itself wrote, which means matching on
+// that message.
+//
+// Its one caller is pipeline.registerWithFilterFallback, which passes a
+// predicate keyed on the narrowed-filter fallback text it records: a lens's
+// Core KV consumer (re)registration that succeeds cleanly (no
+// narrowed-to-broad fallback) is this process proving THAT condition gone right
 // now, while a LastError an earlier boot's fallback recorded has no other
 // retirement path — a restart alone does not touch health KV, and RecordError
 // only ever appends — so without this call the message outlives every process
@@ -538,7 +551,8 @@ func (r *Reporter) SetFilterState(ctx context.Context, mode string, labelCount i
 // at activation is the "not yet provisioned" state its probe resolves on its
 // own, and a manual pause never carries a cause of its own, so for both the
 // only thing LastError can hold is exactly the stale fallback message this
-// method exists to retire.
+// method exists to retire — and the predicate is the second, narrower gate on
+// the same question.
 //
 // Deliberately narrower than SetActive, which also writes Status: "active"
 // and PauseReason: nil unconditionally — exactly the pair
@@ -550,18 +564,21 @@ func (r *Reporter) SetFilterState(ctx context.Context, mode string, labelCount i
 // clobbering the pause open; nil-ing only LastError cannot, whichever
 // goroutine runs first. Thread-safe, serialized via writeMu like every other
 // setter. A no-op (no KV write) when LastError is already nil.
-func (r *Reporter) ClearLastError(ctx context.Context) error {
+func (r *Reporter) ClearLastErrorIf(ctx context.Context, owns func(lastError string) bool) error {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
 
 	existing, err := r.readExisting(ctx)
 	if err != nil {
-		return fmt.Errorf("health: ClearLastError read: %w", err)
+		return fmt.Errorf("health: ClearLastErrorIf read: %w", err)
 	}
 	if existing.PauseReason != nil && *existing.PauseReason == PauseReasonStructural {
 		return nil
 	}
 	if existing.LastError == nil {
+		return nil
+	}
+	if owns == nil || !owns(*existing.LastError) {
 		return nil
 	}
 	existing.LastError = nil

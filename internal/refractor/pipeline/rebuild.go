@@ -343,6 +343,60 @@ func resolveTruncate(adpt adapter.Adapter, ruleID string, truncate bool) bool {
 	return true
 }
 
+// TruncateForReactivation clears the lens's rows on the seam between a stopped
+// pipeline and the same lens ID being activated again from an edited spec, and
+// reports whether it purged.
+//
+// requested says the replay the activation runs cannot overwrite what is already
+// stored — the caller's question, not this one's (cmd/refractor's
+// replayCannotOverwrite). A guarded target purges whatever requested says, for
+// resolveTruncate's reason: the §6.2 watermark declines a replayed write at or
+// below the seq already stored, so on a guarded target the new shape never lands
+// on top of the old rows at all.
+//
+// Two things have to hold before it purges, and they are different questions.
+// The target must be truncatable at all — the grant family shares one table
+// across every producer and implements no Truncater, so a purge there is
+// declined rather than announced. And the purge must be CONFINED
+// (RebuildTruncateIsScoped): an unscoped NATS-KV truncate clears the whole
+// bucket, and several lenses share one with producers this seam knows nothing
+// about. Either way it warns and declines; the replay still overwrites in place
+// every row it re-derives, and what stays behind is only what the new spec no
+// longer addresses.
+//
+// Confinement here means what ApplyTruncateScope bound onto the adapter: the
+// lens's key prefix AND its own key inverse as the exact ownership test over
+// what that prefix lists, because one lens's prefix contains another's (`cap.`
+// covers `cap.roles.`). Without the second, a guarded lens's forced purge takes
+// its siblings' rows and re-derives none of them.
+//
+// The purge runs through truncateTarget, so a cap-read producer's grant sink
+// hears every actor whose grants it withdrew.
+//
+// Call it once Run has returned — an in-flight write of the old shape landing
+// after the purge would outlive the whole re-activation — and before the
+// activation that follows, which is what re-derives every row this removes.
+func (p *Pipeline) TruncateForReactivation(ctx context.Context, requested bool) (bool, error) {
+	adpt := p.currentAdapter()
+	if !resolveTruncate(adpt, p.ruleID, requested) {
+		return false, nil
+	}
+	if _, truncatable := adpt.(adapter.Truncater); !truncatable {
+		slog.Warn("pipeline: re-activation: target cannot be truncated — shared with other producers; skipping the purge (the replay re-derives rows that are ABSENT and leaves rows already present at or above their stored watermark unchanged)",
+			"ruleId", p.ruleID)
+		return false, nil
+	}
+	if !p.RebuildTruncateIsScoped() {
+		slog.Warn("pipeline: re-activation: target is not confined to this lens's own keys — skipping the purge (the replay overwrites in place; rows the new spec no longer addresses stay behind)",
+			"ruleId", p.ruleID)
+		return false, nil
+	}
+	if err := p.truncateTarget(ctx, adpt); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSignal) error {
 	// Mark the rebuild in flight before the status write so a concurrent
 	// supervisor health persist (probe recovery, operator resume) cannot

@@ -99,6 +99,16 @@ type NatsKVAdapter struct {
 	// owns the whole bucket, which is the dedicated-target case. Set per-lens via
 	// SetKeyPrefix, from the same compiled projection plan SetGuarded reads.
 	keyPrefix string
+	// keyOwner reports whether a listed key is one this lens's own descriptor
+	// built (OutputDescriptor.AnchorFromKey). It is the EXACT ownership test a
+	// prefix cannot be, because one lens's prefix contains another's: `cap.`
+	// covers `cap.roles.`, `cap.svc.`, `cap.ephemeral.` and
+	// `cap.role-by-operation.`, so the kernel capability lens's prefix listing
+	// returns four sibling lenses' rows. nil leaves the purge prefix-scoped,
+	// which is right for a lens owning its target outright and for a descriptor
+	// whose key inverse does not round-trip. Set per-lens via SetKeyOwner, from
+	// the same compiled descriptor SetKeyPrefix reads.
+	keyOwner func(key string) bool
 	// readGrantWriter licenses this adapter to write the D1 read-grant
 	// namespace. FALSE BY DEFAULT, which is the whole point: the D1 gate
 	// discovers its rows by a wildcard listing over cap-read.*, so any key in
@@ -187,6 +197,20 @@ func (a *NatsKVAdapter) SetKeyPrefix(prefix string) { a.keyPrefix = prefix }
 // KeyPrefix reports the prefix Truncate is scoped to, or "" when this adapter
 // truncates its whole bucket.
 func (a *NatsKVAdapter) KeyPrefix() string { return a.keyPrefix }
+
+// SetKeyOwner binds the exact ownership test Truncate applies to the keys its
+// prefix listing hands back. Like SetGuarded and SetKeyPrefix it must be called
+// at construction time, before the pipeline starts writing.
+//
+// owns is the lens's own key inverse (projection.OutputDescriptor.AnchorFromKey,
+// bound by ApplyTruncateScope). Passing nil leaves the purge scoped by prefix
+// alone, which is what a lens owning its target outright needs.
+func (a *NatsKVAdapter) SetKeyOwner(owns func(key string) bool) { a.keyOwner = owns }
+
+// OwnsKeysExactly reports whether an exact ownership test is bound, so a caller
+// can tell a purge confined to the keys this lens actually wrote from one
+// confined only by a prefix a sibling producer may share.
+func (a *NatsKVAdapter) OwnsKeysExactly() bool { return a.keyOwner != nil }
 
 // Guarded reports whether the projection-write guard is enabled. The pipeline
 // consults it — e.g. Rebuild forces a truncate before rescanning a guarded
@@ -807,18 +831,56 @@ func (a *NatsKVAdapter) truncate(ctx context.Context) ([]string, error) {
 // rows when it declares a key prefix, the whole bucket when it does not, minus
 // any D1 read-grant key an unlicensed lens has no business removing.
 func (a *NatsKVAdapter) truncateKeys(ctx context.Context) ([]string, error) {
+	var keys []string
+	var err error
 	if a.keyPrefix == "" {
-		keys, err := a.kv.ListKeys(ctx)
-		if err != nil {
+		if keys, err = a.kv.ListKeys(ctx); err != nil {
 			return nil, fmt.Errorf("natskv truncate: list keys: %w", err)
 		}
-		return a.withoutUnsanctionedGrantKeys(ctx, keys), nil
-	}
-	keys, err := a.kv.ListKeysPrefix(ctx, a.keyPrefix)
-	if err != nil {
+	} else if keys, err = a.kv.ListKeysPrefix(ctx, a.keyPrefix); err != nil {
 		return nil, fmt.Errorf("natskv truncate: list keys under %q: %w", a.keyPrefix, err)
 	}
-	return a.withoutUnsanctionedGrantKeys(ctx, keys), nil
+	return a.withoutUnsanctionedGrantKeys(ctx, a.ownedOnly(keys)), nil
+}
+
+// ownedOnly drops every listed key this lens's own descriptor did not build.
+//
+// The prefix Truncate lists under scopes the listing; it does not decide
+// ownership, because one lens's prefix contains another's. The kernel
+// `capability` lens writes `cap.{actorSuffix}`, and its prefix `cap.` also
+// covers `cap.ephemeral.`, `cap.svc.`, `cap.roles.` and
+// `cap.role-by-operation.` — four sibling producers of the same bucket. Purging
+// those is not a rebuild of this lens: it is an authorization wipe healed only
+// at sweep pace, of rows the replay that follows re-derives none of. And it runs
+// unattended: a package upgrade's Output edit re-activates the lens, which forces
+// this purge on a guarded target with no operator in the loop.
+//
+// No owner bound leaves the purge prefix-scoped — the lens owns its target
+// outright, or its key inverse does not round-trip and filtering on it would
+// skip the lens's OWN rows instead. One line per truncate, like the namespace
+// refusal below.
+func (a *NatsKVAdapter) ownedOnly(keys []string) []string {
+	if a.keyOwner == nil {
+		return keys
+	}
+	kept := make([]string, 0, len(keys))
+	skipped := 0
+	firstSkipped := ""
+	for _, key := range keys {
+		if a.keyOwner(key) {
+			kept = append(kept, key)
+			continue
+		}
+		if skipped == 0 {
+			firstSkipped = key
+		}
+		skipped++
+	}
+	if skipped > 0 {
+		slog.Info("natskv truncate: skipping keys under this lens's prefix that its own key inverse does not claim — a sibling producer shares the prefix",
+			"skipped", skipped, "kept", len(kept), "firstKey", firstSkipped, "prefix", a.keyPrefix)
+	}
+	return kept
 }
 
 // withoutUnsanctionedGrantKeys drops every D1 read-grant key from an unlicensed

@@ -112,9 +112,17 @@ type pipelineEntry struct {
 	// unaddressable).
 	grantTable bool
 	// output is the §6.13 Output descriptor the RUNNING pipeline's envelope,
-	// delete key and sweep plan were installed from. An INTO-only update
-	// re-runs none of that installation, so an edit here is refused.
+	// delete key and sweep plan were installed from. Neither swap re-runs that
+	// installation, so an edit here re-activates the lens (reload.go's
+	// reloader.reactivate).
 	output *lens.OutputDescriptorSpec
+	// projectionKind is the aspect activation's install switch dispatched on
+	// (projection.IsActorAggregate). It is recorded beside output because it
+	// decides whether the descriptor above was installed AT ALL: a lens edited
+	// into or out of the actor-aggregate kind needs the same re-installation an
+	// Output edit does, with a byte-identical descriptor on both sides, and
+	// nothing else on the reload path examines it.
+	projectionKind string
 	// secureColumns is the Secure-Lens column set the RUNNING pipeline's
 	// decryptor was built from. Hot-reload guards compare an incoming spec
 	// against this — not against the last-seen spec — so a refused update
@@ -2117,6 +2125,14 @@ func main() {
 		// stop being re-driven the moment its definition is gone.
 		dropGrantConsumer: grantReprojector.DeregisterPersonal,
 	}
+	// The removal half of an Output edit's re-activation, driven through the SAME
+	// remover a tombstone goes through: one removal mechanism, so a re-activation
+	// cannot tear a lens down any less completely than a delete does. It differs
+	// from the tombstone callback in one way only — it hands the teardown's
+	// success back, because reactivate must not start a replacement over a
+	// pipeline that failed to stop. Its counterpart, rl.activateForTaxonomy, is
+	// the existence-checked activation entry point set above.
+	rl.deactivate = func(old *lens.Rule) error { return rm.stop(old, "reactivation") }
 
 	// Wait for adjacency bootstrap before activating any lens.
 	select {

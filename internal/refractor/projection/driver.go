@@ -855,6 +855,24 @@ func ApplyGuard(adpt adapter.Adapter, r *lens.Rule) error {
 // whether to ASK for a truncate must read it as unconfined —
 // Pipeline.RebuildTruncateIsScoped is that test, and it refuses.
 //
+// The prefix alone is not the whole confinement, because one lens's prefix
+// CONTAINS another's: `cap.{actorSuffix}` scopes to `cap.`, which also covers
+// `cap.ephemeral.`, `cap.svc.`, `cap.roles.` and `cap.role-by-operation.`. So
+// the descriptor's own ownership test is bound alongside the prefix (SetKeyOwner,
+// OwnsKey) and applied to whatever the scoped listing returns — the test
+// KeyPrefix's own doc says still has to run. The two are
+// separate questions and stay separate: Pipeline.RebuildTruncateIsScoped asks
+// whether a purge is confined at all; this predicate asks which of the confined
+// keys are actually this lens's.
+//
+// The owner is bound only when the inverse ROUND-TRIPS
+// (KeyOwnershipRoundTrips — the narrower AnchorFromKey question, deliberately,
+// since that is what decides whether the inverse works at all). A descriptor
+// whose two halves disagree would reject the lens's OWN rows, turning a
+// confinement into a purge that clears nothing; such a lens keeps the
+// prefix-only scoping, and is already refused a convergence sweep for the same
+// broken inverse.
+//
 // What keeps the truncates that already happen safe is that they are FORCED
 // only for a guarded adapter, and the guard has the same actor-aggregate driver
 // this scoping does (projection.RequiresGuard): every lens truncating on a
@@ -873,6 +891,9 @@ func ApplyTruncateScope(adpt adapter.Adapter, r *lens.Rule) {
 	}
 	if prefix, ok := desc.KeyPrefix(); ok {
 		nkv.SetKeyPrefix(prefix)
+		if desc.KeyOwnershipRoundTrips() {
+			nkv.SetKeyOwner(desc.OwnsKey)
+		}
 	}
 }
 

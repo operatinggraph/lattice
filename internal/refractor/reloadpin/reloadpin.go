@@ -1,6 +1,11 @@
-// Package reloadpin names the lens-spec changes a running Refractor cannot
-// carry through a hot reload, and answers that question from two stored spec
-// documents alone.
+// Package reloadpin names the lens-spec changes a running Refractor REFUSES,
+// and answers that question from two stored spec documents alone.
+//
+// Refused, not merely unswappable: a change the swaps cannot carry but a
+// re-activation can — an Output-descriptor edit — is applied by Refractor
+// itself, by stopping the lens and starting it again from the new spec, and so
+// is deliberately not pinned here. What remains are the edits that leave rows or
+// state no restart would let the lens address again.
 //
 // Refractor is the authority: cmd/refractor decides refusals against the
 // RUNNING pipeline, which knows things a spec does not (the guard the built
@@ -42,16 +47,15 @@ type PinnedField struct {
 // check is what lets pkgmgr consume it at all; TestPinnedFieldsMatchTheRefusalSet
 // in cmd/refractor is what keeps the two from drifting.
 //
-// The write-surface pins (target/bucket/table/dsn/grantSource) are deliberately
-// ABSENT. They are refused only for a lens whose built adapter carries the §6.2
-// guard, which is a property of the running pipeline and not of any document —
-// predicting them from a spec pair would warn about edits that are legitimately
-// applied.
+// Two families are deliberately ABSENT. The write-surface pins
+// (target/bucket/table/dsn/grantSource) are refused only for a lens whose built
+// adapter carries the §6.2 guard, which is a property of the running pipeline
+// and not of any document — predicting them from a spec pair would warn about
+// edits that are legitimately applied. The `output` descriptor is absent for the
+// opposite reason: Refractor carries that edit live, by re-activating the lens,
+// so warning about it would send an operator to a remedy for a change that has
+// already applied.
 var PinnedFields = []PinnedField{
-	{
-		Path: []string{"output"},
-		Why:  "the envelope, delete key and sweep plan are installed when the lens activates, so a running lens cannot adopt a new Output descriptor",
-	},
 	{
 		Path: []string{"targetConfig", "grantTable"},
 		Why:  "the rows the lens already wrote to the shared grant table become unaddressable — no producer claims them, so nothing can ever revoke them",

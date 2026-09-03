@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1135,6 +1136,21 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 	return nil
 }
 
+// narrowedFilterFallbackPrefix opens the one health LastError
+// registerWithFilterFallback writes, and is the exact latch its clean-
+// registration path is licensed to retire. Writer and clearer read the same
+// constant so the two cannot drift into a clear that retires nothing (a stale
+// fallback message outliving every process that could explain it) or one that
+// retires everything (an unrelated registration erasing another writer's live
+// diagnosis).
+const narrowedFilterFallbackPrefix = "narrowed Core KV filter registration failed"
+
+// isNarrowedFilterFallback reports whether a stored health LastError is the
+// narrowed-filter fallback's own message.
+func isNarrowedFilterFallback(lastError string) bool {
+	return strings.HasPrefix(lastError, narrowedFilterFallbackPrefix)
+}
+
 // registerWithFilterFallback runs register — the supervisor call that
 // (re)creates this lens's Core KV durable (supervisor.Add for the initial
 // Run, supervisor.ResetAwaitReopen for a Rebuild) — and, if it fails while filterSubjects
@@ -1153,11 +1169,17 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 // anticipate is exactly the case this exists for.
 //
 // A clean FIRST attempt (register succeeds with no fallback fired) instead
-// clears any stale LastError an earlier process's fallback left on this same
-// health entry (Reporter.ClearLastError) — the fallback path below is the
-// only writer of that latch, and nothing else ever revisits it, so left
-// alone it survives every restart even once the lens is provably healthy
-// again. The clear is scoped to LastError alone precisely so it cannot race
+// clears a stale LastError an earlier process's fallback left on this same
+// health entry (Reporter.ClearLastErrorIf) — that message has no other
+// retirement path, since nothing else ever revisits it, so left alone it
+// survives every restart even once the lens is provably healthy again.
+//
+// It clears ONLY that message, matched on narrowedFilterFallbackPrefix. A clean
+// registration proves the registration healthy and nothing else, while LastError
+// is a latch many writers append to: an unscoped clear retires whichever
+// diagnosis happens to be standing, including one raised seconds earlier by a
+// re-activation that cannot purge its target. The clear is also scoped to
+// LastError alone precisely so it cannot race
 // the supervisor's startup restore of a persisted pause (this doc's own
 // caller, Pipeline.Run: "restore persisted paused state on startup (NFR4)";
 // substrate.ConsumerSupervisor's restoreState, run once from the pump
@@ -1169,7 +1191,7 @@ func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubject
 	err := register()
 	if err == nil {
 		if p.reporter != nil {
-			if clrErr := p.reporter.ClearLastError(ctx); clrErr != nil {
+			if clrErr := p.reporter.ClearLastErrorIf(ctx, isNarrowedFilterFallback); clrErr != nil {
 				slog.Error("pipeline: clear stale health signal after clean registration", "ruleId", p.ruleID, "err", clrErr)
 			}
 		}
@@ -1181,7 +1203,7 @@ func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubject
 	slog.Error("pipeline: narrowed Core KV consumer registration failed — retrying with the broad filter",
 		"ruleId", p.ruleID, "filterSubjects", filterSubjects, "err", err)
 	if p.reporter != nil {
-		msg := fmt.Sprintf("narrowed Core KV filter registration failed, fell back to the broad filter: %v", err)
+		msg := fmt.Sprintf("%s, fell back to the broad filter: %v", narrowedFilterFallbackPrefix, err)
 		if recErr := p.reporter.RecordError(ctx, msg); recErr != nil {
 			slog.Error("pipeline: record narrowed-filter fallback health signal", "ruleId", p.ruleID, "err", recErr)
 		}
