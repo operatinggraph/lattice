@@ -146,6 +146,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-03 · `c76522e` · [CI] leaseconvergence lens-activation wait root-caused (CoreKVSource's serial MaxPrefetch:1 replay) and fixed, 25s→90s — board row 137(b) resolved, full CI green (run 33816206576)
 - 2026-09-03 · `689eb0c0` · [lease-signing] TombstoneSupersededLeaseServiceInstance (ownership-checked, operator-only) + purge of 12,245 superseded background checks on the dev stack, 0 rejected
 - 2026-09-03 · `7e2ef6b2` · [lease-signing] a background check stays valid 30 days (not 5 min) and the op-meta targets are labeled — the runaway re-check loop stops; leaseApplicationComplete narrows to 7 labels
 - 2026-09-03 · `3017eac3` · [Refractor] a lens Output edit re-activates the lens in place — ownership-tested purge, refusal by construction, scoped health clear; live round trip on cafeStaleTabSettlement
