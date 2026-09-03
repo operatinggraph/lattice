@@ -1257,3 +1257,85 @@ func TestReloaderUpdate_NarrowingMatchChangeRetractsTheDroppedLabelsRows(t *test
 	assert.True(t, projected(siblingKey), "the truncate must be confined to the lens's own key prefix — another producer's row in the same bucket must survive")
 	assert.Zero(t, errorCount(t, reporter), "an accepted narrowing MATCH change must not record a refusal")
 }
+
+// readGrantProducerRule is the shape whose adapter must carry the D1 read-grant
+// namespace licence: an actor-aggregate, per-entry, auth-plane lens whose key
+// pattern round-trips — i.e. what projection.IsReadGrantProducer admits.
+func readGrantProducerRule(t *testing.T) *lens.Rule {
+	t.Helper()
+	r := authPlaneRule(t)
+	r.Output.OutputKeyPattern = "cap-read.reloadtest.{actorSuffix}"
+	r.Output.BodyColumns = []string{"readableAnchors"}
+	r.Output.EntryKeyColumn = "anchorId"
+	r.Output.RealnessFilter = "anchorId"
+	return r
+}
+
+// adapterIsReadGrantLicensed reports whether a built adapter carries the D1
+// read-grant namespace licence — the same question adapterIsGuarded asks about
+// the §6.2 guard, and asked of the ADAPTER for the same reason: what a
+// replacement actually acquired is the only thing this path can get wrong, and
+// re-deriving it from the rule here would assert the predicate against itself.
+//
+// What the licence then DOES to a write (refuse, terminally, fail-closed) is
+// pinned in internal/refractor/adapter's own tests, against a real KV.
+func adapterIsReadGrantLicensed(adpt adapter.Adapter) bool {
+	licensed, reports := adpt.(interface{ ReadGrantWriter() bool })
+	return reports && licensed.ReadGrantWriter()
+}
+
+// TestBuildAdapter_ReadGrantProducer_KeepsItsLicenceAcrossAnIntoReload is the
+// third rule property every adapter built for a lens must acquire, and the one
+// whose absence is silent.
+//
+// An INTO-only hot reload builds a FRESH adapter and swaps it into the running
+// pipeline. CoreKVSource fires its update callback on every CDC revision of a
+// known lens spec — a package reinstall with an UNCHANGED cypher classifies as
+// IntoOnly and nothing in hotReloadRefusal stops it — so a `lattice pkg
+// install` of a package owning a cap-read producer, or a kernel re-seed of
+// capabilityRead, runs this path routinely.
+//
+// An unlicensed replacement would then refuse every cap-read key the lens
+// renders: its retractions fail while the grants they meant to withdraw stay
+// live, in the over-grant direction, with no notifyGrantChange because the
+// write errors before the announcement. Binding in buildAdapter — the single
+// point activation and the reload replacement both pass through — is what
+// makes the licence a property of the rule rather than of one call site.
+func TestBuildAdapter_ReadGrantProducer_KeepsItsLicenceAcrossAnIntoReload(t *testing.T) {
+	r := readGrantProducerRule(t)
+	adpt, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+	assert.True(t, adapterIsReadGrantLicensed(adpt),
+		"a read-grant producer's replacement adapter must carry the namespace licence, or a package reinstall silently unlicenses the lens")
+}
+
+// TestBuildAdapter_PlainRule_GainsNoReadGrantLicence is the other direction,
+// and it carries the security half: the reload path must not hand the licence
+// to a lens the installer would refuse. A binding that armed every adapter
+// would close the hole by opening the namespace.
+func TestBuildAdapter_PlainRule_GainsNoReadGrantLicence(t *testing.T) {
+	r := readGrantProducerRule(t)
+	// Doc mode: no entryKeyColumn, so IsReadGrantProducer refuses it.
+	r.Output.EntryKeyColumn = ""
+	r.Output.RealnessFilter = ""
+	adpt, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, adapterIsReadGrantLicensed(adpt),
+		"a lens that does not qualify as a read-grant producer must not acquire the namespace licence from the reload path")
+
+	// And a lens with no output descriptor at all — the descriptor-less plain
+	// shape the runtime guard exists for — likewise.
+	plain := authPlaneRule(t)
+	plain.ProjectionKind = ""
+	plain.Output = nil
+	plainAdpt, err := buildAdapter(plain, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, adapterIsReadGrantLicensed(plainAdpt),
+		"a descriptor-less plain lens declares no key space and must never be licensed")
+}

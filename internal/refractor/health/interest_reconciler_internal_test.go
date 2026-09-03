@@ -444,3 +444,55 @@ func (h *reasonRecorder) messages() []string {
 	defer h.mu.Unlock()
 	return append([]string(nil), h.msgs...)
 }
+
+// TestInterestReconciler_ReapAnnouncesOnTheInterestChangeEdge pins Increment
+// 1b's third writer (personal-lens-derivation-licence-design.md §4.2).
+//
+// Removing a registration WIDENS what personalinterest.IsRelevant admits for
+// that identity — absence of any registration admits everything — and a
+// personal lens reads that answer live at evaluation time. Without the edge the
+// widening reaches the identity's rows only when the convergence sweep next
+// comes round.
+//
+// The negative half is what makes it a claim about the mechanism rather than
+// about the announce call: every registration this sweep KEPT — the live
+// device, the one inside the birth-race grace, the unparseable documents —
+// changes nothing, so announcing for them would drive a reprojection of an
+// identity whose interest is exactly what it was.
+func TestInterestReconciler_ReapAnnouncesOnTheInterestChangeEdge(t *testing.T) {
+	conn, kv, ctx := newInterestReconcilerFixture(t)
+
+	old := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	fresh := time.Now().UTC().Format(time.RFC3339)
+
+	require.NoError(t, personalinterest.Register(ctx, kv, reconcilerIdentity, reconcilerLiveDevice, nil, nil, old))
+	makeSyncDurable(ctx, t, conn, reconcilerIdentity, reconcilerLiveDevice)
+	require.NoError(t, personalinterest.Register(ctx, kv, reconcilerIdentity, reconcilerGoneDevice, nil, nil, old))
+	require.NoError(t, personalinterest.Register(ctx, kv, reconcilerIdentity, reconcilerBornDevice, nil, nil, fresh))
+
+	var announced []string
+	r := newTestReconciler(conn, kv, reconcilerSyncStream, slog.New(&reasonRecorder{}))
+	r.SetInterestChangeSink(func(identityID string) { announced = append(announced, identityID) })
+
+	require.Empty(t, r.sweep(ctx), "first strike removes nothing")
+	require.Empty(t, announced, "a sweep that removed nothing must announce nothing")
+
+	require.ElementsMatch(t, []string{reconcilerIdentity + "." + reconcilerGoneDevice}, r.sweep(ctx))
+	require.Equal(t, []string{reconcilerIdentity}, announced,
+		"the reaped registration's identity must be announced exactly once, and no kept registration may announce at all")
+}
+
+// TestInterestReconciler_ReapWithNoSinkIsUnchanged pins the nil default: a
+// reconciler wired without the edge still reaps, and announces nothing — what
+// every harness that runs no reprojector gets.
+func TestInterestReconciler_ReapWithNoSinkIsUnchanged(t *testing.T) {
+	conn, kv, ctx := newInterestReconcilerFixture(t)
+
+	old := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	require.NoError(t, personalinterest.Register(ctx, kv, reconcilerIdentity, reconcilerGoneDevice, nil, nil, old))
+
+	r := newTestReconciler(conn, kv, reconcilerSyncStream, slog.New(&reasonRecorder{}))
+	require.Empty(t, r.sweep(ctx))
+	require.ElementsMatch(t, []string{reconcilerIdentity + "." + reconcilerGoneDevice}, r.sweep(ctx))
+	require.False(t, registrationExists(ctx, t, kv, reconcilerIdentity+"."+reconcilerGoneDevice))
+}

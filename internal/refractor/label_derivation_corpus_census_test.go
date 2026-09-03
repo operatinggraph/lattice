@@ -616,13 +616,33 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string, rule *lens.
 		spec := pkgmgr.LensSpec{
 			CanonicalName:  l.CanonicalName,
 			Adapter:        l.Adapter,
-			Bucket:         l.TargetBucket,
+			Bucket:         provisionedBucket(l.TargetBucket),
 			ProjectionKind: l.ProjectionKind,
 			Output:         bootstrapDescriptorAsPkgmgr(t, l),
 		}
 		visit(l.CanonicalName, l.CypherRule, corpusLensRule(t, l.CanonicalName, spec),
 			l.ProjectionKind == projection.ActorAggregateKind, false)
 	}
+}
+
+// provisionedBucket resolves a kernel LensDefinition's TargetBucket to the
+// bucket Refractor actually activates the lens against.
+//
+// A bootstrap definition carries the SHORT canonical name ("capability"), or
+// omits the field entirely — makeLensSpecBody maps BOTH onto the provisioned
+// bucket ("capability-kv") on the way into the lens spec, defaulting an absent
+// TargetBucket before it translates the short spelling. Handling only the
+// spelling would leave the default arm modelling a bucket named "". Every
+// bucket-driven classification downstream — auth-plane, the §6.2 guard, the
+// read-grant producer test — reads the translated value. A census carrying the
+// short name models a deployment nobody runs: it makes the kernel's own
+// capability-bucket lenses answer non-auth-plane, which is the opposite of what
+// the write-authorization surface and the base cap-read self-grant are.
+func provisionedBucket(target string) string {
+	if target == "capability" || target == "" {
+		return bootstrap.CapabilityKVBucket
+	}
+	return target
 }
 
 // bootstrapDescriptorAsPkgmgr re-reads a kernel lens's output descriptor as a

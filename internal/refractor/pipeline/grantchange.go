@@ -81,6 +81,35 @@ func (p *Pipeline) RecordGrantReprojectIssue(ctx context.Context, kind, detail s
 	return nil
 }
 
+// RecordUnsanctionedGrantKeyRefusal raises the lens's Health fault for a write
+// this lens attempted into the D1 read-grant namespace without being an
+// installed read-grant producer (adapter.ErrUnsanctionedReadGrantKey).
+//
+// It routes to the lens's own health entry for the same reason every other
+// fault here does: the lens that is misdeclared is the one an operator has to
+// find, and a process-level counter would have to be correlated back to it.
+//
+// Raised once per LENS, and the distinction is load-bearing: the offending
+// cypher renders the same key on every evaluation of every actor, so a fault
+// per write would bury the entry it exists to raise — and the dedup lives here
+// rather than on the adapter because an adapter is rebuilt on every INTO-only
+// hot reload, so a once over there would re-arm on a package reinstall, which
+// is precisely when an operator is reading the entry.
+func (p *Pipeline) RecordUnsanctionedGrantKeyRefusal(ctx context.Context, key string) {
+	p.unsanctionedGrantKeyOnce.Do(func() {
+		slog.Error("pipeline: REFUSED a write into the reserved D1 read-grant namespace — this lens is not an installed read-grant producer, so no cap-read key it renders may land",
+			"ruleId", p.ruleID, "key", key)
+		if p.reporter == nil {
+			return
+		}
+		if err := p.reporter.RecordGrantReprojectIssue(ctx, "unsanctioned-grant-key",
+			"refused a write to "+key+": this lens is not an installed read-grant producer, so no key it renders in the reserved D1 namespace may land"); err != nil {
+			slog.Warn("pipeline: could not record the unsanctioned read-grant key refusal on health",
+				"ruleId", p.ruleID, "key", key, "err", err)
+		}
+	})
+}
+
 // SetPersonalSweepProgress records the personal convergence sweep's
 // round-robin cursor, its last completed cycle, and the grant-change drain's
 // queue depth on this lens's own health entry
@@ -133,8 +162,17 @@ func (p *Pipeline) HasGrantChangeSink() bool {
 // Contract #6 §6.14 makes audit-only) would deliver a retraction to the wrong
 // lens, or to none, and read as a silent over-grant.
 func (p *Pipeline) notifyGrantChange(targetKey string, transition adapter.GrantTransition) {
+	p.notifyGrantChangeSignalled(targetKey, transition)
+}
+
+// notifyGrantChangeSignalled is notifyGrantChange plus whether a signal was
+// actually emitted. The retraction paths read it: a per-key announcement that
+// emitted nothing — an unclassified liveness, or a key the lens's own inverse
+// does not claim — leaves the caller holding a revocation nobody heard, and the
+// caller often still holds the actor by name.
+func (p *Pipeline) notifyGrantChangeSignalled(targetKey string, transition adapter.GrantTransition) bool {
 	if p.grantSink == nil || p.grantAnchorFromKey == nil || targetKey == "" {
-		return
+		return false
 	}
 	switch transition {
 	case adapter.TransitionGranted, adapter.TransitionRevoked:
@@ -147,9 +185,9 @@ func (p *Pipeline) notifyGrantChange(targetKey string, transition adapter.GrantT
 		// only way the distinction the type draws is observable at all.
 		slog.Info("pipeline: grant change: write carried no ordering token, so its liveness is unclassified — no signal emitted; the convergence sweep covers this key",
 			"ruleId", p.ruleID, "key", targetKey)
-		return
+		return false
 	default:
-		return
+		return false
 	}
 	actorKey, ok := p.grantAnchorFromKey(targetKey)
 	if !ok {
@@ -161,6 +199,36 @@ func (p *Pipeline) notifyGrantChange(targetKey string, transition adapter.GrantT
 		// loud rather than dropping in silence.
 		slog.Warn("pipeline: grant change: written key does not invert to an anchor — no signal emitted",
 			"ruleId", p.ruleID, "key", targetKey)
+		return false
+	}
+	p.grantSink.GrantChanged(actorKey)
+	return true
+}
+
+// notifyActorGrantChange announces a retraction for one actor whose keys this
+// pipeline just removed, naming the actor directly instead of recovering it
+// from a written key.
+//
+// It is the coarser sibling of notifyGrantChange, for the one caller that holds
+// the actor already and cannot get a per-key liveness answer: an out-of-band
+// shred against a target whose adapter does not derive GrantTransition
+// (adapter.GrantTransitionDeriver). Such an adapter reports TransitionNone for
+// every key it retracts, so routing the shred through notifyGrantChange would
+// emit nothing at all and leave the consumer honouring grants the shred
+// destroyed.
+//
+// Announcing per actor rather than per key is strictly safe and no coarser than
+// the consumer needs: the sink's own entry point takes an actor
+// (GrantChangeSink.GrantChanged), notifyGrantChange's inversion exists only to
+// RECOVER one from a key, and the reprojection it triggers is per actor. The
+// cost of the coarser signal is at most one extra reprojection of an actor
+// whose keys were already gone.
+//
+// actorKey is the full Contract #1 vertex key, the same shape the inversion
+// yields. The grantSink nil-guard is the same one notifyGrantChange keeps: only
+// a read-grant producer carries a sink, and a lens with none has nobody to tell.
+func (p *Pipeline) notifyActorGrantChange(actorKey string) {
+	if p.grantSink == nil || actorKey == "" {
 		return
 	}
 	p.grantSink.GrantChanged(actorKey)

@@ -195,9 +195,17 @@ type Reprojection struct {
 // same adapter.Delete path a vertex tombstone takes). Used by the Refractor
 // KeyShredded nullification listener (vault-crypto-shredding-design.md §2.4) to
 // scrub a shredded identity's row out-of-band.
+//
+// actorKey carries the identity the shred names, alongside the row's own key
+// values, because the retraction ANNOUNCES on the read-grant change edge and
+// the announcement's fallback arm has no written key to invert back to an
+// actor. It is the same explicit-actor shape RowSetNullifier below already
+// takes, and for the same reason: the caller holds the identity, so re-deriving
+// it downstream out of a key field would be a second implementation of a key
+// shape that must never disagree with the first.
 // Defined here so internal/control does not import internal/pipeline (architecture boundary).
 type RowNullifier interface {
-	Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error
+	Delete(ctx context.Context, keys map[string]any, actorKey string, projectionSeq uint64) error
 }
 
 // RowSetNullifier is implemented by any component that can remove EVERY
@@ -301,6 +309,28 @@ type Service struct {
 	// Interest Set, personal-secure-lens-design.md §3.3). nil until
 	// SetPersonalInterestKV is called; those two ops fail closed until then.
 	personalInterestKV *substrate.KV
+	// interestChanged is the Interest Set's change edge: it names the identity
+	// whose registered interest this service just rewrote, so the personal
+	// plane can re-decide that identity's rows instead of waiting for the
+	// convergence sweep to come round.
+	//
+	// A personal row is a function of the lens's own subgraph AND two
+	// projections read live at evaluation time — the D1 read gate and this
+	// Interest Set. This is the second one's edge; without it a device that
+	// narrows its interest keeps receiving the excluded keys for up to a full
+	// sweeper cycle.
+	//
+	// LIFETIME: set once by the host at wiring time, before Run; never mutated
+	// afterwards, never reset, process-lifetime. nil is today's behaviour — the
+	// registration still lands, it simply announces nothing — which is what
+	// every test and harness that does not wire a reprojector gets.
+	//
+	// A bare func rather than a named sink interface because
+	// health.InterestReconciler takes the SAME edge and this package imports
+	// health: a shared interface type declared here could not be referenced
+	// there, and declaring it in a third package would be a second spelling of
+	// a one-method contract. The host supplies the closure to both.
+	interestChanged func(identityID string)
 	// personalHydratorByRuleID backs the "hydrate" op (personal-secure-lens-
 	// design.md §3.5, Fire PL.4). Empty until RegisterPersonalHydrator is
 	// called; the op fails closed while empty. A deployment installs one
@@ -460,6 +490,37 @@ func (s *Service) SetPersonalInterestKV(kv *substrate.KV) {
 	s.mu.Lock()
 	s.personalInterestKV = kv
 	s.mu.Unlock()
+}
+
+// SetInterestChangeSink installs the Interest Set's change edge: fn is called
+// with the identity id after every "register"/"deregister" that actually
+// rewrote the bucket. nil leaves the ops announcing nothing.
+//
+// fn runs inline on the control-plane request goroutine, synchronous with the
+// write it describes, so it must not block or do I/O — the shipped
+// implementation enqueues onto the grant-change reprojector's coalescing dirty
+// set, which is a map insert under a mutex.
+//
+// Called AFTER the write, never before: an announcement ahead of the write
+// would re-decide the actor's rows against the interest the write is about to
+// replace, and the reprojection it triggers is the only one that edge will
+// produce.
+func (s *Service) SetInterestChangeSink(fn func(identityID string)) {
+	s.mu.Lock()
+	s.interestChanged = fn
+	s.mu.Unlock()
+}
+
+// announceInterestChange routes one identity to the Interest Set change edge,
+// if one is wired.
+func (s *Service) announceInterestChange(identityID string) {
+	s.mu.Lock()
+	fn := s.interestChanged
+	s.mu.Unlock()
+	if fn == nil || identityID == "" {
+		return
+	}
+	fn(identityID)
 }
 
 // RegisterPersonalHydrator registers the Hydrator the "hydrate" op dispatches
@@ -771,14 +832,16 @@ func (s *Service) RebuildRule(ctx context.Context, ruleID string, truncate bool,
 // target store via its registered RowNullifier (*pipeline.Pipeline.Delete — the
 // same adapter.Delete path a vertex tombstone takes). Returns an error if ruleID
 // is not registered as a RowNullifier, or if the underlying Delete fails.
-func (s *Service) NullifyRow(ctx context.Context, ruleID string, keys map[string]any, projectionSeq uint64) error {
+// actorKey is the identity the shred names — see RowNullifier for why the row's
+// key values alone do not carry it.
+func (s *Service) NullifyRow(ctx context.Context, ruleID string, keys map[string]any, actorKey string, projectionSeq uint64) error {
 	s.mu.Lock()
 	n, ok := s.rowNullifierByRuleID[ruleID]
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("control: rule %q: %w", ruleID, ErrRuleNotRegistered)
 	}
-	return n.Delete(ctx, keys, projectionSeq)
+	return n.Delete(ctx, keys, actorKey, projectionSeq)
 }
 
 // NullifyActor deletes EVERY projected row under actorKey's prefix from
@@ -1211,6 +1274,13 @@ func (s *Service) deleteRule(ctx context.Context, ruleID string) ControlResponse
 // (personal-secure-lens-design.md §3.3, Fire PL.2). Fails closed if
 // SetPersonalInterestKV hasn't been called, or if identityId/deviceId are
 // missing from the request body.
+//
+// A registration both NARROWS and WIDENS what personalinterest.IsRelevant
+// admits for this identity, and the narrowing direction is the one that
+// matters: a device that stops caring about a type must stop receiving its
+// keys, and the personal lens's authoritative keyset frame is what prunes
+// them. So the write announces on the Interest Set change edge, which re-drives
+// the identity's personal pipelines.
 func (s *Service) personalRegister(ctx context.Context, body ControlRequest) ControlResponse {
 	s.mu.Lock()
 	kv := s.personalInterestKV
@@ -1225,12 +1295,19 @@ func (s *Service) personalRegister(ctx context.Context, body ControlRequest) Con
 		time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return ControlResponse{Error: err.Error()}
 	}
+	s.announceInterestChange(body.IdentityID)
 	return ControlResponse{PersonalRegister: &PersonalRegisterResult{Registered: true}}
 }
 
 // personalDeregister removes a device's Personal Lens Interest Set
 // registration. Fails closed if SetPersonalInterestKV hasn't been called, or
 // if identityId/deviceId are missing from the request body.
+//
+// Removing the identity's LAST device widens what IsRelevant admits — absence
+// of any registration admits everything — so this announces on the Interest Set
+// change edge too. The widening direction costs nothing to get wrong, but the
+// edge is one mechanism and having it fire on one of the two writers would be a
+// coverage claim the next reader has to re-derive.
 func (s *Service) personalDeregister(ctx context.Context, body ControlRequest) ControlResponse {
 	s.mu.Lock()
 	kv := s.personalInterestKV
@@ -1244,6 +1321,7 @@ func (s *Service) personalDeregister(ctx context.Context, body ControlRequest) C
 	if err := personalinterest.Deregister(ctx, kv, body.IdentityID, body.DeviceID); err != nil {
 		return ControlResponse{Error: err.Error()}
 	}
+	s.announceInterestChange(body.IdentityID)
 	return ControlResponse{PersonalDeregister: &PersonalDeregisterResult{Deregistered: true}}
 }
 
@@ -1342,10 +1420,21 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 	}
 
 	if body.DeviceID != "" && kv != nil {
-		if cerr := personalinterest.SetRevisionCursor(ctx, kv, body.IdentityID, body.DeviceID, highWater,
-			time.Now().UTC().Format(time.RFC3339)); cerr != nil {
+		created, cerr := personalinterest.SetRevisionCursor(ctx, kv, body.IdentityID, body.DeviceID, highWater,
+			time.Now().UTC().Format(time.RFC3339))
+		if cerr != nil {
 			slog.Warn("control: hydrate: record revision cursor", "identityId", body.IdentityID,
 				"deviceId", body.DeviceID, "err", cerr)
+		}
+		if created {
+			// The cursor write is bookkeeping, but CREATING the row is not: an
+			// unregistered device's cursor lands as a registration carrying no
+			// types and no anchors, and an unfiltered registration is what
+			// IsRelevant reads as admit-everything. So this arm is a fourth
+			// writer of the Interest Set, widening it exactly as a filterless
+			// register would, and it announces on the same edge. The update arm
+			// touches no filter and changes nothing IsRelevant answers.
+			s.announceInterestChange(body.IdentityID)
 		}
 	}
 	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs, SyncStartSeq: syncStartSeq, SyncEndSeq: syncEndSeq}}

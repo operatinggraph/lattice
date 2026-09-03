@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -99,6 +100,29 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 				"ruleId", p.ruleID, "entityId", key,
 				"stage", "write", "adapter", p.adapterName, "err", writeErr)
 
+			if errors.Is(writeErr, adapter.ErrUnsanctionedReadGrantKey) {
+				// Checked BEFORE FailClosed, and it is the only error that
+				// jumps that queue.
+				//
+				// FailClosed exists so a retraction that did not take effect
+				// cannot be masked by a sibling's fresh upsert landing: the
+				// whole batch is redelivered instead. That reasoning assumes
+				// the failure might not recur. This one always does — the
+				// lens's own declaration is what makes the key unsanctioned,
+				// so every redelivery renders the same key and is refused
+				// again, and a perEntry retraction carrying FailClosed would
+				// Nak the lens into a permanent redelivery loop against a
+				// misconfiguration no retry can fix.
+				//
+				// Nothing is masked by acking instead: the guard refuses the
+				// lens's writes into that namespace in BOTH directions, so
+				// there is no sibling upsert to land ahead of the retraction
+				// this refused. The lens is dark for the namespace, loudly, on
+				// its own health entry — which is the state a misdeclared
+				// grant writer should be in.
+				terminalErrs = append(terminalErrs, writeErr)
+				continue
+			}
 			if result.FailClosed {
 				// A FailClosed result's own failure must never be masked by
 				// continuing to write its batch siblings (ruleengine.EvalResult's

@@ -91,6 +91,32 @@ type SeqGuarded interface {
 	Guarded() bool
 }
 
+// GrantTransitionDeriver is an optional interface reporting whether this
+// adapter's outcome-returning writes actually DERIVE DeleteOutcome.Transition /
+// UpsertOutcome.Transition from the stored body, rather than leaving it at the
+// zero TransitionNone.
+//
+// It exists because OutcomeDeleter is the wrong test for that question, and the
+// difference is a silent security hole rather than a style point. Satisfying
+// OutcomeDeleter says only that an adapter can report whether a retraction
+// landed; GrantWriterAdapter and PostgresAdapter both satisfy it while leaving
+// Transition at its zero value, because neither reads the stored row's liveness
+// back. A caller that routed a retraction through DeleteWithOutcome on the
+// strength of the interface alone would receive TransitionNone for every key,
+// announce nothing, and read as though the grant-change edge were covering the
+// path — a mechanism reported as installed while closing nothing.
+//
+// Only the sequence-guarded NATS-KV write path has both bodies in hand at once
+// (natskv.go's guardedWrite reads the stored entry for the CAS precondition and
+// builds the outgoing body itself), so only it can answer, and only while its
+// guard is on: an unguarded delete never reads the stored body at all.
+//
+// An adapter that does not implement it, or reports false, tells a caller that
+// wants a liveness transition to fall back to whatever coarser signal it holds.
+type GrantTransitionDeriver interface {
+	DerivesGrantTransition() bool
+}
+
 // RowReader is an optional interface for adapters that support reading back
 // one row by its composite key. Implemented by NatsKVAdapter for the
 // Chronicler's event→row runtime (internal/chronicler): a single lifecycle

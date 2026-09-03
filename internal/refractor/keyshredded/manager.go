@@ -360,7 +360,7 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 			err = m.cfg.Control.NullifyActor(ctx, target.RuleID, ev.Payload.IdentityKey, math.MaxInt64)
 		} else {
 			keys := map[string]any{target.KeyField: ev.Payload.IdentityKey}
-			err = m.cfg.Control.NullifyRow(ctx, target.RuleID, keys, math.MaxInt64)
+			err = m.cfg.Control.NullifyRow(ctx, target.RuleID, keys, ev.Payload.IdentityKey, math.MaxInt64)
 		}
 		if err == nil {
 			continue

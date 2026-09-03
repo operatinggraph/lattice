@@ -17,14 +17,16 @@ import (
 )
 
 // fakeNullifier is a control.RowNullifier test double. Delete returns err
-// (nil for success) and records every call.
+// (nil for success) and records every call's key values and named actor.
 type fakeNullifier struct {
-	err   error
-	calls []map[string]any
+	err       error
+	calls     []map[string]any
+	actorKeys []string
 }
 
-func (f *fakeNullifier) Delete(_ context.Context, keys map[string]any, _ uint64) error {
+func (f *fakeNullifier) Delete(_ context.Context, keys map[string]any, actorKey string, _ uint64) error {
 	f.calls = append(f.calls, keys)
+	f.actorKeys = append(f.actorKeys, actorKey)
 	return f.err
 }
 
@@ -92,6 +94,12 @@ func TestHandleKeyShredded_TargetSucceeds_DeletesAndAcks(t *testing.T) {
 	require.Equal(t, uint64(1), m.HandledTotal())
 	require.Len(t, nullifier.calls, 1)
 	require.Equal(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA", nullifier.calls[0]["identityKey"])
+	// The shredded identity travels alongside the row's key values, not only
+	// inside them: the retraction announces on the read-grant change edge, and
+	// the arm that cannot invert a written key back to an actor has nothing
+	// else to name. A doc-mode target whose KeyField were some other column
+	// would leave that arm silent.
+	require.Equal(t, []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}, nullifier.actorKeys)
 }
 
 func TestHandleKeyShredded_MultipleTargets_AllAttempted(t *testing.T) {

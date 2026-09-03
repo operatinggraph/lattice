@@ -160,6 +160,28 @@ jobs:
         # STRICT=1 fails the build on either violation.
         run: STRICT=1 go run ./scripts/lint-lens-anchors.go
 
+      - name: Cap-read producer closure gate (authoring half)
+        # Refractor's D1 read gate finds its rows by a WILDCARD listing over
+        # cap-read.*, so any lens writing that namespace is read as a live
+        # grant whether or not the platform has ever heard of it. A lens that
+        # cannot carry the grant-change edge — not actorAggregate, not
+        # per-entry, not auth-plane, or a key pattern whose inverse cannot name
+        # the actor — therefore writes grants nothing ever hears withdrawn. It
+        # calls projection.CapReadWriterRefusal, the same predicate the runtime
+        # installer calls, so the two cannot diverge.
+        #
+        # SCOPE, stated plainly: the internal/bootstrap arm inspects the
+        # kernel's real base producer, but the packages/** arm is PREVENTIVE
+        # ONLY — the three shipped generated producers are composed at install
+        # time by internal/pkgmgr/anchorwalk.go and are not literals in any
+        # package's source, so this gate never sees them. They are closed by
+        # validateGrantDomainName, by the corpus test
+        # TestCapReadWriterRefusal_ShippedProducersStillInstall, and at runtime
+        # by NatsKVAdapter's namespace guard. The gate's own vectors therefore
+        # run on every invocation — a clean corpus proves nothing on its own.
+        # STRICT=1 fails the build on any violation.
+        run: STRICT=1 go run ./scripts/lint-cap-read-producers.go
+
       - name: Vertical Package Standard gate (S1 descriptors / S6 floor / S7 manifest)
         # A user-facing op with no descriptor is invisible to a
         # descriptor-driven client; a lens no cypher test executes is only

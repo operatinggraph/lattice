@@ -112,6 +112,24 @@ type InterestReconciler struct {
 	// would be worse than none.
 	absentLastSweep map[string]struct{}
 
+	// interestChanged is the Interest Set's change edge, named with the
+	// identity behind every registration this reconciler removes.
+	//
+	// A removal WIDENS what personalinterest.IsRelevant admits for that
+	// identity — absence of any registration admits everything — and a personal
+	// lens reads that answer live at evaluation time. Without the edge the
+	// widening reaches the identity's rows only when the personal convergence
+	// sweep next comes round, which on a large population is hours.
+	//
+	// LIFETIME: set once by the host at wiring time, before Run; never mutated,
+	// never reset, process-lifetime. nil is today's behaviour.
+	//
+	// A bare func rather than a shared sink interface: control.Service takes the
+	// same edge and internal/refractor/control imports this package, so a type
+	// declared in either is unusable by the other. The host supplies one closure
+	// to both.
+	interestChanged func(identityID string)
+
 	graceWindow  time.Duration
 	tickInterval time.Duration
 	registration time.Duration
@@ -150,6 +168,29 @@ func NewInterestReconciler(
 		registration:    interestRegistrationGrace,
 		logger:          logger,
 	}
+}
+
+// SetInterestChangeSink installs the Interest Set's change edge: fn is called
+// with the identity id of every registration a sweep actually removed. nil
+// leaves the sweep announcing nothing.
+//
+// Called after the conditional delete has landed, one identity at a time, on
+// the sweep goroutine. fn must not block — the shipped implementation enqueues
+// onto the grant-change reprojector's coalescing dirty set.
+//
+// Set at wiring time, before Run: this is not safe to flip concurrently with a
+// sweep in flight, the same posture every other constructor-time field on this
+// type takes.
+func (r *InterestReconciler) SetInterestChangeSink(fn func(identityID string)) {
+	r.interestChanged = fn
+}
+
+// announceInterestChange routes one identity to the change edge, if one is wired.
+func (r *InterestReconciler) announceInterestChange(identityID string) {
+	if r.interestChanged == nil || identityID == "" {
+		return
+	}
+	r.interestChanged(identityID)
 }
 
 // Run blocks until ctx is cancelled: waits out the boot grace window, sweeps
@@ -233,6 +274,11 @@ func (r *InterestReconciler) sweep(ctx context.Context) []string {
 			continue
 		}
 		removed = append(removed, key)
+		// After the delete has landed, never before: the widening this
+		// announces is the state the delete just created, and a reprojection
+		// driven off the pre-delete registration would decide the identity's
+		// rows against interest that no longer exists.
+		r.announceInterestChange(identityID)
 	}
 	r.absentLastSweep = absentNow
 

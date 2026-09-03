@@ -278,7 +278,13 @@ func TestGuardedWrite_ErrorExitsClassifyAsNoTransition(t *testing.T) {
 func TestGuardedOutcomes_CarryKeyAndTransition(t *testing.T) {
 	t.Run("upsert reports the granted transition beside an unconditional Wrote", func(t *testing.T) {
 		store := &transitionStore{absent: true}
-		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+		// readGrantWriter: these cases model a real cap-read PRODUCER — the
+		// key they render is a D1 grant key — so the fixture has to carry the
+		// licence the installer grants such a lens. Without it the namespace
+		// guard refuses the write before any transition is derived, which is
+		// the correct answer for a lens that is NOT a producer and the wrong
+		// fixture for one that is.
+		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true, readGrantWriter: true}
 
 		out, err := a.upsert(context.Background(),
 			map[string]any{"key": "cap-read.dom.identity.A.B"}, map[string]any{"v": 1}, 5)
@@ -291,7 +297,13 @@ func TestGuardedOutcomes_CarryKeyAndTransition(t *testing.T) {
 
 	t.Run("a watermark-declined upsert still claims Wrote but reports no transition", func(t *testing.T) {
 		store := &transitionStore{stored: []byte(liveBody)}
-		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+		// readGrantWriter: these cases model a real cap-read PRODUCER — the
+		// key they render is a D1 grant key — so the fixture has to carry the
+		// licence the installer grants such a lens. Without it the namespace
+		// guard refuses the write before any transition is derived, which is
+		// the correct answer for a lens that is NOT a producer and the wrong
+		// fixture for one that is.
+		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true, readGrantWriter: true}
 
 		out, err := a.upsert(context.Background(),
 			map[string]any{"key": "cap-read.dom.identity.A.B"}, map[string]any{"v": 1}, 1)
@@ -304,7 +316,13 @@ func TestGuardedOutcomes_CarryKeyAndTransition(t *testing.T) {
 
 	t.Run("delete reports the revoked transition", func(t *testing.T) {
 		store := &transitionStore{stored: []byte(liveBody)}
-		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+		// readGrantWriter: these cases model a real cap-read PRODUCER — the
+		// key they render is a D1 grant key — so the fixture has to carry the
+		// licence the installer grants such a lens. Without it the namespace
+		// guard refuses the write before any transition is derived, which is
+		// the correct answer for a lens that is NOT a producer and the wrong
+		// fixture for one that is.
+		a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true, readGrantWriter: true}
 
 		out, err := a.deleteRow(context.Background(),
 			map[string]any{"key": "cap-read.dom.identity.A.B"}, 5)

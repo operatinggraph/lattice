@@ -576,6 +576,12 @@ type Pipeline struct {
 	// deliberately conservative — it can force an unneeded re-survey, never
 	// miss a needed one.
 	projectionWrites atomic.Uint64
+	// unsanctionedGrantKeyOnce bounds the read-grant namespace refusal's health
+	// fault to one per lens. It lives on the PIPELINE, which outlives its
+	// adapters: a fresh adapter is built for every INTO-only hot reload, so a
+	// once on that type would re-arm on a package reinstall — exactly the
+	// moment an operator would be reading the entry.
+	unsanctionedGrantKeyOnce sync.Once
 }
 
 // ProjectionProgress is the lens's forward-progress snapshot for the health
@@ -591,6 +597,23 @@ func (p *Pipeline) Progress() ProjectionProgress {
 	p.progressMu.Lock()
 	defer p.progressMu.Unlock()
 	return ProjectionProgress{LastAppliedSeq: p.lastAppliedSeq, LastProjectedAt: p.lastProjectedAt}
+}
+
+// OrderingTokenSeeded reports whether this pipeline holds an ordering token —
+// whether Progress().LastAppliedSeq is non-zero.
+//
+// It is the same value ReprojectPersonalActor captures and REFUSES on, exposed
+// as the question its callers actually ask: can a reprojection of this lens
+// publish a frame at all? A frame at revision 0 is one the client discards, so
+// publishing it would report a retraction that provably cannot retract.
+//
+// The grant-change drain reads it before consuming a signal, because it
+// consumes each signal exactly once and does not re-enqueue a refusal. Asking
+// here rather than re-deriving `Progress().LastAppliedSeq != 0` at each caller
+// keeps the drain's readiness and the reprojection's refusal reading the same
+// fact.
+func (p *Pipeline) OrderingTokenSeeded() bool {
+	return p.Progress().LastAppliedSeq != 0
 }
 
 // recordAppliedSeq advances the consumer's forward cursor. Called for every
@@ -710,7 +733,22 @@ func New(
 		peakRowsBuf:         NewPeakRowsRingBuffer(DefaultPeakRowsBufferSize),
 	}
 	p.adpt = adpt
+	p.bindAdapterReporters(adpt)
 	return p, nil
+}
+
+// bindAdapterReporters wires an adapter this pipeline is about to write through
+// to the lens's own health entry.
+//
+// Called from both places a pipeline takes an adapter — construction, and the
+// replacement HotReloadInto swaps in — because a reload builds a FRESH adapter
+// and one that arrived without its reporter would refuse writes into a log line
+// with no health fault behind it. The pipeline is the only object that spans
+// both, which is why the binding lives here rather than at either caller.
+func (p *Pipeline) bindAdapterReporters(adpt adapter.Adapter) {
+	if nkv, ok := adpt.(*adapter.NatsKVAdapter); ok {
+		nkv.SetUnsanctionedGrantKeyReporter(p.RecordUnsanctionedGrantKeyRefusal)
+	}
 }
 
 // SetPatternClosedOutput declares that this lens's row for an anchor is a
@@ -1065,6 +1103,7 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 		p.requireGuardedAdapter = true
 	}
 	p.adpt = newAdpt
+	p.bindAdapterReporters(newAdpt)
 	return nil
 }
 
@@ -1332,10 +1371,82 @@ func (p *Pipeline) RemoveConsumer(ctx context.Context) error {
 // shredded identity's row out-of-band, independent of the rule's own CDC
 // stream. Safe to call from any goroutine; the adapter itself is idempotent
 // (deleting an absent row/key is a no-op).
-func (p *Pipeline) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
-	err := p.currentAdapter().Delete(ctx, keys, projectionSeq)
+//
+// actorKey is the identity the shred names, in full Contract #1 vertex-key
+// form. It is carried rather than derived because this retraction ANNOUNCES on
+// the read-grant change edge, and the announcement's fallback arm — an adapter
+// that reports no liveness transition — has no written key to invert back to an
+// actor. Empty is permitted, for a caller naming no actor; that arm then
+// announces nothing, the same fail-slow direction a missing sink takes.
+func (p *Pipeline) Delete(ctx context.Context, keys map[string]any, actorKey string, projectionSeq uint64) error {
+	adpt := p.currentAdapter()
+	if deleter, ok := grantTransitionDeleter(adpt, p.grantSink); ok {
+		outcome, err := deleter.DeleteWithOutcome(ctx, keys, projectionSeq)
+		p.recordProjectionWrite()
+		if err != nil {
+			return err
+		}
+		if grantSignalOwed(outcome) && !p.notifyGrantChangeSignalled(outcome.Key, outcome.Transition) {
+			p.notifyActorGrantChange(actorKey)
+		}
+		return nil
+	}
+	err := adpt.Delete(ctx, keys, projectionSeq)
 	p.recordProjectionWrite()
-	return err
+	if err != nil {
+		return err
+	}
+	p.notifyActorGrantChange(actorKey)
+	return nil
+}
+
+// grantSignalOwed reports whether a retraction outcome leaves an announcement
+// owed that the per-key path may not have made.
+//
+// Two of the three cases are silences the per-key path produces for reasons
+// that are NOT "nothing was revoked": a sequence-less guarded write leaves the
+// liveness unclassified (TransitionUnknown), and a key the lens's own inverse
+// does not claim emits nothing at all. Both are correctly fail-slow for a CDC
+// write, which has no actor in hand — a shred has one, so the coarser signal
+// costs at most an extra reprojection.
+//
+// The third is DeclinedByWatermark, and it is the one that reads backwards. A
+// declined guarded retraction returns the ZERO transition — not because the row
+// was a tombstone, but because the guard never compared: it saw a stored
+// watermark at or above this call's token and returned before reading the body.
+// The row it left behind may be perfectly live. So TransitionNone alone does
+// NOT positively mean nothing was revoked; only TransitionNone with the write
+// actually attempted does.
+//
+// (A shred stamps math.MaxInt64, so no stored watermark can decline one today.
+// That is a property of one caller's argument, not of this outcome type, and a
+// predicate that reads the field is right whether or not the caller changes.)
+func grantSignalOwed(outcome adapter.DeleteOutcome) bool {
+	return outcome.Transition != adapter.TransitionNone || outcome.DeclinedByWatermark
+}
+
+// grantTransitionDeleter reports the outcome-returning deleter to route a
+// retraction through when — and only when — the announcement it feeds will
+// carry a real liveness transition.
+//
+// Both conjuncts are load-bearing and neither implies the other. A sink-less
+// lens has nobody to announce to, so the outcome form buys nothing and the
+// plain Delete stays the path. And an adapter satisfying OutcomeDeleter is NOT
+// evidence that a transition will be derived: GrantWriterAdapter and
+// PostgresAdapter both satisfy it while leaving Transition at TransitionNone,
+// so keying on the interface would announce nothing for every key and report
+// the retraction path covered while it emitted no signal at all. Only
+// adapter.GrantTransitionDeriver answers the question actually being asked.
+func grantTransitionDeleter(adpt adapter.Adapter, sink GrantChangeSink) (adapter.OutcomeDeleter, bool) {
+	if sink == nil {
+		return nil, false
+	}
+	deriver, ok := adpt.(adapter.GrantTransitionDeriver)
+	if !ok || !deriver.DerivesGrantTransition() {
+		return nil, false
+	}
+	deleter, ok := adpt.(adapter.OutcomeDeleter)
+	return deleter, ok
 }
 
 // DeleteAllForActor removes every child key under actorKey's perEntry prefix
@@ -1344,7 +1455,9 @@ func (p *Pipeline) Delete(ctx context.Context, keys map[string]any, projectionSe
 // perEntry-lens analog of Delete: a perEntry lens's grants for one actor live
 // under N per-anchor keys rather than the single parent key Delete targets, so
 // the Refractor KeyShredded nullification listener (control.RowSetNullifier)
-// calls this instead when a target lens is configured PerEntry. Refuses
+// calls this instead when a target lens is configured PerEntry. Announces
+// every grant it withdraws on the read-grant change edge, so a shred re-drives
+// the personal plane the same way a CDC-path revocation does. Refuses
 // closed when this pipeline is not actually a perEntry lens (no
 // MultiEnvelopeFn installed): a doc-mode lens's row lives at the parent key
 // itself, not under a trailing-dot child prefix, so a mis-flagged
@@ -1379,14 +1492,49 @@ func (p *Pipeline) DeleteAllForActor(ctx context.Context, actorKey string, proje
 	}
 	var errs []error
 	deleted := 0
+	// A shred is a revocation, and a revocation nobody hears about leaves the
+	// consumer of the read-grant projection honouring a grant that is gone —
+	// the over-grant direction. Where the adapter derives liveness the
+	// announcement is per key and only for the keys that were actually live
+	// (an already-tombstoned child transitions nowhere and signals nothing);
+	// where it does not, one announcement names the actor after the loop, which
+	// is the same actor every per-key signal would have inverted to anyway.
+	deleter, perKey := grantTransitionDeleter(adpt, p.grantSink)
+	// silentKey records that at least one key owed an announcement the per-key
+	// path did not make — see grantSignalOwed for the three ways that happens.
+	// Those are silences a shred can afford to close, because it holds the
+	// actor by name.
+	silentKey := false
 	for _, keys := range existing {
-		err := adpt.Delete(ctx, keys, projectionSeq)
+		var err error
+		if perKey {
+			var outcome adapter.DeleteOutcome
+			outcome, err = deleter.DeleteWithOutcome(ctx, keys, projectionSeq)
+			if err == nil && grantSignalOwed(outcome) &&
+				!p.notifyGrantChangeSignalled(outcome.Key, outcome.Transition) {
+				silentKey = true
+			}
+		} else {
+			err = adpt.Delete(ctx, keys, projectionSeq)
+		}
 		p.recordProjectionWrite()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("delete %v: %w", keys, err))
 			continue
 		}
 		deleted++
+	}
+	// The non-deriving arm announces on `deleted > 0` alone, which means it
+	// announces again on a REDELIVERED shred of an actor whose keys are already
+	// gone. That is accepted rather than overlooked: such an adapter cannot tell
+	// a live key from a tombstone without a read-before-delete it deliberately
+	// does not perform, so the only alternatives are this or announcing nothing
+	// at all — and the cost is bounded to one reprojection per redelivery,
+	// coalesced per identity by the reprojector's own dirty set, against the
+	// benefit of never leaving a real revocation silent. The guarded arm above
+	// has the liveness in hand and is exact.
+	if (!perKey && deleted > 0) || silentKey {
+		p.notifyActorGrantChange(actorKey)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("pipeline: DeleteAllForActor: deleted %d/%d keys under %q, then failed: %w",

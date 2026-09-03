@@ -30,6 +30,13 @@ func TestInstallActorAggregate_GrantChangeSinkClassification(t *testing.T) {
 		keyPattern     string
 		entryKeyColumn string
 		want           bool
+		// refusedAtInstall marks the shapes the producer-closure gate
+		// (projection.CapReadWriterRefusal) now refuses outright: a lens
+		// claiming the cap-read.* namespace that cannot carry the change edge
+		// is not installed sink-less, it is not installed at all. The
+		// cap.*-prefixed write-plane rows below stay installable — they never
+		// claim the namespace, so the D1 gate's wildcard never reads them.
+		refusedAtInstall bool
 	}{
 		{
 			// The bootstrap capabilityRead base lens's real shape.
@@ -70,11 +77,12 @@ func TestInstallActorAggregate_GrantChangeSinkClassification(t *testing.T) {
 			// says "this actor's grants changed somehow" — not which grant, and
 			// not whether any liveness flipped. The per-key transition the edge
 			// is built on does not exist for it.
-			name:           "a cap-read-prefixed lens that is NOT per-entry is refused",
-			bucket:         projection.AuthPlaneBucket,
-			keyPattern:     "cap-read.{actorSuffix}",
-			entryKeyColumn: "",
-			want:           false,
+			name:             "a cap-read-prefixed lens that is NOT per-entry is refused",
+			bucket:           projection.AuthPlaneBucket,
+			keyPattern:       "cap-read.{actorSuffix}",
+			entryKeyColumn:   "",
+			want:             false,
+			refusedAtInstall: true,
 		},
 		{
 			// The pattern grammar permits a repeated placeholder, and BuildKey
@@ -83,18 +91,20 @@ func TestInstallActorAggregate_GrantChangeSinkClassification(t *testing.T) {
 			// this lens wrote. Wiring the edge onto it would install something
 			// that emits nothing for its entire life, with no trace anywhere
 			// that names the edge.
-			name:           "a lens whose key pattern does not round-trip is refused",
-			bucket:         projection.AuthPlaneBucket,
-			keyPattern:     "cap-read.{actorSuffix}.{actorSuffix}",
-			entryKeyColumn: "anchorId",
-			want:           false,
+			name:             "a lens whose key pattern does not round-trip is refused",
+			bucket:           projection.AuthPlaneBucket,
+			keyPattern:       "cap-read.{actorSuffix}.{actorSuffix}",
+			entryKeyColumn:   "anchorId",
+			want:             false,
+			refusedAtInstall: true,
 		},
 		{
-			name:           "a business-plane lens is refused",
-			bucket:         "weaver-targets",
-			keyPattern:     "cap-read.{actorSuffix}",
-			entryKeyColumn: "anchorId",
-			want:           false,
+			name:             "a business-plane lens is refused",
+			bucket:           "weaver-targets",
+			keyPattern:       "cap-read.{actorSuffix}",
+			entryKeyColumn:   "anchorId",
+			want:             false,
+			refusedAtInstall: true,
 		},
 	}
 
@@ -111,6 +121,13 @@ func TestInstallActorAggregate_GrantChangeSinkClassification(t *testing.T) {
 
 			ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 },
 				nil, nil, discardLogger(), projection.WithGrantChangeSink(&recordingGrantSink{}))
+			if tc.refusedAtInstall {
+				if ok {
+					t.Fatalf("expected the producer-closure gate to refuse registration (bucket %q, pattern %q, entryKeyColumn %q)",
+						tc.bucket, tc.keyPattern, tc.entryKeyColumn)
+				}
+				return
+			}
 			if !ok {
 				t.Fatalf("expected the lens to install")
 			}

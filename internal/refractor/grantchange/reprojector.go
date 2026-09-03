@@ -24,9 +24,12 @@ package grantchange
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +67,17 @@ type PersonalPipeline interface {
 	// ReprojectPersonalActor re-evaluates this lens for one actor and
 	// publishes the authoritative keyset frame.
 	ReprojectPersonalActor(ctx context.Context, identityID string) error
+	// OrderingTokenSeeded reports whether this lens's consumer has applied an
+	// event yet, i.e. whether a reprojection could publish a frame at all.
+	//
+	// It is the drain's second readiness conjunct, and it exists because
+	// ReprojectPersonalActor REFUSES with ErrNoOrderingToken while the ack
+	// floor is unseeded, while the drain consumes a signal exactly once and
+	// deliberately does not re-enqueue a failure. A device that narrows its
+	// interest inside the post-restart window would otherwise lose its
+	// retraction to the standing healer — up to a full sweeper cycle, in the
+	// over-grant direction.
+	OrderingTokenSeeded() bool
 	// RecordGrantReprojectIssue raises this lens's Health fault for a
 	// reprojection that did not happen. It returns the write's own error so a
 	// caller tracking what has actually been REPORTED (rather than what it
@@ -198,12 +212,17 @@ func (r *Reprojector) SetRegistryReady(fn func(context.Context) error) {
 	r.registryReady = fn
 }
 
-// registryIsReady reports whether the drain may consume signals yet.
+// registryIsReady reports whether the drain may consume signals yet —
+// readinessRefusal's two conjuncts, evaluated under one hold.
 //
-// It latches: once the registry has been observed complete, the check stops
-// running. That bounds its cost — it is a Core KV enumeration, and the drain
-// ticks every second — and it is sound for what the gate is FOR, which is the
-// boot window.
+// It latches: once readiness has been observed, the check stops running. That
+// bounds its cost — it is a Core KV enumeration, and the drain ticks every
+// second — and it is sound for what the gate is FOR, which is the boot window.
+//
+// A nil registryReady means no gate at all (tests, harnesses), the
+// ordering-token conjunct included: this is the whole readiness check, and a
+// host that installs none has said it wants none. Every production wiring
+// installs one.
 //
 // A lens hot-added later reopens a smaller window, and "smaller" is the honest
 // word rather than "brief": it runs from the lens's Core-KV declaration being
@@ -233,33 +252,117 @@ func (r *Reprojector) registryIsReady(ctx context.Context) bool {
 	r.holdLogged = true
 	r.mu.Unlock()
 
-	err := check(ctx)
+	err := r.readinessRefusal(ctx, check)
 	if err == nil {
 		r.latchRegistry()
-		slog.Info("grantchange: lens registry is complete — draining the grant changes queued during boot",
+		slog.Info("grantchange: lens registry is complete and every personal lens can order a frame — draining the changes queued during boot",
 			"heldFor", held.String())
 		return true
 	}
 	if held > holdMax {
 		r.latchRegistry()
-		slog.Warn("grantchange: lens registry never reported complete within the hold bound — draining anyway; signals for a lens that is still missing will be lost until the convergence sweep covers them",
+		slog.Warn("grantchange: the drain's readiness never held within the hold bound — draining anyway; signals for a lens that is still missing, or that still cannot order a frame, will be lost until the convergence sweep covers them",
 			"heldFor", held.String(), "bound", holdMax.String(), "reason", err)
 		// Raised, not merely logged, for the same reason the overflow path is:
 		// this is a degradation an operator has to be able to SEE, and every
 		// other way this package can silently do less already raises one. It
 		// fires once per process — the latch above guarantees it — so it costs
 		// one Health write per registered lens, ever.
-		detail := "drained against an incomplete lens registry after " + held.Round(time.Second).String() + ": " + err.Error()
+		detail := "drained against an unready personal plane after " + held.Round(time.Second).String() + ": " + err.Error()
 		for _, p := range r.snapshotPersonal() {
-			_ = p.RecordGrantReprojectIssue(ctx, "registry-incomplete", detail)
+			_ = p.RecordGrantReprojectIssue(ctx, readinessIssueKind(err), detail)
 		}
 		return true
 	}
 	if !logged {
-		slog.Info("grantchange: holding grant changes until the lens registry finishes loading — reprojecting now would silently skip the lenses that have not registered yet",
+		slog.Info("grantchange: holding changes until the personal plane is ready to receive them — reprojecting now would silently skip the lenses that have not registered yet, or fail outright on the ones with no ordering token",
 			"reason", err)
 	}
 	return false
+}
+
+// IssueRegistryIncomplete and IssueOrderingTokenUnseeded are the two health
+// fault kinds the drain's bounded fallback raises, one per readiness conjunct.
+//
+// Two kinds rather than one because the operator response differs completely: a
+// registry that never completes is a lens that failed activation somewhere in
+// the deployment, while a pipeline with no ordering token is a consumer that
+// has applied no event — a stream position or a stalled durable. Folding both
+// into "registry-incomplete" would send an operator looking for a lens that is
+// activating perfectly well.
+const (
+	IssueRegistryIncomplete    = "registry-incomplete"
+	IssueOrderingTokenUnseeded = "ordering-token-unseeded"
+)
+
+// errOrderingTokenUnseeded marks the refusal raised by the ordering-token
+// conjunct, so the fault kind is derived from the refusal itself rather than by
+// re-testing the condition after the fact (which would re-read a value that has
+// moved on).
+var errOrderingTokenUnseeded = errors.New("personal lens has applied no event yet")
+
+// readinessIssueKind maps a readiness refusal onto the health fault kind that
+// names it.
+func readinessIssueKind(err error) string {
+	if errors.Is(err, errOrderingTokenUnseeded) {
+		return IssueOrderingTokenUnseeded
+	}
+	return IssueRegistryIncomplete
+}
+
+// readinessRefusal names why the drain may not consume signals yet, or returns
+// nil when it may. Both conjuncts hold a signal rather than dropping it, and
+// both ride the SAME hold, the same holdMax bound and the same latch — no new
+// state, no second lifetime.
+//
+//  1. the in-process lens registry is complete against Core KV (check, see
+//     SetRegistryReady for what that costs and why it latches);
+//  2. every REGISTERED personal pipeline can order a frame.
+//
+// The second conjunct is the one a narrowing needs. ReprojectPersonalActor
+// refuses with ErrNoOrderingToken while a pipeline's ack floor is unseeded, and
+// its own comment calls that reachable rather than theoretical: the drain's
+// ticker runs before every personal consumer has seeded one. The drain consumes
+// a signal exactly once — take() has already removed the actor from dirty by
+// the time reprojectActor runs, and reprojectActor deliberately does not
+// re-enqueue on failure — so a device that narrows its Interest Set inside that
+// window loses its RETRACTION to the standing healer, which is up to a full
+// sweeper cycle in the over-grant direction. Fixing it at the latch reuses a
+// hold that already exists rather than adding a retry queue with a lifetime of
+// its own.
+//
+// It is asserted over the registry as it stands, not over the corpus: a lens
+// that has not registered yet is conjunct 1's business, and asking an
+// unregistered pipeline anything is not possible.
+func (r *Reprojector) readinessRefusal(ctx context.Context, check func(context.Context) error) error {
+	if check != nil {
+		if err := check(ctx); err != nil {
+			return err
+		}
+	}
+	if unseeded := r.pipelinesAwaitingOrderingToken(); len(unseeded) > 0 {
+		return fmt.Errorf("%w: lens(es) %s, so a reprojection could publish no frame", errOrderingTokenUnseeded, strings.Join(unseeded, ", "))
+	}
+	return nil
+}
+
+// pipelinesAwaitingOrderingToken lists the registered personal lenses whose
+// consumer has not seeded an ack floor, sorted. The registry is snapshotted
+// first and each pipeline asked outside the lock, the same posture
+// reprojectActor takes: a producer's GrantChanged call must not block behind a
+// readiness probe.
+func (r *Reprojector) pipelinesAwaitingOrderingToken() []string {
+	var unseeded []string
+	for _, ruleID := range r.registeredRuleIDs() {
+		p, live := r.registered(ruleID)
+		if !live {
+			continue
+		}
+		if !p.OrderingTokenSeeded() {
+			unseeded = append(unseeded, ruleID)
+		}
+	}
+	return unseeded
 }
 
 func (r *Reprojector) latchRegistry() {
@@ -329,6 +432,39 @@ func (r *Reprojector) GrantChanged(actorKey string) {
 		return
 	}
 
+	r.enqueue(actorID)
+}
+
+// InterestChanged records that one identity's Personal Lens Interest Set was
+// rewritten — a device registering, re-registering with a different filter,
+// deregistering, or its orphaned registration being reaped
+// (personal-lens-derivation-licence-design.md §4.2).
+//
+// It is the SECOND out-of-pattern input a personal row depends on, and it lands
+// on exactly the same coalescing dirty set the D1 grant edge feeds: one bound,
+// one drop accounting, one drain worker, one registry-ready hold. A second path
+// straight to ReprojectPersonalActor would be a second lifetime to reason about
+// and an unbounded fan-out under a device that flaps its registration.
+//
+// It takes an identity ID rather than a vertex key because that is what both
+// its callers hold — the control-plane register/deregister request body and the
+// interest bucket's own key — where the grant edge holds a written target key
+// and must invert it. GrantChanged's parse exists to RECOVER an id; there is
+// nothing here to recover.
+//
+// Like GrantChanged it never blocks and never does I/O: it runs inline on the
+// caller's goroutine, synchronous with the registration write it describes.
+func (r *Reprojector) InterestChanged(identityID string) {
+	if identityID == "" {
+		return
+	}
+	r.enqueue(identityID)
+}
+
+// enqueue is the shared body behind both change edges: coalesce, bound, count
+// the drop. One implementation so the two edges cannot drift in what they do
+// when the set is full — the direction where a divergence is invisible.
+func (r *Reprojector) enqueue(actorID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, already := r.dirty[actorID]; already {

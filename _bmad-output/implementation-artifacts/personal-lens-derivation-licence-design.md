@@ -326,8 +326,19 @@ be closed:
 
 - **At install:** `InstallActorAggregate` already computes `IsReadGrantProducer` (`driver.go:377-389`). Add
   the converse refusal — a lens whose declared output key space begins `cap-read.` and which does **not**
-  qualify (wrong projection kind, no `entryKeyColumn`, no key-ownership round trip, no sink wired) is
-  **REFUSED at registration**, loudly, rather than installed as a silent grant writer no plane hears from.
+  qualify (wrong projection kind, no `entryKeyColumn`, no key-ownership round trip) is **REFUSED at
+  registration**, loudly, rather than installed as a silent grant writer no plane hears from.
+  *(Amended at build, 2026-09-02 — two corrections from the Inc 1 cold reviews.)* **"No sink wired" is not a
+  registration refusal.** Refusing the install would turn a host with no reprojector into an auth-plane
+  outage on the primordial `capabilityRead` lens, and the sweep-without-edge posture is a shipped, tested
+  invariant; a qualifying producer with no sink logs a Warn, and conjunct 1 of the licence (§4.4c) is where
+  the narrowing refuses. **And the declared key space is not the only key space:** a descriptor-less plain
+  `nats_kv` lens on `capability-kv` renders its key from RETURN columns, so a string literal `'cap-read.x'`
+  mints a live D1 grant no install-time descriptor check can see. The closure is therefore at the **write**:
+  the NATS-KV adapter carries a read-grant licence, bound from the *rule* at the single adapter-construction
+  point (activation and INTO hot-reload alike), and an unlicensed adapter refuses to write, delete or purge
+  any `cap-read.`-prefixed key — terminal, health-reported, fail-closed. The install refusal and the authoring
+  gate remain, sharing one predicate (`CapReadWriterRefusal`, which the gate calls on an AST-built rule).
 - **At authoring:** the matching `lint-conventions` check over `packages/**` + `internal/bootstrap`, so the
   refusal is discovered by the author rather than at a stack's boot.
 
@@ -835,4 +846,13 @@ substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc
 
 ### 15.8 Checkpoint
 
-*(amended per increment)* — next: open the worktree, Inc 1.
+*(amended per increment)* — **Inc 1 landed** (1a shred announces on both arms · 1b Interest Set edge + the
+ordering-token latch conjunct · 1c `interest-change-posture` gate · 1d producer closure at install, at the
+write, and at authoring). Two cold reviews (2 BLOCKING + 2 MAJOR + 7 MINOR; then 1 BLOCKING + 1 MAJOR + 5
+MINOR on the fix round), all closed. Deviations recorded in §4.3(d). Found in passing and fixed in-fire:
+the corpus census modelled every kernel lens off the auth plane (`TargetBucket` "capability"/"" never
+translated to `capability-kv`), so `capability` and `capabilityRead` were absent from the auth-plane
+narrowing census — now pinned. **Next: Inc 2** (the licence) — worktree
+`/tmp/lattice-worktrees/lattice-personal-licence-1788382715`, branch `fire/personal-lens-derivation-licence`.
+Conjunct 1 must additionally require that every installed cap-read producer in the process has a sink
+(the Warn path counts), per the §4.3(d) amendment.

@@ -388,7 +388,205 @@ func IsReadGrantProducer(desc OutputDescriptor, plan *ProjectionPlan) bool {
 	return desc.KeyOwnershipRoundTrips()
 }
 
-// InstallActorAggregate wires an actor-aggregate lens through the compiled
+// CapReadWriterRefusal names why a lens declaring a cap-read.* output key space
+// must NOT be registered, or "" when it may be.
+//
+// The D1 read gate answers by a WILDCARD listing over cap-read.*
+// (capabilityread's own doc says package names are not statically enumerable),
+// so the producer set is open by construction: any lens that writes a key in
+// that namespace is read by the gate, whether or not the platform has ever
+// heard of it. "Every cap-read producer announces on the change edge" is
+// therefore a standing claim no runtime conjunct can make — and a personal
+// lens's narrowing rests on exactly that claim. This closes the set where it
+// CAN be closed, at registration, so the claim becomes an install-time property
+// instead of a hope.
+//
+// Without it a vertical shipping cap-read.billing.<actor> through a plain
+// nats_kv lens writes live grants the reader's wildcard finds, gets no sink and
+// no refusal, and every consumer of the read-grant projection keeps honouring a
+// revoked grant until its standing healer next runs.
+//
+// It answers about the LENS ALONE, never about the host's wiring, and that
+// boundary is what lets one predicate serve both the authoring gate
+// (scripts/lint-cap-read-producers.go, which sees a package's source and no
+// runtime at all) and this resolver. Whether a grant-change sink was wired in
+// some process is a different question with a different answer per deployment:
+// a sink-less producer is fail-SLOW by design (see
+// pipeline.SetGrantChangeSink) — its grants still land and still retract,
+// they simply converge on the standing healer — so refusing to install it would
+// turn a latency posture into an auth-plane outage. The consumer that must NOT
+// narrow on the strength of an edge this process lacks refuses on its own
+// terms instead.
+//
+// # What this closes, and what it does NOT
+//
+// It reads a lens's DECLARED key space, which is the §6.13 Output descriptor's
+// key pattern — the only place a lens states one statically. That bounds it
+// precisely, and the bound is not a footnote:
+//
+// A lens with NO descriptor declares no key space at all. It renders its key by
+// joining RETURN column values (NatsKVAdapter.buildKey), so a plain nats_kv
+// lens on the capability bucket whose cypher returns the literal
+// 'cap-read.billing' into its first key column writes
+// `cap-read.billing.identity.<actor>.<anchor>` — a live five-token D1 grant
+// that capabilityread's wildcard reader matches — while this function, looking
+// only at declarations, correctly sees nothing to refuse. That is not a gap in
+// this predicate; it is a question no declaration-level check can answer,
+// because the key does not exist until the row does.
+//
+// The runtime half is NatsKVAdapter's own namespace guard
+// (refuseUnsanctionedGrantKey, licensed by ApplyReadGrantLicence, which
+// cmd/refractor's buildAdapter binds to every adapter it builds):
+// it refuses on the RENDERED key, at the one seam where that key exists, for
+// every write path the adapter has. The authoring half is
+// scripts/lint-cap-read-producers.go, which calls THIS function for a declaring
+// lens and separately refuses a descriptor-less auth-plane lens whose cypher
+// names the namespace.
+//
+// So the closure is three checks over two facts, not one check over one: this
+// one binds what a lens DECLARES, the adapter binds what it WRITES, and the
+// authoring gate binds both before an install ever runs. Read alone, none of
+// them closes the set.
+func CapReadWriterRefusal(r *lens.Rule) string {
+	if r == nil || r.Output == nil {
+		return ""
+	}
+	desc, err := ParseOutputDescriptor(r.Output)
+	if err != nil {
+		// An unparseable descriptor is refused by every installer already. It
+		// is named here only when its raw pattern claims the namespace, so the
+		// refusal an author sees is the one that explains the namespace rule
+		// rather than a generic descriptor error.
+		if strings.HasPrefix(r.Output.OutputKeyPattern, capabilityread.KeyPrefix) {
+			return "its output key pattern claims the " + capabilityread.KeyPrefix +
+				" namespace but the descriptor does not parse: " + err.Error()
+		}
+		return ""
+	}
+	// Short-circuit before Compile, which is real work and runs for every lens
+	// on every activation. The shared tail re-asks both questions because its
+	// other caller has not asked them; here they are an early-out.
+	if prefix, ok := desc.KeyPrefix(); !ok || !strings.HasPrefix(prefix, capabilityread.KeyPrefix) {
+		return ""
+	}
+	// Before Compile, not after: Compile refuses a non-actorAggregate outright,
+	// and its error names the projectionKind rather than the namespace rule the
+	// author needs to read.
+	if !IsActorAggregate(r) {
+		return "it writes the " + capabilityread.KeyPrefix +
+			" namespace without projectionKind actorAggregate, so it has no projection plan, no key-ownership inverse and no read-grant change edge — the D1 gate would read its keys as live grants no plane ever hears withdrawn"
+	}
+	plan, err := Compile(r)
+	if err != nil {
+		return "it writes the " + capabilityread.KeyPrefix + " namespace but its projection plan does not compile: " + err.Error()
+	}
+	return capReadWriterRefusalFor(r, desc, plan)
+}
+
+// CapReadWriterRefusalFor is CapReadWriterRefusal for a caller that has already
+// parsed the descriptor and compiled the plan — the installer, which needs both
+// for the rest of its work.
+//
+// It exists so the installer does not parse and compile a second time on every
+// activation, and more importantly so it cannot ask the question about a
+// DIFFERENT descriptor than the one it then installs: a re-parse is a second
+// read of a mutable input, and the two agreeing is an assumption rather than a
+// property.
+func CapReadWriterRefusalFor(r *lens.Rule, desc OutputDescriptor, plan *ProjectionPlan) string {
+	if r == nil || r.Output == nil {
+		return ""
+	}
+	return capReadWriterRefusalFor(r, desc, plan)
+}
+
+// capReadWriterRefusalFor is the shared tail both entry points end in, from the
+// point where the descriptor is parsed and the plan compiled.
+func capReadWriterRefusalFor(r *lens.Rule, desc OutputDescriptor, plan *ProjectionPlan) string {
+	prefix, ok := desc.KeyPrefix()
+	if !ok || !strings.HasPrefix(prefix, capabilityread.KeyPrefix) {
+		return ""
+	}
+	if !IsActorAggregate(r) {
+		return "it writes the " + capabilityread.KeyPrefix +
+			" namespace without projectionKind actorAggregate, so it has no projection plan, no key-ownership inverse and no read-grant change edge — the D1 gate would read its keys as live grants no plane ever hears withdrawn"
+	}
+	if !IsReadGrantProducer(desc, plan) {
+		return "it writes the " + capabilityread.KeyPrefix + " namespace but does not qualify as a read-grant producer (" +
+			readGrantProducerShortfall(desc, plan) + "), so no grant-change edge can be wired onto it"
+	}
+	return ""
+}
+
+// readGrantProducerShortfall names which of IsReadGrantProducer's conjuncts a
+// descriptor fails, in the order that function evaluates them. A refusal that
+// says only "does not qualify" leaves the author to re-derive a four-conjunct
+// predicate from a log line.
+func readGrantProducerShortfall(desc OutputDescriptor, plan *ProjectionPlan) string {
+	switch {
+	case plan == nil:
+		return "no projection plan"
+	case !plan.AuthPlane:
+		return "its plan does not project an authorization surface"
+	case desc.EntryKeyColumn == "":
+		return "no entryKeyColumn, so it writes one aggregate document rather than one guarded key per granted anchor"
+	default:
+		// No KeyPrefix arm: every caller has already established that the
+		// prefix resolves AND names the namespace — that is what selected this
+		// lens for the question — so the round trip is the only conjunct left
+		// for IsReadGrantProducer to have failed on.
+		return "its key pattern does not round-trip through AnchorFromKey, so a change edge could never name the owning actor"
+	}
+}
+
+// ApplyReadGrantLicence binds a lens rule's licence to write the D1 read-grant
+// namespace to an adapter built for that rule.
+//
+// Whether a lens may mint a cap-read key is a property of the RULE, exactly as
+// the §6.2 guard and the truncate scope are, so it belongs to EVERY adapter
+// built for that rule — activation's, and the replacement an INTO-only hot
+// reload swaps in. Binding it at the installer instead would leave a
+// hot-reloaded producer unlicensed: its next retraction would be refused, the
+// grant it meant to withdraw would stay live, and nothing would announce it.
+//
+// The answer is derived from the rule alone, the way RequiresGuard is, because
+// the reload path has no installer and no pipeline state to consult — only a
+// rule and a fresh target. A non-KV target has no such namespace to claim (a
+// nats_subject Personal lens publishes to a subject, a Postgres lens writes
+// table rows), so it is left untouched.
+//
+// Unconditional in both directions: a lens that stops qualifying across a
+// reload must LOSE the licence, and "we did not call the setter" would leave a
+// stale one armed.
+func ApplyReadGrantLicence(adpt adapter.Adapter, r *lens.Rule) error {
+	nkv, ok := adpt.(*adapter.NatsKVAdapter)
+	if !ok {
+		return nil
+	}
+	nkv.SetReadGrantWriter(ruleIsReadGrantProducer(r))
+	return nil
+}
+
+// ruleIsReadGrantProducer answers IsReadGrantProducer from a rule alone.
+//
+// Every failure to answer resolves to FALSE, and that is the safe direction:
+// an unlicensed adapter refuses cap-read writes, so a rule this cannot classify
+// mints no grants rather than minting unannounced ones.
+func ruleIsReadGrantProducer(r *lens.Rule) bool {
+	if r == nil || r.Output == nil || !IsActorAggregate(r) {
+		return false
+	}
+	desc, err := ParseOutputDescriptor(r.Output)
+	if err != nil {
+		return false
+	}
+	plan, err := Compile(r)
+	if err != nil {
+		return false
+	}
+	return IsReadGrantProducer(desc, plan)
+}
+
+// InstallActorAggregate wires an actor-aggregate lens through the compiled// InstallActorAggregate wires an actor-aggregate lens through the compiled
 // ProjectionPlan: the §6.13 Output descriptor drives the on-wire envelope, the
 // per-actor cross-vertex fan-out, the empty/delete-key behavior, and the §6.2
 // guard predicate — all from lens-definition data, with no canonical-name
@@ -423,6 +621,18 @@ func InstallActorAggregate(
 			"lensId", r.ID, "err", err)
 		return false
 	}
+	// The producer-closure refusal (personal-lens-derivation-licence-design.md
+	// §4.3b). A lens claiming the cap-read.* namespace that cannot carry the
+	// change edge is a silent grant writer no plane hears from, and the D1
+	// gate's wildcard reader finds its keys regardless — so it is refused here
+	// rather than installed. Loud, naming which conjunct it failed, the same
+	// posture the secureColumns-on-nats_kv refusal takes.
+	if refusal := CapReadWriterRefusalFor(r, desc, plan); refusal != "" {
+		logger.Error("read-grant producer closure REFUSED registration: "+refusal,
+			"lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
+		return false
+	}
+
 	authPlane := plan.AuthPlane
 	p.SetAuthPlane(authPlane)
 	p.SetRequiresFootprintValidation(plan.RequiresFootprintValidation)
@@ -443,9 +653,33 @@ func InstallActorAggregate(
 	// somewhere wrong. IsReadGrantProducer's fourth conjunct is what makes the
 	// inverse trustworthy here: it probes the pattern's round trip, so an edge
 	// is never wired onto a descriptor whose inverse could not name an actor.
-	if options.grantSink != nil && IsReadGrantProducer(desc, plan) {
-		p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
-		logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
+	// The namespace licence, bound through the SAME rule-derived function
+	// cmd/refractor's buildAdapter calls. Both sites, not one: buildAdapter is
+	// the only one an INTO-only hot reload passes through (it never runs the
+	// installer), and this is the only one a caller constructing an adapter
+	// directly passes through — every harness, and any embedder. The function
+	// is rule-derived and idempotent, so two callers cannot reach two answers,
+	// and no path can miss it.
+	if err := ApplyReadGrantLicence(adpt, r); err != nil {
+		logger.Error("read-grant namespace licence could not be bound — refusing registration",
+			"lensId", r.ID, "err", err)
+		return false
+	}
+
+	if IsReadGrantProducer(desc, plan) {
+		if options.grantSink != nil {
+			p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
+			logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
+		} else {
+			// Fail-SLOW, and said out loud. The lens installs and its grants
+			// still land and still retract; what is missing is the push, so
+			// every consumer of this projection converges on its standing
+			// healer instead. Silence here is what let a host omission read as
+			// a working edge, and a consumer that narrows on the strength of
+			// the edge has to be able to tell the two apart.
+			logger.Warn("read-grant producer installed with NO grant-change sink — its grant withdrawals push nothing; consumers converge on the standing healer instead",
+				"lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
+		}
 	}
 
 	// A perEntry descriptor (entryKeyColumn set) projects through

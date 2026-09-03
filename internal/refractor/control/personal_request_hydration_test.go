@@ -136,7 +136,8 @@ func TestControl_PersonalRequestHydration_ClearedBySetRevisionCursor(t *testing.
 	require.NoError(t, err)
 	require.True(t, before, "sanity: the request must be visible before the hydrate")
 
-	require.NoError(t, personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 7, "2026-07-30T02:00:00Z"))
+	_, cerr := personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 7, "2026-07-30T02:00:00Z")
+	require.NoError(t, cerr)
 
 	after, err := personalinterest.HydrationRequested(ctx, kv, "identityA", "deviceX")
 	require.NoError(t, err)

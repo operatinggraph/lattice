@@ -115,17 +115,22 @@ func narrowingCases(t *testing.T) []narrowingCase {
 			// The kernel cap.<actor> doc. Its grant set is a RETURN literal, not
 			// a grantedBy/permission walk, so `permission` is legitimately absent
 			// — core references no rbac permission vocabulary (Contract #7 §7.7).
-			//
-			// lensName is empty on purpose: this lens is declared by the kernel
-			// seeder, not by a package, and its declaration carries the bucket
-			// name `capability` rather than the auth-plane bucket, so the derived
-			// population does not contain it. It is covered here anyway, because
-			// what it projects IS the write-authorization surface.
 			lensID:     "CensusKerneLCap99999",
-			lensName:   "",
+			lensName:   "capability",
 			cypher:     bootstrap.CapabilityLensDefinition().CypherRule,
 			anchorType: "identity",
 			wantLabels: map[string]struct{}{"identity": {}, "role": {}},
+		},
+		{
+			// The kernel's base cap-read.<actor> self-grant — the D1 read-grant
+			// producer every deployment runs. Its pattern is one labelled node
+			// bound to the actor and no traversal at all, so the derived set is
+			// the single type that node names, and the anchor is in it.
+			lensID:     "CensusKerneLCapRead9",
+			lensName:   "capabilityRead",
+			cypher:     bootstrap.CapabilityReadLensDefinition().CypherRule,
+			anchorType: "identity",
+			wantLabels: map[string]struct{}{"identity": {}},
 		},
 		{
 			// edge-manifest's PROVIDER read-grant producer, generated from the
@@ -408,7 +413,7 @@ func authPlaneOrCorpusSpec(t *testing.T, name string) (cypher, anchorType string
 // someone deleted both tables, and would satisfy it silently.
 func TestAuthPlaneCensus_CoversEveryAuthPlaneActorAggregate(t *testing.T) {
 	population := authPlaneActorAggregates(t)
-	require.GreaterOrEqualf(t, len(population), 6,
+	require.GreaterOrEqualf(t, len(population), 8,
 		"the auth-plane enumeration collapsed to %d lenses — this census is only worth what it covers", len(population))
 
 	covered := map[string]string{}

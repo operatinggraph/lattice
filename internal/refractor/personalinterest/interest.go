@@ -129,10 +129,18 @@ func Register(ctx context.Context, kv *substrate.KV, identityID, deviceID string
 // than failing. Not itself load-bearing for correctness — the Edge decides
 // warm-vs-cold hydration from its own local cursor (§3.5); this is
 // server-side bookkeeping only.
-func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, deviceID string, revision uint64, registeredAt string) error {
+// created reports whether this call CREATED the registration rather than
+// updating one that already existed. That distinction is the caller's business,
+// not bookkeeping: a created row carries no types and no anchors, and an
+// unfiltered registration is what IsRelevant reads as admit-everything — so the
+// creating call WIDENS what the identity's personal lenses publish, exactly as
+// a register with an empty filter would, and owes the same announcement on the
+// Interest Set change edge. An update leaves the filter untouched and changes
+// nothing IsRelevant answers.
+func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, deviceID string, revision uint64, registeredAt string) (created bool, err error) {
 	key, err := Key(identityID, deviceID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// CAS retry loop: a plain Get-then-Put would lose a concurrent writer's
 	// update (e.g. a register call adding a filter racing this hydrate call
@@ -147,19 +155,19 @@ func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, device
 		switch {
 		case getErr == nil:
 			if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
-				return fmt.Errorf("personalinterest: unmarshal existing %q: %w", key, uerr)
+				return false, fmt.Errorf("personalinterest: unmarshal existing %q: %w", key, uerr)
 			}
 			expectedRev = entry.Revision
 		case errors.Is(getErr, substrate.ErrKeyNotFound):
 			create = true
 		default:
-			return fmt.Errorf("personalinterest: get %q: %w", key, getErr)
+			return false, fmt.Errorf("personalinterest: get %q: %w", key, getErr)
 		}
 		doc.RevisionCursor = revision
 		doc.HydrationRequestedAt = ""
 		body, merr := json.Marshal(doc)
 		if merr != nil {
-			return fmt.Errorf("personalinterest: marshal cursor update for %q: %w", key, merr)
+			return false, fmt.Errorf("personalinterest: marshal cursor update for %q: %w", key, merr)
 		}
 		var casErr error
 		if create {
@@ -168,12 +176,12 @@ func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, device
 			_, casErr = kv.Update(ctx, key, body, expectedRev)
 		}
 		if casErr == nil {
-			return nil
+			return create, nil
 		}
 		if errors.Is(casErr, substrate.ErrRevisionConflict) {
 			continue
 		}
-		return fmt.Errorf("personalinterest: put %q: %w", key, casErr)
+		return false, fmt.Errorf("personalinterest: put %q: %w", key, casErr)
 	}
 }
 

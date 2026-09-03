@@ -191,6 +191,13 @@ func personalEnvelopeFn(interestKV, capKV *substrate.KV, logger *slog.Logger) pi
 
 		if interestKV != nil {
 			anchorType, _ := row["kind"].(string)
+			// interest-change-posture: (subscribed) every writer of the
+			// Interest Set announces on the change edge — the control plane's
+			// register and deregister ops, and the health InterestReconciler's
+			// orphan reap — so a device that narrows or widens what it wants
+			// has this actor's personal pipelines re-driven through
+			// Pipeline.ReprojectPersonalActor rather than waiting for the
+			// convergence sweep to come round.
 			relevant, err := personalinterest.IsRelevant(context.Background(), interestKV, actorID, anchorType, anchorRaw)
 			if err != nil {
 				return nil, nil, fmt.Errorf("projection: personal lens interest-set check for %q: %w", actorID, err)

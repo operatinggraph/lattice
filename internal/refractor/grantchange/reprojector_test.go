@@ -36,6 +36,25 @@ type fakePersonal struct {
 	// no sleeps, no racing goroutine. Set at construction and never mutated, so
 	// it needs no lock.
 	onProgress func()
+	// unseeded makes OrderingTokenSeeded answer false — a personal pipeline
+	// whose consumer has applied no event yet, the state ReprojectPersonalActor
+	// refuses to publish a frame from. The zero value is the ordinary seeded
+	// lens every other case here wants.
+	unseeded bool
+}
+
+func (f *fakePersonal) OrderingTokenSeeded() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.unseeded
+}
+
+// seedOrderingToken flips the double from "no event applied yet" to seeded, the
+// way a consumer's first delivery does.
+func (f *fakePersonal) seedOrderingToken() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unseeded = false
 }
 
 // sweepProgress is one recorded SetPersonalSweepProgress call.
@@ -432,13 +451,13 @@ func TestDrain_RegistryHoldIsNotPermanent(t *testing.T) {
 
 	assert.Equal(t, []string{actorA}, lens.seen(),
 		"past the bound the drain proceeds rather than holding the edge closed forever")
-	assert.Equal(t, []string{"registry-incomplete"}, lens.raised(),
+	assert.Equal(t, []string{grantchange.IssueRegistryIncomplete}, lens.raised(),
 		"proceeding against an incomplete registry is a degradation, and every other way this package does less already raises a Health issue")
 
 	// Latched: the issue is raised once per process, not once per tick.
 	r.GrantChanged(substrate.VertexKey("identity", actorB))
 	r.Drain(context.Background())
-	assert.Equal(t, []string{"registry-incomplete"}, lens.raised(),
+	assert.Equal(t, []string{grantchange.IssueRegistryIncomplete}, lens.raised(),
 		"the latch means the fallback reports once, not on every drain thereafter")
 	assert.ElementsMatch(t, []string{actorA, actorB}, lens.seen())
 }
@@ -487,4 +506,126 @@ func TestReprojectActor_SkipsALensDeregisteredMidWalk(t *testing.T) {
 	assert.Empty(t, doomed.seen(), "a lens deregistered mid-walk must not be reprojected")
 	assert.Empty(t, doomed.raised(),
 		"and must not have a Health entry re-created for it — the deleter just removed that entry")
+}
+
+// TestInterestChanged_EnqueuesCoalescesAndSharesTheGrantEdgesSet is Increment
+// 1b's transport (personal-lens-derivation-licence-design.md §4.2).
+//
+// The Interest Set is the SECOND projection a personal row is decided against.
+// The thing worth pinning is not that a second entry point exists but that it
+// lands on the SAME coalescing set as the grant edge: one bound, one drop
+// accounting, one drain. A second path to the same effect would be a second
+// lifetime to reason about and an unbounded fan-out under a device that flaps
+// its registration.
+func TestInterestChanged_EnqueuesCoalescesAndSharesTheGrantEdgesSet(t *testing.T) {
+	r := grantchange.New()
+	lens := &fakePersonal{}
+	r.RegisterPersonal("lens-1", lens)
+
+	// It takes an identity ID, not a vertex key — that is what both its callers
+	// hold, where the grant edge holds a written target key and must invert it.
+	r.InterestChanged(actorA)
+	r.InterestChanged(actorA)
+	assert.Equal(t, 1, r.QueueDepth(), "two interest changes for one identity coalesce into one reprojection")
+
+	// The grant edge's own signal for the same actor coalesces with it rather
+	// than queueing a second reprojection.
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	assert.Equal(t, 1, r.QueueDepth(), "both edges feed one set, so one actor is owed one reprojection")
+
+	r.InterestChanged("")
+	assert.Equal(t, 1, r.QueueDepth(), "an empty identity names nobody and must not queue a reprojection of nothing")
+
+	r.Drain(context.Background())
+	assert.Equal(t, []string{actorA}, lens.seen())
+}
+
+// TestInterestChanged_OverflowIsCountedLikeAGrantChange pins that the shared
+// set means shared BOUND: an interest storm must be refused and counted exactly
+// as a grant storm is, rather than growing the set past the limit that stands
+// between a mass change and unbounded memory.
+func TestInterestChanged_OverflowIsCountedLikeAGrantChange(t *testing.T) {
+	r := grantchange.New()
+	lens := &fakePersonal{}
+	r.RegisterPersonal("lens-1", lens)
+	r.SetBounds(1, 0)
+
+	r.InterestChanged(actorA)
+	r.InterestChanged(actorB) // dropped at the bound
+	assert.Equal(t, 1, r.QueueDepth())
+
+	r.Drain(context.Background())
+	assert.Equal(t, []string{actorA}, lens.seen(), "the entry already queued is the one that survives")
+	assert.Equal(t, []string{"overflow"}, lens.raised(),
+		"a dropped interest signal is reported exactly as a dropped grant signal is — every way this package does less must be loud")
+}
+
+// TestDrain_HoldsUntilEveryPersonalLensCanOrderAFrame is the ordering-token
+// latch (design §4.2's "one fix the transport requires", §10's
+// "Ordering-token latch").
+//
+// ReprojectPersonalActor REFUSES with ErrNoOrderingToken while a pipeline's ack
+// floor is unseeded, and its own comment calls that reachable rather than
+// theoretical: the drain's ticker runs before every personal consumer has
+// seeded one. The drain consumes each signal exactly once — take() has already
+// removed the actor from the set by the time reprojectActor runs, and
+// reprojectActor deliberately does not re-enqueue a failure — so a device that
+// narrows its Interest Set inside that window loses its RETRACTION to the
+// standing healer, up to a full sweeper cycle, in the over-grant direction.
+//
+// Fixed at the latch rather than with a retry queue: the hold, its two-minute
+// bound and its latch already exist, and a retry queue would be a second
+// lifetime.
+func TestDrain_HoldsUntilEveryPersonalLensCanOrderAFrame(t *testing.T) {
+	r := grantchange.New()
+	seeded, unseeded := &fakePersonal{}, &fakePersonal{unseeded: true}
+	r.RegisterPersonal("seeded", seeded)
+	r.RegisterPersonal("unseeded", unseeded)
+	// The registry itself is complete: this test is about the OTHER conjunct,
+	// so a registry refusal must not be what holds the drain.
+	r.SetRegistryReady(func(context.Context) error { return nil })
+
+	// The narrowing scenario §4.2 names: a device changes its interest inside
+	// the post-restart window.
+	r.InterestChanged(actorA)
+	r.Drain(context.Background())
+
+	assert.Empty(t, seeded.seen(),
+		"the drain must not consume a signal while any registered personal lens would refuse the frame it publishes")
+	assert.Empty(t, unseeded.seen())
+	assert.Equal(t, 1, r.QueueDepth(), "the retraction is HELD, not consumed and dropped")
+
+	// The lens's consumer applies its first event.
+	unseeded.seedOrderingToken()
+	r.Drain(context.Background())
+
+	assert.Equal(t, []string{actorA}, seeded.seen())
+	assert.Equal(t, []string{actorA}, unseeded.seen(),
+		"once every lens can order a frame, the held retraction lands rather than having been lost")
+	assert.Zero(t, r.QueueDepth())
+}
+
+// TestDrain_OrderingTokenHoldIsBoundedLikeTheRegistryHold pins that the new
+// conjunct rides the EXISTING bound rather than introducing an unbounded stall:
+// a lens whose consumer never seeds a token must not hold the whole edge closed
+// forever, and proceeding anyway is a degradation an operator can see.
+func TestDrain_OrderingTokenHoldIsBoundedLikeTheRegistryHold(t *testing.T) {
+	r := grantchange.New()
+	lens := &fakePersonal{unseeded: true}
+	r.RegisterPersonal("lens-1", lens)
+	r.SetRegistryReady(func(context.Context) error { return nil })
+
+	r.InterestChanged(actorA)
+	r.Drain(context.Background())
+	require.Empty(t, lens.seen(), "held while inside the bound")
+
+	r.SetRegistryHoldMax(time.Nanosecond)
+	r.Drain(context.Background())
+
+	assert.Equal(t, []string{actorA}, lens.seen(),
+		"past the bound the drain proceeds rather than holding the edge closed forever")
+	assert.Equal(t, []string{grantchange.IssueOrderingTokenUnseeded}, lens.raised(),
+		"the fault KIND must name the conjunct that held: an operator answering \"registry-incomplete\" goes looking for a lens that is activating perfectly well, while this one is a consumer that has applied no event")
+	assert.Contains(t, lens.reportedDetails()[0], "applied no event yet",
+		"and the detail must say which lens, so the answer is actionable without a second investigation")
 }

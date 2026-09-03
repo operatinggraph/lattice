@@ -44,6 +44,14 @@ func buildAdapter(r *lens.Rule, buildTarget targetBuilder) (adapter.Adapter, err
 	// Which keys the lens owns is a rule property too, and a replacement that
 	// lost it would purge a shared bucket whole on its next rebuild.
 	projection.ApplyTruncateScope(adpt, r)
+	// So is whether the lens may write the D1 read-grant namespace. A
+	// replacement that lost THAT would have every cap-read key it renders
+	// refused: its retractions would fail while the grants they meant to
+	// withdraw stayed live, in the over-grant direction, on a lens that had
+	// merely been reinstalled with an unchanged cypher.
+	if err := projection.ApplyReadGrantLicence(adpt, r); err != nil {
+		return nil, err
+	}
 	return adpt, nil
 }
 

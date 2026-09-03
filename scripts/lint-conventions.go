@@ -541,29 +541,6 @@ var (
 	derivedKeySymbol = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\b`)
 	derivedKeyShape  = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 
-	// grantChangePostureImport matches the import spec for the capabilityread
-	// package, capturing any local alias. A gate whose whole job is
-	// default-deny must not be evadable by `import cr ".../capabilityread"`, so
-	// the qualifier it looks for is RESOLVED from the file's own imports rather
-	// than hardcoded. The dot-import form is captured too — its calls carry no
-	// qualifier at all.
-	//
-	// The leading `import` keyword is CONSUMED, never captured. Both single-line
-	// forms are legal and gofmt-stable — `import "path"` and `import cr "path"`
-	// — and an optional-alias group with nothing to consume the keyword
-	// mis-reads the first as an alias literally named "import" (so the gate
-	// looks for `import.IsReadable(` and matches nothing) and fails the second
-	// outright (so the whole FILE goes unscanned). Both are silent
-	// un-gatings of a default-deny check, which is worse than the evasion the
-	// resolver was added to close.
-	grantChangePostureImport = regexp.MustCompile(`^\s*(?:import\s+)?(?:([A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"github\.com/operatinggraph/lattice/internal/refractor/capabilityread"`)
-	// grantChangePostureBare anchors a dot-imported (unqualified) call.
-	grantChangePostureBare = regexp.MustCompile(`(^|[^.\w])IsReadable\(`)
-	// grantChangePostureShape is the author's declaration of how THIS consumer
-	// learns that a grant it already admitted has changed. The capture is the
-	// justification a none-justified declaration owes.
-	grantChangePostureShape = regexp.MustCompile(`//\s*grant-change-posture:\s*\(([a-z-]+)\)(.*)$`)
-
 	// substrateConnectCall anchors a substrate.Connect( call in a cmd/** binary.
 	// maxReconnectsField is the ConnectOpts field that call must set — the
 	// omission this gate exists to catch: substrate.Connect only threads
@@ -1548,18 +1525,19 @@ func scanSource(path string, data []byte) []finding {
 	if derivedKeyScoped {
 		derivedKeyLines = strings.Split(string(data), "\n")
 	}
-	// grant-change-posture scope: every non-test .go file. Deliberately not
-	// narrowed to the package that holds today's single call site — the whole
-	// point is to bind the NEXT consumer of the D1 read-grant projection,
-	// wherever it is written. This file is excluded because its own self-test
-	// fixtures below carry the very call shape the gate denies.
-	grantChangeScoped := !isTest && !strings.HasPrefix(slash, "scripts/lint-")
-	var grantChangeLines []string
-	var grantChangeCall *regexp.Regexp
-	if grantChangeScoped {
-		grantChangeLines = strings.Split(string(data), "\n")
-		grantChangeCall = grantChangeCallPattern(grantChangeLines)
-		grantChangeScoped = grantChangeCall != nil
+	// change-posture scope (grant-change-posture, interest-change-posture):
+	// every non-test .go file. Deliberately not narrowed to the packages
+	// holding today's single call site apiece — the whole point is to bind the
+	// NEXT consumer of either projection, wherever it is written. This file is
+	// excluded because its own self-test fixtures below carry the very call
+	// shapes the gate denies.
+	changePostureScoped := !isTest && !strings.HasPrefix(slash, "scripts/lint-")
+	var changePostureLines []string
+	var changePostureActive []activeChangePosture
+	if changePostureScoped {
+		changePostureLines = strings.Split(string(data), "\n")
+		changePostureActive = changePostureCalls(changePostureLines)
+		changePostureScoped = len(changePostureActive) > 0
 	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
@@ -1704,8 +1682,8 @@ func scanSource(path string, data []byte) []finding {
 		if derivedKeyScoped {
 			out = append(out, checkDerivedKey(path, ln, derivedKeyLines)...)
 		}
-		if grantChangeScoped {
-			out = append(out, checkGrantChangePosture(path, ln, line, grantChangeCall, grantChangeLines)...)
+		if changePostureScoped {
+			out = append(out, checkChangePosture(path, ln, line, changePostureActive, changePostureLines)...)
 		}
 		if opNameScoped {
 			out = append(out, checkOpName(path, ln, line, opNameAt[ln], opNameUniverse)...)
@@ -3102,93 +3080,213 @@ func derivedKeyOnLine(line string) derivedKeyVerdict {
 	return reasonGiven
 }
 
-// grantChangePostureShapes are the declared ways a consumer of the D1
-// read-grant projection learns that a grant it already admitted has changed.
+// changePostureShapes are the declared ways a projection read live as a
+// decision input learns that the answer it already acted on has changed.
 //
-//   - subscribed: the consumer's pipeline carries the producer-side change edge
-//     (projection.IsReadGrantProducer wires it), so a transition re-drives it.
+//   - subscribed: a producer-side change edge re-drives this consumer, so the
+//     staleness is bounded by the edge's own latency.
 //   - swept: a standing healer re-asks on its own cadence, so the staleness is
 //     bounded by a sweep cycle rather than by unrelated traffic.
 //   - none-justified: neither, and the author says why that is acceptable here.
-var grantChangePostureShapes = map[string]bool{
+var changePostureShapes = map[string]bool{
 	"subscribed":     true,
 	"swept":          true,
 	"none-justified": true,
 }
 
-// checkGrantChangePosture default-denies one executable call site of
-// capabilityread.IsReadable that does not declare how it learns a grant
-// changed (personal-lens-grant-change-trigger-design.md §10.1; BLOCKING).
+// changePostureRule binds one live-read symbol to the annotation its call sites
+// must carry. The rule the gate enforces is about the SHAPE, not about any one
+// package: a projection written by one pipeline and read live by another as a
+// decision input needs a change edge, and a call site reads exactly the same
+// whether or not anything re-asks it.
+type changePostureRule struct {
+	// importPath is the package that owns symbol; qualifier resolution runs
+	// against the reading file's own import of it.
+	importPath string
+	// symbol is the function name, unqualified.
+	symbol string
+	// annotation is the comment key the author declares under.
+	annotation string
+	// subject names the call in a finding, as the ordinary import spells it.
+	subject string
+	// projection describes what is being read, and edges names the mechanisms
+	// a (subscribed) declaration would point at — both appear verbatim in the
+	// undeclared finding, which is the only place a first-time author reads
+	// what the gate wants.
+	projection string
+	edges      string
+	// design cites the ratifying design for the rule.
+	design string
+	// importRe, bareRe and shapeRe are derived at init from the three fields
+	// above; see changePostureImportPattern for why the qualifier is resolved
+	// rather than hardcoded.
+	importRe *regexp.Regexp
+	bareRe   *regexp.Regexp
+	shapeRe  *regexp.Regexp
+}
+
+// changePostureRules is the symbol→annotation table. Adding a row is how the
+// next live-read decision input gets a gate; the check itself is shared, so the
+// findings, the shape vocabulary and the annotation-scoping rules cannot drift
+// between one symbol and the next.
+var changePostureRules = []*changePostureRule{
+	{
+		importPath: "github.com/operatinggraph/lattice/internal/refractor/capabilityread",
+		symbol:     "IsReadable",
+		annotation: "grant-change-posture",
+		subject:    "capabilityread.IsReadable",
+		projection: "the D1 read-grant projection",
+		edges:      "`(subscribed) <which producer edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>`",
+		design:     "personal-lens-grant-change-trigger-design.md §10.1",
+	},
+	{
+		importPath: "github.com/operatinggraph/lattice/internal/refractor/personalinterest",
+		symbol:     "IsRelevant",
+		annotation: "interest-change-posture",
+		subject:    "personalinterest.IsRelevant",
+		projection: "the Personal Lens Interest Set",
+		edges:      "`(subscribed) <which registration edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>`",
+		design:     "personal-lens-derivation-licence-design.md §4.3",
+	},
+}
+
+func init() {
+	for _, rule := range changePostureRules {
+		rule.importRe = changePostureImportPattern(rule.importPath)
+		rule.bareRe = regexp.MustCompile(`(^|[^.\w])` + regexp.QuoteMeta(rule.symbol) + `\(`)
+		rule.shapeRe = regexp.MustCompile(`//\s*` + regexp.QuoteMeta(rule.annotation) + `:\s*\(([a-z-]+)\)(.*)$`)
+	}
+}
+
+// changePostureImportPattern matches the import spec for one package, capturing
+// any local alias. A gate whose whole job is default-deny must not be evadable
+// by `import cr ".../capabilityread"`, so the qualifier it looks for is
+// RESOLVED from the file's own imports rather than hardcoded. The dot-import
+// form is captured too — its calls carry no qualifier at all.
 //
-// The bug it exists to prevent is the one that produced that design: the
-// Personal Lens gates every row on this projection, reads it live, and had no
-// change edge — so a revoked grant stayed honoured until some unrelated Core KV
-// event happened to re-drive the actor. That is invisible in review, because
-// the call site reads exactly the same whether or not anything re-asks it.
+// The leading `import` keyword is CONSUMED, never captured. Both single-line
+// forms are legal and gofmt-stable — `import "path"` and `import cr "path"` —
+// and an optional-alias group with nothing to consume the keyword mis-reads the
+// first as an alias literally named "import" (so the gate looks for
+// `import.IsReadable(` and matches nothing) and fails the second outright (so
+// the whole FILE goes unscanned). Both are silent un-gatings of a default-deny
+// check, which is worse than the evasion the resolver was added to close.
+func changePostureImportPattern(importPath string) *regexp.Regexp {
+	return regexp.MustCompile(`^\s*(?:import\s+)?(?:([A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"` + regexp.QuoteMeta(importPath) + `"`)
+}
+
+// activeChangePosture is one table row plus the call pattern resolved for the
+// file being scanned. A file that does not import the row's package produces
+// none, which short-circuits the whole check for that row.
+type activeChangePosture struct {
+	rule *changePostureRule
+	call *regexp.Regexp
+}
+
+// checkChangePosture default-denies one executable call site of a live-read
+// decision input that does not declare how it learns the answer changed
+// (BLOCKING).
+//
+// The bug it exists to prevent is the one that produced the grant-change
+// design: the Personal Lens gates every row on the D1 read-grant projection,
+// reads it live, and had no change edge — so a revoked grant stayed honoured
+// until some unrelated Core KV event happened to re-drive the actor. That is
+// invisible in review, because the call site reads exactly the same whether or
+// not anything re-asks it. The Interest Set row is the same shape, found the
+// same way, and its asymmetry — a gate for one input and none for the other —
+// was structural rather than accidental.
 //
 // Like every gate in this file it does not CLASSIFY — it makes the author
-// declare, and forgetting fails closed. It ships blocking rather than
-// warn-first, unlike the read-posture gate it borrows its mechanical shape
+// declare, and forgetting fails closed. Each row ships blocking rather than
+// warn-first, unlike the read-posture gate they borrow their mechanical shape
 // from: warn-first was right there because it met a corpus of existing debt,
-// and is wrong here because the census is exactly one site, so a warn over a
+// and is wrong here because each census is exactly one site, so a warn over a
 // clean tree would be precisely the fingers-crossed state the gate ends.
 //
 // A `<why>` is required on every shape, not only none-justified: "subscribed"
 // with nothing after it does not say subscribed to WHAT, which is the fact the
 // next reader needs. That follows the shipped authcontext-target gate rather
 // than the design's looser schema sketch.
-func checkGrantChangePosture(path string, ln int, line string, call *regexp.Regexp, lines []string) []finding {
-	if call == nil || isCommentLine(line) || !call.MatchString(line) {
+func checkChangePosture(path string, ln int, line string, active []activeChangePosture, lines []string) []finding {
+	if isCommentLine(line) {
 		return nil
 	}
-	shape, why, declared := grantChangePosture(lines, ln-1)
-	if !declared {
-		return []finding{{file: path, line: ln,
-			msg: "grant-change-posture: undeclared capabilityread.IsReadable call site — this reads the D1 read-grant projection as a security decision, and that projection is written by a DIFFERENT pipeline with no change notification of its own. Declare how this site learns a grant changed: `// grant-change-posture: (subscribed) <which producer edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>` (personal-lens-grant-change-trigger-design.md §10.1)"}}
+	var out []finding
+	for _, a := range active {
+		if a.call == nil || !a.call.MatchString(line) {
+			continue
+		}
+		shape, why, declared := changePosture(lines, ln-1, a.rule.shapeRe)
+		switch {
+		case !declared:
+			out = append(out, finding{file: path, line: ln,
+				msg: a.rule.annotation + ": undeclared " + a.rule.subject + " call site — this reads " + a.rule.projection +
+					" as a decision input, and that projection is written by a DIFFERENT pipeline with no change notification of its own. Declare how this site learns the answer changed: " +
+					a.rule.edges + " (" + a.rule.design + ")"})
+		case !changePostureShapes[shape]:
+			out = append(out, finding{file: path, line: ln,
+				msg: a.rule.annotation + ": unknown shape (" + shape + ") — the declared ways a consumer learns its input changed are (subscribed), (swept), and (none-justified)"})
+		case strings.TrimSpace(why) == "":
+			out = append(out, finding{file: path, line: ln,
+				msg: a.rule.annotation + ": (" + shape + ") declaration carries no `<why>` — name the mechanism (or the accepted staleness), so the next reader need not re-derive whether anything re-asks this gate"})
+		}
 	}
-	if !grantChangePostureShapes[shape] {
-		return []finding{{file: path, line: ln,
-			msg: "grant-change-posture: unknown shape (" + shape + ") — the declared ways a consumer learns a grant changed are (subscribed), (swept), and (none-justified)"}}
-	}
-	if strings.TrimSpace(why) == "" {
-		return []finding{{file: path, line: ln,
-			msg: "grant-change-posture: (" + shape + ") declaration carries no `<why>` — name the mechanism (or the accepted staleness), so the next reader need not re-derive whether anything re-asks this gate"}}
-	}
-	return nil
+	return out
 }
 
-// grantChangeCallPattern resolves how THIS file would spell a call to
-// capabilityread.IsReadable, from its own import spec, and returns the pattern
-// that matches it — or nil when the file does not import the package at all,
-// which is the common case and short-circuits the whole check.
+// changePostureCalls resolves, for one file, how it would spell a call to each
+// table row's symbol — from its own import specs — and returns one entry per
+// row the file actually imports. An empty result means the file is out of scope
+// for every row, which is the common case.
+func changePostureCalls(lines []string) []activeChangePosture {
+	var out []activeChangePosture
+	for _, rule := range changePostureRules {
+		if call := changePostureCallPattern(lines, rule); call != nil {
+			out = append(out, activeChangePosture{rule: rule, call: call})
+		}
+	}
+	return out
+}
+
+// changePostureCallPattern returns the pattern matching rule's symbol as THIS
+// file would spell it, or nil when the file does not import the package at all.
 //
-// Resolving rather than hardcoding "capabilityread." is the difference between
-// a default-deny gate and a default-deny-unless-you-rename-the-import gate. An
+// Resolving rather than hardcoding the qualifier is the difference between a
+// default-deny gate and a default-deny-unless-you-rename-the-import gate. An
 // alias (`import cr ".../capabilityread"`) is the ordinary evasion; a
 // dot-import removes the qualifier entirely and is matched by its own pattern.
-func grantChangeCallPattern(lines []string) *regexp.Regexp {
+func changePostureCallPattern(lines []string, rule *changePostureRule) *regexp.Regexp {
 	for _, line := range lines {
-		m := grantChangePostureImport.FindStringSubmatch(line)
+		m := rule.importRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
 		switch m[1] {
 		case "":
-			return regexp.MustCompile(`\bcapabilityread\.IsReadable\(`)
+			return regexp.MustCompile(`\b` + regexp.QuoteMeta(defaultQualifier(rule.importPath)+"."+rule.symbol) + `\(`)
 		case ".":
-			return grantChangePostureBare
+			return rule.bareRe
 		default:
-			return regexp.MustCompile(`\b` + regexp.QuoteMeta(m[1]) + `\.IsReadable\(`)
+			return regexp.MustCompile(`\b` + regexp.QuoteMeta(m[1]) + `\.` + regexp.QuoteMeta(rule.symbol) + `\(`)
 		}
 	}
 	return nil
 }
 
-// grantChangePosture looks for the annotation on line i, else on the contiguous
-// run of comment lines directly above it. A blank line or any code line ends the
+// defaultQualifier is the package name an unaliased import binds — the last
+// path segment, which every package in this repo matches.
+func defaultQualifier(importPath string) string {
+	if i := strings.LastIndexByte(importPath, '/'); i >= 0 {
+		return importPath[i+1:]
+	}
+	return importPath
+}
+
+// changePosture looks for the annotation on line i, else on the contiguous run
+// of comment lines directly above it. A blank line or any code line ends the
 // run, so a declaration never reaches past the call it was written for.
-func grantChangePosture(lines []string, i int) (shape, why string, declared bool) {
-	if m := grantChangePostureShape.FindStringSubmatch(lines[i]); m != nil {
+func changePosture(lines []string, i int, shape *regexp.Regexp) (kind, why string, declared bool) {
+	if m := shape.FindStringSubmatch(lines[i]); m != nil {
 		return m[1], m[2], true
 	}
 	for j := i - 1; j >= 0; j-- {
@@ -3196,7 +3294,7 @@ func grantChangePosture(lines []string, i int) (shape, why string, declared bool
 		if trimmed == "" || !strings.HasPrefix(trimmed, "//") {
 			return "", "", false
 		}
-		if m := grantChangePostureShape.FindStringSubmatch(lines[j]); m != nil {
+		if m := shape.FindStringSubmatch(lines[j]); m != nil {
 			return m[1], m[2], true
 		}
 	}
@@ -3659,6 +3757,50 @@ func selfTest() []string {
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok := gate.IsReadable(anchor)\n}\n", ""},
 		{"a test file is out of scope", "internal/refractor/capabilityread/capabilityread_test.go",
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc TestX(t *testing.T) {\n\tok, err := capabilityread.IsReadable(ctx, kv, at, aid, anchor)\n}\n", ""},
+		// The interest-change-posture row of the same table
+		// (personal-lens-derivation-licence-design.md §4.3). The Interest Set is
+		// the SECOND projection a personal row is decided against, read live at
+		// evaluation time exactly as the read-grant one is, and the asymmetry —
+		// a gate for one and none for the other — was structural rather than
+		// accidental. Its census is one call site too, so these vectors are the
+		// only thing keeping the deny path honest.
+		{"an undeclared IsRelevant call site is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"undeclared personalinterest.IsRelevant call site"},
+		{"a subscribed interest declaration above the call passes", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// interest-change-posture: (subscribed) register/deregister and the reconciler re-drive it\n" +
+				"\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n", ""},
+		{"an interest declaration with no why is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// interest-change-posture: (subscribed)\n" +
+				"\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"carries no `<why>`"},
+		{"an unknown interest shape is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// interest-change-posture: (exempt) devices re-register often\n" +
+				"\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"unknown shape (exempt)"},
+		{"an ALIASED personalinterest import does not evade the gate", "internal/refractor/projection/personal.go",
+			"import (\n\tpi \"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\n" +
+				"func f() {\n\tok, err := pi.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"undeclared personalinterest.IsRelevant call site"},
+		{"a DOT personalinterest import does not evade the gate", "internal/refractor/projection/personal.go",
+			"import (\n\t. \"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\n" +
+				"func f() {\n\tok, err := IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"undeclared personalinterest.IsRelevant call site"},
+		{"the interest gate reaches a NEW consumer outside the refractor packages", "cmd/loupe/handlers.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"undeclared personalinterest.IsRelevant call site"},
+		{"the interest qualifier does not fire in a file that never imports the package", "internal/refractor/projection/personal.go",
+			"func f() {\n\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n", ""},
+		{"an interest declaration does not discharge a grant call site", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// interest-change-posture: (subscribed) the register/deregister edge\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a grant declaration does not discharge an interest call site", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) the cap-read producer edge\n" +
+				"\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n",
+			"undeclared personalinterest.IsRelevant call site"},
+		{"an interest test file is out of scope", "internal/refractor/personalinterest/interest_test.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc TestX(t *testing.T) {\n\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n", ""},
 		// primordial-actor. The fixture directory does not exist on disk, so
 		// packageOpScopeIsAny answers "any" — the fail-closed default these
 		// cases are written against. `emit` is the external-egress line the
@@ -4057,6 +4199,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") &&
 				!strings.HasPrefix(fd.msg, "derived-key:") &&
 				!strings.HasPrefix(fd.msg, "grant-change-posture:") &&
+				!strings.HasPrefix(fd.msg, "interest-change-posture:") &&
 				!strings.HasPrefix(fd.msg, "max-reconnects:") &&
 				!strings.HasPrefix(fd.msg, "primordial-actor:") &&
 				!strings.HasPrefix(fd.msg, "actor-guard:") &&

@@ -146,6 +146,23 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   `lattice.ctrl.refractor.personal.deregister` (`"personal"` is a fixed pseudo-lensId, not a real
   lens) — request body `{identityId, deviceId, types?, anchors?}`, response
   `{personalRegister: {registered: true}}` / `{personalDeregister: {deregistered: true}}`.
+- **Interest Set change edge.** `IsRelevant` is read live at evaluation time, so a rewritten
+  registration changes what a personal lens publishes with no Core-KV event on the lens's own
+  subgraph. All **four** writers therefore announce, after their write lands: `personal.register`,
+  `personal.deregister`, `health.InterestReconciler`'s orphan reap, and — less obviously —
+  `personal.hydrate` when its revision-cursor write CREATES the registration
+  (`personalinterest.SetRevisionCursor`'s `kv.Create` arm), since a row with no types and no anchors
+  is what `IsRelevant` reads as admit-everything. Hydrating an already-registered device only
+  updates a cursor, touches no filter, and announces nothing. Each takes a bare
+  `func(identityID string)` wired by `cmd/refractor` — `control` imports `health`, so a shared sink
+  type is unusable by both — and the closure enqueues onto the grant-change `Reprojector`'s existing
+  coalescing dirty set, which already owns the bound, the drop accounting and the registry-ready
+  hold. `nil` announces nothing, which is what a harness running no reprojector gets. The direction
+  that matters is the NARROWING one: a device that stops asking for a type must stop receiving its
+  keys, and the authoritative keyset frame is what prunes them. The reader side is gated — the
+  `interest-change-posture` check in `scripts/lint-conventions.go` default-denies any
+  `personalinterest.IsRelevant` call site that does not declare how it learns its answer changed,
+  through the same symbol→annotation table that governs `capabilityread.IsReadable`.
 - **D1 read-grant security gate (Fire PL.3, `internal/refractor/capabilityread`).** The
   correctness boundary: before publishing, `IsReadable(actorType, actorID, anchorID)` GETs the
   actor's base `cap-read.<actor>` slice plus every domain-specific `cap-read.<domain>.<actor>`
@@ -170,9 +187,63 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   the process-level `grantchange.Reprojector`, which coalesces per actor and re-drives that one
   actor across every registered personal lens via `Pipeline.ReprojectPersonalActor` — `Hydrate`
   without the terminal `hydrationComplete` marker, with the frame revision captured *after*
-  reprojection so the retraction can actually retract. `Truncate` (a rebuild, or the truncating
-  rebuild a *narrowing* MATCH reload owes automatically) announces every purged key the same
-  way, since it never reaches the guard. **The backstop (convergence path):**
+  reprojection so the retraction can actually retract. The drain holds a signal, rather than
+  consuming it, until two things hold: the in-process lens registry is complete against Core KV,
+  **and** every registered personal pipeline reports an ordering token (`Progress().LastAppliedSeq
+  != 0`). The second conjunct exists because `ReprojectPersonalActor` refuses with
+  `ErrNoOrderingToken` while a consumer's ack floor is unseeded, and the drain consumes each signal
+  exactly once without re-enqueueing a failure — so a device changing its interest inside the
+  post-restart window would otherwise lose its retraction to the sweeper. Both conjuncts share one
+  hold, one two-minute bound and one latch; past the bound the drain proceeds and raises the
+  degradation on every registered lens's health entry under the kind that names the conjunct that
+  held — `registry-incomplete` for a lens that never activated, `ordering-token-unseeded` for a
+  consumer that has applied no event. **Operator note:** on a fresh stack the FIRST grant- or
+  interest-change signal after boot can wait out the whole two-minute bound and then raise
+  `ordering-token-unseeded`, because a personal consumer that has applied no event yet genuinely
+  cannot publish a frame. Nothing is lost — the signal is held, not dropped — and the hold latches
+  open once; a fault that recurs after the first boot window is a stalled durable, not this. `Truncate` (a rebuild,
+  or the truncating rebuild a *narrowing* MATCH reload owes automatically) announces every purged
+  key the same way, since it never reaches the guard. So does the identity key-shred path, on **both** its arms
+  — `Pipeline.DeleteAllForActor` for a perEntry target and `Pipeline.Delete` (behind
+  `Control.NullifyRow`) for a doc-mode one. Which announcement each makes turns on
+  `adapter.GrantTransitionDeriver`, **not** on `OutcomeDeleter`: satisfying the outcome interface
+  says only that a retraction reports whether it landed, and both `GrantWriterAdapter` and
+  `PostgresAdapter` satisfy it while leaving `Transition` at zero, so keying on it would announce
+  nothing for every key while reading like a closed hole. A liveness-deriving adapter retracts
+  through `DeleteWithOutcome` and announces per revoked key; any other announces **once per actor**,
+  with the actor key the shred call already holds — coarser than per key, strictly safe, and the
+  reprojection it drives is per actor anyway. **The producer set is closed by three checks over two
+  facts,** because the D1 gate discovers its rows by a wildcard listing and so reads *any*
+  `cap-read.` key as a live grant. (1) **What a lens DECLARES:** `projection.CapReadWriterRefusal`
+  refuses, at registration, a lens whose §6.13 output key pattern claims the namespace without
+  qualifying as a read-grant producer (wrong projection kind, no `entryKeyColumn`, not auth-plane,
+  or a key pattern whose inverse cannot name the actor). (2) **What a lens WRITES:** a lens with no
+  descriptor declares no key space at all — it renders its key by joining RETURN column values — so
+  a plain `nats_kv` lens on the capability bucket returning the literal `'cap-read.billing'` into
+  its first key column would mint a live five-token grant no declaration-level check can see.
+  `NatsKVAdapter` therefore refuses any write whose *rendered* key claims the namespace unless the
+  rule licensed it, fail-closed and terminal, raising `unsanctioned-grant-key` on the lens's own
+  health entry once per lens. The licence is bound by `projection.ApplyReadGrantLicence` inside
+  `cmd/refractor`'s `buildAdapter` — keyed on `IsReadGrantProducer`, never on "has a sink" — because
+  that is the single point every adapter passes through, **activation and the replacement an
+  INTO-only hot reload swaps in alike**: a package reinstall with an unchanged cypher classifies as
+  INTO-only, so binding at the installer would silently unlicense a producer on `lattice pkg
+  install`. The health reporter is bound by the *pipeline* (`New` and `HotReloadInto`), which
+  outlives its adapters and therefore also owns the once-per-lens dedup. The two write paths reach
+  the guard differently: `upsert`/`deleteRow` render through `buildKey` and are refused there, while
+  `truncate` never renders a key — it lists and purges — so an unlicensed adapter's truncate
+  **skips** every `cap-read.` key instead, which is what stops a descriptor-less plain lens (whose
+  rebuild is unscoped, since `ApplyTruncateScope` derives a prefix only for actor-aggregate lenses)
+  from purging every producer's grants under cover of a rebuild. `writeResults` recognizes the
+  refusal *ahead of* its `FailClosed` arm: the misconfiguration is permanent, so redelivering would
+  spin the lens forever, and the guard refuses that lens's writes in both directions so acking masks
+  nothing. (3) **Before either runs:** `scripts/lint-cap-read-producers.go` calls the same predicate
+  as (1) over `internal/bootstrap` and `packages/**`, and separately refuses a descriptor-less
+  auth-plane lens whose cypher names the namespace; its `packages/**` arm is preventive only, since
+  the generated producers are composed at install time rather than written as source literals. A
+  qualifying producer installed with no sink offered stays installable and says so loudly — that
+  posture is fail-SLOW (its consumers converge on the standing healer), never fail-open.
+  **The backstop (convergence path):**
   `grantchange.PersonalSweeper` — one walk shared by every personal lens, over the `identity`
   population from Core KV, `DefaultPersonalSweepBatch` (5) identities per
   `DefaultPersonalSweepInterval` (60s), population cached per cycle rather than re-listed per

@@ -129,8 +129,14 @@ func TestSetRevisionCursor_NewDevice_CreatesCursorOnlyDoc(t *testing.T) {
 	kv := newTestKV(t)
 	ctx := context.Background()
 
-	require.NoError(t, personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 10500,
-		time.Now().UTC().Format(time.RFC3339)))
+	created, err := personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 10500,
+		time.Now().UTC().Format(time.RFC3339))
+	require.NoError(t, err)
+	// Reported, not incidental: the row this created carries no types and no
+	// anchors, which IsRelevant reads as admit-everything — so the caller has
+	// to be able to tell a CREATE from an update and announce the widening on
+	// the Interest Set change edge.
+	require.True(t, created, "hydrating an unregistered device CREATES its registration")
 
 	key, err := personalinterest.Key("identityA", "deviceX")
 	require.NoError(t, err)
@@ -146,8 +152,10 @@ func TestSetRevisionCursor_PreservesExistingFilter(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", []string{"lease"}, nil, time.Now().UTC().Format(time.RFC3339)))
-	require.NoError(t, personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 20000,
-		time.Now().UTC().Format(time.RFC3339)))
+	created, err := personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", 20000,
+		time.Now().UTC().Format(time.RFC3339))
+	require.NoError(t, err)
+	require.False(t, created, "an existing registration is UPDATED, and an update touches no filter — announcing it would drive a reprojection of an identity whose interest did not move")
 
 	// The Interest Set filter must survive the cursor update — a hydrate call
 	// must not silently revert a device to admit-all.
@@ -179,7 +187,8 @@ func TestSetRevisionCursor_ConcurrentCallers_NeitherUpdateIsLost(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func(rev uint64) {
-			errs <- personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", rev, now)
+			_, cerr := personalinterest.SetRevisionCursor(ctx, kv, "identityA", "deviceX", rev, now)
+			errs <- cerr
 		}(uint64(1000 + i))
 	}
 	for i := 0; i < n; i++ {
@@ -208,8 +217,10 @@ func TestSetRevisionCursor_MissingIdentityOrDevice_Errors(t *testing.T) {
 	kv := newTestKV(t)
 	ctx := context.Background()
 
-	require.Error(t, personalinterest.SetRevisionCursor(ctx, kv, "", "deviceX", 1, time.Now().UTC().Format(time.RFC3339)))
-	require.Error(t, personalinterest.SetRevisionCursor(ctx, kv, "identityA", "", 1, time.Now().UTC().Format(time.RFC3339)))
+	_, err := personalinterest.SetRevisionCursor(ctx, kv, "", "deviceX", 1, time.Now().UTC().Format(time.RFC3339))
+	require.Error(t, err)
+	_, err = personalinterest.SetRevisionCursor(ctx, kv, "identityA", "", 1, time.Now().UTC().Format(time.RFC3339))
+	require.Error(t, err)
 }
 
 func TestIsRelevant_ScopedToIdentityPrefix(t *testing.T) {

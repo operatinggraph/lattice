@@ -1370,6 +1370,21 @@ func main() {
 	// install and registers every personal lens on it.
 	grantReprojector := grantchange.New()
 
+	// The SECOND out-of-pattern input's change edge
+	// (personal-lens-derivation-licence-design.md §4.2). A personal row is
+	// decided against the D1 read gate AND the Interest Set, both read live at
+	// evaluation time. The grant edge above covers the first; this covers the
+	// second. Without it a device that narrows its interest keeps receiving the
+	// excluded keys until the convergence sweep comes round.
+	//
+	// Both writers of the Interest Set take a bare closure rather than a shared
+	// sink type: control imports health, so no interface either package
+	// declares is usable by both. The closure enqueues onto the grant edge's own
+	// coalescing dirty set, which already owns the bound, the drop accounting
+	// and the registry-ready hold — the reconciler's is installed at its
+	// construction site below.
+	controlSvc.SetInterestChangeSink(grantReprojector.InterestChanged)
+
 	// The standing healer behind that edge (§4.3). The edge is in-process and
 	// best-effort by construction — a crash between the producer's write and
 	// the drain loses the signal, the coalescing set is bounded, and a lens
@@ -1588,6 +1603,21 @@ func main() {
 			}
 		}
 
+		// The producer-closure refusal, applied to EVERY lens rather than only
+		// the actor-aggregate arm below (personal-lens-derivation-licence-
+		// design.md §4.3b). The D1 read gate finds cap-read.* keys by a wildcard
+		// listing, so any lens writing that namespace is read as a grant
+		// producer whatever its projectionKind — and a lens that cannot carry
+		// the change edge writes grants nothing hears withdrawn. Refusing here
+		// closes the set that the reader's wildcard leaves open; the same
+		// predicate runs inside InstallActorAggregate, so the two arms cannot
+		// disagree about which shapes are sanctioned.
+		if refusal := projection.CapReadWriterRefusal(r); refusal != "" {
+			logger.Error("read-grant producer closure REFUSED activation: "+refusal,
+				"lensId", r.ID, "canonicalName", r.CanonicalName)
+			return
+		}
+
 		// Install the per-lens projection components via data-driven paths keyed
 		// off lens-definition aspects — never off the canonical name. An
 		// actor-aggregate lens (projectionKind: actorAggregate) is driven by the
@@ -1697,7 +1727,14 @@ func main() {
 					// beside it so the two read the same world, though the
 					// reconciler's own boot grace window would cover the gap
 					// anyway.
-					health.NewInterestReconciler(conn, personalInterestKV, syncStream, syncStreams, logger).Run(ctx)
+					reconciler := health.NewInterestReconciler(conn, personalInterestKV, syncStream, syncStreams, logger)
+					// Reaping an orphaned registration WIDENS what
+					// personalinterest.IsRelevant admits for that identity, and
+					// a personal lens reads that answer live — so the reap
+					// announces on the same Interest Set change edge the
+					// control-plane register/deregister ops use.
+					reconciler.SetInterestChangeSink(grantReprojector.InterestChanged)
+					reconciler.Run(ctx)
 				}()
 			}
 

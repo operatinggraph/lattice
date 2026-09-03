@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/refractor/capabilityread"
+	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -23,6 +25,7 @@ var _ RowReader = (*NatsKVAdapter)(nil)
 var _ SeqGuarded = (*NatsKVAdapter)(nil)
 var _ OutcomeUpserter = (*NatsKVAdapter)(nil)
 var _ OutcomeDeleter = (*NatsKVAdapter)(nil)
+var _ GrantTransitionDeriver = (*NatsKVAdapter)(nil)
 
 // guardVerdict reports how a guarded write ended when it did not error.
 type guardVerdict uint8
@@ -96,7 +99,56 @@ type NatsKVAdapter struct {
 	// owns the whole bucket, which is the dedicated-target case. Set per-lens via
 	// SetKeyPrefix, from the same compiled projection plan SetGuarded reads.
 	keyPrefix string
+	// readGrantWriter licenses this adapter to write the D1 read-grant
+	// namespace. FALSE BY DEFAULT, which is the whole point: the D1 gate
+	// discovers its rows by a wildcard listing over cap-read.*, so any key in
+	// that namespace is read as a live grant whatever lens wrote it, and a lens
+	// that cannot carry the grant-change edge would be minting grants no plane
+	// ever hears withdrawn. Set true only by the installer, and only for a lens
+	// projection.IsReadGrantProducer admits.
+	//
+	// It is enforced HERE rather than at the pipeline's write call sites
+	// because this is where the key actually exists, and a policy applied at
+	// the six-odd pipeline seams instead would be a coverage claim over a set
+	// that grows.
+	//
+	// The write surface is three paths, and they are NOT all covered the same
+	// way. upsert and deleteRow render their key through buildKey and are
+	// refused there. truncate never calls buildKey at all — it LISTS keys and
+	// Purges them, so a key it removes was rendered by some earlier write —
+	// and is covered instead by truncateKeys, which drops every cap-read key
+	// from an unlicensed adapter's purge set. Saying "every write goes through
+	// buildKey" would be false and would hide exactly that third path.
+	readGrantWriter bool
+	// unsanctionedKeyReporter is called on EVERY refusal of a read-grant key,
+	// so the refusal reaches the lens's own health entry rather than living in
+	// a log line. Installed by the pipeline, which owns the health reporter;
+	// nil in a harness.
+	//
+	// Deliberately not deduplicated here. An adapter is rebuilt on every
+	// INTO-only hot reload, so a once on this type re-arms whenever a package
+	// is reinstalled and "once per lens" would be false in exactly the
+	// situation an operator is looking at the entry. The pipeline outlives its
+	// adapters and owns the dedup.
+	unsanctionedKeyReporter func(ctx context.Context, key string)
 }
+
+// ErrUnsanctionedReadGrantKey is returned when a lens that is not an installed
+// read-grant producer tries to write a key in the D1 cap-read namespace.
+//
+// It is TERMINAL, never transient: the lens's own declaration is what makes the
+// key unsanctioned, so redelivering the same event renders the same key
+// forever, and a category that retries would spin against a permanent
+// misconfiguration. The write never lands, which is the direction that matters.
+//
+// What the caller does with that is the caller's rule, and it is not uniform:
+// pipeline.writeResults treats a terminal write error as a per-result failure
+// and acks the message — EXCEPT that it checks FailClosed first, so a
+// perEntry retraction carrying that flag would Nak for redelivery instead.
+// writeResults therefore recognizes this sentinel ahead of its FailClosed arm;
+// see the comment there for why a permanent misconfiguration must not be
+// redelivered.
+var ErrUnsanctionedReadGrantKey = errors.New("adapter: lens is not an installed read-grant producer, so it may not write the " + capabilityread.KeyPrefix + " namespace")
 
 // New creates a NatsKVAdapter that writes to kv.
 // keyOrder must match the rule's into.key field list and determines the order
@@ -143,6 +195,86 @@ func (a *NatsKVAdapter) KeyPrefix() string { return a.keyPrefix }
 // cleared by a stream-sequenced write.
 func (a *NatsKVAdapter) Guarded() bool { return a.guarded }
 
+// DerivesGrantTransition reports whether this adapter's outcome-returning
+// writes carry a real liveness transition (adapter.GrantTransitionDeriver).
+//
+// It follows the guard, because the guard is what reads the stored body: only
+// guardedWrite holds the stored entry (fetched for the CAS precondition) and
+// the outgoing body at the same moment, which is the only place the comparison
+// is derivable. The unguarded arms of upsert/deleteRow put or remove the key
+// without ever reading its liveness, and report TransitionNone — which means
+// "we looked and nothing changed", a claim they have no evidence for.
+//
+// A caller wanting per-key grant announcements must therefore consult this
+// rather than the OutcomeDeleter/OutcomeUpserter interfaces, which say only
+// that an outcome is reported at all.
+func (a *NatsKVAdapter) DerivesGrantTransition() bool { return a.guarded }
+
+// SetReadGrantWriter licenses this adapter to write the D1 read-grant
+// namespace. Like SetGuarded and SetKeyPrefix it must be called at construction
+// time, before the pipeline starts writing.
+//
+// The caller is projection.InstallActorAggregate, from the same compiled
+// plan/descriptor data every other installation decision reads — never a
+// canonical-name list, and never "this lens has a grant-change sink": a
+// producer whose host wired no reprojector still writes real grants that its
+// standing healer converges, and refusing its writes would take the read-auth
+// plane down over a latency posture.
+func (a *NatsKVAdapter) SetReadGrantWriter(licensed bool) { a.readGrantWriter = licensed }
+
+// ReadGrantWriter reports whether this adapter carries the D1 read-grant
+// namespace licence. Its reader is the reload path's own pin: an adapter is the
+// only honest source for what a REPLACEMENT actually acquired, exactly as
+// Guarded is for the §6.2 guard, and a rule-level re-derivation in a test would
+// be asserting the predicate against itself rather than against the binding.
+func (a *NatsKVAdapter) ReadGrantWriter() bool { return a.readGrantWriter }
+
+// SetUnsanctionedGrantKeyReporter installs the callback this adapter invokes
+// the first time it refuses a read-grant key, so the refusal lands on the
+// lens's own health entry. Construction-time, like every other Set* here.
+func (a *NatsKVAdapter) SetUnsanctionedGrantKeyReporter(fn func(ctx context.Context, key string)) {
+	a.unsanctionedKeyReporter = fn
+}
+
+// HasUnsanctionedGrantKeyReporter reports whether a refusal on this adapter can
+// reach a health entry at all, the same way Pipeline.HasGrantChangeSink reports
+// its own wiring: whether a replacement adapter acquired it is a property only
+// the adapter can be asked about, and a refusal that lands in a log line with
+// no fault behind it is invisible on exactly the lens an operator is looking at.
+func (a *NatsKVAdapter) HasUnsanctionedGrantKeyReporter() bool {
+	return a.unsanctionedKeyReporter != nil
+}
+
+// refuseUnsanctionedGrantKey fails a write whose rendered key claims the D1
+// read-grant namespace on a lens that is not an installed read-grant producer.
+//
+// This is the runtime half of the producer closure. The authoring gate and the
+// registration refusal both read a lens's DECLARED output key space, which is
+// the §6.13 descriptor — and a plain lens has none: it renders its key from
+// RETURN columns, so a cypher returning the literal 'cap-read.billing' into the
+// first key column mints a live five-token grant that both declaration-level
+// checks are structurally blind to. The key is only knowable here.
+//
+// Refusing on the RENDERED key rather than on any declaration is what makes
+// that hole closed rather than narrowed.
+//
+// It is BUCKET-BLIND, and that is a deliberate simplification rather than an
+// implied claim: only a key in the capability bucket is ever read by
+// capabilityread's listing, so an unlicensed lens writing cap-read.* into a
+// business bucket harms nobody. Refusing it anyway keeps this guard answering
+// the same question the authoring gate answers — "is this lens sanctioned to
+// use the namespace" — with one rule instead of two, and the namespace is
+// reserved regardless of where a lens tries to spend it.
+func (a *NatsKVAdapter) refuseUnsanctionedGrantKey(ctx context.Context, key string) error {
+	if a.readGrantWriter || !strings.HasPrefix(key, capabilityread.KeyPrefix) {
+		return nil
+	}
+	if a.unsanctionedKeyReporter != nil {
+		a.unsanctionedKeyReporter(ctx, key)
+	}
+	return failure.Terminal(fmt.Errorf("%w: key %q", ErrUnsanctionedReadGrantKey, key))
+}
+
 // buildKey concatenates key field values in keyOrder order, joined with ".".
 // Lattice key shape convention (Contract #1) uses "." as the segment
 // separator throughout — vtx.<type>.<id>.<aspect>, lnk.<…>, cap.identity.<id>.
@@ -186,6 +318,9 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 	key, err := a.buildKey(keys)
 	if err != nil {
 		return UpsertOutcome{}, fmt.Errorf("natskv upsert: %w", err)
+	}
+	if err := a.refuseUnsanctionedGrantKey(ctx, key); err != nil {
+		return UpsertOutcome{}, err
 	}
 	if a.guarded {
 		// Always reports Wrote:true, even through guardedWrite's own internal
@@ -273,6 +408,9 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 	key, err := a.buildKey(keys)
 	if err != nil {
 		return DeleteOutcome{}, fmt.Errorf("natskv delete: %w", err)
+	}
+	if err := a.refuseUnsanctionedGrantKey(ctx, key); err != nil {
+		return DeleteOutcome{}, err
 	}
 	if a.guarded {
 		// A guarded delete is always a soft tombstone carrying the watermark,
@@ -666,20 +804,69 @@ func (a *NatsKVAdapter) truncate(ctx context.Context) ([]string, error) {
 }
 
 // truncateKeys returns the keys Truncate is allowed to purge: the lens's own
-// rows when it declares a key prefix, the whole bucket when it does not.
+// rows when it declares a key prefix, the whole bucket when it does not, minus
+// any D1 read-grant key an unlicensed lens has no business removing.
 func (a *NatsKVAdapter) truncateKeys(ctx context.Context) ([]string, error) {
 	if a.keyPrefix == "" {
 		keys, err := a.kv.ListKeys(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("natskv truncate: list keys: %w", err)
 		}
-		return keys, nil
+		return a.withoutUnsanctionedGrantKeys(ctx, keys), nil
 	}
 	keys, err := a.kv.ListKeysPrefix(ctx, a.keyPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("natskv truncate: list keys under %q: %w", a.keyPrefix, err)
 	}
-	return keys, nil
+	return a.withoutUnsanctionedGrantKeys(ctx, keys), nil
+}
+
+// withoutUnsanctionedGrantKeys drops every D1 read-grant key from an unlicensed
+// adapter's purge set.
+//
+// Truncate is the write path buildKey cannot guard: it lists keys and Purges
+// them, so the namespace refusal has to be applied to the LIST instead. And the
+// exposure is not hypothetical — ApplyTruncateScope derives a key prefix only
+// for an actor-aggregate lens, so a descriptor-less plain lens sharing the
+// capability bucket has no prefix at all and its rebuild would otherwise purge
+// the WHOLE bucket, every sanctioned producer's grants included.
+//
+// Skipping rather than erroring is deliberate: a rebuild is an operator action
+// on a lens that may be perfectly well-formed apart from sharing a bucket, and
+// failing it outright would leave that lens unrebuildable. Removing its own
+// rows while leaving the namespace alone is the outcome an operator wants.
+//
+// It is also the one refusal that returns NOTHING to its caller — Truncate sees
+// a shorter list, not an error — so unlike the write path it logs here rather
+// than relying on the caller to. One line per truncate (a rebuild is rare and
+// operator-initiated, so there is nothing to bury), naming the count and one
+// example key; the health fault goes through the same reporter the write
+// refusal uses, which the pipeline dedups to once per lens.
+func (a *NatsKVAdapter) withoutUnsanctionedGrantKeys(ctx context.Context, keys []string) []string {
+	if a.readGrantWriter {
+		return keys
+	}
+	kept := make([]string, 0, len(keys))
+	skipped := 0
+	firstSkipped := ""
+	for _, key := range keys {
+		if strings.HasPrefix(key, capabilityread.KeyPrefix) {
+			if skipped == 0 {
+				firstSkipped = key
+			}
+			skipped++
+			continue
+		}
+		kept = append(kept, key)
+	}
+	if skipped > 0 {
+		slog.Error("natskv truncate: SKIPPING keys in the reserved D1 read-grant namespace — this lens is not an installed read-grant producer, so a rebuild of it must not purge another lens's grants",
+			"skipped", skipped, "firstKey", firstSkipped, "namespace", capabilityread.KeyPrefix)
+		if a.unsanctionedKeyReporter != nil {
+			a.unsanctionedKeyReporter(ctx, firstSkipped)
+		}
+	}
+	return kept
 }
 
 // Probe checks whether the NATS KV bucket is reachable by calling kv.Status.
