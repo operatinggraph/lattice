@@ -125,3 +125,14 @@ triple as the bootstrap identity (holds `roleOperator`), declaring the six reads
 **Not in this fire:** the reply-op rule that supersedes automatically (the `📐` row stays; the primitive it will call
 now exists).
 
+**Found by the op's cold review (filed, not fixed here):** `internal/processor/step6_validate.go:247-260` derives a
+mutation's class only from its own document, so a documentless `{"op":"tombstone","key"}` skips the whole DDL-driven
+block (permittedCommands, abstract-class, sensitive custody); in step 8, `protectedRootKey` (`step8_commit.go:1375-1385`)
+returns "" for any link key and `rejectPermissionRoleRewrites` (`:1349-1353`, `:1397-1400`) skips bare tombstones. A
+package script can therefore tombstone any root not marked `data.protected`, any aspect of it, and any link of any
+package — and the corpus relies on that (identity-domain, clinic-domain, rbac-domain, orchestration-base,
+privacy-base, service-location all emit bare tombstones). This op's two link tombstones depend on it: no
+`instanceOf` / `providedTo` link DDL exists to resolve against, so a tightening must derive class from the prior
+document and name a link-type authority. Board: `[Processor] A documentless tombstone skips every DDL-driven write
+gate…` (📐).
+
