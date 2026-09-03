@@ -179,7 +179,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 23; got != want {
+	if got, want := len(Package.Permissions), 24; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 14; got != want {
@@ -259,6 +259,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	wantPerms := []struct{ op, scope string }{
 		{"CreateLeaseApplication", "any"}, {"CreateLeaseApplication", "self"},
 		{"CreateLeaseServiceInstance", "any"},
+		{"TombstoneSupersededLeaseServiceInstance", "any"},
 		{"RecordLeaseServiceOutcome", "any"}, {"RecordServiceDispatch", "any"},
 		{"CreateLeaseDocInstance", "any"}, {"RecordLeaseDocOutcome", "any"},
 		{"SignLease", "any"},

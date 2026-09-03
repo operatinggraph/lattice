@@ -67,6 +67,11 @@ func lsLoomCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
 			{OperationType: "CreateLeaseDocInstance", Scope: "any"},
+			// Granted so the PlatformEngineDenied test isolates the script's own
+			// actor-guard from a missing-permission denial (S3, bgcheck-runaway-
+			// and-broad-filter-design.md §6) — Loom must never actually reach this
+			// op's mutations.
+			{OperationType: "TombstoneSupersededLeaseServiceInstance", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -89,6 +94,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SignLease", Scope: "any"},
 			{OperationType: "WithdrawLeaseApplication", Scope: "any"},
 			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
+			{OperationType: "TombstoneSupersededLeaseServiceInstance", Scope: "any"},
 			{OperationType: "RecordLeaseServiceOutcome", Scope: "any"},
 			{OperationType: "RecordServiceDispatch", Scope: "any"},
 			{OperationType: "CreateLeaseDocInstance", Scope: "any"},

@@ -605,7 +605,15 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 		// aspect-type DDLs (leaseServiceOutcome / leaseServiceDispatchMarker) — so
 		// they never walk the instanceOf chain to this DDL. The op SCRIPT is selected
 		// by operationType (ClassForCommand).
-		PermittedCommands: []string{"CreateLeaseServiceInstance"},
+		//
+		// TombstoneSupersededLeaseServiceInstance's mutations carry NO document (the
+		// bare op:tombstone form), so step 6 derives no class for them at all and
+		// this PermittedCommands list never gates the instanceOf / providedTo link
+		// tombstones it emits (Contract #1 §1.5/§1.6 permissive default —
+		// step6_validate.go's class derivation reads only a mutation's OWN document);
+		// it is listed here only because the op's PRINCIPAL mutation (the instance
+		// root tombstone) still targets a service.<family>.instance-classed key.
+		PermittedCommands: []string{"CreateLeaseServiceInstance", "TombstoneSupersededLeaseServiceInstance"},
 		Description: "ExternalTask instanceOp DDL (Contract #10 §10.5). The op Loom submits for an externalTask step: " +
 			"payload {instanceKey (the bare handle Loom minted), subjectKey (the applicant identity), adapter, replyOp, " +
 			"params:{family}}. It prepends the package-chosen claim-vertex type `service` → vtx.service.<handle> and mints " +
@@ -616,23 +624,57 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 			"convergence link the lens walks; the lens discriminates bgcheck/payment by reading inst.class directly). It " +
 			"emits the external.<adapter> event via its own transactional outbox (body {instanceKey, adapter, replyOp, " +
 			"params, externalRef, idempotencyKey} — the shape the bridge's externalEvent reader consumes); the bridge " +
-			"selects its adapter and posts the replyOp.",
+			"selects its adapter and posts the replyOp. " +
+			"TombstoneSupersededLeaseServiceInstance{instanceKey, supersededBy, subjectKey} (bgcheck-runaway-and-broad-" +
+			"filter-design.md §6, Andrew-authorized maintenance) retires a service instance once a NEWER instance of the " +
+			"SAME family has completed for the SAME subject, so a readiness aggregate that fans out over every instance " +
+			"of an applicant (the leaseApplicationComplete lens) stops reading a retired check — a superseded check's " +
+			"instance is retired so readers aggregate only over live checks. All three payload keys are FULL keys (not " +
+			"bare handles). Restricted to a human/trusted-tool maintenance submitter: refuses op.actor == " +
+			"primordialActor[\"loom\"] or [\"weaver\"] outright (AuthDenied) — the operator/Scope:\"any\" grant behind " +
+			"this op is broad enough to admit those two platform engines (they hold the operator role for their own " +
+			"unrelated ops), which is never a legitimate submitter for a maintenance repair. Guards, fail-closed, in " +
+			"order: instanceKey != supersededBy; both parse as vtx.service.<handle>; subjectKey parses as " +
+			"vtx.identity.<NanoID>; instanceKey's root alive; instanceKey's instanceOf link resolves to THIS DDL's own " +
+			"meta-vertex (Contract #1 §1.5 type authority, derived the same way CreateLeaseServiceInstance derives it) — " +
+			"the OWNERSHIP check: a foreign instance minted by another mechanism can carry the identical readable shape " +
+			"(envelope class / .outcome / providedTo) while its real instanceOf link targets a different type authority, " +
+			"so this runs before anything else about instanceKey is trusted; supersededBy's root alive; both roots " +
+			"carry the SAME non-empty envelope class (a successor supersedes only its own family); both carry a " +
+			".outcome aspect with status=completed; supersededBy's outcome.completedAt is strictly later than " +
+			"instanceKey's (compared as RFC3339 UTC strings); both instances' providedTo link to subjectKey is alive. " +
+			"Declares SEVEN reads in contextHint.reads (the dispatcher's responsibility — the script never enumerates): " +
+			"instanceKey; lnk.service.<instanceKey's handle>.instanceOf.meta.<this DDL's metaKey id> (the ownership " +
+			"link); instanceKey+\".outcome\"; supersededBy; supersededBy+\".outcome\"; " +
+			"lnk.service.<instanceKey's handle>.providedTo.identity.<subjectKey's id>; " +
+			"lnk.service.<supersededBy's handle>.providedTo.identity.<subjectKey's id>. Every one of these seven is " +
+			"REQUIRED (never optionalReads): in production a foreign (unowned) instanceKey, an unknown instanceKey or " +
+			"supersededBy, or a genuinely wrong subjectKey each derive a key that never existed at all, so the " +
+			"Processor faults HydrationMiss at dispatch (Contract #2 §2.5) before the script ever runs — the script's " +
+			"own NotOwned: / UnknownInstance: / SubjectMismatch: messages fire only for the narrower present-but-" +
+			"tombstoned residual (e.g. a repeat submission racing a concurrent purge, Contract #2 §2.5's fail-closed-" +
+			"at-dispatch default handling the rest). Tombstones (bare op:tombstone, no document) the instance root + " +
+			"its instanceOf link + its providedTo link — never the successor. Emits " +
+			"lease.serviceInstanceSuperseded{instanceKey, supersededBy, subjectKey}. Returns primaryKey (instanceKey, " +
+			"the tombstoned instance).",
 		Script: leaseServiceInstanceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"instanceKey":{"type":"string","description":"The BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.service. → vtx.service.<handle>. Required."},` +
-			`"subjectKey":{"type":"string","description":"vtx.identity.<NanoID> of the applicant the claim is for (the pattern subject); the providedTo link points at it. Required, validated alive."},` +
-			`"adapter":{"type":"string","description":"The external adapter name (e.g. backgroundCheck, stripe), carried into the external.<adapter> event. Required."},` +
-			`"replyOp":{"type":"string","description":"The result-op the bridge posts back (RecordLeaseServiceOutcome), carried into the external event. Required."},` +
-			`"params":{"type":"object","description":"Opaque pass-through adapter params from the Loom step; params.family (backgroundCheck|payment) sets the instance's envelope class service.<family>.instance."}},` +
-			`"required":["instanceKey","subjectKey","adapter","replyOp"]}`,
+			`{"instanceKey":{"type":"string","description":"CreateLeaseServiceInstance: the BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.service. → vtx.service.<handle>. TombstoneSupersededLeaseServiceInstance: the FULL vtx.service.<handle> key of the (older, superseded) instance to retire. Required."},` +
+			`"supersededBy":{"type":"string","description":"TombstoneSupersededLeaseServiceInstance only: the FULL vtx.service.<handle> key of the NEWER completed instance that supersedes instanceKey (same envelope class, same subject, strictly later outcome.completedAt). Required."},` +
+			`"subjectKey":{"type":"string","description":"CreateLeaseServiceInstance: vtx.identity.<NanoID> of the applicant the claim is for (the pattern subject); the providedTo link points at it, required, validated alive. TombstoneSupersededLeaseServiceInstance: vtx.identity.<NanoID> both instanceKey and supersededBy must carry a live providedTo link to (the shared subject). Required."},` +
+			`"adapter":{"type":"string","description":"CreateLeaseServiceInstance only: the external adapter name (e.g. backgroundCheck, stripe), carried into the external.<adapter> event. Required."},` +
+			`"replyOp":{"type":"string","description":"CreateLeaseServiceInstance only: the result-op the bridge posts back (RecordLeaseServiceOutcome), carried into the external event. Required."},` +
+			`"params":{"type":"object","description":"CreateLeaseServiceInstance only: opaque pass-through adapter params from the Loom step; params.family (backgroundCheck|payment) sets the instance's envelope class service.<family>.instance."}},` +
+			`"required":["instanceKey","subjectKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.service.<handle> of the minted claim vertex (the operation's principal key)."}}}`,
+			`{"primaryKey":{"type":"string","description":"CreateLeaseServiceInstance: vtx.service.<handle> of the minted claim vertex. TombstoneSupersededLeaseServiceInstance: vtx.service.<handle> of the tombstoned (superseded) instance. Either way, the operation's principal key."}}}`,
 		FieldDescription: map[string]string{
-			"instanceKey": "The bare instance handle Loom minted for this externalTask (type-free, no dots / key segments / wildcards). The op prepends vtx.service. to it → vtx.service.<handle>. It is echoed back as the reply op's externalRef and is the bridge's adapter dedup key. Required.",
-			"subjectKey":  "Full vtx.identity.<NanoID> key of the applicant the externalTask is for (the Loom pattern subject). CreateLeaseServiceInstance validates it is alive and writes the providedTo link (the convergence link the lens reads across). Required.",
-			"adapter":     "The registered bridge adapter name (e.g. backgroundCheck, stripe). Carried into the external.<adapter> event class + body so the bridge selects its adapter. Required.",
-			"replyOp":     "The result-op type the bridge posts back (RecordLeaseServiceOutcome). Carried into the external event body so the bridge knows which op to submit on success. Required.",
-			"params":      "Opaque adapter params passed through from the Loom step. params.family (backgroundCheck|payment) discriminates the claim vertex's envelope class (service.<family>.instance).",
+			"instanceKey":  "CreateLeaseServiceInstance: the bare instance handle Loom minted for this externalTask (type-free, no dots / key segments / wildcards); the op prepends vtx.service. to it → vtx.service.<handle>, echoed back as the reply op's externalRef and the bridge's adapter dedup key. TombstoneSupersededLeaseServiceInstance: the FULL vtx.service.<handle> key of the older, superseded instance being retired — validated alive, same envelope class as supersededBy, providedTo subjectKey. Required either way.",
+			"supersededBy": "TombstoneSupersededLeaseServiceInstance only: full vtx.service.<handle> key of the newer completed instance that supersedes instanceKey — validated alive, same envelope class, providedTo the same subjectKey, and its outcome.completedAt strictly later than instanceKey's. Never itself tombstoned by this op. Required.",
+			"subjectKey":   "CreateLeaseServiceInstance: full vtx.identity.<NanoID> key of the applicant the externalTask is for (the Loom pattern subject); validated alive, the providedTo link target (the convergence link the lens reads across). TombstoneSupersededLeaseServiceInstance: full vtx.identity.<NanoID> key both instanceKey and supersededBy must carry a live providedTo link to — the shared subject that makes one a legitimate successor of the other. Required either way.",
+			"adapter":      "CreateLeaseServiceInstance only: the registered bridge adapter name (e.g. backgroundCheck, stripe). Carried into the external.<adapter> event class + body so the bridge selects its adapter. Required.",
+			"replyOp":      "CreateLeaseServiceInstance only: the result-op type the bridge posts back (RecordLeaseServiceOutcome). Carried into the external event body so the bridge knows which op to submit on success. Required.",
+			"params":       "CreateLeaseServiceInstance only: opaque adapter params passed through from the Loom step. params.family (backgroundCheck|payment) discriminates the claim vertex's envelope class (service.<family>.instance).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -649,6 +691,31 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 					"type-authority meta + the providedTo link (instance→identity). NO outcome aspect yet (absence = not-yet-complete). Emits the external.backgroundCheck " +
 					"event (body {instanceKey, adapter, replyOp, params, externalRef, idempotencyKey}) off the op's outbox. " +
 					"Returns primaryKey (the claim-vertex key). Rejects with ScriptError if the applicant is absent or the handle is malformed.",
+			},
+			{
+				Name: "TombstoneSupersededLeaseServiceInstance — retire a background check superseded by a newer completed one",
+				Payload: map[string]any{
+					"instanceKey":  "vtx.service.<olderHandle>",
+					"supersededBy": "vtx.service.<newerHandle>",
+					"subjectKey":   "vtx.identity.<applicantNanoID>",
+				},
+				ExpectedOutcome: "Reads the seven declared keys (instanceKey's root, instanceKey's ownership instanceOf " +
+					"link, both .outcome aspects, supersededBy's root, both providedTo links to subjectKey) — all REQUIRED, " +
+					"so in production a foreign/unowned instanceKey, an unknown instanceKey or supersededBy, or a wrong " +
+					"subjectKey each derive a key that was never created and are rejected as HydrationMiss AT DISPATCH, " +
+					"before the script runs at all. Once all seven do hydrate, the script validates instanceKey != " +
+					"supersededBy; instanceKey's instanceOf link actually resolves to this DDL's own meta-vertex (NotOwned " +
+					"otherwise — reachable only for a present-but-tombstoned ownership link); both roots carry the SAME " +
+					"non-empty envelope class (e.g. both service.backgroundCheck.instance); both outcomes status=completed; " +
+					"supersededBy's outcome.completedAt strictly later than instanceKey's (RFC3339 UTC string compare); both " +
+					"instances providedTo subjectKey (SubjectMismatch otherwise — same present-but-tombstoned-only " +
+					"reachability). Tombstones (bare op:tombstone, no document — step 6 derives no class for these, so " +
+					"the write gate never resolves a governing DDL for them) instanceKey's root + its instanceOf link + its " +
+					"providedTo link; supersededBy is left untouched. Emits lease.serviceInstanceSuperseded{instanceKey, " +
+					"supersededBy, subjectKey}. Returns primaryKey (instanceKey). Rejects AuthDenied if the actor is Loom or " +
+					"Weaver, HydrationMiss (at dispatch) if a declared key genuinely never existed, or a ScriptError " +
+					"(InvalidArgument / UnknownInstance / NotOwned / WrongClass / NotSuperseded / SubjectMismatch) for a " +
+					"guard the script itself evaluates.",
 			},
 		},
 	}

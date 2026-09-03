@@ -9,6 +9,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	CreateLeaseApplication          → operator
 //	CreateLeaseApplication (self)   → consumer
 //	CreateLeaseServiceInstance      → operator
+//	TombstoneSupersededLeaseServiceInstance → operator
 //	RecordLeaseServiceOutcome       → operator
 //	RecordServiceDispatch           → operator
 //	CreateLeaseDocInstance          → operator
@@ -79,6 +80,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CreateLeaseServiceInstance",
 			Scope:         "any",
 			Note:          "Grants the operator (Loom's relay actor) the right to submit the externalTask instanceOp.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "TombstoneSupersededLeaseServiceInstance",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to retire a lease service instance superseded by a newer completed one on the same subject + family — a one-time/maintenance repair (the runaway-bgcheck-instance purge, bgcheck-runaway-and-broad-filter-design.md §6), never a person-facing action (BackfillPatientRegistration/BackfillLeaseTerms precedent).",
 			GrantsTo:      []string{"operator"},
 		},
 		{
