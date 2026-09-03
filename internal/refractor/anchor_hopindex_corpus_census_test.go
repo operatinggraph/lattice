@@ -146,6 +146,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"pastDueBookings":                   hopIndexed,
 	"renewalComplete":                   hopIndexed,
 	"staleAssignedTasks":                hopIndexed,
+	"staleUserTasks":                    hopIndexed,
 	"unroutedTasks":                     hopIndexed,
 	"visitSeriesDue":                    hopIndexed,
 	"visitSeriesSiteBackfill":           hopIndexed,

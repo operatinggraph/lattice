@@ -151,6 +151,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"pastDueBookings":                   "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
 	"renewalComplete":                   "identity:applicationFor,manages,providedTo|leaseapp:applicationFor,appliesToUnit,renews|renewal:renews|service:providedTo|unit:appliesToUnit,manages",
 	"staleAssignedTasks":                "identity:assignedTo|task:assignedTo",
+	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|renewal:scopedTo|task:forOperation,scopedTo|any:forOperation",
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",
 	"visitSeriesDue":                    "patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",

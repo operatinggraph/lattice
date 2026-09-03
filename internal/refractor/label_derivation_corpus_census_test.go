@@ -217,10 +217,15 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// lens anchored elsewhere cannot have, because a class holder is not a
 	// vertex such a lens binds (retention-class-key-custody-design.md §6.3,
 	// which is why the destruction THERE needs a driven rebuild).
-	"retentionKeyStatus":                {narrow, "retentionclass", modeRelation},
-	"shredStatus":                       {narrow, "identity", modeRelation},
-	"staffReadGrants":                   {narrow, "building identity role", modeRelation},
-	"staleAssignedTasks":                {narrow, "identity task", modeRelation},
+	"retentionKeyStatus": {narrow, "retentionclass", modeRelation},
+	"shredStatus":        {narrow, "identity", modeRelation},
+	"staffReadGrants":    {narrow, "building identity role", modeRelation},
+	"staleAssignedTasks": {narrow, "identity task", modeRelation},
+	// The untyped `(t)-[:forOperation]->(op)` (same shape as orphanedTaskGrants
+	// below) leaves the label set non-exhaustive — op could bind any type — so
+	// this earns the broad filter despite the three OTHER hops being
+	// label-typed.
+	"staleUserTasks":                    {broad, "identity leaseapp renewal task", modeBroad},
 	"unroutedTasks":                     {narrow, "role task", modeRelation},
 	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},
