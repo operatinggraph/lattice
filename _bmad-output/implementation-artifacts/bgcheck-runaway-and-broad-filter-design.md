@@ -145,6 +145,12 @@ lease-signing bgcheck instances, 7 keepers, 7 foreign-owned instances skipped by
 submitted 4-wide as the bootstrap identity, **12,245 accepted, 0 rejected**, Processor healthy throughout;
 each heavy identity ends with two live `providedTo` links. The freshness rows retracted through the
 anchor-tombstone shortcut (a tombstone body per key; the Weaver `@at`s fire harmlessly against absent rows).
-`leaseApplicationComplete`'s drain after the purge is recorded in the row's Done-log line once measured — its
-durable showed no waiting pull for several minutes right after the burst (investigated in-session).
-
+**Measured cost of the burst (15:05–15:17):** 12,245 ops × 3 tombstones ≈ 36k Core-KV link/root events. The
+adjacency index is a *durable consumer* that must drain to zero before any lens activates (`consumer/bootstrap.go`),
+not a boot-time scan — it fell 53k events behind and drains at ~330/min (≈2.5 h), during which every lens's traversal
+still returns the tombstoned edges (each read then filtered as `isDeleted`), so `leaseApplicationComplete` stayed at
+one event per several minutes and `objectLiveness`'s fan-out through the `instanceOf` hub (the leaseServiceInstance
+meta vertex, 12k edges) timed out 32× ("get-multi fallback consumer never drained"; 1–3/h before). A Refractor
+restart during the lag would be strictly worse: no lens starts until the adjacency durable is caught up. Rule for
+the next bulk retirement: pace to the adjacency drain (watch `refractor-adjacency`'s unprocessed count), not to
+the Processor. The lens's post-drain rate is left for the next reader of its health entry (`projectionLag`).
