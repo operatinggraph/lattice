@@ -2712,16 +2712,18 @@ async function loadFollowups() {
 }
 
 // hasLaterVisit reports whether the patient has another booked-or-attended
-// appointment after this one — the heuristic that a requested follow-up has
-// since been addressed. A no-show never attended, so it does not count any
-// more than a cancellation does.
+// appointment on or after the requested follow-up date — the heuristic that a
+// requested follow-up has since been addressed. A no-show never attended, so
+// it does not count any more than a cancellation does. A visit merely later
+// than the original (but still before followUpDate) does not address it.
 function hasLaterVisit(f, all) {
   return all.some(
     (g) =>
       g.appointmentKey !== f.appointmentKey &&
       g.patientKey === f.patientKey &&
       !["cancelled", "noshow"].includes((g.status || "").toLowerCase()) &&
-      g.startsAt > f.startsAt,
+      g.startsAt > f.startsAt &&
+      (!f.followUpDate || g.startsAt >= f.followUpDate),
   );
 }
 
