@@ -127,7 +127,7 @@ func main() {
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "decidedProfileSnapshot", class: "meta.ddl.aspectType", ops: []string{"DecideLeaseApplication"}},
-		{canonical: "leaseServiceInstance", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseServiceInstance"}},
+		{canonical: "leaseServiceInstance", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseServiceInstance", "TombstoneSupersededLeaseServiceInstance"}},
 		{canonical: "leaseServiceReply", class: "meta.ddl.vertexType", ops: []string{"RecordLeaseServiceOutcome"}},
 		{canonical: "leaseServiceDispatch", class: "meta.ddl.vertexType", ops: []string{"RecordServiceDispatch"}},
 		{canonical: "leaseServiceOutcome", class: "meta.ddl.aspectType", ops: []string{"RecordLeaseServiceOutcome"}},
