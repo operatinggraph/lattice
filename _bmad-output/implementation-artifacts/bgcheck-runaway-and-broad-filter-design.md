@@ -74,4 +74,23 @@ PKG=packages/lease-signing` on the running stack → the MATCH hot-reload's rebu
 
 ## 5. Build note
 
-_Filled at close._
+**Shipped 2026-09-03 — `7e2ef6b2` (lease-signing 0.31.23), one worktree, lead review.** Census pins flipped for the
+three lenses in three census files (label derivation `broad → narrowed-label`; actor one-key `walkMultiPosition →
+oneKey`; walk scope `any:forOperation → meta:forOperation`), read off the tests' own verdicts.
+
+**Live (shared dev stack, `make reinstall-package PKG=packages/lease-signing`):** `leaseApplicationComplete`
+MATCH-hot-reloaded at 11:56:55, its rebuild re-derived the consumer filter to `narrowed-label` (7 labels, 21
+subject filters), and the replay started at **67,104** messages instead of **137,562**. Drain rate measured over
+three minutes: **~2 messages/min** (66,739 → 66,733) — the per-event cost is the 3,637-row readiness aggregate
+on the seven runaway identities, and the narrowed replay's subjects are largely the runaway instances themselves
+(36,826 `vtx.service` + 24,583 `instanceOf`/`providedTo` links). So A + B stop the growth and the noise; the
+backlog and the suppressed sweep clear only once the accumulated instances are gone.
+
+**Remaining, routed:** (F) purging the 12,281 accumulated `service.backgroundCheck.instance` vertices (all but the
+newest per identity) is destructive on shared data and has **no sanctioned op** — `Tombstone*` commands exist for
+patient / provider / appointment / location, none for a service instance — so it is proposed to Andrew, not
+done. (D) the durable rule — a check superseded by its successor is tombstoned by the reply op, one live instance
+per subject per pattern — is filed `📐` on the Lattice lane; `SupersedeClause` (semantic-contracts) is the shape
+precedent, and whether a superseded check's history is a record is the product question the design must answer.
+(E) a rebuild that cannot drain suppressing the sweep indefinitely stays unfiled until F/D land and the lens is
+re-measured: with the instances gone the replay is expected to drain.
