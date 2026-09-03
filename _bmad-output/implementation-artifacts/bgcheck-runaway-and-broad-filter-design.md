@@ -94,3 +94,34 @@ per subject per pattern — is filed `📐` on the Lattice lane; `SupersedeClaus
 precedent, and whether a superseded check's history is a record is the product question the design must answer.
 (E) a rebuild that cannot drain suppressing the sweep indefinitely stays unfiled until F/D land and the lens is
 re-measured: with the instances gone the replay is expected to drain.
+
+## 6. Fire 2 — the supersession op and the purge (Andrew-authorized 2026-09-03)
+
+**Scope:** a sanctioned op that tombstones a lease service instance superseded by a newer completed one, and a
+one-off purge of the accumulated instances on the shared dev stack. Andrew's words: "build the tombstone op and
+run the purge."
+
+**Op:** `TombstoneSupersededLeaseServiceInstance` on `packages/lease-signing`'s `leaseServiceInstance` DDL — the
+type authority the step-6 write gate resolves every `vtx.service.<handle>` root to through its `instanceOf` link,
+and the DDL whose `CreateLeaseServiceInstance` minted the instance and its two links. Payload `{instanceKey,
+supersededBy, subjectKey}` (full keys). Declared reads (`contextHint.reads`, the operator dispatcher's
+responsibility): both roots, both `.outcome` aspects, both `providedTo` links to `subjectKey`. Guards, fail-closed:
+both roots alive; same envelope class (`service.<family>.instance` — the successor supersedes only its own
+family); both outcomes `completed`; `supersededBy.outcome.completedAt` strictly later than the instance's; both
+`providedTo` links to `subjectKey` alive (same subject); `instanceKey != supersededBy`. Mutations: tombstone the
+root **and** its `instanceOf` and `providedTo` links — adjacency returns no edge for a soft-tombstoned link, so the
+readiness aggregate stops reading the instance at all (a tombstoned root alone is still read before it is filtered,
+`ruleengine/full/executor.go:887`). Event `lease.serviceInstanceSuperseded`. Grant: `operator` (the maintenance
+posture `BackfillPatientRegistration` takes). Shape precedent: `TombstonePatient` (clinic-domain). Version
+0.31.24.
+
+**Purge (dev stack):** a throwaway reader groups every `lnk.service.*.providedTo.identity.*` by identity, reads each
+instance's root class and `.outcome`, keeps per identity the newest `completed` `service.backgroundCheck.instance`
+(and every non-completed one), and emits (instance, successor, subject) triples; a paced loop submits one op per
+triple as the bootstrap identity (holds `roleOperator`), declaring the six reads. Expected: ~12,274 tombstones, the
+`backgroundCheckFreshness` rows retract through the anchor-tombstone shortcut (Weaver clears their `@at`s), and
+`leaseApplicationComplete`'s per-event cost collapses as the edges vanish, so its rebuild finally drains.
+
+**Not in this fire:** the reply-op rule that supersedes automatically (the `📐` row stays; the primitive it will call
+now exists).
+
