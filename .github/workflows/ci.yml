@@ -182,6 +182,26 @@ jobs:
         # STRICT=1 fails the build on any violation.
         run: STRICT=1 go run ./scripts/lint-cap-read-producers.go
 
+      - name: Refractor single-instance gate (personal derivation licence premise)
+        # A personal lens's derivation narrowing rests on the D1 grant-change
+        # edge, which is an IN-PROCESS function call: on a second Refractor
+        # instance a producer on one announces to no personal lens on another,
+        # while every wiring conjunct a consumer could test stays true on both.
+        # This fails the moment the repository gains a second-instance
+        # affordance — a replica/scale count on a refractor service, two
+        # background launches in one Makefile recipe or a loop around one, a new
+        # JetStream queue group under cmd/refractor or internal/refractor, or an
+        # instance-identity/cardinality env knob — while
+        # grantchange.GrantChangeEdgeSpansDeployment is false. The durable
+        # grant-change signal is the precondition that retires it.
+        #
+        # It cannot see orchestration outside this repo (none ships today) or an
+        # operator starting the binary twice; the licence's own runtime instance
+        # count off Health KV is the other half of the pair. Vectors run on every
+        # invocation, since the tree ships no violating configuration.
+        # STRICT=1 fails the build on any violation.
+        run: STRICT=1 go run ./scripts/lint-refractor-single-instance.go
+
       - name: Vertical Package Standard gate (S1 descriptors / S6 floor / S7 manifest)
         # A user-facing op with no descriptor is invisible to a
         # descriptor-driven client; a lens no cypher test executes is only

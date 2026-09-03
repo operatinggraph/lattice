@@ -452,3 +452,106 @@ func TestLagPoller_AckPendingChangeAlwaysWrites(t *testing.T) {
 	require.GreaterOrEqual(t, len(hist), 6,
 		"SetActive's write plus one write per ackPending-changing poll, with AckFloor never moving")
 }
+
+// TestLagPoller_EscalatesAStalledPersonalSweepToStale pins the ONE writer that
+// can report the personal healer's silence.
+//
+// The sweeper publishes its verdict at the end of every pass, so a sweeper that
+// stops passing leaves `clean` standing on every personal lens's entry — the
+// field reading healthy through the exact condition it exists to report.
+// Surfacing that needs a writer on a different clock, and this poller is the one
+// periodic per-lens writer there is.
+func TestLagPoller_EscalatesAStalledPersonalSweepToStale(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 20 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-stalled-sweep"
+	reporter := health.New(env.healthKV, ruleID)
+	ctx := context.Background()
+
+	// A healer that reported clean and then went quiet: the last pass is far
+	// outside the licence's own window, and nothing will ever write again.
+	stalledAt := time.Now().Add(-time.Hour)
+	require.NoError(t, reporter.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", stalledAt, 0, "clean"))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+	lp.SetPersonalHealerPassFunc(func() (time.Time, time.Duration, int, bool) {
+		return stalledAt, time.Second, 3, true
+	})
+	_ = startPoller(lp, runCtx)
+
+	require.Eventually(t, func() bool {
+		entry, err := reporter.GetStatus(ctx)
+		return err == nil && entry.PersonalSweepVerdict == health.PersonalSweepVerdictStale
+	}, 3*time.Second, 10*time.Millisecond,
+		"a healer silent past the licence's window must surface on the lens entry; the sweep cannot report its own silence")
+
+	// The coverage record the sweep DID earn is untouched — reporting the
+	// silence must not destroy the evidence of what was covered before it.
+	entry, err := reporter.GetStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "Hj4kPmRtw9nbCxz5vQ2y", entry.PersonalSweepCursor)
+	require.NotEmpty(t, entry.PersonalSweepCycleCompletedAt)
+}
+
+// TestLagPoller_DoesNotEscalateALivePersonalSweep is the negative half, and the
+// one that keeps the escalation from being a permanent lie: a healer whose clock
+// is moving owns its own field, and this poller must write nothing at all.
+func TestLagPoller_DoesNotEscalateALivePersonalSweep(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 20 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-live-sweep"
+	reporter := health.New(env.healthKV, ruleID)
+	ctx := context.Background()
+	require.NoError(t, reporter.SetPersonalSweepProgress(ctx, "Kx3TmZpq7RvwNsY2Hc9L", time.Now(), 0, "clean"))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+	lp.SetPersonalHealerPassFunc(func() (time.Time, time.Duration, int, bool) {
+		// A pass that just completed, on a generous window.
+		return time.Now(), time.Minute, 5, true
+	})
+	_ = startPoller(lp, runCtx)
+
+	require.Never(t, func() bool {
+		entry, err := reporter.GetStatus(ctx)
+		return err == nil && entry.PersonalSweepVerdict == health.PersonalSweepVerdictStale
+	}, 500*time.Millisecond, 20*time.Millisecond,
+		"a healer whose clock is moving owns its own verdict; escalating it would be this poller reporting a silence that is not happening")
+}
+
+// TestLagPoller_NoPersonalHealerLeavesTheFieldAlone: a process running no
+// personal healer at all — every harness, and any deployment with no personal
+// lens — must not have this poller touch the field.
+func TestLagPoller_NoPersonalHealerLeavesTheFieldAlone(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 20 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-no-healer"
+	reporter := health.New(env.healthKV, ruleID)
+	ctx := context.Background()
+	require.NoError(t, reporter.SetPersonalSweepProgress(ctx, "Wq7bNmXt4RkzPy2LcH8v", time.Now(), 0, "clean"))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+	lp.SetPersonalHealerPassFunc(func() (time.Time, time.Duration, int, bool) {
+		return time.Time{}, 0, 0, false
+	})
+	_ = startPoller(lp, runCtx)
+
+	require.Never(t, func() bool {
+		entry, err := reporter.GetStatus(ctx)
+		return err == nil && entry.PersonalSweepVerdict != "clean"
+	}, 400*time.Millisecond, 20*time.Millisecond)
+}

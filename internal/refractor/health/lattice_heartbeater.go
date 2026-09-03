@@ -2653,8 +2653,26 @@ func (h *LatticeHeartbeater) evalLensSweepStall(name string, now, lastPassAt tim
 	return elapsed, elapsed > stallAfter
 }
 
+// InstanceKeyPrefix and InstanceKeyFilter name the Health KV key one Refractor
+// instance's heartbeat lands on, and the subject filter that enumerates all of
+// them.
+//
+// Exported because a second reader now depends on the shape: the personal
+// plane's standing healer counts live Refractor instances off this filter once
+// per pass, since the grant-change edge is an in-process function call and a
+// second instance silently stops it spanning the deployment. A reader spelling
+// the prefix itself would be a second definition of the key this file writes,
+// and the direction it drifts is a count that reads zero and refuses forever —
+// or, worse, one that reads one and licenses a narrowing across a two-instance
+// deployment. The `*` matches exactly one token, so a per-lens key nested under
+// an instance is not counted as an instance.
+const (
+	InstanceKeyPrefix = "health.refractor."
+	InstanceKeyFilter = InstanceKeyPrefix + "*"
+)
+
 func (h *LatticeHeartbeater) healthKey() string {
-	return "health.refractor." + h.instance
+	return InstanceKeyPrefix + h.instance
 }
 
 // formatISODuration converts a duration to an ISO 8601 duration string (e.g. "PT2M30S").

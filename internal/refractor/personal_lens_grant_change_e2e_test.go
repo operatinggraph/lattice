@@ -415,7 +415,10 @@ func TestPersonalLensGrantChange_T6_SweepConvergesWithoutTheEdge(t *testing.T) {
 	// never goes quiet and could not tell the frame under test from the next
 	// tick's. The ticker is unit-tested; what this proves is that ONE CYCLE
 	// converges, which is exactly T6's claim.
-	sweeper := grantchange.NewPersonalSweeper(f.reprojector, f.h.coreKV)
+	// nil health lister: this test is about the sweep converging a cycle, and
+	// the instance census it would otherwise perform only feeds the derivation
+	// licence, which this fixture does not assert.
+	sweeper := grantchange.NewPersonalSweeper(f.reprojector, f.h.coreKV, nil)
 	sweeper.SetBounds(100, 0)
 	sweepOneCycle := func(t *testing.T) {
 		t.Helper()

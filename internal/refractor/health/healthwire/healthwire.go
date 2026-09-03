@@ -215,6 +215,24 @@ type Entry struct {
 	// grant change outpacing the drain, which is the shape that ends in the
 	// coalescing set overflowing (and that overflow raises its own fault).
 	PersonalSweepQueueDepth uint64 `json:"personalSweepQueueDepth,omitempty"`
+	// PersonalSweepVerdict is what that sweep's LAST PASS achieved, in a closed
+	// vocabulary: `clean`, `never-passed`, `failed`, `population-unreadable`,
+	// `instance-count-unreadable`, `instance-count-impossible`,
+	// `multiple-instances` — the seven pipeline.PersonalHealerVerdict.Summary
+	// produces — plus `stale`, which Summary never produces because a stalled
+	// sweeper reports nothing at all and health.LagPoller writes it instead. ""
+	// before the first pass reports, and for every lens the sweep does not
+	// drive. The set is default-denied by
+	// TestPersonalSweepVerdict_VocabularyIsClosed, which drives every producing
+	// arm and compares the produced set against the declared constants.
+	//
+	// It is a VERDICT, not a progress stamp, and that distinction is the field's
+	// whole reason for existing: the cursor and the cycle stamp above advance on
+	// a pass in which every single reprojection failed, because the per-lens
+	// failure path logs and continues. An operator — and the personal
+	// derivation licence, which refuses on exactly this value — needs to tell a
+	// sweep that ran from a sweep that repaired.
+	PersonalSweepVerdict string `json:"personalSweepVerdict,omitempty"`
 	// EvalDriftRetries is the cumulative number of inline re-executions an
 	// auth-plane evaluation's footprint validation has triggered — a
 	// mid-evaluation write moved a key the evaluation read

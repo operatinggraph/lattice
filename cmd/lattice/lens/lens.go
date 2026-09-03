@@ -14,6 +14,7 @@ import (
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
+	refractorhealth "github.com/operatinggraph/lattice/internal/refractor/health"
 	refractorlens "github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -374,7 +375,7 @@ func newLagCommand(natsURL, outputFmt *string) *cobra.Command {
 			}
 			var entries []lagEntry
 			for _, k := range allKeys {
-				if !strings.HasPrefix(k, "health.refractor.") {
+				if !strings.HasPrefix(k, refractorhealth.InstanceKeyPrefix) {
 					continue
 				}
 				entry, err := conn.KVGet(ctx, bootstrap.HealthKVBucket, k)

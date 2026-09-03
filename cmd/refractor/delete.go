@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 )
 
 // deleteTimeout bounds the automatic tombstone-triggered removal below —
@@ -74,6 +75,23 @@ func (d pipelineDeleter) Delete(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+
+	// The process-level census of cap-read producers installed with no
+	// grant-change sink, evicted only once the pipeline has actually STOPPED.
+	//
+	// It sits here rather than beside the two registries above, and the two
+	// orderings are both right for their own reason. Those registries evict
+	// EARLY because their failure mode is a mechanism continuing to drive a lens
+	// that is going away — the drain calling ReprojectPersonalActor on a
+	// cancelled pipeline, a taxonomy sweep resurrecting a deleted id — so the
+	// sooner they stop naming it the better, and a teardown that then fails
+	// leaves a lens nobody re-drives, which is safe. This census is the mirror
+	// image: an entry standing here REFUSES the personal derivation licence, so
+	// evicting it early and then failing to remove the consumer would relicense
+	// a narrowing while a sink-less producer is still running. Evicting a
+	// producer that is still writing grants is the fail-OPEN direction, so it
+	// waits for the run context to be cancelled and Run to return.
+	projection.ForgetReadGrantProducer(d.ruleID)
 
 	if d.entry.reporter != nil {
 		err := retryTransientBoot(ctx, func() error {

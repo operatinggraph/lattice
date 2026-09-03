@@ -13,6 +13,7 @@ import (
 
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	refractorhealth "github.com/operatinggraph/lattice/internal/refractor/health"
 )
 
 // NewCommand returns the cobra.Command for the health command group.
@@ -92,9 +93,9 @@ func classifyKey(key string) string {
 		return "processor-heartbeat"
 	case strings.HasPrefix(key, "health.processor."):
 		return "processor-event"
-	case strings.HasPrefix(key, "health.refractor.") && !strings.Contains(strings.TrimPrefix(key, "health.refractor."), "."):
+	case strings.HasPrefix(key, refractorhealth.InstanceKeyPrefix) && !strings.Contains(strings.TrimPrefix(key, refractorhealth.InstanceKeyPrefix), "."):
 		return "refractor-heartbeat"
-	case strings.HasPrefix(key, "health.refractor."):
+	case strings.HasPrefix(key, refractorhealth.InstanceKeyPrefix):
 		return "refractor-event"
 	case strings.HasPrefix(key, "health.weaver.") && !strings.Contains(strings.TrimPrefix(key, "health.weaver."), "."):
 		return "weaver-heartbeat"

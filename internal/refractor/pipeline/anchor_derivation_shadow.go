@@ -145,7 +145,19 @@ type derivationShadow struct {
 
 	// staticRefusal is the last reason this lens was found unable to act, so
 	// the reason is logged on change rather than on every event.
-	staticRefusal string
+	// staticRefusalSet distinguishes "no reason has been reported yet" from
+	// "the reported reason was the empty string": without it an empty reason
+	// reads as a repeat of a report that never happened, and is swallowed.
+	staticRefusal    string
+	staticRefusalSet bool
+
+	// personalLicensed latches the OTHER direction of the same transition: a
+	// personal lens whose narrowing licence was granted. It lives here beside
+	// staticRefusal, under the same mutex, because the two must move together —
+	// a lens granted, revoked and granted again owes all three log lines, and a
+	// grant that only cleared the refusal (or a refusal that only cleared the
+	// grant) would swallow one of them.
+	personalLicensed bool
 }
 
 // AnchorDerivationShadow returns this lens's shadow tally.

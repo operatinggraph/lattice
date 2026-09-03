@@ -157,7 +157,7 @@ func NewInterestReconciler(
 		witness = NewSyncStreamWitness()
 		witness.Observe(syncStream)
 	}
-	return &InterestReconciler{
+	r := &InterestReconciler{
 		conn:            conn,
 		kv:              kv,
 		syncStream:      syncStream,
@@ -168,6 +168,13 @@ func NewInterestReconciler(
 		registration:    interestRegistrationGrace,
 		logger:          logger,
 	}
+	// Counted UNARMED from construction, not from the first SetInterestChangeSink
+	// call. A reconciler nobody ever hands a sink to would otherwise never reach
+	// the census at all — the one shape the census exists to catch — and a
+	// personal lens's narrowing licence would keep resting on a fourth Interest
+	// Set writer that announces nothing.
+	noteInterestReconcilerSink(r, false)
+	return r
 }
 
 // SetInterestChangeSink installs the Interest Set's change edge: fn is called
@@ -181,8 +188,26 @@ func NewInterestReconciler(
 // Set at wiring time, before Run: this is not safe to flip concurrently with a
 // sweep in flight, the same posture every other constructor-time field on this
 // type takes.
+//
+// It also updates this process's census of unarmed reconcilers, which the
+// personal derivation licence's conjunct 2 reads live — see
+// InterestReconcilersWithoutSink for why a reconciler is counted from the moment
+// it is constructed rather than from the moment it runs.
 func (r *InterestReconciler) SetInterestChangeSink(fn func(identityID string)) {
 	r.interestChanged = fn
+	noteInterestReconcilerSink(r, fn != nil)
+}
+
+// InterestChangeSinkInstalled reports whether this reconciler's orphan reap
+// announces on the Interest Set change edge.
+//
+// Its reap WIDENS what personalinterest.IsRelevant admits for the identity whose
+// registration it removed (absence admits everything), and a personal lens reads
+// that answer live — so it is the FOURTH writer of the Interest Set, beside the
+// control plane's register, deregister and hydrate arms. A licence that asserted
+// only the first three would be asserting three quarters of its own conjunct.
+func (r *InterestReconciler) InterestChangeSinkInstalled() bool {
+	return r.interestChanged != nil
 }
 
 // announceInterestChange routes one identity to the change edge, if one is wired.

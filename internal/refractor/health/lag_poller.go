@@ -41,6 +41,12 @@ type AckStatsFunc func(ctx context.Context) (substrate.AckStats, error)
 // lens's first projection.
 type ProgressFunc func() time.Time
 
+// PersonalHealerPassFunc optionally returns the personal plane's standing
+// healer's last-pass clock, its cadence, and the token that pass published.
+// ok == false means this process runs no personal healer, and the poller then
+// touches the field at all.
+type PersonalHealerPassFunc func() (lastPassAt time.Time, interval time.Duration, staleCycles int, ok bool)
+
 // PeakRowsFunc optionally returns the lens's peak binding rows over the
 // pipeline's rolling observation window, and whether the window holds any
 // sample at all. A false second return means "no evaluation to report" — the
@@ -70,6 +76,11 @@ type LagPoller struct {
 	// peakBindingRows untouched, so a caller that does not wire it is unchanged
 	// rather than reporting a fabricated zero.
 	peakRows PeakRowsFunc
+
+	// healerPass optionally supplies the personal healer's last-pass clock, so
+	// this poller can escalate a stored personalSweepVerdict to `stale`. nil
+	// leaves the field entirely alone.
+	healerPass PersonalHealerPassFunc
 
 	// ackStats optionally supplies the consumer's un-acked count and ack floor.
 	// nil (the default, unless SetAckStatsFunc is called) leaves the Entry's
@@ -113,6 +124,13 @@ type LagPoller struct {
 	// Single dedicated goroutine (Start), so no lock.
 	lastPeakRows    uint64
 	lastPeakRowsSet bool
+
+	// staleWritten latches the escalation so a stalled healer costs one Health-KV
+	// write, not one per poll for as long as it stays stalled. Cleared the moment
+	// the healer's clock moves again, which is what lets a recovered healer's own
+	// write be the next thing on the field.
+	staleWritten   bool
+	lastSeenPassAt time.Time
 }
 
 // projectionProgressTuple is the SetProjectionProgress input set the LagPoller
@@ -149,6 +167,15 @@ func (lp *LagPoller) SetProgressFunc(fn ProgressFunc) {
 // before Start. Pass nil to clear (the default).
 func (lp *LagPoller) SetAckStatsFunc(fn AckStatsFunc) {
 	lp.ackStats = fn
+}
+
+// SetPersonalHealerPassFunc installs the clock this poller escalates a stale
+// personal-sweep verdict from. Must be called before Start. Pass nil to clear
+// (the default), which leaves the field entirely untouched. See
+// pollPersonalHealerStaleness for the two-writer rule that makes a second writer
+// of that field safe.
+func (lp *LagPoller) SetPersonalHealerPassFunc(fn PersonalHealerPassFunc) {
+	lp.healerPass = fn
 }
 
 // SetPeakRowsFunc attaches the pipeline's peak-binding-rows source. Must be
@@ -259,7 +286,69 @@ func (lp *LagPoller) poll(ctx context.Context) {
 			}
 		}
 		lp.pollPeakRows(ctx)
+		lp.pollPersonalHealerStaleness(ctx)
 	}
+}
+
+// pollPersonalHealerStaleness escalates this lens's stored personalSweepVerdict
+// to `stale` once the personal plane's standing healer has gone quiet for longer
+// than the derivation licence's own window.
+//
+// IT EXISTS BECAUSE THE FIELD'S ONLY OTHER WRITER IS THE THING IT REPORTS ON. The
+// sweeper writes the verdict at the end of every pass, so a sweeper that stops
+// passing — a wedged goroutine, a cancelled context, a ticker that never fires
+// — leaves `clean` standing on fifteen lens entries forever, which is the entry
+// reading healthy through the exact condition it exists to report. Surfacing that
+// needs a writer on a DIFFERENT clock, and this poller is the one per-lens
+// periodic writer there is.
+//
+// THE TWO-WRITER RULE, stated because two writers of one field is a hazard and
+// not a pattern: this poller may only ever write the single token `stale`, and
+// the sweeper never writes it. So the field has one owner per value — the
+// sweeper owns every verdict a pass can reach, this poller owns the absence of
+// passes — and the two cannot disagree about a value they never both produce.
+// If they interleave (a sweeper pass landing as this poller escalates), the
+// later write wins and the next cycle re-derives: the escalation is level-
+// triggered off the healer's own clock, not edge-triggered off a transition, so
+// it converges either way.
+//
+// The write is latched, so a healer stalled for an hour costs one write rather
+// than one per poll, and unlatched the moment the healer's clock moves — which
+// is what lets the sweeper's own next verdict be the next thing on the field.
+func (lp *LagPoller) pollPersonalHealerStaleness(ctx context.Context) {
+	if lp.healerPass == nil {
+		return
+	}
+	lastPassAt, interval, staleCycles, ok := lp.healerPass()
+	if !ok {
+		return
+	}
+	if !lastPassAt.Equal(lp.lastSeenPassAt) {
+		// The healer's clock moved: whatever it wrote is current, and this
+		// poller has nothing to add until the clock stops again.
+		lp.lastSeenPassAt = lastPassAt
+		lp.staleWritten = false
+		return
+	}
+	if lastPassAt.IsZero() || interval <= 0 || staleCycles <= 0 {
+		// A healer that has never completed a pass already publishes
+		// `never-passed`, and a cadence this poller cannot read is not a window
+		// it may judge against.
+		return
+	}
+	if lp.staleWritten || time.Since(lastPassAt) <= time.Duration(staleCycles)*interval {
+		return
+	}
+	if err := lp.reporter.SetPersonalSweepVerdict(ctx, PersonalSweepVerdictStale); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("lag poller: could not escalate the personal sweep verdict to stale",
+				"ruleId", lp.ruleID, "err", err)
+		}
+		return
+	}
+	lp.staleWritten = true
+	slog.Warn("lag poller: the personal plane's standing healer has not completed a pass inside the derivation licence's window — this lens's health entry now reads stale, and the licence refuses",
+		"ruleId", lp.ruleID, "lastPassAt", lastPassAt, "window", time.Duration(staleCycles)*interval)
 }
 
 // pollPeakRows publishes the lens's peak-binding-rows gauge onto its health

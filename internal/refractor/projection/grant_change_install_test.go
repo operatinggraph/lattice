@@ -158,3 +158,77 @@ func TestInstallActorAggregate_NoSinkOfferedInstallsNone(t *testing.T) {
 		t.Fatalf("no sink was offered, so none may be installed")
 	}
 }
+
+// TestReadGrantSinkCensus_CountsTheSinkLessProducers pins the §4.3(d)
+// amendment's consumer half at its source.
+//
+// A qualifying producer with no sink INSTALLS — refusing it would turn a host
+// with no reprojector into an auth-plane outage on the primordial capabilityRead
+// lens — and warns. The warning alone is not something a consumer can refuse on,
+// so the same boolean the warning is emitted from is recorded in a process-level
+// census, and the personal derivation licence's conjunct 1 reads it.
+//
+// Both directions are pinned. A census that only ever answered "none" would pass
+// just as happily if nothing ever wrote to it, which is precisely how the
+// conjunct it feeds would become vacuous.
+func TestReadGrantSinkCensus_CountsTheSinkLessProducers(t *testing.T) {
+	install := func(t *testing.T, ruleID string, offerSink bool) {
+		t.Helper()
+		r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptyDelete))
+		r.ID = ruleID
+		r.Output.OutputKeyPattern = "cap-read.{actorSuffix}"
+		r.Output.EntryKeyColumn = "anchorId"
+		r.Output.RealnessFilter = "anchorId"
+		adpt := newUnguardedAdapter(t)
+		p := newTestPipeline(t, adpt)
+
+		opts := []projection.InstallOption{}
+		if offerSink {
+			opts = append(opts, projection.WithGrantChangeSink(&recordingGrantSink{}))
+		}
+		if !projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger(), opts...) {
+			t.Fatalf("expected %s to install", ruleID)
+		}
+	}
+	listed := func(ruleID string) bool {
+		for _, id := range projection.ReadGrantProducersWithoutSink() {
+			if id == ruleID {
+				return true
+			}
+		}
+		return false
+	}
+
+	const sinkless, sinked = "census-sinkless-lens", "census-sinked-lens"
+	t.Cleanup(func() {
+		projection.ForgetReadGrantProducer(sinkless)
+		projection.ForgetReadGrantProducer(sinked)
+	})
+
+	install(t, sinkless, false)
+	if !listed(sinkless) {
+		t.Fatalf("a read-grant producer installed with no sink must be counted; the licence's conjunct 1 has nothing to refuse on otherwise")
+	}
+
+	install(t, sinked, true)
+	if listed(sinked) {
+		t.Fatalf("a producer that DID get a sink must not be counted")
+	}
+
+	// A hot reload that adds the sink clears the entry the previous body wrote —
+	// otherwise one boot-order accident would refuse the narrowing for the life
+	// of the process.
+	install(t, sinkless, true)
+	if listed(sinkless) {
+		t.Fatalf("re-installing the same lens WITH a sink must clear its census entry")
+	}
+
+	// And a deleted lens stops being counted, for the reason the reprojector's
+	// own deregistration exists: a lens that no longer runs must stop being held
+	// against a consumer deciding what to narrow.
+	install(t, sinkless, false)
+	projection.ForgetReadGrantProducer(sinkless)
+	if listed(sinkless) {
+		t.Fatalf("a lens removed from the process must leave the census")
+	}
+}

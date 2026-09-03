@@ -77,6 +77,20 @@ type ruleState struct {
 	// "", which ConsumerFilter reports as not-eligible rather than as a missing
 	// reason.
 	narrowingBlocked string
+	// personalClockRefusal is the personal narrowing licence's conjunct 4 —
+	// "the row references neither $now nor $projectedAt" — precomputed here and
+	// "" when the rule clears it.
+	//
+	// It rides the rule snapshot because it is a property OF this compiled rule
+	// and of nothing else, derived where the rule is published and read where
+	// the licence is asked, so a hot reload replaces it wholesale with the body
+	// it describes. That placement is what keeps the licence's other conjuncts
+	// honest about their own cost: everything else the licence reads is process
+	// wiring or a healer verdict that MOVES, and must be read live, while this
+	// one is two exhaustive walks of the compiled rule's clauses and would
+	// otherwise run on every CDC event of every personal lens to answer a
+	// question whose answer cannot change until the body does.
+	personalClockRefusal string
 }
 
 // ruleState returns the pipeline's current compiled rule as one snapshot.
@@ -114,6 +128,14 @@ func (p *Pipeline) ruleState() ruleState {
 		declaresActorAnchor: p.declaresActorAnchor,
 		labelExpansion:      p.labelExpansion,
 		narrowingBlocked:    p.plainNarrowingBlocked,
+		// The round trip through the Pipeline's own fields is hand-maintained,
+		// so a ruleState field added without a line HERE and one in
+		// publishRuleState reads as its zero value on every event with nothing
+		// failing anywhere. For this field the zero value is "" — the LICENSING
+		// answer — so the omission is fail-open, which is why
+		// TestRuleState_PersonalClockRefusalSurvivesPublication pins the trip
+		// rather than trusting the two lists to stay in step.
+		personalClockRefusal: p.personalClockRefusal,
 	}
 }
 
@@ -156,6 +178,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.declaresActorAnchor = rs.declaresActorAnchor
 	p.labelExpansion = rs.labelExpansion
 	p.plainNarrowingBlocked = rs.narrowingBlocked
+	p.personalClockRefusal = rs.personalClockRefusal
 }
 
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may

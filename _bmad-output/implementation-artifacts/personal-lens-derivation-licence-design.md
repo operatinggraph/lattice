@@ -432,6 +432,21 @@ vendor question; treat the consumer-bound route as a permitted sharpening, not a
 `SetPersonalPlaneHealer` — the host asserts conjuncts 0–2 at `registerPersonalHealer`, and the zero value is
 refusal. Conjuncts 3–4 are read live at each gate evaluation.
 
+*(Amended at build, 2026-09-03 — what two cold reviews added to the conjuncts as built.)* Conjunct 1's sink
+half and conjunct 2 are **live accessors**, not registration-time samples (a sink-less producer installed
+after the last personal lens registered must revoke on the next evaluation; the `InterestReconciler` is
+the fourth Interest Set writer and is counted from construction). Conjunct 3 additionally refuses until a
+pass **began after this lens registered** (`StartedAt > RegisteredAt`) — a lens registered into an
+already-swept plane must not inherit a verdict from a pass that never drove it. Conjunct 5 refuses a
+**readable count of zero** on both the sweeper side and the licence side: the lister is itself a live
+instance, so zero is a broken census, not an empty deployment. Conjunct 4 is derived once at rule
+publication onto `ruleState`, and the gate asks the **index before the licence**, mirroring the plain arm's
+documented order — a multi-walk lens is refused on its zero `HopIndex` (a named reason,
+`DerivationNoBranchIndexRefusal`, closing G15) before any census mutex is touched. The exposure window
+for a not-yet-heartbeating second instance is up to one **sweep** interval past its first heartbeat, not
+one heartbeat. Conjuncts 0 and 1 are structurally vacuous in the process `cmd/refractor` builds; only 2
+(transiently), 3, 4 (once an author writes a clock) and 5 can refuse a shipped deployment.
+
 **Why `patternClosedOutput` stays false.** It is a *claim about the lens*, read by two predicates with
 different tolerances and different rollback shapes. §17.2 of the parent design already refused to conflate
 "may an event be withheld" with "which anchors can an arriving event affect"; this is that refusal from the
@@ -503,7 +518,7 @@ default-denies.
 | `PersonalSweeper` pass verdict `{completedAt, attempted, failed, populationReadable}` | first completed pass — which `Run` now performs immediately rather than on the first 60 s tick | zero at process start, and **zero refuses the licence** (the plain licence's zero-`LastPassAt` rule) | not persisted; a restart re-earns the licence on the first pass | replaced wholesale per pass under the sweeper's own lock; read live at every gate evaluation, never snapshotted |
 | the interest-change callback (`func(identityID string)`) on `control.Service` and `health.InterestReconciler` | `cmd/refractor` wiring, before `Run` | never | process lifetime | nil = today's behaviour; set once, never mutated. A bare func rather than an interface because `control` imports `health` (G21) |
 | the healer-verdict accessor on `Pipeline` | injected at `registerPersonalHealer`, beside the existing `SetPersonalPlaneHealer` | never | across hot reload (host wiring, not rule state) | read live; `pipeline` cannot import `grantchange` (G21), so this is a one-method value the host supplies, not a typed dependency |
-| `personalLicence` (conjuncts 0–2, per pipeline) | at `registerPersonalHealer` | re-asserted at the same site on hot reload | across reload | read **live** at each gate evaluation, not snapshotted onto `ruleState` — both healer arms are installed after `useFullEngineBranches` runs, the same reason `standingHealerInstalled` is read live (`walkscope.go:76-84`) |
+| `personalLicence` (conjuncts 0–2, per pipeline) | at `registerPersonalHealer` — once, at activation (*amended at build 2026-09-03: a hot reload never re-runs it, and that is correct — every asserted member is a property of the process; the two that can move are live accessors, and conjunct 4 rides `ruleState`, re-derived by the very publication a reload performs*) | never | across reload | read **live** at each gate evaluation, not snapshotted onto `ruleState` — both healer arms are installed after `useFullEngineBranches` runs, the same reason `standingHealerInstalled` is read live (`walkscope.go:76-84`) |
 | `anchorHopsPerBranch []full.HopIndex` | `useFullEngineBranches`, per rule publication | replaced wholesale on every publication, so a reload can never leave a previous body's indexes armed | published on `ruleState` under `ruleMu` with the rest of the compiled rule | never mutated after publication; readers alias |
 | the per-derivation shared read budget + neighbour memo (Inc 3) | per `affectedAnchors` call | per call — it must **not** outlive one event, or one wide event poisons the next | not carried | threaded through the per-branch `walkToAnchors` calls in order; a breach declines the whole lens once |
 
@@ -846,13 +861,13 @@ substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc
 
 ### 15.8 Checkpoint
 
-*(amended per increment)* — **Inc 1 landed** (1a shred announces on both arms · 1b Interest Set edge + the
-ordering-token latch conjunct · 1c `interest-change-posture` gate · 1d producer closure at install, at the
-write, and at authoring). Two cold reviews (2 BLOCKING + 2 MAJOR + 7 MINOR; then 1 BLOCKING + 1 MAJOR + 5
-MINOR on the fix round), all closed. Deviations recorded in §4.3(d). Found in passing and fixed in-fire:
-the corpus census modelled every kernel lens off the auth plane (`TargetBucket` "capability"/"" never
-translated to `capability-kv`), so `capability` and `capabilityRead` were absent from the auth-plane
-narrowing census — now pinned. **Next: Inc 2** (the licence) — worktree
+*(amended per increment)* — **Inc 1 landed** (`cc42b5de`). **Inc 2 landed**: the licence (conjuncts 0–5 as
+amended in §4.4), the healer pass verdict published as `personalSweepVerdict` (eight-token closed
+vocabulary, `stale` escalated by the LagPoller), the single-instance build-time gate
+(`scripts/lint-refractor-single-instance.go`, gated on `grantchange.GrantChangeEdgeSpansDeployment`), the
+per-lens licence answer on the control-plane `health` RPC, and `TestCorpusPersonalDerivation` (19 branches /
+15 lenses; the 7 multi-walk rows pinned to the no-branch-index refusal until Inc 3 flips them). Reviews:
+full cold pass (1 BLOCKING + 2 MAJOR + 8 MINOR) and a fix-round re-review (1 MAJOR + 7 MINOR), all closed.
+**Next: Inc 3** (multi-walk per-branch indexes + union) — worktree
 `/tmp/lattice-worktrees/lattice-personal-licence-1788382715`, branch `fire/personal-lens-derivation-licence`.
-Conjunct 1 must additionally require that every installed cap-read producer in the process has a sink
-(the Warn path counts), per the §4.3(d) amendment.
+Then close: cycle `bin/refractor`, the §11 live verification, the R7 latency number, dossier classification.

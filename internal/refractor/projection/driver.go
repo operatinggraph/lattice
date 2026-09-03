@@ -667,6 +667,12 @@ func InstallActorAggregate(
 	}
 
 	if IsReadGrantProducer(desc, plan) {
+		// The verdict is recorded from the same boolean the log is emitted on,
+		// so this process's census of sink-less producers and its own log lines
+		// cannot disagree about which lenses those are. The consumer that
+		// REFUSES on the census is the personal derivation licence, which is
+		// where the fail-slow install becomes a fail-closed narrowing.
+		noteReadGrantProducerSink(r.ID, options.grantSink != nil)
 		if options.grantSink != nil {
 			p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
 			logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)

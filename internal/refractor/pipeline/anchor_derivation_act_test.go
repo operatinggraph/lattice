@@ -244,7 +244,7 @@ func TestFlip_ActRefusedWithoutSweepPlan(t *testing.T) {
 	f := newCoHolderFixture(t)
 	f.p.sweeper = nil
 
-	_, ready := f.p.derivationIndexForAct(f.p.ruleState())
+	_, ready, _ := f.p.derivationIndexForAct(f.p.ruleState())
 	require.False(t, ready, "no standing healer, no acting")
 
 	f.handleLink("holdsRole", "dave", "admin", false, 1)
@@ -256,7 +256,7 @@ func TestFlip_ActRefusedWithoutPatternClosure(t *testing.T) {
 	f := newCoHolderFixture(t)
 	f.p.SetPatternClosedOutput(false)
 
-	_, ready := f.p.derivationIndexForAct(f.p.ruleState())
+	_, ready, _ := f.p.derivationIndexForAct(f.p.ruleState())
 	require.False(t, ready,
 		"a row fed by an input outside the pattern can change with no pattern edge changing")
 

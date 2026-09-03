@@ -408,7 +408,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	instance := "rfx-" + randHex(6)
+	instance := newInstanceToken()
 	logger.Info("refractor starting", "instance", instance, "natsURL", *natsURL)
 
 	// The primordial identifier table, loaded before anything in this process
@@ -1394,7 +1394,13 @@ func main() {
 	// they share a single identity population, and fifteen tickers would walk
 	// it fifteen times. It rides the reprojector's own registry, so there is no
 	// second registration site to keep in step. Started beside the drain below.
-	personalSweeper := grantchange.NewPersonalSweeper(grantReprojector, coreKV)
+	// healthKVHandle is threaded so the sweep can count live Refractor instances
+	// once per pass. The grant-change edge is an in-process function call
+	// (grantchange.GrantChangeEdgeSpansDeployment), so a second instance stops it
+	// spanning the deployment while every wiring conjunct a personal lens could
+	// test stays true — the personal derivation licence refuses on the count, and
+	// a nil handle here would make that count unreadable and refuse everything.
+	personalSweeper := grantchange.NewPersonalSweeper(grantReprojector, coreKV, healthKVHandle)
 
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
@@ -1668,7 +1674,45 @@ func main() {
 			// from importing the pipeline package at all, and there is no
 			// iterator over it. This list is Refractor-internal and crosses
 			// nothing.
-			registerPersonalHealer(grantReprojector, r.ID, p)
+			registerPersonalHealer(grantReprojector, personalSweeper, controlSvc, r.ID, p,
+				pipeline.PersonalDerivationWiring{
+					// This activation arm IS the personal-lens arm of the
+					// install switch, so the class conjunct is asserted from the
+					// dispatch rather than re-derived from the envelope.
+					PersonalLens: true,
+					// The two handles InstallPersonalLens was threaded, read
+					// from the same variables that call passes: requireReadGate
+					// is true above, so a nil capabilityKV would have refused
+					// the registration outright and never reached here — the
+					// conjunct is asserted from the handle anyway, because a
+					// licence that inferred it from an unrelated refusal would
+					// silently become vacuous if that posture ever changed.
+					ReadGateWired:           capabilityKV != nil,
+					InterestFilterInstalled: personalInterestKV != nil,
+					// The two edges Increment 1 built. Each is asserted from
+					// the object that would carry it, never from the presence of
+					// one standing in for both: "a reprojector exists" and "the
+					// Interest Set's writers reach it" are different claims, and
+					// only the second is what conjunct 2 rests on.
+					GrantReprojectorWired: grantReprojector != nil,
+					// All FOUR Interest Set writers, read LIVE. Three live on
+					// the control service — register, deregister, and hydrate's
+					// registration-creating arm. The fourth is the
+					// InterestReconciler's orphan reap, which cmd/refractor
+					// constructs a few statements below this one and only for a
+					// deployment that has a SYNC stream, so it cannot be sampled
+					// here at all: a reconciler built after this line with no
+					// sink would leave a value captured now saying "armed" while
+					// a fourth writer reaps silently. The process census counts
+					// every reconciler from CONSTRUCTION, so this closure sees
+					// one the moment it exists; a deployment that builds none
+					// owes no fourth announcement and the census is legitimately
+					// empty.
+					InterestEdgeArmed: func() bool {
+						return controlSvc.InterestChangeSinkInstalled() &&
+							health.InterestReconcilersWithoutSink() == 0
+					},
+				})
 			// The syncgap gap-detection read (edge-syncgap-control-rpc-
 			// design.md §3.2): the "personal.syncgap" control RPC answers the
 			// Edge node's warm-resume freshness check off the control host's
@@ -1884,6 +1928,20 @@ func main() {
 		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
 		lp.SetAckStatsFunc(p.AckStats)
 		lp.SetPeakRowsFunc(p.PeakBindingRows)
+		// The one writer that can report the personal healer's SILENCE. The
+		// sweeper publishes its verdict at the end of every pass, so a sweeper
+		// that stops passing leaves `clean` standing on every personal lens's
+		// entry — the field reading healthy through the exact condition it
+		// exists to report. This poller runs on its own clock and escalates the
+		// stored token to `stale`, and only ever to `stale`, which is the
+		// ownership rule that makes a second writer of one field safe.
+		lp.SetPersonalHealerPassFunc(func() (time.Time, time.Duration, int, bool) {
+			if personalSweeper == nil {
+				return time.Time{}, 0, 0, false
+			}
+			v := personalSweeper.Verdict()
+			return v.CompletedAt, v.Interval, pipeline.PersonalHealerStaleCycles, true
+		})
 		p.SetLagPoller(lp)
 
 		// Transient write failures escalate to the shared retry queue (deferred
@@ -2536,6 +2594,31 @@ func wireControlChecker(ctx context.Context, conn *substrate.Conn, component str
 		"component", component, "authMode", string(mode),
 		"systemActors", len(systemActorKeys))
 	return checker, nil
+}
+
+// newInstanceToken mints this process's Health-KV instance token and refuses to
+// return one that would escape the census built on it.
+//
+// The heartbeat lands at health.refractor.<instance>, and the personal
+// derivation licence counts live Refractors with the single-token filter
+// health.refractor.* . A token containing a `.` writes a key that filter does
+// NOT match, so the instance would be invisible to the census — and the
+// direction is the bad one: a second such Refractor UNDER-counts, and every
+// personal lens on the first one keeps narrowing on a grant-change edge that no
+// longer spans the deployment. A dot is also how the per-lens sub-keys under an
+// instance are formed, so a dotted token could collide with one.
+//
+// hex.EncodeToString cannot produce a dot, so this can only fire if the token's
+// construction changes. It panics rather than sanitising because a silently
+// rewritten instance id is a second identity for one process, which is worse
+// than not starting: this runs at the top of main, before anything is wired.
+func newInstanceToken() string {
+	token := "rfx-" + randHex(6)
+	if strings.ContainsAny(token, ".*>") {
+		panic("refractor: instance token " + strconv.Quote(token) +
+			" contains a NATS subject metacharacter — its heartbeat key would escape the health.refractor.* instance census, and an uncounted instance is the fail-OPEN direction for the personal derivation licence")
+	}
+	return token
 }
 
 func randHex(n int) string {

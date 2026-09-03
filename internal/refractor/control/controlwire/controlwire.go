@@ -99,6 +99,34 @@ type ControlResponse struct {
 	PersonalSyncGap          *PersonalSyncGapResult          `json:"personalSyncGap,omitempty"`          // present only for "syncgap" op
 	PersonalRequestHydration *PersonalRequestHydrationResult `json:"personalRequestHydration,omitempty"` // present only for "requesthydration" op
 	Reproject                *ReprojectResult                `json:"reproject,omitempty"`                // present only for "reproject" op
+	PersonalDerivation       *PersonalDerivationStatus       `json:"personalDerivation,omitempty"`       // present on "health" for a Personal Lens
+}
+
+// PersonalDerivationStatus is one Personal Lens's narrowing-licence verdict,
+// answered live on the "health" op
+// (personal-lens-derivation-licence-design.md §4.4).
+//
+// It rides the control RPC rather than the health KV Entry because the two
+// answer different questions and only one of them is per-lens. The entry's
+// personalSweepVerdict is PLANE-WIDE: one shared sweeper fans one pass verdict
+// onto every personal lens, so it says what the healer achieved and nothing
+// about which conjunct is refusing THIS lens. Conjuncts 0-2 are properties of
+// the host's wiring, and conjunct 3's "a pass begun after this lens registered"
+// clause is per-lens by construction — none of them is visible on a shared
+// verdict. An operator who sees a lens on the enumerator needs the conjunct, and
+// this is where it is.
+//
+// It is derived at request time, never stored: every input is either live
+// process wiring or the healer's current verdict, so a persisted copy would be
+// a snapshot of a question whose whole point is that its answer moves.
+type PersonalDerivationStatus struct {
+	// Licensed reports whether this lens is currently acting on a derived
+	// anchor set rather than on the ActorEnumerator's walk.
+	Licensed bool `json:"licensed"`
+	// Refusal names the conjunct refusing it, "" when licensed. It is the same
+	// string the `anchor derivation cannot act on this lens` log line carries,
+	// so an operator reading either finds the same sentence.
+	Refusal string `json:"refusal,omitempty"`
 }
 
 // ReprojectResult is the synchronous acknowledgement returned by the

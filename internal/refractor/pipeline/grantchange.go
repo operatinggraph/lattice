@@ -111,9 +111,10 @@ func (p *Pipeline) RecordUnsanctionedGrantKeyRefusal(ctx context.Context, key st
 }
 
 // SetPersonalSweepProgress records the personal convergence sweep's
-// round-robin cursor, its last completed cycle, and the grant-change drain's
-// queue depth on this lens's own health entry
-// (personal-lens-grant-change-trigger-design.md §4.3).
+// round-robin cursor, its last completed cycle, the grant-change drain's queue
+// depth, and its last pass's VERDICT on this lens's own health entry
+// (personal-lens-grant-change-trigger-design.md §4.3;
+// personal-lens-derivation-licence-design.md §4.4).
 //
 // The sweep is one process-level walk shared by every personal lens, but the
 // fact it publishes is per-lens: whether THIS lens's rows have a standing
@@ -121,17 +122,28 @@ func (p *Pipeline) RecordUnsanctionedGrantKeyRefusal(ctx context.Context, key st
 // to the lens's own entry is what lets an operator answer that from the lens
 // they are already looking at.
 //
+// The verdict rides here rather than on a surface of its own because it answers
+// the same question the cursor does and answers it more honestly: the cursor
+// advances on a pass in which every reprojection failed.
+//
+// It is PLANE-WIDE, not this lens's verdict. The sweep is one process-level walk
+// and this is its pass report fanned onto every personal lens, so it explains a
+// whole plane dropping back onto the enumerator and nothing narrower. A lens
+// refused by its own wiring or by its own registration clause reads `clean`
+// here; the per-lens conjunct is on the control plane's `health` op
+// (controlwire.PersonalDerivationStatus).
+//
 // A nil reporter (a directly-constructed pipeline, every harness) silently
 // succeeds, the same posture every other reporter call on this type takes. The
 // write's error is logged AND returned, so the sweeper can say which lens's
 // observability it lost rather than dropping the failure.
-func (p *Pipeline) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+func (p *Pipeline) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64, verdict string) error {
 	if p.reporter == nil {
 		return nil
 	}
-	if err := p.reporter.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, queueDepth); err != nil {
+	if err := p.reporter.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, queueDepth, verdict); err != nil {
 		slog.Warn("pipeline: grant change: could not record the personal sweep's progress on health",
-			"ruleId", p.ruleID, "cursor", cursor, "err", err)
+			"ruleId", p.ruleID, "cursor", cursor, "verdict", verdict, "err", err)
 		return err
 	}
 	return nil

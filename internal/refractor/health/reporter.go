@@ -158,6 +158,7 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		PersonalSweepCursor:           existing.PersonalSweepCursor,
 		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
 		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
+		PersonalSweepVerdict:          existing.PersonalSweepVerdict,
 		// Every CUMULATIVE fault counter carries forward for the same reason,
 		// and SecureRedactions is the one that made the omission load-bearing:
 		// a rebuild calls SetRebuilding on the way in and SetActive on the way
@@ -283,6 +284,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		PersonalSweepCursor:           existing.PersonalSweepCursor,
 		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
 		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
+		PersonalSweepVerdict:          existing.PersonalSweepVerdict,
 		SecureRedactions:              existing.SecureRedactions,
 		EvalDriftRetries:              existing.EvalDriftRetries,
 		EvalDriftRequeues:             existing.EvalDriftRequeues,
@@ -372,6 +374,7 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		PersonalSweepCursor:           existing.PersonalSweepCursor,
 		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
 		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
+		PersonalSweepVerdict:          existing.PersonalSweepVerdict,
 		SecureRedactions:              existing.SecureRedactions,
 		EvalDriftRetries:              existing.EvalDriftRetries,
 		EvalDriftRequeues:             existing.EvalDriftRequeues,
@@ -851,13 +854,16 @@ func (r *Reporter) SetAuditProgress(ctx context.Context, cursor string, cycleCom
 // mechanism. It is the same fan-out RecordGrantReprojectIssue takes and for the
 // same reason: the mechanism is shared, the fact is per-lens.
 //
-// A zero cycleCompletedAt leaves the stored value alone rather than clearing
-// it, exactly as SetAuditProgress does: the sweep stamps that field only on the
-// tick that reaches the END of the identity population, so writing a zero on
-// every intermediate tick would erase the one field that says what the walk has
-// actually covered. queueDepth always overwrites — it is a live gauge, not a
-// milestone, and a stale depth is worse than a zero one.
-func (r *Reporter) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+// The two MILESTONE fields leave their stored value alone when handed a zero:
+// cycleCompletedAt exactly as SetAuditProgress does, because the sweep stamps it
+// only on the tick that reaches the END of the identity population, and cursor
+// because a pass that reached no batch at all — an unreadable population — still
+// owes a verdict and must not erase the position the last real pass got to.
+// queueDepth and verdict always overwrite: both are the current answer rather
+// than a milestone, and a stale verdict is the one thing this field must never
+// be, since the state it exists to report is precisely a healer that has stopped
+// achieving anything while still ticking.
+func (r *Reporter) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64, verdict string) error {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
 
@@ -865,11 +871,52 @@ func (r *Reporter) SetPersonalSweepProgress(ctx context.Context, cursor string, 
 	if err != nil {
 		return fmt.Errorf("health: SetPersonalSweepProgress read: %w", err)
 	}
-	existing.PersonalSweepCursor = cursor
+	if cursor != "" {
+		existing.PersonalSweepCursor = cursor
+	}
 	if !cycleCompletedAt.IsZero() {
 		existing.PersonalSweepCycleCompletedAt = cycleCompletedAt.UTC().Format(time.RFC3339)
 	}
 	existing.PersonalSweepQueueDepth = queueDepth
+	existing.PersonalSweepVerdict = verdict
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// PersonalSweepVerdictStale is the ONE token this package writes onto
+// personalSweepVerdict itself. It mirrors pipeline.PersonalHealerVerdictStale,
+// which this package cannot import (pipeline imports health), and the two are
+// pinned together by a cross-package test rather than left to agree by
+// inspection.
+const PersonalSweepVerdictStale = "stale"
+
+// SetPersonalSweepVerdict overwrites the personal sweep's verdict token alone,
+// leaving every other field of the entry — including the cursor and the cycle
+// stamp — exactly as it stands.
+//
+// It is deliberately narrower than SetPersonalSweepProgress, because its caller
+// is not the sweep: it is health.LagPoller, escalating the stored token to
+// `stale` when the healer's own clock has stopped moving. The sweep cannot
+// report its own silence, so the field has a second writer on a different clock
+// — and the ownership rule that keeps that safe is that this path writes only
+// `stale` and the sweep never does. See LagPoller.pollPersonalHealerStaleness.
+func (r *Reporter) SetPersonalSweepVerdict(ctx context.Context, verdict string) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetPersonalSweepVerdict read: %w", err)
+	}
+	if existing.PersonalSweepVerdict == "" {
+		// This lens's entry carries no sweep verdict at all, so no sweep has
+		// ever reported on it and there is nothing to escalate. Writing `stale`
+		// here would claim a healer relationship the lens does not have — every
+		// non-personal lens in the corpus is in exactly this state.
+		return nil
+	}
+	existing.PersonalSweepVerdict = verdict
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)

@@ -257,7 +257,126 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   actor-aggregate plane runs does not fit here. Both mechanisms report on each personal lens's
   own health entry: faults through `RecordGrantReprojectIssue` (dropped signals, a failed
   reprojection), and the sweep's cursor / last completed cycle / drain queue depth through
-  `personalSweep*` (personal-lens-grant-change-trigger-design.md).
+  `personalSweep*` (personal-lens-grant-change-trigger-design.md). The sweep also publishes what its
+  last pass **achieved**, as `personalSweepVerdict` in a closed vocabulary — `clean`, `never-passed`,
+  `failed`, `population-unreadable`, `instance-count-unreadable`, `instance-count-impossible`,
+  `multiple-instances`, and `stale`, the one token the sweep never produces because a stalled sweeper
+  reports nothing at all (`health.LagPoller` writes it instead). That field
+  is not decoration: the cursor and the cycle stamp advance on a pass in which every reprojection
+  failed, because the per-lens failure path logs, raises the fault and continues — so a reader that
+  took progress for health would read healthy through the exact condition the healer exists to
+  detect. `Run` performs one pass immediately and only then ticks, or the whole plane would spend a
+  full interval after every restart with no verdict at all.
+- **The personal derivation licence (`personal-lens-derivation-licence-design.md` §4.4).** The
+  affected-anchor derivation refused every personal lens outright, because a personal row is a
+  function of *two* inputs the compiled pattern does not bind — the D1 read gate and the Interest
+  Set — so a derived anchor set that correctly excludes an anchor whose pattern did not change still
+  skips a row whose grant did. That refusal was correct while those inputs were silent. Now that each
+  has a change edge, `pipeline.personalDerivationLicence` states what it actually required, as six
+  fail-closed conjuncts:
+
+  | # | Conjunct | Where it comes from |
+  |---|---|---|
+  | 0 | this pipeline is a personal lens | asserted by the host at `registerPersonalHealer` |
+  | 1 | the D1 read gate is wired, a grant-change reprojector exists in this process, and **every** cap-read producer installed here has a sink | the first two asserted at the same call; the sink half is a live accessor onto `projection.ReadGrantProducersWithoutSink()` |
+  | 2 | **all four** Interest Set writers announce, or the lens has no interest filter | a live accessor over `control.Service.InterestChangeSinkInstalled()` (register/deregister/hydrate) **and** `health.InterestReconcilersWithoutSink() == 0` (the orphan reap) |
+  | 3 | the personal-plane healer's **last pass verdict** is clean, recent, and from a pass that **began after this lens registered** | read live off `PersonalSweeper.Verdict()` |
+  | 4 | the compiled rule references neither `$now` nor `$projectedAt`, exhaustively provable | the compiled rule |
+  | 5 | exactly one live Refractor instance — not zero, not more — and the count itself readable | the same pass verdict |
+
+  Conjuncts 0 and the wiring halves of 1 are boot-time facts only `cmd/refractor` holds, and their
+  zero value is refusal: a host that asserts nothing narrows nothing. **The two census halves of
+  conjuncts 1 and 2 are accessors, not booleans**, and that is load-bearing: a cap-read producer can
+  install after a personal lens registered (a hot lens install), and `cmd/refractor` builds the
+  `InterestReconciler` *inside* the very activation arm that registers the first personal lens — a
+  value sampled at registration would answer about a process that no longer exists, in the fail-open
+  direction. A **nil** accessor refuses, because "nobody wired a way to check" and "checked, and it
+  is fine" are different answers. Conjuncts 3 and 5 are likewise read **live** at every gate
+  evaluation and never snapshotted onto the rule state, for the reason `standingHealerInstalled` is
+  read live — both halves of the wiring are installed after the rule is published. Conjunct 3's
+  registration clause exists because a lens joining an already-swept plane would otherwise inherit a
+  clean verdict from a pass that never drove it: the healer's guarantee is per-lens, so the evidence
+  for it is too. Refusal strings are stable (no interpolated durations), because the refusal note
+  latches on the string. `patternClosedOutput` stays **false** for a personal lens: it is a claim
+  about the lens read by two predicates with different tolerances and different rollback shapes, and
+  this narrowing is entitled to change one of them. The knob back is the existing
+  `REFRACTOR_ANCHOR_DERIVATION=off`; no new operator surface.
+
+  **Which conjuncts can actually refuse a shipped deployment, stated plainly.** Conjunct 0 and
+  conjunct 1 are *structurally vacuous* in the process `cmd/refractor` builds: the personal arm of
+  the install switch is what asserts the class, `requireReadGate` is true so a nil capability handle
+  refuses registration long before the licence is asked, the reprojector is constructed
+  unconditionally, and `startPipeline` always offers the grant sink — so the producer census is empty
+  by construction. They are conjuncts because a *different* host (a harness, an embedder, a future
+  wiring change) can falsify them, and a licence built only of conjuncts nobody can falsify asserts
+  nothing about the class it governs. What can refuse a real deployment is conjunct 2 (transiently,
+  while an `InterestReconciler` exists but its sink is not yet wired), conjunct 3 (the healer's own
+  verdict — the common case, and the availability cliff R6 names), conjunct 4 (only once an author
+  writes a clock into a personal cypher), and conjunct 5 (the deployment's cardinality).
+
+  **A count of ZERO refuses, and is its own verdict token.** The process running the census is itself
+  a live Refractor, so a census that finds none has contradicted itself: zero means the census is
+  broken — the Health bucket purged or re-provisioned under a running process, heartbeat writes
+  failing while listings succeed, a permission change, a key-shape drift — not that the deployment is
+  empty. The direction is what makes it a defect rather than a curiosity: two instances whose
+  heartbeats are not landing read exactly this on *both* of them, so a readable zero would license
+  the narrowing on both while the edge reaches neither. It is refused twice, once where the count is
+  read (an empty listing is reported UNREADABLE) and once in the licence, so an edit to either cannot
+  reopen it alone.
+
+  **A multi-walk personal lens is licensed and still cannot act**, and now says so.
+  `ruleinstall.go` publishes no `anchorHops` for a rule that compiles to several branches, so the
+  derivation reads the zero `HopIndex` — incomplete, with an *empty* reason. Until the licence
+  landed, conjunct 1 refused every multi-walk lens first (they are all personal), so that emptiness
+  was masked; a licensed one reaches it, and the refusal latch's own zero value is also the empty
+  string, so an unnamed reason would be swallowed on its first report and the three biggest personal
+  lenses would sit silently on the enumerator. `pipeline.DerivationNoBranchIndexRefusal` names it,
+  the corpus census pins it per lens, and the latch now distinguishes "nothing reported yet" from
+  "reported the empty string" so the class cannot recur. **Increment 3 arms a per-branch index and
+  re-pins those rows; until then `edgeCatalog`, `edgeTasks` and `edgeEntitySessions` gain nothing
+  from this licence** — the census is the record of that, not this paragraph.
+  A **granted** licence logs once, at Info, naming the verdict it was granted on — because the payoff
+  is claimed as "the refusal is gone", and an absence of log lines is indistinguishable from a lens
+  that stopped receiving events. **A stalled healer surfaces on the entry**, too: the sweep cannot
+  report its own silence, so `health.LagPoller` — the one *other* periodic per-lens writer, on its
+  own clock — escalates a stored `personalSweepVerdict` to `stale` once the healer's last pass has
+  aged past the licence's window. Two writers of one field are safe here by an ownership rule rather
+  than by luck: the poller writes only `stale` and the sweep never does, so each value has exactly
+  one producer and a recovered healer's own verdict is simply the later write. The healer conjunct of `derivationIndexForAct` now reads
+  `standingHealerInstalled()` rather than `p.sweeper` alone: a Personal Lens never receives a
+  `SweepPlan`, so the old reader was the one consumer of "has this lens a standing healer" that could
+  never see the personal arm. (`oneKeyAnswerSound` is a **third** reader of that same question and is
+  deliberately left alone — converging it would arm a different narrowing with no licence review of
+  its own.)
+- **R4 — the licence revokes itself above one instance, by design.** The grant-change edge is an
+  in-process function call, declared as such by `grantchange.GrantChangeEdgeSpansDeployment`. On a
+  second Refractor a producer on one instance announces to no personal lens on another, while every
+  wiring conjunct above stays true on both — a fail-open at exactly the transition. Two mechanisms
+  close it, and they are a pair rather than alternatives. At **runtime**, conjunct 5 counts live
+  instances from a Health-KV listing of `health.refractor.*`, once per sweep pass and never per
+  event, failing closed on an unreadable count *and on an empty one*. That count is a **backstop with
+  a bounded window**, because its two staleness directions are not symmetric: a crashed instance's
+  unexpired heartbeat over-counts and refuses (pessimisation, safe — and pinned as correct by a test,
+  so a later freshness filter has to argue with it), while a newly started instance that has not yet
+  written its first heartbeat under-counts and the licence stays on meanwhile. **The window is not
+  the heartbeat interval**: the count is re-derived once per *sweep* pass, so the exposure runs until
+  the first sweep pass that begins after the second instance's first heartbeat lands — up to one
+  sweep interval on top of the heartbeat, not one heartbeat. At **build time**,
+  `scripts/lint-refractor-single-instance.go` refuses the affordance itself — a replica/scale count
+  on a refractor service, two background launches in one Makefile recipe or a loop around one, a new
+  JetStream queue group under `cmd/refractor` or `internal/refractor`, an instance-identity or
+  cardinality env knob, or a `--scale refractor=N` command — while that constant is false. It matches
+  a service by name, image or command, and globs override files, because a replica count lands in
+  `docker-compose.override.yml` without touching the file under review. Its reach gaps are printed on
+  every clean run rather than left implied: orchestration outside this repo (k8s/Helm/Nomad/systemd/
+  ECS/Procfile — none ships today), an operator starting the binary twice or running
+  `cycle-refractor` without stopping what it replaces, a scale typed at a shell rather than
+  committed, a service composed under a name/image/command it does not recognize, and the fact that
+  Refractor's lens consumers are pull consumers on a shared durable name, so two processes already
+  split a lens's stream with no new declaration anywhere. **A durable, deployment-wide grant-change signal
+  (`personal-lens-derivation-licence-design.md` §8 alternative #6) is the precondition of
+  re-licensing a personal lens on a multi-instance deployment** — not an optimisation to be done
+  later, and flipping the constant without it removes both mechanisms at once.
 - **Hydration Hook (Fire PL.4, `internal/refractor/pipeline.Pipeline.Hydrate`).** The cold-start
   catch-up path for a device that missed the SYNC stream's retention window (or is starting for the
   first time): the control-plane RPC `lattice.ctrl.refractor.personal.hydrate` — request body
@@ -847,6 +966,18 @@ census alike. It is a third switch, separate from the two beside it:
 `REFRACTOR_ACTOR_PEER_ANCHORS` governs only events on a lens's own actor type — so a full
 rollback to the pre-scope walk needs this knob as well. Like the others it bounds the next
 event and heals nothing already stale; that is `lattice lens rebuild`'s job or the sweep's.
+
+**The derivation is the arm this scope is the fallback for, and the personal plane now reaches it.**
+`derivationIndexForAct` refused every personal lens on two conjuncts — `patternClosedOutput`, which
+no personal lens sets, and a healer test that read `p.sweeper` alone, which a Personal Lens never
+receives. Both are now answered: the healer conjunct reads `standingHealerInstalled()` (one arm per
+plane), and the pattern-closure conjunct is a disjunction with the personal narrowing licence
+described in the Personal Lens section above. A licensed personal lens derives its affected anchors
+from the compiled pattern instead of walking outward from the event; every one it refuses keeps the
+scoped enumerator exactly as it is. The per-lens static verdicts are pinned by the corpus census
+(`internal/refractor/personal_derivation_corpus_census_test.go`), which pins the declaration and the
+cypher-level conjuncts — the process-level ones cannot be censused and are held by
+`TestPersonalDerivationLicence_Conjuncts`.
 
 One residual the scope does **not** remove: `byType` is keyed by vertex type, so a lens
 whose own pattern binds `instanceOf` between two `service` positions — `edgeInstances`,

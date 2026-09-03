@@ -537,6 +537,23 @@ type Pipeline struct {
 	// of it is on the per-event path.
 	personalPlaneHealer atomic.Bool
 
+	// personalClockRefusal is the published half of the personal narrowing
+	// licence's conjunct 4 — see ruleState's field of the same name for why it
+	// is derived at publication rather than per event. Guarded by ruleMu with
+	// the rest of the compiled rule.
+	personalClockRefusal string
+
+	// personalLicence carries the host's assertion of the personal narrowing
+	// licence's wiring conjuncts plus the accessor its live conjuncts read
+	// (anchor_derivation_personal.go). Nil — a host that asserted nothing — is
+	// the refusing answer, exactly like personalPlaneHealer's false.
+	//
+	// A pointer swapped atomically rather than a mutex-guarded struct because
+	// every read is on the per-event path, and because the wiring and the
+	// accessor must move together: a reader that saw one registration's wiring
+	// beside another's accessor would be answering about neither.
+	personalLicence atomic.Pointer[personalLicenceWiring]
+
 	// auditor is the plain-lens divergence audit, installed via InstallAudit
 	// and driven by RunAudit. Nil until InstallAudit has run; non-nil and
 	// carrying Enrolled=false for a lens the enrolment conjuncts REFUSED, so

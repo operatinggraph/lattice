@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -39,6 +41,23 @@ type CoreKVLister interface {
 	ListKeysFilter(ctx context.Context, filter, cursor string, limit int) ([]string, string, error)
 }
 
+// HealthKVLister is the one Health KV capability the sweep needs: enumerate the
+// live Refractor instance heartbeats, so a pass can say how many processes are
+// running.
+//
+// A separate named type from CoreKVLister despite the identical method set,
+// because the two are different buckets answering different questions and a
+// single name would let a caller thread one where the other belongs — a mistake
+// whose symptom is an instance count derived from the identity population.
+//
+// NIL IS A REFUSAL, not a default: a sweeper with no health lister reports its
+// instance count UNREADABLE, and the personal derivation licence refuses on
+// that. The grant-change edge is process-local, so a consumer that cannot tell
+// how many processes exist must not narrow.
+type HealthKVLister interface {
+	ListKeysFilter(ctx context.Context, filter, cursor string, limit int) ([]string, string, error)
+}
+
 // PersonalSweeper is the personal plane's standing healer: one shared ticker
 // that walks the identity population in bounded batches and re-drives each
 // identity across every registered personal lens.
@@ -66,8 +85,9 @@ type CoreKVLister interface {
 // the sweeper's candidates go through ReprojectNow rather than duplicating
 // that walk beside it.
 type PersonalSweeper struct {
-	r      *Reprojector
-	coreKV CoreKVLister
+	r        *Reprojector
+	coreKV   CoreKVLister
+	healthKV HealthKVLister
 
 	mu sync.Mutex
 	// population is the cached identity census for the CURRENT cycle: bare
@@ -94,16 +114,37 @@ type PersonalSweeper struct {
 	// has closed over it.
 	cycleCompletedAt time.Time
 
+	// verdict is what the LAST PASS achieved, replaced wholesale under this
+	// same lock at the end of every pass and read live by the personal
+	// derivation licence (pipeline.PersonalHealerVerdict).
+	//
+	// LIFETIME: created by the first completed pass — which Run performs
+	// immediately rather than on the first tick, or the whole personal plane
+	// would run on the enumerator for a full interval after every restart,
+	// precisely when the backlog is deepest. Zero at process start, and zero
+	// REFUSES the licence. Not persisted: a restart re-earns the narrowing on
+	// its first pass. Replaced wholesale rather than field-by-field so a reader
+	// can never see one pass's failure count beside another pass's clock.
+	verdict pipeline.PersonalHealerVerdict
+
 	batch    int
 	interval time.Duration
 }
 
 // NewPersonalSweeper builds the sweeper over the Reprojector whose registry it
-// shares and the Core KV handle it enumerates identities from.
-func NewPersonalSweeper(r *Reprojector, coreKV CoreKVLister) *PersonalSweeper {
+// shares, the Core KV handle it enumerates identities from, and the Health KV
+// handle it counts live Refractor instances on.
+//
+// healthKV is a positional parameter rather than an option precisely so every
+// caller has to decide: nil is legal and means "this deployment's cardinality is
+// unknown", which the personal derivation licence reads as a refusal. A harness
+// exercising the sweep alone passes nil and gets exactly today's behaviour plus
+// a narrowing it was never going to earn.
+func NewPersonalSweeper(r *Reprojector, coreKV CoreKVLister, healthKV HealthKVLister) *PersonalSweeper {
 	return &PersonalSweeper{
 		r:        r,
 		coreKV:   coreKV,
+		healthKV: healthKV,
 		batch:    DefaultPersonalSweepBatch,
 		interval: DefaultPersonalSweepInterval,
 	}
@@ -125,11 +166,19 @@ func (s *PersonalSweeper) SetBounds(batch int, interval time.Duration) {
 	}
 }
 
-// Run sweeps on a ticker until ctx is cancelled.
+// Run sweeps once IMMEDIATELY, then on a ticker until ctx is cancelled.
+//
+// The immediate pass is not an optimisation. The pass verdict is what the
+// personal derivation licence rests on and its zero value refuses, so a bare
+// ticker would leave every personal lens on the relation-blind enumerator for a
+// full interval after every restart — which is exactly when the backlog is
+// deepest and the enumerator most expensive. It also costs nothing new: the
+// first tick was always going to do this work, and Sweep already returns
+// immediately when no personal lens is registered yet.
 func (s *PersonalSweeper) Run(ctx context.Context) {
-	s.mu.Lock()
-	interval := s.interval
-	s.mu.Unlock()
+	interval := s.tickInterval()
+
+	s.Sweep(ctx)
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -139,6 +188,19 @@ func (s *PersonalSweeper) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			s.Sweep(ctx)
+			// The ticker FOLLOWS SetBounds. Every verdict advertises
+			// tickInterval() as the cadence the licence measures staleness
+			// against, so a bound changed after Run started would otherwise
+			// leave the advertised window describing a clock the loop no longer
+			// keeps — and the direction of that drift is a licence that stays
+			// granted through a cadence it is not actually running at. Reset
+			// after the pass rather than in a second goroutine: the read is one
+			// mutex acquisition per interval, and there is exactly one owner of
+			// this ticker.
+			if live := s.tickInterval(); live != interval {
+				interval = live
+				t.Reset(interval)
+			}
 		}
 	}
 }
@@ -157,38 +219,203 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 		// the drain's registry-COMPLETENESS gate: this sweep is the healer for
 		// the lens that registers late, so holding it until every lens is
 		// present would be the mechanism waiting on the thing it repairs.
+		//
+		// No verdict is recorded, and none is owed: a plane with no personal
+		// lens has nothing for a licence to speak about. A lens that registers
+		// LATER earns its licence on the first pass after it, and until then
+		// reads the standing zero verdict, which refuses.
 		return
 	}
-	if !s.ensurePopulation(ctx) {
-		// Either the listing failed — already logged, and the next tick retries
-		// — or this cell has no identities. Neither publishes progress: a cursor
-		// written over a population nobody could read would claim coverage the
-		// sweep does not have.
+
+	// The deployment's cardinality is read ONCE here, on the healer's own clock,
+	// and never on the event path — the licence's conjunct 5 asks a question
+	// about the deployment, and asking it per CDC event would put a Health-KV
+	// listing on the path this whole narrowing exists to shorten.
+	// Stamped BEFORE any work, and carried on the verdict, because a lens that
+	// registers into an already-swept plane must not inherit a pass that began
+	// before it joined the registry: the licence compares this against the
+	// lens's own registration time.
+	startedAt := time.Now()
+
+	instances, instancesReadable := s.countInstances(ctx)
+
+	populated, readable := s.ensurePopulation(ctx)
+	if !readable {
+		// The listing failed — already logged, and the next tick retries. This
+		// is the case the verdict exists for: a healer that cannot enumerate its
+		// own population is not covering it, whatever it did to the actors it
+		// last saw, and the licence must read that as "nothing is standing
+		// behind these rows" rather than inheriting the previous pass's clean
+		// answer. Published, too: an operator reading one personal lens must be
+		// able to see why fifteen of them stopped narrowing.
+		s.recordVerdict(ctx, pipeline.PersonalHealerVerdict{
+			StartedAt:             startedAt,
+			CompletedAt:           time.Now(),
+			Interval:              s.tickInterval(),
+			PopulationReadable:    false,
+			InstanceCount:         instances,
+			InstanceCountReadable: instancesReadable,
+			EdgeSpansDeployment:   GrantChangeEdgeSpansDeployment,
+		}, "", time.Time{})
 		return
 	}
-	ids, cycleCompletedAt, ok := s.claim()
-	if !ok {
-		return
+
+	verdict := pipeline.PersonalHealerVerdict{
+		StartedAt:             startedAt,
+		Interval:              s.tickInterval(),
+		PopulationReadable:    true,
+		InstanceCount:         instances,
+		InstanceCountReadable: instancesReadable,
+		EdgeSpansDeployment:   GrantChangeEdgeSpansDeployment,
 	}
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			// A cancelled context abandons the rest of the batch. The cursor has
-			// already advanced past it, so the abandoned identities are covered
-			// on the NEXT cycle rather than this one — the same "re-work, never
-			// a skipped segment" direction the unpersisted cursor takes, since
-			// the only thing that cancels this context is the process going away.
-			return
+
+	var cursor string
+	var cycleCompletedAt time.Time
+	if populated {
+		var ids []string
+		var ok bool
+		ids, cycleCompletedAt, ok = s.claim()
+		if ok {
+			for _, id := range ids {
+				if ctx.Err() != nil {
+					// A cancelled context abandons the rest of the batch. The
+					// cursor has already advanced past it, so the abandoned
+					// identities are covered on the NEXT cycle rather than this
+					// one — the same "re-work, never a skipped segment"
+					// direction the unpersisted cursor takes, since the only
+					// thing that cancels this context is the process going away.
+					//
+					// No verdict is recorded on this path either: the process is
+					// going away, and a partial pass stamped as a completed one
+					// would hand the licence a clean answer over work that did
+					// not happen.
+					return
+				}
+				// One actor at a time, all its lenses in sequence, through the
+				// Reprojector's own per-lens walk: no new concurrency, and a
+				// per-lens failure logs, raises that lens's Health fault, and
+				// continues — while COUNTING, which is what makes this a
+				// verdict rather than a stamp.
+				verdict.Attempted++
+				verdict.Failed += s.r.ReprojectNow(ctx, id)
+			}
+			cursor = ids[len(ids)-1]
 		}
-		// One actor at a time, all its lenses in sequence, through the
-		// Reprojector's own per-lens walk: no new concurrency, and a per-lens
-		// failure logs, raises that lens's Health fault, and continues.
-		s.r.ReprojectNow(ctx, id)
 	}
-	s.publishProgress(ctx, ids[len(ids)-1], cycleCompletedAt)
+	// An EMPTY population is a clean pass, not a failed one: a cell with no
+	// identities has no personal rows for anything to leave stale, and refusing
+	// the licence there would put fifteen lenses on the enumerator to heal
+	// nothing.
+	verdict.CompletedAt = time.Now()
+	s.recordVerdict(ctx, verdict, cursor, cycleCompletedAt)
+}
+
+// tickInterval reports the cadence this sweeper runs on, which rides on every
+// verdict so the licence's staleness window is measured against the clock the
+// healer actually keeps rather than against a constant the consumer would have
+// to hold in step with a bound SetBounds can move.
+func (s *PersonalSweeper) tickInterval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.interval
+}
+
+// recordVerdict replaces the pass verdict wholesale under the sweeper's own
+// lock and fans it out, with the walk's position, to every registered personal
+// lens's health entry.
+//
+// The in-memory store happens FIRST and unconditionally. The health write is
+// observability and can fail against a KV blip; the verdict is what the
+// narrowing licence reads, and a pass whose verdict was lost to a failed health
+// write would leave the licence on the PREVIOUS pass's answer — which is the
+// stale-clean direction this whole mechanism exists to refuse.
+func (s *PersonalSweeper) recordVerdict(ctx context.Context, v pipeline.PersonalHealerVerdict, cursor string, cycleCompletedAt time.Time) {
+	s.mu.Lock()
+	s.verdict = v
+	s.mu.Unlock()
+	s.publishProgress(ctx, cursor, cycleCompletedAt, v.Summary())
+}
+
+// Verdict reports what this sweeper's last pass achieved. It is the accessor
+// cmd/refractor injects into every personal pipeline as the licence's live
+// conjuncts, and the zero value — no pass has completed — refuses.
+//
+// The cadence is stamped HERE, at read time, rather than carried from the pass
+// that produced the verdict. The licence measures staleness as K × Interval
+// against a pass that has not happened, so the interval it needs is the one the
+// loop is running on NOW — and a bound changed after the last pass would
+// otherwise leave the standing verdict advertising the old one until a pass it
+// is waiting for arrives to correct it. The unsafe direction is a cadence
+// SHORTENED after a pass: the stale longer interval would hold the licence open
+// past the window the sweeper is actually keeping. Run's ticker reads the same
+// value, so the advertised window and the loop's cadence are one number.
+func (s *PersonalSweeper) Verdict() pipeline.PersonalHealerVerdict {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.verdict
+	v.Interval = s.interval
+	return v
+}
+
+// countInstances reports how many Refractor instances are live in Health KV,
+// and whether the count could be read at all.
+//
+// One filtered key listing per pass, no value reads: the question is how many
+// heartbeats exist, and health.InstanceKeyFilter's single-token wildcard matches
+// exactly one key per instance. The prefix comes from the package that WRITES it
+// rather than being respelled here, because a reader that spelled its own would
+// drift silently into counting zero and refusing forever.
+//
+// It fails CLOSED — a listing error, or no health handle at all, reports
+// unreadable — and the two staleness directions are asymmetric in a way worth
+// stating where the read happens. A CRASHED instance whose entry has not yet
+// expired over-counts, so the licence refuses: pessimisation, safe, and pinned
+// as correct by a test so a later change that trusts freshness has something
+// standing in front of it. A newly started instance that has not yet written its
+// first heartbeat under-counts, and the licence stays on for that window: this
+// is why the count is a backstop and the build-time gate
+// (scripts/lint-refractor-single-instance.go) is the primary defence.
+func (s *PersonalSweeper) countInstances(ctx context.Context) (count int, readable bool) {
+	if s.healthKV == nil {
+		return 0, false
+	}
+	keys, _, err := s.healthKV.ListKeysFilter(ctx, health.InstanceKeyFilter, "", 0)
+	if err != nil {
+		slog.Warn("grantchange: personal sweep could not count the live Refractor instances — the personal derivation licence refuses while the deployment's cardinality is unknown",
+			"filter", health.InstanceKeyFilter, "err", err)
+		return 0, false
+	}
+	if len(keys) == 0 {
+		// AN EMPTY LISTING IS NOT AN EMPTY DEPLOYMENT. This code is running
+		// inside a live Refractor, so a census that finds no Refractor has
+		// contradicted itself: the answer zero can only mean the census is
+		// broken — the Health bucket purged or re-provisioned under a running
+		// process, heartbeat writes failing while listings succeed, a
+		// permission change, a drift in the key shape this filter matches.
+		//
+		// The direction matters. Two instances whose heartbeats are not landing
+		// produce exactly this reading on BOTH of them, and a zero treated as
+		// readable would license the narrowing on both while the grant-change
+		// edge reaches neither — the precise fail-open conjunct 5 exists to
+		// close. So an empty listing is UNREADABLE, not empty; the licence
+		// asserts the same thing again on its own side, so an edit here cannot
+		// reopen it alone.
+		slog.Warn("grantchange: the live Refractor instance census returned NO instances, which cannot be true of a process performing the census — treating the count as unreadable and refusing the personal derivation licence",
+			"filter", health.InstanceKeyFilter)
+		return 0, false
+	}
+	return len(keys), true
 }
 
 // ensurePopulation lists the identity census when a cycle is starting, and
-// reports whether there is anything to sweep.
+// reports both whether there is anything to sweep and whether the population
+// could be READ at all.
+//
+// Two answers rather than one because they are different facts with opposite
+// consequences for the narrowing licence, and the single boolean this returned
+// before conflated them: a cell with no identities is a clean pass over nothing,
+// while a listing this sweep could not perform means nothing is standing behind
+// any personal row on the plane.
 //
 // The listing is the same shape the auth-plane sweep takes for its anchors: a
 // filtered Core-KV key listing with limit 0, so the whole population arrives in
@@ -201,11 +428,11 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 // read per identity per cycle, and it would filter out precisely the case that
 // most needs sweeping: a deleted identity's personal frames must go empty, and
 // reprojecting it is what publishes that retraction.
-func (s *PersonalSweeper) ensurePopulation(ctx context.Context) bool {
+func (s *PersonalSweeper) ensurePopulation(ctx context.Context) (populated, readable bool) {
 	s.mu.Lock()
 	if s.loaded {
 		s.mu.Unlock()
-		return true
+		return true, true
 	}
 	s.mu.Unlock()
 
@@ -214,7 +441,7 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) bool {
 	if err != nil {
 		slog.Warn("grantchange: personal sweep could not list the identity population — this cycle is skipped and the next tick retries",
 			"filter", filter, "err", err)
-		return false
+		return false, false
 	}
 	ids := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -231,7 +458,7 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) bool {
 		// make a cell that boots before its first identity exists stay unswept
 		// for the life of the process. Re-listing an empty population per tick
 		// is the cheapest listing there is.
-		return false
+		return false, true
 	}
 
 	s.mu.Lock()
@@ -239,7 +466,7 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) bool {
 	s.loaded = true
 	s.cursor = ""
 	s.mu.Unlock()
-	return true
+	return true, true
 }
 
 // claim takes this tick's identities and advances the cursor past them. The
@@ -283,8 +510,16 @@ func (s *PersonalSweeper) claim() (ids []string, cycleCompletedAt time.Time, ok 
 //
 // The queue depth rides along because it is the gauge Increment 1's drain
 // exposes and nothing read: a mass grant change shows up as a depth that stops
-// falling, and this is the only place that number reaches an operator.
-func (s *PersonalSweeper) publishProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time) {
+// falling, and this is the only place that number reaches an operator. The
+// VERDICT rides along for the sharper version of the same reason: the cursor
+// advances on a pass in which every reprojection failed, so an entry carrying a
+// moving cursor and nothing else reads healthy through the exact condition an
+// operator is looking for.
+//
+// An EMPTY cursor means "this pass reached no batch" — an unreadable population
+// — and the reporter leaves the stored position alone rather than erasing the
+// one the last real pass earned. The verdict always overwrites.
+func (s *PersonalSweeper) publishProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, verdict string) {
 	depth := uint64(s.r.QueueDepth())
 	for _, ruleID := range s.r.registeredRuleIDs() {
 		// Re-read the registry immediately before each write, the same posture
@@ -300,9 +535,9 @@ func (s *PersonalSweeper) publishProgress(ctx context.Context, cursor string, cy
 		if !live {
 			continue
 		}
-		if err := p.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, depth); err != nil {
+		if err := p.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, depth, verdict); err != nil {
 			slog.Warn("grantchange: personal sweep could not record its progress on a lens's health entry — the sweep itself is unaffected, its observability is not",
-				"ruleId", ruleID, "cursor", cursor, "err", err)
+				"ruleId", ruleID, "cursor", cursor, "verdict", verdict, "err", err)
 		}
 	}
 }

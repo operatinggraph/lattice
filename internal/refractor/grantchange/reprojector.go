@@ -84,8 +84,8 @@ type PersonalPipeline interface {
 	// tried to report) can tell a landed issue from a lost one.
 	RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error
 	// SetPersonalSweepProgress records the SHARED personal convergence sweep's
-	// round-robin state, and the drain's queue depth, on this lens's own health
-	// entry.
+	// round-robin state, the drain's queue depth, and the last pass's verdict on
+	// this lens's own health entry.
 	//
 	// Per-lens for the reason RecordGrantReprojectIssue fans out the same way:
 	// the mechanism is process-level but the fact is about this lens. An
@@ -93,7 +93,7 @@ type PersonalPipeline interface {
 	// converge, and that answer rests on a backstop the lens itself does not
 	// own — so a cursor kept anywhere else would leave every personal lens
 	// looking like it has no standing healer.
-	SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error
+	SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64, verdict string) error
 }
 
 // Reprojector is the process-level consumer of read-grant transitions: one
@@ -539,7 +539,11 @@ func (r *Reprojector) Drain(ctx context.Context) {
 			r.reportDropped(ctx)
 			return
 		}
-		r.reprojectActor(ctx, actorID)
+		// The failure count is the SWEEPER's input, not the drain's: the drain's
+		// posture on a per-lens failure is unchanged (log, raise the lens's
+		// health fault, do not re-enqueue), and the standing healer behind it is
+		// exactly what it hands the actor to.
+		_ = r.reprojectActor(ctx, actorID)
 		drained++
 	}
 }
@@ -562,7 +566,8 @@ func (r *Reprojector) take() (string, bool) {
 	return "", false
 }
 
-// reprojectActor re-drives one actor across every registered personal lens.
+// reprojectActor re-drives one actor across every registered personal lens, and
+// returns how many of that actor's lenses it FAILED to re-drive.
 //
 // A per-lens failure — a Capability KV read fault surfacing through the D1 gate
 // is the live case — logs at Warn, raises the lens's own Health fault, and
@@ -570,7 +575,15 @@ func (r *Reprojector) take() (string, bool) {
 // persistent fault would spin the drain forever, starving every other actor,
 // and the actor has a standing healer behind it. The Health fault is what keeps
 // that from being a silent handoff.
-func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
+//
+// The COUNT is returned because the standing healer is what the personal
+// narrowing licence rests on, and a healer that reports having run while
+// repairing nothing is a predicate reading healthy through the very condition it
+// exists to detect. The drain ignores the count — its posture is unchanged, and
+// the Health fault is still its own signal — but the sweeper cannot reach a
+// verdict without it. A lens deregistered mid-walk is skipped, not counted: it
+// is not a failure to heal a lens that no longer runs.
+func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) (failed int) {
 	for _, ruleID := range r.registeredRuleIDs() {
 		// Re-read the registry immediately before each call rather than trusting
 		// the snapshot. Walking one actor across every personal lens is a window
@@ -584,6 +597,7 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
 			continue
 		}
 		if err := p.ReprojectPersonalActor(ctx, actorID); err != nil {
+			failed++
 			slog.Warn("grantchange: reprojection failed for one lens — continuing with this actor's remaining lenses; the convergence sweep is its healer",
 				"ruleId", ruleID, "actorId", actorID, "err", err)
 			// Checked again after the call, for the same reason: the
@@ -594,6 +608,7 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
 			}
 		}
 	}
+	return failed
 }
 
 // ReprojectNow re-evaluates one actor across every registered personal lens,
@@ -605,8 +620,11 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
 // Warn + Health-fault + continue on a per-lens failure. A second call path
 // would be a second place for that posture to drift, over an identical job:
 // the two callers differ only in what selected the actor.
-func (r *Reprojector) ReprojectNow(ctx context.Context, actorID string) {
-	r.reprojectActor(ctx, actorID)
+//
+// It returns how many of the actor's lenses could NOT be re-driven, which is
+// what turns the sweeper's pass from a progress stamp into a verdict.
+func (r *Reprojector) ReprojectNow(ctx context.Context, actorID string) (failed int) {
+	return r.reprojectActor(ctx, actorID)
 }
 
 // registered reports the pipeline currently registered under ruleID, if any.

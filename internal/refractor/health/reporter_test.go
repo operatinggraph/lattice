@@ -689,17 +689,18 @@ func TestReporter_SetPersonalSweepProgress(t *testing.T) {
 	r := health.New(kv, "personal-rule")
 
 	// An intermediate tick: a cursor and a live queue depth, no cycle claim.
-	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", time.Time{}, 3))
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", time.Time{}, 3, "clean"))
 	entry, err := r.GetStatus(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "Hj4kPmRtw9nbCxz5vQ2y", entry.PersonalSweepCursor)
 	assert.Equal(t, uint64(3), entry.PersonalSweepQueueDepth)
 	assert.Empty(t, entry.PersonalSweepCycleCompletedAt,
 		"a tick that closed no cycle must not claim coverage the walk has not earned")
+	assert.Equal(t, "clean", entry.PersonalSweepVerdict)
 
 	// The tick that closes a cycle stamps it.
 	completed := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Kx3TmZpq7RvwNsY2Hc9L", completed, 0))
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Kx3TmZpq7RvwNsY2Hc9L", completed, 0, "clean"))
 	entry, err = r.GetStatus(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "Kx3TmZpq7RvwNsY2Hc9L", entry.PersonalSweepCursor)
@@ -710,11 +711,24 @@ func TestReporter_SetPersonalSweepProgress(t *testing.T) {
 	// And the next intermediate tick leaves that claim alone. Writing a zero
 	// here would erase, once a minute, the only field that says what the sweep
 	// has actually covered.
-	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Wq7bNmXt4RkzPy2LcH8v", time.Time{}, 1))
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Wq7bNmXt4RkzPy2LcH8v", time.Time{}, 1, "failed"))
 	entry, err = r.GetStatus(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt)
 	assert.Equal(t, uint64(1), entry.PersonalSweepQueueDepth)
+	assert.Equal(t, "failed", entry.PersonalSweepVerdict,
+		"the VERDICT always overwrites: it is the current answer, not a milestone, and the state it exists to report is a healer that ticks while achieving nothing")
+
+	// A pass that reached no batch at all — an unreadable population — still owes
+	// a verdict, and must not erase the position the last real pass earned. The
+	// cursor is a coverage claim; the verdict is not.
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "", time.Time{}, 1, "population-unreadable"))
+	entry, err = r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "Wq7bNmXt4RkzPy2LcH8v", entry.PersonalSweepCursor,
+		"an empty cursor is 'this pass reached no batch', never 'forget where the walk got to'")
+	assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt)
+	assert.Equal(t, "population-unreadable", entry.PersonalSweepVerdict)
 
 	// A concurrent fault write must not lose it, and vice versa: both are
 	// read-modify-write under the same writeMu.
@@ -738,7 +752,7 @@ func TestReporter_StatusTransitions_PreserveThePersonalSweepProgress(t *testing.
 	r := health.New(kv, "personal-transition-rule")
 
 	completed := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", completed, 7))
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", completed, 7, "clean"))
 
 	assertProgress := func(t *testing.T, stage string) {
 		t.Helper()
@@ -748,6 +762,7 @@ func TestReporter_StatusTransitions_PreserveThePersonalSweepProgress(t *testing.
 		assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt,
 			"cycle claim must survive %s", stage)
 		assert.Equal(t, uint64(7), entry.PersonalSweepQueueDepth, "queue depth must survive %s", stage)
+		assert.Equal(t, "clean", entry.PersonalSweepVerdict, "sweep verdict must survive %s", stage)
 	}
 
 	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))

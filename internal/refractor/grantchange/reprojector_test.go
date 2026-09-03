@@ -62,9 +62,10 @@ type sweepProgress struct {
 	cursor           string
 	cycleCompletedAt time.Time
 	queueDepth       uint64
+	verdict          string
 }
 
-func (f *fakePersonal) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+func (f *fakePersonal) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64, verdict string) error {
 	if f.onProgress != nil {
 		f.onProgress()
 	}
@@ -73,7 +74,7 @@ func (f *fakePersonal) SetPersonalSweepProgress(ctx context.Context, cursor stri
 	if f.progressErr != nil {
 		return f.progressErr
 	}
-	f.progress = append(f.progress, sweepProgress{cursor: cursor, cycleCompletedAt: cycleCompletedAt, queueDepth: queueDepth})
+	f.progress = append(f.progress, sweepProgress{cursor: cursor, cycleCompletedAt: cycleCompletedAt, queueDepth: queueDepth, verdict: verdict})
 	return nil
 }
 

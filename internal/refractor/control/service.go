@@ -270,6 +270,10 @@ type ReprojectResult = controlwire.ReprojectResult
 // PersonalSessionKeyResult is the acknowledgement returned by the "sessionkey" op.
 type PersonalSessionKeyResult = controlwire.PersonalSessionKeyResult
 
+// PersonalDerivationStatus is one Personal Lens's narrowing-licence verdict,
+// answered live on the "health" op.
+type PersonalDerivationStatus = controlwire.PersonalDerivationStatus
+
 // PersonalSyncGapResult is the answer returned by the "syncgap" op.
 type PersonalSyncGapResult = controlwire.PersonalSyncGapResult
 
@@ -303,6 +307,12 @@ type Service struct {
 	rowSetNullifierByRuleID map[string]RowSetNullifier
 	reprojectorByRuleID     map[string]Reprojector
 	reporters               map[string]*health.Reporter
+	// personalLicenceByRuleID answers, per Personal Lens, whether its narrowing
+	// licence currently holds and which conjunct refuses it otherwise. A bare
+	// func rather than an interface for the reason the Interest Set's own sink
+	// takes one: it is a single method whose only implementation lives in a
+	// package this one must not import.
+	personalLicenceByRuleID map[string]func() (bool, string)
 	microSvc                micro.Service // set by StartNATSListener; nil until started
 	ruleGetter              RuleGetter    // set via SetRuleGetter; used by validate op
 	// personalInterestKV backs the "register"/"deregister" ops (Personal Lens
@@ -416,6 +426,7 @@ func NewService() *Service {
 		rowSetNullifierByRuleID:  make(map[string]RowSetNullifier),
 		reprojectorByRuleID:      make(map[string]Reprojector),
 		personalHydratorByRuleID: make(map[string]Hydrator),
+		personalLicenceByRuleID:  make(map[string]func() (bool, string)),
 		reporters:                make(map[string]*health.Reporter),
 		capability:               newDenyAllChecker(nil),
 		rebuildGate:              rebuildgate.New(1),
@@ -511,6 +522,23 @@ func (s *Service) SetInterestChangeSink(fn func(identityID string)) {
 	s.mu.Unlock()
 }
 
+// InterestChangeSinkInstalled reports whether the Interest Set's change edge is
+// wired on this service, i.e. whether the register/deregister/hydrate writers
+// announce at all.
+//
+// It exists so the personal derivation licence's conjunct 2 is asserted from
+// POSITIVE evidence rather than inferred from the presence of some other
+// object: "a reprojector exists in this process" is not the same claim as "the
+// Interest Set's writers reach it", and only one of them is what a narrowing
+// rests on. It answers for the three writers this service owns; the
+// InterestReconciler's orphan reap carries its own sink, wired from the same
+// value at its own construction site, and is not visible from here.
+func (s *Service) InterestChangeSinkInstalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.interestChanged != nil
+}
+
 // announceInterestChange routes one identity to the Interest Set change edge,
 // if one is wired.
 func (s *Service) announceInterestChange(identityID string) {
@@ -521,6 +549,28 @@ func (s *Service) announceInterestChange(identityID string) {
 		return
 	}
 	fn(identityID)
+}
+
+// RegisterPersonalDerivationLicence registers the accessor the "health" op
+// answers a Personal Lens's narrowing-licence verdict from.
+//
+// Per-ruleID and overwritten on re-registration, like every other per-lens
+// registry here. nil unregisters, which is what a lens torn down leaves behind.
+//
+// It exists because the licence's refusal is otherwise reachable only by reading
+// an operator log line that is emitted at most once per distinct reason: a lens
+// quietly on the enumerator, hours after the line scrolled past, has no surface
+// that says why. The health KV entry cannot answer it either — its
+// personalSweepVerdict is one shared sweeper's plane-wide pass verdict, which
+// says nothing about conjuncts 0-2 or about the per-lens registration clause.
+func (s *Service) RegisterPersonalDerivationLicence(ruleID string, fn func() (bool, string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn == nil {
+		delete(s.personalLicenceByRuleID, ruleID)
+		return
+	}
+	s.personalLicenceByRuleID[ruleID] = fn
 }
 
 // RegisterPersonalHydrator registers the Hydrator the "hydrate" op dispatches
@@ -632,6 +682,7 @@ func (s *Service) Unregister(ruleID string) {
 	delete(s.reporters, ruleID)
 	delete(s.reprojectorByRuleID, ruleID)
 	delete(s.personalHydratorByRuleID, ruleID)
+	delete(s.personalLicenceByRuleID, ruleID)
 }
 
 // RegisterRebuilder records a Rebuilder for the given ruleID.
@@ -1081,7 +1132,22 @@ func (s *Service) getHealth(ctx context.Context, ruleID string) ControlResponse 
 	if err != nil {
 		return ControlResponse{Error: err.Error()}
 	}
-	return ControlResponse{Entry: &entry}
+	resp := ControlResponse{Entry: &entry}
+
+	// The Personal Lens narrowing licence, derived live rather than read off the
+	// entry. The entry's personalSweepVerdict is the SHARED sweeper's plane-wide
+	// pass verdict; this is the per-lens answer, and the two differ exactly where
+	// an operator needs them to — a plane whose healer is clean while this one
+	// lens is refused by its own registration clause, or by wiring the verdict
+	// knows nothing about.
+	s.mu.Lock()
+	licence := s.personalLicenceByRuleID[ruleID]
+	s.mu.Unlock()
+	if licence != nil {
+		licensed, refusal := licence()
+		resp.PersonalDerivation = &PersonalDerivationStatus{Licensed: licensed, Refusal: refusal}
+	}
+	return resp
 }
 
 // rebuildRule is async: it looks up the registered Rebuilder, admits the

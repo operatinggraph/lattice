@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/grantchange"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -87,7 +88,7 @@ func newSweptFixture(t *testing.T, n, batch int) (*grantchange.PersonalSweeper, 
 	r := grantchange.New()
 	lens := &fakePersonal{}
 	r.RegisterPersonal("lens-1", lens)
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(batch, 0)
 	return s, lister, lens, ids
 }
@@ -145,7 +146,7 @@ func TestPersonalSweep_ListsOnlyIdentityRootsAndSaysSoInTheFilter(t *testing.T) 
 	r := grantchange.New()
 	lens := &fakePersonal{}
 	r.RegisterPersonal("lens-1", lens)
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(10, 0)
 
 	s.Sweep(context.Background())
@@ -169,7 +170,7 @@ func TestPersonalSweep_PublishesItsPositionToEveryRegisteredLens(t *testing.T) {
 	r.GrantChanged(substrate.VertexKey("identity", actorA))
 	r.GrantChanged(substrate.VertexKey("identity", actorB))
 
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(2, 0)
 	ctx := context.Background()
 
@@ -191,19 +192,40 @@ func TestPersonalSweep_PublishesItsPositionToEveryRegisteredLens(t *testing.T) {
 	assert.False(t, progress[1].cycleCompletedAt.IsZero(), "the tick that closes a cycle stamps it")
 }
 
-func TestPersonalSweep_AnEmptyPopulationPublishesNothingAndKeepsLooking(t *testing.T) {
+// A pass that swept nobody still owes a VERDICT — what it publishes and what it
+// must NOT publish are different fields, and the distinction is the point.
+// Neither of the two cases below may write a cursor or a cycle stamp: those are
+// coverage claims, and a walk that reached no batch has covered nothing. Both
+// must write the verdict, because the personal derivation licence reads it and
+// the entry an operator opens has to say why fifteen lenses stopped narrowing.
+func TestPersonalSweep_AnEmptyPopulationPublishesNoCoverageClaimAndKeepsLooking(t *testing.T) {
 	lister := &fakeLister{}
 	r := grantchange.New()
 	lens := &fakePersonal{}
 	r.RegisterPersonal("lens-1", lens)
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	ctx := context.Background()
 
 	s.Sweep(ctx)
 	s.Sweep(ctx)
 	assert.Empty(t, lens.seen())
-	assert.Empty(t, lens.reportedProgress(),
-		"a cursor written over a population nobody swept would claim coverage the sweep does not have")
+	for i, p := range lens.reportedProgress() {
+		assert.Empty(t, p.cursor,
+			"pass %d: a cursor written over a population nobody swept would claim coverage the sweep does not have", i)
+		assert.True(t, p.cycleCompletedAt.IsZero(),
+			"pass %d: a cycle stamp over nobody is the same false claim", i)
+	}
+	// An EMPTY population is a CLEAN pass, not a failed one: a cell with no
+	// identities has no personal rows for anything to leave stale, and refusing
+	// the licence there would put every personal lens on the enumerator to heal
+	// nothing. The instance census is what refuses here, because this fixture
+	// threads no health lister — the fail-closed answer for a deployment whose
+	// cardinality nothing can read.
+	require.NotEmpty(t, lens.reportedProgress())
+	assert.Equal(t, pipeline.PersonalHealerVerdictInstancesUnreadable, lens.reportedProgress()[0].verdict)
+	assert.True(t, s.Verdict().PopulationReadable,
+		"an empty population is readable; it is the LISTING that must be able to fail separately")
+	assert.Zero(t, s.Verdict().Failed)
 
 	// The cache is invalidated by a cycle WRAPPING, and a walk over nothing
 	// never wraps — so an empty answer must not be cached, or a cell that boots
@@ -223,7 +245,14 @@ func TestPersonalSweep_AFailedListingSkipsTheCycleAndRetries(t *testing.T) {
 
 	s.Sweep(ctx)
 	assert.Empty(t, lens.seen())
-	assert.Empty(t, lens.reportedProgress(), "a cycle nobody could enumerate publishes no coverage claim")
+	require.Len(t, lens.reportedProgress(), 1)
+	assert.Empty(t, lens.reportedProgress()[0].cursor, "a cycle nobody could enumerate publishes no coverage claim")
+	assert.True(t, lens.reportedProgress()[0].cycleCompletedAt.IsZero())
+	// The verdict is the whole point of the distinction: a healer that cannot
+	// see its own population is not covering it, and the licence must read that
+	// rather than inherit the previous pass's clean answer.
+	assert.Equal(t, pipeline.PersonalHealerVerdictPopulationUnreadable, lens.reportedProgress()[0].verdict)
+	assert.False(t, s.Verdict().PopulationReadable)
 
 	lister.setErr(nil)
 	s.Sweep(ctx)
@@ -259,7 +288,7 @@ func TestPersonalSweep_AFailedHealthWriteDoesNotStopTheWalk(t *testing.T) {
 	mute, heard := &fakePersonal{progressErr: errors.New("health kv unreachable")}, &fakePersonal{}
 	r.RegisterPersonal("a-mute", mute)
 	r.RegisterPersonal("b-heard", heard)
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(10, 0)
 
 	s.Sweep(context.Background())
@@ -287,7 +316,7 @@ func TestPersonalSweep_ALensDeletedMidFanOutGetsNoProgressWrite(t *testing.T) {
 	survivor := &fakePersonal{onProgress: func() { r.DeregisterPersonal("b-doomed") }}
 	r.RegisterPersonal("a-survivor", survivor)
 	r.RegisterPersonal("b-doomed", doomed)
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(10, 0)
 
 	s.Sweep(context.Background())
@@ -337,7 +366,7 @@ func TestPersonalSweep_WithNoRegisteredLensItSpendsNothing(t *testing.T) {
 	_, keys := sweepActors(3)
 	lister := &fakeLister{keys: keys}
 	r := grantchange.New()
-	s := grantchange.NewPersonalSweeper(r, lister)
+	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(10, 0)
 	ctx := context.Background()
 
