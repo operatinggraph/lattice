@@ -37,9 +37,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // post_entry therefore proves BOTH: ownership (the account's own
 // heldFor→patient→identifiedBy topology, never the payload, resolves the
 // patient and binds it to the caller's identity) and amount (a self-credit
-// may never exceed the account's own recomputed outstanding balance,
-// paginated + bounded, failing closed if the history is too large to
-// verify). ClinicDebitAccount gets no matching self-scope grant — a patient
+// may never exceed the account's own maintained .balance aspect — an O(1)
+// cache post_entry keeps in lockstep with every posted entry, not a live
+// full-history replay). ClinicDebitAccount gets no matching self-scope grant — a patient
 // may pay down a balance, never charge one.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{

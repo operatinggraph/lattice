@@ -13,8 +13,13 @@ package clinicledger
 // ClinicCreateAccount for the same patient conflicts on that already-existing
 // aspect key, the same "let the key shape be the uniqueness guard" idiom, just
 // anchored on the pre-existing parent instead of a freshly-minted sibling.
-// Root data stays {} on the account (D5): the balance is derived by the
-// ledgerHistory lens, never stored here.
+// Root data stays {} on the account (D5): the ledgerHistory lens still derives
+// the DISPLAYED balance by summing transactions. The account also carries a
+// maintained .balance aspect ({balanceCents}) — an O(1) cache post_entry
+// (transactionDDLScript) keeps in lockstep with every posted entry, so the
+// self-credit ownership check never has to replay full history to answer "how
+// much is owed" (see transactionDDLScript's own comment for the OCC shape
+// that keeps it race-free under concurrent debits/credits).
 const accountDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -96,11 +101,13 @@ def execute(state, op):
         # held for this patient."
         held_for_lnk = "lnk.clinicaccount." + acct_id + ".heldFor.patient." + patient_id
 
-        # Root data minimal (D5): {} on root. The balance is derived by the
-        # ledgerHistory lens summing linked transactions, never stored here.
+        # Root data minimal (D5): {} on root. The .balance aspect starts at
+        # zero and is the only thing post_entry mutates going forward — this
+        # create is unconditioned (brand-new account, nothing to race).
         mutations = [
             make_vtx(acct_key, "clinicaccount", {}),
             make_aspect(patient_key, "ledgerAccount", "clinicLedgerAccountGuard", {"accountKey": acct_key}),
+            make_aspect(acct_key, "balance", "clinicAccountBalance", {"balanceCents": 0}),
             make_link(held_for_lnk, acct_key, patient_key, "heldFor", "heldFor", {}),
         ]
         events = [{"class": "account.created",
@@ -113,10 +120,27 @@ def execute(state, op):
 
 // transactionDDLScript handles ClinicDebitAccount and ClinicCreditAccount. Each mints a
 // fresh transaction vertex + a .entry aspect + the postedTo link to the
-// account. The ledger is append-only: no aspect on the account is read or
-// mutated here, so concurrent debits/credits against the same account never
-// race a read-modify-write — the balance is derived by the ledgerHistory lens
-// summing entries. A debit entry carries a bounded payer dimension —
+// account, and ALSO updates the account's .balance aspect (accountDDLScript)
+// by the signed amount via a BARE update — deliberately no expectedRevision
+// of its own. .balance is a declared read (opmetas.go/targets.go), so
+// commit_path.go's applyHydratedRevisions (Contract #3 §3.2 (A)) conditions
+// this update on the step-4 hydrated revision FOR us and marks it
+// retry-eligible: on a lost race the Processor re-hydrates and retries the
+// whole op (the bounded §3.2 (B) internal retry) before a terminal
+// RevisionConflict, so two concurrent debits/credits against one account
+// serialize instead of silently dropping an update. (An update that supplied
+// its own expectedRevision would be treated as an explicit-caller compensating
+// assertion instead — excluded from that retry, per the same function's
+// comment — which is why make_aspect_update takes no revision parameter.)
+// This is what lets post_entry answer "how much is owed" in O(1) — a single kv.Read of
+// .balance — instead of replaying the account's full postedTo history, which
+// used to blow the Starlark wall budget on any patient with a long ledger
+// (a heavy self-pay account was timing out 9 of 10 self-credit submits). The
+// ledgerHistory lens remains the display source of truth (it still sums
+// entries independently, for the FE and for anyone auditing the maintained
+// balance against the append-only log); .balance is purely this DDL's own
+// fast authorization cache, never read by anything outside this package. A
+// debit entry carries a bounded payer dimension —
 // billedTo (self|insurance, default self) and, only when billedTo is
 // insurance, expectedReimbursementCents (must be positive, capped at
 // amountCents) — so a clinic can track what it billed insurance for vs. what
@@ -140,6 +164,21 @@ def make_link(key, source, target, cls, local_name, data):
             "document": {"class": cls, "isDeleted": False,
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
+
+def make_aspect_update(vtx_key, local_name, cls, data):
+    # Deliberately NO expectedRevision here — leaving it unset is what makes
+    # this update RETRY-eligible, not less safe. Contract #3 §3.2 (A) in
+    # commit_path.go's applyHydratedRevisions auto-conditions any bare update
+    # on a key the op declared in reads/optionalReads (so still safe, still
+    # OCC-guarded) using the step-4 hydrated revision, and marks it
+    # defaulted — the retry-eligible set. An update that supplies its OWN
+    # expectedRevision instead is treated as an explicit-caller compensating
+    # assertion and is EXCLUDED from that retry (commit_path.go:652-654,
+    # "never overridden") — it hard-conflicts instead of serializing, which
+    # is the opposite of what a maintained counter two ops can race on needs.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
 def required_string(p, name):
     if not hasattr(p, name):
@@ -190,12 +229,13 @@ def vertex_alive(state, key):
         return False
     return True
 
-# Self-credit balance-verification budget (post_entry's authContextTarget
-# branch): 10 pages of 50 postedTo entries covers many years of a billing
-# history; an account that exceeds it fails the self-credit closed rather
-# than trust a partial sum.
-SELF_CREDIT_PAGE_LIMIT = 50
-SELF_CREDIT_MAX_PAGES = 10
+# Legacy-account .balance backfill budget (post_entry's balance_is_new
+# branch, first touch only): 10 pages of 50 postedTo entries covers many
+# years of billing history; an account that exceeds it fails closed rather
+# than seed a partial sum. Every touch after the first succeeds, that account
+# is O(1) forever — this only ever runs once per pre-existing account.
+BALANCE_BACKFILL_PAGE_LIMIT = 50
+BALANCE_BACKFILL_MAX_PAGES = 10
 
 def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     p = op.payload
@@ -204,6 +244,56 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
 
     if not vertex_alive(state, acct_key):
         fail("UnknownAccount: " + acct_key)
+
+    # .balance is a declared OPTIONALREADS key (opmetas.go/targets.go both
+    # list accountKey + ".balance" there, not in Reads) — absence-tolerant,
+    # because an account minted before this DDL revision has no .balance yet.
+    balance_key = acct_key + ".balance"
+    # read-posture: (d) opmetas.go OpDispatchSpec.OptionalReads + targets.go
+    # GapActionSpec.OptionalReads both declare accountKey + ".balance" for
+    # every ClinicDebitAccount/ClinicCreditAccount dispatch (FE descriptor
+    # and Weaver directOp alike).
+    balance_doc = kv.Read(balance_key)
+    balance_is_new = balance_doc == None or balance_doc.isDeleted
+    if balance_is_new:
+        # Self-heal a legacy account's FIRST touch since this DDL shipped:
+        # replay its full postedTo history once (same bounded/paginated shape
+        # this authorization check used before the .balance cache existed) to
+        # seed the correct starting balance. Every touch after this one takes
+        # the O(1) balance_doc path above instead — this branch runs at most
+        # once per pre-existing account, ever.
+        balance_cents = 0
+        cursor = None
+        budget_exhausted = True
+        for _page in range(BALANCE_BACKFILL_MAX_PAGES):
+            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+            # page budget; exhausting it below fails closed.
+            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, BALANCE_BACKFILL_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                # read-posture: (e) per-candidate follow-up read off the
+                # enumeration above -- each transaction's own .entry aspect,
+                # data-derived and unknowable client-side.
+                tx_entry = kv.Read(lk.sourceVertex + ".entry")
+                if tx_entry == None or tx_entry.isDeleted:
+                    continue
+                tx_amount = tx_entry.data.get("amountCents")
+                if tx_amount == None:
+                    continue
+                if tx_entry.data.get("type") == "debit":
+                    balance_cents += tx_amount
+                elif tx_entry.data.get("type") == "credit":
+                    balance_cents -= tx_amount
+            if cursor == None:
+                budget_exhausted = False
+                break
+        if budget_exhausted:
+            fail("AuthDenied: could not backfill account " + acct_key + "'s balance (too much transaction history for one op) — retry, or ask an operator to post a small correcting entry to shrink the next attempt's remaining page budget")
+    else:
+        balance_cents = balance_doc.data.get("balanceCents")
+        if balance_cents == None:
+            balance_cents = 0
 
     appt_key = None
     appt_id = None
@@ -296,40 +386,13 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
         # Amount trust: nothing on this platform verifies a self-submitted
         # payment actually happened (no payment-rail integration — out of
         # scope for a reference vertical), so an unbounded self-credit would
-        # let a patient forgive their own debt for free. The outstanding
-        # balance is recomputed from the account's OWN postedTo transaction
-        # history (never trusted from the payload), paginated + bounded: an
-        # account whose history exhausts the page budget fails closed
-        # (denies) rather than trusts a partial sum. A self-credit may never
-        # exceed what is actually owed.
-        owed_cents = 0
-        cursor = None
-        budget_exhausted = True
-        for _page in range(SELF_CREDIT_MAX_PAGES):
-            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
-            # page budget; exhausting it below fails closed.
-            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
-            for lk in page:
-                if lk.isDeleted:
-                    continue
-                # read-posture: (e) per-candidate follow-up read off the
-                # enumeration above -- each transaction's own .entry aspect,
-                # data-derived and unknowable client-side.
-                tx_entry = kv.Read(lk.sourceVertex + ".entry")
-                if tx_entry == None or tx_entry.isDeleted:
-                    continue
-                tx_amount = tx_entry.data.get("amountCents")
-                if tx_amount == None:
-                    continue
-                if tx_entry.data.get("type") == "debit":
-                    owed_cents += tx_amount
-                elif tx_entry.data.get("type") == "credit":
-                    owed_cents -= tx_amount
-            if cursor == None:
-                budget_exhausted = False
-                break
-        if budget_exhausted:
-            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+        # let a patient forgive their own debt for free. owed_cents comes from
+        # the account's own maintained .balance aspect (read above, O(1) —
+        # never the payload), which post_entry itself keeps in lockstep with
+        # every posted entry, so this is exactly the same quantity the old
+        # full-history replay computed, just without re-deriving it live on
+        # every self-credit. A self-credit may never exceed what is owed.
+        owed_cents = balance_cents
         if owed_cents <= 0:
             fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
         if amount_cents > owed_cents:
@@ -377,12 +440,41 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     # "this transaction posted to this account."
     posted_to_lnk = "lnk.clinictransaction." + tx_id + ".postedTo.clinicaccount." + acct_id
 
+    # new_balance_cents: same sign convention the old full-history replay used
+    # (debit increases what's owed, credit decreases it) — a staff credit/
+    # waiver is not bounded by owed_cents (only the self-credit branch above
+    # enforces that), so this can go negative on an overpayment/over-waiver,
+    # exactly as the replay's owed_cents could before this change.
+    if entry_type == "debit":
+        new_balance_cents = balance_cents + amount_cents
+    else:
+        new_balance_cents = balance_cents - amount_cents
+
+    # balance_mutation: balance_is_new (a legacy account's first touch, seeded
+    # by the backfill replay above) mints .balance fresh — an unconditioned
+    # create, same idiom every other aspect create in this script uses; the
+    # key was observed ABSENT at step 4 (declared optionalReads), so a lost
+    # two-way race on the same legacy account's first touch is itself
+    # retry-eligible (absentConditionedCreates, commit_path.go). Every
+    # subsequent touch takes the bare-update path — auto-conditioned (no
+    # expectedRevision of our own) on the step-4 hydrated revision, so it
+    # serializes AND retries under a concurrent writer (make_aspect_update's
+    # own comment).
+    if balance_is_new:
+        balance_mutation = make_aspect(acct_key, "balance", "clinicAccountBalance",
+                                        {"balanceCents": new_balance_cents})
+    else:
+        balance_mutation = make_aspect_update(acct_key, "balance", "clinicAccountBalance",
+                                               {"balanceCents": new_balance_cents})
+
     # Root data minimal (D5): {} on root. The charge/payment fact is the
-    # .entry aspect; the account itself is untouched (append-only ledger).
+    # .entry aspect; the account's .balance aspect is the one thing this DDL
+    # mutates on the account itself.
     mutations = [
         make_vtx(tx_key, "clinictransaction", {}),
         make_aspect(tx_key, "entry", "transactionEntry", entry_data),
         make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
+        balance_mutation,
     ]
 
     # settles: the transaction (later-arriving) is the source, the

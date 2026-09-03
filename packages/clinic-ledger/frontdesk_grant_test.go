@@ -133,7 +133,7 @@ func TestFrontDesk_ClinicDebitAccountUnconfined(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk copay"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
@@ -187,7 +187,7 @@ func TestFrontDesk_ClinicCreditAccountUnconfined(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk payment"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {

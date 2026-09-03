@@ -32,7 +32,7 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 3; got != want {
+	if got, want := len(Package.DDLs), 4; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 4; got != want {
@@ -51,7 +51,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"clinicaccount", "clinicLedgerAccountGuard", "clinictransaction"}
+	wantDDLs := []string{"clinicaccount", "clinicLedgerAccountGuard", "clinicAccountBalance", "clinictransaction"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])

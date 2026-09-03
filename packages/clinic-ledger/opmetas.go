@@ -64,11 +64,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"memo":        "Optional free text describing the charge — e.g. \"Office visit copay\".",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "clinictransaction",
-				AuthContext: "standing",
-				TargetField: "accountKey",
-				TargetType:  "clinicaccount",
-				Reads:       []string{"{payload.accountKey}"},
+				Class:         "clinictransaction",
+				AuthContext:   "standing",
+				TargetField:   "accountKey",
+				TargetType:    "clinicaccount",
+				Reads:         []string{"{payload.accountKey}"},
+				OptionalReads: []string{"{payload.accountKey}.balance"},
+				// A legacy account (no .balance aspect yet) makes post_entry
+				// walk its postedTo history once to backfill — bounded,
+				// declared here per Contract #2 §2.5 the same as any other
+				// enumeration, even though most dispatches never exercise it.
+				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
 			},
 		},
 		{
@@ -93,11 +99,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"reason":      "\"payment\" or \"waiver\" (default \"payment\"). Front-desk/operator only — a self-scoped submit is rejected server-side if set to \"waiver\".",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "clinictransaction",
-				AuthContext: "self",
-				TargetField: "accountKey",
-				TargetType:  "clinicaccount",
-				Reads:       []string{"{payload.accountKey}"},
+				Class:         "clinictransaction",
+				AuthContext:   "self",
+				TargetField:   "accountKey",
+				TargetType:    "clinicaccount",
+				Reads:         []string{"{payload.accountKey}"},
+				OptionalReads: []string{"{payload.accountKey}.balance"},
+				// A legacy account (no .balance aspect yet) makes post_entry
+				// walk its postedTo history once to backfill — bounded,
+				// declared here per Contract #2 §2.5 the same as any other
+				// enumeration, even though most dispatches never exercise it.
+				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
 			},
 		},
 	}

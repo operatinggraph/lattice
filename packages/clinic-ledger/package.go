@@ -1,6 +1,7 @@
 // Package clinicledger is the Clinic patient payment ledger: a per-patient
 // financial account that records charges (copays, invoice lines) and payments
-// as an append-only transaction history, never a mutable running total.
+// as an append-only transaction history, plus a CAS-maintained .balance
+// aspect that caches the running total in O(1) for authorization checks.
 //
 // It declares:
 //
@@ -8,7 +9,9 @@
 //     mints vtx.clinicaccount.<NanoID> (root data {} per D5) with its OWN
 //     independently-minted NanoID (never reused from the patient — Core KV
 //     NanoIDs are unique platform-wide identifiers, not scoped per vertex
-//     type), linked to the patient via heldFor. "At most one account per
+//     type), linked to the patient via heldFor, plus a .balance aspect
+//     ({balanceCents: 0}) that ClinicDebitAccount/ClinicCreditAccount keep in
+//     lockstep with every posted entry. "At most one account per
 //     patient" is enforced by the `clinicLedgerAccountGuard` aspect on the
 //     patient instead of a shared/derived key.
 //
@@ -22,13 +25,18 @@
 //     ClinicCreditAccount (a payment received, or reason:"waiver" a charge
 //     forgiven) each mint vtx.clinictransaction.<NanoID> (root data {} per
 //     D5) with a .entry aspect {type, amountCents, memo?, postedAt,
-//     reason? (credit only)}, linked to the account via postedTo. The
-//     ledger is append-only: a balance is derived by summing entries (the
-//     clinicLedgerHistory lens), never stored as a mutable aspect — so
-//     concurrent debits/credits never race a read-modify-write. A waiver
-//     reduces the balance identically to a payment but reason keeps the
-//     two distinguishable in the history; only the operator/frontOfHouse
-//     scope=any grant may waive — a self-scoped patient credit is rejected.
+//     reason? (credit only)}, linked to the account via postedTo, and
+//     update the account's .balance aspect by the signed amount — a bare
+//     update, auto-conditioned on the step-4 hydrated revision (since
+//     .balance is a declared read) rather than an explicit expectedRevision
+//     of its own, which is what makes it retry-eligible: a lost race
+//     re-hydrates and retries the whole op rather than hard-conflicting.
+//     The append-only log stays the audit trail; the clinicLedgerHistory
+//     lens still derives its own balance independently by summing entries.
+//     A waiver reduces the balance identically to a payment but reason
+//     keeps the two distinguishable in the history; only the
+//     operator/frontOfHouse scope=any grant may waive — a self-scoped
+//     patient credit is rejected.
 //
 //   - The `clinicLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
@@ -69,7 +77,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.2.13",
+	Version: "0.2.14",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(ClinicDebitAccount/ClinicCreditAccount, append-only entries linked to the account via postedTo, ClinicDebitAccount " +

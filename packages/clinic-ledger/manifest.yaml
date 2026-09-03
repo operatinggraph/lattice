@@ -1,10 +1,13 @@
 name: clinic-ledger
-version: 0.2.13
+version: 0.2.14
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
-  on the patient) + the clinictransaction vertex type (ClinicDebitAccount /
-  ClinicCreditAccount, append-only entries linked to the account via postedTo; a
+  on the patient, plus a .balance aspect maintained O(1) by every posted
+  entry) + the clinictransaction vertex type (ClinicDebitAccount /
+  ClinicCreditAccount, append-only entries linked to the account via postedTo,
+  each also updating the account's .balance aspect by the signed amount (a bare,
+  auto-conditioned, retry-eligible update); a
   debit entry carries a bounded billedTo self|insurance + optional
   expectedReimbursementCents payer dimension, and an optional appointmentRef
   back-ref; a credit entry carries reason payment|waiver, default payment, and
@@ -19,7 +22,8 @@ description: |
   ClinicCreditAccount ALSO grants a patient scope=self (pay down their own
   balance, never waive it — reason:"waiver" is rejected server-side for a
   self-scoped submit) — ownership + amount proven server-side against the
-  account's own heldFor->patient->identifiedBy topology and postedTo history.
+  account's own heldFor->patient->identifiedBy topology and the account's
+  maintained .balance aspect (O(1), not a full-history replay).
   Depends clinic-domain.
 depends:
   - clinic-domain
@@ -28,6 +32,8 @@ declares:
     - canonicalName: clinicaccount
       class: meta.ddl.vertexType
     - canonicalName: clinicLedgerAccountGuard
+      class: meta.ddl.aspectType
+    - canonicalName: clinicAccountBalance
       class: meta.ddl.aspectType
     - canonicalName: clinictransaction
       class: meta.ddl.vertexType

@@ -261,7 +261,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -311,7 +311,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Insurance payment - claim #4471"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, creditEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -348,7 +348,7 @@ func TestDebitAccount_InsuranceBilling(t *testing.T) {
 		Class:         "clinictransaction",
 		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":15000,"memo":"Specialist visit",` +
 			`"billedTo":"insurance","expectedReimbursementCents":12000}`),
-		ContextHint: &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -399,7 +399,7 @@ func TestDebitAccount_PayerDimensionValidation(t *testing.T) {
 			SubmittedAt:   "2026-07-01T13:00:00Z",
 			Class:         "clinictransaction",
 			Payload:       json.RawMessage(c.payload),
-			ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+			ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		}
 		testutil.PublishOp(t, conn, env)
 		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -427,7 +427,7 @@ func TestCreditAccount_Waiver(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"No-show fee"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -441,7 +441,7 @@ func TestCreditAccount_Waiver(t *testing.T) {
 		SubmittedAt:   "2026-07-01T14:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Waived — patient hardship","reason":"waiver"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, waiverEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -488,7 +488,7 @@ func TestCreditAccount_ReasonValidation(t *testing.T) {
 			SubmittedAt:   "2026-07-01T13:00:00Z",
 			Class:         "clinictransaction",
 			Payload:       json.RawMessage(c.payload),
-			ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+			ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		}
 		testutil.PublishOp(t, conn, env)
 		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -532,7 +532,7 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":0}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -602,7 +602,7 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"appointmentRef":"` + apptKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, apptKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, apptKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -622,7 +622,7 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, plainEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -649,7 +649,7 @@ func TestDebitAccount_UnknownAppointmentRefRejected(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"appointmentRef":"vtx.appointment.CLABSENTAPPTHJKMNPQR"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.appointment.CLABSENTAPPTHJKMNPQR"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.appointment.CLABSENTAPPTHJKMNPQR", acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -676,7 +676,7 @@ func TestCreditAccount_ReversesRefWritesReversesLink(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -691,7 +691,7 @@ func TestCreditAccount_ReversesRefWritesReversesLink(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reason":"waiver","reversesRef":"` + debitTxKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, debitTxKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, debitTxKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, creditEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -711,7 +711,7 @@ func TestCreditAccount_ReversesRefWritesReversesLink(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:10:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, plainEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -738,7 +738,7 @@ func TestCreditAccount_UnknownReversesRefRejected(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reversesRef":"vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.clinictransaction.CLABSENTTXNHJKMNPQRS", acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -762,7 +762,7 @@ func TestDebitAccount_ReversesRefRejected(t *testing.T) {
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reversesRef":"vtx.clinictransaction.CLABSENTTXNHJKMNPQRS"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -864,7 +864,7 @@ func TestCreditAccount_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -878,7 +878,7 @@ func TestCreditAccount_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -912,7 +912,7 @@ func TestCreditAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -928,13 +928,211 @@ func TestCreditAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("over-balance self-credit outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestAccountBalance_AccumulatesAcrossEntries proves the .balance aspect
+// (scripts.go's O(1) replacement for the old full-postedTo-history replay)
+// tracks the SAME net total a hand-summed history would, across a sequence
+// of debits and a staff credit — not just a single entry. Two debits
+// ($50 + $30 = $80 owed) then a staff payment ($20) should leave $60 owed;
+// the .balance aspect is read directly (proving the maintained value, not
+// just an outcome that could pass with a wrong-but-net-zero bug), and the
+// self-credit boundary ($60 accepted, $61 rejected) proves post_entry's
+// authorization check reads that same maintained value.
+func TestAccountBalance_AccumulatesAcrossEntries(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balanceaccum")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERBALACCMPATNT", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "balaccumacctsetup001", patientKey)
+
+	debit1Env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("balaccumdebit0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-09T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":5000,"memo":"Visit one"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+	}
+	testutil.PublishOp(t, conn, debit1Env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	debit2Env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("balaccumdebit0000002"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-09T08:10:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":3000,"memo":"Visit two"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+	}
+	testutil.PublishOp(t, conn, debit2Env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	staffCreditEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("balaccumcredit000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-09T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2000,"memo":"Partial payment"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+	}
+	testutil.PublishOp(t, conn, staffCreditEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// $50 + $30 - $20 = $60 owed. Read the aspect directly.
+	balanceDoc := readDoc(t, ctx, conn, acctKey+".balance")
+	balanceData, _ := balanceDoc["data"].(map[string]any)
+	if got, _ := balanceData["balanceCents"].(float64); got != 6000 {
+		t.Fatalf(".balance aspect balanceCents = %v, want 6000 (5000+3000-2000)", got)
+	}
+
+	// Self-credit for exactly $60 succeeds.
+	exactReqID := testutil.GenReqID("balaccumselfpay00001")
+	exactEnv := &processor.OperationEnvelope{
+		RequestID:     exactReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-09T09:05:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":6000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, exactEnv)
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("self-credit for the exact $60 owed outcome = %v, want Accepted", outcome)
+	}
+
+	// Balance is now zero — a further self-credit of even $1 is rejected.
+	overReqID := testutil.GenReqID("balaccumselfpay00002")
+	overEnv := &processor.OperationEnvelope{
+		RequestID:     overReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-09T09:10:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, overEnv)
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeRejected {
+		t.Fatalf("self-credit against a zeroed balance outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// seedLegacyTransaction writes a clinictransaction straight to Core KV —
+// vertex, .entry aspect, postedTo link — mirroring exactly what
+// ClinicDebitAccount/ClinicCreditAccount's post_entry mints, EXCEPT it never
+// touches the account's .balance aspect. This is what a real transaction
+// posted before the .balance DDL revision shipped looks like today: a
+// vertex_alive account, a live postedTo history, no .balance aspect anywhere.
+func seedLegacyTransaction(t *testing.T, ctx context.Context, conn *substrate.Conn, txID, acctKey, acctID, entryType string, amountCents int) {
+	t.Helper()
+	txKey := "vtx.clinictransaction." + txID
+	putDoc(t, ctx, conn, txKey, map[string]any{"class": "clinictransaction", "isDeleted": false, "data": map[string]any{}})
+	putDoc(t, ctx, conn, txKey+".entry", map[string]any{
+		"class": "transactionEntry", "isDeleted": false, "vertexKey": txKey, "localName": "entry",
+		"data": map[string]any{"type": entryType, "amountCents": amountCents, "postedAt": "2026-05-01T12:00:00Z"},
+	})
+	postedToLnk := "lnk.clinictransaction." + txID + ".postedTo.clinicaccount." + acctID
+	putDoc(t, ctx, conn, postedToLnk, map[string]any{
+		"class": "postedTo", "isDeleted": false, "sourceVertex": txKey, "targetVertex": acctKey, "localName": "postedTo", "data": map[string]any{},
+	})
+}
+
+func putDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, doc map[string]any) {
+	t.Helper()
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", key, err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed %s: %v", key, err)
+	}
+}
+
+// TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch proves an account
+// whose history predates the .balance DDL revision (real postedTo history,
+// no .balance aspect at all — the exact shape createAccount's own accounts
+// could never produce post-fix, but every account minted before it did) is
+// NOT permanently bricked. post_entry's balance_is_new branch (scripts.go)
+// must replay that pre-existing history once, mint .balance seeded with the
+// correct total, and still charge the NEW entry on top — .balance ends up
+// exactly where it would have if this account had always carried the cache.
+func TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "legacybalance")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatlegacy00000001", "Lena Ferraro")
+	patientID := patientKey[len("vtx.patient."):]
+
+	acctID := "CLLEGACYACCTHJKMNPQR"
+	acctKey := "vtx.clinicaccount." + acctID
+	putDoc(t, ctx, conn, acctKey, map[string]any{"class": "clinicaccount", "isDeleted": false, "data": map[string]any{}})
+	putDoc(t, ctx, conn, patientKey+".ledgerAccount", map[string]any{
+		"class": "clinicLedgerAccountGuard", "isDeleted": false, "vertexKey": patientKey, "localName": "ledgerAccount",
+		"data": map[string]any{"accountKey": acctKey},
+	})
+	heldForLnk := "lnk.clinicaccount." + acctID + ".heldFor.patient." + patientID
+	putDoc(t, ctx, conn, heldForLnk, map[string]any{
+		"class": "heldFor", "isDeleted": false, "sourceVertex": acctKey, "targetVertex": patientKey, "localName": "heldFor", "data": map[string]any{},
+	})
+	// NOTE: deliberately no vtx.clinicaccount.<id>.balance aspect — this IS
+	// the legacy shape.
+
+	// Pre-existing history: a $40 charge, a $10 payment — $30 owed, computed
+	// nowhere but this replay until the first post-fix touch below.
+	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNAHJKMNPQR", acctKey, acctID, "debit", 4000)
+	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNBHJKMNPQR", acctKey, acctID, "credit", 1000)
+
+	// A fresh $20 charge — the FIRST op to touch this account since the fix.
+	// OptionalReads (not Reads) for .balance mirrors opmetas.go's production
+	// shape exactly: the key doesn't exist yet, so a required Reads entry
+	// would HydrationMiss instead of exercising the self-heal.
+	debitReqID := testutil.GenReqID("legacydebit00000001")
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     debitReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-10T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2000,"memo":"New visit, legacy account"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{acctKey},
+			OptionalReads: []string{acctKey + ".balance"},
+			Enumerations:  []processor.EnumerationHint{{Hub: acctKey, Relation: "postedTo", Direction: "in"}},
+		},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("first debit against a legacy (pre-.balance) account outcome = %v, want Accepted (self-heal, not HydrationMiss)", outcome)
+	}
+
+	// $40 - $10 (backfilled from history) + $20 (this debit) = $50.
+	balanceDoc := readDoc(t, ctx, conn, acctKey+".balance")
+	balanceData, _ := balanceDoc["data"].(map[string]any)
+	if got, _ := balanceData["balanceCents"].(float64); got != 5000 {
+		t.Fatalf("legacy account .balance after self-heal = %v, want 5000 (4000-1000+2000)", got)
 	}
 }
 
@@ -959,7 +1157,7 @@ func TestCreditAccount_ConsumerSelfScope_RejectedNoBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -993,7 +1191,7 @@ func TestCreditAccount_ConsumerSelfScope_RejectedForOthersAccount(t *testing.T) 
 		SubmittedAt:   "2026-07-08T09:05:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1026,7 +1224,7 @@ func TestCreditAccount_ConsumerSelfScope_DebitStaysStaffOnly(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:10:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":500}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1059,7 +1257,7 @@ func TestCreditAccount_ConsumerSelfScope_RejectedWaiver(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1073,7 +1271,7 @@ func TestCreditAccount_ConsumerSelfScope_RejectedWaiver(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reason":"waiver"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)

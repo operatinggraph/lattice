@@ -51,14 +51,23 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// otherwise if ever shared).
 					Class:  "clinictransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey", "memo": "row.memo"},
-					// Reads only the two bare vertex keys the DDL's vertex_alive() checks
-					// hydrate (accountKey, appointmentKey) — memo is free text ('No-show
+					// Reads the two bare vertex keys the DDL's vertex_alive() checks
+					// hydrate (accountKey, appointmentKey). memo is free text ('No-show
 					// fee', never a vtx.* key) and belongs in Params only. Declaring it
 					// here made every dispatch fail at step4 hydrate (`KV get
 					// core-kv/No-show fee: nats: invalid key`), so the charge never
-					// executed and the gap never closed — confirmed live in processor.log
-					// against every one of this target's dispatches.
+					// executed and the gap never closed — confirmed live in
+					// processor.log against every one of this target's dispatches.
 					Reads: []string{"row.accountKey", "row.appointmentKey"},
+					// OptionalReads: the account's own .balance aspect post_entry
+					// maintains — resolveReadKey's row.<col>.<aspect> derived-aspect
+					// form (strategist.go). Absence-tolerant (not Reads) so an account
+					// opened before this DDL revision self-heals its .balance on next
+					// touch instead of HydrationMiss-rejecting every dispatch against it.
+					OptionalReads: []string{"row.accountKey.balance"},
+					// A legacy account (no .balance aspect yet) makes
+					// post_entry walk its postedTo history once to backfill.
+					Enumerations: []pkgmgr.EnumerationSpec{{Hub: "row.accountKey", Relation: "postedTo", Direction: "in"}},
 				},
 				"missing_reversal": {
 					Action:    "directOp",
@@ -74,12 +83,16 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 						"reversesRef": "row.chargeTxKey",
 						"memo":        "No-show fee reversal (corrected)",
 					},
-					// Reads only the two bare vertex keys ClinicCreditAccount's
-					// vertex_alive() checks hydrate (accountKey, chargeTxKey) — reason and
-					// memo are literal free text, never vtx.* keys, and belong in Params
-					// only. Declaring either here would fail step4 hydrate the same way
-					// missing_charge's memo field already did (comment above).
+					// Reads the two bare vertex keys ClinicCreditAccount's
+					// vertex_alive() checks hydrate (accountKey, chargeTxKey) — reason
+					// and memo are literal free text, never vtx.* keys, and belong in
+					// Params only. Declaring either here would fail step4 hydrate the
+					// same way missing_charge's memo field already did (comment above).
 					Reads: []string{"row.accountKey", "row.chargeTxKey"},
+					// OptionalReads: same derived-aspect / absence-tolerant shape as
+					// missing_charge above.
+					OptionalReads: []string{"row.accountKey.balance"},
+					Enumerations:  []pkgmgr.EnumerationSpec{{Hub: "row.accountKey", Relation: "postedTo", Direction: "in"}},
 				},
 			},
 		},

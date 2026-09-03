@@ -3,16 +3,19 @@ package clinicledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `clinicaccount`
-// (ClinicCreateAccount), `clinictransaction` (ClinicDebitAccount, ClinicCreditAccount), and the
+// (ClinicCreateAccount), `clinictransaction` (ClinicDebitAccount, ClinicCreditAccount), the
 // `clinicLedgerAccountGuard` aspect-type declaration (the patient-anchored
-// uniqueness guard ClinicCreateAccount writes). Vertical-prefixed: a DDL
-// canonicalName is global across every installed package
-// (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
-// loftspace-ledger already owns the bare `account` / `transaction` names.
+// uniqueness guard ClinicCreateAccount writes), and the `clinicAccountBalance`
+// aspect-type declaration (the account-anchored running-balance cache
+// ClinicCreateAccount mints and ClinicDebitAccount/ClinicCreditAccount keep
+// updated). Vertical-prefixed: a DDL canonicalName is global across every
+// installed package (internal/pkgmgr/installer.go checkCanonicalNameCollision),
+// and loftspace-ledger already owns the bare `account` / `transaction` names.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		accountDDL(),
 		accountGuardAspectTypeDDL(),
+		accountBalanceAspectTypeDDL(),
 		transactionDDL(),
 	}
 }
@@ -23,13 +26,17 @@ func accountDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"ClinicCreateAccount"},
 		Description: "Ledger account DDL. Vertex shape: vtx.clinicaccount.<NanoID>, class=clinicaccount, root data = {} " +
-			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). ClinicCreateAccount{patientKey} " +
-			"mints the account under its OWN independently-generated NanoID (never reused from the patient — Core KV NanoIDs " +
-			"are unique platform-wide identifiers, not scoped per vertex type). \"One account per patient\" is enforced by a " +
-			"deterministic create-only guard aspect on the PATIENT (patientKey+\".ledgerAccount\", " +
-			"clinicLedgerAccountGuard DDL) instead: a second ClinicCreateAccount for the same patient conflicts on that " +
-			"already-existing aspect key. Writes the heldFor link (account→patient, the account is the later-arriving " +
-			"vertex so it is the source — Contract #1 §1.1). Requires the patientKey be a live patient (no orphan accounts).",
+			"(minimal, D5). ClinicCreateAccount{patientKey} mints the account under its OWN independently-generated NanoID " +
+			"(never reused from the patient — Core KV NanoIDs are unique platform-wide identifiers, not scoped per vertex " +
+			"type), and mints a .balance aspect ({balanceCents: 0}) alongside it — the running total transactionDDL's " +
+			"ClinicDebitAccount/ClinicCreditAccount keep in lockstep with every posted entry (an auto-conditioned update, " +
+			"retry-eligible on a concurrent-writer conflict), " +
+			"an O(1) cache the ledgerHistory lens's own independent full-history sum remains the display source of truth for. " +
+			"\"One account per patient\" is enforced by a deterministic create-only guard aspect on the PATIENT " +
+			"(patientKey+\".ledgerAccount\", clinicLedgerAccountGuard DDL) instead: a second ClinicCreateAccount for the same " +
+			"patient conflicts on that already-existing aspect key. Writes the heldFor link (account→patient, the account is " +
+			"the later-arriving vertex so it is the source — Contract #1 §1.1). Requires the patientKey be a live patient " +
+			"(no orphan accounts).",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of the patient this account is for (ClinicCreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per patient) is enforced via the patient's .ledgerAccount guard aspect, not the account's own id."}},` +
@@ -89,6 +96,43 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// accountBalanceAspectTypeDDL declares the .balance aspect (class
+// clinicAccountBalance) on the ACCOUNT — the maintained O(1) running-total
+// cache accountDDLScript mints at ClinicCreateAccount ({balanceCents: 0}) and
+// transactionDDLScript keeps updated by the signed amount on every
+// ClinicDebitAccount/ClinicCreditAccount. Declaration-only, mirroring
+// accountGuardAspectTypeDDL: the aspect is written by those three ops' own
+// handlers, never has an operationType of its own.
+func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "clinicAccountBalance",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"ClinicCreateAccount", "ClinicDebitAccount", "ClinicCreditAccount"},
+		Description: "Per-account running-balance cache aspect. Stored as vtx.clinicaccount.<NanoID>.balance " +
+			"(class clinicAccountBalance) = {balanceCents: <integer>}. Non-sensitive. Minted at {balanceCents: 0} by " +
+			"ClinicCreateAccount alongside the account vertex it names, then kept in lockstep with every posted entry by " +
+			"ClinicDebitAccount (+= amountCents) and ClinicCreditAccount (-= amountCents) via a bare update — auto-conditioned " +
+			"on the step-4 hydrated revision (a declared read) rather than an explicit expectedRevision, which is what makes " +
+			"it retry-eligible under a concurrent writer instead of hard-conflicting. Exists purely as this package's own O(1) " +
+			"authorization cache (the self-scoped ClinicCreditAccount amount-owed check); the clinicLedgerHistory lens remains " +
+			"the independently-derived display source of truth and never reads this aspect. Declaration-only: no op handler " +
+			"of its own.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"balanceCents":{"type":"integer"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"balanceCents": "The account's current running balance in integer cents (positive = owed, can go negative on an overpayment/over-waiver). Maintained by ClinicDebitAccount/ClinicCreditAccount, never set directly by a caller.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "account running-balance cache aspect",
+				Payload:         map[string]any{"balanceCents": 2500},
+				ExpectedOutcome: "Stored as vtx.clinicaccount.<NanoID>.balance; minted at 0 by ClinicCreateAccount, updated by the signed amount on every ClinicDebitAccount/ClinicCreditAccount.",
+			},
+		},
+	}
+}
+
 // aspectDeclarationOnlyScript is the declaration-only Starlark for
 // clinicLedgerAccountGuard — written by ClinicCreateAccount's own op handler, never
 // dispatched as an operation in its own right.
@@ -109,8 +153,12 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"{type (debit|credit), amountCents, memo?, postedAt, billedTo? (debit only), expectedReimbursementCents? (debit+insurance only), " +
 			"reason? (credit only)} " +
 			"+ the postedTo link (transaction→account, the transaction is the later-arriving vertex so it is the source — " +
-			"Contract #1 §1.1). The ledger is APPEND-ONLY — no balance is stored or mutated on the account; the ledgerHistory " +
-			"lens derives a balance by summing entries, so concurrent debits/credits never race a read-modify-write. Requires " +
+			"Contract #1 §1.1) + a bare (no explicit expectedRevision) update of the account's own .balance aspect (accountDDL) " +
+			"by the signed amount — auto-conditioned on the step-4 hydrated revision since .balance is a declared read, which " +
+			"is what makes it retry-eligible: a lost race re-hydrates and retries the whole op rather than hard-conflicting. " +
+			"The ledgerHistory lens still derives its own full-history sum independently " +
+			"(the display source of truth); .balance is this DDL's O(1) authorization cache, letting a self-scoped credit " +
+			"verify the amount owed without replaying the account's whole transaction history. Requires " +
 			"the accountKey be a live account and amountCents be a positive number. A debit carries a bounded payer dimension — " +
 			"billedTo (self|insurance, default self when omitted) and, only when billedTo is insurance, " +
 			"expectedReimbursementCents (positive, capped at amountCents) — so a clinic can track what it billed insurance for " +

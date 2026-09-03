@@ -1,8 +1,11 @@
 # clinic-ledger
 
 The Clinic patient payment ledger (v0.1.0) — a per-patient financial account that records charges
-(copays, invoice lines) and payments as an **append-only** transaction history; a balance is always
-derived by summing entries, never stored as a mutable running total.
+(copays, invoice lines) and payments as an **append-only** transaction history. The account also
+carries a maintained `.balance` aspect (`{balanceCents}`) — an O(1) authorization cache kept in
+lockstep with every posted entry via an auto-conditioned, retry-eligible update (no explicit
+`expectedRevision` of its own); the `clinicLedgerHistory` lens remains the display source of
+truth, independently summing the full entry history.
 
 Depends: `clinic-domain` (the `patient` vertex type an account is `heldFor`). Install:
 `lattice-pkg install packages/clinic-ledger` (after `clinic-domain`; or `make install-clinic` onto a
@@ -12,8 +15,8 @@ running stack).
 
 | Kind | Canonical names |
 |---|---|
-| **Vertex types** (2) | `clinicaccount` (root `{}`, D5) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
-| **Aspect types** (1) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard |
+| **Vertex types** (2) | `clinicaccount` (root `{}`, D5, `.balance` aspect) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
+| **Aspect types** (2) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard · `clinicAccountBalance` — `vtx.clinicaccount.<id>.balance`, the maintained running-total cache |
 | **Links** (2) | `heldFor` (account → patient) · `postedTo` (transaction → account) |
 | **Operations** (3) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` |
 | **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
@@ -25,7 +28,8 @@ ledger account, records a charge, and records a payment all directly from the br
 ## Key shapes (Contract #1)
 
 ```
-vtx.clinicaccount.<id>                 class=clinicaccount       root {} (D5 — balance is lens-derived)
+vtx.clinicaccount.<id>                 class=clinicaccount       root {} (D5)
+vtx.clinicaccount.<id>.balance         class=clinicAccountBalance  {balanceCents}  (O(1) cache; updated on every post)
 vtx.clinictransaction.<id>             class=clinictransaction   root {} (D5)
 vtx.clinictransaction.<id>.entry       class=entry               {type ∈ debit|credit, amountCents, memo?, postedAt,
                                                                    billedTo? ∈ self|insurance (debit only, default self),
@@ -54,12 +58,19 @@ running balance across all of them); see
 [`adjacency-shared-nanoid-collision-design.md`](../../_bmad-output/implementation-artifacts/adjacency-shared-nanoid-collision-design.md)
 for why the account carries its own id rather than the patient's.
 
-## Append-only ledger
+## Append-only ledger + the maintained balance cache
 
 `ClinicDebitAccount`/`ClinicCreditAccount` each mint a fresh `vtx.clinictransaction.<id>` with a
-`.entry` aspect and the `postedTo` link back to the account — no balance field is ever written or
-mutated; the `clinicLedgerHistory` lens derives a balance by summing `amountCents` (positive for
-debit, negative for credit) client-side, so concurrent debits/credits never race a read-modify-write.
+`.entry` aspect and the `postedTo` link back to the account. The append-only log stays the audit
+trail — the `clinicLedgerHistory` lens still derives its own balance independently by summing
+`amountCents` (positive for debit, negative for credit) — but each op also updates the account's own
+`.balance` aspect by the signed amount, via a BARE update (no explicit `expectedRevision`). Because
+`.balance` is a declared read, the Processor auto-conditions that update on the step-4 hydrated
+revision and marks it retry-eligible: a lost race re-hydrates and retries the whole op (the bounded
+internal commit-conflict retry) rather than hard-conflicting, so concurrent debits/credits never
+race a silent read-modify-write. This is what lets a self-scoped `ClinicCreditAccount` verify "amount
+owed" in O(1) instead of replaying the account's full transaction history — a heavy self-pay account
+was blowing the Starlark wall budget on that replay before this cache existed.
 
 ## Payer dimension (billing, not a claims pipeline)
 
@@ -79,8 +90,9 @@ only way the FE resolves a patient's account key, since it is no longer derivabl
 
 ## Out of scope
 
-- **A stored/cached balance** — deliberately never materialized; always summed from
-  `clinicLedgerHistory`.
+- **The `.balance` aspect as a display/query surface** — it is `post_entry`'s own internal
+  authorization cache, never read outside this package; the FE and any auditor use
+  `clinicLedgerHistory`, which stays the independently-derived source of truth.
 - **Refunds / voids as a distinct operation** — model as an offsetting
   `ClinicCreditAccount`/`ClinicDebitAccount` entry with an explanatory `memo` today; a dedicated
   reversal op is not yet needed.
