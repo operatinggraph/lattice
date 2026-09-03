@@ -191,4 +191,17 @@ set), implementation-bug 2 (the inert purge flag; the unchecked teardown), brief
 `projectionKind`), convention 1 (history-narrating comments). Dossier: one entry appended, one mechanized entry
 retired (`docs/components/refractor.md`).
 
-**Live proof:** recorded below once the round trip runs (§5 Close).
+**Live proof (2026-09-03, shared dev stack, Refractor cycled to the merged binary):** `cafeStaleTabSettlement`
+(guarded: `emptyBehavior: delete`, 78 rows) was upgraded in place through `lattice-pkg install --force` with a
+scratch `staticEmptyColumns` addition, then reverted the same way from the committed package. Each upgrade
+produced `lens pipeline removed (trigger=reactivation)` → `lens deactivated for an Output change` → `lens target
+cleared for re-activation truncated=true` → `lens pipeline started` → `lens re-activated after an Output change`
+within 135 ms, the installer printed no re-activation warning, every row was rewritten (KV revision advanced,
+the column present after the first upgrade and absent after the revert, 78 rows both times), and the lens's
+health entry read `active`, `errorCount 0`, `lastError nil`, `consumerLag 0` after each. The stack ended
+identical to the repo (cafe-domain 0.11.29).
+
+**Found at close and fixed in-fire:** the scoped clear left a hot-reload refusal recorded before a restart
+standing after the activation that resolved it (`clinicNoShowSettlement`, refused 03:53, still `lastError`
+after the 11:18 cycle). Every reloader verdict now carries `health.HotReloadRefusalPrefix`, and the
+clean-registration clear owns that class alongside its own fallback message.
