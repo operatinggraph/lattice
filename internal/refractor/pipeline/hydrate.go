@@ -79,18 +79,36 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 	}
 
 	adpt := p.currentAdapter()
+	// A cold hydrate is the widest write loop the personal path runs — every
+	// row of an actor at once — so it pipelines its publishes and awaits the
+	// acks once, below, before the frame. writeCtx carries the pipeline; ctx
+	// does not, so the frame and the marker publish synchronously.
+	writeCtx := ctx
+	var rowPipeline *substrate.PublishPipeline
+	if opener, ok := adpt.(adapter.PublishPipelineOpener); ok {
+		rowPipeline = opener.NewPublishPipeline()
+		writeCtx = adapter.WithPublishPipeline(ctx, rowPipeline)
+	}
 	var frameKeys []map[string]any
 	for _, result := range results {
 		var writeErr error
 		if result.Delete {
-			writeErr = adpt.Delete(ctx, result.Keys, highWater)
+			writeErr = adpt.Delete(writeCtx, result.Keys, highWater)
 		} else {
-			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, highWater)
+			writeErr = adpt.Upsert(writeCtx, result.Keys, result.Row, highWater)
 			frameKeys = append(frameKeys, result.Keys)
 		}
 		p.recordProjectionWrite()
 		if writeErr != nil {
 			return 0, fmt.Errorf("pipeline: hydrate %q: write: %w", identityID, writeErr)
+		}
+	}
+
+	// Every row is known stored before the frame that claims to describe them
+	// is published: the pipeline's flush is where the loop's acks are awaited.
+	if rowPipeline != nil {
+		if err := rowPipeline.Flush(ctx); err != nil {
+			return 0, fmt.Errorf("pipeline: hydrate %q: write: %w", identityID, err)
 		}
 	}
 

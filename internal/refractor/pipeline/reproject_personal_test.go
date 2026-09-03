@@ -81,6 +81,14 @@ func (f *fakePersonalTarget) snapshot() []personalFrame {
 func newPersonalTestPipeline(t *testing.T, adpt adapter.Adapter) (*Pipeline, *substrate.KV) {
 	t.Helper()
 	coreKV, adjKV := newDeleteKeyKV(t)
+	return newPersonalPipelineOn(t, coreKV, adjKV, adpt), coreKV
+}
+
+// newPersonalPipelineOn is newPersonalTestPipeline over KV buckets the caller
+// already holds, for a fixture that needs the pipeline's reads and its personal
+// target on one substrate connection.
+func newPersonalPipelineOn(t *testing.T, coreKV, adjKV *substrate.KV, adpt adapter.Adapter) *Pipeline {
+	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(`
 MATCH (identity {key: $actorKey})-[:holds]->(l:lease)
@@ -122,7 +130,7 @@ RETURN l.key AS anchor, "lease" AS kind, l.id AS entityId
 	// a fixture left at zero would exercise that refusal instead of whatever it
 	// meant to test.
 	p.recordAppliedSeq(1)
-	return p, coreKV
+	return p
 }
 
 func putPersonalVertex(t *testing.T, kv *substrate.KV, key, class string, fields map[string]any) {

@@ -51,8 +51,42 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	// else: without this the edge would ship a working grant-lands trigger and
 	// a dead grant-revoked one.
 	deleteOutcomeAdpt, reportsDeleteOutcome := adpt.(adapter.OutcomeDeleter)
+
+	// Two publish pipelines, deliberately separate, and neither one reaches
+	// anything but its own loop.
+	//
+	// writeCtx carries the ROW pipeline, so the loop below pays one ack round
+	// trip for all of its writes instead of one per row — the cost that makes a
+	// wide personal actor's evaluation take tens of seconds. ctx itself is left
+	// alone: the keyset frame, the terminal DLQ and the retry enqueues all run
+	// under it and must not join a pipeline nobody flushes for them. The frame
+	// in particular is published only after flushRowPipeline has returned
+	// cleanly, which is what keeps its "the rows I describe have applied"
+	// contract true.
+	//
+	// The AUDIT pipeline is the writer's own and is flushed on the way out,
+	// whatever the disposition — a lost audit entry is logged, never a reason
+	// to redeliver, so folding it into the row pipeline would let forensics
+	// decide the fate of correctly written rows.
+	writeCtx := ctx
+	var rowPipeline *substrate.PublishPipeline
+	if opener, ok := adpt.(adapter.PublishPipelineOpener); ok {
+		rowPipeline = opener.NewPublishPipeline()
+		writeCtx = adapter.WithPublishPipeline(ctx, rowPipeline)
+	}
+	var auditPipeline *substrate.PublishPipeline
+	if p.auditWriter != nil {
+		auditPipeline = p.auditWriter.NewPublishPipeline()
+		defer p.flushAuditPipeline(ctx, auditPipeline, key)
+	}
+
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
+	// committedResults are the rows the adapter reported as landed, held back
+	// until the flush below proves it. Emitting the freshness mark and the
+	// audit entry from inside the loop would record rows a failed flush is
+	// about to redeliver — see the buffering point in the loop.
+	var committedResults []ruleengine.EvalResult
 	transientActorRetry := false
 	for i := range results {
 		// Stamp the triggering CDC message's stream sequence as the monotonic
@@ -69,14 +103,14 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		if result.Delete {
 			if reportsDeleteOutcome {
 				var outcome adapter.DeleteOutcome
-				outcome, writeErr = deleteOutcomeAdpt.DeleteWithOutcome(ctx, result.Keys, result.ProjectionSeq)
+				outcome, writeErr = deleteOutcomeAdpt.DeleteWithOutcome(writeCtx, result.Keys, result.ProjectionSeq)
 				committed, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
 			} else {
-				writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
+				writeErr = adpt.Delete(writeCtx, result.Keys, result.ProjectionSeq)
 			}
 		} else if reportsOutcome {
 			var outcome adapter.UpsertOutcome
-			outcome, writeErr = outcomeAdpt.UpsertWithOutcome(ctx, result.Keys, result.Row, result.ProjectionSeq)
+			outcome, writeErr = outcomeAdpt.UpsertWithOutcome(writeCtx, result.Keys, result.Row, result.ProjectionSeq)
 			// Committed, not Wrote. A guarded adapter reports Wrote on every call
 			// because maintaining the projectionSeq watermark is its job whatever
 			// the row says, and it has more than one way to end up storing nothing
@@ -86,7 +120,7 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 			// and the only event the read-model's freshness clock marks.
 			committed, writtenKey, transition = outcome.Committed, outcome.Key, outcome.Transition
 		} else {
-			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
+			writeErr = adpt.Upsert(writeCtx, result.Keys, result.Row, result.ProjectionSeq)
 		}
 		p.recordProjectionWrite()
 
@@ -166,14 +200,47 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 
 		p.notifyGrantChange(writtenKey, transition)
 		if committed {
-			// The read model's freshness clock and its forensic trail both mark
-			// the same event — a row landing in the target — so a write that
-			// stored nothing marks neither. An operator reading lastProjectedAt
-			// off a lens whose every write the guard is declining would otherwise
-			// see a clock ticking over a target that has not changed in hours.
-			p.recordProjected()
-			p.writeAudit(ctx, key, result)
+			// Buffered, not emitted. The read model's freshness clock and its
+			// forensic trail both mark the same event — a row landing in the
+			// target — and under a pipelined write a row is only KNOWN to have
+			// landed once the flush below comes back clean. Marking here would
+			// append an audit entry whose outputRowHash describes a row the
+			// stream never stored, and advance lastProjectedAt over a target
+			// that has not changed, on exactly the path that then Naks. (The
+			// same reasoning as the guard-declined case: a write that stored
+			// nothing marks neither clock nor trail.)
+			committedResults = append(committedResults, result)
 		}
+	}
+
+	// The rows are on the wire but not yet known stored. Await them here —
+	// ahead of every disposition below, including the ack the terminal/retry
+	// path takes: acking a unit whose rows never landed would lose them with
+	// no DLQ and no retry entry behind them.
+	if err := p.flushRowPipeline(ctx, rowPipeline, key); err != nil {
+		if cat := failure.Classify(err); cat == failure.CatInfra || cat == failure.CatStructural {
+			// Same disposition the per-row branch takes for these: pending
+			// message, paused pump, no frame.
+			return substrate.Nak, err
+		}
+		// Everything else redelivers plainly. A flush error names no single
+		// result, so neither of the per-row dispositions that need one — the
+		// DLQ publish and the retry-queue capture — can be reached from here;
+		// redelivery re-runs the whole batch instead, which the idempotent
+		// upserts behind it are built for. Nothing is masked: no ack, and no
+		// frame, so a retraction this batch was carrying cannot be reported as
+		// applied. CatTerminal never arrives here in practice — it exists only
+		// where an adapter wraps an error in failure.Terminal, and a publish
+		// path has no such wrap — so this is not a DLQ route left unbuilt.
+		return substrate.Nak, nil
+	}
+
+	// Only now is a committed row a stored row. The freshness clock and the
+	// audit trail advance together, once, for exactly the rows the flush stands
+	// behind — a failed flush returned above without emitting either.
+	for i := range committedResults {
+		p.recordProjected()
+		p.writeAudit(ctx, auditPipeline, key, committedResults[i])
 	}
 
 	for _, terr := range terminalErrs {
@@ -304,7 +371,9 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result ruleengine
 			}
 			if committed {
 				p.recordProjected()
-				p.writeAudit(rctx, key, capturedResult)
+				// No pipeline: a replay writes one captured result, so there
+				// is no loop to amortise an ack over.
+				p.writeAudit(rctx, nil, key, capturedResult)
 			}
 			return nil
 		},
@@ -437,10 +506,11 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, rawBody []byte, entit
 	}
 }
 
-// writeAudit appends an audit entry after a successful write. It is a no-op when
-// auditWriter is nil (optional feature, AC6). Errors are logged as Warn — a failed
-// audit entry must never interrupt message processing (the write already succeeded).
-func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result ruleengine.EvalResult) {
+// writeAudit appends an audit entry after a successful write, into pipe when
+// the caller opened one. It is a no-op when auditWriter is nil (optional
+// feature, AC6). Errors are logged as Warn — a failed audit entry must never
+// interrupt message processing (the write already succeeded).
+func (p *Pipeline) writeAudit(ctx context.Context, pipe *substrate.PublishPipeline, entityID string, result ruleengine.EvalResult) {
 	if p.auditWriter == nil {
 		return
 	}
@@ -451,10 +521,42 @@ func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result rulee
 	} else {
 		row = result.Row
 	}
-	if err := p.auditWriter.WriteAudit(ctx, entityID, op, row); err != nil {
+	if err := p.auditWriter.WriteAuditPipelined(ctx, pipe, entityID, op, row); err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("pipeline: audit write failed",
 				"ruleId", p.ruleID, "entityId", entityID, "op", op, "err", err)
 		}
+	}
+}
+
+// flushRowPipeline awaits the store acks of a write loop's pipelined rows and
+// logs a failure the way the loop logs a per-row write error, so the two read
+// the same in a lens's log. A nil pipe (an adapter whose writes are not
+// publishes) has nothing outstanding and returns nil.
+func (p *Pipeline) flushRowPipeline(ctx context.Context, pipe *substrate.PublishPipeline, entityID string) error {
+	if pipe == nil {
+		return nil
+	}
+	if err := pipe.Flush(ctx); err != nil {
+		slog.Error("pipeline: write flush",
+			"ruleId", p.ruleID, "entityId", entityID,
+			"stage", "write", "adapter", p.adapterName, "err", err)
+		return err
+	}
+	return nil
+}
+
+// flushAuditPipeline awaits the audit entries of one writeResults call, whatever
+// disposition it reached — it runs deferred, so an early return on a write
+// failure still lands the entries for the rows that did commit before it. A
+// failure is logged at Warn and goes no further: the audit trail is
+// best-effort, and a forensic entry never decides a message's fate.
+func (p *Pipeline) flushAuditPipeline(ctx context.Context, pipe *substrate.PublishPipeline, entityID string) {
+	if pipe == nil {
+		return
+	}
+	if err := pipe.Flush(ctx); err != nil && ctx.Err() == nil {
+		slog.Warn("pipeline: audit write failed",
+			"ruleId", p.ruleID, "entityId", entityID, "err", err)
 	}
 }

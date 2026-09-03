@@ -380,6 +380,15 @@ type PublishBatchAck struct {
 //
 // Order is preserved via `Nats-Batch-Sequence` (1..N). On failure, no
 // message is durably stored — semantics are all-or-nothing.
+//
+// An ATOMIC BATCH and a PUBLISH PIPELINE (PublishPipeline,
+// Conn.NewPublishPipeline) are different things and are named differently: this
+// call is an all-or-nothing commit of one op list, while a pipeline is a series
+// of ordinary, ordered async publishes whose acks are awaited at its Flush and
+// which carries no atomicity — each message lands on its own, and a failure can
+// leave earlier ones stored. Take this call when partial application would be
+// wrong, and a pipeline when the cost being removed is the per-message ack
+// round trip.
 func (c *Conn) PublishBatch(ctx context.Context, ops []PublishOp) (*PublishBatchAck, error) {
 	if len(ops) == 0 {
 		return nil, fmt.Errorf("substrate: PublishBatch: empty op list")

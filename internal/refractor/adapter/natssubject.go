@@ -16,7 +16,10 @@ import (
 	"github.com/operatinggraph/lattice/internal/vault"
 )
 
-var _ Adapter = (*NatsSubjectAdapter)(nil)
+var (
+	_ Adapter               = (*NatsSubjectAdapter)(nil)
+	_ PublishPipelineOpener = (*NatsSubjectAdapter)(nil)
+)
 
 // PersonalActorKeyField is the reserved key field a "nats_subject" Personal
 // Lens's targetConfig.key must include: the recipient identity used to
@@ -421,16 +424,37 @@ func (a *NatsSubjectAdapter) Delete(ctx context.Context, keys map[string]any, pr
 	return a.publish(ctx, actor, env)
 }
 
+// publish is the one wire seam every envelope kind takes — upsert, delete,
+// keyset and hydrationComplete alike. When ctx carries a publish pipeline
+// (WithPublishPipeline) the envelope joins it and the store ack is awaited by
+// whoever flushes that pipeline; otherwise the publish awaits its own ack.
+// Which one a given envelope gets is entirely the caller's choice of context:
+// an envelope that must be durable before the next step — the keyset frame —
+// is simply published under a context carrying no pipeline.
 func (a *NatsSubjectAdapter) publish(ctx context.Context, actor string, env deltaEnvelope) error {
 	data, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("natssubject: marshal envelope: %w", err)
 	}
 	subject := subjects.PersonalSync(a.subjectPrefix, actor)
+	if pipe := publishPipelineFrom(ctx); pipe != nil {
+		if err := pipe.Add(ctx, subject, data, nil); err != nil {
+			return fmt.Errorf("natssubject: publish %s: %w", subject, err)
+		}
+		return nil
+	}
 	if err := a.conn.Publish(ctx, subject, data, nil); err != nil {
 		return fmt.Errorf("natssubject: publish %s: %w", subject, err)
 	}
 	return nil
+}
+
+// NewPublishPipeline opens a publish pipeline on the connection this adapter
+// publishes through, satisfying PublishPipelineOpener. The caller installs it
+// on the context of its write loop with WithPublishPipeline and flushes it
+// before anything that depends on those rows being stored.
+func (a *NatsSubjectAdapter) NewPublishPipeline() *substrate.PublishPipeline {
+	return a.conn.NewPublishPipeline(0)
 }
 
 // PublishHydrationComplete publishes a terminal "hydrationComplete" marker to

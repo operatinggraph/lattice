@@ -135,11 +135,25 @@ func CleanupLegacyAuditStreams(ctx context.Context, conn *substrate.Conn) (int, 
 	return deleted, nil
 }
 
-// WriteAudit publishes one audit entry for a committed successful write.
+// WriteAudit publishes one audit entry for a committed successful write and
+// waits for its store ack.
 // op must be "upsert" or "delete". row is the written row data (nil or empty for deletes).
 // Returns an error if marshaling or publishing fails; the caller should log and continue —
 // a failed audit entry must never abort message processing.
 func (a *AuditWriter) WriteAudit(ctx context.Context, entityID, op string, row map[string]any) error {
+	return a.WriteAuditPipelined(ctx, nil, entityID, op, row)
+}
+
+// WriteAuditPipelined is WriteAudit with the store ack deferred to a publish
+// pipeline: the entry is published without awaiting its own ack, and is known
+// stored only once the caller flushes. A nil pipe is exactly WriteAudit.
+//
+// The pipeline a caller passes here must be its OWN, never the one carrying the
+// rows it is auditing. The two have opposite dispositions — a row that did not
+// land redelivers the message, a missing audit entry is logged and forgiven —
+// so sharing one would fold an audit failure into the row pipeline's flush and
+// redeliver rows that were written perfectly well.
+func (a *AuditWriter) WriteAuditPipelined(ctx context.Context, pipe *substrate.PublishPipeline, entityID, op string, row map[string]any) error {
 	entry := AuditEntry{
 		EntityID:      entityID,
 		Operation:     op,
@@ -150,10 +164,25 @@ func (a *AuditWriter) WriteAudit(ctx context.Context, entityID, op string, row m
 	if err != nil {
 		return fmt.Errorf("health: AuditWriter.WriteAudit marshal: %w", err)
 	}
+	if pipe != nil {
+		if err := pipe.Add(ctx, subjects.Audit(a.ruleID), data, nil); err != nil {
+			return fmt.Errorf("health: AuditWriter.WriteAudit publish %s: %w", entityID, err)
+		}
+		return nil
+	}
 	if err := a.conn.Publish(ctx, subjects.Audit(a.ruleID), data, nil); err != nil {
 		return fmt.Errorf("health: AuditWriter.WriteAudit publish %s: %w", entityID, err)
 	}
 	return nil
+}
+
+// NewPublishPipeline opens a publish pipeline on the connection this writer's
+// entries go to, for a caller auditing a whole write loop and flushing once. It
+// is opened here rather than built from any connection the caller happens to
+// hold, because a substrate.PublishPipeline publishes on the connection it came
+// from.
+func (a *AuditWriter) NewPublishPipeline() *substrate.PublishPipeline {
+	return a.conn.NewPublishPipeline(0)
 }
 
 // rowHash computes a deterministic SHA-256 hex digest of the written row for upsert

@@ -194,22 +194,39 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 	}
 
 	adpt := p.currentAdapter()
+	// The reprojection rewrites the whole actor, so its publishes are pipelined
+	// and their acks awaited once, below, before the frame. writeCtx carries
+	// the pipeline; ctx does not, so the frame publishes synchronously.
+	writeCtx := ctx
+	var rowPipeline *substrate.PublishPipeline
+	if opener, ok := adpt.(adapter.PublishPipelineOpener); ok {
+		rowPipeline = opener.NewPublishPipeline()
+		writeCtx = adapter.WithPublishPipeline(ctx, rowPipeline)
+	}
 	var frameKeys []map[string]any
 	for _, result := range results {
 		if result.Delete {
-			err := adpt.Delete(ctx, result.Keys, revision)
+			err := adpt.Delete(writeCtx, result.Keys, revision)
 			p.recordProjectionWrite()
 			if err != nil {
 				return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
 			}
 			continue
 		}
-		err := adpt.Upsert(ctx, result.Keys, result.Row, revision)
+		err := adpt.Upsert(writeCtx, result.Keys, result.Row, revision)
 		p.recordProjectionWrite()
 		if err != nil {
 			return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
 		}
 		frameKeys = append(frameKeys, result.Keys)
+	}
+
+	// Every row is known stored before the frame describing them goes out: the
+	// pipeline's flush is where the loop's acks are awaited.
+	if rowPipeline != nil {
+		if err := rowPipeline.Flush(ctx); err != nil {
+			return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
+		}
 	}
 
 	// The authoritative frame is the retraction transport: the client prunes

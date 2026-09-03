@@ -27,6 +27,35 @@ const (
 	// cycle against a genuinely unreachable server, not just a loaded one.
 	defaultConnectTimeout = 10 * time.Second
 
+	// publishAsyncTimeout bounds how long an ASYNC JetStream publish waits for
+	// its store ack before the client resolves the future with
+	// ErrAsyncPublishTimeout. nats.go leaves async acks unbounded by default —
+	// a publish the server accepted but never acknowledged (a stream leader
+	// lost between accept and ack) would otherwise leave the future unresolved
+	// forever, hanging whichever PublishPipeline.Flush awaits it and holding
+	// its slot in the connection's pending budget for the life of the process.
+	// The value mirrors the SYNCHRONOUS path's own bound — nats.go applies a 5s
+	// default API timeout to a Publish whose ctx carries no deadline — so
+	// pipelining a write loop changes when acks are awaited, not how long a
+	// stuck one can hold a caller.
+	publishAsyncTimeout = 5 * time.Second
+
+	// PublishAsyncMaxPending caps the unacknowledged async publishes ONE
+	// JetStream context will hold, replacing nats.go's 4,000 default. The cap
+	// is per connection and a process runs a single substrate.Conn, so it is
+	// the budget every PublishPipeline open at that moment draws on at once —
+	// each personal lens's write step holds two (rows and audit entries), and a
+	// device hydrate or grant-change reprojection opens another. 8,192 funds 64
+	// simultaneously draining pipelines at DefaultPublishPipelineWindow, which
+	// covers the whole corpus with room to spare; crossing it is not a slow
+	// path but a failure, since the publisher stalls 200ms and then returns
+	// ErrTooManyStalledMsgs. That failure is fail-closed for whichever caller
+	// hits it and for nobody else: the stalled publish is recorded on its own
+	// pipeline and surfaces at that pipeline's Flush, so a hydrate returns an
+	// error and the device re-attaches, and a row batch Naks and redelivers.
+	// It never wedges a caller and never lets one ack a write that was refused.
+	PublishAsyncMaxPending = 8192
+
 	// connectAttempts bounds the retry on the INITIAL connect only —
 	// reconnects after a connection has been established once are nats.go's
 	// own loop (MaxReconnects/ReconnectWait), never this one. A stall that
@@ -198,7 +227,7 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("substrate: nats connect: %w", err)
 	}
-	js, err := jetstream.New(nc)
+	js, err := jetstream.New(nc, publishAsyncOpts()...)
 	if err != nil {
 		nc.Close()
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
@@ -444,11 +473,30 @@ func wipeBytes(buf []byte) {
 // connection-state edges must keep the Conn it registered on, and must not
 // let another Wrap of the same *nats.Conn outlive it.
 func Wrap(nc *nats.Conn) (*Conn, error) {
-	js, err := jetstream.New(nc)
+	js, err := jetstream.New(nc, publishAsyncOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
 	return newConn(nc, js), nil
+}
+
+// publishAsyncOpts is the async-publish posture every substrate JetStream
+// context takes, in one place so Connect and Wrap cannot drift apart: a bound
+// on how long an unacknowledged publish may stay unresolved, and a ceiling on
+// how many of them one connection holds. Both matter only to the async path
+// (PublishPipeline); a synchronous Publish reaches neither.
+func publishAsyncOpts() []jetstream.JetStreamOpt {
+	return []jetstream.JetStreamOpt{
+		jetstream.WithPublishAsyncTimeout(publishAsyncTimeout),
+		jetstream.WithPublishAsyncMaxPending(PublishAsyncMaxPending),
+	}
+}
+
+// PublishAsyncPending reports how many async publishes this connection has
+// issued and not yet had acknowledged, across every PublishPipeline open on it.
+// It is the connection-wide view of the budget publishAsyncMaxPending caps.
+func (c *Conn) PublishAsyncPending() int {
+	return c.js.PublishAsyncPending()
 }
 
 // NATS returns the underlying *nats.Conn. Provided as an escape hatch for

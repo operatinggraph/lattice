@@ -64,7 +64,7 @@ Key sub-packages:
 | **Per-lens target KV buckets** | Bucket name per `LensSpec.targetConfig.bucket` | e.g. `duplicate-candidates` (the identity-hygiene package's Duplicate Candidates Lens). Created on demand if not pre-provisioned. |
 | **Postgres rows** | Target table per `LensSpec.targetConfig.table` | For SQL-target lenses. The adapter is **thin**: it upserts one column **per RETURN field** (`INSERT … (book_id, title) … ON CONFLICT DO UPDATE`) and issues no DDL. The target table is **provisioned out-of-band** (a migration), with columns matching the lens RETURN (key columns + projected fields). Delete projection is **mode-dependent** (`targetConfig.deleteMode`, default `hard`): the default hard delete issues `DELETE FROM` and needs only the key + projected columns; `deleteMode: soft` issues `UPDATE … SET is_deleted=true, deleted_at=NOW()` and **requires** the `is_deleted` / `deleted_at` columns. The Refractor does not create or alter the table. |
 | **Health KV signals** (Contract #5) | Health KV `health.refractor.<instance>.lens.<canonicalName>` | Per-lens latency snapshots (p95, p99, mean, count from `LatencyRingBuffer`); consumer lag; per-instance heartbeat every 10s. |
-| **Audit subjects** | `lattice.refractor.audit.<lensId>` | One `AuditEntry` per **committed** projection — a row that actually landed in the target along the CDC write path (the pipeline's write step, plus the retry queue that finishes what it could not). A write the ordering guard declined and one dropped for want of an ordering token each append nothing, as does a NATS-KV row an unguarded write skips for being byte-identical to what is stored (a read-before-write only that adapter does — unguarded Postgres takes `ON CONFLICT DO UPDATE` and reports a row changed whatever its value); reconciliation accounts for its heals as health verdicts, not here. Every lens's audit subject lands on the single consolidated `REFRACTOR_AUDIT` JetStream stream (subject filter `lattice.refractor.audit.>`, 7-day MaxAge, 512 MiB MaxBytes) — one stream for the whole deployment, not one per lens. |
+| **Audit subjects** | `lattice.refractor.audit.<lensId>` | One `AuditEntry` per **committed** projection — a row that actually landed in the target along the CDC write path (the pipeline's write step, plus the retry queue that finishes what it could not). A write the ordering guard declined and one dropped for want of an ordering token each append nothing, as does a NATS-KV row an unguarded write skips for being byte-identical to what is stored (a read-before-write only that adapter does — unguarded Postgres takes `ON CONFLICT DO UPDATE` and reports a row changed whatever its value); reconciliation accounts for its heals as health verdicts, not here. Every lens's audit subject lands on the single consolidated `REFRACTOR_AUDIT` JetStream stream (subject filter `lattice.refractor.audit.>`, 7-day MaxAge, 512 MiB MaxBytes) — one stream for the whole deployment, not one per lens. A write step's entries are pipelined through their own publish pipeline, flushed on the way out and separate from the one carrying the rows: a lost audit entry is logged and forgiven, never a reason to redeliver. |
 | **Metrics subjects** | `lattice.refractor.metrics.<lensId>` | Consumer lag on `LagPoller` interval. |
 | **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (`health`, `validate`, `rebuild`, `pause`, `resume`, `delete`, `register`, `deregister`, `hydrate`, `sessionkey`, `syncgap`) via the NATS Services framework; capability-gated (FR30). The five identity-bound Personal-Lens ops (`register`/`deregister`/`hydrate`/`sessionkey`/`syncgap`) additionally bind `identityId` to the verified actor server-side. |
 | **Personal Lens delta envelopes** | Per-recipient NATS subject `<targetConfig.subjectPrefix>.<actor>` (e.g. `lattice.sync.user.<identityId>`) on the backing JetStream stream `targetConfig.stream` | Produced by a `targetType: "nats_subject"` lens (`adapter/natssubject.go`). See below. |
@@ -135,6 +135,23 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
 - **Guard posture: unguarded.** A subject publish is a fire-and-forget-shaped append (though the
   underlying JetStream publish is a confirmed round-trip, not a literal fire-and-forget); ordering
   is the stream's per-subject sequence, and the recipient dedups/reorders by envelope `revision`.
+- **Pipelined publishes.** A write loop over a whole actor — the CDC write step, a cold `Hydrate`, a
+  grant-change reprojection — publishes its rows through one `substrate.PublishPipeline` and awaits
+  the store acks once at the end, instead of paying a round trip per row (a wide actor projects
+  thousands). The pipeline rides the write loop's own context, so the adapter stays stateless and
+  each concurrent caller owns its own; ordering on the wire is unchanged (the connection's send
+  order), and the pipeline is always flushed **before** the keyset frame, which is what keeps the
+  frame's "the rows I describe have applied" contract exact. A failed flush is a write failure of
+  the whole loop: the frame is withheld and the message redelivers, because a publish pipeline
+  carries no atomicity — unlike `Conn.PublishBatch`'s all-or-nothing batch it can leave earlier rows
+  stored, and only redelivery over idempotent upserts restores the rest. The flush is the **only**
+  place a pipelined publish failure is reported: an ack that resolves mid-loop belongs to an earlier
+  row, so surfacing it there would charge one row's failure to another and dispose of the wrong one.
+  Two bounds keep the mechanism honest — an unacknowledged publish resolves as a timeout rather than
+  hanging a flush forever, and the connection-wide ceiling on outstanding acks is sized above
+  `personal lenses × pipelines × window` so a wide write step cannot exhaust the budget every lens on
+  the process shares. Nothing is recorded until the flush returns clean: the audit entry claiming a
+  row's hash and the lens's freshness clock both advance only for rows the flush stands behind.
 - **Interest Set (Fire PL.2, `internal/refractor/personalinterest`).** A per-device relevance
   filter — a **bandwidth optimization, never a security control**: no registered device for a
   recipient (or a device that declares no `types`/`anchors`) admits everything; a declared filter
