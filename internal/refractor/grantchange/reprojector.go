@@ -130,6 +130,22 @@ type Reprojector struct {
 	// personal is the per-ruleID registry, populated at boot from the same
 	// site that registers the control-plane hydrator.
 	personal map[string]PersonalPipeline
+	// personalRegistered, when set, is called once after every registration has
+	// landed in that map — the standing healer's nudge, installed by
+	// NewPersonalSweeper.
+	//
+	// It exists because the sweeper's registry IS this map, and its pass returns
+	// without recording a verdict while the map is empty (Sweep's hasPersonal
+	// gate). The host starts the sweep loop before any lens activates, so with a
+	// bare ticker the first verdict — the one the personal derivation licence
+	// rests on — cannot land until the first tick, and the whole personal plane
+	// runs on the relation-blind enumerator until then.
+	//
+	// Read under the lock and called after it is released, so a hook that
+	// touched the Reprojector could not deadlock against the registration that
+	// fired it, and called AFTER the insert, so the pass it kicks off sees the
+	// lens that kicked it.
+	personalRegistered func()
 
 	maxDirty int
 	interval time.Duration
@@ -388,13 +404,32 @@ func (r *Reprojector) SetBounds(maxDirty int, interval time.Duration) {
 // RegisterPersonal adds one personal lens's pipeline to the registry the drain
 // re-drives. Called at boot, from the same site that registers the lens's
 // control-plane hydrator, where the concrete pipeline is in hand.
+//
+// It also nudges the standing healer, if one is installed: the sweep walks THIS
+// registry and records nothing while it is empty, so a registration is the event
+// that makes a pass worth running at all.
 func (r *Reprojector) RegisterPersonal(ruleID string, p PersonalPipeline) {
 	if p == nil {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.personal[ruleID] = p
+	nudge := r.personalRegistered
+	r.mu.Unlock()
+	if nudge != nil {
+		nudge()
+	}
+}
+
+// setPersonalRegisteredHook installs the callback RegisterPersonal fires once a
+// registration has landed. NewPersonalSweeper is its only caller — the sweeper
+// is the thing that wants to know, and it already holds the Reprojector whose
+// registry it walks, so the wiring stays inside this package rather than being
+// one more pair cmd/refractor has to keep in step.
+func (r *Reprojector) setPersonalRegisteredHook(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.personalRegistered = fn
 }
 
 // DeregisterPersonal drops a lens from the registry — a deleted or replaced

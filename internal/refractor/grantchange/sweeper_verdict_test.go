@@ -13,6 +13,7 @@ package grantchange_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,18 +196,28 @@ func TestPersonalSweep_CountsLiveRefractorInstances(t *testing.T) {
 	})
 }
 
-// TestPersonalSweep_RunSweepsImmediately pins §4.4c's third bullet: a bare
-// ticker leaves every personal lens on the relation-blind enumerator for a full
-// interval after every restart, because the zero verdict refuses — and that is
-// exactly when the backlog is deepest.
+// TestPersonalSweep_RunSweepsImmediately pins §4.4c's third bullet — no lens
+// waits a whole interval on the relation-blind enumerator after a restart —
+// AGAINST THE SEQUENCE cmd/refractor ACTUALLY RUNS.
+//
+// THE ORDER IS THE TEST. cmd/refractor starts the loop before the lens source
+// has activated anything, and Sweep returns without recording a verdict while
+// the registry is empty — so a fixture that registers a lens and only then
+// starts Run hands the immediate pass a registry to walk that production never
+// gives it, and goes green over a mechanism that records nothing where it runs.
+// Run first, registration second, and an interval of an hour so that no tick can
+// be what produced the answer.
+//
+// The lens's own registration instant is the bar, not merely the pass's
+// existence: conjunct 3 refuses a verdict from a pass that began before this
+// lens registered (anchor_derivation_personal.go), so a prompt pass that
+// started first licenses nothing.
 func TestPersonalSweep_RunSweepsImmediately(t *testing.T) {
 	_, keys := sweepActors(2)
-	lens := &fakePersonal{}
 	r := grantchange.New()
-	r.RegisterPersonal("lens-1", lens)
 	s := grantchange.NewPersonalSweeper(r, &fakeLister{keys: keys}, &fakeLister{keys: []string{health.InstanceKeyPrefix + "rfx-a1b2c3"}})
 	// An interval far longer than this test will ever wait: whatever the run
-	// loop produces has to come from the pass BEFORE the first tick.
+	// loop produces cannot have come from a tick.
 	s.SetBounds(10, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -217,9 +228,83 @@ func TestPersonalSweep_RunSweepsImmediately(t *testing.T) {
 		close(done)
 	}()
 
+	// The first lens is the BARRIER, not the subject: once a verdict exists the
+	// run loop has provably finished its immediate pass and is sitting in the
+	// select, so nothing after this point can be attributed to that pass.
+	r.RegisterPersonal("lens-1", &fakePersonal{})
 	require.Eventually(t, func() bool { return !s.Verdict().CompletedAt.IsZero() }, 5*time.Second, time.Millisecond,
-		"Run must sweep once immediately; with a bare ticker this verdict stays zero for a whole interval and every personal lens keeps the enumerator")
+		"a registration must earn a pass without waiting for a tick — the run loop started over an EMPTY registry, so the immediate pass recorded nothing and only the registration's nudge can produce a verdict")
 	assert.Equal(t, 2, s.Verdict().Attempted)
+
+	// Now the subject, in registerPersonalHealer's own order: the registry
+	// insert, then the licence's RegisteredAt stamp, then the nudge. The stamp
+	// sits AFTER the insert, which is why the registry's own nudge is not enough
+	// on its own and cmd/refractor fires a second one here.
+	r.RegisterPersonal("lens-2", &fakePersonal{})
+	registeredAt := time.Now()
+	s.Nudge()
+
+	require.Eventually(t, func() bool { return s.Verdict().StartedAt.After(registeredAt) }, 5*time.Second, time.Millisecond,
+		"a lens registering into a running loop must see a pass BEGUN after its own registration instant; without the nudge the next one is a tick away and conjunct 3 refuses until then")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after its context was cancelled")
+	}
+}
+
+// TestPersonalSweep_RegistrationDuringAPassEarnsItsOwnPass is the race the
+// single-slot nudge exists to answer.
+//
+// A pass drains the slot BEFORE it runs, so a registration landing while that
+// pass is in flight refills it and the loop's next iteration runs one more pass
+// — whose StartedAt is later than that registration. Drain the slot after the
+// pass instead and the two coalesce into a pass that began before the lens
+// existed, which conjunct 3 correctly refuses, leaving the lens on the
+// enumerator until a tick.
+//
+// Driven off the health fan-out rather than a sleep: SetPersonalSweepProgress
+// runs inside the pass, after its verdict is stamped, which is exactly the
+// window in question.
+func TestPersonalSweep_RegistrationDuringAPassEarnsItsOwnPass(t *testing.T) {
+	_, keys := sweepActors(2)
+	r := grantchange.New()
+	s := grantchange.NewPersonalSweeper(r, &fakeLister{keys: keys}, &fakeLister{keys: []string{health.InstanceKeyPrefix + "rfx-a1b2c3"}})
+	s.SetBounds(10, time.Hour)
+
+	registered := make(chan time.Time, 1)
+	var once sync.Once
+	first := &fakePersonal{}
+	first.onProgress = func() {
+		once.Do(func() {
+			// Mid-pass: the running pass's StartedAt is already fixed and is
+			// earlier than this instant, so only a LATER pass can cover it.
+			r.RegisterPersonal("lens-2", &fakePersonal{})
+			registered <- time.Now()
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx)
+		close(done)
+	}()
+
+	r.RegisterPersonal("lens-1", first)
+
+	var registeredAt time.Time
+	select {
+	case registeredAt = <-registered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first lens's pass never reached its health fan-out")
+	}
+
+	require.Eventually(t, func() bool { return s.Verdict().StartedAt.After(registeredAt) }, 5*time.Second, time.Millisecond,
+		"the mid-pass registration must be covered by a FOLLOWING pass; a nudge dropped because one was already being served leaves it for the tick")
 
 	cancel()
 	select {

@@ -1589,10 +1589,21 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   `TestRebuildGate_TaxonomyAndControlPathsShareOneBound`, `TestRebuild_HoldsUntilTheConsumerPumpHasReopened`
   and `TestSupervisor_ResetAwaitReopen_{ReturnsOnlyAfterThePumpReopens,OverlappingWaitersAreBothReleased}`,
   which are now the record.)
-- **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
-  order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
-  item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
-  standing checklist #1.
+- **A hand-maintained struct round trip's omitted field is fail-OPEN, because the zero value is the
+  admitting answer.** Minted: personal-lens licence — `personalClockRefusal`'s `""` LICENSES the
+  narrowing, and `anchorHopsPerBranch`'s nil beside an empty refusal is a union over no walks returned as
+  a real anchor set. Two fields, each reasoning about the hazard in its own doc comment, neither gating
+  it. The trip is `Pipeline` fields → `ruleState` → `Pipeline` fields, two hand-written lists nothing held
+  in step, and a field with a line in only one reads as its zero on every event with nothing failing
+  anywhere. Check: **MECHANIZED — `TestRuleState_RoundTripCarriesEveryField`**, which discovers the field
+  universe from `rulestate.go`'s source at test time and fails by field name unless the field is read into
+  the snapshot, written back by `publishRuleState`, and routed through the SAME `Pipeline` field on both
+  sides — or allow-listed with a reason. Generalize before writing the next such trip: two hand-maintained
+  lists over one struct are a gate's worth of work, not a comment's. (Absorbed *"New pipeline state
+  without a declared lifetime"* — reset, carry, and order it at replay, reconnect, tombstone, and retry,
+  minted by dynamic-type-taxonomy item 4; the designer's state-lifetime table and standing checklist #1
+  remain that half's check, and a design's own state-lifetime table is still the record for reset /
+  carry / order.)
 - **A soundness claim's stated REASON is load-bearing, and a reason measurement can falsify is worse than
   none** — §4.4 justified "evaluate, don't render" by "a shrunken footprint turns a match into a spurious
   drift retry." Backwards: `footprintValid` re-reads only what the footprint NAMES, so a smaller footprint
@@ -1649,11 +1660,6 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
 - **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
   over-grant. Minted: negative/retraction design pass (designer SKILL §2). Check: none yet (the retraction
   primitive is its own backlog item).
-- **A consumer that has SETTLED has not necessarily finished its handler** — `NumPending == 0` drops when a
-  delivery is prefetched into the client buffer, not when the write it causes has landed, so a
-  purge-then-observe test races an in-flight reprojection and the row reappears on its own. Minted:
-  auth-plane 4c (surfaced at `-count=3`, not at `-count=1`). Check: barrier on the EFFECT — poll until the
-  row's own revision advances past the last pre-purge write — never on pending alone.
 - **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒
   widen the filter" reads as safe and is, for delivery; the same unresolved answer also published an empty
   matcher, so the lens went to zero rows and a retracting lens to a mass Delete. Minted: dynamic-type-taxonomy
@@ -1700,10 +1706,33 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   `default:` arm cannot catch an unwalked FIELD on a type the walk already recognises — that is where both
   bugs lived. A scope walk that enumerates the shapes that CARRY a binding is
   fail-open by construction; enumerate the shapes that provably do not, and assume the rest carry it.
-- **A liveness test must run the arm the consumer's `ProjectionKind` actually selects.** The design's
-  self-declared most-important test — a data-only link update must move the projected row — was written on
-  a fixture whose pipeline installs no actor enumerator, so it exercised `evalPlainLinkReprojection` while
-  the feature's only consumer declares `actorAggregate` and runs `evalLinkFanOut`. The mechanism was proved
-  on an arm nothing ships. Minted: relationship-data-projection close pass (found independently by two
-  reviewers). Check: read the consumer lens's `ProjectionKind` and assert the fixture takes the same branch
-  of `handle`'s `KindLink` case — a re-trigger proof on the wrong arm is an argument, not a test.
+- **A fixture that establishes the favourable ORDER or ARM is an argument, not a test.** Minted on the
+  ARM: the design's self-declared most-important test — a data-only link update must move the projected
+  row — was written on a fixture whose pipeline installs no actor enumerator, so it exercised
+  `evalPlainLinkReprojection` while the feature's only consumer declares `actorAggregate` and runs
+  `evalLinkFanOut`; the mechanism was proved on an arm nothing ships (relationship-data-projection close
+  pass, found independently by two reviewers). **Second sighting, on ORDER:**
+  `TestPersonalSweep_RunSweepsImmediately` registered the lens before starting `Run`, while `cmd/refractor`
+  starts `Run` before any lens activates — so `Sweep`'s empty-registry early return recorded no verdict,
+  the first one waited a whole 60 s interval with every personal lens on the relation-blind enumerator, and
+  an immediate pass that never ran was green (personal-lens licence close pass). **Third, on the BARRIER —
+  a consumer that has SETTLED has not necessarily finished its handler:** `NumPending == 0` drops when a
+  delivery is prefetched into the client buffer, not when the write it causes has landed, so a
+  purge-then-observe test races an in-flight reprojection and the row reappears on its own (auth-plane 4c,
+  surfaced at `-count=3`, not at `-count=1`). Check: read the consumer lens's `ProjectionKind` and assert
+  the fixture takes the same branch of `handle`'s `KindLink` case; write the test in `cmd/`'s actual
+  startup sequence, or assert the ordering in `cmd/` directly; and barrier on the EFFECT — poll until the
+  row's own revision advances past the last pre-purge write — never on pending alone. The generalization:
+  before asserting, name what the fixture ARRANGED that production does not, and arrange the other way.
+- **A zero or empty reading that cannot be distinguished from "not measured" must read UNREADABLE, and a
+  census owes a reached-ness counter.** Minted: personal-lens licence, four sightings in one item — an
+  empty `health.refractor.*` listing would have licensed a two-instance deployment (a live Refractor that
+  finds no Refractor has contradicted itself); an empty `HopIndex.Incomplete` swallowed by a latch whose
+  zero value is `""`, so the operator log printed a blank reason; `staticRefusalSet`, which exists only to
+  separate "no reason reported yet" from a reported empty one; and `InterestReconcilersConstructed()`,
+  where zero constructed reconcilers and zero *reached* would have read the same. Check: for every
+  count/verdict a consumer refuses on, ask what it reads when the MEASUREMENT is broken; if that equals
+  the empty-subject reading, return unreadable rather than the number, and expose a reached-ness counter
+  so a census can tell "nothing matched" from "nothing ran".
+  `TestPersonalSweepVerdict_VocabularyIsClosed` pins the vocabulary half (a verdict summary is
+  default-denied, so a new state cannot land as an unnamed empty string).

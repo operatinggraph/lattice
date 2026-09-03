@@ -26,6 +26,15 @@
 //     beside it, because the two are different questions: one walk's graph can
 //     answer while the LENS is refused on a conjunct about the set.
 //
+// THE TAXONOMY EXPANSION IS RESOLVED, NOT SKIPPED. ruleinstall.go builds these
+// graphs with the label expansion it resolved over the lens's whole branch set,
+// and a `*` position reads UNRESOLVED without one — so a census that passed nil
+// would pin a `*`-carrying lens as refused while the installed lens derives.
+// Both columns take the same map, from the same armed resolver every sibling
+// census in this package uses (corpusTaxonomyResolver, built from the corpus's
+// own vertexType DDLs), and the pair of readings for one branch set is pinned
+// directly in TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent.
+//
 // Conjuncts 1, 2, 3 and 5 are about a PROCESS — what the host wired, what the
 // standing healer's last pass achieved, how many Refractor instances are live —
 // and no corpus census can speak for them. Their vectors are
@@ -60,6 +69,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 )
 
 // The static licence's refusal vocabulary, matched by containment so a reason
@@ -210,6 +220,8 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 	// ruleinstall.go receives them in. The lens-level verdict is asked of the
 	// SET, so the set has to be assembled the way the installer assembles it.
 	compiled := map[string][]ruleengine.CompiledRule{}
+	perCypher := map[string]*full.CompiledRule{}
+	resolver := corpusTaxonomyResolver(t)
 	forEachCorpusCypher(t, func(name, spec string, _ *lens.Rule, _, declaredPersonal bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
@@ -219,11 +231,11 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 		_, dup := got[name]
 		require.Falsef(t, dup, "two installed lenses share the canonical name %q", name)
 		got[name] = personalDerivationVerdict{
-			personal:         declaredPersonal,
-			staticRefusal:    pipeline.PersonalDerivationRuleRefusal(cr),
-			branchIndexReady: indexReadyForPersonal(fullCR),
+			personal:      declaredPersonal,
+			staticRefusal: pipeline.PersonalDerivationRuleRefusal(cr),
 		}
 		lensName := lensNameOf(name)
+		perCypher[name] = fullCR
 		compiled[lensName] = append(compiled[lensName], cr)
 	})
 
@@ -242,13 +254,21 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 	// label must be the enumerator's actor type, and the enumerator is installed
 	// after the rule); that is the branchIndexReady column's own question, and
 	// it is folded in below for both arms alike.
+	//
+	// The TAXONOMY EXPANSION is threaded into both, resolved per LENS over its
+	// whole branch set exactly as useFullEngineBranches resolves it. Passing nil
+	// instead would answer about a different lens: an expansion-carrying position
+	// reads UNRESOLVED with no expansion and resolved with one, so a `*` lens
+	// would be pinned as refused here while the installer derived for it.
 	for name, v := range got {
 		lensName := lensNameOf(name)
 		v.walks = len(compiled[lensName])
+		expanded := corpusBranchLabelExpansion(t, resolver, compiled[lensName])
+		v.branchIndexReady = indexReadyForPersonal(perCypher[name], expanded)
 		switch {
 		case v.walks > 1:
-			v.indexRefusal = pipeline.BranchDerivationRefusal(compiled[lensName])
-			if v.indexRefusal == "" && !allBranchesReadyForPersonal(compiled[lensName]) {
+			v.indexRefusal = pipeline.BranchDerivationRefusal(compiled[lensName], expanded)
+			if v.indexRefusal == "" && !allBranchesReadyForPersonal(compiled[lensName], expanded) {
 				v.indexRefusal = personalIndexBranchRefused
 			}
 		case !v.branchIndexReady:
@@ -259,14 +279,50 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 	return got
 }
 
+// corpusBranchLabelExpansion resolves the taxonomy expansion ruleinstall.go
+// would thread into a lens's pattern graphs, over the same branch set and from
+// the same declarations the installed corpus ships.
+//
+// It mirrors useFullEngineBranches' own arithmetic: union every branch's
+// ExpansionLabels, and consult the resolver only when that union is non-empty
+// (a sigil-free query never touches the resolver, which is the taxonomy design's
+// inertness guarantee). A StatusUnknown answer is what makes activation REFUSE,
+// so a census pinning that lens is pinning a lens that does not run — it fails
+// here rather than quietly reading the nil-expansion verdict, which is exactly
+// the substitution this parameter exists to prevent.
+func corpusBranchLabelExpansion(t *testing.T, resolver *taxonomy.Resolver, branches []ruleengine.CompiledRule) map[string]map[string]struct{} {
+	t.Helper()
+	needed := map[string]struct{}{}
+	for _, c := range branches {
+		fullCR, isFull := c.(*full.CompiledRule)
+		if !isFull {
+			continue
+		}
+		for l := range fullCR.ExpansionLabels() {
+			needed[l] = struct{}{}
+		}
+	}
+	if len(needed) == 0 {
+		return nil
+	}
+	expanded, _, status, reason := resolver.Expand(needed)
+	require.NotEqualf(t, taxonomy.StatusUnknown, status,
+		"the corpus taxonomy cannot expand a `*` this lens carries (%s) — activation would refuse the lens outright, so there is no derivation verdict to pin for it", reason)
+	return expanded
+}
+
 // allBranchesReadyForPersonal answers the conjunct BranchDerivationRefusal
 // deliberately does not: every walk's anchor position must be labelled with the
 // personal plane's actor type. The runtime asks it live, off the installed
 // ActorEnumerator; a census can only ask it of the declaration.
-func allBranchesReadyForPersonal(branches []ruleengine.CompiledRule) bool {
+//
+// It takes the same expansion its sibling predicate does, for the same reason:
+// two readings of one lens's graphs that disagree about `*` would put the
+// per-branch column and the lens column on different lenses.
+func allBranchesReadyForPersonal(branches []ruleengine.CompiledRule, expanded map[string]map[string]struct{}) bool {
 	for _, cr := range branches {
 		fullCR, isFull := cr.(*full.CompiledRule)
-		if !isFull || !indexReadyForPersonal(fullCR) {
+		if !isFull || !indexReadyForPersonal(fullCR, expanded) {
 			return false
 		}
 	}
@@ -294,9 +350,12 @@ func lensNameOf(cypherName string) string {
 // configures the enumerator with.
 //
 // It reads the SAME full.HopIndex derivationIndex reads and the SAME actor-type
-// symbol InstallPersonalLens passes, rather than re-deriving either.
-func indexReadyForPersonal(fullCR *full.CompiledRule) bool {
-	ix := fullCR.AnchorHopIndex()
+// symbol InstallPersonalLens passes, rather than re-deriving either — including
+// the label expansion the installer threads in, without which a `*` position
+// reads unresolved and the lens is pinned as refused while the installer derives
+// for it.
+func indexReadyForPersonal(fullCR *full.CompiledRule, expanded map[string]map[string]struct{}) bool {
+	ix := fullCR.AnchorHopIndex().WithLabelExpansion(expanded)
 	if !ix.Complete || ix.UnresolvedExpansionPosition() >= 0 {
 		return false
 	}
@@ -444,28 +503,35 @@ func TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent(t *testin
 
 	require.Empty(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
 		sound, parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
-	}), "positive vector: two walks that agree must admit, or the negatives below prove nothing")
+	}, nil), "positive vector: two walks that agree must admit, or the negatives below prove nothing")
 
 	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
 		sound, parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
-	}), personalIndexBranchIncomplete,
+	}, nil), personalIndexBranchIncomplete,
 		"a walk whose graph cannot answer must refuse the LENS: the derived set is a union, and a union with an unknown in it is a superset of nothing")
 
 	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
 		sound, parse("MATCH (org:org {key: $actorKey})-[:owns]->(x:unit)\nRETURN x.key AS anchor"),
-	}), personalIndexBranchAnchorDisagree,
+	}, nil), personalIndexBranchAnchorDisagree,
 		"walks anchoring on different labels must refuse — the checkable form of \"each branch carries its own anchor\"")
 
-	// The taxonomy conjunct, reached the way a rule state published while the
-	// resolver could not answer reaches it: a `*` label position with no
-	// concrete set. Pruning a far end the walk cannot confirm is the
-	// under-approximating direction, so one such walk refuses the whole lens.
-	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
-		sound, parse("MATCH (identity:identity {key: $actorKey})-[:manages]->(l:location*)\nRETURN l.key AS anchor"),
-	}), personalIndexBranchUnresolvedExp,
+	// The taxonomy conjunct, and the EXPANSION PARAMETER that decides it. The
+	// same branch set reads two ways: refused with no expansion (the reading a
+	// pipeline whose resolver could not answer gets — pruning a far end the walk
+	// cannot confirm under-approximates, so one such walk refuses the whole
+	// lens), and admitted once the label resolves. A door that supplied nil for
+	// itself would report the first for a lens the installer runs as the second,
+	// so the pair is pinned rather than the parameter trusted.
+	expansionWalks := []ruleengine.CompiledRule{
+		sound, parse("MATCH (identity:identity {key: $actorKey})-[:manages]->(l:unit*)\nRETURN l.key AS anchor"),
+	}
+	require.Contains(t, pipeline.BranchDerivationRefusal(expansionWalks, nil), personalIndexBranchUnresolvedExp,
 		"a walk carrying an unresolved `*` position must refuse the lens: the walk would prune far ends it cannot confirm")
+	require.Empty(t, pipeline.BranchDerivationRefusal(expansionWalks, map[string]map[string]struct{}{
+		"unit": {"unit": {}, "studio": {}},
+	}), "the SAME walks must admit once the `*` resolves — otherwise threading the installer's expansion through this door changes nothing and the census is answering about a lens that does not run")
 
-	require.Equal(t, personalIndexNoBranchIndex, pipeline.BranchDerivationRefusal(nil),
+	require.Equal(t, personalIndexNoBranchIndex, pipeline.BranchDerivationRefusal(nil, nil),
 		"no walks at all is a refusal, never a union over nothing")
 }
 

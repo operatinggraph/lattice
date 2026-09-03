@@ -557,6 +557,19 @@ func readGrantProducerShortfall(desc OutputDescriptor, plan *ProjectionPlan) str
 // Unconditional in both directions: a lens that stops qualifying across a
 // reload must LOSE the licence, and "we did not call the setter" would leave a
 // stale one armed.
+//
+// TWO CALL SITES, AND ONE NatsKVAdapter THAT REACHES NEITHER. Refractor builds
+// its lens adapters at activation (InstallLensTarget, below) and at INTO hot
+// reload (cmd/refractor's reload path), and both call this — that pair is what
+// "every adapter built for that rule" means. internal/chronicler builds a
+// NatsKVAdapter of its own (its natsKVAdapterFactory) and is deliberately out of
+// scope rather than an omission: it is not a lens target at all, it opens the
+// bucket named by the Manager it serves with a single keyField from that same
+// spec, and no rule, descriptor or RETURN column reaches it — so there is no
+// path by which it renders a `cap-read.`-prefixed key, and the D1 namespace
+// stays closed over the sites this licence binds. A future chronicler target
+// that could render such a key would owe this call, and the adapter's own
+// refusal (refuseUnsanctionedGrantKey) is what would catch it meanwhile.
 func ApplyReadGrantLicence(adpt adapter.Adapter, r *lens.Rule) error {
 	nkv, ok := adpt.(*adapter.NatsKVAdapter)
 	if !ok {
@@ -586,7 +599,7 @@ func ruleIsReadGrantProducer(r *lens.Rule) bool {
 	return IsReadGrantProducer(desc, plan)
 }
 
-// InstallActorAggregate wires an actor-aggregate lens through the compiled// InstallActorAggregate wires an actor-aggregate lens through the compiled
+// InstallActorAggregate wires an actor-aggregate lens through the compiled
 // ProjectionPlan: the §6.13 Output descriptor drives the on-wire envelope, the
 // per-actor cross-vertex fan-out, the empty/delete-key behavior, and the §6.2
 // guard predicate — all from lens-definition data, with no canonical-name

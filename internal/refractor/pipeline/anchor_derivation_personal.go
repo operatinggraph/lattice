@@ -414,7 +414,16 @@ func (p *Pipeline) personalDerivationLicence(rs ruleState) (licensed bool, refus
 		// inherit a clean verdict from a pass that BEGAN before it joined the
 		// registry and therefore never drove it. The healer's guarantee is
 		// per-lens; so is the evidence for it.
-		return false, "the personal-plane healer has not completed a pass begun after this lens registered, so its own rows have not been covered once"
+		//
+		// The reason is a LIVENESS statement, and deliberately not a coverage
+		// one. A pass drives a bounded batch of ARBITRARY identities, so a pass
+		// begun after this lens registered has very likely touched none of the
+		// rows an operator is looking at; what it establishes is that a standing
+		// healer is turning over a registry this lens is in. Claiming the rows
+		// had been "covered once" would promise a per-row sweep nothing here
+		// performs, and would send an operator looking for a guarantee the
+		// mechanism does not make.
+		return false, "the personal-plane healer has not completed a pass begun after this lens registered, so nothing standing has yet been proven to re-test its rows"
 	}
 	if stale, window := personalHealerStale(v, time.Now()); stale {
 		return false, fmt.Sprintf("the personal-plane healer has not completed a pass in %d of its own sweep intervals, so nothing is proven to be re-testing these rows", window)

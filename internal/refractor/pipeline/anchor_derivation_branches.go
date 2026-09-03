@@ -167,8 +167,17 @@ func branchAnchorHopsRefusal(hops []full.HopIndex) string {
 // the shipped predicate through this door instead of restating it, so a conjunct
 // added above is pinned for free and neither side can answer the question
 // differently.
-func BranchDerivationRefusal(branches []ruleengine.CompiledRule) string {
-	_, refusal := deriveBranchAnchorHops(ruleengine.EngineFull, branches, nil)
+//
+// expanded is the taxonomy label expansion, and it is a PARAMETER rather than a
+// nil the door supplies for itself because the installer threads one
+// (useFullEngineBranches resolves it from the branch set's ExpansionLabels
+// before building these graphs) and a census that passed nil would be answering
+// about a different lens: a `*` position reads UNRESOLVED with no expansion and
+// resolves with one, which is the difference between the whole lens being
+// refused and it deriving. A caller with no expansion to offer passes nil, and
+// gets the reading a pipeline whose resolver could not answer would get.
+func BranchDerivationRefusal(branches []ruleengine.CompiledRule, expanded map[string]map[string]struct{}) string {
+	_, refusal := deriveBranchAnchorHops(ruleengine.EngineFull, branches, expanded)
 	return refusal
 }
 

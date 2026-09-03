@@ -63,6 +63,19 @@ func registerPersonalHealer(
 	}
 	p.SetPersonalDerivationLicence(wiring, verdict)
 
+	// Ask the standing healer for a pass now that this lens is BOTH registered
+	// and licensed. Nil-safe, and a no-op on a deployment with no healer.
+	//
+	// RegisterPersonal already nudged it, and that nudge alone is not enough:
+	// RegisteredAt is stamped above, AFTER the registry insert, so the pass that
+	// nudge kicked off can have begun before this lens's own registration
+	// instant — and conjunct 3 refuses a verdict from a pass that did not begin
+	// after it. This second nudge is what makes the promptness the LICENCE's
+	// rather than merely the registry's. It costs at most one extra pass: the
+	// nudge channel holds a single slot, so a burst of activating lenses
+	// coalesces into one.
+	sweeper.Nudge()
+
 	// The operator surface for both halves of "is this lens narrowing": the
 	// licence and the lens's own pattern index, each with the conjunct refusing
 	// it. Without it the only evidence of a refusal is a log line emitted at

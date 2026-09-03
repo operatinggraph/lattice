@@ -201,6 +201,39 @@ func TestPersonalLensActivationAssertsTheDerivationLicence(t *testing.T) {
 		require.Equal(t, pipeline.PersonalHealerVerdictClean, v.Summary())
 	})
 
+	t.Run("registration earns a pass begun after it, so the licence grants without waiting a tick", func(t *testing.T) {
+		// The seam the sweeper's own TestPersonalSweep_RunSweepsImmediately pins
+		// from below, driven here through the production sequence: main starts
+		// the sweep loop BEFORE the lens source activates anything, so that
+		// loop's immediate pass runs over an empty registry and records nothing,
+		// and conjunct 3 additionally requires a pass BEGUN after this lens's
+		// RegisteredAt. Both are why registration nudges the healer — once from
+		// the registry insert, once from registerPersonalHealer after the stamp,
+		// since the stamp lands after the insert and a pass starting between the
+		// two would be refused for the very lens that kicked it off.
+		//
+		// The interval is an hour, so a licence granted inside this test cannot
+		// have come from a tick. Without the nudge it waits that hour, and every
+		// personal lens spends the wait on the relation-blind enumerator —
+		// precisely when the backlog is deepest.
+		p := newPipeline(t)
+		r := grantchange.New()
+		sweeper := grantchange.NewPersonalSweeper(r, &staticKeyLister{}, &staticKeyLister{keys: []string{health.InstanceKeyPrefix + "rfx-a1b2c3"}})
+		sweeper.SetBounds(0, time.Hour)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go sweeper.Run(ctx)
+
+		registerPersonalHealer(r, sweeper, nil, rule.ID, p, fullyWired)
+
+		require.Eventually(t, func() bool {
+			licensed, _, _, _ := p.PersonalDerivationStatus()
+			return licensed
+		}, 5*time.Second, time.Millisecond,
+			"the licence must grant on a pass the registration itself kicked off, not on the next tick")
+	})
+
 	t.Run("a nil sweeper leaves the live conjuncts refusing", func(t *testing.T) {
 		p := newPipeline(t)
 		registerPersonalHealer(grantchange.New(), nil, nil, rule.ID, p, fullyWired)

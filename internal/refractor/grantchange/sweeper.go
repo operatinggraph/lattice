@@ -89,6 +89,19 @@ type PersonalSweeper struct {
 	coreKV   CoreKVLister
 	healthKV HealthKVLister
 
+	// nudge asks Run for a pass now rather than at the next tick. Buffered at
+	// ONE and sent to non-blockingly, which is the whole coalescing rule: a
+	// hundred lenses activating in a burst cost one extra pass, and a nudge
+	// arriving while a pass is already running is kept rather than dropped, so
+	// the loop's next iteration runs one MORE pass whose StartedAt is later than
+	// the registration that sent it. That is the property the licence's conjunct
+	// 3 needs (StartedAt after the lens's RegisteredAt) and the reason the
+	// buffer is a slot rather than a boolean the running pass could clear.
+	//
+	// Never closed: Run's exit is ctx.Done, and a closed channel in the select
+	// would spin.
+	nudge chan struct{}
+
 	mu sync.Mutex
 	// population is the cached identity census for the CURRENT cycle: bare
 	// NanoIDs (not vertex keys — that is what ReprojectPersonalActor takes),
@@ -118,10 +131,10 @@ type PersonalSweeper struct {
 	// same lock at the end of every pass and read live by the personal
 	// derivation licence (pipeline.PersonalHealerVerdict).
 	//
-	// LIFETIME: created by the first completed pass — which Run performs
-	// immediately rather than on the first tick, or the whole personal plane
-	// would run on the enumerator for a full interval after every restart,
-	// precisely when the backlog is deepest. Zero at process start, and zero
+	// LIFETIME: created by the first completed pass — which a lens's own
+	// registration kicks off (Nudge), rather than the first tick, or the whole
+	// personal plane would run on the enumerator for a full interval after every
+	// restart, precisely when the backlog is deepest. Zero at process start, and zero
 	// REFUSES the licence. Not persisted: a restart re-earns the narrowing on
 	// its first pass. Replaced wholesale rather than field-by-field so a reader
 	// can never see one pass's failure count beside another pass's clock.
@@ -141,12 +154,44 @@ type PersonalSweeper struct {
 // exercising the sweep alone passes nil and gets exactly today's behaviour plus
 // a narrowing it was never going to earn.
 func NewPersonalSweeper(r *Reprojector, coreKV CoreKVLister, healthKV HealthKVLister) *PersonalSweeper {
-	return &PersonalSweeper{
+	s := &PersonalSweeper{
 		r:        r,
 		coreKV:   coreKV,
 		healthKV: healthKV,
+		nudge:    make(chan struct{}, 1),
 		batch:    DefaultPersonalSweepBatch,
 		interval: DefaultPersonalSweepInterval,
+	}
+	if r != nil {
+		// A registration is what turns a pass from a no-op into the verdict the
+		// licence reads, so the registry tells the sweep when one lands. Wired
+		// here rather than by the host: the pair is the Reprojector this
+		// sweeper was built over, and a second wiring step in cmd/refractor
+		// would be one more thing that can be forgotten with no symptom but a
+		// slower plane.
+		r.setPersonalRegisteredHook(s.Nudge)
+	}
+	return s
+}
+
+// Nudge asks the run loop for a pass as soon as it can take one, coalescing
+// with any nudge already pending. Safe on a nil sweeper and safe before Run
+// starts — a nudge sent early is simply the first thing the loop sees.
+//
+// Two callers, for two halves of one registration. The Reprojector fires it
+// when a lens lands in the registry this sweep walks; cmd/refractor fires it
+// again once that lens's derivation licence has been asserted, because the
+// licence's RegisteredAt is stamped AFTER the registry insert and a pass that
+// began in between would be refused by conjunct 3 for the very lens it was
+// kicked off for. The second nudge cannot be lost to the first: the buffered
+// slot is drained before a pass runs, so a nudge arriving during one is kept.
+func (s *PersonalSweeper) Nudge() {
+	if s == nil || s.nudge == nil {
+		return
+	}
+	select {
+	case s.nudge <- struct{}{}:
+	default:
 	}
 }
 
@@ -166,15 +211,23 @@ func (s *PersonalSweeper) SetBounds(batch int, interval time.Duration) {
 	}
 }
 
-// Run sweeps once IMMEDIATELY, then on a ticker until ctx is cancelled.
+// Run sweeps once immediately, then on every nudge and every tick until ctx is
+// cancelled.
 //
-// The immediate pass is not an optimisation. The pass verdict is what the
-// personal derivation licence rests on and its zero value refuses, so a bare
-// ticker would leave every personal lens on the relation-blind enumerator for a
-// full interval after every restart — which is exactly when the backlog is
-// deepest and the enumerator most expensive. It also costs nothing new: the
-// first tick was always going to do this work, and Sweep already returns
-// immediately when no personal lens is registered yet.
+// The NUDGE is what makes the promptness real, and the immediate pass alone is
+// not. The pass verdict is what the personal derivation licence rests on and its
+// zero value refuses — but Sweep returns without recording one while no personal
+// lens is registered, and the host starts this loop before any lens activates.
+// So an immediate pass on its own records nothing, and the first verdict would
+// land a full interval later: every personal lens on the relation-blind
+// enumerator for that window, which is exactly when the backlog is deepest and
+// the enumerator most expensive. A registration therefore kicks a pass (Nudge),
+// and the immediate pass covers the other wiring order — a host that registers
+// its lenses before starting the loop, which is what every unit fixture in this
+// package does.
+//
+// The nudged and ticked arms run the same pass. Only the ticked arm re-reads the
+// cadence, because only it schedules by it.
 func (s *PersonalSweeper) Run(ctx context.Context) {
 	interval := s.tickInterval()
 
@@ -186,6 +239,13 @@ func (s *PersonalSweeper) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.nudge:
+			// Received BEFORE the pass runs, which is what lets a registration
+			// arriving mid-pass keep the slot and earn a further pass of its
+			// own — see Nudge. Draining it after the pass would coalesce a
+			// registration this pass could not have covered into a pass that
+			// started before it.
+			s.Sweep(ctx)
 		case <-t.C:
 			s.Sweep(ctx)
 			// The ticker FOLLOWS SetBounds. Every verdict advertises

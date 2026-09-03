@@ -141,7 +141,9 @@ func (p *Pipeline) ruleState() ruleState {
 		// a real answer. So the omission this hand-maintained round trip invites
 		// is fail-OPEN here too, and multiWalkDerivationRefusal fails closed on
 		// the PAIR rather than on either half.
-		// TestRuleState_BranchAnchorHopsSurvivePublication pins the trip.
+		// TestRuleState_BranchAnchorHopsSurvivePublication pins this pair's own
+		// behaviour — including that a REFUSED set publishes no graphs, which
+		// the round-trip gate below cannot see.
 		anchorHopsPerBranch:        p.anchorHopsPerBranch,
 		anchorHopsPerBranchRefusal: p.anchorHopsPerBranchRefusal,
 		walkScope:                  p.walkScope,
@@ -150,13 +152,13 @@ func (p *Pipeline) ruleState() ruleState {
 		declaresActorAnchor:        p.declaresActorAnchor,
 		labelExpansion:             p.labelExpansion,
 		narrowingBlocked:           p.plainNarrowingBlocked,
-		// The round trip through the Pipeline's own fields is hand-maintained,
-		// so a ruleState field added without a line HERE and one in
-		// publishRuleState reads as its zero value on every event with nothing
-		// failing anywhere. For this field the zero value is "" — the LICENSING
-		// answer — so the omission is fail-open, which is why
-		// TestRuleState_PersonalClockRefusalSurvivesPublication pins the trip
-		// rather than trusting the two lists to stay in step.
+		// For this field the zero value is "" — the LICENSING answer — so the
+		// omission the hand-maintained trip invites is fail-open here too. The
+		// class is now gated for EVERY field rather than argued per field:
+		// TestRuleState_RoundTripCarriesEveryField reads both lists out of this
+		// file and fails by field name unless each one is read here, written
+		// back in publishRuleState, and read and written through the same
+		// Pipeline field.
 		personalClockRefusal: p.personalClockRefusal,
 	}
 }
