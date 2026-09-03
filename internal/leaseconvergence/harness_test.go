@@ -439,10 +439,23 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 	require.NoError(h.t, src.Start(ctx))
 
 	found := make(map[string]*lens.Rule, len(want))
-	deadline := time.Now().Add(25 * time.Second)
+	// CoreKVSource's boot replay is deliberately SERIAL: MaxPrefetch:1 plus a
+	// per-event ACK (corekv_source.go's subscribeOptions doc) means the ~20
+	// historical lens rules this harness's nine-package install produces are
+	// each fetched and acked one at a time before the wanted ones surface — a
+	// quiet box clears that in ~150ms, but every fetch+ack is a network round
+	// trip, and this suite's sibling board row (TestRefractor_E2E_P99) has
+	// measured a single comparable projection at just over 10s under this
+	// runner's own worst -p4 contention (CI run 31288862556). Twenty such
+	// round trips inflating even a fraction of that under load crosses a 25s
+	// budget outright — the exact EMPTY/PARTIAL found=map[...] signature seen
+	// on CI (board: "suite reddens under parallel load" (b)), a slow watch,
+	// not a stall. 90s buys ample margin over that worst case; the happy path
+	// (a quiet box) still returns in well under a second.
+	deadline := time.Now().Add(90 * time.Second)
 	for len(found) < len(want) {
 		if time.Now().After(deadline) {
-			h.t.Fatalf("did not activate all requested lenses (%v) within 25s; found=%v", want, found)
+			h.t.Fatalf("did not activate all requested lenses (%v) within 90s; found=%v", want, found)
 		}
 		select {
 		case r := <-loaded:
@@ -491,9 +504,13 @@ func (h *harness) activateActorAggregateLensNow(ctx context.Context, name string
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
 	require.NoError(h.t, src.Start(ctx))
 
-	deadline := time.Now().Add(25 * time.Second)
+	// Same serial-replay mechanism as startRefractor's wait, above — same
+	// budget for the same reason (a single named lens is faster to surface
+	// than the full boot-time set, but the underlying per-event round trip
+	// still inflates under host contention).
+	deadline := time.Now().Add(90 * time.Second)
 	for {
-		require.Truef(h.t, time.Now().Before(deadline), "lens %s was not activated within 25s", name)
+		require.Truef(h.t, time.Now().Before(deadline), "lens %s was not activated within 90s", name)
 		select {
 		case r := <-loaded:
 			if r.CanonicalName != name {
