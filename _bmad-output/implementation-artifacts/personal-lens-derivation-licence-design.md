@@ -917,10 +917,11 @@ lines for `edgeInstances` and `edgeCatalog` (`healerVerdict=clean`, `refractorIn
 `edgeInstances`' residual is **after** the derivation: its slow messages (10–22 s each) are exactly the events
 its pattern binds — `vtx.service.*`, `lnk.service.*.providedTo.identity.*`, `vtx.service.*.outcome` — which
 `edgeCatalog` handles in < 50 ms; the events its pattern does not bind (`vtx.op.*.events`, 66 % of the stream)
-are instant. The derivation names the right actor and the cost is the per-actor whole-recompute + keyset frame
-the personal-lens model performs (§6: "over-approximation costs an extra frame" — here the frame itself is
-wide). Not this design's mechanism; filed as a designer-pass row on the board (no ratified pattern for a
-sub-actor incremental reprojection of a personal lens). R7's latency number: the producer sweep paces the
+are instant. The derivation names the right actor. *(Struck 2026-09-03 — `personal-lens-whole-actor-cost-design.md`
+§1.2 measured where the time goes: ~63 % in the envelope's per-row `IsReadable` / `IsRelevant` reads, ~20 %
+in the two synchronous publishes per row, ~17 % in the engine's per-neighbour point reads. The frame is one
+publish. The row that this paragraph filed is being built under that design; the sub-actor reprojection
+idea survives as the delta-publication designer row.)* R7's latency number: the producer sweep paces the
 repair; not separately measurable on this stack (no grant flips during the window).
 
 Three other stuck consumers seen in the same report are other rows' territory and unchanged by this item:
