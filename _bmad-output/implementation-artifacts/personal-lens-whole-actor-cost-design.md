@@ -164,16 +164,66 @@ has, and the edge re-drives it.
   keeps serving from the memo. The read-free executor (`coreKV == nil`) prefetches nothing.
 - **Proof shape**: a test-only point-read counter on the executor; N neighbours ⇒ 0 point reads after
   prefetch, and with the prefetch disabled ⇒ N (the revert-proof, run in the builder's own worktree).
+- *(Amended at build, 2026-09-03.)* **Prefetched values are STAGED, not memoized**: `prefetchNodes` fills a
+  separate staging map and `fetchNode` promotes an entry into the memo on its first dereference. Direct
+  memoization would have broken the byte-identical-footprint promise above — `walkExprAll` collects keys
+  from expression positions the evaluation may never evaluate (`evalExpr` short-circuits `AND`/`OR`, `CASE`
+  arms and `coalesce`; the corpus has 16 CASE arms and 45 non-first `AND` operands dereferencing an aspect),
+  so a memoized-but-never-read key would enter the footprint at a revision no point read ever observed.
+  Staging makes the footprint identical by construction for every rule, not only the ones a test picks.
+- *(Amended at build, 2026-09-03 — Inc 2b, found by Inc 2's own census.)* **A stage's bound-source frontier
+  reads its adjacency in one batch too.** `applyMatch` expands each binding from its bound first node, and
+  `traverseRel`'s `fetchEdges` costs one adjacency node-state read per source node, so
+  `OPTIONAL MATCH (inst)-[:instanceOf]->(tpl:service)` over 3,638 bound rows was 3,638 serial round trips
+  the Core-KV prefetch never touched. `adjacency` gains a chunked multi-node state read that answers exactly
+  what `NeighborsScoped`/`Neighbors` answer for an UNMARKED node (doc edges + doc revision; absent ⇒ empty at
+  0) and returns a marked hub as *marked, no edges* so it keeps its per-node scoped path; the executor stages
+  those answers and `fetchEdges` promotes them through `memoizeWhole` at first use, so composition with pinned
+  relations, the `edgeRevisions` record and the read-observer observations are the per-node path's. Sources
+  are collected per `applyMatch` pattern (bound first node), per pattern comprehension and per existence
+  pattern (`PatternExpr`, incl. its negated form) in a projection or WHERE. Two details as built: the
+  read-observer observation fires at **promotion**, not at batch time — `matchPath` gates a bound head on
+  its label/property predicates before it hops, so a batch-time observation would announce nodes the walk
+  never reaches; and the batch is chunked **by node at 512** so a node's document and its overflow mark are
+  always read in one request (the pairing `readNodeState` relies on to never see an emptied document
+  without the mark that explains it).
+- **Branch-decomposed stages (Inc 2c, absorbed at build).** A `stagePlan` — an aggregating `WITH`/`RETURN`
+  whose sibling OPTIONAL MATCH branches are deferred into the fold — expands each branch per base row inside
+  the fold loop, so the stage-level prefetch above never sees the branch's variables. The corpus census
+  (`branch_decomposition_corpus_census_pins_test.go`) pins the decomposed set: one personal lens
+  (`edgeIdentity`, 8 deferred groups), `myTasks`, the three `edgeManifest*ReadGrants` producers, the
+  `capability*` aggregates and a dozen vertical read models. A deferred branch's **first node is bound in
+  the base row**, so its adjacency source batch is applied across all base rows before the fold, exactly
+  as `applyMatch` does; what stays per row is the aspect dereference of a node the branch only binds during
+  its own expansion (the branches are deliberately not co-resident — that is what decomposition bounds).
+  Trigger for going further: a decomposed stage whose deferred branch dereferences aspects over a wide
+  actor; the fix is a bounded per-branch expansion window, which changes the memory bound decomposition
+  exists to hold and so needs its own design.
+- *(Amended at build, 2026-09-03 — Inc 2 cold review.)* A batch is bounded by **count and by size**: a chunk
+  whose aggregate value size trips the connection's 64 MiB response ceiling is split in half and retried down
+  to a floor, so a wide frontier of large documents degrades to more requests, never to a wedged evaluation;
+  a body or adjacency document that fails to decode is **not staged** (Warn), so the point read fires iff the
+  evaluation dereferences it and fails exactly where it did before batching (R6's rule, mirrored); the
+  request count per batch is pinned by a `batchReads` counter so a shrunken chunk constant cannot pass CI
+  with the payoff gone; and `traverseRel`'s multi-hop frontier batches its adjacency at the top of each hop.
+- **Not covered, named:** a `MATCH`/`OPTIONAL MATCH` clause's OWN `WHERE` whose existence pattern's subject
+  is bound by that same clause (`packages/service-location/lenses.go:170-171`, `capabilityServiceAccess`:
+  `… <-[:availableAt]-(svc:service) WHERE NOT (svc)-[:instanceOf]->(svcTpl:service) AND …`). The predicate
+  runs per row inside `applyMatch`'s loop before the clause's own sources exist, so batching it means
+  hoisting the WHERE out of that loop — a restructure, one corpus instance, an actor-aggregate lens whose
+  per-actor row count is small. Its `[(svc)-[:permitsOperation]->(op) …]` comprehension IS batched.
 
 ### 4.3 Increment 3 — publishes are pipelined, acks awaited once per batch
 
-- **`substrate.PublishBatch`** (`publish_batch.go`): `Conn.NewPublishBatch(window int)`; `Add(ctx, subject,
+- **`substrate.PublishPipeline`** (`publish_pipeline.go`; *named at build so it cannot be read as the
+  pre-existing atomic `Conn.PublishBatch`, which is all-or-nothing — this one is ordered async publishes with
+  no atomicity*): `Conn.NewPublishPipeline(window int)`; `Add(ctx, subject,
   data)` issues `js.PublishMsgAsync` and, when `window` futures are in flight, awaits the oldest; `Flush(ctx)`
   awaits every outstanding future and returns the **first** error. Ordering is the connection's send order
   (unchanged from the synchronous path). The window (256) keeps a wide batch under nats.go's 4,000
   outstanding-async-publish default with headroom for the other pipelines sharing the connection.
-- **The batch rides the ctx** (G15's precedent): `adapter.WithPublishBatch(ctx, b)`; `NatsSubjectAdapter.publish`
-  adds to a batch found on the ctx and otherwise publishes synchronously as today. No adapter interface
+- **The pipeline rides the ctx** (G15's precedent): `adapter.WithPublishPipeline(ctx, p)`; `NatsSubjectAdapter.publish`
+  adds to a pipeline found on the ctx and otherwise publishes synchronously as today. No adapter interface
   changes, no adapter state, and the adapter's concurrent callers (consumer goroutine, hydrate, reprojection)
   each own their batch.
 - **Callers**: `writeResults`, `Hydrate`, `ReprojectPersonalActor` open a batch around their write loop and
@@ -196,7 +246,8 @@ has, and the edge re-drives it.
 | State | Created | Reset | Carried | Ordered |
 |---|---|---|---|---|
 | per-evaluation gate scope (`*AnchorSet`, `[]Registration`) in the envelope's params copy | after `executeBranches`, per `executeFullForActorOnce` call | dropped with the call — never outlives one evaluation, never cached across actors or events | not carried | one read per actor evaluation, taken after the walk |
-| executor node memo entries seeded by prefetch | per evaluation, same memo as today | with the executor | not carried | identical revisions/absences to point reads (pinned) |
+| executor staging maps `prefetched` (Core-KV bodies) and `prefetchedEdges` (adjacency answers) — *amended at build, 2026-09-03* | per evaluation, filled by each batch | an entry is **deleted on promotion** into the memo (first dereference), so the map holds only not-yet-used answers; the whole map dies with the executor | not carried | bounded by the keys one evaluation's expressions and frontiers name — for the widest actor a few thousand decoded bodies at most; a key the evaluation never uses never reaches the memo or the footprint |
+| executor node/edge memo entries promoted from staging | per evaluation, same memos as today | with the executor | not carried | identical revisions/absences/observations to point reads (pinned on/off) |
 | `PublishBatch` futures | per write loop, on the ctx | flushed before the frame; dropped with the loop | not carried | connection send order |
 | executor point-read counter | test builds only | — | — | — |
 
@@ -238,6 +289,8 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 | R3 | A batched publish fails after earlier ones in the batch landed. | Partial batch on the wire. | Same as today's mid-loop failure: Nak ⇒ full redelivery; upserts are idempotent; the frame is withheld. |
 | R4 | The async window starves another pipeline of nats.go's outstanding-publish budget. | Latency elsewhere. | Window 256 ≪ 4,000; `Add` awaits the oldest future rather than queueing without bound. |
 | R5 | A listing over `cap-read.*.<actor>.*` returns a sibling actor's keys. | Over-grant. | The actor suffix is a literal token pair in both filters; `TestIsReadable_DoesNotLeakAcrossActors` is mirrored for the set. |
+| R6 | *(added at build, 2026-09-03 — Inc 1 cold review)* The set reads every one of the actor's grant bodies, so one corrupt body would have failed the whole actor's evaluation on every redelivery, where the per-row read touched only the gated anchor's key. | Fail-closed, but a redelivery wedge for that actor's whole personal plane. | An unparseable body is logged at Warn and its anchor is simply not admitted — fail-closed per anchor; the asymmetry with `IsReadable` (which errors) is pinned in the equivalence test. |
+| R7 | *(added at build, 2026-09-03 — Inc 1 cold review)* The widest actors' grant sets exceed the multi-get's 1,024 fast-path cap, so production always takes the consumer drain, whose contract requires a caller deadline; the consumer ctx has none. | A starved drain stalls the personal consumer up to 80 s per event. | The scope read is bounded by a 15 s timeout inside `personalEnvelopeScope`; a timeout is a loud evaluation error the Nak path handles. The drain path itself is now pinned by a past-the-cap test over both key shapes with a second actor present. |
 
 ## 10. Test strategy
 
@@ -257,7 +310,7 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 
 ## 11. Decomposition for the Steward
 
-One fire, three increments, landed on `main` in order (each independently green and semantics-preserving —
+One fire, three increments (Inc 2 carries the 2b adjacency batch found at build), landed on `main` in order (each independently green and semantics-preserving —
 the *land each increment* shape; the invariant that keeps main correct across boundaries is that every
 increment's fallback is today's path). Build tier: **opus** for all three (a security-plane read memo, an
 engine read-consistency change, an ack-discipline change); cold **opus** review per increment sized to its
@@ -297,11 +350,13 @@ bar:** every gate green; C1 re-measured live at p50 < 1 s / p90 < 2 s on pattern
 | 2 | `internal/refractor/ruleengine/full/executor.go` | `:852-895` `fetchNode`/`readNode`, `:1147-1190` `applyWith`, `:1208-1330` `projectItems`, `:1619` `walkExprAll` | factor `decodeNode(key, entry)`; add `prefetchNodes(keys)` (chunk ≤ 1,024, `GetMultiNoSnapshot`, absent ⇒ nil memo) and `prefetchAspects(bindings, exprs)`; call before the item loops and the WITH WHERE |
 | 2 | `internal/refractor/ruleengine/full/rel_traverse.go` | `:58-100` the per-edge `fetchNode` loop | collect the frontier node's unmemoized other-end keys, `prefetchNodes`, then the existing loop |
 | 2 | `internal/refractor/ruleengine/full/values.go` | `:23-80` `resolveProperty` | unchanged — the aspect-key shape (`nr.key + "." + key`, link key for a rel binding) is what the prefetch mirrors |
-| 3 | `internal/substrate/publish_batch.go` (new) + `publish.go` | `:62-76` `Publish` | `PublishBatch` (`NewPublishBatch(window)`, `Add`, `Flush`) over `js.PublishMsgAsync` (nats.go v1.52.0 `jetstream/publish.go:274`) |
-| 3 | `internal/refractor/adapter/natssubject.go` | `:424-434` `publish` | ctx-carried batch: `WithPublishBatch(ctx, b)` / `publishBatchFrom(ctx)`; sync path when none |
+| 2b | `internal/refractor/adjacency/store.go`, `overflow.go` | `:52-145` `Neighbors`/`NeighborsScoped`, `:148-170` `readNodeState` | add the chunked multi-node state read (unmarked ⇒ whole answer, marked ⇒ marked/no edges, observer parity) |
+| 2b | `internal/refractor/ruleengine/full/executor.go` | `:534-600` `applyMatch`, `:930-975` `fetchEdges`/`memoizeWhole` | stage per-source adjacency answers; promote via `memoizeWhole` on first `fetchEdges`; collect sources per bound-first-node pattern and per pattern comprehension |
+| 3 | `internal/substrate/publish_pipeline.go` (new) + `publish.go` | `:62-76` `Publish` | `PublishPipeline` (`NewPublishPipeline(window)`, `Add`, `Flush`) over `js.PublishMsgAsync` (nats.go v1.52.0 `jetstream/publish.go:274`) |
+| 3 | `internal/refractor/adapter/natssubject.go` + `publishpipeline.go` (new) | `:424-434` `publish` | ctx-carried pipeline: `WithPublishPipeline(ctx, p)` / `publishPipelineFrom(ctx)`, `PublishPipelineOpener`; sync path when none |
 | 3 | `internal/refractor/pipeline/results.go` | `:34-250` `writeResults`, `:443-460` `writeAudit` | open row batch + audit batch before the loop; flush the row batch before returning the decision the frame emission reads; audit flush logged |
 | 3 | `internal/refractor/pipeline/hydrate.go`, `reproject_personal.go` | `:80-125`, `:143-225` | same batch around the write loop, flushed before `PublishKeySet` |
-| 3 | `internal/refractor/health/audit_writer.go` | `:138-156` `WriteAudit` | `WriteAuditAsync(ctx, batch, ...)` sibling; sync `WriteAudit` kept for other callers |
+| 3 | `internal/refractor/health/audit_writer.go` | `:138-156` `WriteAudit` | `WriteAuditPipelined(ctx, pipe, ...)` sibling (`WriteAudit` delegates with nil); own pipeline, never the row pipeline |
 | docs | `docs/components/refractor.md` | personal-lens transport rows (`:72-135`), rule-engine section (`:563+`) | the three mechanisms, one line each |
 
 ### 13.3 Precedents to mirror
