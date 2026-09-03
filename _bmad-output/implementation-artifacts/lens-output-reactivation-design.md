@@ -157,4 +157,38 @@ consumer names it); `reloadpin`'s remaining pins.
 
 ## 6. Build note
 
-_Checkpoint and deviations recorded at close._
+**Shipped in one fire (2026-09-03), one worktree, one code commit; SHA in the board's Done-log.** Two cold
+adversarial passes (opus) ran over the diff; every finding was fixed in-fire, none filed.
+
+**Deviations from §3, all in the direction of a narrower licence:**
+- **Pre-flight is the whole guard, not a flag.** A re-activation is refused unless BOTH the running target and
+  the new rule's target are `nats_kv` (the descriptor's only home), the new descriptor compiles, and the
+  cap-read closure admits it. The purge's target gate was first written as a conjunct on `requested` — inert,
+  because `resolveTruncate` forces a purge on any guarded adapter, and a protected Postgres adapter is
+  guarded, truncatable and unscoped. Refusing by construction is what closes it.
+- **Ownership, not prefix.** `KeyPrefix` scopes a listing and admits siblings (`cap.` contains
+  `cap.roles.` / `cap.svc.` / `cap.ephemeral.` / `cap.role-by-operation.`); an automatic purge over the listing
+  would have wiped four producers' rows on a `bodyColumns` edit to the kernel `capability` lens.
+  `ApplyTruncateScope` now binds `OutputDescriptor.OwnsKey` (the `AnchorFromKey` round trip, plus the
+  doc-mode parent for a perEntry descriptor) and `truncateKeys` keeps only owned keys — every truncate path
+  inherits it. Census: all 30 shipped patterns round-trip, no cross-claims.
+- **A clear keyed to what it wrote.** The clean-registration path cleared every writer's `LastError`, erasing
+  the purge-failure diagnosis seconds after it was raised; `Reporter.ClearLastErrorIf` clears only the
+  narrowed-filter fallback message it owns.
+- **Teardown is consumed.** `remover.stop` returns the deleter's error (and `errLensNotRunning` when the
+  registry had nothing); a stop that failed refuses the re-activation before any purge, records the failure
+  on the still-present health entry, and withholds `unregister` so the operator delete op remains the retry.
+- **A dark lens is a fault plus an INFRA pause** — the one pause kind the pump resumes by probing, so the next
+  activation heals it; a structural pause would have outlived the restart the remedy names.
+- **`replayCannotOverwrite`** widens the purge trigger to `emptyBehavior → skip` (rows for empty actors are
+  never rewritten), and a `projectionKind` flip re-activates like an Output edit (`pipelineEntry.projectionKind`).
+- **A descriptor ARRIVING** (plain → actor-aggregate) re-activates without a purge: the old adapter carries
+  no scope, and the plain lens's rows are not addressable by the new descriptor — the outcome a tombstone
+  or a restart leaves; logged as a Warn naming it.
+
+**Review classification (close pass):** design-gap 3 (prefix-as-ownership; the over-broad clear; the pre-flight
+set), implementation-bug 2 (the inert purge flag; the unchecked teardown), brief-gap 2 (`skip` empty behaviour;
+`projectionKind`), convention 1 (history-narrating comments). Dossier: one entry appended, one mechanized entry
+retired (`docs/components/refractor.md`).
+
+**Live proof:** recorded below once the round trip runs (§5 Close).

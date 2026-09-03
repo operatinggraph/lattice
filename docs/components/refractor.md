@@ -1556,7 +1556,7 @@ necessarily the consumer filter* (`label_derivation_corpus_census_test.go`'s per
 `(labels, exhaustive, filterMode)` pin), *a new health `Entry` field ships with no carry-forward line, so the
 next status transition silently zeroes it* (`health/entry_carry_forward_completeness_test.go` — reflects over
 `Entry`, drives all three wholesale writers, and fails by field AND writer name unless the field is carried
-forward or allow-listed as writer-owned with a reason).
+forward or allow-listed as writer-owned with a reason), *a hand-maintained struct round trip's omitted field is fail-OPEN because the zero value is the admitting answer* (`TestRuleState_RoundTripCarriesEveryField`, which discovers the field universe from `rulestate.go` at test time and fails by field name unless each field is read into the snapshot and written back through the same `Pipeline` field).
 
 **Standing rule, not a finding class:** a new per-lens analysis **ships its corpus census in the same
 fire**, reusing `forEachCorpusCypher` rather than sweeping its own way — enumerate every parseable corpus
@@ -1589,21 +1589,6 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   `TestRebuildGate_TaxonomyAndControlPathsShareOneBound`, `TestRebuild_HoldsUntilTheConsumerPumpHasReopened`
   and `TestSupervisor_ResetAwaitReopen_{ReturnsOnlyAfterThePumpReopens,OverlappingWaitersAreBothReleased}`,
   which are now the record.)
-- **A hand-maintained struct round trip's omitted field is fail-OPEN, because the zero value is the
-  admitting answer.** Minted: personal-lens licence — `personalClockRefusal`'s `""` LICENSES the
-  narrowing, and `anchorHopsPerBranch`'s nil beside an empty refusal is a union over no walks returned as
-  a real anchor set. Two fields, each reasoning about the hazard in its own doc comment, neither gating
-  it. The trip is `Pipeline` fields → `ruleState` → `Pipeline` fields, two hand-written lists nothing held
-  in step, and a field with a line in only one reads as its zero on every event with nothing failing
-  anywhere. Check: **MECHANIZED — `TestRuleState_RoundTripCarriesEveryField`**, which discovers the field
-  universe from `rulestate.go`'s source at test time and fails by field name unless the field is read into
-  the snapshot, written back by `publishRuleState`, and routed through the SAME `Pipeline` field on both
-  sides — or allow-listed with a reason. Generalize before writing the next such trip: two hand-maintained
-  lists over one struct are a gate's worth of work, not a comment's. (Absorbed *"New pipeline state
-  without a declared lifetime"* — reset, carry, and order it at replay, reconnect, tombstone, and retry,
-  minted by dynamic-type-taxonomy item 4; the designer's state-lifetime table and standing checklist #1
-  remain that half's check, and a design's own state-lifetime table is still the record for reset /
-  carry / order.)
 - **A soundness claim's stated REASON is load-bearing, and a reason measurement can falsify is worse than
   none** — §4.4 justified "evaluate, don't render" by "a shrunken footprint turns a match into a spurious
   drift retry." Backwards: `footprintValid` re-reads only what the footprint NAMES, so a smaller footprint
@@ -1736,3 +1721,5 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   so a census can tell "nothing matched" from "nothing ran".
   `TestPersonalSweepVerdict_VocabularyIsClosed` pins the vocabulary half (a verdict summary is
   default-denied, so a new state cannot land as an unnamed empty string).
+
+- **An operator-driven repair promoted to an AUTOMATIC one carries every tolerance the operator path had, and each must be re-derived.** Minted: lens-output-reactivation (2026-09-03), where an Output edit began re-activating the lens with the rebuild's purge ahead of the replay. Three tolerances rode in, all found by the cold reviewer, none by the brief: (a) a listing SCOPE is not an ownership set — `KeyPrefix`'s own doc says a prefix admits siblings (`cap.` contains `cap.roles.`), and `truncateKeys` purged the listing whole, so a `bodyColumns` edit to the kernel `capability` lens would have wiped four sibling producers' rows; (b) a healer's clear keyed to nothing clears every writer's latch — the clean-registration `ClearLastError` erased the purge-failure diagnosis seconds after it was raised; (c) a flag consulted on the wrong side of a force rule guards nothing — `requested` gated the purge while `resolveTruncate` forces one for any guarded adapter, so a protected Postgres table was still purgeable. Check: ownership is exact (`OutputDescriptor.OwnsKey`, bound by `ApplyTruncateScope`, pinned by `TestTruncateScope_KernelCapabilityLensPurgesOnlyTheKeysItsOwnInverseClaims`), a clear names what it owns (`Reporter.ClearLastErrorIf`), and a refusal is by construction (`reactivationPreflight`) — and a design that automates a repair lists the operator path's tolerances (scope, clears, teardown result, target family) as premises to falsify.
