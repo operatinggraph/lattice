@@ -136,3 +136,15 @@ privacy-base, service-location all emit bare tombstones). This op's two link tom
 document and name a link-type authority. Board: `[Processor] A documentless tombstone skips every DDL-driven write
 gate…` (📐).
 
+**Fire 2 build note (2026-09-03):** op shipped `689eb0c0` (lease-signing 0.31.24; verify-gate pin `9329f045`).
+Cold review found the op proved family, subject and recency but never OWNERSHIP — service-domain mints
+byte-identical `service.backgroundCheck.instance` roots — so the instance's own `instanceOf` link to this
+package's type authority became the seventh declared read, checked first; an engine actor is refused; a
+foreign-shaped instance is a pinned negative vector. **Purge run:** planner found 7 identities, 12,252
+lease-signing bgcheck instances, 7 keepers, 7 foreign-owned instances skipped by ownership; 12,245 ops
+submitted 4-wide as the bootstrap identity, **12,245 accepted, 0 rejected**, Processor healthy throughout;
+each heavy identity ends with two live `providedTo` links. The freshness rows retracted through the
+anchor-tombstone shortcut (a tombstone body per key; the Weaver `@at`s fire harmlessly against absent rows).
+`leaseApplicationComplete`'s drain after the purge is recorded in the row's Done-log line once measured — its
+durable showed no waiting pull for several minutes right after the burst (investigated in-session).
+
