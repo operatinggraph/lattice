@@ -550,6 +550,8 @@ mechanizes it (name the gate, strike the entry).
   would never have landed from the console. Check: for every new op a `cmd/loupe` handler submits, assert
   it appears in `console-operator`'s grant list — and have the submitting handler surface its own failure
   on the SUCCESS path, so a denial is visible instead of swallowed.
+- **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
+
 
 ## Related contracts
 
