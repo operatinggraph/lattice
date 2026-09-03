@@ -129,7 +129,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// blocker was the `containedIn*1..` variable-length hop
 	// (typed-relation-signatures-design.md §9.2), rewritten to a fixed
 	// single hop now every live wiring is verified unit->building at depth 1.
-	"applicantOnboarding":            {broad, "identity leaseapp task unit", modeBroad},
+	"applicantOnboarding":            {narrow, "identity leaseapp meta task unit", modeLabel},
 	"applicantRosterRead":            {narrow, "building identity leaseapp unit", modeLabel},
 	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
 	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},
@@ -221,11 +221,9 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"shredStatus":        {narrow, "identity", modeRelation},
 	"staffReadGrants":    {narrow, "building identity role", modeRelation},
 	"staleAssignedTasks": {narrow, "identity task", modeRelation},
-	// The untyped `(t)-[:forOperation]->(op)` (same shape as orphanedTaskGrants
-	// below) leaves the label set non-exhaustive — op could bind any type — so
-	// this earns the broad filter despite the three OTHER hops being
-	// label-typed.
-	"staleUserTasks":                    {broad, "identity leaseapp renewal task", modeBroad},
+	// (t)-[:forOperation]->(op:meta) is label-typed, same as the other three
+	// hops off t, so the label set is exhaustive.
+	"staleUserTasks":                    {narrow, "identity leaseapp meta renewal task", modeLabel},
 	"unroutedTasks":                     {narrow, "role task", modeRelation},
 	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},
@@ -284,7 +282,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// be written over it. The reprojection cost is bounded by the anchor
 	// predicate: only erasure-requested identities have a row at all.
 	"identityErasureResidue":        {broad, "identity", modeBroad},
-	"leaseApplicationComplete":      {broad, "identity leaseapp object service task unit", modeBroad},
+	"leaseApplicationComplete":      {narrow, "identity leaseapp meta object service task unit", modeLabel},
 	"menuCatalog":                   {broad, "menuitem", modeBroad},
 	"myTasks":                       {broad, "identity role task", modeBroad},
 	"objectAttachments":             {broad, "object", modeBroad},

@@ -100,7 +100,7 @@ const corpusWalkScopeMinimum = 55
 // derivation already is. Every OTHER lens's absence of an `instanceOf` entry is
 // the descriptor hop being pruned, which is what this scope buys.
 var corpusActorWalkScopeDigests = map[string]string{
-	"applicantOnboarding":               "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|task:forOperation,scopedTo|unit:appliesToUnit|any:forOperation",
+	"applicantOnboarding":               "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|meta:forOperation|task:forOperation,scopedTo|unit:appliesToUnit",
 	"appointmentReminders":              "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"augurDispatchPending":              "none",
 	"backgroundCheckFreshness":          "none",
@@ -140,7 +140,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"followUpReminders":                 "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"identityAnchors":                   "identity:identifiedBy,manages,residesIn,worksAt|any:containedIn,identifiedBy,manages,residesIn,worksAt",
 	"identityErasureResidue":            "identity:boundTo,duplicateOf,indexes|any:boundTo,duplicateOf,indexes",
-	"leaseApplicationComplete":          "identity:applicationFor,manages,providedTo,scopedTo|leaseapp:applicationFor,appliesToUnit,providedTo,scopedTo,signedLease|object:signedLease|service:providedTo|task:forOperation,scopedTo|unit:appliesToUnit,manages|any:forOperation",
+	"leaseApplicationComplete":          "identity:applicationFor,manages,providedTo,scopedTo|leaseapp:applicationFor,appliesToUnit,providedTo,scopedTo,signedLease|meta:forOperation|object:signedLease|service:providedTo|task:forOperation,scopedTo|unit:appliesToUnit,manages",
 	"leaseExpiry":                       "identity:manages|leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit,manages",
 	"leaseRentSettlement":               "clause:governs|leaseapp:governs",
 	"myTasks":                           "identity:assignedTo,holdsRole|role:holdsRole,queuedFor|task:assignedTo,forOperation,queuedFor,scopedTo|any:forOperation,scopedTo",
@@ -151,7 +151,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"pastDueBookings":                   "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
 	"renewalComplete":                   "identity:applicationFor,manages,providedTo|leaseapp:applicationFor,appliesToUnit,renews|renewal:renews|service:providedTo|unit:appliesToUnit,manages",
 	"staleAssignedTasks":                "identity:assignedTo|task:assignedTo",
-	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|renewal:scopedTo|task:forOperation,scopedTo|any:forOperation",
+	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|meta:forOperation|renewal:scopedTo|task:forOperation,scopedTo",
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",
 	"visitSeriesDue":                    "patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",

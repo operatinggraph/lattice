@@ -17,7 +17,14 @@ package leasesigning
 //
 // The window is baked into leaseServiceReplyDDLScript at package-init time, so
 // it is a compile-time constant: the value is selected by build tag, never a
-// runtime mutation. This file carries the production default; the e2e
-// convergence gate compiles with `-tags leaseshortwindow` to substitute a short
-// window it can watch lapse in bounded wall-clock (freshness_window_short.go).
-const bgcheckFreshnessWindow = "5m"
+// runtime mutation. This file carries the production default: the span a
+// completed check stays valid, set by the vendor's own validity policy for the
+// screening — a vendor-validity policy, not a demo cadence. A window of
+// minutes turns the missing_bgcheck convergence loop into a metronome: every
+// lapse re-opens missing_bgcheck, Weaver's triggerLoom mints a fresh service
+// instance to close it, and that instance's own reply stamps a validUntil that
+// lapses one window later, repeating for as long as the application stays
+// open. The e2e convergence gate compiles with `-tags leaseshortwindow` to
+// substitute a short window it can watch lapse in bounded wall-clock
+// (freshness_window_short.go).
+const bgcheckFreshnessWindow = "720h"

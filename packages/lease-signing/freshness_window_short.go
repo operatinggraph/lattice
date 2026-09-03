@@ -24,6 +24,6 @@ package leasesigning
 //     dominant cost of the gate (~2*window of pure lapse), so the window is kept
 //     to the steady-state floor, not above it.
 //
-// The production default (5m) lives in freshness_window.go; this value is never
+// The production default (720h) lives in freshness_window.go; this value is never
 // compiled into a shipped binary.
 const bgcheckFreshnessWindow = "25s"

@@ -856,10 +856,10 @@ OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
 OPTIONAL MATCH (app)<-[:scopedTo]-(sigTask:task)
   WHERE sigTask.data.status = 'open'
-OPTIONAL MATCH (sigTask)-[:forOperation]->(sigOp)
+OPTIONAL MATCH (sigTask)-[:forOperation]->(sigOp:meta)
 OPTIONAL MATCH (id)<-[:scopedTo]-(onbTask:task)
   WHERE onbTask.data.status = 'open'
-OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp)
+OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp:meta)
 %s
 WITH
   app.key AS entityKey,
@@ -1031,7 +1031,7 @@ OPTIONAL MATCH (id)<-[:applicationFor]-(app:leaseapp)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
 OPTIONAL MATCH (id)<-[:scopedTo]-(onbTask:task)
   WHERE onbTask.data.status = 'open'
-OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp)
+OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp:meta)
 WITH
   id.key AS entityKey,
   id.ssn.data AS ssnVal,
@@ -1071,7 +1071,7 @@ RETURN
 const staleUserTasksSpec = `
 MATCH (t:task {key: $actorKey})
   WHERE t.data.status = 'open'
-OPTIONAL MATCH (t)-[:forOperation]->(op)
+OPTIONAL MATCH (t)-[:forOperation]->(op:meta)
 OPTIONAL MATCH (t)-[:scopedTo]->(onbIdentity:identity)
 OPTIONAL MATCH (t)-[:scopedTo]->(sigApp:leaseapp)
 OPTIONAL MATCH (t)-[:scopedTo]->(termsRenewal:renewal)

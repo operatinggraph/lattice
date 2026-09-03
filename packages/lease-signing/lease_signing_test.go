@@ -684,10 +684,11 @@ func TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted(t *testing.
 	}
 	// validUntil = completedAt + the bgcheck freshness window, stamped by the
 	// read-free replyOp via time.rfc3339_add (pure arithmetic on completedAt, no
-	// clock). The demo window is "5m" (see scripts.go bgcheckFreshnessWindow), so
-	// 14:00:00Z + 5m = 14:05:00Z. If 14.5 tunes the window, update this constant.
-	if got, _ := odata["validUntil"].(string); got != "2026-06-18T14:05:00Z" {
-		t.Fatalf("outcome.validUntil = %q, want completedAt + 5m window = 2026-06-18T14:05:00Z", got)
+	// clock). The production window is "720h" (freshness_window.go), so
+	// 2026-06-18T14:00:00Z + 720h = 2026-07-18T14:00:00Z. If the window value
+	// changes, update this constant.
+	if got, _ := odata["validUntil"].(string); got != "2026-07-18T14:00:00Z" {
+		t.Fatalf("outcome.validUntil = %q, want completedAt + 720h window = 2026-07-18T14:00:00Z", got)
 	}
 	if _, present := odata["result"]; present {
 		t.Fatalf("outcome aspect must NOT carry the free-form result (PII off the projection plane), got %v", odata["result"])

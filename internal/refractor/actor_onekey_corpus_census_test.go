@@ -85,13 +85,10 @@ const (
 // can decide", and the runtime withholds it from strictly more lenses, never
 // fewer. That direction is the safe one.
 var corpusActorOneKeyVerdicts = map[string]string{
-	// The onboarding companion's `(onbTask)-[:forOperation]->(onbOp)` leaves
-	// onbOp UNTYPED, exactly as leaseApplicationComplete's does, so an identity
-	// can bind there as well as at the anchor. The leaseapp-anchored sibling
-	// reads oneKey only because ITS actor type is leaseapp; anchoring the same
-	// untyped hop on the identity is what moves this one to the walk. That is
-	// the safe direction — reprojection work, never a stale row.
-	"applicantOnboarding":            walkMultiPosition,
+	// (onbTask)-[:forOperation]->(onbOp:meta) is label-typed, so onbOp can
+	// never bind the identity actor type; the identity anchor type binds only
+	// at the anchor across the whole pattern.
+	"applicantOnboarding":            oneKey,
 	"appointmentReminders":           oneKey,
 	"augurDispatchPending":           oneKey,
 	"backgroundCheckFreshness":       oneKey,
@@ -131,7 +128,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"followUpReminders":              oneKey,
 	"identityAnchors":                walkMultiPosition,
 	"identityErasureResidue":         walkMultiPosition,
-	"leaseApplicationComplete":       walkMultiPosition,
+	"leaseApplicationComplete":       oneKey,
 	"leaseExpiry":                    oneKey,
 	"leaseRentSettlement":            oneKey,
 	"myTasks":                        walkMultiPosition,
@@ -142,12 +139,10 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"pastDueBookings":                oneKey,
 	"renewalComplete":                oneKey,
 	"staleAssignedTasks":             oneKey,
-	// The same shape as orphanedTaskGrants, and for the same reason: this
-	// lens's `(t)-[:forOperation]->(op)` leaves op UNTYPED, so a task can bind
-	// there as well as at the anchor (the three OTHER hops off t are all
-	// label-typed — identity/leaseapp/renewal — and never bind task). walk is
-	// the safe direction regardless: extra reprojection, never a stale row.
-	"staleUserTasks":                    walkMultiPosition,
+	// (t)-[:forOperation]->(op:meta) is label-typed, so op can never bind the
+	// task actor type — every hop off t (identity/leaseapp/renewal/meta) now
+	// excludes task, and the task anchor type binds only at the anchor.
+	"staleUserTasks":                    oneKey,
 	"unroutedTasks":                     oneKey,
 	"visitSeriesDue":                    oneKey,
 	"visitSeriesSiteBackfill":           oneKey,

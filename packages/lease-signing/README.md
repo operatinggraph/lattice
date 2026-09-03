@@ -143,7 +143,7 @@ re-open → re-dispatch → re-converge chain across multiple freshness cycles).
 - The replyOp stamps `validUntil = completedAt + bgcheckFreshnessWindow` onto the
   `.outcome` aspect (`time.rfc3339_add` — a pure, deterministic Starlark duration
   add; the op stays read-free). `bgcheckFreshnessWindow` is a named package
-  constant: the production default `5m` (`freshness_window.go`), or a short window
+  constant: the production default `720h` (`freshness_window.go`), or a short window
   under `-tags leaseshortwindow` (`freshness_window_short.go`) so the e2e watches a
   lapse in bounded wall-clock. The replyOp is family-agnostic, so it stamps
   `validUntil` on **every** outcome; the value on a payment outcome is harmless and
@@ -192,7 +192,7 @@ None of those anchors could host the marker — they all reach the check across 
 The `bgcheckFreshnessWindow` is a **compile-time** constant baked into the replyOp DDL
 script at package-init time (the value is interpolated into `leaseServiceReplyDDLScript`
 by a package-level `var`, so it cannot be mutated at runtime). The production default
-(`5m`) lives in `freshness_window.go`; the `test-lease-convergence` gate compiles the e2e
+(`720h`) lives in `freshness_window.go`; the `test-lease-convergence` gate compiles the e2e
 with `-tags leaseshortwindow` to substitute a short window (`freshness_window_short.go`)
 it can watch lapse in bounded wall-clock.
 
