@@ -275,13 +275,14 @@ to derive the transition.
 
 ### 4.2 Increment 1b — the Interest Set gets the edge it never had
 
-Three writers change what `IsRelevant` answers. Each gets the same edge, onto machinery that already exists:
+Four writers change what `IsRelevant` answers *(amended at build, 2026-09-03 — the design first counted three; hydrate's registration-creating arm is the fourth, found by the Inc 1 cold review)*. Each gets the same edge, onto machinery that already exists:
 
 | Writer | Site | Direction | Edge |
 |---|---|---|---|
 | `personal.register` | `control/service.go:1224` | widens or narrows | enqueue the registering identity |
 | `personal.deregister` | `control/service.go:1244` | widens (last device removed ⇒ absence admits everything) | enqueue the identity |
 | `InterestReconciler` orphan delete | `health/interest_reconciler.go:47` | widens | enqueue each identity whose registration it deleted |
+| `personal.hydrate` when `SetRevisionCursor` **creates** a registration (a filterless row `IsRelevant` reads as admit-all) | `control/service.go` hydrate arm; `personalinterest/interest.go` `SetRevisionCursor` returns `created` | widens | enqueue the identity only on the create arm |
 
 **The transport is a bare `func(identityID string)`, injected by `cmd/refractor`.** My first draft declared a
 sink interface in `control` and had `health.InterestReconciler` take "the same sink" — which is an import
@@ -534,6 +535,10 @@ default-denies.
 | `personalLicence` (conjuncts 0–2, per pipeline) | at `registerPersonalHealer` — once, at activation (*amended at build 2026-09-03: a hot reload never re-runs it, and that is correct — every asserted member is a property of the process; the two that can move are live accessors, and conjunct 4 rides `ruleState`, re-derived by the very publication a reload performs*) | never | across reload | read **live** at each gate evaluation, not snapshotted onto `ruleState` — both healer arms are installed after `useFullEngineBranches` runs, the same reason `standingHealerInstalled` is read live (`walkscope.go:76-84`) |
 | `anchorHopsPerBranch []full.HopIndex` | `useFullEngineBranches`, per rule publication | replaced wholesale on every publication, so a reload can never leave a previous body's indexes armed | published on `ruleState` under `ruleMu` with the rest of the compiled rule | never mutated after publication; readers alias |
 | the per-derivation shared read budget + neighbour memo (Inc 3) | per `affectedAnchors` call | per call — it must **not** outlive one event, or one wide event poisons the next | not carried | threaded through the per-branch `walkToAnchors` calls in order; a breach declines the whole lens once |
+| *(added at build, 2026-09-03)* `projection`'s read-grant sink census — process-global, keyed by lens id | at install (with or without a sink) | evicted by `ForgetReadGrantProducer` after a successful teardown | process lifetime | read live by conjunct 1 |
+| `health`'s interest-reconciler census — process-global, keyed by reconciler pointer | at `NewInterestReconciler` (counted unarmed) | **never evicted** — an abandoned unarmed reconciler wedges refusal for the process life (safe direction) | process lifetime | read live by conjunct 2 |
+| `Pipeline.unsanctionedGrantKeyOnce` | first refused `cap-read.` write | never (once per lens, outliving its adapters) | across INTO reload | the adapter reports every refusal, the pipeline dedups |
+| `LagPoller.staleWritten` / `lastSeenPassAt` | first poll after a verdict | on a newer pass | process lifetime | the poller writes only `stale`; the sweeper never does |
 
 The `registryIsReady` latch (`reprojector.go:146`, `:186-215`) gains one conjunct — every registered personal
 pipeline reports a non-zero `LastAppliedSeq` — and keeps its existing lifetime and its 2-minute bound
@@ -562,7 +567,7 @@ and leaves a backstop. §4.2 makes it a mechanism.
 says plainly that a per-type scope cannot remove a same-label `instanceOf` leg and that *"only the
 pattern-DIRECTED walk … answers 'is V in this anchor's bound subgraph' exactly"*. This is that walk.
 
-**"Does this introduce new state we already keep?"** Only `LastProgressAt`, and the cursor it derives from is
+**"Does this introduce new state we already keep?"** *(amended at build, 2026-09-03: as built the new state is the `PersonalHealerVerdict` — eight fields, replaced wholesale per pass — and the `PersonalDerivationWiring` behind an atomic pointer, two of whose members are live accessors; §5 is the record. The paragraph that follows is the design-time answer.)* Only `LastProgressAt`, and the cursor it derives from is
 already published (`sweeper.go:287`). The licence itself is a boolean the host asserts at a site that already
 asserts a sibling boolean.
 
@@ -620,7 +625,7 @@ the compiled indexes, not of the author's cypher style.
 | R3 | Inc 1b makes a flapping device's registrations a reprojection storm. | Availability, not correctness. | The dirty set coalesces per identity and is bounded at 10 000 with drop accounting (`reprojector.go:53`, `:338-341`); an interest change enqueues the *same* key a grant change would. |
 | R4 | **The grant-change edge is in-process only** — with multiple Refractor instances a producer on instance A never reaches a personal pipeline on instance B. My first draft named this in prose and left conjunct 1 testing *"a reprojector is wired in this process"*, **which stays true on every instance while the edge stops spanning the deployment**. That is a fail-open at exactly the transition, in a design whose entire argument is fail-closed-by-default. | Silent, and in the over-grant direction. | **Now enforced, not narrated** (Andrew, at ratification — the same failure class the §13 adversarial pass caught in conjunct 3, which I did not then run back across its siblings). Conjunct 5 refuses the licence above one live instance; the build-time gate refuses the *transition* while the edge is still process-local. When multi-instance lands, alternative #6 (a durable signal) is a precondition of re-licensing, not an optimisation. Record it in `docs/components/refractor.md` too, not only here. |
 | R5 | The 2-minute registry-ready hold means the first grant-change signal after every boot waits (`reprojector.go:186-198`). | Latency at boot. | Pre-existing, unchanged, and now shared by the interest edge. Worth one line in the operator doc; not worth a mechanism. |
-| R6 | **Conjunct 3 is an availability cliff for the whole plane.** A Core-KV listing blip makes `ensurePopulation` fail, `Sweep` returns before recording a pass, and after `K` intervals **all 15** personal lenses drop back onto the relation-blind enumerator — the 20 s–190 s/message pathology §1.1 measured. | Pessimisation, in the safe direction, but abrupt and system-wide. | The direction is correct and must not be softened: a licence that survives its own healer being blind is not a licence. Bound the blast radius instead — `K` is generous (a listing blip is seconds, `K × 60 s` is minutes), the `off` knob is unaffected, and the cliff is an *operator-visible* refusal string, not a silent one. Named here rather than discovered live (§13 B3). |
+| R6 | **Conjunct 3 is an availability cliff for the whole plane.** A Core-KV listing blip makes `ensurePopulation` fail, `Sweep` returns before recording a pass, and after `K` intervals **all 15** personal lenses drop back onto the relation-blind enumerator — the 20 s–190 s/message pathology §1.1 measured. | Pessimisation, in the safe direction, but abrupt and system-wide. | The direction is correct and must not be softened: a licence that survives its own healer being blind is not a licence. Bound the blast radius instead — `K` is generous (a listing blip is seconds, `K × 60 s` is minutes), the `off` knob is unaffected, and the cliff is an *operator-visible* refusal string, not a silent one. Named here rather than discovered live (§13 B3). *(Build, 2026-09-03: the `failed > 0` arm has the same cliff shape and a sharper edge — one pass is 5 identities × 15 lenses, so a single transient reprojection error refuses all 15 lenses for ≥ 1 interval. Conjunct 3 is a liveness test, not a coverage proof; a qualifying pass drives 5 arbitrary identities, not this lens's own actors.)* |
 | R7 | **Two narrowings compose.** The D1 gate's own producer, `capabilityRead`, is *itself* acting on this derivation today (it clears every conjunct of `derivationIndexForAct`). If the producer under-approximates, no grant is rewritten, so no transition fires, so the personal edge is silent — and after Inc 2 the personal lens's BFS accident is no longer there to re-ask the gate. | The accident was quietly serving as the other plane's second line of defence. | **Closed, but only because the producer's own convergence sweep announces** — both heal legs call `notifyGrantChange` with the outcome key, and the code says why: *"a retraction either of them heals is as real a grant withdrawal as one the CDC path writes"* (G19, `reproject.go:535-545`, `:643-645`). So the chain is producer-sweep-heals → guarded write → transition → personal reprojection. What genuinely changes is the **latency**: the repair is now paced by the producer's sweep rather than by the personal lens's next unrelated event. Measure it at close; it is a number the fire owes, not an unknown. |
 
 ---
@@ -692,6 +697,26 @@ same fire; if the fire is cut, cut it after Inc 2, never between 2 and 3.
 three multi-walk ones (Inc 3); `nats consumer report KV_core-kv` shows `edgeCatalog` and `edgeInstances`
 draining at ≥ 1 msg/s; the `anchor-derivation tally` line reports `acted > 0` per personal lens; a goroutine
 profile shows no personal-lens handler inside `neighborsFromCoreKV` for a descriptor hub.
+
+---
+
+**The POSITIVE verdict is the acceptance, not the absence of a refusal line** *(added at build, 2026-09-03 —
+the dossier's "a granted licence logs nothing" rule, applied to this fire's own green bar)*:
+
+| Read | Where | Expect |
+|---|---|---|
+| `pipeline: personal-lens derivation licensed; this lens now acts on its derived anchor set` (`ruleId`, `healerVerdict`, `healerLastPassAt`, `refractorInstances`) | Info, latched once per grant | one per personal lens that receives an event; `healerVerdict=clean`, `refractorInstances=1` |
+| `pipeline: anchor derivation cannot act on this lens; using the enumerator` | Info | names no personal lens after the first qualifying sweep pass |
+| control RPC `health` → `personalDerivation{licensed, refusal, indexReady, indexRefusal}` | per lens | `licensed:true, indexReady:true` for all 15 |
+| Health-KV lens entry `personalSweepVerdict` | per lens | `clean` |
+| `pipeline: anchor-derivation tally` | per lens | `acted > 0`, `fellBack = 0` |
+| `read-grant producer installed with NO grant-change sink` | Warn | absent |
+| `grantchange: lens registry is complete and every personal lens can order a frame` | Info | present once, never the `holdMax` Warn |
+
+Boot window: a lens is licensed only by a pass that BEGAN after it registered, so after `make cycle-refractor`
+every personal lens reads "never completed a pass" until registration nudges the sweeper; and the killed
+process's `health.refractor.<instance>` entry over-counts until its TTL (interval × 10) lapses, refusing with
+"more than one Refractor instance is live" — the safe direction, ~100 s.
 
 ---
 
@@ -872,12 +897,33 @@ transition, it does not build the durable signal).
 substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc 1's edges), Inc 2 → Inc 3
 (reachability). No unlisted load-bearing dependency found.
 
-### 15.8 Checkpoint
+### 15.8 Checkpoint — CLOSED (2026-09-03)
 
-*(amended per increment)* — **Inc 1 landed** (`cc42b5de`). **Inc 2 landed** (`0bac8278`). **Inc 3 landed**:
-per-branch anchor indexes + the union under one per-event budget; the 7 multi-walk corpus rows flipped from
-the no-branch-index refusal to ready (the payoff record in `TestCorpusPersonalDerivation`); the anchor-label
-conjunct's uncovered disjunct pinned; the health RPC reports index readiness beside the licence. Review: full
-cold pass (0 BLOCKING · 1 MAJOR · 8 MINOR), all closed. **Next: close** — cumulative cold pass over the whole
-item, cycle `bin/refractor` + `bin/loupe` + `bin/bridge` from `main`, the §11 live verification, the R7
-latency number, dossier classification, Done-log.
+**Shipped:** Inc 1 `cc42b5de` · Inc 2 `0bac8278` · Inc 3 `9725f42e` · close-pass fixes (see the Done-log SHA).
+Reviews: 3 per-increment cold passes + 3 fix-round re-reviews + 1 cumulative close pass — 4 BLOCKING, 8 MAJOR,
+~40 MINOR, every one closed and revert-proven; classes routed to the Refractor dossier, one twice-seen class
+mechanized (the reflective `ruleState` round-trip test).
+
+**Live measurement (MERGED ≠ RUNNING — `make cycle-refractor` at 01:43, read 01:46–01:53):** one Refractor
+instance in Health KV once the killed process's entry expired; positive `personal-lens derivation licensed`
+lines for `edgeInstances` and `edgeCatalog` (`healerVerdict=clean`, `refractorInstances=1`); no
+`cannot act` line names a personal lens after 01:46.
+
+| Lens | Backlog at cycle | Drain | Derivation |
+|---|---|---|---|
+| `edgeCatalog` (3 walks, the headline) | 150 k | **24.6 msg/s** (was ~3/min) | acting, `fellBack=0`, 315 anchors / 2450 events |
+| `edgeInstances` (1 walk) | 96 k | **0.13 msg/s** — §11's ≥ 1 msg/s NOT met | acting, `fellBack=0`, 15 anchors / 50 events |
+
+`edgeInstances`' residual is **after** the derivation: its slow messages (10–22 s each) are exactly the events
+its pattern binds — `vtx.service.*`, `lnk.service.*.providedTo.identity.*`, `vtx.service.*.outcome` — which
+`edgeCatalog` handles in < 50 ms; the events its pattern does not bind (`vtx.op.*.events`, 66 % of the stream)
+are instant. The derivation names the right actor and the cost is the per-actor whole-recompute + keyset frame
+the personal-lens model performs (§6: "over-approximation costs an extra frame" — here the frame itself is
+wide). Not this design's mechanism; filed as a designer-pass row on the board (no ratified pattern for a
+sub-actor incremental reprojection of a personal lens). R7's latency number: the producer sweep paces the
+repair; not separately measurable on this stack (no grant flips during the window).
+
+Three other stuck consumers seen in the same report are other rows' territory and unchanged by this item:
+`edgeManifest{,Staff}ReadGrants` 121 k / 86 k (the `WITH`-scope 📋 row), `objectLiveness` /
+`objectAttachments` 68 k each (the untyped-hop ✅ row), and `leaseApplicationComplete` 152 k at 0 msg/s (not
+on the board — noted for the Surveyor).

@@ -93,7 +93,7 @@ remove both terms in Refractor, where they live.
 | A KindVertex event with an **empty body** is unconditionally ack-and-skipped — actor-aware included; the real actor retraction is the **soft**-delete (`isDeleted: true`, non-empty body) | `pipeline/pipeline.go:1210-1212` (its `:1207-1209` comment is stale); `pipeline/evaluate.go:131-148` |
 | Footprint validation already accepts that a sibling write to an *unrelated relation* on a shared hub is not drift (selector-scoped edge comparison) | `pipeline/evaluate.go:351-393` |
 | `capabilityRoles` is exempt from footprint validation (single-binding) — so the 500 ms is **not** validation cost | `pipeline/evaluate.go:318-332` |
-| Personal lenses consult **two** inputs outside the compiled pattern: the D1 read gate (`cap-read.*`, capability-kv) and the Interest Set (`personal-lens-interest`) | `projection/personal.go:130`, `:172-184`, `:186-195`; `capabilityread/capabilityread.go:73` |
+| Personal lenses consult **two** inputs outside the compiled pattern: the D1 read gate (`cap-read.*`, capability-kv) and the Interest Set (`personal-lens-interest`) | `projection/personal.go` — `InstallPersonalLens`, and `personalEnvelopeFn`'s `capabilityread.IsReadable` call (the D1 gate) then its `personalinterest.IsRelevant` call (the Interest Set); `capabilityread/capabilityread.go:73` |
 | `SecureDecryptor` reads `vtx.identity.<id>.piiKey` keyed off a RETURN column, not off anything the executor bound | `pipeline/secure.go:130-137`, `:194-196` |
 | `CoreKVNarrowedFilters` + the ≤8-label cap already exist and are proven non-subset-overlapping against the pin | `subjects/subjects.go:150-187`, `pipeline/pipeline.go:24-31` |
 | Pin: `nats-server v2.14.0` — D1's vendor gate (plural `FilterSubjects`, per-filter pending, live-editable filters, **no cursor reset on update**) was cleared against this exact source and is unchanged here | `go.mod:10`; `refractor-footprint-reduction-design.md` §3 D1 |
@@ -197,7 +197,7 @@ Increment 0 is independently valuable and independently shippable: it hardens na
 
 - **Personal (nats-subject) lenses — excluded.** Two out-of-pattern inputs, not one: the **D1 read gate**
   (`capabilityread.IsReadable` reading `cap-read.<domain>.<actor>` from capability-kv,
-  `personal.go:172-190`, the call at `:183`) and the **Interest Set** (`personalinterest.IsRelevant` on
+  `personal.go` `personalEnvelopeFn`, the `capabilityread.IsReadable` call under its `grant-change-posture` annotation) and the **Interest Set** (`personalinterest.IsRelevant` on
   `personal-lens-interest`, `:192-201`, the call at `:194` — *citations re-pinned 2026-09-01; a posture comment
   inserted at `:177-182` had pushed the second range onto D1's own code*). Concretely for the first: an actor granted a new *role* that
   widens their read grants gets their rows today because the broad filter delivers the `role` event and
