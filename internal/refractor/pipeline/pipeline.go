@@ -1151,6 +1151,30 @@ func isNarrowedFilterFallback(lastError string) bool {
 	return strings.HasPrefix(lastError, narrowedFilterFallbackPrefix)
 }
 
+// retiredByCleanRegistration reports whether a stored health LastError names a
+// condition a clean consumer registration has settled, and so may clear.
+//
+// Two classes qualify, for the same reason read from opposite ends. The
+// narrowed-filter fallback is this function's own message, and a registration
+// that succeeded without falling back IS the proof it no longer holds. A
+// hot-reload refusal (health.HotReloadRefusalPrefix, recorded by
+// cmd/refractor's reloader) says a SWAP could not carry a spec edit — and
+// registering a consumer means this process activated the lens, which reads the
+// current spec and installs all of it, so the edit that verdict was about has
+// already applied or failed on its own terms. Both are latches with no other
+// retirement path: a restart does not touch health KV and RecordError only ever
+// appends, so left alone either outlives every process that could explain it.
+//
+// Everything else on the entry belongs to a writer this one is not. Both the
+// writer and the clearer read the constants above, so the pair cannot drift into
+// a clear that retires nothing or one that retires another writer's live
+// diagnosis — a re-activation that could not purge its target, or a lens left
+// dark, carry neither prefix precisely because a registration settles neither.
+func retiredByCleanRegistration(lastError string) bool {
+	return isNarrowedFilterFallback(lastError) ||
+		strings.HasPrefix(lastError, health.HotReloadRefusalPrefix)
+}
+
 // registerWithFilterFallback runs register — the supervisor call that
 // (re)creates this lens's Core KV durable (supervisor.Add for the initial
 // Run, supervisor.ResetAwaitReopen for a Rebuild) — and, if it fails while filterSubjects
@@ -1174,11 +1198,13 @@ func isNarrowedFilterFallback(lastError string) bool {
 // retirement path, since nothing else ever revisits it, so left alone it
 // survives every restart even once the lens is provably healthy again.
 //
-// It clears ONLY that message, matched on narrowedFilterFallbackPrefix. A clean
-// registration proves the registration healthy and nothing else, while LastError
-// is a latch many writers append to: an unscoped clear retires whichever
-// diagnosis happens to be standing, including one raised seconds earlier by a
-// re-activation that cannot purge its target. The clear is also scoped to
+// It clears ONLY what a clean registration has actually settled
+// (retiredByCleanRegistration): its own fallback message, and a hot-reload
+// refusal, which registering supersedes because activation reads the current
+// spec. LastError is a latch many writers append to, so an unscoped clear
+// retires whichever diagnosis happens to be standing, including one raised
+// seconds earlier by a re-activation that cannot purge its target. The clear is
+// also scoped to
 // LastError alone precisely so it cannot race
 // the supervisor's startup restore of a persisted pause (this doc's own
 // caller, Pipeline.Run: "restore persisted paused state on startup (NFR4)";
@@ -1191,7 +1217,7 @@ func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubject
 	err := register()
 	if err == nil {
 		if p.reporter != nil {
-			if clrErr := p.reporter.ClearLastErrorIf(ctx, isNarrowedFilterFallback); clrErr != nil {
+			if clrErr := p.reporter.ClearLastErrorIf(ctx, retiredByCleanRegistration); clrErr != nil {
 				slog.Error("pipeline: clear stale health signal after clean registration", "ruleId", p.ruleID, "err", clrErr)
 			}
 		}

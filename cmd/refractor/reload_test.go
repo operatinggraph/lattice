@@ -2426,3 +2426,121 @@ func TestRemoverStop_NothingRunningIsASentinelNotAFault(t *testing.T) {
 	err := rm.stop(businessLensRule(t), "tombstone")
 	assert.ErrorIs(t, err, errLensNotRunning)
 }
+
+// TestReloaderRefuse_RecordsUnderTheHotReloadClass pins the marker the clear on
+// the other side reads. A refusal says only that a SWAP could not carry the
+// edit — activation reads the current spec and settles it either way — so the
+// verdict is retired by the next clean consumer registration, and the prefix is
+// what licenses that. Without it a refusal recorded before a restart outlives
+// the restart that resolved it and the lens renders faulted for an edit that
+// landed.
+func TestReloaderRefuse_RecordsUnderTheHotReloadClass(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	entry := runningEntry()
+	entry.reporter = reporter
+	rl := &reloader{ctx: context.Background(), logger: discardLogger()}
+
+	rl.refuse(entry, "lens-reload-test", "lens update changes grantTable — not hot-reloadable")
+
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, status.LastError)
+	assert.True(t, strings.HasPrefix(*status.LastError, health.HotReloadRefusalPrefix),
+		"every reloader verdict carries the class marker its retirement is keyed on, got %q", *status.LastError)
+	assert.Contains(t, *status.LastError, "changes grantTable",
+		"and the operator still reads the reason, not just the marker")
+}
+
+// TestReloaderReactivation_UnsettledFailuresCarryNoHotReloadClass is the other
+// half. Neither of these is settled by an activation: a restart un-strands no
+// rows, and a dark lens is brought back by its own infra pause's
+// probe-and-resume. Marking them would have the next registration retire a fault
+// that is still true.
+func TestReloaderReactivation_UnsettledFailuresCarryNoHotReloadClass(t *testing.T) {
+	t.Run("a purge that could not clear the target", func(t *testing.T) {
+		kv := startHealthKV(t)
+		reporter := health.New(kv, "lens-reload-test")
+
+		rl, rig := newReactivationRig(t, businessLensEntry(t, failingTruncateAdapter{}, reporter))
+
+		newLens := businessLensRule(t)
+		newLens.Output.OutputKeyPattern = "reloadTest.moved.{actorSuffix}"
+		rl.update(businessLensRule(t), newLens, lens.IntoOnly)
+		require.Equal(t, []string{"deactivate", "activate"}, rig.order,
+			"precondition: a failed purge does not stop the activation")
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, status.LastError)
+		assert.Contains(t, *status.LastError, "could not clear the target")
+		assert.False(t, strings.HasPrefix(*status.LastError, health.HotReloadRefusalPrefix),
+			"stranded rows survive every restart, so no registration may retire this")
+	})
+
+	t.Run("a lens left dark", func(t *testing.T) {
+		kv := startHealthKV(t)
+		reporter := health.New(kv, "lens-reload-test")
+
+		rl, rig := newReactivationRig(t, businessLensEntry(t, &scopedTruncAdapter{}, reporter))
+		rig.activateOK = false
+
+		newLens := businessLensRule(t)
+		newLens.Output.BodyColumns = []string{"tasks", "grants"}
+		rl.update(businessLensRule(t), newLens, lens.IntoOnly)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, status.LastError)
+		assert.Contains(t, *status.LastError, "the lens is dark")
+		assert.False(t, strings.HasPrefix(*status.LastError, health.HotReloadRefusalPrefix),
+			"the dark marker is retired by the infra pause's own resume, not by a registration")
+	})
+}
+
+// TestActivation_RetiresAHotReloadRefusalTheRestartResolved is the shipped
+// symptom, end to end and through the real activation path: a lens whose health
+// entry still carries a refusal from before the process came up must not keep
+// rendering faulted once it activates. Activation reads the current spec and
+// installs all of it, so by the time its consumer registers cleanly the edit the
+// refusal named has been settled — and the entry has to say so.
+//
+// The re-activation path does not reach this: it DELETES the health entry with
+// the pipeline, so a verdict recorded there is gone whether or not anything
+// clears it. A restart is where the latch actually survives, which is what this
+// drives.
+func TestActivation_RetiresAHotReloadRefusalTheRestartResolved(t *testing.T) {
+	h := newReactivationHarness(t)
+	ctx := context.Background()
+
+	r := reactivationLensRule(t, h.engine, "lens-reactivate-refusal", reactivateCypherOld,
+		reactivationOutput(reloadTestKeyPattern, "emptyDoc", "tasks"))
+
+	// The verdict the previous process left behind, on this lens's own key.
+	stale := health.New(h.healthKV, r.ID)
+	require.NoError(t, stale.RecordError(ctx,
+		health.HotReloadRefusalPrefix+"lens Output descriptor changed — not hot-reloadable"))
+	// And one nobody's registration settles, on a second lens, to keep the clear
+	// from reading as "a fresh activation blanks the entry".
+	stranded := health.New(h.healthKV, "lens-reactivate-refusal-stranded")
+	const strandedMsg = "re-activation could not clear the target before the replay — rows the new Output no longer addresses may survive"
+	require.NoError(t, stranded.RecordError(ctx, strandedMsg))
+
+	h.activate(t, r)
+
+	mcPollUntil(t, 15*time.Second, func() bool {
+		status, err := stale.GetStatus(ctx)
+		return err == nil && status.LastError == nil
+	}, "activation settles the edit a hot-reload verdict was about, so the verdict must not outlive it")
+
+	status, err := stale.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), status.ErrorCount,
+		"the cumulative count is the record that the refusal happened; only the live latch is retired")
+
+	strandedStatus, err := stranded.GetStatus(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, strandedStatus.LastError, "an unsettled fault on another lens must be untouched")
+	assert.Equal(t, strandedMsg, *strandedStatus.LastError)
+}

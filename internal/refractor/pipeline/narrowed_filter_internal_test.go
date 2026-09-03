@@ -552,6 +552,56 @@ func TestRegisterWithFilterFallback_CleanSuccessKeepsAnotherWritersFault(t *test
 	require.Equal(t, foreign, *entry.LastError)
 }
 
+// TestRegisterWithFilterFallback_CleanSuccessRetiresAHotReloadRefusal is the
+// second class the clear owns, and the one a restart is the remedy for. A
+// refusal says only that a SWAP could not carry a spec edit; registering a
+// consumer means this process activated the lens, which reads the current spec
+// and installs all of it — so the edit that verdict was about has already
+// applied or failed on its own terms, and the verdict is describing a decision
+// nothing stands on. Left standing it outlives the very restart that resolved
+// it, and Loupe's fault conjunct reads a live LastError, so the lens renders
+// faulted for an edit that landed.
+func TestRegisterWithFilterFallback_CleanSuccessRetiresAHotReloadRefusal(t *testing.T) {
+	reporter := newFallbackHealthReporter(t, "rwff-refusal")
+	require.NoError(t, reporter.RecordError(context.Background(),
+		health.HotReloadRefusalPrefix+"lens Output descriptor changed — not hot-reloadable"))
+
+	p := &Pipeline{ruleID: "rwff-refusal", reporter: reporter}
+	err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+		t.Fatal("applyBroad must not be called on a clean first-attempt success")
+	}, func() error { return nil })
+	require.NoError(t, err)
+
+	entry, gerr := reporter.GetStatus(context.Background())
+	require.NoError(t, gerr)
+	require.Nil(t, entry.LastError, "activation supersedes every hot-reload verdict, so a clean registration retires it")
+	require.Equal(t, uint64(1), entry.ErrorCount, "the cumulative count is the record that the refusal happened")
+}
+
+// And the two failures the re-activation path records WITHOUT that prefix stay:
+// a restart un-strands no rows, and a dark lens is retired by its own infra
+// pause's probe-and-resume, not by a registration that proves nothing about
+// either.
+func TestRegisterWithFilterFallback_CleanSuccessKeepsTheUnprefixedReactivationFaults(t *testing.T) {
+	for _, msg := range []string{
+		"re-activation could not clear the target before the replay — rows the new Output no longer addresses may survive",
+		"re-activation after an Output change failed — the lens is dark; restart Refractor, or fix the spec and reinstall",
+	} {
+		reporter := newFallbackHealthReporter(t, "rwff-unprefixed")
+		require.NoError(t, reporter.RecordError(context.Background(), msg))
+
+		p := &Pipeline{ruleID: "rwff-unprefixed", reporter: reporter}
+		require.NoError(t, p.registerWithFilterFallback(context.Background(), []string{"a.>"},
+			func() { t.Fatal("applyBroad must not be called on a clean first-attempt success") },
+			func() error { return nil }))
+
+		entry, gerr := reporter.GetStatus(context.Background())
+		require.NoError(t, gerr)
+		require.NotNil(t, entry.LastError, "a registration settles neither of these")
+		require.Equal(t, msg, *entry.LastError)
+	}
+}
+
 // TestRegisterWithFilterFallback_FallbackSuccessKeepsFreshError is the
 // counter-case (item 2): when the narrowed attempt itself fails and the
 // broad retry is what succeeds, the fallback's own fresh error must survive —

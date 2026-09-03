@@ -483,7 +483,12 @@ func (rl *reloader) refuse(entry *pipelineEntry, lensID, reason string, attrs ..
 	if entry.reporter == nil {
 		return
 	}
-	if err := entry.reporter.RecordError(rl.ctx, reason); err != nil {
+	// Recorded under health.HotReloadRefusalPrefix, which the log line above does
+	// not carry: the prefix is what tells the clean-registration clear that this
+	// verdict is retired by the next activation (which reads the current spec and
+	// so settles the edit the refusal was about), and an operator reading the log
+	// wants the reason, not the class marker.
+	if err := entry.reporter.RecordError(rl.ctx, health.HotReloadRefusalPrefix+reason); err != nil {
 		rl.logger.Error("record hot-reload refusal in health", "lensId", lensID, "err", err)
 	}
 }

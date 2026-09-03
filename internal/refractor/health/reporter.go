@@ -56,6 +56,29 @@ const (
 	FilterBroadReasonRegistrationFailed   = healthwire.FilterBroadReasonRegistrationFailed
 )
 
+// HotReloadRefusalPrefix opens every verdict cmd/refractor's reloader records
+// when it declines to apply a lens-spec edit to the running pipeline, and it is
+// what licenses the clean-registration clear (pipeline.registerWithFilterFallback)
+// to retire that verdict.
+//
+// The licence rests on what ACTIVATION means for such a verdict. A refusal says
+// only that a swap could not carry the edit; activation reads the current spec
+// and installs all of it, so by the time a lens registers a consumer cleanly the
+// edit the refusal was about has either applied or failed on its own terms, and
+// the verdict describes a decision nothing is still standing on. Left on the
+// entry it outlives the restart that resolved it, and Loupe's fault conjunct
+// reads a live LastError — so the lens renders faulted for an edit that landed.
+//
+// It is a message prefix rather than a schema field deliberately: LastError is
+// one latch many writers append to, and a prefix is how a writer names the class
+// it owns without every reader of the entry having to learn a new key.
+//
+// Not every failure the re-activation path records is one of these. A purge that
+// could not clear the target, and a lens left dark by a failed re-activation,
+// carry no prefix: a restart un-strands no rows, and the dark marker is retired
+// by the infra pause's own probe-and-resume rather than by any clear.
+const HotReloadRefusalPrefix = "hot-reload refused: "
+
 // Entry is the full health KV value schema. The KV key is the ruleID; the KV
 // bucket is configured via config.HealthKVBucket.
 type Entry = healthwire.Entry
