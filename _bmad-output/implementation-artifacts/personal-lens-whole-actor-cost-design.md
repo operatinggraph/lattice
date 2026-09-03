@@ -201,7 +201,10 @@ has, and the edge re-drives it.
   exists to hold and so needs its own design.
 - *(Amended at build, 2026-09-03 — Inc 2 cold review.)* A batch is bounded by **count and by size**: a chunk
   whose aggregate value size trips the connection's 64 MiB response ceiling is split in half and retried down
-  to a floor, so a wide frontier of large documents degrades to more requests, never to a wedged evaluation;
+  to a floor — and ONLY on that signature (`substrate.ErrDirectGetAttemptsExhausted`, the deterministic
+  over-size case); any other error propagates unchanged on the first request, so a transport stall is not
+  amplified by the descent — so a wide frontier of large documents degrades to more requests, never to a
+  wedged evaluation;
   a body or adjacency document that fails to decode is **not staged** (Warn), so the point read fires iff the
   evaluation dereferences it and fails exactly where it did before batching (R6's rule, mirrored); the
   request count per batch is pinned by a `batchReads` counter so a shrunken chunk constant cannot pass CI
@@ -308,6 +311,13 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
   p90 < 2 s** (from 8.9 s / 22 s); the consumer drains ≥ 1 msg/s until empty; hydrate of the widest actor
   timed from Loupe/CLI.
 
+### 10.1 Live measurements (MERGED ≠ RUNNING — each increment cycled from `main` and re-measured)
+
+| Build live | `providedTo`-link median / p90 | `service.outcome` | `service` root | consumer |
+|---|---|---|---|---|
+| baseline (C1, 13:02–14:00) | 9.03 s / 22.0 s | 8.86 s / 22.6 s | 8.90 s / 22.9 s | 71 k → 116 k (growing) |
+| Inc 1 (`0712aa14`, cycled 16:06, read 16:06–16:16, 646 msgs) | **4.72 s / 7.85 s** | — (none in window) | 0.00 s (the window's roots were the supersession purge's soft-deletes) | 116 k → 29 k in 10 min |
+
 ## 11. Decomposition for the Steward
 
 One fire, three increments (Inc 2 carries the 2b adjacency batch found at build), landed on `main` in order (each independently green and semantics-preserving —
@@ -352,6 +362,8 @@ bar:** every gate green; C1 re-measured live at p50 < 1 s / p90 < 2 s on pattern
 | 2 | `internal/refractor/ruleengine/full/values.go` | `:23-80` `resolveProperty` | unchanged — the aspect-key shape (`nr.key + "." + key`, link key for a rel binding) is what the prefetch mirrors |
 | 2b | `internal/refractor/adjacency/store.go`, `overflow.go` | `:52-145` `Neighbors`/`NeighborsScoped`, `:148-170` `readNodeState` | add the chunked multi-node state read (unmarked ⇒ whole answer, marked ⇒ marked/no edges, observer parity) |
 | 2b | `internal/refractor/ruleengine/full/executor.go` | `:534-600` `applyMatch`, `:930-975` `fetchEdges`/`memoizeWhole` | stage per-source adjacency answers; promote via `memoizeWhole` on first `fetchEdges`; collect sources per bound-first-node pattern and per pattern comprehension |
+| 2 (review) | `internal/substrate/kv_multi_chunked.go` (new) | beside `kv_multi.go` `KVGetMultiNoSnapshot` | `ChunkedMultiGet(ctx, items, chunk, floor, read, visit)`: count-chunked, halves a failing request down to the floor, item = the unit a split may never tear (a node's doc + mark); both prefetchers use it |
+| 2 (review) | `internal/refractor/adjacency/overflow.go`, `internal/refractor/subjects/subjects.go` | `readNodeState`, `validateToken` | one `decodeNodeState` behind the per-node read and the batch; `ValidToken` exported so the token rule has one definition |
 | 3 | `internal/substrate/publish_pipeline.go` (new) + `publish.go` | `:62-76` `Publish` | `PublishPipeline` (`NewPublishPipeline(window)`, `Add`, `Flush`) over `js.PublishMsgAsync` (nats.go v1.52.0 `jetstream/publish.go:274`) |
 | 3 | `internal/refractor/adapter/natssubject.go` + `publishpipeline.go` (new) | `:424-434` `publish` | ctx-carried pipeline: `WithPublishPipeline(ctx, p)` / `publishPipelineFrom(ctx)`, `PublishPipelineOpener`; sync path when none |
 | 3 | `internal/refractor/pipeline/results.go` | `:34-250` `writeResults`, `:443-460` `writeAudit` | open row batch + audit batch before the loop; flush the row batch before returning the decision the frame emission reads; audit flush logged |
