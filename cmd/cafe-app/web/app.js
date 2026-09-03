@@ -657,14 +657,18 @@ async function loadLeasePickerContext() {
   return { residentsByLease, approvedByLease, leaseDetailsByLease };
 }
 
-// fillLeaseSelect renders every pickable lease, disabling one the landlord
-// hasn't approved yet (approvedByLease[leaseAppKey] === false) — OpenTab
-// itself now rejects LeaseNotApproved, but a disabled, badged option tells
-// staff why before they even try, instead of a raw error toast. A lease
-// this app can't resolve approval for (roster unreachable, or a lease absent
-// from /api/residents entirely) stays selectable — this picker only blocks
-// on POSITIVE evidence of non-approval, never on its absence.
-function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease) {
+// fillLeaseSelect renders every pickable lease. When gateOnApproval is true
+// it disables one the landlord hasn't approved yet
+// (approvedByLease[leaseAppKey] === false) — OpenTab itself rejects
+// LeaseNotApproved, but a disabled, badged option tells staff why before
+// they even try, instead of a raw error toast. A lease this app can't
+// resolve approval for (roster unreachable, or a lease absent from
+// /api/residents entirely) stays selectable — this picker only blocks on
+// POSITIVE evidence of non-approval, never on its absence. Callers that
+// don't gate on OpenTab (e.g. the Resident tab's front-desk picker, which
+// only reaches ledger viewing and Record Payment) pass gateOnApproval=false
+// so an unapproved lease's debt stays collectable.
+function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval) {
   const prev = select.value;
   select.innerHTML = "";
   if (!leases.length) {
@@ -682,7 +686,7 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
     const detail = leaseDetailsByLease && leaseDetailsByLease[l.leaseAppKey];
     const unit = detail && detail.unitAddress ? " — " + detail.unitAddress : "";
     const approved = approvedByLease && approvedByLease[l.leaseAppKey];
-    if (approved === false) {
+    if (gateOnApproval && approved === false) {
       opt.disabled = true;
       opt.textContent = who + unit + " (awaiting landlord approval)";
     } else {
@@ -698,7 +702,7 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
 async function loadPos() {
   const select = document.getElementById("pos-lease");
   const [leases, ctx] = await Promise.all([loadLeases(), loadLeasePickerContext()]);
-  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease);
+  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, true);
   await renderPos();
 }
 
@@ -1317,7 +1321,7 @@ async function loadResident() {
     label.hidden = false;
     select.hidden = false;
     const ctx = await loadLeasePickerContext();
-    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease);
+    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false);
   } else {
     label.hidden = true;
     select.hidden = true;
