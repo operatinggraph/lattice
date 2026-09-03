@@ -1,12 +1,16 @@
 # A `WITH` is not a closure refusal — resolve the key column through its aliases
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-02 · Component: **Refractor**
+**Status: ✅ Andrew-ratified 2026-09-02 — build as designed, §13's three increments in order** · Designer fire 2026-09-02 · Component: **Refractor**
 (`internal/refractor/ruleengine/full`, `internal/refractor/pipeline`) · Board row: *[Refractor] A `WITH`
 refuses per-anchor closure wholesale…* (`backlog/lattice.md`, Read-model / projection maturity)
 
 ---
 
-## 0. For Andrew
+## 0. For Andrew — ratified 2026-09-02, unchanged
+
+Andrew ratified this as written: no scope change, no branch taken, nothing below superseded. The block
+stands as the record of what was signed off.
+
 
 `anchorProjectionShape` (`internal/refractor/ruleengine/full/anchor_delete.go:181-185`) refuses **any**
 query carrying a `WITH`, wholesale, before it ever looks at a key column. That one predicate is the
