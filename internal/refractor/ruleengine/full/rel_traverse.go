@@ -7,6 +7,48 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// adjacencyNodeID maps a Core KV vertex key to the bare NodeID Adjacency KV is
+// indexed by. A key that is not a Contract #1 vertex key is itself the NodeID
+// (the test / legacy Materializer fixture path). It is the one derivation, so
+// the batch that prefetches a set of nodes and the hop that reads one of them
+// cannot come to disagree about which node was meant.
+func adjacencyNodeID(key string) string {
+	if _, nodeID, ok := substrate.ParseVertexKey(key); ok {
+		return nodeID
+	}
+	return key
+}
+
+// otherEndKey reconstructs the Core KV key of the endpoint e leads to. An edge
+// carrying OtherType follows the Contract #1 link convention, so the endpoint's
+// full vtx key is built from it; otherwise OtherNodeID is itself the Core KV
+// key (the test / legacy Materializer fixture path).
+func otherEndKey(e adjacency.EdgeEntry) string {
+	if e.OtherType != "" {
+		return substrate.VertexPrefix + "." + e.OtherType + "." + e.OtherNodeID
+	}
+	return e.OtherNodeID
+}
+
+// hopCrosses reports whether a hop of rel from a node whose path has already
+// visited `seen` crosses edge e to the endpoint at otherKey: the relation
+// matches (an untyped hop crosses every relation), the direction matches, and
+// the endpoint is one this path has not already visited.
+//
+// It is the single admission rule for the hop, so the batch that prefetches the
+// frontier and the loop that binds it cannot come to differ about which edges
+// this hop consumes.
+func hopCrosses(e adjacency.EdgeEntry, rel RelPattern, seen map[string]struct{}, otherKey string) bool {
+	if rel.Type != "" && e.Name != rel.Type {
+		return false
+	}
+	if !adjacency.DirectionMatches(e.Direction, rel.Direction.String()) {
+		return false
+	}
+	_, visited := seen[otherKey]
+	return !visited
+}
+
 // traverseRel expands one relationship hop (possibly variable-length).
 func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to NodePattern) ([]binding, error) {
 	minHops := rel.MinHops
@@ -57,37 +99,42 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 
 	current := starts
 	for hop := 1; hop <= maxHops; hop++ {
+		// Every node this hop steps FROM is known before the loop, so their
+		// adjacency is one batch rather than one node-state read apiece. It
+		// matters from hop 2 on: hop 1 steps from a single node, and a ranged
+		// hop's later frontiers are as wide as the walk has fanned out.
+		frontierNodes := make([]string, 0, len(current))
+		for _, f := range current {
+			frontierNodes = append(frontierNodes, adjacencyNodeID(f.node.key))
+		}
+		if err := ex.prefetchEdges(frontierNodes, rel.Type); err != nil {
+			return nil, err
+		}
 		var nextFrontier []frontier
 		for _, f := range current {
-			// Adjacency KV is indexed by bare NodeID, not full Contract #1
-			// vertex keys. When f.node.key is a Contract #1 vtx key, extract
-			// the NodeID; otherwise treat the key as a bare NodeID (test /
-			// legacy Materializer fixture path).
-			adjLookupID := f.node.key
-			if _, nodeID, ok := substrate.ParseVertexKey(f.node.key); ok {
-				adjLookupID = nodeID
-			}
+			adjLookupID := adjacencyNodeID(f.node.key)
 			edges, err := ex.fetchEdges(adjLookupID, rel.Type)
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)
 			}
 			ex.recordEdgeSelector(adjLookupID, rel, edges)
+			// The whole frontier this hop admits is read in ONE batch before
+			// any of it is bound, so a node carrying thousands of admitted
+			// edges costs a round trip per chunk rather than one per
+			// neighbour. The binding loop below is unchanged — its fetchNode
+			// calls are served by what the batch staged.
+			frontierKeys := make([]string, 0, len(edges))
 			for _, e := range edges {
-				if rel.Type != "" && e.Name != rel.Type {
-					continue
+				if other := otherEndKey(e); hopCrosses(e, rel, f.seen, other) {
+					frontierKeys = append(frontierKeys, other)
 				}
-				if !adjacency.DirectionMatches(e.Direction, rel.Direction.String()) {
-					continue
-				}
-				// Reconstruct the OTHER endpoint's Core KV key. If the edge
-				// carries OtherType (Contract #1 link convention), build the
-				// full vtx key; otherwise the OtherNodeID itself is the
-				// Core KV key (Materializer-style fixture path).
-				otherCoreKey := e.OtherNodeID
-				if e.OtherType != "" {
-					otherCoreKey = substrate.VertexPrefix + "." + e.OtherType + "." + e.OtherNodeID
-				}
-				if _, seen := f.seen[otherCoreKey]; seen {
+			}
+			if err := ex.prefetchNodes(frontierKeys); err != nil {
+				return nil, err
+			}
+			for _, e := range edges {
+				otherCoreKey := otherEndKey(e)
+				if !hopCrosses(e, rel, f.seen, otherCoreKey) {
 					continue
 				}
 				neighbor, err := ex.fetchNode(otherCoreKey)

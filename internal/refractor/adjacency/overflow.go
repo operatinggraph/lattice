@@ -153,17 +153,26 @@ func readNodeState(ctx context.Context, kv *substrate.KV, nodeID string) (nodeSt
 	if err != nil {
 		return nodeState{}, fmt.Errorf("adjacency: get %s: %w", docKey, err)
 	}
+	_, marked := entries[markKey]
+	return decodeNodeState(nodeID, entries[docKey], marked)
+}
 
-	var st nodeState
-	if _, ok := entries[markKey]; ok {
-		st.marked = true
+// decodeNodeState renders one node's document/mark pair into its state — the
+// single decoder behind the per-node read and the batched one, so a node
+// yields the same state, and the same error, however its keys were fetched.
+//
+// A nil docEntry is a node with no document at all, which is not the same as a
+// document holding no edges: the two differ in the revision a footprint
+// records, and docFound is what tells them apart.
+func decodeNodeState(nodeID string, docEntry *substrate.KVEntry, markPresent bool) (nodeState, error) {
+	st := nodeState{marked: markPresent}
+	if docEntry == nil {
+		return st, nil
 	}
-	if entry, ok := entries[docKey]; ok {
-		st.docFound = true
-		st.docRev = entry.Revision
-		if jsonErr := json.Unmarshal(entry.Value, &st.doc); jsonErr != nil {
-			return nodeState{}, fmt.Errorf("adjacency: unmarshal %s: %w", docKey, jsonErr)
-		}
+	st.docFound = true
+	st.docRev = docEntry.Revision
+	if err := json.Unmarshal(docEntry.Value, &st.doc); err != nil {
+		return nodeState{}, fmt.Errorf("adjacency: unmarshal %s: %w", subjects.AdjKey(nodeID), err)
 	}
 	return st, nil
 }

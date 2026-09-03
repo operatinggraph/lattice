@@ -8,13 +8,21 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
+// ValidToken reports whether s can be spelled as one NATS subject token: it is
+// non-empty and free of the reserved characters (`.`, `*`, `>`) and whitespace.
+// It is the predicate form of the rule the builders below enforce, for a caller
+// holding an id from elsewhere that would rather skip it than be panicked at.
+func ValidToken(s string) bool {
+	return s != "" && !strings.ContainsAny(s, ".*> \t\n\r")
+}
+
 // validateToken panics if s is empty or contains NATS-reserved characters
 // (`.`, `*`, `>`) or whitespace. Call at the top of every builder function.
 func validateToken(name, s string) {
 	if s == "" {
 		panic(fmt.Sprintf("subjects: %s must not be empty", name))
 	}
-	if strings.ContainsAny(s, ".*> \t\n\r") {
+	if !ValidToken(s) {
 		panic(fmt.Sprintf("subjects: %s %q contains invalid NATS token character", name, s))
 	}
 }

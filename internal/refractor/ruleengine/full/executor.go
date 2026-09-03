@@ -107,6 +107,57 @@ type executor struct {
 	// absent-then-created aspect splits a group exactly as a changed one does.
 	nodes map[string]*nodeRef
 
+	// prefetched stages the entries a BATCHED read fetched ahead of use, keyed
+	// by Core KV key exactly as nodes is, with the same nil-means-absent
+	// convention. It is a staging area, not the memo: fetchNode promotes an
+	// entry into nodes the first time the evaluation dereferences that key.
+	//
+	// The split is what keeps the read-surface footprint the set of keys the
+	// evaluation USED rather than the set a batch guessed at. A prefetch reads
+	// what a clause is about to want, and a clause does not always want all of
+	// it — a CASE takes one branch, an AND stops at its first false, a coalesce
+	// at its first non-null. Promoting on use means a key the evaluation never
+	// dereferenced never enters the certificate a validating caller re-checks,
+	// so batching cannot widen what counts as mid-evaluation drift.
+	//
+	// Lives for ONE evaluation, exactly like nodes.
+	prefetched map[string]*nodeRef
+
+	// prefetchDisabled takes every node, aspect and adjacency read down the
+	// one-at-a-time path, stamped at construction from the engine's posture.
+	prefetchDisabled bool
+
+	// prefetchedEdges stages the adjacency answers a BATCHED node-state read
+	// fetched ahead of use, keyed by adjacency NodeID. It is the edge twin of
+	// prefetched, and staged for the same reason: fetchEdges promotes an entry
+	// through memoizeWhole at first use, so composition with an already-pinned
+	// relation, the edgeRevisions record and the read observation all happen at
+	// exactly the point they do without a batch, for exactly the nodes the walk
+	// reaches.
+	//
+	// A staged entry is relation-agnostic — an unmarked node's read is its
+	// whole document whatever relation a hop follows — so one entry serves a
+	// typed hop and an untyped one alike. An entry for an overflow-MARKED node
+	// carries no edges and is ignored: that node's edges live in Core KV's link
+	// keyspace, and reading it stays the scoped read's job.
+	//
+	// Lives for ONE evaluation, exactly like edges.
+	prefetchedEdges map[string]adjacency.Prefetched
+
+	// pointReads counts the single-key Core KV reads this evaluation issued,
+	// and adjReads the per-node adjacency reads — the round trips batching
+	// removes, and the quantities that say whether a hop's frontier, a
+	// projection's aspects, or a stage's bound sources were served from a
+	// batch.
+	pointReads int
+	adjReads   int
+
+	// batchReads counts the multi-get REQUESTS this evaluation issued —
+	// including each retry a request split into. It is what says a batch is a
+	// batch: an assertion counting only the point reads a batch removed stays
+	// satisfied by a batch that issued one request per key.
+	batchReads int
+
 	// edges memoizes a WHOLE adjacency read by adjacency NodeID for the life
 	// of ONE evaluation — the link twin of nodes, closing the same class of
 	// defect for relationship hops: without it, every hop through a given
@@ -409,7 +460,23 @@ func (e *Engine) ExecuteWithStats(
 			errors.New("full engine: compiled rule has nil query")
 	}
 
-	ex := &executor{
+	ex := e.newExecutor(ctx, compiled, ec, adjKV, coreKV)
+
+	results, footprint, err := ex.run(compiled)
+	return results, footprint, ex.evalStats(), err
+}
+
+// newExecutor builds the per-evaluation state for one run of compiled: the
+// engine's postures and caps, the event's parameters and seed, the compiled
+// rule's parse-time analyses, and the empty memos every read of this
+// evaluation goes through.
+func (e *Engine) newExecutor(
+	ctx context.Context,
+	compiled *CompiledRule,
+	ec ruleengine.EventContext,
+	adjKV, coreKV *substrate.KV,
+) *executor {
+	return &executor{
 		ctx:               ctx,
 		adjKV:             adjKV,
 		coreKV:            coreKV,
@@ -417,7 +484,10 @@ func (e *Engine) ExecuteWithStats(
 		keyColumns:        compiled.KeyColumns,
 		seedAnchor:        seedAnchorFor(compiled.Query, ec.SeedAnchor, compiled.LabelExpansion),
 		nodes:             map[string]*nodeRef{},
+		prefetched:        map[string]*nodeRef{},
+		prefetchDisabled:  e.prefetchDisabled,
 		edges:             map[string][]adjacency.EdgeEntry{},
+		prefetchedEdges:   map[string]adjacency.Prefetched{},
 		edgeRevisions:     map[string]uint64{},
 		hubEdges:          map[hubKey][]adjacency.EdgeEntry{},
 		hubReadScope:      e.hubReadScopeEnabled(),
@@ -428,9 +498,6 @@ func (e *Engine) ExecuteWithStats(
 		branchStages:      compiled.branchStages,
 		branchDeferred:    compiled.branchDeferred,
 	}
-
-	results, footprint, err := ex.run(compiled)
-	return results, footprint, ex.evalStats(), err
 }
 
 // run walks compiled's clauses over this executor's per-evaluation state and
@@ -532,6 +599,12 @@ func (e *Engine) Execute(_ context.Context, _ ruleengine.CompiledRule, _ ruleeng
 // --- MATCH ---
 
 func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) {
+	// The loop below walks each row on its own, so a pattern hanging off an
+	// already-bound variable reads one node's adjacency per row. Reading them
+	// all in one batch first is what turns that into a round trip per chunk.
+	if err := ex.prefetchPathSources(bindings, m.Patterns); err != nil {
+		return nil, err
+	}
 	var out []binding
 	for _, b := range bindings {
 		expanded, err := ex.matchPatterns(b, m.Patterns, m.Optional)
@@ -849,13 +922,26 @@ func (ex *executor) propsAllMatch(b binding, ref *nodeRef, n NodePattern) (bool,
 // evaluation — see executor.nodes for why repeatable-read is a correctness
 // requirement here. A read error is never memoized: it is transport, not a
 // value, so a retry within the same evaluation may legitimately succeed.
+//
+// An entry a batched read staged ahead of this call is PROMOTED into the memo
+// here rather than re-read, which is what makes a prefetch free of a second
+// round trip and what puts the key into the read-surface footprint at the
+// moment the evaluation actually uses it (see executor.prefetched).
 func (ex *executor) fetchNode(key string) (*nodeRef, error) {
 	if ref, ok := ex.nodes[key]; ok {
 		return ref, nil
 	}
-	ref, err := ex.readNode(key)
-	if err != nil {
-		return nil, err
+	ref, staged := ex.prefetched[key]
+	if staged {
+		// The staging area holds only entries the evaluation has not reached
+		// yet, so promoting one drops it.
+		delete(ex.prefetched, key)
+	} else {
+		var err error
+		ref, err = ex.readNode(key)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// The read-free key-resolution path (anchor_delete) builds an executor with
 	// no memo; it resolves at most one key per call, so a nil map just means no
@@ -868,6 +954,7 @@ func (ex *executor) fetchNode(key string) (*nodeRef, error) {
 
 // readNode performs the uncached Core KV point-read behind fetchNode.
 func (ex *executor) readNode(key string) (*nodeRef, error) {
+	ex.pointReads++
 	entry, err := ex.coreKV.Get(ex.ctx, key)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
@@ -875,12 +962,25 @@ func (ex *executor) readNode(key string) (*nodeRef, error) {
 		}
 		return nil, fmt.Errorf("full engine: get %q: %w", key, err)
 	}
+	return decodeNode(key, entry)
+}
+
+// decodeNode renders one Core KV entry into the handle a variable binds — the
+// single decoder behind both the point read and the batched prefetch, so a key
+// yields the same value and the same revision however it was fetched.
+//
+// A nil entry (the key is absent), a JSON "null" body, and a soft-deleted
+// entry all decode to a nil handle: absent, in the executor's terms. A
+// null-body entry is a corrupted or transitional write and is read as a
+// tombstone rather than as an empty vertex.
+func decodeNode(key string, entry *substrate.KVEntry) (*nodeRef, error) {
+	if entry == nil {
+		return nil, nil
+	}
 	var props map[string]any
 	if err := json.Unmarshal(entry.Value, &props); err != nil {
 		return nil, fmt.Errorf("full engine: unmarshal %q: %w", key, err)
 	}
-	// A JSON "null" body unmarshals to a nil map. Treat as absent/tombstone —
-	// a null-body entry is likely a corrupted or transitional write.
 	if props == nil {
 		return nil, nil
 	}
@@ -889,6 +989,302 @@ func (ex *executor) readNode(key string) (*nodeRef, error) {
 	}
 	props["key"] = key
 	return &nodeRef{key: key, props: props, revision: entry.Revision}, nil
+}
+
+// prefetchChunk is the largest exact-key set one batched read asks for. It is
+// the substrate multi-get's atomic fast-path cap (substrate.KVGetMulti): at or
+// under it the response is computed under the stream's read lock in one round
+// trip, and past it the primitive falls back to draining a consumer. Chunking
+// here keeps every prefetch this executor issues on the fast path.
+const prefetchChunk = 1024
+
+// prefetchChunkFloor is the request size below which a failed read is the
+// evaluation's error rather than another split. The response BYTE ceiling no
+// subject count can predict (substrate.ChunkedMultiGet) is what the splitting
+// exists for; sixteen vertex or aspect bodies are far under it, so a failure
+// there is about something other than size.
+const prefetchChunkFloor = 16
+
+// prefetchNodes reads the given Core KV keys in batched requests and stages the
+// decoded entries for the fetchNode calls about to ask for them, replacing one
+// sequential point read per key with one round trip per chunk.
+//
+// The read is NoSnapshot and by EXACT KEY — never a wildcard. Each key is an
+// independent fact: the pipeline re-validates the whole evaluation by comparing
+// the read-surface footprint afterwards, so a set assembled from one instant
+// buys this caller nothing and would fail outright whenever any of thousands of
+// keys took a write mid-read (see substrate.KVGetMultiNoSnapshot, which spells
+// out which callers are entitled to it).
+//
+// An absent key stages a nil handle, exactly what a point read of it yields, so
+// promoting it memoizes the absence and footprints it at revision 0. A read
+// error stages nothing and returns: transport is not a value. A key whose body
+// does NOT DECODE also stages nothing, and is logged: the point read then fires
+// if and only if the evaluation dereferences that key, and fails exactly where
+// it failed before any batching — so a corrupt body on a branch the evaluation
+// never takes cannot fail the evaluation.
+//
+// Fewer than two unstaged keys is left to the point-read path — one batched
+// read of one key is one round trip either way. The read-free key-resolution
+// executor (nil coreKV, nil memo) prefetches nothing.
+func (ex *executor) prefetchNodes(keys []string) error {
+	if ex.prefetchDisabled || ex.coreKV == nil || ex.nodes == nil || len(keys) < 2 {
+		return nil
+	}
+	want := make([]string, 0, len(keys))
+	requested := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if _, memoized := ex.nodes[key]; memoized {
+			continue
+		}
+		if _, staged := ex.prefetched[key]; staged {
+			continue
+		}
+		if _, dup := requested[key]; dup {
+			continue
+		}
+		requested[key] = struct{}{}
+		want = append(want, key)
+	}
+	if len(want) < 2 {
+		return nil
+	}
+	read := func(ctx context.Context, chunk []string) (map[string]*substrate.KVEntry, error) {
+		ex.batchReads++
+		return ex.coreKV.GetMultiNoSnapshot(ctx, chunk)
+	}
+	visit := func(chunk []string, entries map[string]*substrate.KVEntry) error {
+		for _, key := range chunk {
+			ref, err := decodeNode(key, entries[key])
+			if err != nil {
+				slog.Warn("full engine: prefetched entry did not decode; leaving the key to its own read",
+					"key", key, "error", err)
+				continue
+			}
+			ex.stage(key, ref)
+		}
+		return nil
+	}
+	if err := substrate.ChunkedMultiGet(
+		ex.ctx, want, prefetchChunk, prefetchChunkFloor, read, visit,
+	); err != nil {
+		return fmt.Errorf("full engine: prefetch %d keys: %w", len(want), err)
+	}
+	return nil
+}
+
+// stage records one prefetched entry, allocating the staging area on first use
+// so an executor built without one still batches.
+func (ex *executor) stage(key string, ref *nodeRef) {
+	if ex.prefetched == nil {
+		ex.prefetched = map[string]*nodeRef{}
+	}
+	ex.prefetched[key] = ref
+}
+
+// prefetchAspects batches the aspect and link reads the expressions in exprs
+// are about to make against the node bindings in bindings — the projection twin
+// of the frontier prefetch traverseRel takes.
+//
+// The keys it collects mirror resolveProperty's own derivation: a property
+// absent from a vertex's root body resolves as the aspect key
+// <nodeKey>.<property>, and a projectable property of a relationship binding
+// resolves as a read of the link key itself. A property already in the root
+// body, and the "key" alias, resolve with no read and are not collected.
+//
+// Only a property read straight off a VARIABLE is collectable, which is the
+// only hop that reads: a deeper access (`n.aspect.data.name`) navigates the
+// body the first hop returned, in memory.
+//
+// Collecting a key the evaluation then does not dereference — a CASE branch not
+// taken, a short-circuited AND, a coalesce that stopped at its first argument —
+// costs the batched read and nothing else: a staged entry enters the memo, and
+// so the read-surface footprint, only when fetchNode promotes it.
+func (ex *executor) prefetchAspects(bindings []binding, exprs []Expr) error {
+	if ex.prefetchDisabled || ex.coreKV == nil || ex.nodes == nil || len(bindings) == 0 {
+		return nil
+	}
+	type propRef struct{ variable, property string }
+	var refs []propRef
+	seen := map[propRef]struct{}{}
+	for _, e := range exprs {
+		walkExprAll(e, func(sub Expr) {
+			access, ok := sub.(*PropertyAccess)
+			if !ok {
+				return
+			}
+			target, ok := access.Target.(*VariableRef)
+			if !ok {
+				return
+			}
+			ref := propRef{variable: target.Name, property: access.Key}
+			if _, dup := seen[ref]; dup {
+				return
+			}
+			seen[ref] = struct{}{}
+			refs = append(refs, ref)
+		})
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(bindings)*len(refs))
+	for _, b := range bindings {
+		for _, ref := range refs {
+			node, _ := b[ref.variable].(*nodeRef)
+			if node == nil {
+				continue
+			}
+			if _, present := node.props[ref.property]; present {
+				continue
+			}
+			if ref.property == "key" {
+				continue
+			}
+			if node.rel != "" {
+				if relPropertyProjectable(ref.property) {
+					keys = append(keys, node.key)
+				}
+				continue
+			}
+			keys = append(keys, node.key+"."+ref.property)
+		}
+	}
+	return ex.prefetchNodes(keys)
+}
+
+// projectionExprs returns the expressions items project, the argument the
+// stage prefetch walks for the reads a projecting clause is about to make.
+func projectionExprs(items []ProjectionItem) []Expr {
+	exprs := make([]Expr, 0, len(items))
+	for _, it := range items {
+		exprs = append(exprs, it.Expr)
+	}
+	return exprs
+}
+
+// prefetchEdges reads the adjacency state of many nodes in one batched request
+// and stages it for the fetchEdges calls about to ask for them — the adjacency
+// twin of prefetchNodes, for the hops a stage takes from nodes it has ALREADY
+// bound.
+//
+// rel is the relation the hop will follow, and decides only whether an id
+// already answered at that relation's scope is worth asking for again: the
+// answer a batch stages is the node's whole document, which is what an unmarked
+// node's read returns at any scope.
+//
+// Fewer than two nodes left to ask for is left to the per-node read, which is
+// one round trip either way.
+func (ex *executor) prefetchEdges(nodeIDs []string, rel string) error {
+	if ex.prefetchDisabled || ex.adjKV == nil || ex.edges == nil || len(nodeIDs) < 2 {
+		return nil
+	}
+	scoped := ex.hopRelations(rel) != nil
+	want := make([]string, 0, len(nodeIDs))
+	requested := make(map[string]struct{}, len(nodeIDs))
+	for _, id := range nodeIDs {
+		if _, memoized := ex.edges[id]; memoized {
+			continue
+		}
+		if _, staged := ex.prefetchedEdges[id]; staged {
+			continue
+		}
+		if scoped {
+			if _, pinned := ex.hubEdges[hubKey{nodeID: id, rel: rel}]; pinned {
+				continue
+			}
+		}
+		if _, dup := requested[id]; dup {
+			continue
+		}
+		requested[id] = struct{}{}
+		want = append(want, id)
+	}
+	if len(want) < 2 {
+		return nil
+	}
+	staged, requests, err := adjacency.PrefetchNodes(ex.ctx, ex.adjKV, want)
+	ex.batchReads += requests
+	if err != nil {
+		return err
+	}
+	for id, entry := range staged {
+		ex.stageEdges(id, entry)
+	}
+	return nil
+}
+
+// stageEdges records one prefetched adjacency answer, allocating the staging
+// area on first use so an executor built without one still batches.
+func (ex *executor) stageEdges(nodeID string, entry adjacency.Prefetched) {
+	if ex.prefetchedEdges == nil {
+		ex.prefetchedEdges = map[string]adjacency.Prefetched{}
+	}
+	ex.prefetchedEdges[nodeID] = entry
+}
+
+// prefetchPathSources batches the adjacency reads the first hop of each of
+// patterns is about to make, over every row's ALREADY-BOUND source node.
+//
+// This is the shape that otherwise pays one round trip per row: matchPath walks
+// each binding on its own, so an OPTIONAL MATCH hanging off a variable bound to
+// thousands of rows reads thousands of nodes one at a time. A pattern whose
+// first node is not an already-bound variable contributes nothing — it seeds by
+// scan, and what it will hop from is not known until the seed is read.
+//
+// Batching a node the walk turns out not to reach costs the read and nothing
+// else: a staged entry is neither memoized nor observed until fetchEdges
+// promotes it.
+func (ex *executor) prefetchPathSources(bindings []binding, patterns []PathPattern) error {
+	for _, p := range patterns {
+		if len(p.Rels) == 0 || len(p.Nodes) < 2 {
+			continue
+		}
+		variable := p.Nodes[0].Variable
+		if variable == "" {
+			continue
+		}
+		ids := make([]string, 0, len(bindings))
+		for _, b := range bindings {
+			ref, _ := b[variable].(*nodeRef)
+			if ref == nil {
+				continue
+			}
+			ids = append(ids, adjacencyNodeID(ref.key))
+		}
+		if err := ex.prefetchEdges(ids, p.Rels[0].Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prefetchStageReads batches the reads the expressions of one projecting stage
+// are about to make over rows: the aspect and link bodies they dereference, and
+// the adjacency of the bound nodes any pattern in them will hop from.
+//
+// Two expression shapes carry a pattern, and both walk it once per row through
+// matchPath: a pattern comprehension, and an existence predicate (a bare path in
+// a WHERE, and the `NOT (path)` anti-pattern, whose operand is that same node).
+func (ex *executor) prefetchStageReads(bindings []binding, exprs []Expr) error {
+	if err := ex.prefetchAspects(bindings, exprs); err != nil {
+		return err
+	}
+	var patterns []PathPattern
+	for _, e := range exprs {
+		walkExprAll(e, func(sub Expr) {
+			switch x := sub.(type) {
+			case *PatternComprehension:
+				patterns = append(patterns, x.Pattern)
+			case *PatternExpr:
+				patterns = append(patterns, x.Pattern)
+			}
+		})
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	return ex.prefetchPathSources(bindings, patterns)
 }
 
 // fetchEdges returns the edges of adjNodeID this hop may consume, memoized for
@@ -931,13 +1327,25 @@ func (ex *executor) fetchEdges(adjNodeID string, rel string) ([]adjacency.EdgeEn
 	if edges, ok := ex.edges[adjNodeID]; ok {
 		return edges, nil
 	}
-	if rel != "" && ex.hubReadScope {
+	rels := ex.hopRelations(rel)
+	// An entry a batched node-state read staged is promoted here, which is
+	// where the per-node read would have happened: it is memoized through the
+	// same composition, and it reports the read it stands in for to a context
+	// observer at the same point. A staged MARKED node carries no edges and
+	// falls through to the read below, the only path that can answer for it.
+	if staged, ok := ex.prefetchedEdges[adjNodeID]; ok && !staged.Marked {
+		delete(ex.prefetchedEdges, adjNodeID)
+		adjacency.ObserveWholeRead(ex.ctx, adjNodeID, rels)
+		return ex.memoizeWhole(adjNodeID, staged.Edges, staged.Fingerprint), nil
+	}
+	if rels != nil {
 		hk := hubKey{nodeID: adjNodeID, rel: rel}
 		if edges, ok := ex.hubEdges[hk]; ok {
 			return edges, nil
 		}
+		ex.adjReads++
 		edges, fingerprint, whole, err := adjacency.NeighborsScoped(
-			ex.ctx, ex.adjKV, ex.coreKV, adjNodeID, map[string]struct{}{rel: {}})
+			ex.ctx, ex.adjKV, ex.coreKV, adjNodeID, rels)
 		if err != nil {
 			return nil, err
 		}
@@ -949,11 +1357,24 @@ func (ex *executor) fetchEdges(adjNodeID string, rel string) ([]adjacency.EdgeEn
 		}
 		return edges, nil
 	}
+	ex.adjReads++
 	edges, revision, err := adjacency.Neighbors(ex.ctx, ex.adjKV, ex.coreKV, adjNodeID)
 	if err != nil {
 		return nil, err
 	}
 	return ex.memoizeWhole(adjNodeID, edges, revision), nil
+}
+
+// hopRelations is the relation scope fetchEdges reads a node at for a hop of
+// rel: that single relation when the hop is typed AND hub read-scoping is on,
+// and nil — the whole node — otherwise. It is the one derivation, so the batch
+// that prefetches a set of nodes and the read that would have fetched one of
+// them cannot come to disagree about the scope they were read at.
+func (ex *executor) hopRelations(rel string) map[string]struct{} {
+	if rel == "" || !ex.hubReadScope {
+		return nil
+	}
+	return map[string]struct{}{rel: {}}
 }
 
 // memoizeWhole installs a whole read of adjNodeID as the node's memo entry and
@@ -1174,6 +1595,12 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 		projected = deduped
 	}
 	if w.Where != nil {
+		// The predicate runs once per projected row, so whatever bodies and
+		// neighbour sets it reaches off those rows are one batched read for
+		// the clause.
+		if err := ex.prefetchStageReads(projected, []Expr{w.Where}); err != nil {
+			return nil, err
+		}
 		var filtered []binding
 		for _, b := range projected {
 			v, err := ex.evalExpr(b, w.Where)
@@ -1206,6 +1633,12 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 // each of them per base row, folding each into the aggregators stamped with it.
 // Nil is the product path, where every branch already multiplied the rows.
 func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, redundant []bool, plan *stagePlan) ([]binding, error) {
+	// Both arms below evaluate the items once per inbound row, so the bodies
+	// and neighbour sets those items reach are a single batched read for the
+	// whole stage rather than one round trip per row per column.
+	if err := ex.prefetchStageReads(bindings, projectionExprs(items)); err != nil {
+		return nil, err
+	}
 	// Decide aggregating vs non-aggregating per item.
 	itemAggregating := make([]bool, len(items))
 	anyAggregating := false
@@ -1274,6 +1707,23 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 	var branchRows []int
 	if plan != nil {
 		branchRows = make([]int, len(plan.deferred))
+		// Each deferred branch is expanded ONE base row at a time below, so no
+		// batch can form inside applyMatch there: its first clause's hops cost
+		// a node-state read per base row. Reading every base row's sources for
+		// that clause here — once per branch, before the fold loop — is what
+		// turns them into a request per chunk.
+		//
+		// Only the first clause. A later clause of a branch hops from a head
+		// the expansion itself binds, so what it will read is not known until
+		// that expansion runs, and it stays per row.
+		for _, branch := range plan.deferred {
+			if len(branch.clauses) == 0 {
+				continue
+			}
+			if err := ex.prefetchPathSources(bindings, branch.clauses[0].Patterns); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, b := range bindings {
 		if err := ex.checkCancelled(); err != nil {

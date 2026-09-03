@@ -26,6 +26,13 @@ type Engine struct {
 	// hubReadScope overrides the package-wide hub read-scope posture for this
 	// engine alone; HubReadScopeModeUnset (the zero value) takes the default.
 	hubReadScope HubReadScopeMode
+
+	// prefetchDisabled takes this engine's evaluations down the point-read
+	// path for every node and aspect read — one key per round trip, no batched
+	// prefetch. The zero value batches, which is what a registered engine does;
+	// the comparison tests that pin the two paths to the same rows and the same
+	// read-surface footprint are what set it.
+	prefetchDisabled bool
 }
 
 // New returns a ready-to-register full engine.

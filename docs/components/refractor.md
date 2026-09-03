@@ -597,6 +597,30 @@ validation. The full openCypher engine is the only rule engine Refractor runs.
 - **Canonical engine for new lenses.** The bootstrap-seeded Capability Lens uses `engine: "full"`.
 - **Wiring**: `cmd/refractor/main.go` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+#### Batched reads: a hop's frontier, a projection's aspects, a stage's bound sources
+
+An evaluation reads a relationship hop's whole admitted frontier, and the aspect (or link) bodies a
+projecting clause is about to dereference off its rows, through the substrate's multi-get
+(`GetMultiNoSnapshot`, exact keys, chunked at the primitive's atomic fast-path cap) rather than one
+point read per key — so a wide actor costs a round trip per chunk instead of one per neighbour and
+one per column per row. A batched entry is **staged**, and enters the evaluation's node memo — and so
+its read-surface footprint — only when the evaluation actually dereferences that key: a clause with a
+branch (a `CASE` arm not taken, a short-circuited `AND`) does not use everything the batch read, and
+the certificate the pipeline re-checks stays exactly the set of keys the evaluation used. Absent and
+soft-deleted keys decode to the same nil handle a point read of them yields, at revision 0.
+
+The **adjacency** side batches the same way: a stage that hops from nodes it has already bound — an
+`OPTIONAL MATCH` or a pattern comprehension hanging off a variable bound to many rows, which is
+otherwise one node-state read per row — reads every source's document-and-mark pair in one chunked
+request, sized so both of a node's keys stay inside one instant. A staged answer is likewise promoted
+on use: through the same `memoizeWhole` composition, recording the same fingerprint, and reporting the
+same read to a context read observer, at the point the per-node read would have happened. An
+overflow-marked node is never answered from a batch — its edges live in Core KV's link keyspace, and
+it keeps the relation-scoped read. A stage the branch-decomposition analysis split takes the same batch
+per deferred branch, over every base row, before the fold loop that would otherwise expand each branch
+one row at a time; a later clause of such a branch hops from a head the expansion itself binds, so it
+stays per row.
+
 #### The pattern graph steps a ranged hop
 
 `AnchorHopIndex`/`ScanRootHopIndex` (`hopindex.go`) index a **variable-length** relationship

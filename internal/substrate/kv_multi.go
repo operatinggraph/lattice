@@ -106,6 +106,20 @@ const (
 	directGetFallbackConsumerTTL = 30 * time.Second
 )
 
+// ErrDirectGetAttemptsExhausted marks the one multi-get failure a SMALLER
+// request can fix: the fast path retried a whole request to exhaustion and
+// every attempt ended short.
+//
+// It is the signature of an over-size response. The fast path is bounded by the
+// connection's negotiated MaxPending as well as by the subject count, and that
+// byte ceiling is deterministic — a request over it ends short on every
+// attempt, so the retry loop runs out. A transient short read is absorbed by
+// that same loop and never surfaces; an API or transport failure returns
+// without entering it, carrying a different error. So a caller sizing its own
+// requests (ChunkedMultiGet) can treat this, and only this, as "try a smaller
+// one".
+var ErrDirectGetAttemptsExhausted = errors.New("substrate: KV get-multi: attempts exhausted")
+
 var (
 	// errDirectGetShortRead is the internal retry-whole signal: the response
 	// stream ended before a clean EOB. Never returned to a KVGetMulti caller
@@ -289,7 +303,8 @@ func (c *Conn) directGetMulti(ctx context.Context, bucket string, subjects []str
 		case <-time.After(directGetRetryBackoff):
 		}
 	}
-	return nil, fmt.Errorf("substrate: KV get-multi %s: %d attempts exhausted: %w", bucket, directGetRetries, lastErr)
+	return nil, fmt.Errorf("substrate: KV get-multi %s: %d attempts: %w: %w",
+		bucket, directGetRetries, ErrDirectGetAttemptsExhausted, lastErr)
 }
 
 // directGetMultiOnce issues a single multi_last request-response cycle. The
