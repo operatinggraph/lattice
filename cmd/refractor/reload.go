@@ -21,7 +21,13 @@ import (
 // is re-authored by an upgrade rather than by hand, re-activating Refractor is
 // the one that applies — activation reads the current spec and installs all of
 // it.
-const reactivateRemedy = "the lens must be re-activated (restart Refractor, or delete and re-create the lens definition)"
+//
+// It is health.ReactivateRemedy rather than a literal because the sentence is
+// read as well as written: the clean-registration clear
+// (pipeline.registerWithFilterFallback) matches it to recognise a verdict
+// persisted without the class marker, so a reworded copy here would strand
+// exactly the entries that arm depends on the wording to reach.
+const reactivateRemedy = health.ReactivateRemedy
 
 // targetBuilder opens a rule's write target. The concrete implementation needs
 // the process's substrate connection and pool manager; taking it as a function

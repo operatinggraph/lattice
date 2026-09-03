@@ -562,20 +562,39 @@ func TestRegisterWithFilterFallback_CleanSuccessKeepsAnotherWritersFault(t *test
 // it, and Loupe's fault conjunct reads a live LastError, so the lens renders
 // faulted for an edit that landed.
 func TestRegisterWithFilterFallback_CleanSuccessRetiresAHotReloadRefusal(t *testing.T) {
-	reporter := newFallbackHealthReporter(t, "rwff-refusal")
-	require.NoError(t, reporter.RecordError(context.Background(),
-		health.HotReloadRefusalPrefix+"lens Output descriptor changed — not hot-reloadable"))
+	for _, tc := range []struct{ name, msg string }{
+		{
+			// The live form: the class marker the reloader records under.
+			name: "marked with its class",
+			msg:  health.HotReloadRefusalPrefix + "lens update changes grantTable — not hot-reloadable; " + health.ReactivateRemedy,
+		},
+		{
+			// The persisted form. Health KV outlives the binary that wrote it, so a
+			// deployment coming up on a build that writes the marker is already
+			// holding verdicts that name their REMEDY instead — and that remedy is
+			// activation, which is exactly what a clean registration has just done.
+			// Reaching these is the difference between the upgrade fixing the stale
+			// fault and an operator hand-editing health entries.
+			name: "named only by its remedy",
+			msg:  "lens Output descriptor changed — not hot-reloadable (the envelope, delete key and sweep plan are installed at activation); " + health.ReactivateRemedy,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reporter := newFallbackHealthReporter(t, "rwff-refusal")
+			require.NoError(t, reporter.RecordError(context.Background(), tc.msg))
 
-	p := &Pipeline{ruleID: "rwff-refusal", reporter: reporter}
-	err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
-		t.Fatal("applyBroad must not be called on a clean first-attempt success")
-	}, func() error { return nil })
-	require.NoError(t, err)
+			p := &Pipeline{ruleID: "rwff-refusal", reporter: reporter}
+			err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+				t.Fatal("applyBroad must not be called on a clean first-attempt success")
+			}, func() error { return nil })
+			require.NoError(t, err)
 
-	entry, gerr := reporter.GetStatus(context.Background())
-	require.NoError(t, gerr)
-	require.Nil(t, entry.LastError, "activation supersedes every hot-reload verdict, so a clean registration retires it")
-	require.Equal(t, uint64(1), entry.ErrorCount, "the cumulative count is the record that the refusal happened")
+			entry, gerr := reporter.GetStatus(context.Background())
+			require.NoError(t, gerr)
+			require.Nil(t, entry.LastError, "activation supersedes every hot-reload verdict, so a clean registration retires it")
+			require.Equal(t, uint64(1), entry.ErrorCount, "the cumulative count is the record that the refusal happened")
+		})
+	}
 }
 
 // And the two failures the re-activation path records WITHOUT that prefix stay:

@@ -79,6 +79,24 @@ const (
 // by the infra pause's own probe-and-resume rather than by any clear.
 const HotReloadRefusalPrefix = "hot-reload refused: "
 
+// ReactivateRemedy is the remedy sentence every hot-reload refusal ends with —
+// cmd/refractor's own reactivateRemedy is defined as this constant, so the
+// producer and the reader cannot drift.
+//
+// It carries the SAME licence HotReloadRefusalPrefix does, over the persisted
+// format rather than the live one. Health KV is durable across binaries: a
+// deployment upgrading to a build that writes the class marker still holds
+// verdicts a build without it wrote, and those name their remedy instead of
+// their class. The remedy IS activation, so a clean consumer registration
+// settles them on exactly the argument the prefix rests on — which is why
+// pipeline.registerWithFilterFallback's clear matches the suffix as well as the
+// prefix, rather than leaving an operator to hand-edit health entries.
+//
+// A verdict is the only message that ends this way: it is appended by
+// hotReloadRefusal's own return values and by nothing else on the entry, so the
+// match is as narrow as the prefix is.
+const ReactivateRemedy = "the lens must be re-activated (restart Refractor, or delete and re-create the lens definition)"
+
 // Entry is the full health KV value schema. The KV key is the ruleID; the KV
 // bucket is configured via config.HealthKVBucket.
 type Entry = healthwire.Entry

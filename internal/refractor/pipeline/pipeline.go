@@ -1165,14 +1165,23 @@ func isNarrowedFilterFallback(lastError string) bool {
 // retirement path: a restart does not touch health KV and RecordError only ever
 // appends, so left alone either outlives every process that could explain it.
 //
+// The hot-reload arm has a second form, because health KV outlives the binary
+// that wrote it. A verdict persisted without the class marker names its REMEDY
+// instead (health.ReactivateRemedy, the sentence every refusal ends with), and
+// that remedy is activation — so a registration settles it on the identical
+// argument, and matching the suffix is what reaches the entries a deployment is
+// already carrying when it comes up on a binary that writes the marker.
+//
 // Everything else on the entry belongs to a writer this one is not. Both the
 // writer and the clearer read the constants above, so the pair cannot drift into
 // a clear that retires nothing or one that retires another writer's live
 // diagnosis — a re-activation that could not purge its target, or a lens left
-// dark, carry neither prefix precisely because a registration settles neither.
+// dark, match none of the three forms precisely because a registration settles
+// neither.
 func retiredByCleanRegistration(lastError string) bool {
 	return isNarrowedFilterFallback(lastError) ||
-		strings.HasPrefix(lastError, health.HotReloadRefusalPrefix)
+		strings.HasPrefix(lastError, health.HotReloadRefusalPrefix) ||
+		strings.HasSuffix(lastError, health.ReactivateRemedy)
 }
 
 // registerWithFilterFallback runs register — the supervisor call that

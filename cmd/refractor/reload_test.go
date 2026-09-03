@@ -2544,3 +2544,21 @@ func TestActivation_RetiresAHotReloadRefusalTheRestartResolved(t *testing.T) {
 	require.NotNil(t, strandedStatus.LastError, "an unsettled fault on another lens must be untouched")
 	assert.Equal(t, strandedMsg, *strandedStatus.LastError)
 }
+
+// TestReactivateRemedy_IsTheOneTheClearMatches: the remedy sentence is read as
+// well as written. pipeline.registerWithFilterFallback's clear matches it to
+// recognise a verdict health KV is carrying from a binary that wrote no class
+// marker — health KV outlives the binary that wrote it — so a copy reworded here
+// would strand exactly the entries that arm exists to reach, and the next
+// activation would leave them rendering faulted for an edit it had just applied.
+func TestReactivateRemedy_IsTheOneTheClearMatches(t *testing.T) {
+	assert.Equal(t, health.ReactivateRemedy, reactivateRemedy,
+		"the remedy this package appends must be the one the clear recognises")
+
+	// And it is genuinely what a refusal ends with, so the suffix match reaches a
+	// real verdict rather than a constant nothing produces.
+	newLens := authPlaneRule(t)
+	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}
+	assert.True(t, strings.HasSuffix(hotReloadRefusal(runningEntry(), newLens), health.ReactivateRemedy),
+		"every refusal names the remedy, which is what the persisted-format arm keys on")
+}
