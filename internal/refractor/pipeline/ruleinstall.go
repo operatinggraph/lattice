@@ -413,11 +413,13 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	next.personalClockRefusal = PersonalDerivationRuleRefusal(next.cr)
 
 	// Pin the anchor label(s) an anchor-labeled event can seed the evaluation
-	// with. Derived unconditionally like the label set above, and for the same
-	// reason: a reload must never leave a previous rule body's anchor armed. A
-	// multi-walk lens is excluded outright — branch merging evaluates N
-	// independent queries, each with its own anchor, and one seed cannot speak
-	// for all of them.
+	// with, and the single-walk pattern graphs. Derived unconditionally like the
+	// label set above, and for the same reason: a reload must never leave a
+	// previous rule body's anchor armed. A multi-walk lens is excluded from
+	// SEEDING outright — branch merging evaluates N independent queries, each
+	// with its own anchor, and one seed cannot speak for all of them. A seed
+	// label that must speak for one evaluation is a different question from an
+	// anchor SET that is a union, and only the second has an answer here.
 	if len(branches) <= 1 {
 		if fullCR, isFull := next.cr.(*full.CompiledRule); isFull {
 			if label, ok := fullCR.AnchorLabel(); ok {
@@ -431,9 +433,9 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			}
 			// The pattern graph the affected-anchor derivation walks under
 			// (auth-plane-projection-latency-design.md §4.7). Derived here for
-			// the same two reasons the anchor label is, and excluded on the
-			// same multi-walk arm: each branch carries its own anchor, and one
-			// graph cannot speak for all of them. WithLabelExpansion threads
+			// the same two reasons the anchor label is; the multi-walk arm
+			// below derives one of these per branch instead, and the derivation
+			// unions their walks. WithLabelExpansion threads
 			// the SAME resolved sets into every `*` position the graph
 			// carries — PositionsBinding, AnchorSideSeeds and the walk's
 			// far-end prune all read them (dynamic-type-taxonomy-design.md
@@ -452,6 +454,17 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			// answered by the same builder.
 			next.rootHops = fullCR.ScanRootHopIndex().WithLabelExpansion(expandedLabels)
 		}
+	} else {
+		// The multi-walk arm's own pattern graphs — one per branch, so the
+		// derivation can walk EVERY branch from its own seeds and union what
+		// they reach (personal-lens-derivation-licence-design.md §4.5). Derived
+		// over `all`, with the same label expansion threaded in, exactly as the
+		// walk scope below is; the refusal rides beside them for the same reason
+		// walkScopeRefusal rides beside the scope, and both are replaced
+		// wholesale here so a reload cannot leave a previous body's graphs
+		// armed.
+		next.anchorHopsPerBranch, next.anchorHopsPerBranchRefusal =
+			deriveBranchAnchorHops(next.engineKind, all, expandedLabels)
 	}
 
 	// The relation scope the ActorEnumerator's BFS runs under

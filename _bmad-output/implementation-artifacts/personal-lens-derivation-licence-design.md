@@ -482,6 +482,19 @@ below — derive over **every** branch:
   for one evaluation is a different question from an anchor set that is a union, and this design does not
   answer it.
 
+*(Amended at build, 2026-09-03.)* As built, the pair `anchorHopsPerBranch` + `anchorHopsPerBranchRefusal`
+is published on `ruleState` (mirroring `walkScope`/`walkScopeRefusal`) so the static conjuncts are decided
+once per publication; the refusals are lens-wide and named per conjunct (`DerivationBranchIncompleteRefusal`,
+`DerivationBranchUnresolvedExpansionRefusal`, `DerivationBranchAnchorDisagreementRefusal`, with
+`DerivationNoBranchIndexRefusal` kept for a non-full branch set and a distinct unnamed-index belt for the
+single-walk arm); the anchor-label conjunct is read live because the enumerator is installed after
+publication; the budget is one `derivationBudget` per event (reads, work, ranged reads, one shared memo)
+threaded through every branch, so a wide lens declines once; and the control-plane `health` RPC reports
+`{licensed, refusal, indexReady, indexRefusal}` from one `ruleState` snapshot so "licensed but the index
+refuses" is an operator-readable state. The differential runs the real corpus with the merged recompute
+(the personal arm) as ground truth, per branch and unioned; a cold review mutated the union to one branch
+and watched it fail.
+
 **Give the exclusion a reason.** G15: a multi-walk lens's zero `HopIndex` has `Complete == false` and an
 **empty** `Incomplete`, so the operator log prints a blank reason the moment conjunct 1 stops masking it.
 Whatever survives this increment gets a named constant in the closed vocabulary the corpus census
@@ -861,13 +874,10 @@ substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc
 
 ### 15.8 Checkpoint
 
-*(amended per increment)* — **Inc 1 landed** (`cc42b5de`). **Inc 2 landed**: the licence (conjuncts 0–5 as
-amended in §4.4), the healer pass verdict published as `personalSweepVerdict` (eight-token closed
-vocabulary, `stale` escalated by the LagPoller), the single-instance build-time gate
-(`scripts/lint-refractor-single-instance.go`, gated on `grantchange.GrantChangeEdgeSpansDeployment`), the
-per-lens licence answer on the control-plane `health` RPC, and `TestCorpusPersonalDerivation` (19 branches /
-15 lenses; the 7 multi-walk rows pinned to the no-branch-index refusal until Inc 3 flips them). Reviews:
-full cold pass (1 BLOCKING + 2 MAJOR + 8 MINOR) and a fix-round re-review (1 MAJOR + 7 MINOR), all closed.
-**Next: Inc 3** (multi-walk per-branch indexes + union) — worktree
-`/tmp/lattice-worktrees/lattice-personal-licence-1788382715`, branch `fire/personal-lens-derivation-licence`.
-Then close: cycle `bin/refractor`, the §11 live verification, the R7 latency number, dossier classification.
+*(amended per increment)* — **Inc 1 landed** (`cc42b5de`). **Inc 2 landed** (`0bac8278`). **Inc 3 landed**:
+per-branch anchor indexes + the union under one per-event budget; the 7 multi-walk corpus rows flipped from
+the no-branch-index refusal to ready (the payoff record in `TestCorpusPersonalDerivation`); the anchor-label
+conjunct's uncovered disjunct pinned; the health RPC reports index readiness beside the licence. Review: full
+cold pass (0 BLOCKING · 1 MAJOR · 8 MINOR), all closed. **Next: close** — cumulative cold pass over the whole
+item, cycle `bin/refractor` + `bin/loupe` + `bin/bridge` from `main`, the §11 live verification, the R7
+latency number, dossier classification, Done-log.

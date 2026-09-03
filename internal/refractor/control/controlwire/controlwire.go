@@ -120,13 +120,28 @@ type ControlResponse struct {
 // process wiring or the healer's current verdict, so a persisted copy would be
 // a snapshot of a question whose whole point is that its answer moves.
 type PersonalDerivationStatus struct {
-	// Licensed reports whether this lens is currently acting on a derived
-	// anchor set rather than on the ActorEnumerator's walk.
+	// Licensed reports whether the narrowing licence holds for this lens — the
+	// host's wiring and the personal plane's healer verdict.
 	Licensed bool `json:"licensed"`
-	// Refusal names the conjunct refusing it, "" when licensed. It is the same
-	// string the `anchor derivation cannot act on this lens` log line carries,
-	// so an operator reading either finds the same sentence.
+	// Refusal names the licence conjunct refusing it, "" when licensed. It is
+	// the same string the `anchor derivation cannot act on this lens` log line
+	// carries, so an operator reading either finds the same sentence.
 	Refusal string `json:"refusal,omitempty"`
+	// IndexReady reports the OTHER half: whether the lens's compiled pattern
+	// gives the derivation a usable graph — one for an ordinary lens, one per
+	// branch for a lens compiling to several walks, whose anchor set is their
+	// union.
+	//
+	// It is a separate field because it is a separate question, and a lens can
+	// be licensed and still act on nothing: the licence speaks about the process
+	// and the plane, the index about the cypher. Licensed with IndexReady false
+	// is a lens on the enumerator whose refusal no licence conjunct explains,
+	// which is exactly the state an operator would otherwise have to infer from
+	// the absence of a log line.
+	IndexReady bool `json:"indexReady"`
+	// IndexRefusal names the pattern conjunct refusing the index, "" when it is
+	// ready — again the same sentence the log line carries.
+	IndexRefusal string `json:"indexRefusal,omitempty"`
 }
 
 // ReprojectResult is the synchronous acknowledgement returned by the

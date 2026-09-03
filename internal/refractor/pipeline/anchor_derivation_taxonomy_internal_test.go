@@ -218,7 +218,7 @@ func TestDerivationIndex_UnresolvedExpansion_DeclinesInsteadOfPruning(t *testing
 	unresolved.anchorHops.Expanded = nil
 	require.GreaterOrEqual(t, unresolved.anchorHops.UnresolvedExpansionPosition(), 0)
 
-	_, ok = p.derivationIndex(unresolved)
+	_, ok = p.derivationIndexes(unresolved)
 	require.False(t, ok, "an index with an unresolved `*` position must be declined, not walked")
 
 	derived, ok, err = p.deriveAnchorsForVertex(ctx, unresolved, f.key("loft1", "unit"), "unit")

@@ -95,17 +95,18 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"clauseSatisfaction":      hopIndexed,
 	"clinicNoShowSettlement":  hopIndexed,
 	"clinicSiteBackfill":      hopIndexed,
-	// Multi-walk (`len(branches) > 1`, ruleinstall.go): the pipeline installs no
-	// HopIndex for it at all, so this row records the index's own verdict and
-	// nothing downstream consumes it. No cypher edit reaches that conjunct.
+	// Multi-walk (`len(branches) > 1`, ruleinstall.go): the pipeline installs one
+	// HopIndex PER BRANCH and the derivation unions their walks, so this row's
+	// verdict is consumed — a walk that stops indexing refuses the whole lens
+	// (personal_derivation_corpus_census_test.go pins the lens-level answer).
 	"edgeCatalog#0":      hopIndexed,
 	"edgeCatalog#1":      hopIndexed,
 	"edgeCatalog#2":      hopIndexed,
 	"edgeEntityBookings": hopIndexed,
-	// Personal lens: held by `patternClosedOutput` and `sweeper != nil`
-	// (derivationIndexForAct) — the D1 read gate and the Interest Set are inputs
-	// outside the compiled pattern, so a complete index is necessary and not
-	// sufficient, and this row states the index's verdict alone.
+	// Personal lens: a complete index is necessary and not sufficient — the D1
+	// read gate and the Interest Set are inputs outside the compiled pattern, so
+	// the narrowing licence is asked as well (derivationIndexForAct). This row
+	// states the index's verdict alone.
 	"edgeEntityMenuItems":            hopIndexed,
 	"edgeEntityProviders":            hopIndexed, // Personal — see edgeEntityMenuItems.
 	"edgeEntitySessions#0":           hopIndexed, // Multi-walk — see edgeCatalog#0.

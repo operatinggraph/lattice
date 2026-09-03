@@ -307,14 +307,15 @@ type Service struct {
 	rowSetNullifierByRuleID map[string]RowSetNullifier
 	reprojectorByRuleID     map[string]Reprojector
 	reporters               map[string]*health.Reporter
-	// personalLicenceByRuleID answers, per Personal Lens, whether its narrowing
-	// licence currently holds and which conjunct refuses it otherwise. A bare
-	// func rather than an interface for the reason the Interest Set's own sink
-	// takes one: it is a single method whose only implementation lives in a
-	// package this one must not import.
-	personalLicenceByRuleID map[string]func() (bool, string)
-	microSvc                micro.Service // set by StartNATSListener; nil until started
-	ruleGetter              RuleGetter    // set via SetRuleGetter; used by validate op
+	// personalDerivationByRuleID answers, per Personal Lens, whether its
+	// narrowing licence currently holds, whether its compiled pattern gives the
+	// derivation a usable index, and which conjunct refuses each. A bare func
+	// rather than an interface for the reason the Interest Set's own sink takes
+	// one: it is a single method whose only implementation lives in a package
+	// this one must not import.
+	personalDerivationByRuleID map[string]func() (licensed bool, refusal string, indexReady bool, indexRefusal string)
+	microSvc                   micro.Service // set by StartNATSListener; nil until started
+	ruleGetter                 RuleGetter    // set via SetRuleGetter; used by validate op
 	// personalInterestKV backs the "register"/"deregister" ops (Personal Lens
 	// Interest Set, personal-secure-lens-design.md §3.3). nil until
 	// SetPersonalInterestKV is called; those two ops fail closed until then.
@@ -418,20 +419,20 @@ type Service struct {
 // misconfiguration, never normal production traffic.
 func NewService() *Service {
 	return &Service{
-		resumerByRuleID:          make(map[string]Resumer),
-		pauserByRuleID:           make(map[string]Pauser),
-		rebuilderByRuleID:        make(map[string]Rebuilder),
-		deleterByRuleID:          make(map[string]Deleter),
-		rowNullifierByRuleID:     make(map[string]RowNullifier),
-		rowSetNullifierByRuleID:  make(map[string]RowSetNullifier),
-		reprojectorByRuleID:      make(map[string]Reprojector),
-		personalHydratorByRuleID: make(map[string]Hydrator),
-		personalLicenceByRuleID:  make(map[string]func() (bool, string)),
-		reporters:                make(map[string]*health.Reporter),
-		capability:               newDenyAllChecker(nil),
-		rebuildGate:              rebuildgate.New(1),
-		rebuildInFlight:          make(map[string]struct{}),
-		rebuildQueued:            make(map[string]bool),
+		resumerByRuleID:            make(map[string]Resumer),
+		pauserByRuleID:             make(map[string]Pauser),
+		rebuilderByRuleID:          make(map[string]Rebuilder),
+		deleterByRuleID:            make(map[string]Deleter),
+		rowNullifierByRuleID:       make(map[string]RowNullifier),
+		rowSetNullifierByRuleID:    make(map[string]RowSetNullifier),
+		reprojectorByRuleID:        make(map[string]Reprojector),
+		personalHydratorByRuleID:   make(map[string]Hydrator),
+		personalDerivationByRuleID: make(map[string]func() (bool, string, bool, string)),
+		reporters:                  make(map[string]*health.Reporter),
+		capability:                 newDenyAllChecker(nil),
+		rebuildGate:                rebuildgate.New(1),
+		rebuildInFlight:            make(map[string]struct{}),
+		rebuildQueued:              make(map[string]bool),
 	}
 }
 
@@ -551,8 +552,9 @@ func (s *Service) announceInterestChange(identityID string) {
 	fn(identityID)
 }
 
-// RegisterPersonalDerivationLicence registers the accessor the "health" op
-// answers a Personal Lens's narrowing-licence verdict from.
+// RegisterPersonalDerivationStatus registers the accessor the "health" op
+// answers a Personal Lens's narrowing verdict from — the licence AND the index,
+// which are separate questions with separate refusals.
 //
 // Per-ruleID and overwritten on re-registration, like every other per-lens
 // registry here. nil unregisters, which is what a lens torn down leaves behind.
@@ -562,15 +564,16 @@ func (s *Service) announceInterestChange(identityID string) {
 // quietly on the enumerator, hours after the line scrolled past, has no surface
 // that says why. The health KV entry cannot answer it either — its
 // personalSweepVerdict is one shared sweeper's plane-wide pass verdict, which
-// says nothing about conjuncts 0-2 or about the per-lens registration clause.
-func (s *Service) RegisterPersonalDerivationLicence(ruleID string, fn func() (bool, string)) {
+// says nothing about conjuncts 0-2, about the per-lens registration clause, or
+// about a pattern the derivation cannot walk at all.
+func (s *Service) RegisterPersonalDerivationStatus(ruleID string, fn func() (licensed bool, refusal string, indexReady bool, indexRefusal string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if fn == nil {
-		delete(s.personalLicenceByRuleID, ruleID)
+		delete(s.personalDerivationByRuleID, ruleID)
 		return
 	}
-	s.personalLicenceByRuleID[ruleID] = fn
+	s.personalDerivationByRuleID[ruleID] = fn
 }
 
 // RegisterPersonalHydrator registers the Hydrator the "hydrate" op dispatches
@@ -682,7 +685,7 @@ func (s *Service) Unregister(ruleID string) {
 	delete(s.reporters, ruleID)
 	delete(s.reprojectorByRuleID, ruleID)
 	delete(s.personalHydratorByRuleID, ruleID)
-	delete(s.personalLicenceByRuleID, ruleID)
+	delete(s.personalDerivationByRuleID, ruleID)
 }
 
 // RegisterRebuilder records a Rebuilder for the given ruleID.
@@ -1141,11 +1144,14 @@ func (s *Service) getHealth(ctx context.Context, ruleID string) ControlResponse 
 	// lens is refused by its own registration clause, or by wiring the verdict
 	// knows nothing about.
 	s.mu.Lock()
-	licence := s.personalLicenceByRuleID[ruleID]
+	derivation := s.personalDerivationByRuleID[ruleID]
 	s.mu.Unlock()
-	if licence != nil {
-		licensed, refusal := licence()
-		resp.PersonalDerivation = &PersonalDerivationStatus{Licensed: licensed, Refusal: refusal}
+	if derivation != nil {
+		licensed, refusal, indexReady, indexRefusal := derivation()
+		resp.PersonalDerivation = &PersonalDerivationStatus{
+			Licensed: licensed, Refusal: refusal,
+			IndexReady: indexReady, IndexRefusal: indexRefusal,
+		}
 	}
 	return resp
 }

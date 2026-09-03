@@ -18,13 +18,13 @@
 //     itself, not a restatement of it, so a conjunct added there is pinned here
 //     for free and neither side can answer a question the other would answer
 //     differently;
-//   - index readiness is pinned from what `derivationIndex` will actually READ
-//     for the lens, which for a multi-walk lens is NOT its branches' own
-//     AnchorHopIndex. `ruleinstall.go` publishes no `anchorHops` at all when a
-//     rule compiles to more than one branch, so what the derivation reads there
-//     is the ZERO HopIndex and the lens can never act however well each branch
-//     indexes on its own. The per-branch fact is pinned separately, in its own
-//     column, because it is the thing Increment 3 changes.
+//   - index readiness is pinned from what `derivationIndexes` will actually READ
+//     for the lens, which for a multi-walk lens is the set of its branches'
+//     graphs — pinned by calling pipeline.BranchDerivationRefusal, the runtime
+//     predicate itself rather than a restatement of it, so a conjunct added
+//     there is pinned here for free. The per-branch fact stays in its own column
+//     beside it, because the two are different questions: one walk's graph can
+//     answer while the LENS is refused on a conjunct about the set.
 //
 // Conjuncts 1, 2, 3 and 5 are about a PROCESS — what the host wired, what the
 // standing healer's last pass achieved, how many Refractor instances are live —
@@ -58,6 +58,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
@@ -81,10 +82,20 @@ const (
 // that will refuse it.
 const (
 	personalIndexReady = ""
-	// personalIndexNoBranchIndex is pipeline's own constant, not a respelling:
-	// the census pins the string an operator reads in the refusal log, so the
-	// two must be the same object or the pin is about a different message.
-	personalIndexNoBranchIndex = pipeline.DerivationNoBranchIndexRefusal
+	// Every other value is pipeline's own constant, not a respelling: the census
+	// pins the string an operator reads in the refusal log, so the two must be
+	// the same object or the pin is about a different message.
+	//
+	// None of the four is reached by the shipped corpus — every multi-walk lens
+	// resolves a graph per walk and they agree — so all four are LATENT here,
+	// which is why TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent
+	// runs the same predicate over branch sets that do reach them. A vocabulary
+	// whose every member is unreachable would look identical to a predicate that
+	// had been replaced with `return ""`.
+	personalIndexNoBranchIndex        = pipeline.DerivationNoBranchIndexRefusal
+	personalIndexBranchIncomplete     = pipeline.DerivationBranchIncompleteRefusal
+	personalIndexBranchUnresolvedExp  = pipeline.DerivationBranchUnresolvedExpansionRefusal
+	personalIndexBranchAnchorDisagree = pipeline.DerivationBranchAnchorDisagreementRefusal
 )
 
 // personalDerivationVerdict is one corpus cypher's row.
@@ -98,21 +109,28 @@ type personalDerivationVerdict struct {
 	// complete, no unresolved `*` expansion, and an anchor position labelled
 	// with the personal plane's actor type. It is a property of the cypher.
 	branchIndexReady bool
-	// indexRefusal is what `derivationIndex` will read for the LENS this cypher
-	// belongs to: "" when it will find a usable index, and the named conjunct
-	// otherwise.
+	// walks is how many executable cyphers the LENS this row belongs to ships.
+	// Pinned rather than derived at assertion time because it is what selects
+	// the arm: `> 1` is ruleinstall.go's own gate, and a grouping bug that
+	// collapsed the multi-walk lenses to single-walk would make the seven
+	// branch rows pass by reading the wrong column.
+	walks int
+	// indexRefusal is what `derivationIndexes` will read for the LENS this
+	// cypher belongs to: "" when it will find a usable index set, and the named
+	// conjunct otherwise.
 	//
-	// The two columns differ for exactly one class today, and that class is the
-	// headline: a MULTI-WALK lens's branches each index perfectly
-	// (branchIndexReady true) while `ruleinstall.go` publishes no index for the
-	// lens at all, so `rs.anchorHops` is the zero HopIndex and the derivation
-	// refuses (indexRefusal set). Pinning only the per-branch fact would have
-	// recorded edgeCatalog — the 128 k backlog this design's payoff table leads
-	// with — as ready to act while at runtime it derives nothing.
+	// The two columns answer different questions, and the difference is the
+	// whole point of the second: a walk's own graph can answer while the LENS is
+	// refused on a conjunct about the SET — one walk incomplete, one carrying an
+	// unresolved `*`, or two walks anchoring on different labels. Pinning only
+	// the per-branch fact would record a lens as ready to act while at runtime
+	// it derives nothing.
 	//
-	// Increment 3 arms a per-branch index and re-pins these rows to "". That
-	// flip is the payoff record for the multi-walk half of the design, which is
-	// why the column exists rather than the rows simply being omitted.
+	// The seven multi-walk rows read ready here, and that reading is what the
+	// multi-walk half of the design is worth: it is the difference between
+	// edgeCatalog — the 128 k backlog the payoff table leads with — deriving a
+	// handful of relation-filtered reads per event and re-executing its cypher
+	// once per actor an undirected walk reaches.
 	indexRefusal string
 }
 
@@ -154,31 +172,31 @@ var corpusPersonalDerivationVerdicts = map[string]personalDerivationVerdict{
 	// into a personal cypher, this table moves rather than the narrowing
 	// silently starting to publish a row only the sweep would refresh.
 	//
-	// The seven `#N` rows below whose indexRefusal is personalIndexNoBranchIndex
-	// are the THREE multi-walk lenses — edgeCatalog (the 128 k backlog),
-	// edgeTasks, edgeEntitySessions. Each branch indexes; the LENS holds no
-	// index, because ruleinstall.go publishes none for a rule with more than one
-	// branch. Increment 2's licence alone therefore delivers them nothing, and
-	// Increment 3 is what re-pins these seven to ready.
-	"edgeCatalog#0":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeCatalog#1":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeCatalog#2":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeEntityBookings":   {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeEntityMenuItems":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeEntityProviders":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeEntitySessions#0": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeEntitySessions#1": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeEntityStudios":    {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeEntityTabs":       {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeIdentity":         {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeInstances":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeProviderQueue":    {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeProviderSchedule": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeServices":         {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeStaffPanes":       {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeStaffWorkOrders":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexReady},
-	"edgeTasks#0":          {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
-	"edgeTasks#1":          {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, indexRefusal: personalIndexNoBranchIndex},
+	// The seven `#N` rows below carrying walks > 1 are the THREE multi-walk
+	// lenses — edgeCatalog (the 128 k backlog), edgeTasks, edgeEntitySessions.
+	// Each walk indexes, they all anchor on the same label, and the derivation
+	// walks every one of them and unions what they reach; their indexRefusal is
+	// therefore READY. A move OFF ready on one of these is the whole lens
+	// dropping to the enumerator, which is the 128 k backlog again.
+	"edgeCatalog#0":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 3, indexRefusal: personalIndexReady},
+	"edgeCatalog#1":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 3, indexRefusal: personalIndexReady},
+	"edgeCatalog#2":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 3, indexRefusal: personalIndexReady},
+	"edgeEntityBookings":   {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeEntityMenuItems":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeEntityProviders":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeEntitySessions#0": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 2, indexRefusal: personalIndexReady},
+	"edgeEntitySessions#1": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 2, indexRefusal: personalIndexReady},
+	"edgeEntityStudios":    {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeEntityTabs":       {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeIdentity":         {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeInstances":        {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeProviderQueue":    {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeProviderSchedule": {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeServices":         {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeStaffPanes":       {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeStaffWorkOrders":  {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 1, indexRefusal: personalIndexReady},
+	"edgeTasks#0":          {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 2, indexRefusal: personalIndexReady},
+	"edgeTasks#1":          {personal: true, staticRefusal: personalStaticClear, branchIndexReady: true, walks: 2, indexRefusal: personalIndexReady},
 }
 
 // corpusPersonalDerivation runs the REAL predicates over every executable corpus
@@ -187,6 +205,11 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 	t.Helper()
 	eng := full.New()
 	got := map[string]personalDerivationVerdict{}
+	// The compiled branches of each lens, in the order forEachCorpusCypher
+	// enumerates them — which is Walks declaration order, the order
+	// ruleinstall.go receives them in. The lens-level verdict is asked of the
+	// SET, so the set has to be assembled the way the installer assembles it.
+	compiled := map[string][]ruleengine.CompiledRule{}
 	forEachCorpusCypher(t, func(name, spec string, _ *lens.Rule, _, declaredPersonal bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
@@ -200,28 +223,54 @@ func corpusPersonalDerivation(t *testing.T) map[string]personalDerivationVerdict
 			staticRefusal:    pipeline.PersonalDerivationRuleRefusal(cr),
 			branchIndexReady: indexReadyForPersonal(fullCR),
 		}
+		lensName := lensNameOf(name)
+		compiled[lensName] = append(compiled[lensName], cr)
 	})
 
 	// The lens-level column, filled in a second pass because it is a property of
 	// the LENS and the enumeration is per executable cypher. A canonical name
 	// carrying a `#N` suffix is one branch of a multi-walk rule — but only when
 	// its lens has more than one, since a rule declaring exactly one SpecBranch
-	// is still enumerated as `name#0` and ruleinstall.go's exclusion is
+	// is still enumerated as `name#0` and ruleinstall.go's arm is
 	// `len(branches) > 1`. Counting rather than testing for the suffix is what
 	// keeps this census reading the same rule the installer does.
-	branches := map[string]int{}
-	for name := range got {
-		branches[lensNameOf(name)]++
-	}
+	//
+	// The multi-walk verdict comes from pipeline.BranchDerivationRefusal — the
+	// shipped predicate, over the same branch set the installer resolves graphs
+	// from — rather than from a restatement here. What it cannot speak for is
+	// the one conjunct that is not a property of the compiled rules (the anchor
+	// label must be the enumerator's actor type, and the enumerator is installed
+	// after the rule); that is the branchIndexReady column's own question, and
+	// it is folded in below for both arms alike.
 	for name, v := range got {
-		if branches[lensNameOf(name)] > 1 {
-			v.indexRefusal = personalIndexNoBranchIndex
-		} else if !v.branchIndexReady {
+		lensName := lensNameOf(name)
+		v.walks = len(compiled[lensName])
+		switch {
+		case v.walks > 1:
+			v.indexRefusal = pipeline.BranchDerivationRefusal(compiled[lensName])
+			if v.indexRefusal == "" && !allBranchesReadyForPersonal(compiled[lensName]) {
+				v.indexRefusal = personalIndexBranchRefused
+			}
+		case !v.branchIndexReady:
 			v.indexRefusal = personalIndexBranchRefused
 		}
 		got[name] = v
 	}
 	return got
+}
+
+// allBranchesReadyForPersonal answers the conjunct BranchDerivationRefusal
+// deliberately does not: every walk's anchor position must be labelled with the
+// personal plane's actor type. The runtime asks it live, off the installed
+// ActorEnumerator; a census can only ask it of the declaration.
+func allBranchesReadyForPersonal(branches []ruleengine.CompiledRule) bool {
+	for _, cr := range branches {
+		fullCR, isFull := cr.(*full.CompiledRule)
+		if !isFull || !indexReadyForPersonal(fullCR) {
+			return false
+		}
+	}
+	return true
 }
 
 // personalIndexBranchRefused stands for "this single-walk cypher's own pattern
@@ -272,15 +321,17 @@ func TestCorpusPersonalDerivation(t *testing.T) {
 	require.Equal(t, want, personal,
 		"the personal-lens population moved — every name here is governed by the derivation licence, so read §4.4 for the one that arrived before pinning it")
 
-	// The MULTI-WALK sub-population, as an exact set. It is the class the two
-	// index columns disagree about, so a grouping bug — `lensNameOf` failing to
-	// strip the branch suffix, say — would silently collapse every row to
-	// single-walk and pin the three biggest personal lenses as ready to act
-	// while at runtime they derive nothing. Asserting the class directly is what
+	// The MULTI-WALK sub-population, as an exact set, selected by the arm the
+	// INSTALLER takes rather than by a verdict. A grouping bug — `lensNameOf`
+	// failing to strip the branch suffix, say — would otherwise collapse every
+	// row to single-walk and quietly pin the three biggest personal lenses
+	// against the wrong arm's predicate. Asserting the class directly is what
 	// keeps this table's all-important seven rows from passing by accident.
+	// Selected by the branch COUNT rather than by a verdict, so the class stays
+	// asserted whatever those rows' verdicts read.
 	var multiWalk []string
 	for name, v := range got {
-		if v.personal && v.indexRefusal == personalIndexNoBranchIndex {
+		if v.personal && v.walks > 1 {
 			multiWalk = append(multiWalk, name)
 		}
 	}
@@ -290,7 +341,14 @@ func TestCorpusPersonalDerivation(t *testing.T) {
 		"edgeEntitySessions#0", "edgeEntitySessions#1",
 		"edgeTasks#0", "edgeTasks#1",
 	}, multiWalk,
-		"the multi-walk personal population moved — these are the lenses Increment 2's licence alone delivers NOTHING to, and Increment 3 is what re-pins them")
+		"the multi-walk personal population moved — these are the lenses the per-branch union delivers, and the biggest backlogs on the plane")
+
+	// And every one of them acts. This is the payoff record: before the union,
+	// each of these seven walks indexed perfectly while the LENS derived nothing.
+	for _, name := range multiWalk {
+		require.Emptyf(t, got[name].indexRefusal,
+			"%s must derive: %s", name, got[name].indexRefusal)
+	}
 
 	// And a floor on the count, so an enumeration that silently reached nothing
 	// cannot read as a table of unchanged rows.
@@ -304,6 +362,8 @@ func TestCorpusPersonalDerivation(t *testing.T) {
 			"%s's Personal declaration moved; the install switch dispatches on this field, so it decides which arm the lens runs on", name)
 		require.Equalf(t, want.branchIndexReady, have.branchIndexReady,
 			"%s's own pattern graph changed what it can answer", name)
+		require.Equalf(t, want.walks, have.walks,
+			"%s's lens gained or lost a walk — that is what selects the arm the derivation runs, so re-read §4.5 before re-pinning", name)
 		require.Equalf(t, want.indexRefusal, have.indexRefusal,
 			"%s's LENS-level index verdict moved — this is what derivationIndex will actually read, and a move to ready means a licensed lens now acts on a derived set", name)
 		if want.staticRefusal == personalStaticClear {
@@ -321,8 +381,8 @@ func TestCorpusPersonalDerivation(t *testing.T) {
 		}
 		_, pinned := corpusPersonalDerivationVerdicts[name]
 		require.Truef(t, pinned,
-			"personal lens %q ships with no pinned derivation verdict (static refusal %q, branch index ready %v, lens index refusal %q) — review it against §4.4, then record it in corpusPersonalDerivationVerdicts",
-			name, v.staticRefusal, v.branchIndexReady, v.indexRefusal)
+			"personal lens %q ships with no pinned derivation verdict (static refusal %q, branch index ready %v, walks %d, lens index refusal %q) — review it against §4.4, then record it in corpusPersonalDerivationVerdicts",
+			name, v.staticRefusal, v.branchIndexReady, v.walks, v.indexRefusal)
 	}
 }
 
@@ -333,21 +393,80 @@ func TestCorpusPersonalDerivation(t *testing.T) {
 // keep reporting green while the reason an operator reads means something nobody
 // pinned.
 func TestCorpusPersonalDerivation_EveryReasonIsAKnownConjunct(t *testing.T) {
-	known := []string{personalStaticClock, personalStaticUnproven, personalStaticNotFull}
-	for name, v := range corpusPersonalDerivation(t) {
-		if v.staticRefusal == "" {
-			continue
-		}
-		matched := false
+	knownStatic := []string{personalStaticClock, personalStaticUnproven, personalStaticNotFull}
+	knownIndex := []string{
+		personalIndexNoBranchIndex, personalIndexBranchIncomplete,
+		personalIndexBranchUnresolvedExp, personalIndexBranchAnchorDisagree,
+		personalIndexBranchRefused,
+	}
+	contains := func(known []string, reason string) bool {
 		for _, k := range known {
-			if strings.Contains(v.staticRefusal, k) {
-				matched = true
-				break
+			if strings.Contains(reason, k) {
+				return true
 			}
 		}
-		require.Truef(t, matched,
-			"%s declines with %q, which matches no conjunct constant in this file — name it before pinning it", name, v.staticRefusal)
+		return false
 	}
+	for name, v := range corpusPersonalDerivation(t) {
+		if v.staticRefusal != "" {
+			require.Truef(t, contains(knownStatic, v.staticRefusal),
+				"%s declines with %q, which matches no conjunct constant in this file — name it before pinning it", name, v.staticRefusal)
+		}
+		// The index column is default-denied the same way, and for the sharper
+		// reason: its vocabulary is entirely latent on the shipped corpus, so a
+		// conjunct added to the multi-walk predicate would land in the table as
+		// the first substring that happened to match — or as an unnamed row —
+		// with every assertion above still green.
+		if v.indexRefusal != "" {
+			require.Truef(t, contains(knownIndex, v.indexRefusal),
+				"%s's index declines with %q, which matches no conjunct constant in this file — name it before pinning it", name, v.indexRefusal)
+		}
+	}
+}
+
+// TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent is the
+// anti-vacuity case for the index column.
+//
+// Every shipped multi-walk lens clears the multi-walk predicate, so the table
+// above would look identical if BranchDerivationRefusal had been replaced with
+// `return ""` — and that replacement is precisely the fail-open one: a lens
+// whose walks disagree would then act on a union that cannot be right. This runs
+// the SAME predicate the census calls over branch sets that do reach each
+// conjunct.
+func TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent(t *testing.T) {
+	eng := full.New()
+	parse := func(spec string) ruleengine.CompiledRule {
+		cr, err := eng.Parse(spec)
+		require.NoError(t, err)
+		return cr
+	}
+	sound := parse("MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor")
+
+	require.Empty(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
+		sound, parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
+	}), "positive vector: two walks that agree must admit, or the negatives below prove nothing")
+
+	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
+		sound, parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
+	}), personalIndexBranchIncomplete,
+		"a walk whose graph cannot answer must refuse the LENS: the derived set is a union, and a union with an unknown in it is a superset of nothing")
+
+	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
+		sound, parse("MATCH (org:org {key: $actorKey})-[:owns]->(x:unit)\nRETURN x.key AS anchor"),
+	}), personalIndexBranchAnchorDisagree,
+		"walks anchoring on different labels must refuse — the checkable form of \"each branch carries its own anchor\"")
+
+	// The taxonomy conjunct, reached the way a rule state published while the
+	// resolver could not answer reaches it: a `*` label position with no
+	// concrete set. Pruning a far end the walk cannot confirm is the
+	// under-approximating direction, so one such walk refuses the whole lens.
+	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
+		sound, parse("MATCH (identity:identity {key: $actorKey})-[:manages]->(l:location*)\nRETURN l.key AS anchor"),
+	}), personalIndexBranchUnresolvedExp,
+		"a walk carrying an unresolved `*` position must refuse the lens: the walk would prune far ends it cannot confirm")
+
+	require.Equal(t, personalIndexNoBranchIndex, pipeline.BranchDerivationRefusal(nil),
+		"no walks at all is a refusal, never a union over nothing")
 }
 
 // TestCorpusPersonalDerivation_TheClockConjunctIsLatentNotAbsent is the

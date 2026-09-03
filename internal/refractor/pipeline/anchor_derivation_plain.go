@@ -386,7 +386,7 @@ func (p *Pipeline) plainDerivationIndexForAct(rs ruleState) (idx full.HopIndex, 
 // scan-root graph. ok == false means the derivation declined and the caller
 // must fall back to today's unseeded evaluation. Mirrors
 // deriveAnchorsForVertex (anchor_derivation.go) exactly, substituting
-// plainDerivationIndex for derivationIndex; walkToAnchors is reused
+// plainDerivationIndex for derivationIndexes; the walk is reused
 // unchanged (§4.1: one index type, two termini, zero duplicated consumers).
 func (p *Pipeline) deriveAnchorsForPlainVertex(ctx context.Context, rs ruleState, vertexKey, vertexType string) ([]string, bool, error) {
 	idx, ready := p.plainDerivationIndex(rs)
@@ -401,7 +401,7 @@ func (p *Pipeline) deriveAnchorsForPlainVertex(ctx context.Context, rs ruleState
 	for _, pos := range idx.PositionsBinding(vertexType) {
 		seeds = append(seeds, seededNode{pos: pos, id: id})
 	}
-	return p.walkToAnchors(ctx, idx, seeds)
+	return p.walkOneIndex(ctx, idx, seeds)
 }
 
 // deriveAnchorsForPlainAspect is deriveAnchorsForPlainVertex seeded by the
@@ -451,7 +451,7 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 		}
 		seeds = append(seeds, seededNode{pos: s.Pos, id: id})
 	}
-	return p.walkToAnchors(ctx, idx, seeds)
+	return p.walkOneIndex(ctx, idx, seeds)
 }
 
 // evaluatePlainDerivedAnchors re-enters evaluatePlainFromVertex once per

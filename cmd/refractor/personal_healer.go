@@ -63,14 +63,16 @@ func registerPersonalHealer(
 	}
 	p.SetPersonalDerivationLicence(wiring, verdict)
 
-	// The operator surface for the licence. Without it the only evidence of a
-	// refusal is a log line emitted at most once per distinct reason, so a lens
-	// quietly on the enumerator hours later has nothing that says why — and the
-	// health KV entry cannot answer it, since its personalSweepVerdict is the
-	// shared sweeper's plane-wide pass verdict rather than this lens's conjunct.
-	// Registered here, at the same call that asserts the licence, so the two
-	// cannot drift about which lenses have one.
+	// The operator surface for both halves of "is this lens narrowing": the
+	// licence and the lens's own pattern index, each with the conjunct refusing
+	// it. Without it the only evidence of a refusal is a log line emitted at
+	// most once per distinct reason, so a lens quietly on the enumerator hours
+	// later has nothing that says why — and the health KV entry cannot answer
+	// it, since its personalSweepVerdict is the shared sweeper's plane-wide pass
+	// verdict rather than this lens's conjunct. Registered here, at the same
+	// call that asserts the licence, so the two cannot drift about which lenses
+	// have one.
 	if control != nil {
-		control.RegisterPersonalDerivationLicence(ruleID, p.PersonalDerivationLicence)
+		control.RegisterPersonalDerivationStatus(ruleID, p.PersonalDerivationStatus)
 	}
 }

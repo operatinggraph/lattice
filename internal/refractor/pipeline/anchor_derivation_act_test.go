@@ -262,7 +262,7 @@ func TestFlip_ActRefusedWithoutPatternClosure(t *testing.T) {
 
 	// The shipped three-conjunct index is untouched: shadow mode must keep
 	// observing exactly the lenses acting refuses.
-	_, shadowReady := f.p.derivationIndex(f.p.ruleState())
+	_, shadowReady := f.p.derivationIndexes(f.p.ruleState())
 	require.True(t, shadowReady)
 
 	f.handleLink("holdsRole", "dave", "admin", false, 1)

@@ -200,23 +200,24 @@ func (p *Pipeline) affectedAnchors(
 	return derived, nil
 }
 
-// DerivationNoBranchIndexRefusal is the reason a MULTI-WALK lens can never act
-// on a derived anchor set: ruleinstall.go publishes no anchorHops at all when a
-// rule compiles to more than one branch, so what the derivation reads is the
-// ZERO HopIndex — Complete false and Incomplete EMPTY.
+// DerivationNoBranchIndexRefusal is the reason a branch-carrying lens can never
+// act on a derived anchor set: the publication resolved no pattern graph for its
+// walks, so there is nothing to union. Two shapes reach it — a branch that is
+// not a full-engine compiled rule, and a rule state whose graph set went missing
+// between publication and read — and both leave the derivation holding no index
+// at all rather than an index that says no.
 //
-// It has a name because the empty string is not a reason. Until the personal
-// licence landed, this arm was unreachable: conjunct 1 refused every multi-walk
-// lens in the corpus first (they are all personal), so the empty reason was
-// masked. A licensed multi-walk personal lens reaches it, and without a name it
-// would log a blank reason — or, worse, be swallowed entirely by a refusal latch
-// whose zero value is also the empty string, leaving the three biggest personal
-// lenses silently on the enumerator while the operator log read as though every
-// personal lens had been licensed.
+// It has a name because the empty string is not a reason: a zero HopIndex
+// carries Complete false and Incomplete EMPTY, so this arm would otherwise log a
+// blank reason — or, worse, be swallowed entirely by a refusal latch whose zero
+// value is also the empty string, leaving the biggest personal lenses silently
+// on the enumerator while the operator log read as though every personal lens
+// had been licensed.
 //
-// It is in the derivation censuses' closed vocabulary. Increment 3 arms a
-// per-branch index and re-pins those rows off this constant; that re-pin is the
-// payoff record for the multi-walk half of this design.
+// It is in the derivation censuses' closed vocabulary, and no shipped lens
+// reaches it: the corpus's multi-walk lenses all resolve a graph per walk. It is
+// named anyway because the population is whatever carries branches, not those
+// three — nothing restricts a branches spec to a generated personal lens.
 const DerivationNoBranchIndexRefusal = "the lens compiles to several walks and the derivation holds no per-branch index"
 
 // noteStaticDerivationRefusal logs, at most once per distinct reason, why this
@@ -243,19 +244,17 @@ func (p *Pipeline) noteStaticDerivationRefusal(rs ruleState, licenceRefusal stri
 	case !p.patternClosedOutput && !p.assertedPersonalLens():
 	case !p.standingHealerInstalled():
 		reason = "no standing healer is installed, so nothing would heal a missed row"
-	case !rs.anchorHops.Complete:
-		reason = rs.anchorHops.Incomplete
-		if reason == "" {
-			// The zero HopIndex: no index was published for this rule at all,
-			// which today means exactly one thing — the rule compiled to several
-			// branches and ruleinstall.go excluded it.
-			reason = DerivationNoBranchIndexRefusal
-		}
-	case rs.anchorHops.UnresolvedExpansionPosition() >= 0:
-		reason = fmt.Sprintf("pattern position %d carries the `*` taxonomy-expansion sigil with no resolved concrete set — the walk would prune far ends it cannot confirm, which under-approximates",
-			rs.anchorHops.UnresolvedExpansionPosition())
 	default:
-		reason = "the anchor position's label is not the enumerator's actor type"
+		// The index's own conjunct, from the SAME predicate derivationIndexes
+		// gated on, so what an operator reads is what actually refused. This arm
+		// is reached only once the licence and the healer have cleared, which
+		// leaves the pattern as the only thing that can have refused — but the
+		// empty string is not a reason under any argument (the latch's own zero
+		// value is ""), so it is named rather than trusted to be impossible.
+		reason = p.derivationIndexRefusal(rs)
+		if reason == "" {
+			reason = derivationUnnamedIndexRefusal
+		}
 	}
 
 	p.derivShadow.mu.Lock()
@@ -283,7 +282,7 @@ func (p *Pipeline) noteStaticDerivationRefusal(rs ruleState, licenceRefusal stri
 		"ruleId", p.ruleID, "reason", reason)
 }
 
-// derivationIndexForAct is derivationIndex plus the two conjuncts that
+// derivationIndexForAct is derivationIndexes plus the two conjuncts that
 // distinguish "the derivation can answer" from "a smaller answer is safe on
 // this lens" (§17.2). Both are act-only: shadow mode must keep observing the
 // lenses acting would refuse, because how far the derivation would have missed
@@ -294,7 +293,7 @@ func (p *Pipeline) noteStaticDerivationRefusal(rs ruleState, licenceRefusal stri
 // it there would repeat a verdict snapshot and a compiled-rule walk per event.
 // It is empty whenever the licence had nothing to say — the lens is pattern-
 // closed and was never asked, or it was asked and admitted.
-func (p *Pipeline) derivationIndexForAct(rs ruleState) (idx full.HopIndex, ready bool, licenceRefusal string) {
+func (p *Pipeline) derivationIndexForAct(rs ruleState) (idxs []full.HopIndex, ready bool, licenceRefusal string) {
 	// Acting removes the incidental reprojection that today happens to heal a
 	// lost row; a standing healer is what replaces it. Two count, one per plane
 	// — the auth/business convergence sweep and the personal plane's own
@@ -306,25 +305,23 @@ func (p *Pipeline) derivationIndexForAct(rs ruleState) (idx full.HopIndex, ready
 	// install: a lens with no healer is refused whatever its pattern or its
 	// licence are doing.
 	if !p.standingHealerInstalled() {
-		return full.HopIndex{}, false, ""
+		return nil, false, ""
 	}
 	// The INDEX before the LICENCE, mirroring plainDerivationIndexForAct and for
 	// the same two reasons it gives. The licence is far the dearer of the two —
 	// four mutex-guarded process censuses, a verdict snapshot and a clock read —
 	// while the index is a handful of field reads off the published rule state.
 	// And a lens whose index refuses has no derived set for a licence to speak
-	// about: asking the licence first made a multi-walk personal lens pay the
-	// whole predicate on every CDC event before being refused on a zero
-	// HopIndex, which is seven of the corpus's nineteen personal cyphers and
-	// includes the deepest backlog of the lot.
+	// about: a lens whose pattern cannot answer would otherwise pay the whole
+	// predicate on every CDC event to be refused on its graph anyway.
 	//
-	// Ordering it this way is also what makes the operator log right: a
-	// multi-walk lens's refusal is now reported as the missing per-branch index
-	// (DerivationNoBranchIndexRefusal), not as whichever licence conjunct
-	// happened to be evaluated first and masked it.
-	idx, ready = p.derivationIndex(rs)
+	// Ordering it this way is also what makes the operator log right: an index
+	// refusal is reported as the conjunct of the lens's own pattern that
+	// declined, not as whichever licence conjunct happened to be evaluated first
+	// and masked it.
+	idxs, ready = p.derivationIndexes(rs)
 	if !ready {
-		return full.HopIndex{}, false, ""
+		return nil, false, ""
 	}
 	// A row that depends on an input the compiled pattern does not bind can
 	// change with no pattern edge changing, so a derived set that correctly
@@ -344,8 +341,8 @@ func (p *Pipeline) derivationIndexForAct(rs ruleState) (idx full.HopIndex, ready
 	if !p.patternClosedOutput {
 		licensed, refusal := p.personalDerivationLicence(rs)
 		if !licensed {
-			return full.HopIndex{}, false, refusal
+			return nil, false, refusal
 		}
 	}
-	return idx, true, ""
+	return idxs, true, ""
 }

@@ -316,6 +316,27 @@ func (p *Pipeline) PersonalDerivationLicence() (licensed bool, refusal string) {
 	return p.personalDerivationLicence(p.ruleState())
 }
 
+// PersonalDerivationStatus reports BOTH halves of "is this lens narrowing":
+// whether the licence holds, and whether the lens's own pattern gives the
+// derivation a usable index — with the conjunct refusing each.
+//
+// The two are separate answers and an operator needs both, because a lens can be
+// fully licensed and still act on nothing: the licence speaks about the
+// process's wiring and the plane's healer, while the index speaks about the
+// cypher, and a lens whose walks cannot answer runs the enumerator with a clean
+// licence. Reported together so "licensed but refused" is one reading rather
+// than an inference from the absence of a log line.
+//
+// Both halves are derived from ONE rule-state snapshot, so the pair cannot
+// straddle a hot reload and describe two different rule bodies. It re-derives on
+// every call — the same cost the gate pays per event, not a cached verdict.
+func (p *Pipeline) PersonalDerivationStatus() (licensed bool, refusal string, indexReady bool, indexRefusal string) {
+	rs := p.ruleState()
+	licensed, refusal = p.personalDerivationLicence(rs)
+	indexRefusal = p.derivationIndexRefusal(rs)
+	return licensed, refusal, indexRefusal == "", indexRefusal
+}
+
 // PersonalHealerVerdictNow reports the verdict the licence would read right
 // now, or the zero verdict when no accessor is installed. Exported for the
 // operator surfaces and the tests that need to state what the licence is

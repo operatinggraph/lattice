@@ -225,6 +225,17 @@ type Pipeline struct {
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
 
+	// anchorHopsPerBranch is the multi-walk arm's pattern graphs — one per
+	// compiled branch — and anchorHopsPerBranchRefusal the conjunct that refused
+	// the set whole (personal-lens-derivation-licence-design.md §4.5). See the
+	// ruleState fields of the same names, which these publish into. Guarded by
+	// ruleMu and republished on every rule swap alongside anchorHops, so a lens
+	// reloaded from three walks down to one cannot leave the previous body's
+	// graphs armed. Their zero values are nil and "", which are fail-closed only
+	// READ AS A PAIR — "no graphs" alone would be a union over no walks.
+	anchorHopsPerBranch        []full.HopIndex
+	anchorHopsPerBranchRefusal string
+
 	// walkScope bounds which relations the ActorEnumerator's BFS follows at
 	// each vertex type (refractor-hub-walk-and-periodic-load-design.md §5.1),
 	// and walkScopeRefusal names the conjunct that left it nil. Guarded by

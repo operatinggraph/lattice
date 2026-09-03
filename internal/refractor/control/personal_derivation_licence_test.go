@@ -57,8 +57,8 @@ func TestControl_Health_AnswersThePersonalDerivationLicence(t *testing.T) {
 	})
 
 	t.Run("a refused lens reports the conjunct by name", func(t *testing.T) {
-		svc.RegisterPersonalDerivationLicence(ruleID, func() (bool, string) {
-			return false, "the personal-plane healer's last pass failed for at least one actor"
+		svc.RegisterPersonalDerivationStatus(ruleID, func() (bool, string, bool, string) {
+			return false, "the personal-plane healer's last pass failed for at least one actor", true, ""
 		})
 		resp := callHealth(t)
 		require.NotNil(t, resp.PersonalDerivation)
@@ -66,6 +66,28 @@ func TestControl_Health_AnswersThePersonalDerivationLicence(t *testing.T) {
 		assert.Equal(t, "the personal-plane healer's last pass failed for at least one actor",
 			resp.PersonalDerivation.Refusal,
 			"the refusal must be the same sentence the log line carries, or an operator reading one cannot match it to the other")
+		assert.True(t, resp.PersonalDerivation.IndexReady,
+			"the index is a separate question, and this lens's pattern answers fine")
+		assert.Empty(t, resp.PersonalDerivation.IndexRefusal)
+	})
+
+	t.Run("a licensed lens whose INDEX refuses is answered as both", func(t *testing.T) {
+		// The state an operator would otherwise have to infer from the absence
+		// of a log line: every licence conjunct holds, and the lens still acts
+		// on nothing because its own pattern gives the derivation no usable
+		// graph. Reported as two answers because they are two questions with
+		// two different fixes — one is the host's wiring or the plane's healer,
+		// the other is the cypher.
+		svc.RegisterPersonalDerivationStatus(ruleID, func() (bool, string, bool, string) {
+			return true, "", false, "the lens's walks do not all anchor on the same vertex label: walk 0 anchors on \"identity\", walk 1 on \"org\""
+		})
+		resp := callHealth(t)
+		require.NotNil(t, resp.PersonalDerivation)
+		assert.True(t, resp.PersonalDerivation.Licensed)
+		assert.Empty(t, resp.PersonalDerivation.Refusal)
+		assert.False(t, resp.PersonalDerivation.IndexReady,
+			"licensed is not acting — a reader that took Licensed for the whole answer would call this lens narrowed")
+		assert.Contains(t, resp.PersonalDerivation.IndexRefusal, "do not all anchor on the same vertex label")
 	})
 
 	t.Run("it is derived LIVE at request time, not stored", func(t *testing.T) {
@@ -73,11 +95,11 @@ func TestControl_Health_AnswersThePersonalDerivationLicence(t *testing.T) {
 		// value captured at registration would be a snapshot of a question whose
 		// whole point is that its answer moves.
 		licensed := false
-		svc.RegisterPersonalDerivationLicence(ruleID, func() (bool, string) {
+		svc.RegisterPersonalDerivationStatus(ruleID, func() (bool, string, bool, string) {
 			if licensed {
-				return true, ""
+				return true, "", true, ""
 			}
-			return false, "more than one Refractor instance is live"
+			return false, "more than one Refractor instance is live", true, ""
 		})
 		require.False(t, callHealth(t).PersonalDerivation.Licensed)
 
@@ -93,8 +115,8 @@ func TestControl_Health_AnswersThePersonalDerivationLicence(t *testing.T) {
 		// the shared sweeper's pass can be clean while THIS lens is refused, and
 		// an operator reading only the entry would conclude the opposite.
 		require.NoError(t, reporter.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", time.Now(), 0, "clean"))
-		svc.RegisterPersonalDerivationLicence(ruleID, func() (bool, string) {
-			return false, "the personal-plane healer has not completed a pass begun after this lens registered"
+		svc.RegisterPersonalDerivationStatus(ruleID, func() (bool, string, bool, string) {
+			return false, "the personal-plane healer has not completed a pass begun after this lens registered", true, ""
 		})
 		resp := callHealth(t)
 		require.NotNil(t, resp.Entry)
@@ -109,8 +131,8 @@ func TestControl_Health_AnswersThePersonalDerivationLicence(t *testing.T) {
 		// narrowing verdict for a lens that no longer runs is the misleading
 		// direction. Unregister is the one place every control registration for
 		// a lens is dropped, and a map it forgets leaks the accessor.
-		svc.RegisterPersonalDerivationLicence(ruleID, func() (bool, string) {
-			return false, "a stale accessor over a cancelled pipeline"
+		svc.RegisterPersonalDerivationStatus(ruleID, func() (bool, string, bool, string) {
+			return false, "a stale accessor over a cancelled pipeline", true, ""
 		})
 		require.NotNil(t, callHealth(t).PersonalDerivation, "precondition: it is answered before the teardown")
 

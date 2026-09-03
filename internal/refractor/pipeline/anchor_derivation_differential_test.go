@@ -42,16 +42,21 @@ import (
 // its own walk, and a mutation must land in both exactly as the pipeline lands
 // it.
 type diffFixture struct {
-	t       *testing.T
-	coreKV  *substrate.KV
-	adjKV   *substrate.KV
-	p       *Pipeline
-	eng     *full.Engine
-	cr      ruleengine.CompiledRule
-	anchors []string // every identity vertex key, the anchors to recompute
-	ids     map[string]string
-	types   map[string]string
-	now     string
+	t      *testing.T
+	coreKV *substrate.KV
+	adjKV  *substrate.KV
+	p      *Pipeline
+	eng    *full.Engine
+	cr     ruleengine.CompiledRule
+	// branches is set only for a multi-walk lens (newBranchDiffFixture), and is
+	// what makes the recompute the LENS's row set rather than one walk's: the
+	// pipeline merges N independently-evaluated branches per actor, so ground
+	// truth has to be that merge.
+	branches []ruleengine.CompiledRule
+	anchors  []string // every identity vertex key, the anchors to recompute
+	ids      map[string]string
+	types    map[string]string
+	now      string
 }
 
 func newDiffFixture(t *testing.T, spec string) *diffFixture {
@@ -152,10 +157,21 @@ func (f *diffFixture) applyLink(rel, from, to string, deleted bool) string {
 // the derivation name anchors nothing actually happened to.
 func (f *diffFixture) rows(anchor string) string {
 	f.t.Helper()
-	results, err := f.eng.ExecuteWith(context.Background(), f.cr, ruleengine.EventContext{
-		NodeKey:    anchor,
-		Parameters: map[string]any{"actorKey": anchor, "now": f.now},
-	}, f.adjKV, f.coreKV)
+	var results []ruleengine.ProjectionResult
+	var err error
+	if len(f.branches) > 1 {
+		// The lens's own execution path, merge included — executeBranches is
+		// what a multi-walk lens really runs per actor, and a ground truth taken
+		// from one branch would call a row changed that the merge hides, or miss
+		// one the merge reveals.
+		results, _, _, err = f.p.executeBranches(context.Background(), f.p.ruleState(), anchor, nil,
+			map[string]any{"actorKey": anchor, "now": f.now}, "")
+	} else {
+		results, err = f.eng.ExecuteWith(context.Background(), f.cr, ruleengine.EventContext{
+			NodeKey:    anchor,
+			Parameters: map[string]any{"actorKey": anchor, "now": f.now},
+		}, f.adjKV, f.coreKV)
+	}
 	require.NoError(f.t, err)
 	rendered := make([]string, 0, len(results))
 	for _, r := range results {

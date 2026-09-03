@@ -324,17 +324,47 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   read (an empty listing is reported UNREADABLE) and once in the licence, so an edit to either cannot
   reopen it alone.
 
-  **A multi-walk personal lens is licensed and still cannot act**, and now says so.
-  `ruleinstall.go` publishes no `anchorHops` for a rule that compiles to several branches, so the
-  derivation reads the zero `HopIndex` — incomplete, with an *empty* reason. Until the licence
-  landed, conjunct 1 refused every multi-walk lens first (they are all personal), so that emptiness
-  was masked; a licensed one reaches it, and the refusal latch's own zero value is also the empty
-  string, so an unnamed reason would be swallowed on its first report and the three biggest personal
-  lenses would sit silently on the enumerator. `pipeline.DerivationNoBranchIndexRefusal` names it,
-  the corpus census pins it per lens, and the latch now distinguishes "nothing reported yet" from
-  "reported the empty string" so the class cannot recur. **Increment 3 arms a per-branch index and
-  re-pins those rows; until then `edgeCatalog`, `edgeTasks` and `edgeEntitySessions` gain nothing
-  from this licence** — the census is the record of that, not this paragraph.
+  **A multi-walk lens derives over EVERY walk, and its anchor set is their union.** A lens that
+  compiles to several branches evaluates N independent queries and merges their rows, so the
+  derivation's question is asked of the *lens*: one `AnchorHopIndex` per branch, published on the
+  rule state as a pair with the conjunct that refused it, one walk per branch from that branch's own
+  seeds, and the union of what they reach. The union is a superset of each branch's superset. Two
+  properties carry it: a branch that does not bind the changed element seeds nothing — a real answer
+  only because every branch that does bind it is walked in the same pass — and `executeBranches`
+  re-runs every branch for every derived actor, so the merge cannot make a sibling's contribution go
+  unrecomputed. Both are pinned by name in `internal/refractor/pipeline`'s branch tests, and the
+  superset itself by a differential test over the real corpus, per branch and unioned.
+
+  The **refusals are of the lens, not of one walk**, because a branch whose graph cannot answer
+  contributes an unknown and a union carrying an unknown is a superset of nothing: any walk
+  incomplete (`DerivationBranchIncompleteRefusal`, carrying that walk's own reason), any walk with an
+  unresolved `*` position (`DerivationBranchUnresolvedExpansionRefusal`), walks that do not all
+  anchor on the same label (`DerivationBranchAnchorDisagreementRefusal` — the checkable form of "each
+  branch carries its own anchor, and one graph cannot speak for all of them"), or no per-branch graph
+  at all
+  (`DerivationNoBranchIndexRefusal`). They are written for whatever carries branches rather than for
+  today's three lenses: nothing restricts a branches spec to a generated personal lens. All four are
+  latent on the shipped corpus, so the census default-denies the vocabulary and a separate vector
+  runs the predicate over branch sets that do reach each one.
+
+  **One budget per event, not per walk.** The adjacency read cap, the ranged-work budget and the
+  neighbour memo are shared across the branches of one derivation and die with it: three walks over a
+  lens's shared vertices read those documents once between them, and a lens too wide for the cap
+  declines ONCE — the whole lens, back to the enumerator — rather than paying N times to decline N
+  times. The budget must not outlive the event, or one wide event would leave the lens declining for
+  ever; both halves are pinned by the cap at which the lens declines.
+
+  `seedAnchorLabels` and the plain arm's `rootHops` stay single-walk on the same arm: a seed label
+  that must speak for one evaluation is a different question from an anchor set that is a union.
+
+  **The `health` control RPC answers BOTH halves per lens** — `personalDerivation` carries
+  `{licensed, refusal, indexReady, indexRefusal}`, derived live from one rule-state snapshot. They are
+  two questions with two different fixes: the licence is about the host's wiring and the plane's
+  healer, the index about the cypher, and a fully licensed lens whose walks cannot answer runs the
+  enumerator with a clean licence. A reader that took `licensed` for the whole answer would call that
+  lens narrowed. Both refusals are the same sentences the `anchor derivation cannot act on this lens`
+  log line carries, off one shared predicate, so the gate, the log and the RPC cannot disagree about
+  which conjunct refused.
   A **granted** licence logs once, at Info, naming the verdict it was granted on — because the payoff
   is claimed as "the refusal is gone", and an absence of log lines is indistinguishable from a lens
   that stopped receiving events. **A stalled healer surfaces on the entry**, too: the sweep cannot

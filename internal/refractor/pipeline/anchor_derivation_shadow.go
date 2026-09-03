@@ -196,7 +196,7 @@ func (p *Pipeline) shadowAnchorDerivation(rs ruleState, eventKey string, bfsAnch
 	if p.actorEnumerator == nil || !p.derivShadow.shouldSample() {
 		return
 	}
-	if _, ready := p.derivationIndex(rs); !ready {
+	if _, ready := p.derivationIndexes(rs); !ready {
 		p.recordShadowDeclined()
 		return
 	}

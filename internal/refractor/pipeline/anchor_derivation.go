@@ -46,10 +46,12 @@ const DefaultDerivationReadCap = 2_000
 // reads on a binary containment tree).
 const DerivationRangedWorkFactor = 16
 
-// SetAnchorDerivationReadCap overrides the per-walk adjacency read budget.
-// n <= 0 restores the default. It exists so an operator can bound the
-// derivation's cost on a live lens without a redeploy, and so a test can reach
-// the fallback without building a graph of thousands of vertices.
+// SetAnchorDerivationReadCap overrides the adjacency read budget one derivation
+// may spend — per EVENT, shared by every branch of a multi-walk lens's union
+// (derivationBudget), not per walk. n <= 0 restores the default. It exists so an
+// operator can bound the derivation's cost on a live lens without a redeploy,
+// and so a test can reach the fallback without building a graph of thousands of
+// vertices.
 func (p *Pipeline) SetAnchorDerivationReadCap(n int) {
 	p.derivReadCap.Store(int64(n))
 }
@@ -65,7 +67,7 @@ func (p *Pipeline) derivationReadCap() int {
 // (vertexType, vertexKey) can change. ok == false means the derivation declined
 // and the caller must fall back.
 func (p *Pipeline) deriveAnchorsForVertex(ctx context.Context, rs ruleState, vertexKey, vertexType string) ([]string, bool, error) {
-	idx, ready := p.derivationIndex(rs)
+	idxs, ready := p.derivationIndexes(rs)
 	if !ready {
 		return nil, false, nil
 	}
@@ -73,11 +75,17 @@ func (p *Pipeline) deriveAnchorsForVertex(ctx context.Context, rs ruleState, ver
 	if !parsed {
 		return nil, false, nil
 	}
-	var seeds []seededNode
-	for _, pos := range idx.PositionsBinding(vertexType) {
-		seeds = append(seeds, seededNode{pos: pos, id: id})
-	}
-	return p.walkToAnchors(ctx, idx, seeds)
+	// Seeded per pattern graph, because a position index means nothing outside
+	// the graph that numbered it: a multi-walk lens's branches bind the changed
+	// type at different positions, and a branch that does not bind it at all
+	// seeds nothing.
+	return p.walkBranches(ctx, idxs, func(idx full.HopIndex) []seededNode {
+		var seeds []seededNode
+		for _, pos := range idx.PositionsBinding(vertexType) {
+			seeds = append(seeds, seededNode{pos: pos, id: id})
+		}
+		return seeds
+	})
 }
 
 // deriveAnchorsForAspect is deriveAnchorsForVertex seeded by the aspect's
@@ -98,9 +106,14 @@ func (p *Pipeline) deriveAnchorsForAspect(ctx context.Context, rs ruleState, asp
 // one.
 //
 // An empty derived set on a complete index is a real answer — the link binds no
-// hop, so no anchor's output can change.
+// hop, so no anchor's output can change. The same reading is what makes the
+// multi-walk union sound at its own boundary: AnchorSideSeeds is exact only for
+// the pattern positions the changed link BINDS, so a branch whose pattern never
+// mentions the link seeds nothing and contributes nothing — correct precisely
+// because every branch that does mention it is walked in the same pass and
+// unioned in.
 func (p *Pipeline) deriveAnchorsForLink(ctx context.Context, rs ruleState, linkKey string) ([]string, bool, error) {
-	idx, ready := p.derivationIndex(rs)
+	idxs, ready := p.derivationIndexes(rs)
 	if !ready {
 		return nil, false, nil
 	}
@@ -108,20 +121,26 @@ func (p *Pipeline) deriveAnchorsForLink(ctx context.Context, rs ruleState, linkK
 	if !ok {
 		return nil, false, nil
 	}
-	var seeds []seededNode
-	for _, s := range idx.AnchorSideSeeds(srcType, rel, dstType) {
-		id := dstID
-		if s.SrcIsAnchorSide {
-			id = srcID
+	return p.walkBranches(ctx, idxs, func(idx full.HopIndex) []seededNode {
+		var seeds []seededNode
+		for _, s := range idx.AnchorSideSeeds(srcType, rel, dstType) {
+			id := dstID
+			if s.SrcIsAnchorSide {
+				id = srcID
+			}
+			seeds = append(seeds, seededNode{pos: s.Pos, id: id})
 		}
-		seeds = append(seeds, seededNode{pos: s.Pos, id: id})
-	}
-	return p.walkToAnchors(ctx, idx, seeds)
+		return seeds
+	})
 }
 
-// derivationIndex returns the compiled pattern graph to walk under, and whether
-// this pipeline may use one at all. Two of the conjuncts beyond
-// HopIndex.Complete are about this pipeline rather than the query:
+// derivationIndexes returns the compiled pattern graph(s) to walk under, and
+// whether this pipeline may use them at all. One for an ordinary lens; one per
+// branch for a lens that compiles to several walks, whose derived set is the
+// UNION of what they reach (anchor_derivation_branches.go).
+//
+// Two of the conjuncts beyond HopIndex.Complete are about this pipeline rather
+// than the query:
 //
 //   - an ActorEnumerator must be installed, because the derived set is only
 //     ever compared with — or substituted for — its answer; and
@@ -134,20 +153,58 @@ func (p *Pipeline) deriveAnchorsForLink(ctx context.Context, rs ruleState, linkK
 // (UnresolvedExpansionPosition's doc), and an empty derived set on a Complete
 // index is read as a real answer with no BFS behind it. So the index is
 // declined whole, exactly like every other shape it cannot resolve.
-func (p *Pipeline) derivationIndex(rs ruleState) (full.HopIndex, bool) {
-	if p.actorEnumerator == nil {
-		return full.HopIndex{}, false
+//
+// The multi-walk arm asks the same questions of every branch and refuses the
+// LENS when any of them declines, because the answer is a union: a branch whose
+// graph cannot answer contributes an unknown, and a union carrying an unknown is
+// a superset of nothing. Its conjuncts live in multiWalkDerivationRefusal, which
+// noteStaticDerivationRefusal reports from, so the gate and the operator log
+// cannot disagree about which one refused.
+func (p *Pipeline) derivationIndexes(rs ruleState) ([]full.HopIndex, bool) {
+	if p.derivationIndexRefusal(rs) != "" {
+		return nil, false
+	}
+	if len(rs.branches) > 1 {
+		return rs.anchorHopsPerBranch, true
+	}
+	return []full.HopIndex{rs.anchorHops}, true
+}
+
+// derivationIndexRefusal names the conjunct that leaves this pipeline without a
+// usable pattern graph, "" when it has one. It is the gate (derivationIndexes),
+// the operator log line (noteStaticDerivationRefusal) and the control-plane
+// health answer (PersonalDerivationStatus) reading ONE predicate: an index gated
+// from one place and explained from another drifts, and the copy that drifts is
+// the one an operator acts on.
+//
+// Every branch of it names itself. The empty string is reserved for "the index
+// answers" — it is never a reason, because the refusal latch's own zero value is
+// also "" and a blank reason is swallowed rather than printed.
+func (p *Pipeline) derivationIndexRefusal(rs ruleState) string {
+	if len(rs.branches) > 1 {
+		return p.multiWalkDerivationRefusal(rs)
 	}
 	if !rs.anchorHops.Complete {
-		return full.HopIndex{}, false
+		if reason := rs.anchorHops.Incomplete; reason != "" {
+			return reason
+		}
+		// A single-walk rule carrying no graph at all. No arm of AnchorHopIndex
+		// leaves Complete false with an empty reason, so this is the belt to
+		// those conjuncts' brace: an unnamed refusal logs a blank line, which is
+		// visible and fixable, rather than nothing at all.
+		return derivationUnnamedIndexRefusal
 	}
-	if rs.anchorHops.UnresolvedExpansionPosition() >= 0 {
-		return full.HopIndex{}, false
+	if pos := rs.anchorHops.UnresolvedExpansionPosition(); pos >= 0 {
+		return fmt.Sprintf("pattern position %d carries the `*` taxonomy-expansion sigil with no resolved concrete set — the walk would prune far ends it cannot confirm, which under-approximates", pos)
 	}
-	if l := rs.anchorHops.Labels[rs.anchorHops.Anchor]; l != p.actorEnumerator.actorType {
-		return full.HopIndex{}, false
+	// Last because it is the one conjunct that is not a property of the compiled
+	// rule: the ActorEnumerator is installed after the rule is published, so a
+	// pipeline that has not finished installing reads exactly like one whose
+	// anchor names the wrong kind of vertex, and both must refuse.
+	if p.actorEnumerator == nil || rs.anchorHops.Labels[rs.anchorHops.Anchor] != p.actorEnumerator.actorType {
+		return derivationAnchorLabelRefusal
 	}
-	return rs.anchorHops, true
+	return ""
 }
 
 // seededNode is a starting point for the walk: a vertex id, bound at a
@@ -182,7 +239,13 @@ type seededNode struct {
 // because the anchor position is pinned by `{key: $actorKey}`: within one
 // evaluation it binds exactly one vertex, so a realized path from some OTHER
 // anchor to the changed element cannot pass through this one.
-func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds []seededNode) ([]string, bool, error) {
+//
+// The budget is the EVENT's, not this walk's: the reads, the ranged work and the
+// neighbour memo are shared with every sibling branch walked for the same event
+// (derivationBudget). One walk exhausting it declines the whole lens, which is
+// the point — a wide lens declines once rather than once per branch, and the
+// vertices two branches share are read once between them.
+func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds []seededNode, budget *derivationBudget) ([]string, bool, error) {
 	// Labels[Anchor] is always a bare (non-`*`) label here: AnchorHopIndex
 	// refuses Complete when the anchor position itself carries LabelExpand
 	// (hopindex.go), because a realized anchor vertex's own concrete type is
@@ -204,24 +267,21 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 		queue = append(queue, s)
 	}
 
-	// One adjacency document per vertex per walk, however many positions that
-	// vertex is reached at.
-	neighbours := map[string][]adjacency.EdgeEntry{}
-	readCap := p.derivationReadCap()
-	reads := 0
+	// One adjacency document per vertex per EVENT, however many positions that
+	// vertex is reached at and however many branches reach it.
 	edgesOf := func(id string) ([]adjacency.EdgeEntry, error) {
-		if edges, cached := neighbours[id]; cached {
+		if edges, cached := budget.neighbours[id]; cached {
 			return edges, nil
 		}
-		if reads >= readCap {
+		if budget.reads >= budget.readCap {
 			return nil, errDerivationTooWide
 		}
-		reads++
+		budget.reads++
 		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, id)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: anchor derivation: neighbours of %q: %w", id, err)
 		}
-		neighbours[id] = edges
+		budget.neighbours[id] = edges
 		return edges, nil
 	}
 
@@ -236,19 +296,12 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 		queue = append(queue, n)
 	}
 
-	// rangedReads is the adjacency documents the ranged closures below read,
-	// tallied for the whole walk and reported once however the walk exits —
-	// including the read-cap exit, which is the firing rate worth seeing.
-	// work counts the adjacency entries the ranged closures iterate, which is
-	// what the memoising read cap cannot see (its doc above).
-	work := 0
-	workBudget := readCap * DerivationRangedWorkFactor
-	rangedReads := 0
-	defer func() {
-		if rangedReads > 0 {
-			p.recordDerivationRangedReads(rangedReads)
-		}
-	}()
+	// budget.rangedReads is the adjacency documents the ranged closures below
+	// read, tallied for the whole EVENT and reported once by the entry point
+	// that owns the budget, however the walks exit — including the read-cap
+	// exit, which is the firing rate worth seeing. budget.work counts the
+	// adjacency entries the ranged closures iterate, which is what the memoising
+	// read cap cannot see (its doc above).
 
 	// expandRanged walks one ranged step's bounded frontier and returns the
 	// adjacency documents it read. Standing on cur.id at cur.pos, it admits at
@@ -305,7 +358,7 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 		hop int
 	}
 	expandRanged := func(cur seededNode, step full.PatternStep) (int, error) {
-		readsBefore := reads
+		readsBefore := budget.reads
 		// A step with no hop to take crosses no edge. StepsFrom never builds
 		// one, but this closure also serves a caller assembling a HopIndex
 		// directly, where silently admitting only the standing node would be an
@@ -329,11 +382,11 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 			for _, id := range frontier {
 				edges, err := edgesOf(id)
 				if err != nil {
-					return reads - readsBefore, err
+					return budget.reads - readsBefore, err
 				}
-				work += len(edges)
-				if work > workBudget {
-					return reads - readsBefore, errDerivationTooWide
+				budget.work += len(edges)
+				if budget.work > budget.workBudget {
+					return budget.reads - readsBefore, errDerivationTooWide
 				}
 				for _, e := range edges {
 					if !edgeTakesStep(step, e) {
@@ -355,7 +408,7 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 			}
 			frontier = next
 		}
-		return reads - readsBefore, nil
+		return budget.reads - readsBefore, nil
 	}
 
 	for len(queue) > 0 {
@@ -389,7 +442,7 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 				continue
 			}
 			n, err := expandRanged(cur, step)
-			rangedReads += n
+			budget.rangedReads += n
 			if err != nil {
 				if err == errDerivationTooWide {
 					return nil, false, nil

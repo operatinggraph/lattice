@@ -26,6 +26,19 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// anchorHopsPerBranch is the multi-walk arm's own pattern graphs — one per
+	// compiled branch, in branch order — and anchorHopsPerBranchRefusal names
+	// the conjunct that refused the set whole, "" when it can answer. Both are
+	// empty for a single-walk lens, which reads anchorHops beside them.
+	//
+	// The derivation walks EVERY branch from its own seeds and unions the
+	// results (anchor_derivation_branches.go), so this is the set derivationIndexes
+	// hands the walk for a branch-carrying lens. Published as a pair under the
+	// same copy-on-write swap as everything else here, and replaced wholesale by
+	// every publication — so a reload that turns a three-walk body into a
+	// one-walk body can never leave the previous body's graphs armed.
+	anchorHopsPerBranch        []full.HopIndex
+	anchorHopsPerBranchRefusal string
 	// walkScope bounds which relations the ActorEnumerator's BFS follows at
 	// each vertex type, nil for the relation-blind walk — see walkScope.
 	//
@@ -122,12 +135,21 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
-		walkScope:           p.walkScope,
-		walkScopeRefusal:    p.walkScopeRefusal,
-		rootHops:            p.rootHops,
-		declaresActorAnchor: p.declaresActorAnchor,
-		labelExpansion:      p.labelExpansion,
-		narrowingBlocked:    p.plainNarrowingBlocked,
+		// The multi-walk pair. Its zero values are a nil graph set and an empty
+		// refusal — "no graphs" plus "nothing refused them", which read together
+		// as a union over no walks at all, i.e. an empty anchor set returned as
+		// a real answer. So the omission this hand-maintained round trip invites
+		// is fail-OPEN here too, and multiWalkDerivationRefusal fails closed on
+		// the PAIR rather than on either half.
+		// TestRuleState_BranchAnchorHopsSurvivePublication pins the trip.
+		anchorHopsPerBranch:        p.anchorHopsPerBranch,
+		anchorHopsPerBranchRefusal: p.anchorHopsPerBranchRefusal,
+		walkScope:                  p.walkScope,
+		walkScopeRefusal:           p.walkScopeRefusal,
+		rootHops:                   p.rootHops,
+		declaresActorAnchor:        p.declaresActorAnchor,
+		labelExpansion:             p.labelExpansion,
+		narrowingBlocked:           p.plainNarrowingBlocked,
 		// The round trip through the Pipeline's own fields is hand-maintained,
 		// so a ruleState field added without a line HERE and one in
 		// publishRuleState reads as its zero value on every event with nothing
@@ -172,6 +194,8 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.anchorHopsPerBranch = rs.anchorHopsPerBranch
+	p.anchorHopsPerBranchRefusal = rs.anchorHopsPerBranchRefusal
 	p.walkScope = rs.walkScope
 	p.walkScopeRefusal = rs.walkScopeRefusal
 	p.rootHops = rs.rootHops

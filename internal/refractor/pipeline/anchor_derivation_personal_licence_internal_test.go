@@ -591,53 +591,69 @@ func TestPersonalDerivationLicence_ANonPersonalLensKeepsItsOwnRefusal(t *testing
 // TestPersonalDerivationLicence_AMultiWalkLensLogsANamedReason pins the arm the
 // licence made reachable for the first time.
 //
-// ruleinstall.go publishes NO anchorHops for a rule that compiles to several
-// branches, so what derivationIndex reads is the zero HopIndex: `Complete` false
-// and `Incomplete` EMPTY. Until the licence landed, conjunct 1 refused every
-// multi-walk lens in the corpus first — they are all personal — so the empty
-// reason was masked. A licensed one reaches it, and the refusal latch's own zero
-// value is also the empty string, so without a name the FIRST report reads as a
-// repeat and nothing is logged at all: the three biggest personal lenses would
-// sit silently on the enumerator while the operator log read as though every
-// personal lens had been licensed. That is §15.1's green bar going green for the
-// wrong reason.
+// A multi-walk lens's single-walk anchorHops is the ZERO HopIndex — `Complete`
+// false and `Incomplete` EMPTY — and the refusal latch's own zero value is also
+// the empty string, so an unnamed reason is not merely unreadable: the FIRST
+// report reads as a repeat and nothing is logged at all. The biggest personal
+// lenses would sit silently on the enumerator while the operator log read as
+// though every personal lens had been licensed. That is §15.1's green bar going
+// green for the wrong reason.
+//
+// The reason such a lens is refused is a conjunct of its own WALKS, and the same
+// rule holds of every one of them: the multi-walk arm reports from
+// multiWalkDerivationRefusal, which is total.
 func TestPersonalDerivationLicence_AMultiWalkLensLogsANamedReason(t *testing.T) {
 	buf := captureDefaultLogger(t)
 
 	// A genuinely multi-walk rule, published through the SAME installer
-	// cmd/refractor uses, so the zero HopIndex under test is the one
-	// ruleinstall.go really leaves behind rather than one a test hand-built.
+	// cmd/refractor uses, so the graphs under test are the ones ruleinstall.go
+	// really leaves behind rather than ones a test hand-built. One walk carries
+	// an untyped relationship, which is what its graph refuses on.
 	eng := full.New()
-	branch := func(rel string) ruleengine.CompiledRule {
-		cr, err := eng.Parse(
-			"MATCH (identity:identity {key: $actorKey})-[:" + rel + "]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
+	branch := func(spec string) ruleengine.CompiledRule {
+		cr, err := eng.Parse(spec)
 		require.NoError(t, err)
 		return cr
 	}
-	head, b0, b1 := branch("mayRead"), branch("mayRead"), branch("mayBook")
+	head := branch("MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
+	untyped := branch("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
 	p := &Pipeline{ruleID: "multi-walk-personal"}
-	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{b0, b1}))
+	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{head, untyped}))
 	p.SetPersonalPlaneHealer(true)
 	verdictOf(p, licensedWiring(), cleanVerdict())
 
-	// The state ruleinstall.go leaves a multi-walk rule in: no index at all, so
-	// the published one is the ZERO HopIndex — incomplete, and carrying no
-	// reason of its own.
 	rs := p.ruleState()
 	require.NotNil(t, rs.branches, "precondition: this rule really compiled to several walks")
 	require.False(t, rs.anchorHops.Complete)
 	require.Empty(t, rs.anchorHops.Incomplete,
-		"precondition: the zero index carries no reason of its own — that absence is what this test is about")
+		"precondition: the single-walk index carries no reason of its own — that absence is what this test is about")
 
 	p.noteStaticDerivationRefusal(rs, "")
-	require.Contains(t, buf.String(), DerivationNoBranchIndexRefusal,
+	require.Contains(t, buf.String(), DerivationBranchIncompleteRefusal,
 		"a licensed multi-walk lens must log a NAMED reason; an empty one is swallowed by the latch and reads as silence")
+	require.Contains(t, buf.String(), "pattern carries an untyped relationship",
+		"and the refused walk's own reason must reach the operator")
 	require.NotContains(t, buf.String(), `reason=""`)
 
 	// And it is latched like every other reason: once, not per event.
 	buf.Reset()
 	p.noteStaticDerivationRefusal(rs, "")
-	require.NotContains(t, buf.String(), DerivationNoBranchIndexRefusal)
+	require.NotContains(t, buf.String(), DerivationBranchIncompleteRefusal)
+
+	// The positive counterpart, and what makes the assertion above a refusal
+	// rather than the arm's only behaviour: the same lens with walks that both
+	// answer is not refused at all — it derives.
+	buf.Reset()
+	licensed := &Pipeline{ruleID: "multi-walk-personal-licensed"}
+	require.NoError(t, licensed.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{
+		head, branch("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor, x.name AS name"),
+	}))
+	licensed.SetPersonalPlaneHealer(true)
+	licensed.SetActorEnumerator(NewActorEnumerator(nil, nil, "identity"))
+	verdictOf(licensed, licensedWiring(), cleanVerdict())
+	_, ready, refusal := licensed.derivationIndexForAct(licensed.ruleState())
+	require.True(t, ready, "refusal: %s", refusal)
+	require.Empty(t, licensed.multiWalkDerivationRefusal(licensed.ruleState()))
 }
 
 // TestStaticDerivationRefusal_EveryArmNamesItself sweeps the reason switch and
@@ -703,20 +719,68 @@ func TestStaticDerivationRefusal_EveryArmNamesItself(t *testing.T) {
 		return p, p.ruleState(), ""
 	})
 
-	arm(t, "a MULTI-WALK lens names the missing per-branch index", DerivationNoBranchIndexRefusal, func() (*Pipeline, ruleState, string) {
-		// The arm that was empty. ruleinstall.go publishes no index at all for a
-		// rule with several branches, so what the switch reads is the zero
-		// HopIndex — incomplete, and carrying no reason of its own.
-		p := &Pipeline{ruleID: "multi-walk"}
-		require.NoError(t, p.UseFullEngineBranches(eng, single, []ruleengine.CompiledRule{
-			single, parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
-		}))
+	// The four multi-walk arms. The class was the one that WAS empty, and it is
+	// now four conjuncts rather than one: each must name itself, because the
+	// switch reports whichever the gate refused on and a fall-through would send
+	// an operator to fix the wrong walk.
+	multiWalk := func(t *testing.T, id string, branches []ruleengine.CompiledRule) (*Pipeline, ruleState, string) {
+		t.Helper()
+		p := &Pipeline{ruleID: id}
+		require.NoError(t, p.UseFullEngineBranches(eng, branches[0], branches))
 		p.SetPatternClosedOutput(true)
 		p.SetPersonalPlaneHealer(true)
 		require.False(t, p.ruleState().anchorHops.Complete)
 		require.Empty(t, p.ruleState().anchorHops.Incomplete,
-			"precondition: this arm's own source carries no reason — that absence is the defect")
+			"precondition: the single-walk index this arm does NOT read carries no reason — that absence is the defect")
 		return p, p.ruleState(), ""
+	}
+
+	arm(t, "a MULTI-WALK lens with a walk that cannot answer names that conjunct", DerivationBranchIncompleteRefusal, func() (*Pipeline, ruleState, string) {
+		return multiWalk(t, "multi-walk-incomplete", []ruleengine.CompiledRule{
+			single, parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
+		})
+	})
+
+	arm(t, "a MULTI-WALK lens whose walks anchor differently names the disagreement", DerivationBranchAnchorDisagreementRefusal, func() (*Pipeline, ruleState, string) {
+		return multiWalk(t, "multi-walk-disagree", []ruleengine.CompiledRule{
+			single, parse("MATCH (org:org {key: $actorKey})-[:owns]->(x:unit)\nRETURN x.key AS anchor"),
+		})
+	})
+
+	arm(t, "a MULTI-WALK lens holding no per-branch graph at all names that", DerivationNoBranchIndexRefusal, func() (*Pipeline, ruleState, string) {
+		p, rs, _ := multiWalk(t, "multi-walk-no-graphs", []ruleengine.CompiledRule{
+			single, parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
+		})
+		// The pair's fail-open shape: graphs gone with nothing refusing them,
+		// which is what a ruleState field losing its round-trip line looks like.
+		rs.anchorHopsPerBranch = nil
+		rs.anchorHopsPerBranchRefusal = ""
+		return p, rs, ""
+	})
+
+	arm(t, "a MULTI-WALK lens whose walks answer names the anchor label", derivationAnchorLabelRefusal, func() (*Pipeline, ruleState, string) {
+		// Every branch conjunct clears, so what is left is the one only a live
+		// read can answer: this pipeline has no enumerator, so no anchor label
+		// can be the enumerator's actor type.
+		return multiWalk(t, "multi-walk-label", []ruleengine.CompiledRule{
+			single, parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
+		})
+	})
+
+	arm(t, "a single-walk graph that declines without naming a conjunct is still named", derivationUnnamedIndexRefusal, func() (*Pipeline, ruleState, string) {
+		// The belt to every named conjunct, and the reason it is its own
+		// constant: the multi-walk sentence would be a WRONG reason here — this
+		// lens compiles to one walk. No arm of AnchorHopIndex produces a graph
+		// that is incomplete and silent, so the vector is authored.
+		p := &Pipeline{ruleID: "unnamed-index"}
+		require.NoError(t, p.UseFullEngine(eng, single))
+		p.SetPatternClosedOutput(true)
+		p.SetPersonalPlaneHealer(true)
+		rs := p.ruleState()
+		rs.anchorHops = full.HopIndex{}
+		require.False(t, rs.anchorHops.Complete)
+		require.Empty(t, rs.anchorHops.Incomplete)
+		return p, rs, ""
 	})
 
 	arm(t, "a cypher-level refusal carries the index's own reason", "pattern carries an untyped relationship", func() (*Pipeline, ruleState, string) {
@@ -858,13 +922,14 @@ func TestDerivationIndexForAct_IndexIsAskedBeforeTheLicence(t *testing.T) {
 	}
 	head := parse(personalLicenceSpec)
 
-	// A multi-walk personal lens — ruleinstall.go publishes no index for it —
-	// whose licence would ALSO refuse. Both conjuncts are live; only one may be
-	// reported, and it must be the index's.
+	// A multi-walk personal lens one of whose walks carries an untyped
+	// relationship — so its per-branch graph set refuses — and whose licence
+	// would ALSO refuse. Both conjuncts are live; only one may be reported, and
+	// it must be the index's.
 	p := &Pipeline{ruleID: "order-multi-walk"}
 	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{
 		head,
-		parse("MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"),
+		parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
 	}))
 	p.SetPersonalPlaneHealer(true)
 	failing := cleanVerdict()
@@ -872,7 +937,7 @@ func TestDerivationIndexForAct_IndexIsAskedBeforeTheLicence(t *testing.T) {
 	verdictOf(p, licensedWiring(), failing)
 
 	rs := p.ruleState()
-	require.False(t, rs.anchorHops.Complete, "precondition: the index really refuses this lens")
+	require.NotEmpty(t, rs.anchorHopsPerBranchRefusal, "precondition: the index really refuses this lens")
 	licensed, licRefusal := p.personalDerivationLicence(rs)
 	require.False(t, licensed, "precondition: the LICENCE would refuse it too")
 	require.Contains(t, licRefusal, "last pass failed")
@@ -885,9 +950,9 @@ func TestDerivationIndexForAct_IndexIsAskedBeforeTheLicence(t *testing.T) {
 	// And the reason an operator reads is the index's, not the licence's.
 	buf := captureDefaultLogger(t)
 	p.noteStaticDerivationRefusal(rs, refusal)
-	require.Contains(t, buf.String(), DerivationNoBranchIndexRefusal)
+	require.Contains(t, buf.String(), DerivationBranchIncompleteRefusal)
 	require.NotContains(t, buf.String(), "last pass failed",
-		"a licence conjunct must not mask the missing per-branch index — fixing the healer would change nothing for this lens")
+		"a licence conjunct must not mask the walk that cannot answer — fixing the healer would change nothing for this lens")
 
 	// The control: a SINGLE-walk lens in the same state does reach the licence,
 	// so the empty refusal above is the ordering and not a predicate that stopped
