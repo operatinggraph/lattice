@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.21
+version: 0.31.22
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -86,6 +86,10 @@ declares:
       bucket: weaver-targets
       engine: full
     - canonicalName: applicantOnboarding
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: staleUserTasks
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -185,6 +189,8 @@ declares:
       lensRef: leaseApplicationComplete
     - targetId: applicantOnboarding
       lensRef: applicantOnboarding
+    - targetId: staleUserTasks
+      lensRef: staleUserTasks
     - targetId: backgroundCheckFreshness
       lensRef: backgroundCheckFreshness
     - targetId: leaseExpiry

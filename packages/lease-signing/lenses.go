@@ -96,6 +96,45 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// staleUserTasks — the TASK-anchored companion to
+			// orchestration-base's orphanedTaskGrants: that sweep catches a task
+			// whose granted OPERATION died out from under it; this one catches a
+			// task whose own GAP already closed through some other route while the
+			// task — still correctly granted, still perfectly actionable — sits
+			// open forever, because nothing in Weaver itself ever revokes a
+			// dispatched assignTask once its effect holds true
+			// (internal/weaver's releaseCompletedLeg only deletes its own mark,
+			// never touches the task artifact — Weaver's whole per-target state is
+			// the mark, not the task). Each of this package's three userTask ops
+			// closes on a write the ASSIGNEE normally makes through that very op,
+			// but an applicant can hold several live applications, a landlord
+			// several open renewals, and a mark-lease reclaim can strand a task
+			// whose person-level fact (an .ssn write from a different
+			// application's flow) was already satisfied elsewhere — leaving a
+			// live task in an inbox for work already done.
+			//
+			// One row per open task; missing_cancellation is true exactly when
+			// the task's own forOperation names one of the three ops below AND
+			// the fact that op exists to produce is already present on the
+			// task's scopedTo neighbor. Reuses orphanedTaskGrants' own directOp
+			// CancelTask{taskKey} verbatim (targets.go) — no new op, no new
+			// permission: CancelTask is already operator-granted platform-wide.
+			CanonicalName:  "staleUserTasks",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           staleUserTasksSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "task",
+				OutputKeyPattern: "staleUserTasks.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_cancellation", "entityKey", "taskKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
 			// backgroundCheckFreshness — the SERVICE-INSTANCE-anchored freshness
 			// window. It projects no gap column and its target dispatches
 			// nothing; what it exists for is the @at Weaver arms from freshUntil,
@@ -1005,6 +1044,54 @@ RETURN
   ((ssnVal = null) AND (onboardingApps > 0)) AS missing_onboarding,
   (onbTaskOpen > 0)                          AS inflight_onboarding,
   ((ssnVal = null) AND (onboardingApps > 0)) AS violating
+`
+
+// staleUserTasksSpec is the TASK-anchored convergence cypher for
+// staleUserTasks (Lenses(), above): one row per open task, whatever operation
+// granted it. The three OPTIONAL MATCHes are label-typed (identity / leaseapp
+// / renewal), never a bare untyped node — a task's operationType pins exactly
+// which vertex type its scopedTo neighbor is (RecordIdentityPII → identity,
+// SignLease → leaseapp, SetRenewalTerms → renewal), so at most one of
+// onbSsn/sigSignedAt/termsSetAt is ever non-null for a given row; the other
+// two OPTIONAL MATCHes simply fail to match and project null, the same
+// label-gated idiom appliesToUnit/renews use elsewhere in this file.
+//
+// The three closure predicates are the SAME facts this package's other
+// convergence lenses already read to flip their own missing_* columns:
+//   - RecordIdentityPII: id.ssn.data present (applicantOnboardingSpec's ssnVal)
+//   - SignLease:          app.signature.data.signedAt present (leaseApplicationCompleteSpec's signedAt)
+//   - SetRenewalTerms:    rn.terms.data.setAt present (renewalComplete's termsSetAt goal column)
+//
+// The status='open' gate excludes an already complete/cancelled task (nothing
+// left to converge — orphanedTaskGrantsSpec's own reasoning, orchestration-base
+// lenses.go); an operationType this package doesn't dispatch as a userTask
+// (VerifyGuarantor, SignRenewal, or a wholly unrelated op scoped here by
+// coincidence) matches none of the three arms and stays missing_cancellation
+// false forever, never mistaken for a closed gap.
+const staleUserTasksSpec = `
+MATCH (t:task {key: $actorKey})
+  WHERE t.data.status = 'open'
+OPTIONAL MATCH (t)-[:forOperation]->(op)
+OPTIONAL MATCH (t)-[:scopedTo]->(onbIdentity:identity)
+OPTIONAL MATCH (t)-[:scopedTo]->(sigApp:leaseapp)
+OPTIONAL MATCH (t)-[:scopedTo]->(termsRenewal:renewal)
+WITH
+  t.key AS entityKey,
+  op.data.operationType AS opType,
+  onbIdentity.ssn.data AS onbSsn,
+  sigApp.signature.data.signedAt AS sigSignedAt,
+  termsRenewal.terms.data.setAt AS termsSetAt
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  nanoIdFromKey(entityKey) AS entityId,
+  entityKey AS taskKey,
+  (((opType = 'RecordIdentityPII') AND (onbSsn <> null)) OR
+   ((opType = 'SignLease') AND (sigSignedAt <> null)) OR
+   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null))) AS missing_cancellation,
+  (((opType = 'RecordIdentityPII') AND (onbSsn <> null)) OR
+   ((opType = 'SignLease') AND (sigSignedAt <> null)) OR
+   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null))) AS violating
 `
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3

@@ -89,7 +89,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.31.21",
+	Version: "0.31.22",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -97,7 +97,10 @@ var Package = pkgmgr.Definition{
 		"landlordLeaseApplicationsRead sibling (the landlord/residence audience anchored on the managing landlord via the " +
 		"loftspace-domain manages link, D1.3 Increment 2), the identity-anchored applicantOnboarding convergence lens + " +
 		"target (one row per applicant, so the PII request is made once however many applications they hold — " +
-		"leaseApplicationComplete keeps missing_onboarding as a surface-declared column), the service-anchored " +
+		"leaseApplicationComplete keeps missing_onboarding as a surface-declared column), the task-anchored " +
+		"staleUserTasks lens + target (an open RecordIdentityPII/SignLease/SetRenewalTerms task whose own gap already " +
+		"closed through another route is cancelled via directOp CancelTask, mirroring orchestration-base's " +
+		"orphanedTaskGrants sweep for the dead-grant half of the same problem), the service-anchored " +
 		"backgroundCheckFreshness lens + gap-less target (a completed check's freshness window gets its timer on the " +
 		"check itself, so the fired timer records the lapse where it happens and every view of bgcheck freshness reads " +
 		"that recorded fact instead of a clock), the §10.8 playbook " +

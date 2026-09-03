@@ -157,6 +157,28 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_onboarding": {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
 		},
 	}, {
+		// staleUserTasks — orchestration-base's orphanedTaskGrants cancels a task
+		// whose granted OPERATION died; this cancels a task whose own GAP already
+		// closed through another route while the grant is still perfectly live
+		// (lenses.go's staleUserTasksSpec doc comment). Reuses the exact same
+		// directOp CancelTask{taskKey} orphanedTaskGrants already dispatches — no
+		// new op, no new permission, and Class pins the "task" DDL the same way
+		// (a directOp fails closed on the first other package that also claims
+		// the operationType, so it stays pinned regardless of ambiguity today).
+		TargetID: "staleUserTasks",
+		Description: "An open user task — RecordIdentityPII, SignLease, or SetRenewalTerms — whose own gap already " +
+			"closed through another route is cancelled instead of sitting in the assignee's inbox forever.",
+		LensRef: "staleUserTasks",
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_cancellation": {
+				Action:    "directOp",
+				Operation: "CancelTask",
+				Class:     "task",
+				Params:    map[string]string{"taskKey": "row.taskKey"},
+				Reads:     []string{"row.taskKey"},
+			},
+		},
+	}, {
 		// backgroundCheckFreshness declares NO gaps, and that is its whole shape:
 		// it dispatches nothing. Weaver's row handler runs the freshness
 		// bookkeeping leg — arm / re-arm / clear the @at from the row's freshUntil
