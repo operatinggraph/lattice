@@ -112,6 +112,26 @@ nats ... kv ls capability-kv | grep -cE '^cap-read\.edgeManifest\.identity\.edu9
 nats ... stream subjects SYNC | grep -E 'edu97ixj2CJB6auNi6L4|dzst9ZB6Q8Jhw4m9hHVG'   # ⇒ 10,000 · 10,000 (the per-subject cap)
 ```
 
+### 3.1 Read-cost probe (C6, live, 16:45 — read-only, the widest actor; run twice each)
+
+| Read | cost |
+|---|---|
+| the two `cap-read` wildcards for the actor, 3,671 matched (past the cap ⇒ consumer drain) | **3.0–3.4 s** |
+| the same set as a keys-only `ListKeysFilter` ×2 | 0.18 s |
+| the same 3,671 keys as exact-key multi-gets in ≤ 1,024 chunks | ~0.04 s (one 1,000-key request: 10–14 ms) |
+| exact keys at the boundary: 1,024 ⇒ 10 ms; **1,025 ⇒ 1.2–1.8 s** (the drain) | the cap is exactly 1,024 |
+| the marked identity hub's `providedTo` links (3,638, two wildcard filters ⇒ drain) | 0.8–2.7 s |
+| the same as a keys-only listing | 0.47 s |
+
+So a whole-actor evaluation of the widest actor was paying two consumer drains — Inc 1's own grant-set read
+and the hub's link read — at ~1 ms per key, ≈ 96 % of the ~4 s that remained after Inc 1+2 (24-sample
+profile of the live handler: 13 in `ReadableAnchors`, 10 in `neighborsFromCoreKV`, 1 in `Registrations`,
+0 in the publishes). **Inc 4 (found at build):** `KVGetMultiNoSnapshot`'s past-the-cap path becomes
+list-then-get — wildcards expanded to exact keys through the listing, then fetched in ≤ 1,024-key atomic
+requests — so every `NoSnapshot` caller past the cap (the grant set, the marked hub, any executor prefetch
+that overflows) pays ~0.05–0.15 ms per key instead of ~1 ms. The snapshot-verified `KVGetMulti` keeps its
+double drain: its guarantee is the comparison, which list-then-get cannot offer.
+
 ## 4. The shape
 
 ### 4.1 Increment 1 — the envelope's gates are answered once per actor evaluation
@@ -233,9 +253,14 @@ has, and the edge re-drives it.
   **flush before the frame** (the frame's "only after the batch cleanly applied" contract, unchanged). A
   flush error is a write error of the batch: `writeResults` Naks (today's category for a personal publish
   failure), the other two return it.
-- **Audit**: `AuditWriter` gains the same async shape with its own batch (never shared with the row batch —
-  an audit failure must not fail a row batch); `writeResults` flushes it at the end and logs errors, exactly
-  today's best-effort posture.
+- **Audit**: `AuditWriter` gains the same async shape with its own pipeline (never shared with the row
+  pipeline — an audit failure must not fail a row batch); `writeResults` flushes it at the end and logs
+  errors, exactly today's best-effort posture. *(Amended at build, 2026-09-03 — Inc 3 cold review.)* The
+  loop's audit tuples and the projected-count / freshness-clock updates are **buffered until the row
+  pipeline's flush succeeds**: an audit entry asserts a row that landed, and a pipelined write is not known to
+  have landed until its ack. The window is sized against the **connection's** async budget, not per pipeline
+  (one `substrate.Conn` per process; sixteen personal lenses × two pipelines): `WithPublishAsyncMaxPending`
+  raised to 8,192 and the default window 128, pinned by a corpus-count test.
 
 ### 4.4 Non-goals
 
@@ -251,7 +276,7 @@ has, and the edge re-drives it.
 | per-evaluation gate scope (`*AnchorSet`, `[]Registration`) in the envelope's params copy | after `executeBranches`, per `executeFullForActorOnce` call | dropped with the call — never outlives one evaluation, never cached across actors or events | not carried | one read per actor evaluation, taken after the walk |
 | executor staging maps `prefetched` (Core-KV bodies) and `prefetchedEdges` (adjacency answers) — *amended at build, 2026-09-03* | per evaluation, filled by each batch | an entry is **deleted on promotion** into the memo (first dereference), so the map holds only not-yet-used answers; the whole map dies with the executor | not carried | bounded by the keys one evaluation's expressions and frontiers name — for the widest actor a few thousand decoded bodies at most; a key the evaluation never uses never reaches the memo or the footprint |
 | executor node/edge memo entries promoted from staging | per evaluation, same memos as today | with the executor | not carried | identical revisions/absences/observations to point reads (pinned on/off) |
-| `PublishBatch` futures | per write loop, on the ctx | flushed before the frame; dropped with the loop | not carried | connection send order |
+| `PublishPipeline` futures | per write loop, on the ctx | flushed before the frame (the single error seam — `Add` never surfaces another message's failure); every future is bounded by the connection's 5 s async ack timeout, so an ack that never arrives surfaces at `Flush` as a timeout, never a wedge | not carried | connection send order; nats.go's no-responders retry can re-send one message ~250 ms later, which `Flush` still awaits before the frame |
 | executor point-read counter | test builds only | — | — | — |
 
 No registry, no cache across evaluations, no new latch.
@@ -293,6 +318,7 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 | R4 | The async window starves another pipeline of nats.go's outstanding-publish budget. | Latency elsewhere. | Window 256 ≪ 4,000; `Add` awaits the oldest future rather than queueing without bound. |
 | R5 | A listing over `cap-read.*.<actor>.*` returns a sibling actor's keys. | Over-grant. | The actor suffix is a literal token pair in both filters; `TestIsReadable_DoesNotLeakAcrossActors` is mirrored for the set. |
 | R6 | *(added at build, 2026-09-03 — Inc 1 cold review)* The set reads every one of the actor's grant bodies, so one corrupt body would have failed the whole actor's evaluation on every redelivery, where the per-row read touched only the gated anchor's key. | Fail-closed, but a redelivery wedge for that actor's whole personal plane. | An unparseable body is logged at Warn and its anchor is simply not admitted — fail-closed per anchor; the asymmetry with `IsReadable` (which errors) is pinned in the equivalence test. |
+| R8 | *(added at build, 2026-09-03 — Inc 3 cold review)* A pipelined publish whose ack never arrives (a JetStream leader dying after accepting the request) would block the flush forever on the deadline-less consumer ctx, wedging the lens with the message neither acked nor naked, where the synchronous publish was bounded at nats.go's 5 s default. | Availability, one lens. | `jetstream.WithPublishAsyncTimeout(5 s)` on the connection's JetStream handle mirrors the sync default and resolves abandoned futures; the timeout surfaces at `Flush` as a write error ⇒ Nak ⇒ redelivery. Pinned by a `NoAck`-stream test. |
 | R7 | *(added at build, 2026-09-03 — Inc 1 cold review)* The widest actors' grant sets exceed the multi-get's 1,024 fast-path cap, so production always takes the consumer drain, whose contract requires a caller deadline; the consumer ctx has none. | A starved drain stalls the personal consumer up to 80 s per event. | The scope read is bounded by a 15 s timeout inside `personalEnvelopeScope`; a timeout is a loud evaluation error the Nak path handles. The drain path itself is now pinned by a past-the-cap test over both key shapes with a second actor present. |
 
 ## 10. Test strategy
@@ -304,8 +330,9 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 - `pipeline`: `TestExecuteFullForActor_TakesScopeOncePerActor` (a counting scope fn: N rows ⇒ 1 call; 0 rows ⇒ 0),
   `TestWriteResults_FlushesBatchBeforeFrame`, `_FlushFailureNaks`; hydrate/reproject batch tests.
 - `full`: `TestTraverseRel_PrefetchZeroesPointReads`, `TestProjection_AspectPrefetch`, `TestPrefetch_FootprintIdentical`.
-- `substrate`: `TestPublishBatch_OrderPreserved`, `_FlushReturnsFirstError`, `_WindowBounds`. `adapter`:
-  ctx-batch on/off. `health`: audit async flush logs, never fails the caller.
+- `substrate`: `TestPublishPipeline_OrderPreserved`, `_FlushReturnsFirstError`, `_WindowBoundsInFlight`, the
+  never-acked (`NoAck` stream) timeout. `adapter`: ctx-pipeline on/off. `health`: audit pipeline flush logs,
+  never fails the caller.
 - `scripts/lint-conventions.go`: self-tests for the two new symbols (undeclared ⇒ denied).
 - **Live acceptance** (after `make cycle-refractor` from `main`): C1 re-run — pattern-bound kinds at **p50 < 1 s,
   p90 < 2 s** (from 8.9 s / 22 s); the consumer drains ≥ 1 msg/s until empty; hydrate of the widest actor
@@ -317,10 +344,13 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 |---|---|---|---|---|
 | baseline (C1, 13:02–14:00) | 9.03 s / 22.0 s | 8.86 s / 22.6 s | 8.90 s / 22.9 s | 71 k → 116 k (growing) |
 | Inc 1 (`0712aa14`, cycled 16:06, read 16:06–16:16, 646 msgs) | **4.72 s / 7.85 s** | — (none in window) | 0.00 s (the window's roots were the supersession purge's soft-deletes) | 116 k → 29 k in 10 min |
+| Inc 1+2 (`03bcfca1`, cycled 16:23, read 16:23–16:33, 651 msgs; licensed at 16:25) | **3.99 s / 7.25 s** | — | 0.00 s | 29 k → 28 k (the window was 86 % `providedTo` events) |
 
 ## 11. Decomposition for the Steward
 
-One fire, three increments (Inc 2 carries the 2b adjacency batch found at build), landed on `main` in order (each independently green and semantics-preserving —
+One fire, four increments (Inc 2 carries the 2b/2c adjacency and deferred-branch batches found at build;
+Inc 4 — the substrate's `NoSnapshot` past-the-cap path — was found by the live measurement after Inc 1+2
+landed, §3.1), landed on `main` in order (each independently green and semantics-preserving —
 the *land each increment* shape; the invariant that keeps main correct across boundaries is that every
 increment's fallback is today's path). Build tier: **opus** for all three (a security-plane read memo, an
 engine read-consistency change, an ack-discipline change); cold **opus** review per increment sized to its
