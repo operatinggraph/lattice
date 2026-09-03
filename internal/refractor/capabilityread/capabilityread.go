@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -59,6 +60,139 @@ func perAnchorBaseKey(actorSuffix, anchorID string) string {
 }
 func perAnchorDomainFilter(actorSuffix, anchorID string) string {
 	return KeyPrefix + "*." + actorSuffix + "." + anchorID
+}
+
+// perAnchorBaseSetFilter and perAnchorDomainSetFilter are the whole-actor
+// counterparts of the two single-anchor key shapes: every base key the actor
+// holds ("cap-read.<actorSuffix>.*") and every domain key
+// ("cap-read.*.<actorSuffix>.*").
+//
+// The two can never match the same subject — a base key is four tokens and a
+// domain key five, and NATS "*" matches exactly one token — so they are safe
+// to pass to one multi-get, which refuses overlapping filters past its
+// fast-path cap (substrate.Conn.kvGetMultiFallback).
+func perAnchorBaseSetFilter(actorSuffix string) string {
+	return KeyPrefix + actorSuffix + ".*"
+}
+func perAnchorDomainSetFilter(actorSuffix string) string {
+	return KeyPrefix + "*." + actorSuffix + ".*"
+}
+
+// AnchorSet is one actor's readable-anchor membership, resolved in a single
+// read and then answered from memory by Admits.
+//
+// It is security-plane state whose only sound lifetime is the one evaluation
+// that built it: it is a snapshot of a projection four other pipelines write,
+// so a set outliving its evaluation is an over-grant waiting for the next
+// revocation. Nothing here caches, and nothing may hold one across
+// evaluations.
+type AnchorSet struct {
+	anchors map[string]struct{}
+}
+
+// Admits reports whether anchorID is in the set — exactly the answer
+// IsReadable computes for the same actor and anchor, by construction (see
+// ReadableAnchors). Admission is exact-string equality: a stored anchor
+// segment is one key token, so a string carrying a NATS subject
+// metacharacter is never a member. Where IsReadable refuses such a string
+// loudly, Admits denies it; both are fail-closed, and a nil set admits
+// nothing.
+func (s *AnchorSet) Admits(anchorID string) bool {
+	if s == nil || anchorID == "" {
+		return false
+	}
+	_, ok := s.anchors[anchorID]
+	return ok
+}
+
+// ReadableAnchors resolves every anchor the actor (actorType, actorID) may
+// read, in ONE read of the per-anchor grant keys, for a caller that has many
+// anchors to gate against one actor and would otherwise run IsReadable — a
+// point read plus a consumer-backed key listing plus a point read per listed
+// key — once per anchor.
+//
+// The membership it returns is identical to IsReadable's answer for every
+// anchor whose keys all parse, and that is the whole contract: an anchor is
+// admitted when its base key OR any of its domain keys is live, and denied
+// when every matching key is soft-tombstoned (isDeleted:true, §6.8) or no key
+// matches at all. It reads the same two key shapes, decodes the same body,
+// and applies the same tombstone rule; the union is additive, so the order
+// entries come back in cannot change the answer. It takes IsReadable's
+// actor-field refusals too — empty, or carrying a NATS subject metacharacter
+// that would build a filter matching a different key shape. A KV failure
+// propagates as an error rather than reading as an empty grant set, which
+// would deny every row of the actor with no diagnosis.
+//
+// TWO deliberate asymmetries with IsReadable, both fail-closed, both
+// consequences of answering for a whole actor rather than for one anchor:
+//
+//   - An UNPARSEABLE body is logged at Warn and CONTRIBUTES NOTHING, where
+//     IsReadable errors. IsReadable reads only the keys of the one anchor it
+//     was asked about, so its error is scoped to that anchor; this reads every
+//     key the actor holds, and erroring would let one corrupt key wedge every
+//     evaluation of an actor holding thousands of good ones — a projection
+//     that fails identically on every redelivery, which is a worse outcome
+//     than the one missing grant it stands in for. The anchor is therefore
+//     denied unless another key for the SAME anchor is live: the set is never
+//     more permissive than the live keys, and can be more permissive than the
+//     per-row read only where that read would have ERRORED.
+//   - An anchorID carrying a NATS subject metacharacter is denied by Admits,
+//     where IsReadable refuses it as an error. A stored anchor segment is one
+//     key token and can never contain one, so such a string is never a member;
+//     IsReadable's refusal exists because it would otherwise TEMPLATE that
+//     string into a filter, which this never does.
+//
+// The read is deliberately GetMultiNoSnapshot, not GetMulti. Three reasons,
+// each independent: the per-anchor reads it replaces already blend instants
+// across an actor's rows, so no simultaneity is being given up; the cap-read
+// producers carry a grant-change edge that re-drives the whole actor when a
+// grant lands or is withdrawn, so the window is the one that edge already
+// closes; and the actors this exists for hold thousands of grant keys, past
+// the 1,024-subject fast path, where GetMulti's stability-verified double
+// drain fails outright under any concurrent write — for a busy actor that is
+// the normal condition, not an edge case (internal/substrate/kv_multi.go's
+// KVGetMultiNoSnapshot contract).
+func ReadableAnchors(ctx context.Context, kv *substrate.KV, actorType, actorID string) (*AnchorSet, error) {
+	if actorType == "" || actorID == "" {
+		return nil, fmt.Errorf("capabilityread: actorType and actorID must both be non-empty")
+	}
+	if strings.ContainsAny(actorType, ".*>") || strings.ContainsAny(actorID, ".*>") {
+		return nil, fmt.Errorf("capabilityread: actorType %q / actorID %q must not contain NATS subject metacharacters", actorType, actorID)
+	}
+	actorSuffix := actorType + "." + actorID
+
+	entries, err := kv.GetMultiNoSnapshot(ctx, []string{
+		perAnchorBaseSetFilter(actorSuffix),
+		perAnchorDomainSetFilter(actorSuffix),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("capabilityread: read per-anchor grants for %q: %w", actorSuffix, err)
+	}
+
+	set := &AnchorSet{anchors: make(map[string]struct{}, len(entries))}
+	for key, entry := range entries {
+		var doc perAnchorEntry
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			// The key is named and the body is not: a grant document is
+			// security-plane state, and a reader logging one at Warn puts it
+			// wherever the logs go.
+			slog.Warn("capabilityread: per-anchor grant key does not parse; the anchor is NOT admitted",
+				"key", key, "actor", actorSuffix, "err", err)
+			continue
+		}
+		if doc.IsDeleted {
+			continue
+		}
+		// The anchor id is the key's last token in both shapes — the
+		// segments ahead of it are the constant prefix, the optional domain
+		// and the actor suffix the two filters pinned literally.
+		anchorID := key[strings.LastIndexByte(key, '.')+1:]
+		if anchorID == "" {
+			continue
+		}
+		set.anchors[anchorID] = struct{}{}
+	}
+	return set, nil
 }
 
 // IsReadable reports whether the actor (actorType, actorID — a Contract #1

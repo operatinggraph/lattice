@@ -174,6 +174,26 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   missing read grant). Threaded into `InstallPersonalLens` as `capKV`; `nil` disables the gate — a
   trusted/test-only posture, never a production default (`cmd/refractor/main.go` always opens a
   real `capability-kv` handle).
+- **Per-evaluation gate scope (`personal-lens-whole-actor-cost-design.md` §4.1).** Both gates are
+  answered from state read **once per actor evaluation**, not once per row: the pipeline's
+  `EnvelopeScopeFn` — installed beside the envelope by `InstallPersonalLens`, run after the walk and
+  only when the evaluation produced rows — reads the actor's whole readable-anchor set
+  (`capabilityread.ReadableAnchors`) and the identity's registrations
+  (`personalinterest.Registrations`), and the envelope answers each row with `AnchorSet.Admits` /
+  `personalinterest.RelevantIn`: the same predicates over the same keys, so neither gate's answer
+  moves. That state reaches the envelope through a **copy** of the evaluation's parameters — the
+  engine's own parameters are never touched, so no `$name` can bind to it — and its lifetime is
+  exactly that evaluation, never cached across events or actors, because a grant set outliving its
+  evaluation would keep honouring a revoked grant. An envelope handed no scope reads live per row,
+  unchanged. Both whole-actor readers sit in the same `grant-change-posture` /
+  `interest-change-posture` table as their per-anchor siblings, under the identical default-deny.
+  Two details follow from reading a whole actor rather than one anchor, both fail-closed: an
+  **unparseable** `cap-read` body denies that anchor and logs at Warn instead of erroring (erroring
+  would let one corrupt key wedge every evaluation of an actor holding thousands of good ones,
+  identically on every redelivery), and the scope's reads are bounded by a **15 s timeout** — a wide
+  actor's grant set is past the multi-get's 1,024-subject fast path, so it drains through a pull
+  consumer whose only other ceiling is the substrate's 80 s, which would stall the lens's consumer
+  silently; exceeding the bound is a loud evaluation error the Nak path already handles.
 - **D1 read-grant change edge + personal convergence sweep
   (`internal/refractor/grantchange`).** That gate makes a personal row a function of *two*
   inputs — the lens's own Core-KV subgraph, which drives it through CDC, and the `cap-read`

@@ -281,37 +281,79 @@ func DeregisterRevision(ctx context.Context, kv *substrate.KV, identityID, devic
 	return nil
 }
 
-// IsRelevant reports whether identityID should receive a delta for the given
-// anchor (personal-secure-lens-design.md §3.3 step 2, the Fire PL.2 relevance
-// filter). No registered device for identityID, or any registered device with
-// an empty filter, admits everything (true). Otherwise a device admits the
-// delta when anchorType is among its declared Types or anchorID is among its
-// declared Anchors; the union of ALL the identity's devices is checked (they
-// share one subject) — any one match makes the delta relevant.
-func IsRelevant(ctx context.Context, kv *substrate.KV, identityID, anchorType, anchorID string) (bool, error) {
-	// One batched read (filter + values in the same round trip) replaces the
-	// former list-then-get-each loop.
+// Registration is one device's declared Interest Set filter — the only part
+// of the stored document the relevance decision reads. The registeredAt /
+// cursor bookkeeping is deliberately absent: a caller holding these is
+// deciding what to publish, and nothing about that decision depends on when
+// the device registered or how far it has been hydrated.
+type Registration struct {
+	Types   []string
+	Anchors []string
+}
+
+// Registrations reads every device registration an identity holds, in ONE
+// batched read (filter + values in the same round trip), for a caller that
+// has many anchors to decide against one identity and would otherwise run
+// IsRelevant — and therefore this read — once per anchor. The answer feeds
+// RelevantIn, which is the whole of the decision.
+//
+// An empty result is a real, admitting state, not an error: an identity with
+// no registered device receives everything it is authorized to see. A
+// document that will not parse propagates as an error instead, so a caller
+// can tell "no filter declared" from "the filter could not be read".
+func Registrations(ctx context.Context, kv *substrate.KV, identityID string) ([]Registration, error) {
 	entries, err := kv.GetMulti(ctx, []string{identityID + ".>"})
 	if err != nil {
-		return false, fmt.Errorf("personalinterest: get devices for %q: %w", identityID, err)
+		return nil, fmt.Errorf("personalinterest: get devices for %q: %w", identityID, err)
 	}
-	if len(entries) == 0 {
-		return true, nil
-	}
+	regs := make([]Registration, 0, len(entries))
 	for _, entry := range entries {
 		var doc registrationDoc
 		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			return false, fmt.Errorf("personalinterest: unmarshal %q: %w", entry.Key, err)
+			return nil, fmt.Errorf("personalinterest: unmarshal %q: %w", entry.Key, err)
 		}
-		if len(doc.Types) == 0 && len(doc.Anchors) == 0 {
-			return true, nil
+		regs = append(regs, Registration{Types: doc.Types, Anchors: doc.Anchors})
+	}
+	return regs, nil
+}
+
+// RelevantIn is the relevance decision itself, over registrations already
+// read (personal-secure-lens-design.md §3.3 step 2, the Fire PL.2 relevance
+// filter). No registration, or any registration with an empty filter, admits
+// everything (true). Otherwise a registration admits the delta when
+// anchorType is among its declared Types or anchorID is among its declared
+// Anchors; the union of ALL the identity's devices is checked (they share one
+// subject) — any one match makes the delta relevant.
+//
+// It reads nothing, so it holds no posture of its own: staleness is a
+// property of when the registrations were read, and belongs to that call.
+func RelevantIn(regs []Registration, anchorType, anchorID string) bool {
+	if len(regs) == 0 {
+		return true
+	}
+	for _, reg := range regs {
+		if len(reg.Types) == 0 && len(reg.Anchors) == 0 {
+			return true
 		}
-		if anchorType != "" && slices.Contains(doc.Types, anchorType) {
-			return true, nil
+		if anchorType != "" && slices.Contains(reg.Types, anchorType) {
+			return true
 		}
-		if anchorID != "" && slices.Contains(doc.Anchors, anchorID) {
-			return true, nil
+		if anchorID != "" && slices.Contains(reg.Anchors, anchorID) {
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+// IsRelevant reports whether identityID should receive a delta for the given
+// anchor: one read of the identity's registrations, decided by RelevantIn.
+// Reach for Registrations + RelevantIn instead whenever more than one anchor
+// is decided against the same identity — this reads the whole registration
+// set per call.
+func IsRelevant(ctx context.Context, kv *substrate.KV, identityID, anchorType, anchorID string) (bool, error) {
+	regs, err := Registrations(ctx, kv, identityID)
+	if err != nil {
+		return false, err
+	}
+	return RelevantIn(regs, anchorType, anchorID), nil
 }

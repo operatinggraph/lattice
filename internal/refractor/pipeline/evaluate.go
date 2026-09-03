@@ -785,12 +785,34 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}
+	// The envelope's per-evaluation scope: state every row's envelope answers
+	// from, computed once here rather than re-read per row. It is taken AFTER
+	// the walk, so it is never staler than the rows it gates, and only when
+	// there is a row to gate — an actor the engine returned nothing for costs
+	// nothing. envParams is a copy: the engine's own parameters must not gain
+	// entries no cypher declared, so `params` itself is never written to.
+	envParams := params
+	if len(out) > 0 && p.envelopeScopeFn != nil && (p.envelopeFn != nil || p.multiEnvelopeFn != nil) {
+		scope, scopeErr := p.envelopeScopeFn(ctx, params)
+		if scopeErr != nil {
+			return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: envelope scope: %w", scopeErr)
+		}
+		if len(scope) > 0 {
+			envParams = make(map[string]any, len(params)+len(scope))
+			for k, v := range params {
+				envParams[k] = v
+			}
+			for k, v := range scope {
+				envParams[k] = v
+			}
+		}
+	}
 	results := make([]ruleengine.EvalResult, 0, len(out))
 	for _, r := range out {
 		row := r.Values
 		keys := r.Key
 		if p.multiEnvelopeFn != nil {
-			entries, envErr := p.multiEnvelopeFn(row, keys, params)
+			entries, envErr := p.multiEnvelopeFn(row, keys, envParams)
 			if errors.Is(envErr, ErrSkipProjection) {
 				continue
 			}
@@ -806,7 +828,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 			continue
 		}
 		if p.envelopeFn != nil {
-			newRow, newKeys, envErr := p.envelopeFn(row, keys, params)
+			newRow, newKeys, envErr := p.envelopeFn(row, keys, envParams)
 			if errors.Is(envErr, ErrSkipProjection) {
 				continue
 			}

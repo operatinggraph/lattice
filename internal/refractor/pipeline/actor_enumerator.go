@@ -373,12 +373,14 @@ func (p *Pipeline) enumerateAnchorsWalk(ctx context.Context, rs ruleState, verte
 // do. That flag governs whether an anchor's row can move with NO pattern edge
 // moving; the CROSS-ACTOR question here is narrower, and pattern closure is not
 // what decides it. Every out-of-pattern input the tree carries is keyed on the
-// EVALUATING actor: a personal lens's two readers both sit in
-// personalEnvelopeFn, where capabilityread.IsReadable reads
-// `cap-read.<actorType>.<actorID>.<anchorID>` (and its `cap-read.*.…` domain
-// form) for the actorKey THIS evaluation is bound to, against an anchor the
-// pattern itself produced, and personalinterest.IsRelevant reads `<actorID>.>`
-// for that same actor. Neither reads a different identity's vertex or aspects,
+// EVALUATING actor: a personal lens's two readers both sit inside the personal
+// envelope's evaluation, and both pin the actorKey THIS evaluation is bound to
+// as a literal in the key they read. The read gate reads
+// `cap-read.<actorType>.<actorID>.<anchorID>` and its `cap-read.*.…` domain
+// form (per row, or the same two shapes wildcarded over the anchor once for
+// the whole actor), against anchors the pattern itself produced; the Interest
+// Set reads `<actorID>.>` for that same actor. Neither reads a different
+// identity's vertex or aspects,
 // so neither makes anchor Y's row a function of actor X's. What those inputs DO
 // create is a row that goes stale with no Core KV event to notice — a
 // `cap-read.<Y>` grant landing is a Capability-KV write, not a CDC event — and

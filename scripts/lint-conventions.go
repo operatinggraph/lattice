@@ -3148,6 +3148,29 @@ var changePostureRules = []*changePostureRule{
 		edges:      "`(subscribed) <which registration edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>`",
 		design:     "personal-lens-derivation-licence-design.md §4.3",
 	},
+	// The whole-actor readers of the same two projections. Reading a whole
+	// actor's grants (or a whole identity's registrations) once per evaluation
+	// answers exactly the predicate its per-anchor sibling answers per row, so
+	// it is the same decision input, gated identically — a widening that
+	// arrived with a weaker gate would be the gate quietly narrowing.
+	{
+		importPath: "github.com/operatinggraph/lattice/internal/refractor/capabilityread",
+		symbol:     "ReadableAnchors",
+		annotation: "grant-change-posture",
+		subject:    "capabilityread.ReadableAnchors",
+		projection: "the D1 read-grant projection",
+		edges:      "`(subscribed) <which producer edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>`",
+		design:     "personal-lens-whole-actor-cost-design.md §4.1",
+	},
+	{
+		importPath: "github.com/operatinggraph/lattice/internal/refractor/personalinterest",
+		symbol:     "Registrations",
+		annotation: "interest-change-posture",
+		subject:    "personalinterest.Registrations",
+		projection: "the Personal Lens Interest Set",
+		edges:      "`(subscribed) <which registration edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>`",
+		design:     "personal-lens-whole-actor-cost-design.md §4.1",
+	},
 }
 
 func init() {
@@ -3801,6 +3824,62 @@ func selfTest() []string {
 			"undeclared personalinterest.IsRelevant call site"},
 		{"an interest test file is out of scope", "internal/refractor/personalinterest/interest_test.go",
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc TestX(t *testing.T) {\n\tok, err := personalinterest.IsRelevant(ctx, kv, aid, at, anchor)\n}\n", ""},
+		// The whole-actor readers of the same two projections
+		// (personal-lens-whole-actor-cost-design.md §4.1). A per-evaluation
+		// read answers the same predicate over the same keys as its per-anchor
+		// sibling, for EVERY anchor at once — so a wider read gated more
+		// weakly would be the whole point of the gate lost. Each census is one
+		// call site, so these fixtures are again the only thing keeping the
+		// deny path honest.
+		{"an undeclared ReadableAnchors call site is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tset, err := capabilityread.ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"undeclared capabilityread.ReadableAnchors call site"},
+		{"a subscribed declaration above the ReadableAnchors call passes", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) the cap-read producer's edge re-drives it\n" +
+				"\tset, err := capabilityread.ReadableAnchors(ctx, capKV, at, aid)\n}\n", ""},
+		{"a ReadableAnchors declaration with no why is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed)\n" +
+				"\tset, err := capabilityread.ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"carries no `<why>`"},
+		{"an unknown ReadableAnchors shape is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (exempt) the actor is trusted\n" +
+				"\tset, err := capabilityread.ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"unknown shape (exempt)"},
+		{"an ALIASED import does not evade the ReadableAnchors gate", "internal/refractor/projection/personal.go",
+			"import (\n\tcr \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +
+				"func f() {\n\tset, err := cr.ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"undeclared capabilityread.ReadableAnchors call site"},
+		{"a DOT import does not evade the ReadableAnchors gate", "internal/refractor/projection/personal.go",
+			"import (\n\t. \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +
+				"func f() {\n\tset, err := ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"undeclared capabilityread.ReadableAnchors call site"},
+		{"an IsReadable declaration does not discharge a ReadableAnchors call site", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) the cap-read producer edge\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n" +
+				"\tset, err := capabilityread.ReadableAnchors(ctx, capKV, at, aid)\n}\n",
+			"undeclared capabilityread.ReadableAnchors call site"},
+		{"a ReadableAnchors test file is out of scope", "internal/refractor/capabilityread/readableanchors_test.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc TestX(t *testing.T) {\n\tset, err := capabilityread.ReadableAnchors(ctx, kv, at, aid)\n}\n", ""},
+		{"an undeclared Registrations call site is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\tregs, err := personalinterest.Registrations(ctx, kv, aid)\n}\n",
+			"undeclared personalinterest.Registrations call site"},
+		{"a subscribed declaration above the Registrations call passes", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// interest-change-posture: (subscribed) register/deregister and the reconciler re-drive it\n" +
+				"\tregs, err := personalinterest.Registrations(ctx, kv, aid)\n}\n", ""},
+		{"a Registrations declaration with no why is denied", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// interest-change-posture: (subscribed)\n" +
+				"\tregs, err := personalinterest.Registrations(ctx, kv, aid)\n}\n",
+			"carries no `<why>`"},
+		{"an ALIASED import does not evade the Registrations gate", "internal/refractor/projection/personal.go",
+			"import (\n\tpi \"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\n" +
+				"func f() {\n\tregs, err := pi.Registrations(ctx, kv, aid)\n}\n",
+			"undeclared personalinterest.Registrations call site"},
+		{"a grant declaration does not discharge a Registrations call site", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) the cap-read producer edge\n" +
+				"\tregs, err := personalinterest.Registrations(ctx, kv, aid)\n}\n",
+			"undeclared personalinterest.Registrations call site"},
+		{"a Registrations test file is out of scope", "internal/refractor/personalinterest/registrations_test.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/personalinterest\"\n)\nfunc TestX(t *testing.T) {\n\tregs, err := personalinterest.Registrations(ctx, kv, aid)\n}\n", ""},
 		// primordial-actor. The fixture directory does not exist on disk, so
 		// packageOpScopeIsAny answers "any" — the fail-closed default these
 		// cases are written against. `emit` is the external-egress line the

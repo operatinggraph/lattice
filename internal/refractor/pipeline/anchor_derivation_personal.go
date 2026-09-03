@@ -3,9 +3,9 @@
 //
 // A personal lens's published row is not a function of its compiled pattern
 // alone. Two inputs sit outside it — D1's `cap-read` read gate and the
-// per-device Interest Set — and both are read live inside personalEnvelopeFn,
-// written by other pipelines and other planes, and reach this lens through no
-// CDC event of its own. That is why derivationIndexForAct refused every
+// per-device Interest Set — and both are read live by the personal envelope's
+// own evaluation, written by other pipelines and other planes, and reach this
+// lens through no CDC event of its own. That is why derivationIndexForAct refused every
 // personal lens outright: a derived anchor set that correctly excludes an
 // anchor whose PATTERN did not change still skips a row whose GRANT did.
 //

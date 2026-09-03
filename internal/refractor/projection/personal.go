@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/capabilityread"
@@ -127,11 +128,102 @@ func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, inte
 	}
 
 	p.SetEnvelopeFn(personalEnvelopeFn(interestKV, capKV, logger))
+	p.SetEnvelopeScope(personalEnvelopeScope(interestKV, capKV))
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, PersonalActorType))
 
 	logger.Info("personal lens fan-out + envelope installed",
 		"lensId", r.ID, "businessKeys", businessKeys, "interestSetFilter", interestKV != nil, "readGrantGate", capKV != nil)
 	return true
+}
+
+// personalScopeGrantsParam and personalScopeInterestParam are the evaluation-
+// parameter entries personalEnvelopeScope publishes and personalEnvelopeFn
+// answers its two gates from. They are unexported and dotted: a cypher
+// parameter is an identifier, so neither spelling can name one, and the
+// pipeline hands these to the envelope through a copy of the parameters the
+// engine never sees.
+//
+// The values are one evaluation's security-plane state — a *AnchorSet and the
+// identity's registrations — and their lifetime is that evaluation. Nothing
+// caches them; a set outliving the evaluation that read it would keep
+// honouring a grant after its revocation landed.
+const (
+	personalScopeGrantsParam   = "projection.personal.readableAnchors"
+	personalScopeInterestParam = "projection.personal.registrations"
+)
+
+// personalScopeReadTimeout bounds the whole per-evaluation gate read.
+//
+// A wide actor's grant set is past the multi-get's 1,024-subject fast path, so
+// the read runs as a consumer drain, and that drain is bounded by the caller's
+// deadline or — with none — by the primitive's own 80-second ceiling
+// (substrate.Conn.KVGetMultiNoSnapshot). An evaluation is on the consumer's hot
+// path: 80 seconds of a starved drain is the whole lens stalled with nothing
+// said about it. Exceeding this bound is a loud evaluation error instead, which
+// the pipeline already classifies and Naks for redelivery. The widest live
+// actor's drain (3,644 keys) completes in well under a second, so the bound is
+// two orders of magnitude of headroom, not a tuning parameter.
+const personalScopeReadTimeout = 15 * time.Second
+
+// personalEnvelopeScope builds the EnvelopeScopeFn that answers a whole
+// actor's evaluation from ONE read per gate instead of one per row: the
+// actor's readable-anchor set (D1) and the identity's Interest Set
+// registrations. A personal lens re-projects every row an actor holds on each
+// event it binds, and the widest actors hold thousands, so the per-row reads
+// personalEnvelopeFn falls back to cost thousands of serial round trips for
+// one event.
+//
+// Both entries are computed from the same actorKey the envelope parses, and a
+// gate whose KV handle is nil contributes nothing — the envelope's own nil
+// checks are what decide whether a gate runs at all, and this must not turn a
+// disabled gate into an enabled one or the reverse. A read failure fails the
+// evaluation, so a gate that could not be read never reads as a gate that
+// admitted; both reads run under personalScopeReadTimeout, so a starved one
+// fails loudly rather than holding the consumer.
+func personalEnvelopeScope(interestKV, capKV *substrate.KV) pipeline.EnvelopeScopeFn {
+	return func(ctx context.Context, params map[string]any) (map[string]any, error) {
+		actorKey, _ := params["actorKey"].(string)
+		if actorKey == "" {
+			return nil, nil
+		}
+		actorType, actorID, ok := substrate.ParseVertexKey(actorKey)
+		if !ok {
+			return nil, fmt.Errorf("projection: personal lens actorKey %q is not a Contract #1 vertex key", actorKey)
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, personalScopeReadTimeout)
+		defer cancel()
+
+		scope := make(map[string]any, 2)
+		if capKV != nil {
+			// grant-change-posture: (subscribed) the cap-read producers carry
+			// the grant-change edge (IsReadGrantProducer wires the sink in
+			// InstallActorAggregate), so a grant landing or being withdrawn
+			// re-drives this actor's personal pipelines through
+			// Pipeline.ReprojectPersonalActor rather than waiting for an
+			// unrelated Core KV event to happen to re-ask this gate.
+			readable, err := capabilityread.ReadableAnchors(ctx, capKV, actorType, actorID)
+			if err != nil {
+				return nil, fmt.Errorf("projection: personal lens read-grant scope for %q: %w", actorID, err)
+			}
+			scope[personalScopeGrantsParam] = readable
+		}
+		if interestKV != nil {
+			// interest-change-posture: (subscribed) every writer of the
+			// Interest Set announces on the change edge — the control plane's
+			// register and deregister ops, and the health InterestReconciler's
+			// orphan reap — so a device that narrows or widens what it wants
+			// has this actor's personal pipelines re-driven through
+			// Pipeline.ReprojectPersonalActor rather than waiting for the
+			// convergence sweep to come round.
+			regs, err := personalinterest.Registrations(ctx, interestKV, actorID)
+			if err != nil {
+				return nil, fmt.Errorf("projection: personal lens interest-set scope for %q: %w", actorID, err)
+			}
+			scope[personalScopeInterestParam] = regs
+		}
+		return scope, nil
+	}
 }
 
 // personalEnvelopeFn builds the EnvelopeFn that turns a fan-out re-execution's
@@ -154,6 +246,14 @@ func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, inte
 // denied even if some device's Interest Set declares it relevant
 // (personal-secure-lens-design.md §3.4: "security filter wins over
 // relevance").
+//
+// Both gates are answered from the per-evaluation scope
+// (personalEnvelopeScope) when the pipeline hands one down: the same
+// predicates over the same keys, read once for the whole actor rather than
+// once per row. Absent a scope — a caller that installed the envelope alone —
+// each gate reads live per row, which is the same answer at a higher cost.
+// Which gates run at all is decided by capKV/interestKV here, never by what
+// the scope happens to carry.
 func personalEnvelopeFn(interestKV, capKV *substrate.KV, logger *slog.Logger) pipeline.EnvelopeFn {
 	return func(row map[string]any, keys map[string]any, params map[string]any) (map[string]any, map[string]any, error) {
 		actorKey, _ := params["actorKey"].(string)
@@ -174,15 +274,21 @@ func personalEnvelopeFn(interestKV, capKV *substrate.KV, logger *slog.Logger) pi
 			if !ok {
 				return nil, nil, fmt.Errorf("projection: personal lens anchor %q is not a Contract #1 vertex key", anchorRaw)
 			}
-			// grant-change-posture: (subscribed) the cap-read producers carry
-			// the grant-change edge (IsReadGrantProducer wires the sink in
-			// InstallActorAggregate), so a grant landing or being withdrawn
-			// re-drives this actor's personal pipelines through
-			// Pipeline.ReprojectPersonalActor rather than waiting for an
-			// unrelated Core KV event to happen to re-ask this gate.
-			readable, err := capabilityread.IsReadable(context.Background(), capKV, actorType, actorID, anchorNanoID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("projection: personal lens read-grant check for %q: %w", actorID, err)
+			var readable bool
+			if grants, scoped := params[personalScopeGrantsParam].(*capabilityread.AnchorSet); scoped {
+				readable = grants.Admits(anchorNanoID)
+			} else {
+				// grant-change-posture: (subscribed) the cap-read producers carry
+				// the grant-change edge (IsReadGrantProducer wires the sink in
+				// InstallActorAggregate), so a grant landing or being withdrawn
+				// re-drives this actor's personal pipelines through
+				// Pipeline.ReprojectPersonalActor rather than waiting for an
+				// unrelated Core KV event to happen to re-ask this gate.
+				perRow, err := capabilityread.IsReadable(context.Background(), capKV, actorType, actorID, anchorNanoID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("projection: personal lens read-grant check for %q: %w", actorID, err)
+				}
+				readable = perRow
 			}
 			if !readable {
 				return nil, nil, pipeline.ErrSkipProjection
@@ -191,16 +297,22 @@ func personalEnvelopeFn(interestKV, capKV *substrate.KV, logger *slog.Logger) pi
 
 		if interestKV != nil {
 			anchorType, _ := row["kind"].(string)
-			// interest-change-posture: (subscribed) every writer of the
-			// Interest Set announces on the change edge — the control plane's
-			// register and deregister ops, and the health InterestReconciler's
-			// orphan reap — so a device that narrows or widens what it wants
-			// has this actor's personal pipelines re-driven through
-			// Pipeline.ReprojectPersonalActor rather than waiting for the
-			// convergence sweep to come round.
-			relevant, err := personalinterest.IsRelevant(context.Background(), interestKV, actorID, anchorType, anchorRaw)
-			if err != nil {
-				return nil, nil, fmt.Errorf("projection: personal lens interest-set check for %q: %w", actorID, err)
+			var relevant bool
+			if regs, scoped := params[personalScopeInterestParam].([]personalinterest.Registration); scoped {
+				relevant = personalinterest.RelevantIn(regs, anchorType, anchorRaw)
+			} else {
+				// interest-change-posture: (subscribed) every writer of the
+				// Interest Set announces on the change edge — the control plane's
+				// register and deregister ops, and the health InterestReconciler's
+				// orphan reap — so a device that narrows or widens what it wants
+				// has this actor's personal pipelines re-driven through
+				// Pipeline.ReprojectPersonalActor rather than waiting for the
+				// convergence sweep to come round.
+				perRow, err := personalinterest.IsRelevant(context.Background(), interestKV, actorID, anchorType, anchorRaw)
+				if err != nil {
+					return nil, nil, fmt.Errorf("projection: personal lens interest-set check for %q: %w", actorID, err)
+				}
+				relevant = perRow
 			}
 			if !relevant {
 				return nil, nil, pipeline.ErrSkipProjection

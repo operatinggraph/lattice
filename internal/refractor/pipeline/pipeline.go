@@ -85,6 +85,14 @@ type Pipeline struct {
 	fullCR     ruleengine.CompiledRule
 	envelopeFn EnvelopeFn
 
+	// envelopeScopeFn (when non-nil) computes per-evaluation state the
+	// envelope answers from, so an envelope gating every row on one
+	// actor-scoped input reads it once per evaluation rather than once per
+	// row. It is inert without an envelope installed, and what it returns is
+	// merged into a copy of the evaluation's parameters that only the
+	// envelope sees — see EnvelopeScopeFn.
+	envelopeScopeFn EnvelopeScopeFn
+
 	// fullCRBranches carries a multi-walk Personal lens's N independently-
 	// compiled branches (refractor-shared-keyspace-arbitration-design.md
 	// §13.2) — nil for every other lens, which keep evaluating fullCR alone.
@@ -713,6 +721,26 @@ func (p *Pipeline) ProjectionWrites() uint64 {
 // A nil EnvelopeFn writes the row verbatim.
 type EnvelopeFn func(row map[string]any, keys map[string]any, params map[string]any) (newRow, newKeys map[string]any, err error)
 
+// EnvelopeScopeFn computes, ONCE per evaluation, the state every row's
+// envelope then answers from — for an envelope whose per-row decision would
+// otherwise re-read the same actor-scoped input once for each of that actor's
+// rows.
+//
+// It is called after the engine has produced rows, only when the evaluation
+// produced at least one and an envelope is installed, with that evaluation's
+// ctx and its parameters. The entries it returns are merged into a COPY of
+// those parameters, and that copy is what reaches the envelope: the map the
+// engine evaluated against is never mutated, so no `$name` in a cypher can
+// ever bind to anything a scope emitted. An error fails the whole evaluation,
+// the same posture an envelope error takes — a scope that could not be
+// computed is a decision input that could not be READ, never an absent one.
+//
+// The state it returns lives exactly as long as the evaluation. Nothing may
+// hold it beyond that: an envelope's decision inputs are typically projections
+// other pipelines write, so a value outliving the evaluation that read it is a
+// stale decision with no bound on how stale.
+type EnvelopeScopeFn func(ctx context.Context, params map[string]any) (map[string]any, error)
+
 // Envelope is one (key, body) pair a MultiEnvelopeFn emits for a single real
 // entry of an actor's split list column.
 type Envelope struct {
@@ -828,9 +856,15 @@ func (p *Pipeline) RebuildTruncateIsScoped() bool {
 
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
 // Clears any installed MultiEnvelopeFn — the two are alternatives, never both
-// active on the same pipeline. Must be called before Run.
+// active on the same pipeline — and any installed EnvelopeScopeFn, because a
+// scope computes the decision inputs of ONE envelope: carried onto a different
+// envelope it would either be dead weight or, on a security-plane envelope
+// reading params by name, a set of admissions computed for something else.
+// A caller replacing the envelope installs the scope that belongs to it,
+// AFTER this. Must be called before Run.
 func (p *Pipeline) SetEnvelopeFn(fn EnvelopeFn) {
 	p.envelopeFn = fn
+	p.envelopeScopeFn = nil
 	if fn != nil {
 		p.multiEnvelopeFn = nil
 	}
@@ -839,12 +873,32 @@ func (p *Pipeline) SetEnvelopeFn(fn EnvelopeFn) {
 // SetMultiEnvelopeFn installs the per-entry envelope wrapper (§4.1 of
 // cap-read-per-anchor-grant-keys-design.md). Pass nil to clear. Clears any
 // installed EnvelopeFn — the two are alternatives, never both active on the
-// same pipeline. Must be called before Run.
+// same pipeline — and any installed EnvelopeScopeFn, for the reason
+// SetEnvelopeFn gives. Must be called before Run.
 func (p *Pipeline) SetMultiEnvelopeFn(fn MultiEnvelopeFn) {
 	p.multiEnvelopeFn = fn
+	p.envelopeScopeFn = nil
 	if fn != nil {
 		p.envelopeFn = nil
 	}
+}
+
+// SetEnvelopeScope installs the per-evaluation envelope scope. Pass nil to
+// clear. Must be called before Run, and AFTER the envelope it belongs to —
+// installing an envelope clears the scope, so the reverse order leaves the
+// pipeline unscoped.
+//
+// The scope runs for whichever of EnvelopeFn / MultiEnvelopeFn the pipeline
+// carries, and does nothing at all when neither is set.
+func (p *Pipeline) SetEnvelopeScope(fn EnvelopeScopeFn) {
+	p.envelopeScopeFn = fn
+}
+
+// HasEnvelopeScope reports whether an EnvelopeScopeFn is installed — the
+// observation an installation-time wiring check needs without driving a live
+// evaluation.
+func (p *Pipeline) HasEnvelopeScope() bool {
+	return p.envelopeScopeFn != nil
 }
 
 // IsPerEntry reports whether this pipeline projects through the per-entry
