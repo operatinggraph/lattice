@@ -899,7 +899,7 @@ substituted; dependencies both ways: Inc 1 → Inc 2 (conjuncts 1–2 assert Inc
 
 ### 15.8 Checkpoint — CLOSED (2026-09-03)
 
-**Shipped:** Inc 1 `cc42b5de` · Inc 2 `0bac8278` · Inc 3 `9725f42e` · close-pass fixes (see the Done-log SHA).
+**Shipped:** Inc 1 `cc42b5de` · Inc 2 `0bac8278` · Inc 3 `9725f42e` · close pass `cf897d71` (the sweeper is nudged by registration — the immediate pass alone ran before any lens had registered, so §4.4c's third bullet and §5's first row hold only through the nudge; the reflective `ruleState` round-trip gate).
 Reviews: 3 per-increment cold passes + 3 fix-round re-reviews + 1 cumulative close pass — 4 BLOCKING, 8 MAJOR,
 ~40 MINOR, every one closed and revert-proven; classes routed to the Refractor dossier, one twice-seen class
 mechanized (the reflective `ruleState` round-trip test).

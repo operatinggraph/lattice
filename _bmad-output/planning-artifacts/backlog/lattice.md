@@ -109,8 +109,8 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor] Derivation licence for personal lenses** | The pattern-directed derivation refuses every personal lens, so `edgeCatalog`/`edgeInstances` expand a descriptor hub per event. Three refusals: the two out-of-pattern inputs (the Interest Set has no edge), a healer conjunct reading `sweeper` alone, and a multi-walk lens handed no hop index. | ★★★ | L | 🏗️ building · owner: fire/personal-lens-derivation-licence · [design](../../implementation-artifacts/personal-lens-derivation-licence-design.md) §15 · next: Inc 3 multi-walk union, then close |
 | **[Refractor] Three lenses are underivable — an untyped `-[r]->` matches any relation** | `objectLiveness`/`objectAttachments` and loftspace's Protected `objectIdentityAttachmentsRead` bind an untyped hop, so the anchor index refuses them and every neighbour event runs the relation-blind walk. The refusal's reason is false the way the varlength one was — the walk filters fetched edges, it never indexes by relation name. | ★★ | L | ✅ Andrew-ratified · [design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md) |
+| **[Refractor] `edgeInstances` is licensed and derives, and still pays ~15 s per pattern-bound event** | The derivation names one actor per `vtx.service.*` / `providedTo` / `.outcome` event and the whole-actor recompute + keyset frame then costs 10–22 s, so the lens drains at 0.13 msg/s against a 96 k backlog while `edgeCatalog` drains the same events at 25 msg/s. Hypothesis: the actor's projected row set is wide; the probe is one `ReprojectPersonalActor` timed against the actor's `providedTo` degree. | ★★ | M | 📐 needs designer pass · no-pattern: sub-actor (per-row) incremental reprojection for a personal lens whose keyset frame is whole-actor by ratified design · [measured](../../implementation-artifacts/personal-lens-derivation-licence-design.md) §15.8 |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
@@ -144,6 +144,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-03 · `cf897d71` · [Refractor] personal-lens derivation licence SHIPPED — both out-of-pattern inputs edged, cap-read producer set closed at install/write/authoring, the licence with a healer verdict + single-instance gate, multi-walk per-branch union; edgeCatalog 3/min→25 msg/s; 7 cold reviews, 4 BLOCKING + 8 MAJOR closed
 - 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff 📐 filed
 - 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
 - 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
