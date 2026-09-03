@@ -15,6 +15,7 @@ const state = {
   canSignOut: false, // whether whoami reports a real cookie session (drives the keepalive + the sign-out affordance)
   anchors: [], // the signed-in identity's residence/workplace anchors (whoami hat hints, persona-worlds-design.md §4). A `worksAt` anchor marks a front-desk staffer; a patient carries only `residesIn`. Drives which hats' surfaces show. UX curation only — the graph's grants + RLS remain the authority.
   frontOfHouse: false, // server-resolved frontOfHouse role (GET /api/staff-hats) — the conjunct isFrontDesk composes with the worksAt anchor above. Fails closed: false until proven true.
+  isOperator: false, // server-resolved operator role (GET /api/staff-hats) — gates the provider/site administration surface, which grants only `operator` (never frontOfHouse). Fails closed: false until proven true.
   patients: [], // append-only lookup cache — every patient the FE has ever seen, never shrinks (so an
   // already-selected patient's contact lookup survives a later ?q= filter)
   patientOptions: [], // the roster currently rendered in the #patient select — the full cache, or a
@@ -295,6 +296,7 @@ async function loadWhoami() {
         state.canSignOut = false;
         state.anchors = [];
         state.frontOfHouse = false;
+        state.isOperator = false;
         applyHatGating();
         return;
       }
@@ -303,18 +305,20 @@ async function loadWhoami() {
   }
 }
 
-// loadStaffHats reads the server-resolved frontOfHouse hat (GET
-// /api/staff-hats) — the app-side mirror of resolveSubjectHats
+// loadStaffHats reads the server-resolved frontOfHouse + isOperator hats
+// (GET /api/staff-hats) — the app-side mirror of resolveSubjectHats
 // (cmd/clinic-app/readauth.go), which whoami's opaque anchors/roles cannot
 // express FE-side. Fails CLOSED: any fetch error (network, 401, malformed
-// body) leaves state.frontOfHouse false, hiding the staff-only tabs rather
-// than showing a surface the server would only 403 on every write.
+// body) leaves both false, hiding the staff-only and operator-only tabs
+// rather than showing a surface the server would only 403 on every write.
 async function loadStaffHats() {
   try {
     const body = await api("/api/staff-hats", { credentials: "same-origin" });
     state.frontOfHouse = !!(body && body.frontOfHouse);
+    state.isOperator = !!(body && body.isOperator);
   } catch (_) {
     state.frontOfHouse = false;
+    state.isOperator = false;
   }
 }
 
@@ -947,11 +951,16 @@ async function loadProviders() {
   populateSpecialtySelect();
   populateProviderSelect("#provider", bookFilterOpts());
   populateProviderSelect("#sched-provider", { includeAll: true });
-  // A provider hat (not front desk) reaches Availability locked to their OWN
-  // entry — the picker, Add-provider, and profile editor stay staff-only
+  // A provider hat (not operator) reaches Availability locked to their OWN
+  // entry — the picker, Add-provider, and profile editor stay operator-only
   // (applyHatGating hides them); onlyKey filters the roster + auto-selects +
-  // disables the select so there is nothing else to pick.
-  populateProviderSelect("#avail-provider", isProvider() && !isFrontDesk() ? { onlyKey: myProviderKey() } : undefined);
+  // disables the select so there is nothing else to pick. Gated on
+  // isOperatorHat(), not isFrontDesk(): a provider who ALSO works the desk
+  // (frontOfHouse + worksAt) still holds no scope=any grant on
+  // SetProviderHours/SetProviderTimeOff, so she must stay locked to her own
+  // entry same as any other bound provider; only an actual operator (who may
+  // also happen to be a bound provider) gets the full roster.
+  populateProviderSelect("#avail-provider", isProvider() && !isOperatorHat() ? { onlyKey: myProviderKey() } : undefined);
   populateProviderSelect("#series-provider");
   refreshBookEnabled();
   renderSlotCalendar();
@@ -4806,12 +4815,16 @@ async function submitEncounter(ev) {
 
 const VIEWS = ["book", "appts", "myschedule", "schedule", "followups", "series", "availability", "sites"];
 
-// STAFF_VIEWS are the front-desk hat's surfaces: the clinic-wide worklists and
-// the site/availability admin. A patient (consumer hat) sees only Book + My
-// Appointments; a front-desk staffer sees these too (persona-worlds §7.1 hats).
-// Gating is UX curation — every op these views submit is still enforced by its
-// GrantsTo + RLS, so a stale/empty whoami degrades to "offer nothing extra",
-// never to a capability the graph would deny anyway.
+// STAFF_VIEWS mixes two audiences: "schedule"/"followups"/"series" are the
+// front-desk hat's clinic-wide worklists (isFrontDesk()); "availability" and
+// "sites" are the provider/site administration surface, reachable only by
+// isOperatorHat() (plus isProvider() for availability's own self-service
+// half) — none of their ops grant frontOfHouse, so a front-desk staffer sees
+// neither (applyHatGating special-cases both, below). A patient (consumer
+// hat) sees only Book + My Appointments. Gating is UX curation — every op
+// these views submit is still enforced by its GrantsTo + RLS, so a
+// stale/empty whoami degrades to "offer nothing extra", never to a
+// capability the graph would deny anyway.
 const STAFF_VIEWS = ["schedule", "followups", "series", "availability", "sites"];
 
 // PROVIDER_VIEWS are the provider hat's surfaces: a clinician's own-day view.
@@ -4869,13 +4882,27 @@ function myProviderKey() {
   return a ? a.key : null;
 }
 
+// isOperatorHat reports whether the caller holds the platform `operator`
+// role — the app-side mirror of resolveSubjectHats' isOperator
+// (cmd/clinic-app/readauth.go). Gates the provider/site administration
+// surface: CreateProvider, SetProviderProfile, SetProviderHours,
+// SetProviderTimeOff, CreateLocation, SetSiteProfile, AssignProviderSite, and
+// RemoveProviderSite (packages/clinic-domain/permissions.go) grant only
+// `operator` (SetProviderHours/SetProviderTimeOff also grant a bound
+// `provider` self-scope) — never `frontOfHouse` — so showing these forms to
+// front desk was a dead end that met AuthDenied on every submit.
+function isOperatorHat() {
+  return !!state.isOperator;
+}
+
 // viewAllowed keeps a stray cross-link (or a stale active tab) from surfacing a
 // hat's view to a session that lacks it: showView routes a disallowed view to Book.
-// "availability" is the one STAFF_VIEWS tab a bound provider also reaches (locked
-// to their own entry — see applyHatGating / loadProviders's onlyKey), so it takes
-// the OR of both hats rather than STAFF_VIEWS's plain front-desk-only rule.
+// "availability" is reachable by an operator (full roster) or a bound provider
+// (locked to their own entry — see applyHatGating / loadProviders's onlyKey);
+// "sites" is operator-only outright, since none of its ops grant frontOfHouse.
 function viewAllowed(view) {
-  if (view === "availability") return isFrontDesk() || isProvider();
+  if (view === "availability") return isOperatorHat() || isProvider();
+  if (view === "sites") return isOperatorHat();
   if (STAFF_VIEWS.includes(view)) return isFrontDesk();
   if (PROVIDER_VIEWS.includes(view)) return isProvider();
   return true;
@@ -4883,18 +4910,22 @@ function viewAllowed(view) {
 
 // applyHatGating hides each hat's tabs from a session that lacks it — the
 // front-desk-only tabs + New-patient + the Book cross-links behind the worksAt
-// anchor, the provider tabs behind the identifiedBy-provider anchor — and bounces
+// anchor, the provider tabs behind the identifiedBy-provider anchor, the
+// provider/site administration surface behind the operator role — and bounces
 // the active view to Book if it just became disallowed. Idempotent; re-run
 // whenever whoami resolves.
 //
-// Availability is shared: a bound provider (prov, not fd) reaches the tab too,
-// but only its self-service half — Add-provider (CreateProvider) and the profile
-// editor (SetProviderProfile) stay operator/front-desk-only, since neither op
-// grants the provider role; loadProviders's onlyKey locks #avail-provider to her
-// own entry so #avail-hours / #avail-timeoff are the only reachable editors.
+// Availability is shared: a bound provider (prov) reaches the tab too, but
+// only its self-service half — Add-provider (CreateProvider) and the profile
+// editor (SetProviderProfile) stay operator-only, since neither op grants the
+// provider role; loadProviders's onlyKey locks #avail-provider to her own
+// entry so #avail-hours / #avail-timeoff are the only reachable editors.
+// Sites is operator-only outright — front desk never had a working action on
+// it either.
 function applyHatGating() {
   const fd = isFrontDesk();
   const prov = isProvider();
+  const op = isOperatorHat();
   const search = $("#patient-search");
   const select = $("#patient");
   const selfName = $("#patient-self-name");
@@ -4904,12 +4935,18 @@ function applyHatGating() {
   for (const v of STAFF_VIEWS) {
     const tab = $("#tab-" + v);
     if (!tab) continue;
-    tab.hidden = v === "availability" ? !(fd || prov) : !fd;
+    if (v === "availability") tab.hidden = !(op || prov);
+    else if (v === "sites") tab.hidden = !op;
+    else tab.hidden = !fd;
   }
   const addProvider = $("#add-provider");
-  if (addProvider) addProvider.hidden = !fd;
+  if (addProvider) addProvider.hidden = !op;
   const availProfile = $("#avail-profile");
-  if (availProfile) availProfile.hidden = !fd;
+  if (availProfile) availProfile.hidden = !op;
+  const addSite = $("#add-site");
+  if (addSite) addSite.hidden = !op;
+  const assignSite = $("#assign-site");
+  if (assignSite) assignSite.hidden = !op;
   for (const v of PROVIDER_VIEWS) {
     const tab = $("#tab-" + v);
     if (tab) tab.hidden = !prov;
@@ -4923,7 +4960,7 @@ function applyHatGating() {
   for (const id of ["#go-availability", "#go-sites"]) {
     const link = $(id);
     const hint = link && link.closest(".hint");
-    if (hint) hint.hidden = !fd;
+    if (hint) hint.hidden = !op;
   }
   if (!viewAllowed(state.view)) showView("book");
 }

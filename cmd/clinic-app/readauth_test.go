@@ -586,3 +586,64 @@ func TestHandleStaffHats_NoCookie_401(t *testing.T) {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
+
+// TestHandleStaffHats_Operator_ReportsIsOperatorTrue: the FE gates the
+// provider/site administration surface (Add-provider, provider profile /
+// hours / time-off, Sites) on isOperator, since those ops grant only
+// `operator` (never frontOfHouse) — a front-desk session showing them met
+// AuthDenied on every submit. An operator caller must see
+// {"isOperator": true} so the FE can show the surface it can actually use.
+func TestHandleStaffHats_Operator_ReportsIsOperatorTrue(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	if bootstrap.RoleOperatorKey == "" {
+		t.Fatal("primordial ids loaded but the operator role key is empty")
+	}
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	gwURL := fakeGatewayActorWorkplaces(t, nil, map[string]bool{id: true})
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = gwURL })
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IsOperator bool `json:"isOperator"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.IsOperator {
+		t.Error("isOperator = false, want true for an operator caller")
+	}
+}
+
+// TestHandleStaffHats_FrontOfHouse_ReportsIsOperatorFalse: the converse of
+// the operator test — a front-desk caller (worksAt + frontOfHouse, no
+// operator role) must see {"isOperator": false}, so the FE hides the
+// administration surface rather than showing one that only 403s. Needs the
+// same primordials guard as the operator test: with RoleOperatorKey unset,
+// resolveSubjectHats skips the operator check entirely (readauth.go's
+// blank-key guard) and isOperator reads false for a structural reason that
+// has nothing to do with this caller's own roles, so the assertion would
+// hold vacuously.
+func TestHandleStaffHats_FrontOfHouse_ReportsIsOperatorFalse(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	if bootstrap.RoleOperatorKey == "" {
+		t.Fatal("primordial ids loaded but the operator role key is empty")
+	}
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	gwURL := fakeGatewayActorWorkplaces(t, map[string][]string{id: {staffWorkplace}}, nil)
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = gwURL })
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IsOperator bool `json:"isOperator"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.IsOperator {
+		t.Error("isOperator = true, want false for a front-desk-only caller")
+	}
+}
