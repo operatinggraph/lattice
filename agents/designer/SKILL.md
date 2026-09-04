@@ -979,6 +979,23 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   handed me the blocker before the reviewers did. A pin you only *specify* is a pin that has never disagreed
   with you.
 
+- **Before pricing a fix, a refusal, or a fork around a branch that handles shape X, grep every CONSTRUCTOR
+  of the value and the parser that admits it — the shape may not be buildable at all.** A branch that
+  handles X reads as evidence that X reaches it; often it is the residue of a shape a *ratified* design
+  already closed at the parser, and the "fork" you then offer the principal is a question he has already
+  answered. (Trialed 2026-09-03, the stored-class write gate: I read `buildMutationValue`'s
+  tombstone-document overlay and the write-once guard's arm for it as a live drift against Contract #3
+  §3.3, built a "chosen class" escalation vector on it, and offered a refuse-vs-ignore alternative. The
+  Starlark runner had refused a tombstone with a document since the tombstone-body-preservation design's
+  Fire 2 — Andrew-ratified 2026-07-22, its alternative B rejecting exactly what I proposed to fix.
+  `MutationOp{` had three production constructors; one grep.) **Two mechanical checks.** (1) For the
+  type whose branch you are designing around: `grep -rn 'TypeName{' --include='*.go' | grep -v _test` →
+  every constructor; open the parser/decoder; if none can produce X, the change is dead-code removal with
+  no contract surface, citing the design that closed it. (2) **An interface-double census is
+  parameter-name-agnostic and repo-wide**: `func \([^)]*\) (Validate|Commit)\((ctx|_) context\.Context`
+  over `.`, never `internal cmd` — a `_`-named parameter and a vertical's own `_test.go` helper each hid a
+  double from the same fire's census (8, not 7).
+
 - **A reassuring negative proved for ONE member of an enumeration you have already read is not a fact about
   the enumeration — and the most relevant in-flight design is often UNCOMMITTED in your own working tree.**
   Two halves of one miss, same fire. (1) I proved "an authored artifact cannot reach sensitive plaintext"
