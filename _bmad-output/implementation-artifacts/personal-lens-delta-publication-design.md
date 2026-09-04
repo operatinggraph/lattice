@@ -77,7 +77,7 @@ has 3,638 `providedTo` links and ~2 live instances (§3 C5: 40/40 sampled bodies
 | H1 | **The SYNC byte cap binds at ~12 h for every actor.** `MaxAge` is 24 h (the vault's ephemerality window); the stream sits at 512 MiB with its first sequence 12 h 21 min old. A quiet actor's device offline for 13 h re-hydrates because a *noisy lens* evicted its history. | C1: 367,196 msgs, 512 MiB, first seq 2026-09-03 13:07 → last 01:28 | Inc 1 + Inc 2 |
 | H2 | **One lens is 91 % of the bytes.** `edgeCatalog` (`ZvZ3EmZvEvM6X9XPZvZ3`): 465 MB / 233,742 msgs. Its rows are ~2 KB (the descriptor vocabulary) and every actor's whole catalog (26–97 rows) is republished per reaching event. | C4 per-lens bytes; C3 (DbYG…): 4,183 upserts in 53 revisions ≈ 97 rows per evaluation | Inc 2 (live), Inc 1 (passes) |
 | H3 | **39 % of all messages are whole-actor passes republishing unchanged content.** 1,555 (actor, revision) groups where ≥10 lenses published at once — the healer's pass or the drain — carry 104,941 upserts and 52,098 frames; every actor got 7–15 such passes in 12 h. | C4 `whole-actor` class; C3 (zyoC…): 270 of 288 messages are empty frames | Inc 1 |
-| H4 | **The audit stream is one hour deep.** `REFRACTOR_AUDIT` holds 1,991,308 entries / 512 MiB spanning 00:23 → 01:24: one entry per published row, so the same republish multiplies the forensic trail. | C6 | Inc 1 + Inc 2 (fewer written rows ⇒ fewer entries; no audit change) |
+| H4 | ~~The audit stream is one hour deep because of the republish~~ **Corrected at Inc 3 (2026-09-04): the audit trail's depth is NOT this item's harm.** `REFRACTOR_AUDIT` holds ~1.9 M entries / 512 MiB over ~1 h 45 min, but per-subject attribution (§3 C6, re-run 08:33 PT) puts 87 % on the generated auth-plane producer `edgeManifestStaffReadGrants` (`TRiLM4J9qRWHBcRbTRiL`, 1,627,110 entries; one appointment `.schedule` aspect event committed 4,915 rows in one second, 29,490 entries in two minutes ≈ 245 rows/s) and 10 % on `edgeManifestReadGrants`; the fifteen personal lenses hold ~100 entries each. The rate is the same before and after Inc 2 (C6 at 01:24 spanned one hour at the same fill). A harm filed in the republish's units was a different writer's bytes; filed on the lane as its own row. | C6 (attributed) | nothing here — T7's audit conjunct is withdrawn |
 | H5 | **The per-subject count cap is an event count for a dense actor** — 3 msgs/event × ~6 events/min ⇒ 10,000 in 8 h 45 min on the widest subject. Scoping lowers it to 1–2 msgs/event; the per-event *frame* is the floor this design does not remove. | C3 (edu97…): span 8 h 45 min, 3,069 revisions | named residual, §9 |
 
 **What is not the harm.** The consumer drain rate (the parent design's subject) is not: `edgeInstances` completes
@@ -602,8 +602,10 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 - **T7 — live acceptance (Inc 3), in terms no classifier decides:** the probes re-run on the dev stack after a full
   `MaxAge` window: SYNC first sequence ≥ 24 h old (the byte cap no longer binds); `edgeCatalog` bytes per 12 h down
   by ≥ 90 %; upserts per 12 h on a quiet actor's subject (zyoC…-shaped) ≤ its row count × 1 (the daily content pass);
-  `REFRACTOR_AUDIT` first sequence ≥ 12 h old; and the widest subject's messages per revision ≤ 2 (one upsert + one
-  frame) on ≥ 95 % of revisions.
+  ~~`REFRACTOR_AUDIT` first sequence ≥ 12 h old~~ (withdrawn at Inc 3 — the trail is another writer's, H4); and the widest
+  subject's messages per revision ≤ 2 (one upsert + one frame) on ≥ 95 % of **live** revisions — the CDC path's revisions,
+  those with fewer than ten lenses; a whole-actor pass (a sweep, a drain, a hydrate) is fifteen frames at one revision by
+  design and is reported beside them, not inside the ratio (`make sync-census SYNC_CENSUS_ARGS="-subject …"`).
 
 ---
 
@@ -824,3 +826,27 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
   24 h on the shipped mechanism (R8's fraction first); correct §1.2 and the parent's §1.3 if the numbers move; file the
   `edgeCatalog` row-size package row and, if the residual binds, the cap re-derivation; the cumulative close pass over
   the item's whole diff, then the row closes.
+
+### Checkpoint (2026-09-04, after Inc 3 — tool shipped, T7 pending its window)
+
+- **Landed on `main`:** `scripts/sync-census.go` + `make sync-census` (the §3 C3/C4 probes as one repo tool, with the T7 block,
+  best-effort lens-name resolution, and `-since <window>` so an interim read excludes the older mechanism's messages) and one
+  sentence in `docs/components/refractor.md`. Deviation from §11 row 3: the repo's tool convention is `//go:build ignore` +
+  `go run ./scripts/<x>.go` behind a Makefile target (`purge-cap-read-legacy` is the precedent), not a `-tags livecensus`
+  build tag; same effect (never compiled by `go test ./...`), one convention. Worktree `../lattice-wt-pl-delta` kept for the
+  close pass.
+- **Interim read on the shipped mechanism (Refractor rebuilt 06:43 PT from the Inc 2 merge; window 06:45–08:26 PT, 100 min):**
+  whole-actor 304 groups / 11,919 msgs / 9.6 MB (177 actors × ≤ 2 passes: the post-restart content cycle — 61 msgs on the widest
+  actor incl. 26 `edgeCatalog` upserts — then a frames-only pass of 15 messages), live 1 group / 52 msgs. `edgeCatalog` 8.1 MB in
+  the window ⇒ 58 MB/12 h, against 465 MB per 12 h 21 min in C4 (−87 %, and the content cycle inside it recurs daily, not
+  hourly). The window's CDC traffic is a replay of the 09-03 superseded-background-check purge (every sampled event is a
+  `providedTo` link of an instance tombstoned 2026-09-03; the widest actors received 2,033 and 1,498 such events and published
+  nothing for them — the correct answer, no row on the device changes). **No actor received a row-changing event in the window,
+  so T7's per-event conjuncts have no live revisions to measure yet (0/0).** R8's fraction is therefore unmeasured.
+- **Next (the row stays 🏗️):** re-run `make sync-census` (stream-wide, then `-subject` on the widest actor and a quiet one) at
+  or after **2026-09-05 06:45 PT**, when SYNC's whole `MaxAge` window post-dates the deploy; evaluate T7's four remaining
+  conjuncts; if the live-revision ratio or `edgeCatalog`'s −90 % falls short, the R8 narrowing (per-hop precision, T4 as gate)
+  is the follow-on. Then the cumulative close pass over the item's whole diff (Inc 1 + Inc 2 + Inc 3), the review classification,
+  and the row closes. **Filing this fire could not do:** §13's `edgeCatalog` row-size row belongs on the verticals lane and this
+  stream's fire may not write that lane; the next Verticals Steward or the PO files it from this sentence (~2 KB × 26–97 rows per
+  actor, the descriptor vocabulary repeated per row).
