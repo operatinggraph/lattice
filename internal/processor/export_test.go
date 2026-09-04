@@ -1,5 +1,7 @@
 package processor
 
+import "sort"
+
 // Test-only exports reached from the EXTERNAL processor_test package.
 //
 // That package is the only place a test may import a packages/ definition —
@@ -28,8 +30,23 @@ var (
 	// buildMutationValue supplies on the committer's own authority. A stored
 	// document carries them; the script document the guard adjudicates never
 	// does, so a pin comparing the two has to set exactly these aside.
-	CommitterInjectedEnvelopeFieldsForTest = []string{
-		"key", "createdAt", "createdBy", "createdByOp",
-		"lastModifiedAt", "lastModifiedBy", "lastModifiedByOp",
-	}
+	//
+	// Derived from committerManagedFields rather than restated, so the pin
+	// tracks the set in BOTH directions: a field added there widens what the
+	// comparison sets aside, and a field REMOVED there — the direction a
+	// hand-copied list is blind to — leaves the pin asserting the seeder still
+	// emits something the committer no longer writes, which is exactly the
+	// disagreement it exists to catch.
+	CommitterInjectedEnvelopeFieldsForTest = committerManagedFieldNames()
 )
+
+// committerManagedFieldNames lists committerManagedFields in a stable order, so
+// a failure message names the same field on every run.
+func committerManagedFieldNames() []string {
+	names := make([]string, 0, len(committerManagedFields))
+	for f := range committerManagedFields {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+	return names
+}

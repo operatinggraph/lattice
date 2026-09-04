@@ -378,8 +378,14 @@ func TestCommit_KernelLinkCreateTakesTheSeededShapeCheck(t *testing.T) {
 	adminKey := "vtx.identity." + kernelAdminIdentityID
 	roleKey := "vtx.role." + kernelOperatorRoleID
 	adminHoldsRole := kernelHoldsRoleKey(kernelAdminIdentityID, kernelOperatorRoleID)
+	// A second member key, so the shape a creator writes without restating the
+	// committer's own defaults can be committed on a key of its own rather than
+	// on the one the seeded-shape create below already occupies.
+	bareHolderID := "Wq7mKt3wNb9pRj5vZd2h"
+	bareHolderKey := "vtx.identity." + bareHolderID
+	bareHoldsRole := kernelHoldsRoleKey(bareHolderID, kernelOperatorRoleID)
 
-	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole})
+	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole, bareHoldsRole})
 
 	// The key is absent, so nothing but this guard stands between the mutation
 	// and the write. A create naming a different holder is the shape that
@@ -410,6 +416,30 @@ func TestCommit_KernelLinkCreateTakesTheSeededShapeCheck(t *testing.T) {
 		Op: "create", Key: adminHoldsRole,
 		Document: seededLinkDoc(adminKey, roleKey, "holdsRole"),
 	})
+
+	// The same seeded edge, written by a creator that leaves `isDeleted` and
+	// `data` to the committer. buildMutationValue defaults both on a create, so
+	// what lands is byte-for-byte the live edge the arm exists to admit; the
+	// guard judges the body as it will be STORED and must not refuse it for
+	// fields it never had to restate.
+	bare := seededLinkDoc(bareHolderKey, roleKey, "holdsRole")
+	delete(bare, "isDeleted")
+	delete(bare, "data")
+	commitOne(t, ctx, c, "rid-create-bare", MutationOp{
+		Op: "create", Key: bareHoldsRole, Document: bare,
+	})
+	if stored := readStoredDoc(t, ctx, c, bareHoldsRole); stored["isDeleted"] != false {
+		t.Fatalf("the committed edge must be live: isDeleted = %v", stored["isDeleted"])
+	}
+
+	// And the strict reading survives where the committer defaults nothing: the
+	// identical body as an UPDATE leaves a link carrying no isDeleted at all,
+	// which is not the shape the seeder wrote.
+	requireProtectedKey(t,
+		commitOneErr(ctx, c, "rid-update-bare", MutationOp{
+			Op: "update", Key: bareHoldsRole, Document: bare,
+		}),
+		bareHoldsRole, bareHolderKey, "update")
 
 	// And a create at a NON-member link key is untouched by the arm, whatever
 	// its body — the set is exact, not a rule over the relation.

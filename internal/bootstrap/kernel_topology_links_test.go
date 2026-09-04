@@ -139,11 +139,17 @@ func TestKernelTopologyLinkKeys_UnloadedIdentifiersError(t *testing.T) {
 		{"permUpgradePackage", &PermUpgradePackageID},
 	}
 
-	// A sanity floor on the enumeration itself: thirteen identifiers compose
-	// twelve keys, and a row dropped from the list above would silently narrow
-	// what this test covers.
-	if len(identifiers) != 13 {
-		t.Fatalf("the enumeration names %d identifiers, want 13 (1 role + 6 identities + 6 permissions)", len(identifiers))
+	// A sanity floor on the enumeration itself: a row dropped from the list
+	// above would silently narrow what this test covers. The floor is DERIVED
+	// from the two sets the composition actually walks rather than restating
+	// thirteen — a seventh service actor or a seventh granted permission raises
+	// it here and fails this test until its row is added, where a literal would
+	// have gone on passing over an identifier nobody checks.
+	actors, permissions := kernelHoldsRoleActors(), kernelGrantPermissions()
+	want := 1 + len(actors) + len(permissions)
+	if len(identifiers) != want {
+		t.Fatalf("the enumeration names %d identifiers, want %d (the operator role + %d holdsRole identities + %d granted permissions)",
+			len(identifiers), want, len(actors), len(permissions))
 	}
 
 	for _, ident := range identifiers {

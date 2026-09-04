@@ -285,6 +285,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// The same read pass loads the stored document behind every update and
 	// tombstone, which buildMutationValue needs to preserve what the mutation
 	// does not resupply.
+	handed := prior
 	prior, err = c.topUpPrior(ctx, result.Mutations, prior)
 	if err != nil {
 		return CommitAck{}, err
@@ -304,6 +305,21 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// stored manifest declares — a manifest this guard validates rather than
 	// trusts, since it is the document that set is read from.
 	if err := c.rejectPackageScopeViolations(ctx, env, result.Mutations, prior); err != nil {
+		return CommitAck{}, err
+	}
+	// The write gate's own lost race, adjudicated last: an update or tombstone
+	// the step-5.5 pass found ABSENT and this pass finds present was gated
+	// against nothing, and committing it would write over an entity whose class
+	// no permittedCommands was ever checked against. Conflict instead, so the
+	// pipeline re-runs 5.5 → 6 → 8 and the gate sees the entity.
+	//
+	// Last, because the three guards above reach TERMINAL verdicts on exactly
+	// the same freshly read entries: a root created data.protected, or a
+	// permission created inside the window and rewritten by this batch, is
+	// refused outright and must stay refused rather than spend an attempt to
+	// arrive at the same answer (and, with the retry budget exhausted, surface
+	// as RevisionConflict instead of what it is).
+	if err := conflictOnEntitiesCreatedInTheWindow(result.Mutations, handed, prior, rid); err != nil {
 		return CommitAck{}, err
 	}
 
@@ -655,6 +671,13 @@ type priorDoc struct {
 // so every key a consumer asks about has been read. A caller that skips those
 // passes — a test handing Commit a nil map, say — validates and commits as if
 // every key were absent, which is the permissive direction.
+//
+// The distinction the accessors collapse is still load-bearing for the map
+// itself, and Commit reads it directly rather than through them: an entry the
+// pass stored and did NOT find is the one shape the batch leaves unconditioned,
+// so Commit re-reads it (commitKeysFor) and, if the key now holds a document,
+// conflicts rather than commits — the write gate judged an absence that has
+// since stopped being true (conflictOnEntitiesCreatedInTheWindow).
 type PriorDocs map[string]priorDoc
 
 func (p PriorDocs) doc(key string) map[string]interface{} { return p[key].Doc }
@@ -808,7 +831,10 @@ func addPriorKey(keys *[]string, seen map[string]struct{}, have PriorDocs, key s
 // A freshly read entry REPLACES the handed one, which is what makes the re-read
 // of an absent-at-5.5 key worth anything: the entity created in the window
 // arrives here with its stored body, so the guards adjudicate it and the batch
-// conditions on the revision it now has.
+// conditions on the revision it now has. What the guards do NOT do is re-run
+// the step-6 write gate, so a mutation key that made that transition is
+// conflicted rather than committed — conflictOnEntitiesCreatedInTheWindow, run
+// by Commit once the guards have had their say.
 func (c *CommitterImpl) topUpPrior(ctx context.Context, mutations []MutationOp, prior PriorDocs) (PriorDocs, error) {
 	missing := commitKeysFor(mutations, prior)
 	if len(missing) == 0 {
@@ -829,6 +855,57 @@ func (c *CommitterImpl) topUpPrior(ctx context.Context, mutations []MutationOp, 
 		merged[k] = pd
 	}
 	return merged, nil
+}
+
+// conflictOnEntitiesCreatedInTheWindow refuses, as a retryable conflict, an
+// update or tombstone whose key held nothing when the step-5.5 pass read it and
+// holds a document now.
+//
+// The step-6 stored-class gate is the only thing that checks permittedCommands
+// against the class of the entity a mutation rewrites or removes, and it read
+// `handed`. An entry that pass found ABSENT resolves no class and is permissive
+// — correctly, there was nothing there — but it is also the one shape the batch
+// leaves unconditioned, so an entity created in the window between that read
+// and this commit would be written over by a mutation no DDL ever adjudicated.
+// A conflict sends the pipeline back through hydrate → execute → 5.5 → 6, where
+// the key is FOUND and its stored class governs: attempt two either commits
+// under a DDL that admits the operation or is refused by one that does not.
+// Convergence is one retry, since attempt two's pass finds the key.
+//
+// Only MUTATION keys are adjudicated. A root the handed map never carried is
+// read by Commit for the guards alone (commitKeysFor) and is no one's write
+// subject; so is a key appended after validation by the task auto-completion,
+// which is outside the gate by construction and whose absence from the handed
+// map is not a fact the gate acted on.
+//
+// The verdict is a *ConflictError carrying the mutation key as its sole
+// fallback-conditioned key at revision zero — the absence this attempt
+// effectively asserted — so the commit path's structural attribution
+// (movedConditionedKeys) confirms the movement and treats it as the benign
+// same-key race it is. The cause wraps substrate.ErrAtomicBatchRejected because
+// that is the disposition: this batch is rejected, ahead of submission rather
+// than by the substrate.
+func conflictOnEntitiesCreatedInTheWindow(mutations []MutationOp, handed, topped PriorDocs, rid string) error {
+	for _, m := range mutations {
+		if m.Op != "update" && m.Op != "tombstone" {
+			continue
+		}
+		was, gated := handed[m.Key]
+		if !gated || was.Found {
+			continue
+		}
+		if now, reread := topped[m.Key]; !reread || !now.Found {
+			continue
+		}
+		return &ConflictError{
+			ConflictingKey:          m.Key,
+			FallbackConditionedKeys: map[string]uint64{m.Key: 0},
+			OperationRequestID:      rid,
+			Cause: fmt.Errorf("%w: %s held nothing when the write gate read it and holds a document now",
+				substrate.ErrAtomicBatchRejected, m.Key),
+		}
+	}
+	return nil
 }
 
 // readKeys performs the bounded concurrent pass over an explicit key list.
@@ -933,8 +1010,13 @@ func (c *CommitterImpl) readPriorDoc(ctx context.Context, key string) (priorDoc,
 //     the one that would install a differently-shaped edge at a key every
 //     authorization consumer looks up by name.
 //
-// The comparison is against the WRITTEN document, not the stored one: what the
-// guard has to decide is what this mutation leaves behind.
+// The comparison is against the document as this mutation will STORE it, not
+// the stored one it supersedes: what the guard has to decide is what the
+// mutation leaves behind. For an update that is the written body verbatim; for
+// a create it is the written body with buildMutationValue's own defaults
+// applied (linkBodyAsStored), so a creator that emits the seeded edge without
+// restating `isDeleted: false` is judged on the live edge it actually writes
+// rather than refused for a field the committer was about to supply.
 //
 // An empty set protects nothing, which is the test-fixture posture; production
 // wiring is pinned non-empty in cmd/processor. Empty cannot fail closed here:
@@ -969,7 +1051,7 @@ func rejectKernelLinkMutation(m MutationOp, kernelLinks map[string]struct{}) err
 	}
 	switch m.Op {
 	case "create", "update":
-		if isSeededLinkShape(m.Key, m.Document) {
+		if isSeededLinkShape(m.Key, linkBodyAsStored(m)) {
 			return nil
 		}
 	case "tombstone":
@@ -979,6 +1061,36 @@ func rejectKernelLinkMutation(m MutationOp, kernelLinks map[string]struct{}) err
 		return nil
 	}
 	return &ProtectedKeyError{Key: m.Key, Root: linkSourceKey(m.Key), Op: m.Op}
+}
+
+// linkBodyAsStored returns the body m leaves at its key, as buildMutationValue
+// will write it — less the envelope fields the committer injects on its own
+// authority (`key` and the two provenance triplets), which a script never
+// supplies and the seeded-shape whitelist therefore never admits.
+//
+// The only divergence between the written and the stored body is on a CREATE,
+// where buildMutationValue defaults an absent `isDeleted` to false and an
+// absent `data` to the empty object. A creator emitting the seeded edge without
+// restating those is writing the live edge the arm exists to admit, so it is
+// judged on that and not on a field it left to the committer. An UPDATE keeps
+// the strict reading: it overlays nothing and defaults nothing, so what it
+// writes is exactly what it supplied, and an absent `isDeleted` there is a body
+// that is not the seeded shape.
+func linkBodyAsStored(m MutationOp) map[string]interface{} {
+	if m.Op != "create" {
+		return m.Document
+	}
+	stored := make(map[string]interface{}, len(m.Document)+2)
+	for k, v := range m.Document {
+		stored[k] = v
+	}
+	if _, ok := stored["isDeleted"]; !ok {
+		stored["isDeleted"] = false
+	}
+	if _, ok := stored["data"]; !ok {
+		stored["data"] = map[string]interface{}{}
+	}
+	return stored
 }
 
 // seededLinkFields is the CLOSED set of top-level fields a body written at a
@@ -1013,6 +1125,11 @@ var seededLinkFields = map[string]struct{}{
 // segments, and nothing else. Every kernel link is seeded with its relation as
 // both class and localName, so the key alone says what a faithful body holds and
 // no stored document has to be consulted.
+//
+// doc is the body AS IT WILL BE STORED — what the mutation leaves at the key
+// once the committer's own defaults are applied (linkBodyAsStored), never the
+// raw script document — because what the arm adjudicates is the edge that ends
+// up there.
 //
 // The comparison is total in both directions — an absent field is a mismatch,
 // not a pass, and an EXTRA top-level field is a mismatch too. A body missing

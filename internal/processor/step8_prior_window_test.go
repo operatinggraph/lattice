@@ -1,7 +1,9 @@
 package processor
 
 import (
+	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -124,4 +126,121 @@ func TestCommitKeysFor_ReReadsOnlyTheEntriesThePassDidNotFind(t *testing.T) {
 	if len(got) != 1 || got[0] != root {
 		t.Fatalf("commitKeysFor = %v, want exactly the absent root %q re-read", got, root)
 	}
+}
+
+// The write gate's own lost race. The step-6 stored-class gate reads the map
+// the step-5.5 pass produced, so an entry that pass found ABSENT resolves no
+// class and admits the mutation on the strength of there being nothing there.
+// If the entity arrives before the batch does, that mutation would rewrite or
+// remove an entity whose permittedCommands nothing ever checked — and the batch
+// leaves an absent key unconditioned, so the substrate would not stop it
+// either.
+//
+// So the commit conflicts, and the pipeline's own OCC retry re-runs hydrate →
+// execute → 5.5 → 6 against a world where the key is FOUND. Attempt two reaches
+// a verdict on the class actually stored there: refused when its DDL does not
+// admit the operation, committed when it does. Both arms are driven through the
+// real pipeline, so the conflict really does have to survive the commit path's
+// structural attribution to become a retry.
+func TestCommit_KeyCreatedInsideTheWindowConflictsAndIsRegatedOnRetry(t *testing.T) {
+	t.Parallel()
+
+	const targetID = "Tq4mKn8wRb3pXj6vZd9c"
+	target := "vtx.widget." + targetID
+
+	for _, tc := range []struct {
+		name     string
+		class    string
+		durable  string
+		outcome  MessageOutcome
+		verified func(t *testing.T, reply OperationReply, stored map[string]interface{})
+	}{
+		{
+			// `widget`'s DDL permits CreateWidgetTemplate / CreateWidgetInstance
+			// / RecordWidgetOutcome — never the envelope's CreateIdentity.
+			name:    "a stored class whose DDL refuses the operation",
+			class:   "widget",
+			durable: "window-regate-refused",
+			outcome: OutcomeRejected,
+			verified: func(t *testing.T, reply OperationReply, stored map[string]interface{}) {
+				t.Helper()
+				if reply.Error == nil || reply.Error.Code != ErrCodeDDLViolation {
+					t.Fatalf("reply error = %+v, want a DDLViolation from the re-run gate", reply.Error)
+				}
+				if got := reply.Error.Details["constraint"]; got != "permittedCommands" {
+					t.Fatalf("details.constraint = %v, want permittedCommands", got)
+				}
+				if stored["isDeleted"] == true {
+					t.Fatalf("the tombstone must not have landed: %v", stored)
+				}
+			},
+		},
+		{
+			// The harness's `identity` DDL permits exactly CreateIdentity.
+			name:    "a stored class whose DDL admits it",
+			class:   "identity",
+			durable: "window-regate-admitted",
+			outcome: OutcomeAccepted,
+			verified: func(t *testing.T, reply OperationReply, stored map[string]interface{}) {
+				t.Helper()
+				if reply.Error != nil {
+					t.Fatalf("reply error = %+v, want an accepted reply", reply.Error)
+				}
+				if stored["isDeleted"] != true {
+					t.Fatalf("the tombstone must have landed: %v", stored)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn, _, _, _ := setupTestPipeline(t)
+			seedWidgetTypeDDL(t, ctx, conn)
+			seedScriptSource(t, ctx, conn, "identity", `
+def execute(state, op):
+    return {"mutations": [{"op": "tombstone", "key": "`+target+`"}], "events": []}
+`)
+			logger := testLogger()
+			cache := NewDDLCache(conn, testCoreBucket, logger)
+			if err := cache.Refresh(ctx); err != nil {
+				t.Fatalf("ddl cache refresh: %v", err)
+			}
+			// The window: the entity arrives after the gate has read its
+			// absence, on the first attempt only.
+			gate := &windowCreatingValidator{
+				inner: NewValidator(cache, conn, testCoreBucket, logger),
+				arrive: func() {
+					seedAspect(t, ctx, conn, target, tc.class)
+				},
+			}
+			cp, cons := newInjectedPipeline(t, ctx, conn,
+				NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil), gate, tc.durable)
+
+			env := newTestEnvelope(testNanoID1)
+			sub := publishWithReply(t, conn, env)
+			driveOne(t, ctx, cp, cons, tc.outcome)
+
+			if got := gate.calls.Load(); got != 2 {
+				t.Fatalf("Validate calls = %d, want 2 (attempt one conflicts, attempt two is re-gated)", got)
+			}
+			tc.verified(t, awaitReply(t, sub), readStoredDocConn(t, ctx, conn, target))
+		})
+	}
+}
+
+// windowCreatingValidator is the real validator with one concurrent writer
+// wedged into the window the step-5.5 pass opens: after the FIRST validation it
+// creates the key the batch is about to write, so that attempt gated an absence
+// the world has left behind.
+type windowCreatingValidator struct {
+	inner  Validator
+	arrive func()
+	calls  atomic.Uint64
+}
+
+func (w *windowCreatingValidator) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState, prior PriorDocs) error {
+	err := w.inner.Validate(ctx, env, result, state, prior)
+	if w.calls.Add(1) == 1 && err == nil {
+		w.arrive()
+	}
+	return err
 }

@@ -720,37 +720,59 @@ func TestValidate_StoredClassAuthorityIgnoresBatchTerminalRetype(t *testing.T) {
 	}
 }
 
-// A meta-rooted key resolves its stored class by the exact lookup alone. The
-// kernel types its own meta-vertices; the seeder emits no meta-rooted link and
-// the installer's are `subtypeOf`/`offeredTo`, so an instanceOf walk over one
-// can only come back empty — while a package uninstall or meta-vertex tombstone
-// cascade would pay one KVGetMulti per meta root for the privilege.
-func TestValidate_MetaKeysSkipTheStoredClassChainWalk(t *testing.T) {
+// NanoIDs for the kernel-typed roots a package cascade tombstones. Distinct
+// from every other id in the package so a mis-scoped short-circuit cannot pass
+// by colliding with a seeded key.
+const (
+	censusPermissionID = "Pv3nKt8wRb5mQx7jYd2c"
+	censusRoleID       = "Rk9mXt4wNb6pQj3vZd8h"
+	censusRoleIndexID  = "Zx2vNt7wKb4mRj9qYd6s"
+)
+
+// A kernel-typed key resolves its stored class by the exact lookup alone. The
+// kernel types its own meta-vertices, permissions, roles and role indexes:
+// none of the four is ever the source of an instanceOf edge (the two corpus
+// censuses hold that closed), so a walk over one can only come back empty —
+// while a package uninstall or upgrade, whose cascade is made almost entirely
+// of exactly these types, would pay one KVGetMulti per root for the privilege.
+func TestValidate_KernelTypedKeysSkipTheStoredClassChainWalk(t *testing.T) {
 	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	reader := &countingLinkReader{}
 	v.linkReader = reader
 
 	root := "vtx.meta." + testMetaNanoID1
+	permission := "vtx.permission." + censusPermissionID
+	role := "vtx.role." + censusRoleID
+	roleIndex := "vtx.roleindex." + censusRoleIndexID
+	// None of permission/role/roleindex is a registered class, so each misses
+	// the exact lookup — which is precisely what sends an un-short-circuited
+	// root into the walk.
 	prior := PriorDocs{
 		root:             storedDoc("meta.ddl.vertexType"),
 		root + ".script": storedDoc("meta.script"),
+		permission:       storedDoc("permission"),
+		role:             storedDoc("role"),
+		roleIndex:        storedDoc("roleindex"),
 	}
 	cascade := ScriptResult{Mutations: []MutationOp{
 		{Op: "tombstone", Key: root},
 		{Op: "tombstone", Key: root + ".script"},
+		{Op: "tombstone", Key: permission},
+		{Op: "tombstone", Key: role},
+		{Op: "tombstone", Key: roleIndex},
 	}}
 
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "UninstallPackage"
 	if err := v.Validate(ctx, env, cascade, HydratedState{}, prior); err != nil {
-		t.Fatalf("a meta tombstone cascade must validate: %v", err)
+		t.Fatalf("a kernel-typed tombstone cascade must validate: %v", err)
 	}
 	if got := chainReads(reader); got != 0 {
-		t.Fatalf("a meta root's stored class must cost no chain read: %d instanceOf reads", got)
+		t.Fatalf("a kernel-typed root's stored class must cost no chain read: %d instanceOf reads", got)
 	}
 
-	// The positive vector: a NON-meta key on the same validator does reach the
+	// The positive vector: a NON-kernel key on the same validator does reach the
 	// reader, so the zero above is the short-circuit and not a dead seam.
 	business := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: "vtx.widget." + instID}}}
 	if err := v.Validate(ctx, env, business,

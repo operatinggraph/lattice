@@ -368,15 +368,14 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 	if root == "" {
 		return MetaVertexRef{}, false // links / unparseable → permissive default (today's behavior)
 	}
-	if disp == resolveCommittedOnly && isMetaVertexKey(root) {
-		// A meta-vertex is typed by the kernel, not by an instanceOf edge. The
-		// seeder emits no meta-rooted link at all, and the only ones the
-		// installer builds are `subtypeOf` (the taxonomy) and `offeredTo` (a
-		// pane's role), so a `lnk.meta.<id>.instanceOf.>` read can only come
-		// back empty. Short-circuiting keeps a package uninstall or a
-		// meta-vertex tombstone cascade — bulk, and exclusively meta keys —
-		// paying the exact class lookup alone, the same way a link key takes
-		// the early return above.
+	if disp == resolveCommittedOnly && isKernelTypedVertexKey(root) {
+		// A kernel-typed vertex is typed by the kernel, not by an instanceOf
+		// edge, so the walk can only ever come back empty — while a package
+		// uninstall, a package upgrade or a meta-vertex tombstone cascade, all
+		// bulk and all made almost entirely of these types, pays one KVGetMulti
+		// per distinct root for the privilege. Short-circuiting leaves them the
+		// exact class lookup alone, the same way a link key takes the early
+		// return above.
 		//
 		// That premise is a closed-set census over the whole corpus, run in CI,
 		// not an assertion: internal/pkgmgr's
@@ -384,8 +383,16 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 		// registered package's install batch through the installer's own
 		// builder, and internal/bootstrap's
 		// TestPrimordialEntries_NeverEmitAMetaRootedInstanceOfLink covers the
-		// seeder. A package that ever needs one fails them before it reaches
-		// this branch.
+		// seeder. Both range over the whole kernel-typed set, not meta alone. A
+		// package that ever needs such an edge fails them before it reaches this
+		// branch.
+		//
+		// The bound this leaves standing: a BUSINESS-vertex cascade still pays
+		// at most one KVGetMulti per distinct un-registered root, plus one class
+		// read per chain terminal, both memoised on the shared
+		// DDLResolutionMemo. The reads are serial inside validateOne and off the
+		// script's live-read budget, bounded by substrate.MaxBatchMessages (the
+		// batch can hold no more roots than that) and by the lane deadline.
 		return MetaVertexRef{}, false
 	}
 
@@ -692,6 +699,31 @@ func vertexRootForResolve(key string, kind substrate.KeyKind) string {
 // isMetaVertexKey reports whether key is a DDL meta-vertex (vtx.meta.<NanoID>).
 func isMetaVertexKey(key string) bool {
 	return strings.HasPrefix(key, "vtx.meta.")
+}
+
+// kernelVertexTypes are the vertex types the kernel owns outright: a DDL
+// meta-vertex, and the three authorization entities the package-lifecycle
+// primitives write and no DDL governs (step 6 resolves no DDL for class
+// "permission", "role" or "roleindex" — rejectPermissionRoleRewrites is their
+// gate). Every one is seeded or written once by the platform and never subtyped
+// through an instanceOf edge, which is what lets the committed-only walk skip
+// them; the two corpus censuses hold that closed.
+var kernelVertexTypes = map[string]struct{}{
+	"meta":       {},
+	"permission": {},
+	"role":       {},
+	"roleindex":  {},
+}
+
+// isKernelTypedVertexKey reports whether key is a 3-segment vertex root of a
+// kernel-owned type.
+func isKernelTypedVertexKey(key string) bool {
+	seg := strings.Split(key, ".")
+	if len(seg) != 3 || seg[0] != "vtx" {
+		return false
+	}
+	_, kernel := kernelVertexTypes[seg[1]]
+	return kernel
 }
 
 // mutationTombstoned reports whether a mutation removes (or carries a removed)
