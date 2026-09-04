@@ -2,6 +2,18 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-01 · `b3436086` · A member no longer eats the cost of a class the studio cancels — ReleaseOrphanedBooking now mints the same wellnessrefund marker CancelBooking does, unconditionally (no late-cancel window, since the studio caused it).
+- 2026-09-01 · `77e196a5` · Wellness can no longer cancel free at the door — CancelBooking forfeits the class price inside a 2h window instead of refunding it.
+- 2026-09-01 · `99233d11` · Wellness front desk can finally see who owes the studio money — new `/api/frontdesk-arrears`, worst-first, mirrors the café pattern.
+- 2026-09-01 · `6df9b708` · Café front desk can finally see who owes the café money — new `/api/frontdesk-balances` mirrors the resident's own overdue statement onto the front-desk grid.
+- 2026-09-01 · `786c51ab` · Wellness front desk can finally cancel a class off the grid — `TombstoneSession` now grants frontOfHouse, workplace-confined off the session's own studio.
+- 2026-09-01 · `baf4e9b3` · Wellness's class-price charge now gates on `status='booked'` — a waitlisted booking was charged like a confirmed one and, absent promotion, never refunded.
+- 2026-08-31 · `0653c57a` · Café's POS/self-order picker collapses a building-level + unit-level item sharing a name to the more specific one, instead of listing both with nothing to tell them apart.
+- 2026-08-31 · `7491f3e4` · Café's three front-desk list handlers (bookings/lease-details/visits) now 502 on a real KVListKeys failure instead of silently answering an empty grid — same shape as `c791574b`/`aa29c41e`'s ledger fix.
+- 2026-08-31 · `aa29c41e` · Café/wellness ledger reads now fail loud on a KVGet error instead of silently dropping the line — `c791574b` fixed the identical shape in clinic/loftspace but missed these two.
+- 2026-08-30 · `d8cf4144` · The four vertical apps' projection-health check now catches a stalled (not just paused) lens — closes the false `projectionHealthy:true` PO found on LoftSpace.
+- 2026-08-30 · `c791574b` · Clinic/LoftSpace ledger reads fail loud on a KVGet error instead of silently dropping the row and skewing the balance.
+- 2026-08-30 · `a096df6f` · Portfolio's service-attach-rate counts usage in a 30-day window (startsAt/settledAt), not raw existence. front-desk 0.3.1 adds `frontDeskBookingHistory`.
 - 2026-08-30 · `de326532`+`9eee9bcd` · café/clinic/wellness's `/api/op-catalog` narrows via `?types=` to just the ops each app renders; loftspace stays unfiltered (task-bound ops can name any op meta).
 - 2026-08-30 · `5be4d4ee` · Facet's Me screen gets a demo-only reversible offline-pause toggle (`FACET_DEMO_CONTROLS`), env-gated. [Design §11](../../implementation-artifacts/facet-app-ux.md).
 - 2026-08-30 · `a5077b9a` · Front desk can finally mark a member present — `SetBookingAttendance` grants frontOfHouse, workplace-confined exactly like `CancelBooking`. wellness-domain 0.22.14.
