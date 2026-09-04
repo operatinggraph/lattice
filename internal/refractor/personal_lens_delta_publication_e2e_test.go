@@ -7,6 +7,8 @@ package refractor_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -355,4 +357,197 @@ func TestPersonalLensDeltaPublication_T6_HydratePublishesEverything(t *testing.T
 	got := frames(published, f.personalLens)
 	require.NotEmpty(t, got)
 	assert.ElementsMatch(t, []string{deltaAlphaEntity, deltaBetaEntity}, got[len(got)-1])
+}
+
+// deltaCDCFixture is Increment 2's e2e fixture: a personal lens with a LIVE
+// CDC consumer over a THREE-row actor, where each row's tail hangs one hop
+// below the actor's own fan-out.
+//
+// The depth is the whole point, and it is a statement about the mechanism
+// rather than a convenience. A row's provenance carries every candidate the
+// hop that produced it fetched, recorded on the HEAD binding that hop expanded
+// (rel_traverse.go's traverseRel: "all of them land on b's chain and are
+// inherited by every row the hop produces"). So the three leases the actor
+// holds are all on the ACTOR's chain and are therefore in each other's
+// provenance: an event on one lease vertex publishes all three rows, correctly
+// and by design — a scope is exact about what it withholds, never minimal.
+// What scoping actually buys is everything BELOW that fan-out, which is where
+// the rows of a wide actor differ from one another (edgeCatalog's ops hang off
+// per-template heads, not off the identity). These vectors are therefore
+// placed where the mechanism does its work, not where it trivially cannot.
+//
+//	(identity)-[:holds]->(l:lease)-[:atSite]->(s:site)-[:inZone]->(z:zone)
+//
+// with one site and one zone per lease. `s.terms` is the aspect vector's
+// target and `s -[:inZone]-> z` the link vector's.
+type deltaCDCFixture struct {
+	h          *pl2Harness
+	lensID     string
+	identityID string
+	cons       jetstream.Consumer
+	leaseIDs   [3]string
+	siteIDs    [3]string
+	zoneIDs    [3]string
+	// entities are the `entityId` business keys, which are what a published
+	// upsert's `key` renders to for this lens.
+	entities [3]string
+}
+
+func newDeltaCDCFixture(t *testing.T, name string) *deltaCDCFixture {
+	t.Helper()
+	h := newPL2Harness(t)
+	f := &deltaCDCFixture{
+		h:          h,
+		lensID:     pl2NanoID(name + "-lens"),
+		identityID: pl2NanoID(name + "-identity"),
+	}
+
+	// No capKV: the D1 read-grant gate needs a cap-read slice per anchor, and
+	// these vectors are about the publication scope, not about who may read.
+	// Everything else is the production wiring activatePersonalLens performs.
+	_, _ = activatePersonalLens(t, h, f.lensID,
+		`MATCH (identity {key: $actorKey})-[:holds]->(l:lease)-[:atSite]->(s:site)-[:inZone]->(z:zone) `+
+			`RETURN l.key AS anchor, "lease" AS kind, l.id AS entityId, `+
+			`s.terms.data.label AS siteLabel, z.id AS zoneId`,
+		[]string{"entityId"}, nil)
+	f.cons = pl3Consumer(t, h, f.identityID)
+
+	writePL2Vertex(t, h, substrate.VertexKey("identity", f.identityID), "identity", map[string]any{"name": "tech"})
+	for i, tag := range []string{"one", "two", "three"} {
+		f.leaseIDs[i] = pl2NanoID(name + "-lease-" + tag)
+		f.siteIDs[i] = pl2NanoID(name + "-site-" + tag)
+		f.zoneIDs[i] = pl2NanoID(name + "-zone-" + tag)
+		f.entities[i] = "lease-" + tag
+		siteKey := substrate.VertexKey("site", f.siteIDs[i])
+		writePL2Vertex(t, h, substrate.VertexKey("lease", f.leaseIDs[i]), "lease", map[string]any{"id": f.entities[i]})
+		writePL2Vertex(t, h, siteKey, "site", map[string]any{"id": "site-" + tag})
+		writePL2Vertex(t, h, substrate.VertexKey("zone", f.zoneIDs[i]), "zone", map[string]any{"id": "zone-" + tag})
+		emWriteAspect(t, h.ctx, h.coreKV, siteKey, "terms", "site.terms", map[string]any{"label": "Site " + tag})
+		writePL2Link(t, h, "lease", f.leaseIDs[i], "atSite", "site", f.siteIDs[i])
+		writePL2Link(t, h, "site", f.siteIDs[i], "inZone", "zone", f.zoneIDs[i])
+		writePL2Link(t, h, "identity", f.identityID, "holds", "lease", f.leaseIDs[i])
+	}
+
+	// The barrier is the EFFECT: the actor's own frame naming all three rows.
+	deltaDrainUntilFrame(t, f.cons, f.lensID, f.entities[:])
+	require.Empty(t, drainBriefly(t, f.cons), "the fixture must be quiet before anything is measured")
+	return f
+}
+
+// tombstonePL2Link rewrites a link envelope with isDeleted set — the soft
+// retraction transport writePL2Link's live form is the other half of.
+func tombstonePL2Link(t *testing.T, h *pl2Harness, srcType, srcID, name, dstType, dstID string) {
+	t.Helper()
+	linkKey := substrate.LinkKey(srcType, srcID, name, dstType, dstID)
+	envelope := map[string]any{
+		"key": linkKey, "class": name, "isDeleted": true,
+		"sourceVertex": substrate.VertexKey(srcType, srcID),
+		"targetVertex": substrate.VertexKey(dstType, dstID),
+		"localName":    name,
+	}
+	b, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = h.coreKV.Put(h.ctx, linkKey, b)
+	require.NoError(t, err)
+}
+
+// deltaDrainUntilFrame reads the actor's subject until the lens's LATEST
+// authoritative frame names exactly want, and returns everything read.
+//
+// The frame is the barrier because it is an EFFECT — a message the write loop
+// published after the rows it describes had applied — not a pending count and
+// not a sleep. A CDC event's whole output for one actor is its rows followed by
+// its frame, so a frame carrying the expected key set is proof that the event
+// under test has been fully published and that what came before it in the
+// returned slice is that event's complete row output.
+func deltaDrainUntilFrame(t *testing.T, cons jetstream.Consumer, lensID string, want []string) []map[string]any {
+	t.Helper()
+	sortedWant := append([]string(nil), want...)
+	sort.Strings(sortedWant)
+
+	var acc []map[string]any
+	read := func(first bool) bool {
+		if first {
+			acc = append(acc, drainUntilQuiet(t, cons)...)
+		} else {
+			acc = append(acc, drainBriefly(t, cons)...)
+		}
+		got := frames(acc, lensID)
+		if len(got) == 0 {
+			return false
+		}
+		last := append([]string(nil), got[len(got)-1]...)
+		sort.Strings(last)
+		return slices.Equal(last, sortedWant)
+	}
+	for attempt := range 5 {
+		if read(attempt == 0) {
+			return acc
+		}
+	}
+	t.Fatalf("lens %s never published a frame naming %v; frames seen: %v", lensID, want, frames(acc, lensID))
+	return nil
+}
+
+// TestPersonalLensDeltaPublication_T6_AspectChangeOnOneTailPublishesOneRow is
+// T6's aspect vector (personal-lens-delta-publication-design.md §10):
+// an aspect change on ONE tail vertex of a three-row actor publishes exactly
+// one upsert and one frame naming three keys.
+//
+// Both halves are the design. The single upsert is the saving — two rows the
+// device already holds unchanged are not re-sent. The three-key frame is what
+// makes the saving safe: the authoritative frame prunes every key it omits, so
+// a scope that withheld a row without the frame still naming it would retract
+// exactly the rows it meant to leave alone.
+func TestPersonalLensDeltaPublication_T6_AspectChangeOnOneTailPublishesOneRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in -short mode")
+	}
+	f := newDeltaCDCFixture(t, "t6cdc-aspect")
+
+	// One aspect, on one site, one hop below the actor's fan-out. The CDC
+	// aspect arm's scope is the aspect's PARENT vertex — {vtx.site.<one>} — and
+	// no other row's evaluation ever read it.
+	emWriteAspect(t, f.h.ctx, f.h.coreKV, substrate.VertexKey("site", f.siteIDs[0]), "terms", "site.terms",
+		map[string]any{"label": "Site one, renamed"})
+
+	published := deltaDrainUntilFrame(t, f.cons, f.lensID, f.entities[:])
+
+	assert.Equal(t, []string{f.entities[0]}, upsertKeys(published, f.lensID),
+		"exactly the row whose tail moved is republished; the other two are unchanged on the device and are not re-sent")
+	got := frames(published, f.lensID)
+	require.NotEmpty(t, got, "the event still publishes its authoritative frame")
+	for _, keys := range got {
+		assert.ElementsMatch(t, f.entities[:], keys,
+			"every frame names all three rows — a key it omitted would be pruned on the device")
+	}
+}
+
+// TestPersonalLensDeltaPublication_T6_LinkTombstoneDropsOneRowAndFramesTheRest
+// is T6's link vector: a link tombstone that drops one row publishes no upsert
+// for the other rows, and a frame naming two keys.
+//
+// The dropped row is carried by the frame alone — §4.1's "a row that
+// disappears is never the scope's concern" — and the two survivors are proved
+// untouched on the wire rather than by reading the scope's arithmetic. The
+// tombstoned hop is the one below the anchor for the fixture's stated reason:
+// a tombstone on the actor→anchor hop names the actor's own vertex, which
+// every row of the actor binds, and correctly republishes all of them.
+func TestPersonalLensDeltaPublication_T6_LinkTombstoneDropsOneRowAndFramesTheRest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in -short mode")
+	}
+	f := newDeltaCDCFixture(t, "t6cdc-tombstone")
+
+	tombstonePL2Link(t, f.h, "site", f.siteIDs[2], "inZone", "zone", f.zoneIDs[2])
+
+	published := deltaDrainUntilFrame(t, f.cons, f.lensID, f.entities[:2])
+
+	assert.Empty(t, upsertKeys(published, f.lensID),
+		"the two surviving rows are unchanged on the device, so the event publishes no row at all — "+
+			"the retraction rides the frame")
+	got := frames(published, f.lensID)
+	require.NotEmpty(t, got)
+	assert.ElementsMatch(t, f.entities[:2], got[len(got)-1],
+		"the frame names what survives and omits the dropped row, which is what retracts it")
 }
