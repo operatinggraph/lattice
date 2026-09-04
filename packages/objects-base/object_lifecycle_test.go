@@ -1021,35 +1021,53 @@ func TestObjectLiveness_LinkMutationCoWritesTheHydratedObjectVertex(t *testing.T
 		t.Fatalf("the replacing attach must mint %s", objB)
 	}
 
-	// REPLACE leg, PRIOR object NOT hydrated — the submitter names the old LINK
-	// (the leg's `alive` test needs it) but not the old vertex, which
-	// derive_reads never supplies for AttachObject. `present` is False, so the
-	// batch tombstones the link and writes NO vertex. That is the correct
-	// answer, not a gap: an un-hydrated object vertex keeps its liveLinks
-	// unchanged, which is exactly the accuracy the lens's sole input already
-	// has — the unconditional form of this invariant is red right here.
+	// REPLACE leg with NOTHING declared beyond the target — derive_reads
+	// supplies the prior link and the prior object vertex from
+	// replaceObjectId under the package's own key grammar, so the leg's
+	// `alive` and `present` tests both see their keys: the old link is
+	// tombstoned AND the old vertex is co-written, exactly as when the
+	// submitter spelled both keys out above.
 	digestC := "SHA-256=coWriteObjectCCCCCCCCCC"
 	oidC := substrate.SHA256NanoID("object:" + digestC)
-	attach("cowriteReplaceUnhydrated", map[string]any{
+	attach("cowriteReplaceDerived", map[string]any{
 		"digest": digestC, "size": 13, "contentType": "image/png",
 		"storeName": "s-cowrite-c", "targetKey": id1, "linkName": "photoOf",
 		"replaceObjectId": oidB},
-		[]string{id1, linkB1})
+		[]string{id1})
 	if !isDeleted(t, ctx, conn, linkB1) {
-		t.Fatalf("the replace leg must tombstone the prior link %s even un-hydrated", linkB1)
+		t.Fatalf("the replace leg must tombstone the prior link %s from derived reads alone", linkB1)
 	}
-	afterRev, ok := revisionOf(ctx, conn, objB)
+	derivedRev, ok := revisionOf(ctx, conn, objB)
 	if !ok {
 		t.Fatalf("%s must still exist", objB)
 	}
-	if afterRev != objBRev {
-		t.Fatalf("an un-hydrated prior object must NOT be written (revision %d -> %d)", objBRev, afterRev)
+	if derivedRev <= objBRev {
+		t.Fatalf("a prior object reached through derive_reads must be co-written by the replace leg (revision %d -> %d)", objBRev, derivedRev)
 	}
-	if ll := liveLinksOf(t, ctx, conn, objB); ll != 1 {
-		t.Fatalf("an un-hydrated prior object keeps its stale liveLinks = %d want 1", ll)
+	if ll := liveLinksOf(t, ctx, conn, objB); ll != 0 {
+		t.Fatalf("prior object liveLinks after a derived-reads replace = %d want 0", ll)
 	}
 	oidCKey := "vtx.object." + oidC
 	if !liveExists(ctx, conn, oidCKey) {
 		t.Fatalf("the replacing attach must mint %s", oidCKey)
+	}
+
+	// REPLACE leg naming a prior object that does not exist — the derived
+	// reads are absence-tolerant, so `alive` is False, the leg is a no-op,
+	// and the attach itself is still accepted: the one legitimate
+	// present==False vector, and it writes no vertex because there is none.
+	ghostOID := substrate.SHA256NanoID("object:SHA-256=coWriteGhostNeverMinted")
+	digestD := "SHA-256=coWriteObjectDDDDDDDDDD"
+	oidD := substrate.SHA256NanoID("object:" + digestD)
+	attach("cowriteReplaceGhost", map[string]any{
+		"digest": digestD, "size": 14, "contentType": "image/png",
+		"storeName": "s-cowrite-d", "targetKey": id2, "linkName": "photoOf",
+		"replaceObjectId": ghostOID},
+		[]string{id2})
+	if _, exists := revisionOf(ctx, conn, "vtx.object."+ghostOID); exists {
+		t.Fatalf("a replace naming an object that never existed must not mint it")
+	}
+	if !liveExists(ctx, conn, "vtx.object."+oidD) {
+		t.Fatalf("the replacing attach must still mint vtx.object.%s", oidD)
 	}
 }

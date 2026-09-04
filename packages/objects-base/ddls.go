@@ -523,15 +523,22 @@ def derive_reads(op):
     # the reason DetachObject's OpMetaSpec.Dispatch declares neither key
     # (staff-descriptor-rendering-design.md sec 22 Inc-C).
     #
-    # AttachObject and TombstoneObject need no entry here: every key their
-    # script reads is either payload-supplied directly (targetKey) or a
-    # function of digest/oid the client already computes itself
-    # (internal/descriptorform/attachments.mjs mirrors crypto.sha256NanoID
-    # byte-for-byte, sec 22 Inc-A) -- nothing package-specific for a
-    # submitter to get wrong.
+    # AttachObject's replace leg is the same class: the prior object's link and
+    # vertex are a function of payload.replaceObjectId/targetKey/linkName under
+    # this DDL's key grammar, and both are absence-tolerant -- a replace naming
+    # a link that is not alive is a no-op by design, and a prior object whose
+    # vertex is gone keeps nothing to OCC-touch. Left undeclared, a submitter
+    # that names replaceObjectId without reproducing the grammar gets a silent
+    # no-op replace, or a tombstoned link whose object keeps a stale liveLinks
+    # and is never reaped. TombstoneObject needs no entry: every key it reads
+    # is payload-supplied or a function of digest/oid the client already
+    # computes (internal/descriptorform/attachments.mjs mirrors
+    # crypto.sha256NanoID byte-for-byte, sec 22 Inc-A).
+    p = op.payload
+    if op.operationType == "AttachObject":
+        return derive_attach_replace_reads(p)
     if op.operationType != "DetachObject":
         return {}
-    p = op.payload
     oid = optional_string(p, "oid")
     target_key = optional_string(p, "targetKey")
     link_name = optional_string(p, "linkName")
@@ -552,6 +559,24 @@ def derive_reads(op):
     obj_key = "vtx.object." + oid
     link_key = "lnk.object." + oid + "." + link_name + "." + tgt_type + "." + tgt_id
     return {"reads": [link_key], "optionalReads": [obj_key]}
+
+def derive_attach_replace_reads(p):
+    replace_oid = optional_string(p, "replaceObjectId")
+    target_key = optional_string(p, "targetKey")
+    link_name = optional_string(p, "linkName")
+    if replace_oid == None or target_key == None or link_name == None:
+        return {}
+    if not valid_link_name(link_name):
+        return {}
+    for bad in [".", "*", ">", " ", "\t", "\n", "/"]:
+        if bad in replace_oid:
+            return {}
+    tparts = target_key.split(".")
+    if len(tparts) != 3 or tparts[0] != "vtx" or tparts[1] == "" or tparts[2] == "":
+        return {}
+    old_obj_key = "vtx.object." + replace_oid
+    old_link = "lnk.object." + replace_oid + "." + link_name + "." + tparts[1] + "." + tparts[2]
+    return {"optionalReads": [old_link, old_obj_key]}
 
 def execute(state, op):
     ot = op.operationType
