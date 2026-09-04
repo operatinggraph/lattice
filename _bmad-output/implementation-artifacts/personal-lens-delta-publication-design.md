@@ -202,7 +202,10 @@ Three publishers reach a device's subject — the CDC write loop, `ReprojectPers
 > `ScopeAnchors(A)` (a grant change) admits a row whose `anchor` alias names a NanoID in `A`. *(Build, 2026-09-04:
 > `A` is a set of valid NanoIDs — blank or malformed tokens are dropped — and an `A` that is EMPTY is `ScopeAll`, never
 > "admit nothing"; a row with no or an unparseable `anchor` is not admitted under `ScopeAnchors`, a branch
-> `personalEnvelopeFn` already makes unreachable.)*
+> `personalEnvelopeFn` already makes unreachable. The same rule binds `ScopeVertices(V)`: `V` is a set of Contract #1
+> vertex keys, a non-vertex token is dropped, a `V` that is empty — originally or after the filter — is `ScopeAll`, never
+> "admit nothing", and more than `MaxScopedAnchors` distinct keys is `ScopeAll`; a row carrying NO provenance is admitted
+> under `ScopeVertices`, so an engine or path that records nothing reproduces today's publication.)*
 > **The zero value is `ScopeAll`** — a caller that forgets to set one reproduces today's behaviour (over-publish:
 > bytes, never a wrong row); because that failure is silent on the wire, T3 pins every scope-bearing call site.
 
@@ -230,12 +233,34 @@ branch's read set is unioned into every key it did not produce. A row that disap
 the frame carries omission. The one input outside provenance is the wall clock, which the licence already names
 (§4.2).
 
+**Grain (build, 2026-09-04).** Every candidate a hop fetches lands on the HEAD binding's chain, which every row that
+hop produces inherits — so the anchors an actor fans out to at hop 1 are in each other's provenance, and an event on
+one of them republishes all of them. Scoping bites BELOW the actor fan-out: `edgeCatalog`'s ~97 rows differ by their
+per-template heads, `edgeInstances`' two by their anchors, and a one-hop lens gains nothing. T4's per-lens withheld
+counts are the measure; per-hop precision (a candidate recorded on the child that admitted it, a rejected one on the
+head) is the named narrowing if Inc 3 finds the grain binding (R8).
+
 **Mechanism** (all inside `ruleengine/full`; the edit sites are enumerated because the pass found three the first
 draft missed):
 
 - `binding` gains a provenance chain under a reserved, non-variable key (`"\x00prov"`, never a Cypher identifier):
-  a `*provNode{parent *provNode; keys []string}` appended on every `cloneBinding` so a child inherits its parent's
-  reads by pointer, not by copy.
+  a `*provNode{parent *provNode; merged []*provNode; keys []string}` appended on every `cloneBinding` so a child
+  inherits its parent's reads by pointer, not by copy. *(Build, 2026-09-04: `merged` carries the several ancestors a
+  grouped row folds together, and the chains a binding that will project no row hands to the bindings that stand in
+  for it — `provAbsorb`: a head that expands to nothing hands its chain to the binding its siblings share; a whole walk
+  that dies at a hop hands its frontiers to the binding it started from, which is what an OPTIONAL null binding clones;
+  a `WHERE`-excluded expansion hands its chain to its source binding; and every CLAUSE that discards a binding — a
+  required `MATCH` whose `WHERE` excludes every expansion of a source binding, a comma-separated pattern inside one
+  `MATCH` whose later pattern admits nothing for an expansion of the earlier one, a `WITH`'s `WHERE`, a `WITH` or
+  `RETURN` `DISTINCT` — keeps one per-clause stage node, absorbs the discarded binding's chain into it and, when anything was
+  discarded, links the stage into every row the clause projects. The stage, not a parent hand-off, is the smallest
+  sound unit: a binding consumed by an expansion two clauses up has no surviving descendant for a parent hand-off to
+  reach (the reviewer's counterexample: a city whose `country` flips under `MATCH (o)-[:in]->(c:city) WHERE c.country
+  = "EU" … count(o)` reached no surviving row and the count was withheld). The deliberate imprecision: a vertex only a
+  discarded row read republishes every surviving row of that clause — bytes, never a wrong row — because which survivor
+  stands in for a discarded row is not knowable when an aggregate may fold any of them. The fold walks `parent` and
+  `merged` post-order over a DAG that may hold a back-link to an ancestor, with a lowlink guard; a node whose fold cut
+  back to something shallower than itself is not memoized.)*
 - **Record sites — the closed list.** (1) `seedNodes` (`seed_nodes.go:21-130`): the point-candidate arm and the
   scan arm both `fetchNode` and reject by label/props; every fetch lands on the head binding's chain. A **scan-seeded
   pattern's row also depends on the membership of `vtx.<label>.`**, which no per-vertex set can name — so scoping
@@ -245,8 +270,9 @@ draft missed):
   the same head (a rejected candidate belongs to *every* child of this head). (3) **`applyMatch`'s own `WHERE`**
   (`executor.go:626`) and **bound-head checks** (`:762-790`) evaluate under a *current-binding cursor*.
   (4) **Projection-time reads** (`projectItems` both arms, `applyWith`'s `WHERE`, `applyReturn`): the cursor is set
-  while one binding's items evaluate, and `fetchNode` / `fetchEdges` append every key they serve — **memo and
-  staging hits included** (`executor.go:930-953` promotes a staged entry through `fetchNode`, so no read goes around
+  while one binding's items evaluate, and `fetchNode` appends every key it serves — **memo and
+  staging hits included** *(build: `fetchEdges` records nothing itself — an adjacency NodeID is a bare NanoID and names
+  no vertex; its single caller, `traverseRel`, records the frontier node's own vertex key before the adjacency read)* (`executor.go:930-953` promotes a staged entry through `fetchNode`, so no read goes around
   the cursor; `resolveProperty`'s aspect and link hops route through it, `values.go:57,73`). **The cursor takes
   precedence over the head-chain rule whenever one is set**: a pattern comprehension or existence predicate runs
   `matchPath` under the cursor, so a multi-hop comprehension's inner clones (`rel_traverse.go:244`, discarded with the
@@ -256,18 +282,27 @@ draft missed):
   `:1761`): the group's output binding's chain is the union of its members' chains. (7) **Branch merge**
   (`branchmerge.go:107-125`): `executeBranches` keeps one *branch read set* per branch evaluation (every key that
   branch's executor fetched — the footprint's key set without revisions); a merged row's provenance = ∪ of its
-  branch rows' provenance ∪ the read set of every branch that produced **no row for that key**. Shared by pointer,
-  flattened once.
+  branch rows' provenance ∪ the read set of every branch that produced **no row for that key** — *and (build) of every
+  branch that produced a row carrying no provenance of its own*, because reading "recorded nothing" as "read nothing"
+  is the withholding direction; the read set is a genuine superset of any row's reads (the footprint is built from the
+  node memo, which holds rejects and misses too). Shared by pointer, flattened once. This lives in
+  `pipeline/branchmerge.go` (`executeBranches` / `mergeBranchRows`), not in `ruleengine/full`.
 - **Where the reserved key must be stripped — three sites, each a wire or semantics leak otherwise:**
   `applyWith`'s `DISTINCT` (`executor.go:1595`) and `applyReturn`'s `DISTINCT` (`:1919`) render the **whole map**
   through `normalizeForKey` — two rows differing only in provenance would stop deduplicating; `applyReturn`'s values
   copy (`:1924-1928`) would put `"\x00prov"` into `ProjectionResult.Values` and `natssubject.go:323` would publish it
-  in `data`. A `stripProvenance(row)` helper at all three, pinned by a test that grepd the wire.
-- **Result** (`applyReturn`): `ProjectionResult.Provenance []string` — the chain flattened, folded to vertex keys,
-  deduplicated, memoized per `*provNode`. The pipeline copies it onto `EvalResult.Provenance`.
-- **Cost.** One pointer per clone, one slice append per fetch, one flatten per output row. For the widest actor:
-  3,638 candidate fetches on one head chain, 2 output rows. T2 pins the executor's peak allocation on that fixture
-  within 2× of today's.
+  in `data`. A `stripProvenance(row)` helper at all three, pinned by a test that grepd the wire. *(Build: `DISTINCT`
+  keeps the first of a duplicate group; the dropped row's chain is absorbed into the clause's stage node, which every
+  surviving row of that clause then carries, so an aggregate downstream of a `WITH DISTINCT` still names what the
+  dropped member read.)*
+- **Result** (`applyReturn`): `ProjectionResult.Provenance []string` — the chain flattened, deduplicated, sorted;
+  keys are folded to vertex keys **at record time** (`appendProvVertexKeys`), so the chain holds vertex keys already.
+  The fold is memoized per `*provNode` for every node the walk visits (post-order), so a head chain shared by many
+  output rows folds once. The pipeline copies it onto `EvalResult.Provenance`.
+- **Cost.** One pointer per clone, one slice append per fetch, one fold per output row over the part of its chain no
+  earlier row folded. Two shapes bound it: the widest head (`edgeInstances`: 3,638 candidate fetches on one chain, 2
+  output rows) and the widest row set over one head (`edgeCatalog`: ~97 rows). T2 pins cumulative allocation against
+  the same executor driven from an unchained root on BOTH fixtures, within 2×.
 - **The read-free executor** (`AnchorProjectionKey`, `coreKV == nil`) records nothing — it fetches nothing.
 
 **Why provenance and not the seeds.** The derivation's `(position, id)` seed says which *actor* an event moved,
@@ -285,25 +320,37 @@ transport to be exact).
   actor is bound in every binding — byte-identical to today); with `peerAnchorsEnabled` the peers' rows are framed
   (`actorsTouchedWithPeers`) and `{actorKey}` correctly admits only the peer rows binding the event identity.
 - **Threading.** The scope travels with `enumeratedActors` from the arm back up through `evaluateForEntryRaw` →
-  `evaluateForEntry` → the five `writeResults` call sites (`dispatch.go:170, 203, 234, 318, 342`) and
-  `dispositionEvalErr`. That is the signature work Inc 2 carries; the two plain-lens sites pass `ScopeAll`.
+  `evaluateForEntry` → the five `writeResults` call sites (`dispatch.go:170, 203, 234, 318, 342`). That is the
+  signature work Inc 2 carries; the two plain-lens sites pass `ScopeAll`. *(Build: `dispositionEvalErr` takes no
+  scope — it Naks, DLQs or enqueues an actor reprojection and publishes no row.)*
 - `writeResults` (`results.go:33-170`): for a pipeline whose adapter is a `KeySetPublisher`, a non-delete result is
   **written iff** `scope.Admits(result)`; a declined result is neither written, audited nor counted toward the
   freshness clock — it is unchanged on the device. **Every** non-delete result still feeds `emitPersonalFrames`
   (`:304`). A plain or auth-plane pipeline is untouched (`ScopeAll` by construction).
-- **Two eligibility conjuncts, read off `ruleState` per event; either failing ⇒ `ScopeAll`:**
+- **Three eligibility conjuncts, read off `ruleState` per event; any failing ⇒ `ScopeAll`:**
   (i) `rs.personalClockRefusal == ""` — a lens whose row depends on `$now` / `$projectedAt` changes with no vertex
   changing (no shipped lens trips it, C7; `personal_derivation_corpus_census_test.go` is the gate); (ii) the compiled
-  anchor is point-seeded by `$actorKey` (`HopIndex.Anchor ≥ 0` on every branch) — a scan-seeded head's rows depend
-  on a key-list read (§4.1 site 1). The derivation *licence* is **not** a conjunct: scoping decides rows within an
+  anchor is point-seeded by `$actorKey` — *(build)* `HopIndex.Anchor ≥ 0 && Anchor < len(Labels)` on every branch,
+  the existence test because the zero-value index has `Anchor == 0`, a real position, and the sentinel alone would
+  license a lens whose pattern graph was never derived in the withholding direction; a refused branch set is no answer
+  and refuses. The scan-seeded case is kept for cost, not soundness: the post-event scan lists and fetches a new
+  member and `fetchNode` records it first, but a scan puts the whole type on every row's provenance, so the scope would
+  admit everything and the whole-actor publish is byte-identical and cheaper to decide. (iii) *(build, from the
+  engine review)* no pattern position expands a label sigil (`*`): the taxonomy closure that decides which vertices
+  such a position binds is resolved outside the executor and its `vtx.meta.*` vertices never enter a row's provenance,
+  while an aggregate over the position changes when a type joins or leaves. No shipped personal lens uses `*`.
+  The refusal reason is logged once per lens and again whenever it changes across a hot reload. The derivation *licence* is **not** a conjunct: scoping decides rows within an
   actor the enumerator or the derivation already selected, and provenance is a property of the evaluation, not of
   how the actor was found.
-- **The freshness clock is changed to count output, not rows** (a change, not a property of the code today —
-  `recordProjected` has two call sites, `results.go:242, :373`, and neither is a frame): `recordProjected` is also
-  called once per published frame in `writeResults`, `ReprojectPersonalActor` and `Hydrate`, so `lastProjectedAt`
-  (published on the lens's health entry, `internal/refractor/health/lattice_heartbeater.go:1681`) keeps advancing on
-  an event whose rows were all unchanged and on a frames-only healer pass. Nothing alarms on that clock; the change
-  keeps the operator surface honest rather than silent. Inc 1 (reprojection + hydrate sites), Inc 2 (write loop).
+- **The freshness clock counts real output** (rewritten at build, 2026-09-04 — the first draft said "output, not
+  rows" and that "nothing alarms on that clock"; `LensProjectionStalled` reads it, so the negative claim was a coverage
+  claim, dossier fourth sighting): `lastProjectedAt` (published on the lens's health entry,
+  `internal/refractor/health/lattice_heartbeater.go:1681`) advances on a committed row write, on a `Hydrate`, and on a
+  SIGNALLED reprojection's frame (a drain signal, an interest change, the content cycle — the frame is the whole answer
+  when the admitted set is empty). It does **not** advance on the healer's `ScopeNone` pass and **not** on the CDC
+  write loop's per-event frame: a frames-only event is not output, and stamping it would turn the one signal that
+  catches a lens silently withholding every row (a missed record site) into an event heartbeat. A lens whose events
+  all withhold for the stall window therefore reads as stalled — the visible direction.
 - **The retry replay is unreachable on a personal pipeline, and stays so by construction.** `enqueueRetry` replays a
   captured row at its **original, lower** `ProjectionSeq` (`results.go:352-375`); once a later event's frame has
   advanced the client's `frameHW`, that replay is dropped for an unattributed key — today the later event's
@@ -389,10 +436,17 @@ pass. Two guards, both required, both Inc 2:
 1. **The write loop publishes `ScopeAll` for an actor whose publish slot a hydrate holds** — `writeResults` asks
    `p.hydrateInFlight(actorID)` (the `personalPublishLocks` entry taken by `Hydrate`, `pipeline.go:439-447`) per
    enumerated actor before choosing the scope. A hydrate that began after the check is covered by guard 2.
-2. **Hydrate captures `highWater` only when no event is in flight above it** — after taking the slot it reads
-   `reporter.ActiveSequence()` (`health/reporter.go:147`); while `ActiveSequence() > highWater` it waits for
-   `LastAppliedSeq ≥ ActiveSequence()` (bounded by the RPC's own ctx) and re-captures. An event applied before the
-   capture is ≤ `highWater`; one that starts after it sees guard 1.
+2. **Hydrate captures `highWater` only after the one event that was already past guard 1 has left** (rewritten at
+   build, 2026-09-04: the first draft read `reporter.ActiveSequence()`, which is the RULE stream's cached sequence —
+   `SetRuleSequence`, `health/reporter.go:110-147` — and says nothing about the CDC stream `highWater` is captured from;
+   the mechanism as drafted could not have worked). The pipeline publishes the CDC sequence its consumer goroutine is
+   INSIDE (`Pipeline.handlingSeq`, stamped by `handleTracked` before the handler runs and cleared by a deferred `leave`
+   after the applied cursor has advanced, whatever the decision — one writer, the supervisor's sequential drain).
+   After taking the slot and setting its mark, `Hydrate` reads it and, if non-zero, waits (`awaitHandlerLeft`, a
+   subscribe-then-recheck on a progress channel under the same lock, bounded by the RPC's own ctx) for that handler to
+   LEAVE — not for `LastAppliedSeq` to reach the sequence, because a Naked event never advances the cursor — then
+   captures. An event applied before the capture is ≤ `highWater`; one that starts after the mark sees guard 1; at
+   most one event can be in between, and it is the one named.
 
 Interleavings (pinned in T3/T6): event applied before capture ⇒ `highWater ≥ S`; event in flight at capture ⇒
 hydrate waits; event starts after capture ⇒ it sees the slot and publishes everything at `S` — the device holds
@@ -431,6 +485,11 @@ are unaffected. `docs/components/edge.md` needs no edit.
 | Sweeper `contentCycle` (build, 2026-09-04) | latched with `lastContentCycleStart` at `ensurePopulation`'s re-list, read by every pass of that cycle | with the process; re-latched at the next re-list | held across the cycle's batches — a per-pass clock test would flip the moment the latch was stamped | the re-list |
 | Sweeper `now` clock (build) | `time.Now` at construction; a test replaces it | n/a | n/a | n/a |
 | Per-event scope (`ScopeVertices`) | in the fan-out arm | with the message | a Nak'd redelivery recomputes it from the same event | n/a |
+| `Pipeline.handlingSeq` (build) | `enterHandling`, before every handler run | to 0 by the deferred `leave`, whatever the decision, after the applied cursor moved | nothing — it names one message | the consumer's sequential drain (one writer) |
+| `Pipeline.progressChanged` (build) | lazily, by the first waiter in `awaitHandlerLeft` | closed and replaced on every move of `handlingSeq` / `lastAppliedSeq` | nothing; nil for a pipeline nobody hydrates | `progressMu` — subscribe-then-recheck under the lock the writer swaps it under |
+| `actorPublishLock.hydrating` (build) | `markHydrating`, after `Hydrate` takes the slot | by the returned `unmark`, before the slot is released | one `Hydrate` call | `personalPublishMu` |
+| `executor.provFolded` (build) | `newExecutor`; nil on the read-free executor | with the executor | nothing — never outlives `ExecuteWith` | n/a |
+| Last-logged scope refusal reason (build) | with the pipeline | on a hot reload that changes the reason | the process | the rule lock |
 
 No state is written to any KV, stream or file. The Refractor remembers nothing about what it sent (vault §4.1).
 
@@ -489,7 +548,8 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 | # | Risk | Direction | Mitigation |
 |---|---|---|---|
 | R1 | A read the row depends on is not recorded (a new executor read path added later without the cursor). | Stale content on the device until the daily content pass or a hydrate — under-display, never over-grant (inclusion is the frame's). | The differential exactness pin (§10, T4) runs the whole personal corpus under mutation and fails on any row whose content changed but whose provenance missed the mutated vertex; a new fetch site that bypasses `fetchNode`/`fetchEdges` fails it. |
-| R2 | The provenance chain's memory on a wide head (3,638 rejected candidates recorded once, flattened per row). | Executor allocation. | Flatten memoized per `*provNode`; the peak-allocation pin (§10, T2) on the `edgeInstances` fixture. |
+| R2 | The provenance chain's memory on a wide head (3,638 rejected candidates recorded once, flattened per row). | Executor allocation. | Fold memoized per `*provNode` for every visited node; the allocation pin (§10, T2) on the `edgeInstances` fixture AND on a wide-head × many-rows fixture. |
+| R8 (build) | The multi-walk merge's read-set substitution (§4.1 site 7) makes most `edgeCatalog` rows carry a non-producing walk's whole read surface, and the head-chain grain puts every candidate a hop fetched on every row that hop produced — so an event on anything those walks reached admits most rows. Correct (over-publish), but the retirement claimed for H2's live share was sized before this rule existed. | Bytes: the payoff on `edgeCatalog` may fall short of T7's ≥ 90 %. Never a withheld row. | T4 reports rows admitted / rows evaluated per lens and mutation kind so the fraction is a number, not a surprise; Inc 3's T7 measures on the shipped mechanism first (dossier: numbers about a replaced mechanism are not evidence). If it binds, the follow-on is per-hop precision (record a candidate on the child that admitted it, a rejected one on the head) — a narrowing with T4 as its gate. |
 | R3 | The grant scope's anchor match by NanoID admits a row anchored at a same-id vertex of another type. | Over-publish of one row (harmless), never a skip. | NanoIDs are minted per vertex, 20 chars; a collision is a Contract #1 violation upstream. |
 | R4 | The healer's content cycle never triggers because the population walk never wraps (a population larger than 5 × 1,440 = 7,200 identities per day). | The daily content heal degrades to "once per full cycle" — ~33 h at 10k identities, the cadence the trigger design already accepted for the un-signalled worst case. | Stated; the sweeper logs the content-cycle start with its cycle length. |
 | R6 | A hydrate row the client's resurrection guard drops is no longer repaired by the next event's whole-actor republish. | A cold device short of rows until the content pass. | §4.6's two guards (pinned T3/T6); the exposure that remains is a hydrate whose RPC ctx expires while waiting on an in-flight event — it fails loud and the device re-attaches. |
@@ -510,15 +570,18 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
   row for the key** (its read set is unioned); (g) the read-free executor records nothing; (h) `DISTINCT` at both
   sites and `ProjectionResult.Values` carry no reserved key (a wire-grep vector on `natssubject`'s envelope). Each
   vector asserts by vertex key, not by count.
-- **T2 — engine allocation pin:** the `edgeInstances`-shaped fixture (one actor, N tombstoned + 2 live neighbours)
-  evaluates within 2× the pre-provenance peak allocation, N = 4,000.
+- **T2 — engine allocation pin:** the `edgeInstances`-shaped fixture (one actor, N tombstoned + 2 live neighbours,
+  N = 4,000) and an `edgeCatalog`-shaped one (a wide head, ~100 output rows) each evaluate within 2× the cumulative
+  allocation of the same executor driven from an unchained root (the in-tree baseline: a root with no chain makes
+  every clone inherit nothing and every read record nowhere).
 - **T3 — pipeline scoping (`pipeline`):** `writeResults` under `ScopeVertices` writes exactly the admitted results,
   frames *all* results, audits and counts only the written ones; the four scope producers (vertex / aspect / link /
-  actor-own with and without peers) hand the right vertex set and **each of the five `writeResults` call sites**
-  carries a non-`All` scope on a personal pipeline; `personalClockRefusal != ""` or a scan-seeded anchor ⇒
+  actor-own with and without peers) hand the right vertex set and **each of the three personal `writeResults` call
+  sites** carries its arm's own key set while the two plain arms hand `ScopeAll` (a plain lens's target publishes no
+  frame); the scope is asserted under the production JSON log handler, not only the text one; `personalClockRefusal != ""` or a scan-seeded anchor ⇒
   `ScopeAll`; a non-`KeySetPublisher` adapter ⇒ unchanged behaviour byte-for-byte (a plain-lens vector runs both ways
   and compares the adapter's call list); a personal lens declaring `Retry` is refused at install; a signalled reprojection's frame advances
-  `lastProjectedAt` and a `ScopeNone` pass's does not; **the hydrate race** — the three interleavings of §4.6 against a scripted in-flight event,
+  `lastProjectedAt`, a `ScopeNone` pass's does not, and a frames-only CDC event's does not; **the hydrate race** — the three interleavings of §4.6 against a scripted in-flight event,
   asserting the device ends with every row.
 - **T4 — differential exactness pin (corpus, `internal/refractor`):** for every personal lens **as composed**
   (its branch set through `executeBranches`/`mergeBranchRows`, never `forEachCorpusCypher`'s per-branch visit —
@@ -731,6 +794,33 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
 - **Named unreachable branch:** a personal lens installed with no read-grant gate (`capKV == nil`, never in
   `cmd/refractor`) could emit a row whose `anchor` does not parse, which `ScopeAnchors` withholds (under-display until
   the content cycle). The refusal sits inside `personalEnvelopeFn`'s `capKV != nil` branch; Inc 2's brief lists it.
-- **Next: Inc 2** (§11 row 2, L) — delta-scout its touch-list live (the seven record sites and three strip sites of
-  §4.1, the five `writeResults` sites, the two conjuncts, the personal+`Retry` refusal, the §4.6 guards) before the
-  first edit; Inc 3 after it.
+- Inc 2 followed (next checkpoint).
+
+### Checkpoint (2026-09-04, after Inc 2)
+
+- **Landed on `main`:** Inc 2 — the engine's row provenance, the CDC write loop's `ScopeVertices`, the three
+  eligibility conjuncts, the personal+`Retry` refusal, the hydrate guards, T1/T2/T3/T4/T6 (the Inc 2 merge commit;
+  CI on its push). Worktree `../lattice-wt-pl-delta`, branch `fire/personal-lens-delta`, kept for Inc 3.
+- **Delta-scout (two haiku scouts, at f6709e9c):** every §4.1/§4.2/§4.6 site re-verified live; one relocation — the
+  branch merge (§4.1 site 7) lives in `pipeline/branchmerge.go`, not the engine. Built as two parallel opus builders
+  (engine · pipeline) on disjoint files, then a third for T4/T6 on the merge.
+- **Inc 2 review classification** (three cold reviewers over the build, one over the fix round; 1 blocking / 11
+  major / 12 minor, all folded or declined with reason): *design-gap* ×6 — §4.6's guard-2 mechanism read the rule
+  stream's sequence (a cited mechanism never opened); the parent-only hand-off for a discarded binding was unsound two
+  clauses deep and the required-`MATCH … WHERE` and `WITH` discard sites were missing from §4.1's closed list; the
+  freshness clock on the CDC frame (the Inc 1 dossier sighting, still standing in §4.2's own text); the label-sigil
+  conjunct; the merge substitution's payoff (R8); *implementation-bug* ×4 — the fold memo keyed to the asked node; the
+  scope logged as `{}` under the production JSON handler; a silent withhold on a missing actor key; a refusal log that
+  never re-armed; *test* ×5 — a racy hydrate barrier, a dead conjunct helper under test, a falsified DISTINCT comment,
+  a no-op assertion, the retry census one hop short; *convention* ×1 — a duplicated Contract #1 fold. The blocking
+  finding (T4 absent from the first diff) was the staged third builder, landed before merge. Declined: none.
+- **Dossier + gate:** the JSON-handler fixture bias is the second sighting of "a fixture on the favourable ARM" on the
+  test-harness axis → mechanized as `scripts/lint-slog-values.go` (an slog attribute value of a module struct type must
+  implement `slog.LogValuer` / `json.Marshaler` / `encoding.TextMarshaler`); the memo-keyed-to-the-asked-node class is
+  minted on `docs/components/refractor.md`.
+- **T4 result:** 15 lenses, 197 mutations each, zero violations; every lens withholds something (positive control).
+  Withheld share on the two-row fixtures: `edgeCatalog` 182 / 394 decisions, the single-walk lenses 248–302 / 394.
+- **Next: Inc 3** (§11 row 3) — the two probes as a `-tags livecensus` tool under `scripts/`; re-run C1/C4/C6 after
+  24 h on the shipped mechanism (R8's fraction first); correct §1.2 and the parent's §1.3 if the numbers move; file the
+  `edgeCatalog` row-size package row and, if the residual binds, the cap re-derivation; the cumulative close pass over
+  the item's whole diff, then the row closes.
