@@ -51,6 +51,16 @@ func hopCrosses(e adjacency.EdgeEntry, rel RelPattern, seen map[string]struct{},
 
 // traverseRel expands one relationship hop (possibly variable-length).
 func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to NodePattern) ([]binding, error) {
+	// Every candidate this hop fetches — the ones it binds, the ones it finds
+	// tombstoned, and the ones the label, the property predicates or the
+	// already-visited rule reject — was fetched to expand b, so all of them
+	// land on b's chain and are inherited by every row the hop produces. A
+	// ranged hop's later frontiers record there too: a candidate rejected at
+	// hop 2 belongs to each row descending from this one head.
+	prevHead := ex.provHead
+	ex.provHead = provChain(b)
+	defer func() { ex.provHead = prevHead }()
+
 	minHops := rel.MinHops
 	maxHops := rel.MaxHops
 	if maxHops < 0 || maxHops > maxVarLengthHops {
@@ -113,6 +123,11 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 		var nextFrontier []frontier
 		for _, f := range current {
 			adjLookupID := adjacencyNodeID(f.node.key)
+			// The hop reads this frontier node's adjacency, so a link written
+			// or tombstoned on it moves what the walk crosses. It is recorded
+			// by the node's own Core KV key: the adjacency NodeID carries no
+			// vertex type and so names no vertex on its own.
+			ex.recordProv(f.node.key)
 			edges, err := ex.fetchEdges(adjLookupID, rel.Type)
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)

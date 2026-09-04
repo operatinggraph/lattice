@@ -275,6 +275,26 @@ type executor struct {
 	// took before the analysis existed.
 	branchStages   map[Clause]*stagePlan
 	branchDeferred map[*Match]struct{}
+
+	// provHead is the chain the MATCH walk currently in flight records onto:
+	// the head binding traverseRel expands, or the source binding matchPath
+	// seeds from. Every candidate such a walk fetches — bound, tombstoned or
+	// rejected — belongs to that head, and so to every row descending from it.
+	//
+	// provCursor is the row one expression evaluation reads on behalf of, and
+	// TAKES PRECEDENCE over provHead whenever it is set: a pattern
+	// comprehension, an existence predicate and a decomposed branch all walk
+	// patterns whose bindings are discarded, and the vertices they reach are
+	// the evaluating row's dependencies rather than the discarded clones'.
+	//
+	// provFolded memoizes provVertexKeys per node, so a chain shared by many
+	// output rows folds once.
+	//
+	// All three are nil on the read-free key-resolution executor
+	// (anchor_delete), which records nothing because it fetches nothing.
+	provHead   *provNode
+	provCursor *provNode
+	provFolded map[*provNode][]string
 }
 
 // hubKey identifies one relation-scoped read of an overflow-marked node: the
@@ -497,6 +517,7 @@ func (e *Engine) newExecutor(
 		groupingRedundant: compiled.groupingRedundant,
 		branchStages:      compiled.branchStages,
 		branchDeferred:    compiled.branchDeferred,
+		provFolded:        map[*provNode][]string{},
 	}
 }
 
@@ -506,7 +527,7 @@ func (e *Engine) newExecutor(
 // each error — passes back through the caller, which reports the evaluation's
 // EvalStats whatever the outcome.
 func (ex *executor) run(compiled *CompiledRule) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
-	bindings := []binding{{}}
+	bindings := []binding{{provBindingKey: provRoot()}}
 	var lastReturn *Return
 
 	for _, clause := range compiled.Query.Clauses {
@@ -623,11 +644,21 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 			if isNonNullExpansion(b, nb, m.Patterns) {
 				hadNonNullMatch = true
 				if m.Where != nil {
+					// The predicate reads on this expansion's behalf, so
+					// whatever it dereferences belongs to the row it admits.
+					restore := ex.provPushRow(provChain(nb))
 					v, err := ex.evalExpr(nb, m.Where)
+					ex.provPopRow(restore)
 					if err != nil {
 						return nil, err
 					}
 					if !truthy(v) {
+						// An excluded expansion projects no row, so what its
+						// predicate reached is carried by the source binding
+						// instead: the rows that survive this clause, and the
+						// OPTIONAL null binding that stands in when none do,
+						// all descend from it.
+						provAbsorb(provChain(b), provChain(nb))
 						continue
 					}
 				}
@@ -759,6 +790,13 @@ func (ex *executor) matchPatterns(b binding, patterns []PathPattern, optional bo
 // matchPath expands binding b across one PathPattern. Returns zero or more
 // new bindings — one per matched path.
 func (ex *executor) matchPath(b binding, p PathPattern) ([]binding, error) {
+	// The seed scan and the bound-head checks below read on b's behalf: their
+	// candidates — the ones they admit and the ones they reject — are what
+	// every row this path produces was derived from.
+	prevHead := ex.provHead
+	ex.provHead = provChain(b)
+	defer func() { ex.provHead = prevHead }()
+
 	if len(p.Nodes) == 0 {
 		return []binding{b}, nil
 	}
@@ -811,15 +849,34 @@ func (ex *executor) matchPath(b binding, p PathPattern) ([]binding, error) {
 		for _, h := range heads {
 			fromRef := ex.currentNode(h, p.Nodes[i])
 			if fromRef == nil {
+				provAbsorb(provParent(h), provChain(h))
 				continue
 			}
 			reached, err := ex.traverseRel(h, fromRef, rel, toNode)
 			if err != nil {
 				return nil, err
 			}
+			if len(reached) == 0 {
+				// This head expanded to nothing, so no row of its own will
+				// carry what it read. Its siblings' rows are what an aggregate
+				// over this hop projects, and they are what has to see the
+				// candidate this head found tombstoned or rejected — so the
+				// binding they share hands it on.
+				provAbsorb(provParent(h), provChain(h))
+			}
 			next = append(next, reached...)
 			if err := ex.checkBindings(len(next)); err != nil {
 				return nil, err
+			}
+		}
+		if len(next) == 0 {
+			// The whole walk died at this hop. What it read belongs to the
+			// binding it started from, which is the one an OPTIONAL MATCH
+			// clones for its null binding and the one a required MATCH drops
+			// outright; absorbing the frontier carries every intermediate hop
+			// with it, since a frontier's chain names its own ancestors.
+			for _, h := range heads {
+				provAbsorb(provChain(b), provChain(h))
 			}
 		}
 		heads = next
@@ -927,7 +984,13 @@ func (ex *executor) propsAllMatch(b binding, ref *nodeRef, n NodePattern) (bool,
 // here rather than re-read, which is what makes a prefetch free of a second
 // round trip and what puts the key into the read-surface footprint at the
 // moment the evaluation actually uses it (see executor.prefetched).
+//
+// Every path through here — a live read, a promoted staging entry and a memo
+// hit alike — records the key onto the current row's provenance, because all
+// three are the evaluation dereferencing the key on that row's behalf: the
+// second row to reach a node depends on it exactly as the first did.
 func (ex *executor) fetchNode(key string) (*nodeRef, error) {
+	ex.recordProv(key)
 	if ref, ok := ex.nodes[key]; ok {
 		return ref, nil
 	}
@@ -1592,7 +1655,7 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 		seen := make(map[string]struct{}, len(projected))
 		deduped := projected[:0]
 		for _, row := range projected {
-			key := normalizeForKey(map[string]any(row))
+			key := normalizeForKey(provStripped(row))
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				deduped = append(deduped, row)
@@ -1609,7 +1672,12 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 		}
 		var filtered []binding
 		for _, b := range projected {
+			// The predicate reads on this row's behalf — a pattern
+			// comprehension or existence check inside it walks vertices the
+			// row's survival depends on.
+			restore := ex.provPushRow(provChain(b))
 			v, err := ex.evalExpr(b, w.Where)
+			ex.provPopRow(restore)
 			if err != nil {
 				return nil, err
 			}
@@ -1645,6 +1713,15 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 	if err := ex.prefetchStageReads(bindings, projectionExprs(items)); err != nil {
 		return nil, err
 	}
+	// Both arms evaluate one inbound row's items at a time, and each arm sets
+	// the cursor to that row for the whole of it — an item's aspect hop, a
+	// pattern comprehension's walk and a decomposed branch's own MATCH all
+	// read on behalf of the row being projected. outerRow is what an enclosing
+	// row's evaluation had set, which keeps precedence and is restored on
+	// every exit from this stage.
+	outerRow := ex.provCursor
+	defer func() { ex.provCursor = outerRow }()
+
 	// Decide aggregating vs non-aggregating per item.
 	itemAggregating := make([]bool, len(items))
 	anyAggregating := false
@@ -1678,7 +1755,13 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 			if err := ex.checkCancelled(); err != nil {
 				return nil, err
 			}
-			nb := binding{}
+			ex.provCursor = provRowTarget(outerRow, b)
+			// The projected row is a fresh binding carrying only the items'
+			// values, so it descends from b's chain explicitly: without that
+			// link every read the traversal feeding this stage made would be
+			// dropped at the WITH boundary, which is where every corpus lens's
+			// tail begins.
+			nb := binding{provBindingKey: &provNode{parent: provChain(b)}}
 			for i, it := range items {
 				v, err := ex.evalExpr(b, it.Expr)
 				if err != nil {
@@ -1735,6 +1818,7 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 		if err := ex.checkCancelled(); err != nil {
 			return nil, err
 		}
+		ex.provCursor = provRowTarget(outerRow, b)
 		// Build grouping key
 		keyParts := make([]string, 0, len(items))
 		groupVals := map[int]any{}
@@ -1758,7 +1842,10 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 		k := strings.Join(keyParts, "|")
 		g, ok := groups[k]
 		if !ok {
-			g = &groupAcc{row: binding{}, aggs: make([]aggFold, len(items))}
+			g = &groupAcc{
+				row:  binding{provBindingKey: &provNode{}},
+				aggs: make([]aggFold, len(items)),
+			}
 			for i := range items {
 				if v, present := groupVals[i]; present {
 					g.row[itemAlias(i)] = v
@@ -1784,6 +1871,14 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 			}
 			groups[k] = g
 			order = append(order, k)
+		}
+		// The group's row is derived from every member folded into it, so its
+		// provenance is their union: a change to anything any member read can
+		// move the aggregate this one row projects.
+		if member := provChain(b); member != nil {
+			if gn := provChain(g.row); gn != nil {
+				gn.merged = append(gn.merged, member)
+			}
 		}
 		if plan == nil {
 			for i := range items {
@@ -1911,7 +2006,7 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 		seen := make(map[string]struct{}, len(rows))
 		deduped := rows[:0]
 		for _, row := range rows {
-			key := normalizeForKey(map[string]any(row))
+			key := normalizeForKey(provStripped(row))
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				deduped = append(deduped, row)
@@ -1923,6 +2018,11 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 	for _, row := range rows {
 		values := map[string]any{}
 		for k, v := range row {
+			if k == provBindingKey {
+				// The chain is the row's read record, not a projected column:
+				// an adapter renders Values straight into the target document.
+				continue
+			}
 			values[k] = v
 		}
 		// Build the projection key. When the rule's key columns are threaded
@@ -1945,7 +2045,11 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 			}
 			keyMap[alias] = values[alias]
 		}
-		out = append(out, ruleengine.ProjectionResult{Key: keyMap, Values: values})
+		out = append(out, ruleengine.ProjectionResult{
+			Key:        keyMap,
+			Values:     values,
+			Provenance: ex.provVertexKeys(provChain(row)),
+		})
 	}
 	return out, nil
 }
@@ -2061,10 +2165,18 @@ func (ex *executor) existsAsPredicate(b binding, p PathPattern) (bool, error) {
 
 // --- helpers ---
 
+// cloneBinding copies b's variables into a new binding and gives it a
+// provenance chain of its own, descending from b's. The child inherits
+// everything b has read by POINTER — the head's candidate set is stored once
+// however many rows come off it — while what the child goes on to read stays
+// off its siblings.
 func cloneBinding(b binding) binding {
 	nb := make(binding, len(b))
 	for k, v := range b {
 		nb[k] = v
+	}
+	if parent, chained := b[provBindingKey].(*provNode); chained {
+		nb[provBindingKey] = &provNode{parent: parent}
 	}
 	return nb
 }
