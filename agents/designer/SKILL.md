@@ -226,6 +226,12 @@ census against it as you would against a stranger's.
   down && make up` is a striking thing to find in a design meant to spare a wipe). (2026-08-21 · package restore)
 - **Two packages you propose plumbing between must not form an import cycle** — `go list -deps` before you
   specify the edge; both edges in one design were cycles. (2026-09-01 · personal-lens derivation licence)
+- **A write you are REMOVING or WITHHOLDING had side effects; price them per concurrent writer on two axes.**
+  Ordering: does the token each writer carries already order the race (capture-before-evaluate ⇒ an older
+  evaluation never out-tokens a newer write)? View freshness: does each writer's evaluation read the store the
+  token is minted from, or a separately-cursored index (`fetchEdges` reads `refractor-adjacency`, not Core KV)?
+  A "redundant" rewrite was an incidental fence on the second axis; the tell is a lock designed for the first.
+  (2026-09-04 · perEntry unchanged-entry withholding — two cold passes, one each way)
 
 **C. Censuses — every count is a premise**
 
