@@ -35,6 +35,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A recurring class is created in one act and can only be undone six** | `CreateSessionSeries` mints every occurrence eagerly, but no op accepts a `vtx.sessionseries` key and `wellnessSessions` projects no series field — so the occurrences render as indistinguishable one-offs. Live: a 6-week series scheduled in one submit took 6 separate `TombstoneSession` submits to call off, and a term-wide time move would take 6 more. | Wellness | pkg + FE | ★★ | S–M | 📋 ready · project the `partOf` parent onto the session lens, then a series-scoped tombstone/reassign |
 | **An automated refund is recorded as cash the member handed over** | `wellnessLedgerHistory`'s `reason` enum is `payment`/`waiver` only ([ddls.go:144](../../../packages/wellness-ledger/ddls.go:144)), so `wellnessRefundSettlement`'s reversal posts `reason: "payment"` (live `vtx.wellnesstransaction.WKNvWBNLH4a8CRCxpKef`) and the FE badges only `waiver`. Takings cannot be told apart from money given back. | Wellness | pkg + FE | ★ | XS | 📋 ready · a third `refund` reason the settlement passes and the statement badges |
 | **Nothing ever tells a resident they owe the café money** | Café's only Weaver targets are `cafeTabSettlement` + `cafeStaleTabSettlement`, while clinic carries `appointmentReminders` + `followUpReminders`, wellness `wellnessBookingReminders` and LoftSpace `leaseExpiry`. 3 of 7 café debtors sit 12–19 days past the 15-day net term with nothing sent to either the resident or the desk. | Café | pkg | ★ | S–M | 📋 ready · an arrears convergence target off `cafeLedgerHistory`'s aged balance, mirroring `wellnessBookingReminders` |
+| **The tenant cannot sign their own renewal, and the term ends in two days** | Live `vtx.renewal.QomdjY7hAGS6mHvN9d2j` (Jordan Ellis, 50 Riverside Walk, ends 2026-09-06): `signRenewal`'s `pre` is fully satisfied, yet no task was ever assigned and a bare submit is denied `OperationNotPermitted`. The FE still offers "Sign renewal" — `renewalReady()` ([app.js:2447](../../../cmd/loftspace-app/web/app.js:2447)) mirrors the write guard, not the task grant. | LoftSpace | platform + FE | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) exhausted-gap row |
+| **A live tenancy with no agreed rent on file is never billed, and every health signal reads clean** | `leaseRentSettlement` drops a leaseapp with no `.terms` from its population by design, not dispatch a malformed op ([lenses.go:125](../../../packages/semantic-contracts/lenses.go:125)), so it reports 0 violating of 12 while `vtx.leaseapp.Lh1ry16PRUJs1mPstSrm` (Riley Chen, 10 Riverside Walk, $1,900/mo) bills nothing. 2 of 57. | LoftSpace | pkg | ★★★ | S | 📋 ready · raise the excluded set (a `missing_terms` gap feeding operator-only `BackfillLeaseTerms`), don't widen the dispatch |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -54,10 +56,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×29, Clinic ×29, Café ×20, Wellness ×17.
+- **Rotation to date:** LoftSpace ×30, Clinic ×29, Café ×20, Wellness ×17.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-30:** Clinic — drove patient, provider + front-desk hats live through book/status/document/bill; the front desk can't book at all and the patient's bill loses lines; filed 3.
 - **2026-08-30:** Café — drove frontOfHouse + resident hats through menu/tab/ledger/front-desk on a saturated stack; front-desk reads fail quiet, overdue is browser-only, menu doubles; filed 3.
 - **2026-08-31:** Wellness — drove member/front-desk hats live through schedule/series/book/waitlist/promote/cancel/refund/bill; the waitlist bills before it seats and the desk can neither cancel a class nor see who owes; filed 4.
 - **2026-09-01:** LoftSpace — drove landlord + applicant hats live through listings/apply/decide/renew/tasks/ledger/one-bill/account; the attach KPI is dark and nothing names the sign-in you are on; filed 2 + 1 platform.
@@ -68,7 +69,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-09-02:** Clinic — drove front-desk/provider/patient hats through book/document/complete/follow-up/pay; a patient can't pay their own bill and the follow-up worklist is always empty; filed 3 + 1 platform.
 - **2026-09-03:** Café — drove front-of-house + resident hats through menu/POS/charge/void/settle/ledger/arrears; the desk can't take a payment it is already chasing, and $14.50 is invisible to all staff; filed 4.
 - **2026-09-03:** Wellness — drove member + front-desk hats through schedule/book/waitlist/capacity/series/roster/ledger/arrears; a capacity raise strands the waitlist and a term takes six ops to call off; filed 3.
-- **Next:** LoftSpace.
+- **2026-09-04:** LoftSpace — drove landlord + tenant hats through portfolio/listings/apply/renewal/tasks/ledger/one-bill/self-pay/search; a tenant cannot sign a renewal that ends in 2 days and one live tenancy bills nothing; filed 2 + 1 platform.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
