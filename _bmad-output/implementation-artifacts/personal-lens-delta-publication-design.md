@@ -347,7 +347,8 @@ transport to be exact).
   still re-asks exactly what the licence design put it there to re-ask.
 - **Once per day the cycle is a content cycle** (`ScopeAll`): the sweeper keeps `lastContentCycleStart time.Time`,
   latched at `ensurePopulation`'s re-list (`sweeper.go:524-529` — the site that actually starts a cycle; `claim()`'s
-  wrap stamps the *end*), when the previous latch is older than `PersonalContentHealInterval = 24 h`; the zero value
+  wrap stamps the *end*), when the previous latch plus the projected cycle length reaches `PersonalContentHealInterval = 24 h` (build
+  correction below); the zero value
   makes the first cycle after boot a content cycle. It is the bounded answer to a connected device that never
   re-hydrates: a row whose upsert was dropped or whose event the derivation missed is republished within a day, at
   one whole-actor republish per actor per day (the measured passes are 7–15 per 12 h).
@@ -516,8 +517,8 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
   actor-own with and without peers) hand the right vertex set and **each of the five `writeResults` call sites**
   carries a non-`All` scope on a personal pipeline; `personalClockRefusal != ""` or a scan-seeded anchor ⇒
   `ScopeAll`; a non-`KeySetPublisher` adapter ⇒ unchanged behaviour byte-for-byte (a plain-lens vector runs both ways
-  and compares the adapter's call list); a personal lens declaring `Retry` is refused at install; the frame advances
-  `lastProjectedAt`; **the hydrate race** — the three interleavings of §4.6 against a scripted in-flight event,
+  and compares the adapter's call list); a personal lens declaring `Retry` is refused at install; a signalled reprojection's frame advances
+  `lastProjectedAt` and a `ScopeNone` pass's does not; **the hydrate race** — the three interleavings of §4.6 against a scripted in-flight event,
   asserting the device ends with every row.
 - **T4 — differential exactness pin (corpus, `internal/refractor`):** for every personal lens **as composed**
   (its branch set through `executeBranches`/`mergeBranchRows`, never `forEachCorpusCypher`'s per-branch visit —
@@ -681,7 +682,7 @@ harness of `personal_lens_grant_change_e2e_test.go` (grant vector) for T6.
 
 **5. In-scope gotchas.** (a) The after-capture revision and the `(lens, actor)` lock in `ReprojectPersonalActor` are
 the retraction design's spine — do not move them; a `ScopeNone` pass still flushes the (empty) pipeline and
-publishes the frame from ALL non-delete results. (b) `recordProjected` on a frame is a stated CHANGE to the freshness
+publishes the frame from ALL non-delete results. (b) `recordProjected` on a signalled reprojection's and a hydrate's frame (never a `ScopeNone` pass) is a stated CHANGE to the freshness
 clock (§4.2) — say so in the doc comment; nothing alarms on it. (c) The sweep's scope is per PASS, latched at the
 cycle start — not per identity, not re-read mid-batch. (d) The merge never creates a second entry: a merge into an
 existing dirty entry is not counted against `maxDirty` and never increments `dropped`. (e) T5 pins that the verdict's
@@ -714,3 +715,22 @@ provenance and `ScopeVertices`, the hydrate guards of §4.6, the personal+`Retry
 **Scope-diff gate.** Every touch in part 2 traces to the scope sentence; nothing widens it; no adjacent mechanism is
 substituted (the write loop and provenance stay Inc 2). Dependencies both ways: Inc 1 depends on nothing unbuilt;
 Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
+
+### Checkpoint (2026-09-04, after Inc 1)
+
+- **Landed on `main`:** Inc 1 — `feat(refractor): personal-lens publication scope` (the Inc 1 commit; CI on its
+  push). Worktree `../lattice-wt-pl-delta`, branch `fire/personal-lens-delta`, kept for Inc 2.
+- **Inc 1 review classification** (three cold reviewers, 0 blocking / 6 major / 8 minor, all folded or declined with
+  reason): *design-gap* ×3 — the frame heals removal only (R7, template checklist #4 sighting), the start-measured
+  latch (§4.4), the liveness-clock stamp (§4.2 → dossier sighting); *implementation-bug* ×1 — malformed tokens under
+  `ScopeAnchors`; *convention/doc* ×6 — five falsified comments, two stale component-doc sentences, sibling design
+  snippets; *test* ×2 — the grant-change e2e's boot-cycle premise, the `ScopeNone` pipelined vector. Declined: a
+  content-interval env knob and a health field (widenings the design does not name; the log carries R4), a bounded
+  retry of a failed drain reprojection (new state against §6's "nothing else"; the health fault is the signal, R7),
+  a scope check on the unreachable `Delete` arm.
+- **Named unreachable branch:** a personal lens installed with no read-grant gate (`capKV == nil`, never in
+  `cmd/refractor`) could emit a row whose `anchor` does not parse, which `ScopeAnchors` withholds (under-display until
+  the content cycle). The refusal sits inside `personalEnvelopeFn`'s `capKV != nil` branch; Inc 2's brief lists it.
+- **Next: Inc 2** (§11 row 2, L) — delta-scout its touch-list live (the seven record sites and three strip sites of
+  §4.1, the five `writeResults` sites, the two conjuncts, the personal+`Retry` refusal, the §4.6 guards) before the
+  first edit; Inc 3 after it.

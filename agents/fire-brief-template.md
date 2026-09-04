@@ -79,7 +79,11 @@ stops being walked). The builder walks it before the first edit; the reviewers w
    that no event names — and for every observer you offer as compensating, open that observer's enrolment
    predicate and run THIS consumer's own declaration through it; a refused observer publishes a refusal, not
    a verdict (WITH-alias closure Inc 3 — a whole-target key diff dropped as a "dearer transport" was a PHI
-   table's only continuous healer, and both named observers refuse a Secure Lens).
+   table's only continuous healer, and both named observers refuse a Secure Lens). **A frame that NAMES a
+   key does not DELIVER it** (personal-lens delta publication Inc 1, 2026-09-04): the keyset frame was offered as
+   the healer of inclusion, and it heals removal only — the client ignores a named key it does not hold — so a
+   lost grant-add now waits for the content cycle; two cold reviewers found it, the design's own §4.4 had asserted
+   the opposite.
 5. **One deterministic key, one writer** — a create-only writer bricks the second; a second writer needs an
    explicit arbitration or a single owner, decided before it is added.
 6. **Precedent may carry debt** — verify a mirrored pattern against the rule it claims to follow before
