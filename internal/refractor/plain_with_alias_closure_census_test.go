@@ -53,10 +53,14 @@ const (
 	// bucket IS the resolution's reach. Without it the key column names a
 	// projected alias that no pattern binds.
 	closureF = "F the WITH is the sole blocker"
-	// closureG — the lens carries a WITH and is still refused: resolving the
-	// aliases leaves a key column binding a variable that is not the anchor,
-	// which is a genuine N-rows-per-anchor shape rather than a naming one.
-	closureG = "G a key column binds a non-anchor variable"
+	// closureG — the lens carries a WITH and is still refused. The classifier
+	// only has HasAnchorOnlyKeyColumns's verdict to go on, not its reason, so
+	// this bucket is every WITH-bearing refusal, not only the one the two
+	// pinned members happen to share: a key column left binding a variable
+	// that is not the anchor (a genuine N-rows-per-anchor shape) is the most
+	// common cause, but a scope-walk or resolver refusal on an unmodelled
+	// node would land here too, indistinguishable from outside the package.
+	closureG = "G refused despite alias resolution (a key column binds a non-anchor variable, or the scope walk or resolver refused)"
 )
 
 // withAliasClosureBuckets pins every plain lens the installed corpus ships.
@@ -192,6 +196,9 @@ func classifyWithAliasClosure(t *testing.T, eng *full.Engine, name, spec string,
 	case closed:
 		return closureA2
 	case withBoundary:
+		// Refused (HasAnchorOnlyKeyColumns is false) with a WITH present.
+		// closureG's doc comment explains why this arm cannot narrow further
+		// than that from outside the package.
 		return closureG
 	default:
 		return closureB

@@ -64,11 +64,18 @@ const leaseApplicationsReadFakeDSN = "postgres://leaseconvergence-test-placehold
 // postgres/RLS storage path itself (row-level security, the provisioned
 // authz_anchors column, or the postgres adapter's own Delete implementation).
 func TestLeaseConvergence_WithdrawRetractsReadModelRow(t *testing.T) {
-	// Must be set before newHarness boots: translateSpec resolves an unset
-	// targetConfig.dsn from this env var the first time the lens is
-	// discovered, and a failure there drops the lens silently (dispatchSpec
-	// logs and never calls the load callback) — the wait loop below would
-	// then time out with no lens ever found.
+	// Deliberately serial (no t.Parallel): REFRACTOR_PG_DSN is read by every
+	// harness's CoreKVSource (translateSpec resolves an unset targetConfig.dsn
+	// from it for each postgres-declared lens), so setting it is a
+	// process-wide change the sibling stacks would observe mid-run. t.Setenv
+	// refuses to combine with t.Parallel for exactly that reason; the ~10 s
+	// this adds serially is the price of not mutating the environment under
+	// fifteen concurrent harnesses.
+	//
+	// It must be set before newHarness boots: a failure in translateSpec
+	// drops the lens silently (dispatchSpec logs and never calls the load
+	// callback), and the wait loop below would then time out with no lens
+	// ever found.
 	t.Setenv("REFRACTOR_PG_DSN", leaseApplicationsReadFakeDSN)
 
 	h := newHarness(t)
@@ -218,8 +225,9 @@ func readLeaseApplicationsRow(ctx context.Context, kv *substrate.KV, appID strin
 	return row
 }
 
-// awaitLeaseApplicationsRow polls readLeaseApplicationsRow until it returns a
-// row or the deadline passes (no fixed sleep — bounded polling only).
+// awaitLeaseApplicationsRow polls readLeaseApplicationsRow on a 150ms
+// interval, under a deadline, until it returns a row or the deadline passes —
+// the interval sleep paces the condition check, it never stands in for it.
 func awaitLeaseApplicationsRow(t *testing.T, ctx context.Context, kv *substrate.KV, appID string, deadline time.Duration) map[string]any {
 	t.Helper()
 	cut := time.Now().Add(deadline)

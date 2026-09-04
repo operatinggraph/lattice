@@ -14,11 +14,13 @@ import (
 // clinicPatientsReadSpec's WITH boundary to p — the pattern variable the WITH
 // carries under its own name — so the closure predicate
 // (internal/refractor/ruleengine/full/anchor_delete.go) admits this lens to
-// the read-free anchor Delete path with no DiffRetraction declared. Without
-// that resolution a TombstonePatient root tombstone would leave the roster row
-// — carrying decrypted name/email/phone PHI — stale in read_clinic_patients
-// forever, which is exactly what the earlier DiffRetraction alternative
-// existed to paper over.
+// the read-free anchor Delete path, which is the retraction TRANSPORT for a
+// TombstonePatient root tombstone. DiffRetraction is declared alongside it as
+// the lens's continuous healer, not as a substitute for this path: without the
+// resolution proven here, a tombstone would depend entirely on the next
+// DiffRetraction diff to remove the roster row — carrying decrypted
+// name/email/phone PHI — from read_clinic_patients, rather than being removed
+// read-free, immediately, by the anchor Delete itself.
 func TestClinicPatientsRead_TombstonedPatientRetractsItsRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -51,7 +53,7 @@ func TestClinicPatientsRead_TombstonedPatientRetractsItsRow(t *testing.T) {
 	keys, ok := eng.AnchorDeleteResult(cr, patientKey, "patient", body)
 	require.True(t, ok,
 		"patient_id must resolve read-free from the tombstoned root body, across the WITH boundary, to p's own key column — "+
-			"without DiffRetraction this is the ONLY retraction transport this lens has")
+			"this is the retraction transport; DiffRetraction is the healer, not a substitute for it")
 	require.Equal(t, map[string]any{"patient_id": f.ids["alice"]}, keys,
 		"the Delete must target the exact row the live patient upserted")
 }

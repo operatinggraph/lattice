@@ -315,33 +315,46 @@ func Lenses() []pkgmgr.LensSpec {
 			// read-free anchor Delete on that key, and a patient dropping out
 			// of the matched set (the registeredAt <> null guard) retracts
 			// through the filter-retraction presence check, the same as any
-			// WITH-free plain lens. Anchor seeding and the plain-derivation
-			// narrowing licence are both available to this lens for the same
-			// reason.
+			// WITH-free plain lens — that transport is pinned by
+			// TestClinicPatientsRead_TombstonedPatientRetractsItsRow. Anchor
+			// seeding and the plain-derivation narrowing licence are both
+			// available to this lens for the same reason (the narrowing
+			// licence still refuses it, on the SecureColumns declaration below
+			// — a per-anchor re-entry would decrypt twice over — not on the
+			// WITH).
 			//
-			// The narrowing licence still refuses it, on the SecureColumns
-			// declaration below (a per-anchor re-entry would decrypt twice
-			// over) — not on the WITH. DiffRetraction is not declared: this
-			// lens's gain from the closure predicate is retraction and audit
-			// coverage (AuditClassRetained reaches it), not narrowing — every
-			// reacting event still re-evaluates the whole patient corpus; only
-			// DiffRetraction's own additional full ListKeys() of
-			// read_clinic_patients on top of that scan is absent.
+			// DiffRetraction is declared anyway, as this lens's CONTINUOUS
+			// HEALER rather than its retraction transport: on every event it
+			// diffs read_clinic_patients' live key set against a fresh
+			// whole-corpus projection, so a row orphaned by a missed or failed
+			// retraction event is removed by the next event of any kind. This
+			// lens has no other standing observer to catch that miss — the
+			// divergence audit refuses enrolment for a lens with a secure
+			// decryptor (internal/refractor/pipeline/audit.go, ~:974: a
+			// background comparison must not re-derive plaintext outside a
+			// request context), and the convergence sweep enrols only
+			// auth-plane actor-aggregate lenses (internal/refractor/pipeline/
+			// sweep.go) — so on a table carrying decrypted name/email/phone,
+			// this whole-target diff is the only thing that heals an orphaned
+			// row. The cost is one extra ListKeys() of read_clinic_patients
+			// per event, on top of the scan the closure predicate already
+			// re-evaluates every event; the disabled anchor seeding and
+			// narrowing licence still apply — the licence refuses this lens on
+			// SecureColumns regardless of DiffRetraction.
 			//
 			// loftspace-domain's landlordUnitsRead (packages/loftspace-domain/
-			// lenses.go) is a different shape and not a precedent here: it
+			// lenses.go) is not the precedent for the WITH question: it
 			// carries no WITH at all, and its refusal sits on its composite
-			// (unit_id, landlord_id) key, which walks the `manages` link
-			// structurally rather than resolving to one anchor's own key
-			// column — which is why it declares DiffRetraction.
-			CanonicalName: "clinicPatientsRead",
-			Class:         "meta.lens",
-			Adapter:       "postgres",
-			Table:         "read_clinic_patients",
-			Engine:        "full",
-			Spec:          clinicPatientsReadSpec,
-			Protected:     true,
-			IntoKey:       []string{"patient_id"},
+			// (unit_id, landlord_id) key.
+			CanonicalName:  "clinicPatientsRead",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			Table:          "read_clinic_patients",
+			Engine:         "full",
+			Spec:           clinicPatientsReadSpec,
+			Protected:      true,
+			IntoKey:        []string{"patient_id"},
+			DiffRetraction: true,
 			Columns: []pkgmgr.PostgresColumn{
 				{Name: "entity_key", Type: "text"},
 				{Name: "patient_key", Type: "text"},
