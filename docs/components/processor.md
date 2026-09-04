@@ -600,9 +600,13 @@ partial state — see the
 
 Primordial kernel entities are **protected** from update and tombstone. Bootstrap
 seeds `protected: true` in the **root vertex document `data`** (not a separate
-aspect) of: the meta-root DDL, the `InstallPackage` / `UninstallPackage` DDLs,
-both Capability lenses, the operator role, the primordial admin identity, and the
-primordial meta-permissions.
+aspect) of twenty-seven vertices: the seven kernel identities (the primordial admin,
+the five service actors — Loom, Weaver, Bridge, Objmgr, Privacy — and the Gateway),
+the meta-root DDL, the four Capability lenses, the operator role, the six kernel
+permissions (three meta-permissions, three package-install permissions), the
+`InstallPackage` / `UninstallPackage` / `UpgradePackage` DDLs, and the five
+aspect-type meta-vertices. The twelve seeded topology links between them are
+protected by exact key (below).
 
 The meta-root DDL's `UpdateMetaVertex` and `TombstoneMetaVertex` branches read the
 hydrated root and, when `data.protected == true`, `fail("ProtectedMetaVertex:
@@ -789,6 +793,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   OF WORK rather than a value, the gate must read the artifact, not its outputs — assert the call sites
   exist, exactly once, at the unnested indent — because the disabling mutation is output-invariant by
   construction.
+  **SEVENTH sighting** (stored-class write gate Inc 2, 2026-09-04), five mechanisms in ONE increment — the
+  `classType` pre-pass, the `classOf` committed-only arm, the stored walk's budget detachment, the OCC re-read
+  and the retryable disposition — each revertible with the suite green, and the top-up fixture carried a shape
+  the platform never emits. The brief had copied this entry in; it was still not walked per mechanism. Mandated
+  report shape, now in force: a builder's report lists EVERY guard / branch / conjunct the increment introduces
+  beside the test that reds when it is reverted; a mechanism with no such line is a report defect before it is a
+  review finding (the two fix rounds that followed each shipped their own reverting pins — the shape working).
 - **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
   declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
   `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it
@@ -832,6 +843,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   its read floor into it). Check: for any lint rule about package content, name the `pkgmgr` counterpart that
   enforces the same invariant at install — and put it in the shared batch builder so fresh install, upgrade
   and dry-run all see it.
+  **Second sighting** (stored-class write gate, 2026-09-04): a premise about what can EXIST in Core KV
+  ("no meta-rooted `instanceOf` link") was closed by two censuses over the seeder and the installer's batch
+  builder — while a raw op submit sits outside both and nothing at step 6 refuses the shape; inert only because
+  a meta stored class resolves no DDL either way. Same fire, same family: a corrected doubles census was re-run
+  with the UNCORRECTED command (the `ctx`-named clause the correction had named survived into the re-run), so
+  the build believed 8 sites when the real number was 15. Check, sharpened: for any census that closes a
+  runtime premise, name the write path OUTSIDE the censused corpus and say why it cannot produce the shape, or
+  gate it; and a corrected census is corrected only if the corrected COMMAND is the one re-run — quote it into
+  the build note verbatim and diff it against the finding that corrected it.
 - **A guard whose SUBJECT is computed from submitter-supplied input is not a guard** — the §2.5 floor's
   required-wins exclusion set was resolved from the descriptor's `reads` templates against the caller's own
   envelope, and every live descriptor's required templates are `{payload.<field>}`-rooted, so a submitter

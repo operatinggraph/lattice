@@ -331,9 +331,10 @@ hand-built `MutationOp` (§9 Inc 2), not a script.
 ### 2.3 Kernel topology links are protected (step 8)
 
 `AuthWiring` gains `KernelLinkKeys []string`, computed in `cmd/processor` from the loaded bootstrap table by
-`bootstrap.KernelTopologyLinkKeys()` — a two-line composition, not a new derivation: `KernelGrantLinkKeys()` (the six `grantedBy`
-keys, already owned and pinned, §1.5) plus the six `*HoldsRoleLinkKey` constants (`Bootstrap`, `Loom`, `Weaver`, `Bridge`,
-`Objmgr`, `Privacy`). The `RoleOperatorID == ""` check comes strictly first and returns `ErrPrimordialIDsUnloaded`, like
+`bootstrap.KernelTopologyLinkKeys()` — a composition, not a new derivation: `KernelGrantLinkKeys()` (the six `grantedBy`
+keys, already owned and pinned, §1.5) plus the six `holdsRole → operator` keys for the same six identities the
+`*HoldsRoleLinkKey` constants name — assembled by concatenation from the ids, never from those constants (they are
+`LinkKey`-derived and empty on an unloaded table; corrected at build 2026-09-04). The `RoleOperatorID == ""` check comes strictly first and returns `ErrPrimordialIDsUnloaded`, like
 `SystemActorKeys`; the keys are assembled by concatenation, never `substrate.LinkKey`, for the reason `KernelGrantLinkKeys`' doc
 comment gives (it panics on an unloaded id, and readiness paths must report on an unloaded process rather than crash it). The
 existing `TestKernelGrantLinkKeys_MatchesWhatTheSeederEmits` pins the grant half; a new pin covers the `holdsRole` half
@@ -459,7 +460,9 @@ collapse (`nfr_s6_wire_shape.go:32-58`), not a timing equalisation, and its own 
 |---|---|---|---|---|---|
 | `PriorDocs` (per attempt) | step 5.5, per pipeline attempt; topped up by `Commit` for injected keys | never mutated by a reader; dropped at attempt end | **not** across OCC retries, redeliveries, or the `derive_reads` pre-pass | read at the step-4 snapshot's successor moment; a commit that succeeds proves no intervening write for every conditioned key. The sole unconditioned shape — an update/tombstone of a key absent at read time — now spans steps 6, 6.5 (Vault round trips) and 7 instead of the prior pass alone; accepted, it is the same race as today and the cascade tombstones that produce it have no body to protect | today's `priorDocs`, one step earlier |
 | `KernelLinkKeys` set | `cmd/processor` start, after `bootstrap.Load` | process restart | process lifetime, like `SystemActorKeys` | none | pure function of `lattice.bootstrap.json`; a regenerated json (new epoch) yields a new set on restart, which is what un-protects a stranded epoch's links |
-| `DDLResolutionMemo` | unchanged | unchanged | unchanged | unchanged | now also warmed by the stored-class walk |
+| `DDLResolutionMemo` | unchanged | unchanged | unchanged | unchanged | now also warmed by the stored-class walk, and carries `classOf`'s committed answer per node |
+
+**Residuals named at close (2026-09-04, cumulative pass):** (1) a mutation key ABSENT at 5.5 and FOUND at commit is a lost race — `Commit` conflicts on it and the OCC loop re-runs 5.5 → 6 → 8, so the stored-class gate sees the entity (a silent merge-and-commit would have skipped `permittedCommands` for the class stored there). (2) The stored-class chain walk is a submitter-driven, off-budget read: ≤ 1 `KVGetMulti` per distinct un-registered business-vertex root (+1 memoised class read per terminal), serial inside step 6, bounded by `substrate.MaxBatchMessages` and the lane deadline; the kernel-owned vertex types (`meta`, `permission`, `role`, `roleindex` — never subtyped by `instanceOf`, pinned by two corpus censuses) take the exact lookup only, which removes the uninstall/upgrade cascade from that population. A raw op submit can still mint a kernel-rooted `instanceOf` link outside both censuses; inert (a kernel-typed stored class resolves no DDL under either path), recorded in the Processor dossier.
 
 **Unset `KernelLinkKeys` (tests, `MakeStubPipeline`) = nothing protected = today's behaviour.** Empty cannot fail closed here
 ("every link protected" bricks every link write), so the production wiring is pinned instead: a `cmd/processor` test asserts the
@@ -671,7 +674,7 @@ edit (§7). **Owns:**
 - **Stored-class governance could refuse a shipped flow the census missed.** The census is executable (§6.1/§6.2) and the
   packages' own suites are the runtime pin; a refusal is loud (`DDLViolation`), never silent. The Steward re-runs the census at
   Phase 0.
-- **The `committedOnly` chain disposition is the one conjunct with no shipped consumer that needs it** (one op bundles the two,
+- ~~The `committedOnly` chain disposition is the one conjunct with no shipped consumer that needs it~~ **Retired at close (2026-09-04): the disposition now also governs `classOf`'s batch scan and carries the kernel-typed short-circuit; it is load-bearing, not optional.** *(was:)* The `committedOnly` chain disposition is the one conjunct with no shipped consumer that needs it (one op bundles the two,
   and it is admitted either way). I kept it because it is the same principle (§2.1) and ten lines; if the Steward finds it
   costs more than that, it is the first thing to cut, with a residual line rather than a row.
 - **`KernelLinkKeys` empty in tests is fail-open by necessity.** The production pin is the mitigation, mirroring
