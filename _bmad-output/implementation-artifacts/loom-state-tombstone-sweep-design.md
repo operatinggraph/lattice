@@ -311,9 +311,16 @@ blocking `Start`. Every converted marker is a new empty-body message on its subj
 families are the filter subjects of `DeliverAll` durables: `outbox.>` feeds `loom-outbox-relay`
 (`engine.go:334-344`), whose handler acks an empty body at once (`actuator.go:87-89`); `deadline.>` feeds
 `loom-deadline` (`:348-361`), whose handler runs `onDeadline` — one `KVGet instance.<id>` and a return on
-*terminal* (every legacy deadline marker's instance is terminal by construction, the deadline was deleted in
-the terminal batch), or for the rare running-but-disarmed instance (a userTask waiting on its human) the
-tracker RPC plus a re-disarm that finds the key absent. Unpaced, 12,346 deadline conversions would put a
+*terminal*. **Not every legacy deadline marker's instance is terminal**: `disarmDeadline` leaves the same DEL
+marker on a *running* instance parked in an unbounded wait (a userTask waiting on its human, an externalTask
+waiting on the bridge), and for that instance the probe's evidence is the Contract #4 tracker, whose lifetime
+is 24 h while the wait it backstops is 30 days — so a re-fired probe more than a day after the disarm finds no
+tracker and no outbox and **fails the parked instance** (`engine.go:1338-1370`, `:1372-1435`). A converted
+marker on such an instance is a destructive signal, not a no-op, and pacing cannot help. So the `deadline.>`
+family carries a **guard**: each marker's `instance.<id>` is read first and the marker is converted only when
+the instance exists and is terminal; a running or unreadable instance's marker is skipped (`skippedRunning`)
+and stays DEL until the terminal batch's own purge rolls it up. (Found by the close pass, §13; the §4 table's
+"probe → no-op" cell was wrong for a running instance and is corrected there.) Unpaced, 12,346 deadline conversions would put a
 multi-second backlog on `loom-deadline`, and §11 says a real expiry marker survives one second in the stream:
 **the pass must never let that durable lag.** So the two CDC-filtered families are converted at a fixed pace,
 `legacySweepRate` ≈ 100 publishes/s (a probe costs ~1 ms, so the durable drains faster than the pass feeds
@@ -350,7 +357,11 @@ of scope (the e2e fixtures clean up with `KVDelete` legitimately, `guard_e2e_tes
 bucket allowing rollups, message TTLs and purges — the same class of dependency `AllowAtomicPublish` already
 earned an assertion for (`internal/bootstrap/verify.go:252-264`, mirrored in `scripts/verify-kernel.go:303-
 310`). Both loops gain `AllowRollup && !DenyPurge && AllowMsgTTL` on `KV_loom-state`, so a bucket that would
-refuse every transition fails `verify-kernel` instead of failing Loom.
+refuse every transition fails `verify-kernel` instead of failing Loom. What the assertion actually guards
+(found at build): while a stream carries `SubjectDeleteMarkerTTL > 0` the server **forces** all three flags
+on create and refuses to relax them on update (`server/stream.go:1767-1781`), so on the bucket as provisioned
+the check cannot fire; it is a backstop against `LimitMarkerTTL` being dropped from `platform_buckets.go`, at
+which point `AllowMsgTTL` is the line that fires. Cheap, and it names the dependency.
 
 **Docs and the comments this design falsifies.** `docs/components/loom.md` § *State & crash-safety*: the
 *Provisioning + index posture* paragraph gains the removal shape (a removal is a TTL'd purge; the four ephemeral
@@ -386,7 +397,7 @@ any of those**.
 | `KVGet` (`resolveToken`, `outboxExists`, `getPinnedPattern`, `disarmDeadline`'s probe) | `nats.go` `Get` maps `ErrKeyDeleted` → `ErrKeyNotFound` for DEL **and** PURGE (`jetstream/kv.go:1004-1011`, `:941-946`) | absent | value | absent | absent | absent | value |
 | `KVGetMulti` (`listInstances`, `pinnedDomains`) | direct-get marker parse treats `KV-Operation: DEL\|PURGE` and any `Nats-Marker-Reason` as absent (`kv_multi.go:656-661`, `:875-880`) | absent | value | absent | absent | absent | value |
 | `KVListKeys*` (all three listing paths) | `IgnoreDeletes` drops DEL and PURGE ops alike (`jetstream/kv.go:1280`) | — | listed | not listed | not listed | not listed | listed |
-| `loom-deadline` handler (`engine.go:1214-1228`) | **empty body ⇒ probe**, else ack; the probe no-ops on a non-running instance or an empty pending token (`:1263-1275`) | — | ack (re-arm PUT) | probe → no-op | probe → no-op | nothing delivered | as live |
+| `loom-deadline` handler (`engine.go:1214-1228`) | **empty body ⇒ probe**, else ack; the probe no-ops on a non-running instance or an empty pending token (`:1263-1275`) — **but on a running instance parked in an unbounded wait it re-runs the tracker probe, whose evidence expires after 24 h (§3.3, §11.2)** | — | ack (re-arm PUT) | probe → no-op on terminal; **destructive after 24 h on a parked running instance** | same as DEL (which is why the conversion pass guards this family) | nothing delivered | as live |
 | `loom-outbox-relay` (`actuator.go:81-83`) | empty body ⇒ ack | — | relay + purge | ack | ack | nothing delivered | relay |
 | `createInstance` pin/cursor `CreateOnly` (`state.go:271-274`) | subject must be **empty** | commits | refuses | refuses | refuses | **commits** | refuses |
 | `transition` new-token `CreateOnly` (`:423-427`) | subject must be empty | commits | refuses | refuses | refuses | **commits** | refuses |
@@ -533,6 +544,18 @@ not signals) and its fix is a bucket-provisioning decision with a blast radius o
 (`platform_buckets.go` sets the value in one loop for all six — the Contract #4 tracker's expiry signal has the
 same 1 s window). **Filed as a ★★★ Lattice row** with this paragraph as its grounding; not designed here.
 
+### 11.2 The deadline probe's evidence is shorter-lived than the wait it backstops
+
+`onUserTaskDeadline` / `onExternalTaskDeadline` decide *rejected-or-lost* from two absences — no tracker
+(`lattice.op.status`, a 24 h TTL) and no outbox record — while the wait they backstop is unbounded (a human
+task's grant is 30 days). Every legitimate firing happens inside the bounded creation window, so the shipped
+posture is correct on the intended path; but **any re-delivery of a `deadline.<id>` marker later than 24 h**
+fails the parked instance: a `loom-deadline` durable rebuilt from `DeliverAll` (12,346 markers replayed, every
+disarmed running instance among them), or a conversion pass without §3.3's guard. The structural fix is state
+the probe can read — an armed/disarmed deadline fact on the instance record, with a lifetime across
+redrive/replay — which is a design increment on the cursor's shape, not this fire's. **Filed as a ★★★ Lattice
+row** (`📐 needs designer pass`). This fire's guard closes the instance it would have created.
+
 ## 12. Decomposition for the Steward
 
 **One Lattice fire; Inc 1–4 are its parts.** Inc 1 and 2 touch `state.go`'s `transition` from two sides; Inc 3
@@ -609,7 +632,21 @@ the body above; recorded here so the next reader knows which claims were *tested
    mechanism; a dozen citations re-anchored, including the Loom `$KV.loom-state.>` grant, which comes from
    `Allow`'s owner loop (`matrix.go:278-282`), not `ExtraPubAllow`.
 
-**Verified correct by the pass (tested against the pinned sources, not reasoned):** the purge-with-TTL-with-CAS
+**Close pass (2026-09-03, three cold reviewers over the whole diff after build): 1 blocking, 8 major, 12
+minor, all folded before merge.** The blocker: converting a `deadline.*` marker of a *running, disarmed*
+instance re-fires the tracker probe past the tracker's 24 h TTL and fails the parked instance — the §4 "probe
+→ no-op" cell I had written for that row was a reassuring negative over a set with two shapes (terminal vs
+parked). Fix: the `deadline.>` family converts only markers whose instance is terminal (§3.3); the latent
+hazard it exposed (a rebuilt durable replays the same markers) is §11.2's row. Majors: the gate accepted
+`TTL: 0` and a sibling element's TTL in a slice literal, and missed field-assignment forms; `AtomicBatch`
+accepted a purge below the server's 1 s TTL floor; `require` inside `Eventually` predicates in the substrate
+test (the Loom dossier's own entry); the engine-start test seeded a running instance and asserted nothing about
+it; `deleteToken` published a marker on a never-written subject; the sweep goroutine was not joined at `Start`
+return; `KVListTombstones` could park a watcher's dispatcher on a mid-drain return. Minors: doc-scope of the
+purge-exclusion claim, the second short-list cause, the unpaced-families cost rationale, two seed values that
+were not NanoIDs, a one-minute test TTL inside a 60 s budget.
+
+**Verified correct by the pre-ratification pass (tested against the pinned sources, not reasoned):** the purge-with-TTL-with-CAS
 publish is accepted as a single publish and inside an atomic batch; the batch commit replays each message
 through `processJetStreamMsg` without re-checking the CAS mid-batch; a `PURGE` marker's expiry is not
 re-marked and the subject leaves the subject set; `MaxAge` is the only marker reason 2.14.0 writes; a
@@ -730,4 +767,8 @@ component's `KVDelete` usage; no contract edit.
 (bucket posture) is asserted rather than assumed. **Landing shape:** hold the worktree, merge once when the
 whole fire is green (Inc 1 alone would leave the redrive defect time-keyed, §3.2).
 
-**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-loom-tombstones-20260903215143` · done: brief · next: Inc 1.
+**Phase 0 re-run (this fire, 2026-09-03 21:30):** §6 rows 1–3 re-derived live — 74,080 subjects · 12,349 live ·
+61,731 DEL markers, per family as §1.2; six delete sites and nine derivation sites at the brief's anchors; no
+stale citation.
+
+**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-loom-tombstones-20260903215143` · done: brief, Inc 1–4 built and green, close pass folded · next: merge, CI, live cycle.
