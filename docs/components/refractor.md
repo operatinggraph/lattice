@@ -161,6 +161,7 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   **unions** the lens's `subjectPrefix` wildcard into the stream's existing `Subjects` rather than
   overwriting them — the `SYNC` stream is meant to carry one platform-wide prefix, but this keeps a
   second lens sharing the same stream name safe regardless.
+- **Composition census.** `make sync-census` (`scripts/sync-census.go`) is a read-only, live re-run of the `SYNC` stream's composition (stream-wide or per-subject via `-subject`) that reports `personal-lens-delta-publication-design.md` §10 "T7"'s acceptance numbers.
 - **Guard posture: unguarded.** A subject publish is a fire-and-forget-shaped append (though the
   underlying JetStream publish is a confirmed round-trip, not a literal fire-and-forget); ordering
   is the stream's per-subject sequence, and the recipient dedups/reorders by envelope `revision`.

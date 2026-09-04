@@ -463,6 +463,11 @@ purge-cap-read-legacy:
 	@echo "==> Purging legacy-shape cap-read.* documents..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) go run ./scripts/purge-cap-read-legacy.go
 
+## sync-census — personal-lens-delta-publication-design.md §10 "T7" live
+## acceptance. Read-only SYNC/REFRACTOR_AUDIT census; pass -subject via SYNC_CENSUS_ARGS for per-actor mode.
+sync-census:
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) go run ./scripts/sync-census.go $(SYNC_CENSUS_ARGS)
+
 ## verify-package-rbac — Install rbac-domain package and assert its KV state.
 verify-package-rbac:
 	@echo "==> Building lattice-pkg..."
