@@ -288,13 +288,17 @@ type executor struct {
 	// the evaluating row's dependencies rather than the discarded clones'.
 	//
 	// provFolded memoizes provVertexKeys per node, so a chain shared by many
-	// output rows folds once.
+	// output rows folds once. provFoldVisits counts the nodes those folds
+	// entered, which is what says the memo is doing its work: a head shared by
+	// every output row is entered while the first row folds and read back on
+	// every row after it.
 	//
-	// All three are nil on the read-free key-resolution executor
+	// All of them are nil / zero on the read-free key-resolution executor
 	// (anchor_delete), which records nothing because it fetches nothing.
-	provHead   *provNode
-	provCursor *provNode
-	provFolded map[*provNode][]string
+	provHead       *provNode
+	provCursor     *provNode
+	provFolded     map[*provNode][]string
+	provFoldVisits int
 }
 
 // hubKey identifies one relation-scoped read of an overflow-marked node: the
@@ -627,6 +631,10 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 		return nil, err
 	}
 	var out []binding
+	// The clause's stage: a source binding this clause admits no expansion of
+	// is dropped whole, and what it read reaches the rows the clause does
+	// project only through the stage they share.
+	stage := &provNode{}
 	for _, b := range bindings {
 		expanded, err := ex.matchPatterns(b, m.Patterns, m.Optional)
 		if err != nil {
@@ -691,11 +699,24 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 			}
 			passing = filtered
 		}
+		if !m.Optional && len(passing) == 0 {
+			// A required clause that admitted no expansion of this source
+			// binding drops the binding itself, so nothing will descend from
+			// it to carry what it read: the excluded expansions absorbed
+			// above, and every candidate the walk fetched on its way to them.
+			// A chain names its own ancestors, so this hands on the ancestors
+			// too — which is what the drop of a row several clauses deep needs,
+			// since the bindings above it were consumed by their expansions and
+			// can hand nothing on themselves. (An OPTIONAL clause keeps the
+			// binding, and needs no hand-off.)
+			provAbsorb(stage, provChain(b))
+		}
 		out = append(out, passing...)
 		if err := ex.checkBindings(len(out)); err != nil {
 			return nil, err
 		}
 	}
+	provAttachStage(out, stage)
 	return out, nil
 }
 
@@ -1639,6 +1660,12 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The clause's stage: a projected row's chain is a leaf — it hangs off its
+	// own inbound binding and no other row descends from it — so a row this
+	// clause discards takes what the projection and the predicate read on its
+	// behalf out of the evaluation with it unless the rows that survive name
+	// it. It is linked into them once both filters have run.
+	stage := &provNode{}
 	// WITH DISTINCT de-duplicates the projected rows, first occurrence wins, by
 	// the same injective rendering applyReturn's DISTINCT and the grouping path
 	// key on — never json.Marshal, which renders every *nodeRef as `{}` and so
@@ -1659,7 +1686,14 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				deduped = append(deduped, row)
+				continue
 			}
+			// The duplicate projects no row of its own, and the row standing
+			// in for it was projected from a different inbound binding — so
+			// nothing it read is on any surviving row's chain. What it read is
+			// what says the two rows are the same: the stage this clause links
+			// into the rows that survive it is where it lands.
+			provAbsorb(stage, provChain(row))
 		}
 		projected = deduped
 	}
@@ -1683,10 +1717,18 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 			}
 			if truthy(v) {
 				filtered = append(filtered, b)
+				continue
 			}
+			// The excluded row is a leaf: its chain hangs off its own inbound
+			// binding and no surviving row descends from it, so the predicate's
+			// own walk — and every read the projection made on this row's
+			// behalf — reaches an aggregate over the survivors only through
+			// the stage they share.
+			provAbsorb(stage, provChain(b))
 		}
 		projected = filtered
 	}
+	provAttachStage(projected, stage)
 	return projected, nil
 }
 
@@ -1992,6 +2034,10 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 	if err != nil {
 		return nil, err
 	}
+	// The clause's stage, as at every projecting clause: a row RETURN DISTINCT
+	// drops is a leaf, and what it read reaches the published rows only
+	// through what they share.
+	stage := &provNode{}
 	// Deduplicate rows when RETURN DISTINCT is specified; order is preserved
 	// (first occurrence wins).
 	//
@@ -2010,10 +2056,17 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				deduped = append(deduped, row)
+				continue
 			}
+			// The duplicate is dropped whole, and the row that stands in for
+			// it descends from a different inbound binding — so what the
+			// dropped row read, and what made it a duplicate, reaches the
+			// published row only through the stage they share.
+			provAbsorb(stage, provChain(row))
 		}
 		rows = deduped
 	}
+	provAttachStage(rows, stage)
 	out := make([]ruleengine.ProjectionResult, 0, len(rows))
 	for _, row := range rows {
 		values := map[string]any{}

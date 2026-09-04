@@ -555,6 +555,121 @@ func TestProvenance_ExcludedExpansionReachesTheGroup(t *testing.T) {
 	require.Contains(t, provFor(t, results, vtxKey(reg, "alice")), vtxKey(reg, "berlin"))
 }
 
+// TestProvenance_RequiredClauseExcludingEverySourceRowHandsItOn pins the
+// required MATCH's own drop, which is the other half of the excluded-expansion
+// rule: when NO expansion of a source binding passes, the binding itself is
+// dropped, and it becomes a leaf nothing reaches. Everything it read — the
+// candidate the walk bound, the predicate's own walk, and everything its
+// ancestors read on the way — has to reach the rows the clause does project.
+//
+// Three vectors, and the hand-off is at a different site in the last of them.
+// A clause that excludes a source binding's only expansion drops the binding,
+// whether the exclusion is this clause's own WHERE or a whole hop finding
+// nothing to bind; a walk that dies with the source binding as its own head
+// hands its reads up a level before the clause sees an empty expansion set at
+// all.
+func TestProvenance_RequiredClauseExcludingEverySourceRowHandsItOn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	seedProvCorpus(t, reg, adjKV, coreKV)
+
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{
+			// globex's only city is berlin, which reaches no region, so the
+			// second clause excludes globex's expansion and globex's row with
+			// it. berlin gaining a region would make the count 2: the row that
+			// survives depends on berlin's answer.
+			name: "the clause excludes the only expansion",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       MATCH (o)-[:in]->(c:city)
+			       WHERE (c)-[:within]->(:region)
+			       RETURN i.key AS anchor, count(o) AS n`,
+			want: "berlin",
+		},
+		{
+			// The row that dies is two clauses deep: globex's city is bound by
+			// one clause and the next one finds no region for it, so what died
+			// is a descendant of a binding that was itself consumed by an
+			// expansion and can hand nothing on.
+			name: "the row that dies is two clauses deep",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       MATCH (o)-[:in]->(c:city)
+			       MATCH (c)-[:within]->(r:region)
+			       RETURN i.key AS anchor, count(r) AS n`,
+			want: "berlin",
+		},
+		{
+			// acme's lead is tombstoned, so its hop expands to nothing and
+			// acme's row is dropped whole. The surviving row's count is what
+			// the tombstone decides.
+			name: "the walk expands to nothing",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       MATCH (o)-[:hasLead]->(l:person)
+			       RETURN i.key AS anchor, count(l) AS n`,
+			want: "deadlead",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runProv(t, New(), tc.body, actorEC(reg), adjKV, coreKV)
+			require.Len(t, results, 1)
+			require.EqualValues(t, 1, results[0].Values["n"],
+				"the clause must actually drop one source row")
+			require.Contains(t, provFor(t, results, vtxKey(reg, "alice")), vtxKey(reg, tc.want))
+		})
+	}
+}
+
+// TestProvenance_RowDiscardedByAWithHandsItOn pins the two sites a projecting
+// clause discards a row at. A projected row's chain is a leaf under its own
+// inbound binding — no sibling descends from it — so what the projection and
+// the clause's WHERE read on that row's behalf leaves the evaluation with it
+// unless the clause's stage carries it, while the aggregate downstream still
+// depends on it.
+func TestProvenance_RowDiscardedByAWithHandsItOn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	seedProvCorpus(t, reg, adjKV, coreKV)
+
+	for _, tc := range []struct{ name, body string }{
+		{
+			// The WITH's predicate walks to berlin and finds no region there,
+			// so globex's row is excluded and the count is 1. Nothing before
+			// the WITH read berlin: the excluded row is the only thing that
+			// did.
+			name: "excluded by the WITH's WHERE",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       WITH i, o
+			       WHERE (o)-[:in]->(c:city)-[:within]->(:region)
+			       RETURN i.key AS anchor, count(o) AS n`,
+		},
+		{
+			// Both cities are in the same country, so the two projected rows
+			// are one and the duplicate is dropped. berlin is on the dropped
+			// row's ancestry alone.
+			name: "dropped by WITH DISTINCT",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)-[:in]->(c:city)
+			       WITH DISTINCT i, c.country AS country
+			       RETURN i.key AS anchor, count(country) AS n`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runProv(t, New(), tc.body, actorEC(reg), adjKV, coreKV)
+			require.Len(t, results, 1)
+			require.EqualValues(t, 1, results[0].Values["n"],
+				"the clause must actually discard one row")
+			require.Contains(t, provFor(t, results, vtxKey(reg, "alice")), vtxKey(reg, "berlin"))
+		})
+	}
+}
+
 // TestProvenance_DecomposedBranchReadsOnTheBaseRow pins the cursor's
 // precedence over a nested walk: the OPTIONAL branch is expanded one base row
 // at a time inside the projection, and its rows are folded into an aggregator
@@ -594,8 +709,12 @@ func TestProvenance_DecomposedBranchReadsOnTheBaseRow(t *testing.T) {
 // berlin share a country, so the two rows differ in nothing but what they
 // read, and the deduplication is over the projected columns alone. A chain
 // rendered into the key would make every row unique — the pointer is part of
-// the rendering — and the row that survives still names both cities, because
-// the candidate set is shared by the rows that produced them.
+// the rendering.
+//
+// The one row that survives names BOTH cities, and the two reach it by
+// different routes: its own walk bound one of them, and the clause's stage
+// carries what the row it dropped had read. The assertion is over the whole
+// key set, so a record that lost the dropped row's half fails it.
 func TestProvenance_DistinctIgnoresTheChain(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -620,7 +739,12 @@ func TestProvenance_DistinctIgnoresTheChain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			results := runProv(t, New(), tc.body, actorEC(reg), adjKV, coreKV)
 			require.Len(t, results, 1, "two rows differing only in provenance are one row")
-			require.Contains(t, provFor(t, results, "EU"), vtxKey(reg, "alice"))
+			want := []string{
+				vtxKey(reg, "alice"), vtxKey(reg, "acme"), vtxKey(reg, "globex"),
+				vtxKey(reg, "ghost"), vtxKey(reg, "vendorco"),
+				vtxKey(reg, "paris"), vtxKey(reg, "berlin"),
+			}
+			require.ElementsMatch(t, want, provFor(t, results, "EU"))
 		})
 	}
 }
@@ -670,4 +794,17 @@ func TestProvenance_FoldsKeyShapes(t *testing.T) {
 	for _, bad := range []string{"", "adj.node", "vtx.identity", c1NanoID("alice"), "vtx.identity.short"} {
 		require.Empty(t, appendProvVertexKeys(nil, bad), "key %q names no vertex", bad)
 	}
+
+	// A vertex the evaluation dereferences again while it is still the last
+	// one recorded is one dependency, however many reads reach it: a body and
+	// then its own aspect, a ranged hop stepping from the same frontier node
+	// on every pass. A repeat further back stands — the fold deduplicates the
+	// record, and the tail check is what keeps a long walk's record
+	// proportional to the vertices it touched.
+	repeated := appendProvVertexKeys(nil, vtx)
+	repeated = appendProvVertexKeys(repeated, substrate.AspectKey(vtx, "name"))
+	repeated = appendProvVertexKeys(repeated, vtx)
+	require.Equal(t, []string{vtx}, repeated)
+	require.Equal(t, []string{vtx, other, vtx},
+		appendProvVertexKeys(appendProvVertexKeys(repeated, other), vtx))
 }

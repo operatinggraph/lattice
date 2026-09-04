@@ -20,6 +20,16 @@ import (
 // sample found none live, and its lens projects two rows.
 const provAllocNeighbours = 4000
 
+// provWideCandidates / provWideRows are the OTHER extreme of the same corpus:
+// `edgeCatalog`'s shape, where one actor's walk fetches a couple of thousand
+// candidates and the projection carries roughly a hundred rows off the one
+// head chain they share. It is the fold's worst case as the narrow fixture is
+// the chain's — every one of those rows names the whole candidate set.
+const (
+	provWideCandidates = 2000
+	provWideRows       = 100
+)
+
 // evalMatchReturn runs one MATCH + one RETURN query from a caller-supplied
 // root binding, through the same executor methods run() drives. The root is
 // the mechanism's own switch: a root carrying no chain gives every clone
@@ -94,10 +104,15 @@ func putProvidedToHub(t testing.TB, reg *fixtureRegistry, adjKV *substrate.KV, n
 
 // TestProvenance_AllocationWithinTwiceTheBaseline pins the cost §4.1 states:
 // one pointer per clone, one slice append per fetch, one fold per output row.
-// The fixture is the widest actor's shape — 4,000 tombstoned neighbours and 2
-// live ones, all of them candidates one head fetches — which is where the
-// chain is at its longest and its output at its narrowest, so the ratio here
-// is the worst the corpus offers.
+// Both extremes of the corpus are measured against the same budget, because
+// each is the worst case of a different half of the mechanism:
+//
+//   - 4,000 tombstoned neighbours and 2 live ones is where the RECORD is at
+//     its longest and the output at its narrowest — the candidate set is held
+//     once and folded twice.
+//   - 2,000 candidates and 100 rows is where the FOLD costs most: every row
+//     names the whole candidate set, so the head chain is what the memo has to
+//     keep from being rebuilt a hundred times over.
 //
 // The baseline is the same evaluation over the same graph with a root binding
 // that carries no chain: identical code, identical reads, the mechanism inert.
@@ -105,6 +120,20 @@ func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
+	t.Run("long chain, two rows", func(t *testing.T) {
+		measureProvAllocation(t, provAllocNeighbours, 2)
+	})
+	t.Run("wide head, many rows", func(t *testing.T) {
+		measureProvAllocation(t, provWideCandidates, provWideRows)
+	})
+}
+
+// measureProvAllocation evaluates one MATCH + RETURN over a hub with `dead`
+// tombstoned candidates and `live` bound ones, with the provenance machinery
+// on and off, and fails when recording costs more than twice the evaluation
+// that records nothing.
+func measureProvAllocation(t *testing.T, dead, live int) {
+	t.Helper()
 	// The shape is measured on the adjacency DOCUMENT path. A node this wide
 	// latches past the production thresholds and serves its edges out of Core
 	// KV's link keyspace instead, which putEdge does not write — so the
@@ -116,14 +145,14 @@ func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
 	reg := newFixtureRegistry()
 
 	hub := putVertex(t, reg, coreKV, "hub", "identity", nil)
-	neighbourNames := make([]string, 0, provAllocNeighbours+2)
-	for i := 0; i < provAllocNeighbours; i++ {
+	neighbourNames := make([]string, 0, dead+live)
+	for i := 0; i < dead; i++ {
 		name := fmt.Sprintf("dead%04d", i)
 		putVertex(t, reg, coreKV, name, "service", map[string]any{"isDeleted": true})
 		neighbourNames = append(neighbourNames, name)
 	}
-	for i := 0; i < 2; i++ {
-		name := fmt.Sprintf("live%02d", i)
+	for i := 0; i < live; i++ {
+		name := fmt.Sprintf("live%04d", i)
 		putVertex(t, reg, coreKV, name, "service", map[string]any{"n": int64(i)})
 		neighbourNames = append(neighbourNames, name)
 	}
@@ -148,13 +177,13 @@ func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
 		eng.newExecutor(context.Background(), compiled, ec, adjKV, coreKV),
 		compiled, binding{})
 
-	require.Len(t, withProv, 2)
-	require.Len(t, baseRows, 2)
+	require.Len(t, withProv, live)
+	require.Len(t, baseRows, live)
 	for i := range withProv {
 		require.Equal(t, withProv[i].Values, baseRows[i].Values)
 		require.Nil(t, baseRows[i].Provenance)
-		require.Len(t, withProv[i].Provenance, provAllocNeighbours+3,
-			"every candidate, the two live instances and the hub")
+		require.Len(t, withProv[i].Provenance, dead+live+1,
+			"every candidate, every live instance and the hub")
 	}
 
 	measure := func(root func() binding) uint64 {
@@ -181,26 +210,53 @@ func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
 		recorded, baseline)
 }
 
-// TestProvenance_FoldIsMemoizedPerNode pins the flatten's memo: a chain shared
-// by many rows is folded once, so a wide head's candidate set is not walked
-// per output row. The second ask for the same node is served from the memo
-// and returns the identical slice.
+// TestProvenance_FoldIsMemoizedPerNode pins the flatten's memo in the order
+// production asks for it: applyReturn folds one leaf per output row, an output
+// row's leaf is shared by nothing, and what those leaves have in common is
+// their ancestry — the head chain carrying the walk's whole candidate set. So
+// the fold has to enter that chain once for the projection rather than once
+// per row, which a memo kept only for the node the caller named would not do.
+//
+// The counter is the pin. Folding one row enters its leaf, the clone it was
+// projected from, the head and the root; every row after it enters its own two
+// and reads the rest back — so the whole projection is 2 per row and a
+// constant, against 4 per row for a fold that re-walked.
 func TestProvenance_FoldIsMemoizedPerNode(t *testing.T) {
-	ex := &executor{provFolded: map[*provNode][]string{}}
-	head := &provNode{keys: []string{
-		substrate.VertexKey("identity", c1NanoID("alice")),
-		substrate.VertexKey("org", c1NanoID("acme")),
-	}}
-	row := &provNode{parent: head, keys: []string{substrate.VertexKey("city", c1NanoID("paris"))}}
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
 
-	first := ex.provVertexKeys(row)
-	require.Len(t, first, 3)
-	require.Len(t, ex.provFolded, 1)
+	const rows = 50
+	hub := putVertex(t, reg, coreKV, "hub", "identity", nil)
+	neighbourNames := make([]string, 0, rows)
+	for i := 0; i < rows; i++ {
+		name := fmt.Sprintf("live%04d", i)
+		putVertex(t, reg, coreKV, name, "service", map[string]any{"n": int64(i)})
+		neighbourNames = append(neighbourNames, name)
+	}
+	putProvidedToHub(t, reg, adjKV, neighbourNames, "hub")
 
-	// Folding the shared head afterwards must agree with what the row's own
-	// walk found for it, and must not re-walk a memoized answer.
-	require.Len(t, ex.provVertexKeys(head), 2)
-	second := ex.provVertexKeys(row)
-	require.Equal(t, fmt.Sprintf("%p", first), fmt.Sprintf("%p", second),
-		"a second fold of one node must be the memoized slice, not a fresh walk")
+	eng := New()
+	cr, err := eng.Parse(
+		`MATCH (i:identity {key: $actorKey})<-[:providedTo]-(inst:service)
+		 RETURN inst.key AS anchor, i.key AS actor`)
+	require.NoError(t, err)
+	compiled, ok := cr.(*CompiledRule)
+	require.True(t, ok)
+
+	ex := eng.newExecutor(context.Background(), compiled,
+		ruleengine.EventContext{Parameters: map[string]any{"actorKey": hub}}, adjKV, coreKV)
+	out := evalMatchReturn(t, ex, compiled, binding{provBindingKey: provRoot()})
+	require.Len(t, out, rows)
+	for _, r := range out {
+		require.Len(t, r.Provenance, rows+1, "every candidate and the hub")
+	}
+
+	require.LessOrEqual(t, ex.provFoldVisits, 2*rows+4,
+		"the head every row descends from was entered more than once: %d node visits for %d rows",
+		ex.provFoldVisits, rows)
+	require.Greater(t, len(ex.provFolded), 2*rows,
+		"a fold that memoized only the node it was asked for holds one entry per row")
 }
