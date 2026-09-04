@@ -288,12 +288,12 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 // cafeLedgerAccountGuard is: this leaseapp may carry other packages' own
 // guard aspects, and a bare local name risks colliding key-for-key.
 // Declaration-only: the aspect is written by OpenTab and tombstoned by
-// Settle, never has its own operationType.
+// Settle and SettleStaleTab, never has its own operationType.
 func openTabGuardAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafeOpenTabGuard",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"OpenTab", "Settle"},
+		PermittedCommands: []string{"OpenTab", "Settle", "SettleStaleTab"},
 		Description: "Per-lease open-tab uniqueness guard aspect. Stored as vtx.leaseapp.<NanoID>.cafeOpenTab " +
 			"(class cafeOpenTabGuard) = {tabKey: <vtx.tab.<NanoID>>}. Non-sensitive. Claimed by OpenTab: a class-(d) " +
 			"optionalReads dedup declared as <leaseAppKey>.cafeOpenTab — absent (the lease's first-ever tab, or any " +

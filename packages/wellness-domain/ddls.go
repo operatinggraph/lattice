@@ -1100,7 +1100,7 @@ func sessionSeatClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionSeatClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking", "CancelBooking"},
+		PermittedCommands: []string{"CreateBooking", "CancelBooking", "ReleaseOrphanedBooking"},
 		Description: "Session seat-claim aspect (wellness). Stored as vtx.session.<NanoID>.seat<n> (class " +
 			"sessionSeatClaim) = {} — a pure existence marker, no relationship field. <n> is a 1-based seat index, " +
 			"1..capacity. CreateBooking walks n=1..capacity in a bounded loop and claims the FIRST cell it reads " +
@@ -1185,7 +1185,7 @@ func sessionBookerClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionBookerClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking"},
+		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"},
 		Description: "Session booker-claim guard aspect (wellness). Stored as vtx.session.<NanoID>.bkr<bookerId> " +
 			"(class sessionBookerClaim) = {} — a pure existence marker, no relationship field (the booker " +
 			"relationship stays the bookedBy link, Contract #1). <bookerId> is the booking booker's bare " +
