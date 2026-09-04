@@ -165,7 +165,7 @@ func TestReprojectPersonalActor_MissingIdentityPublishesEmptyFrame(t *testing.T)
 	target := &fakePersonalTarget{}
 	p, _ := newPersonalTestPipeline(t, target)
 
-	err := p.ReprojectPersonalActor(context.Background(), personalActorA)
+	err := p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll())
 
 	require.NoError(t, err, "a missing actor is the retraction case, not an error")
 	frames := target.snapshot()
@@ -186,7 +186,7 @@ func TestReprojectPersonalActor_MissingIdentityPublishesEmptyFrame(t *testing.T)
 func TestReprojectPersonalActor_RefusesATargetThatCannotFrame(t *testing.T) {
 	p, _ := newPersonalTestPipeline(t, &noFrameTarget{})
 
-	err := p.ReprojectPersonalActor(context.Background(), personalActorA)
+	err := p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "publishes no keyset frame")
@@ -232,7 +232,7 @@ func TestPersonalPublishLock_SerializesTwoPublishersForOneActor(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = p.ReprojectPersonalActor(context.Background(), personalActorA)
+		_ = p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll())
 	}()
 
 	// The drain worker is now parked inside its publish for actor A, holding
@@ -265,7 +265,7 @@ func TestPersonalPublishLock_SerializesTwoPublishersForOneActor(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = p.ReprojectPersonalActor(context.Background(), personalActorB)
+		_ = p.ReprojectPersonalActor(context.Background(), personalActorB, ScopeAll())
 	}()
 	select {
 	case got := <-target.entered:
@@ -346,7 +346,7 @@ func TestReprojectPersonalActor_RefusesWithoutAnOrderingToken(t *testing.T) {
 	// worker's first ticks can genuinely catch a personal lens in.
 	p.recordAppliedSeq(0)
 
-	err := p.ReprojectPersonalActor(context.Background(), personalActorA)
+	err := p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll())
 
 	require.ErrorIs(t, err, ErrNoOrderingToken,
 		"the same refusal Reproject makes, for the same reason")
@@ -355,7 +355,7 @@ func TestReprojectPersonalActor_RefusesWithoutAnOrderingToken(t *testing.T) {
 
 	// And once the pipeline has applied an event, the same call proceeds.
 	p.recordAppliedSeq(7)
-	require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA))
+	require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
 	frames := target.snapshot()
 	require.Len(t, frames, 1)
 	assert.Equal(t, uint64(7), frames[0].revision)

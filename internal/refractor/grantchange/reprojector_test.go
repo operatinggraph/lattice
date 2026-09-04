@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/grantchange"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -20,9 +21,13 @@ import (
 type fakePersonal struct {
 	mu          sync.Mutex
 	reprojected []string
-	issues      []string
-	details     []string
-	failWith    error
+	// scopes is the publication scope each reprojection was asked for, in the
+	// same order as reprojected — what the caller decided this pass or this
+	// signal should publish.
+	scopes   []pipeline.PublishScope
+	issues   []string
+	details  []string
+	failWith error
 	// issueErr makes the Health write itself fail, which is how the overflow
 	// counter's "never clear what was not reported" rule is exercised.
 	issueErr error
@@ -84,11 +89,19 @@ func (f *fakePersonal) reportedProgress() []sweepProgress {
 	return append([]sweepProgress(nil), f.progress...)
 }
 
-func (f *fakePersonal) ReprojectPersonalActor(ctx context.Context, identityID string) error {
+func (f *fakePersonal) ReprojectPersonalActor(ctx context.Context, identityID string, scope pipeline.PublishScope) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reprojected = append(f.reprojected, identityID)
+	f.scopes = append(f.scopes, scope)
 	return f.failWith
+}
+
+// scopesSeen is the scope each reprojection carried, in arrival order.
+func (f *fakePersonal) scopesSeen() []pipeline.PublishScope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]pipeline.PublishScope(nil), f.scopes...)
 }
 
 func (f *fakePersonal) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error {
@@ -132,10 +145,10 @@ func TestGrantChanged_EnqueuesAndCoalesces(t *testing.T) {
 
 	// Three transitions for one actor between drains — the coalescing case a
 	// mass grant change produces per actor.
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorB))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorB), "")
 
 	assert.Equal(t, 2, r.QueueDepth(), "N transitions for one actor cost one queue slot, not N")
 
@@ -150,10 +163,10 @@ func TestGrantChanged_RejectsNonIdentityAndMalformedKeys(t *testing.T) {
 
 	// A read-grant producer anchored on something else has no personal lens
 	// keyed off it; a bare NanoID is not a Contract #1 vertex key at all.
-	r.GrantChanged(substrate.VertexKey("role", actorA))
-	r.GrantChanged(actorA)
-	r.GrantChanged("")
-	r.GrantChanged("cap-read.identity." + actorA)
+	r.GrantChanged(substrate.VertexKey("role", actorA), "")
+	r.GrantChanged(actorA, "")
+	r.GrantChanged("", "")
+	r.GrantChanged("cap-read.identity."+actorA, "")
 
 	assert.Zero(t, r.QueueDepth(), "only a well-formed identity vertex key names a personal reprojection")
 }
@@ -170,7 +183,7 @@ func TestDrain_EveryRegisteredLensIsReDriven(t *testing.T) {
 		r.RegisterPersonal(id, l)
 	}
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	for id, l := range lenses {
@@ -185,7 +198,7 @@ func TestDeregisterPersonal_StopsReDriving(t *testing.T) {
 	r.RegisterPersonal("gone", gone)
 	r.DeregisterPersonal("gone")
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Equal(t, []string{actorA}, live.seen())
@@ -209,7 +222,7 @@ func TestDrain_PerActorErrorDoesNotAbortTheRemainingLenses(t *testing.T) {
 	r.RegisterPersonal("healthy-1", healthy1)
 	r.RegisterPersonal("healthy-2", healthy2)
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Equal(t, []string{actorA}, healthy1.seen(), "a sibling lens's failure must not skip this one")
@@ -231,18 +244,18 @@ func TestGrantChanged_OverflowDropsTheNewEntryAndIsLoud(t *testing.T) {
 	lens := &fakePersonal{}
 	r.RegisterPersonal("lens-1", lens)
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorB))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorB), "")
 	require.Equal(t, 2, r.QueueDepth())
 
 	// At the bound. The NEW entry is refused; the two already owed a
 	// reprojection keep it.
-	r.GrantChanged(substrate.VertexKey("identity", "Zwq9PmRtw3nbCxz5vQ2y"))
+	r.GrantChanged(substrate.VertexKey("identity", "Zwq9PmRtw3nbCxz5vQ2y"), "")
 	assert.Equal(t, 2, r.QueueDepth(), "overflow drops the new entry, never one already queued")
 
 	// An actor ALREADY in the set is still coalesced rather than counted as a
 	// drop — it has a reprojection owed to it, so nothing was lost.
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 
 	r.Drain(context.Background())
 
@@ -266,12 +279,12 @@ func TestDrain_TransitionsLandingMidDrainAreNotSwallowed(t *testing.T) {
 	lens := &reenqueueingPersonal{onReproject: func(actorID string) {
 		if !reentered {
 			reentered = true
-			r.GrantChanged(substrate.VertexKey("identity", actorID))
+			r.GrantChanged(substrate.VertexKey("identity", actorID), "")
 		}
 	}}
 	r.RegisterPersonal("lens-1", lens)
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Equal(t, []string{actorA, actorA}, lens.seen(),
@@ -286,18 +299,18 @@ type reenqueueingPersonal struct {
 	onReproject func(actorID string)
 }
 
-func (f *reenqueueingPersonal) ReprojectPersonalActor(ctx context.Context, identityID string) error {
+func (f *reenqueueingPersonal) ReprojectPersonalActor(ctx context.Context, identityID string, scope pipeline.PublishScope) error {
 	if f.onReproject != nil {
 		f.onReproject(identityID)
 	}
-	return f.fakePersonal.ReprojectPersonalActor(ctx, identityID)
+	return f.fakePersonal.ReprojectPersonalActor(ctx, identityID, scope)
 }
 
 func TestDrain_StopsOnContextCancel(t *testing.T) {
 	r := grantchange.New()
 	lens := &fakePersonal{}
 	r.RegisterPersonal("lens-1", lens)
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -328,14 +341,14 @@ func TestDrain_OverflowIsReportedDuringASustainedStorm(t *testing.T) {
 		if fired >= stormLength {
 			return
 		}
-		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2)))
-		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2+1)))
+		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2)), "")
+		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2+1)), "")
 		fired++
 	}}
 	r.RegisterPersonal("a-storm", storm)
 	r.RegisterPersonal("b-witness", witness)
 
-	r.GrantChanged(substrate.VertexKey("identity", stormActor(9000)))
+	r.GrantChanged(substrate.VertexKey("identity", stormActor(9000)), "")
 	r.Drain(context.Background())
 
 	raised := witness.raised()
@@ -375,8 +388,8 @@ func TestReportDropped_KeepsTheCountWhenTheHealthWriteFails(t *testing.T) {
 	failing := &fakePersonal{issueErr: errors.New("health kv unavailable")}
 	r.RegisterPersonal("lens-1", failing)
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorB)) // dropped at the bound
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorB), "") // dropped at the bound
 
 	r.Drain(context.Background())
 	require.Empty(t, failing.raised(), "the Health write failed, so nothing was reported")
@@ -386,7 +399,7 @@ func TestReportDropped_KeepsTheCountWhenTheHealthWriteFails(t *testing.T) {
 	failing.issueErr = nil
 	failing.mu.Unlock()
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Equal(t, []string{"overflow"}, failing.raised(),
@@ -414,7 +427,7 @@ func TestDrain_HoldsUntilTheLensRegistryIsComplete(t *testing.T) {
 	})
 
 	// A producer signals while the registry is still loading.
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Empty(t, early.seen(), "the drain must not consume a signal against a partial registry")
@@ -441,7 +454,7 @@ func TestDrain_RegistryHoldIsNotPermanent(t *testing.T) {
 	r.SetRegistryReady(func(context.Context) error {
 		return errors.New("1 lens(es) are in Core KV but not yet registered")
 	})
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 
 	r.Drain(context.Background())
 	require.Empty(t, lens.seen(), "held while inside the bound")
@@ -456,7 +469,7 @@ func TestDrain_RegistryHoldIsNotPermanent(t *testing.T) {
 		"proceeding against an incomplete registry is a degradation, and every other way this package does less already raises a Health issue")
 
 	// Latched: the issue is raised once per process, not once per tick.
-	r.GrantChanged(substrate.VertexKey("identity", actorB))
+	r.GrantChanged(substrate.VertexKey("identity", actorB), "")
 	r.Drain(context.Background())
 	assert.Equal(t, []string{grantchange.IssueRegistryIncomplete}, lens.raised(),
 		"the latch means the fallback reports once, not on every drain thereafter")
@@ -501,7 +514,7 @@ func TestReprojectActor_SkipsALensDeregisteredMidWalk(t *testing.T) {
 	r.RegisterPersonal("a-first", first)
 	r.RegisterPersonal("b-doomed", doomed)
 
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	r.Drain(context.Background())
 
 	assert.Empty(t, doomed.seen(), "a lens deregistered mid-walk must not be reprojected")
@@ -531,7 +544,7 @@ func TestInterestChanged_EnqueuesCoalescesAndSharesTheGrantEdgesSet(t *testing.T
 
 	// The grant edge's own signal for the same actor coalesces with it rather
 	// than queueing a second reprojection.
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
 	assert.Equal(t, 1, r.QueueDepth(), "both edges feed one set, so one actor is owed one reprojection")
 
 	r.InterestChanged("")

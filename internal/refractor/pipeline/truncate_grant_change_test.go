@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,10 +12,19 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
-// recordingGrantSink captures the actors a pipeline announced grant changes for.
-type recordingGrantSink struct{ actors []string }
+// recordingGrantSink captures the actors a pipeline announced grant changes
+// for, and the entry token each announcement carried — the token is what scopes
+// the consumer's publish, so a sink that recorded only the actor could not tell
+// a scoped announcement from a whole-actor one.
+type recordingGrantSink struct {
+	actors  []string
+	entries []string
+}
 
-func (s *recordingGrantSink) GrantChanged(actorKey string) { s.actors = append(s.actors, actorKey) }
+func (s *recordingGrantSink) GrantChanged(actorKey, entryID string) {
+	s.actors = append(s.actors, actorKey)
+	s.entries = append(s.entries, entryID)
+}
 
 // purgingTruncater is an OutcomeTruncater over a fixed key list, standing in
 // for the real NatsKVAdapter's prefix-scoped purge.
@@ -58,14 +68,16 @@ func (a *plainTruncater) Close() error                                         {
 func (a *plainTruncater) Truncate(context.Context) error                       { a.called = true; return nil }
 
 // capReadAnchorFromKey inverts the shipped cap-read per-entry key shape:
-// cap-read.<actorType>.<actorId>.<anchorId> -> vtx.<actorType>.<actorId>.
-func capReadAnchorFromKey(targetKey string) (string, bool) {
+// cap-read.<actorType>.<actorId>.<anchorId> -> (vtx.<actorType>.<actorId>,
+// <anchorId>) — the same two halves OutputDescriptor.AnchorEntryFromKey
+// recovers in production.
+func capReadAnchorFromKey(targetKey string) (actorKey, entryID string, ok bool) {
 	const prefix = "cap-read."
 	if len(targetKey) <= len(prefix) || targetKey[:len(prefix)] != prefix {
-		return "", false
+		return "", "", false
 	}
 	rest := targetKey[len(prefix):]
-	// <type>.<id>.<anchor> — strip the trailing entry token.
+	// <type>.<id>.<anchor> — split the trailing entry token off.
 	last := -1
 	for i := len(rest) - 1; i >= 0; i-- {
 		if rest[i] == '.' {
@@ -74,9 +86,9 @@ func capReadAnchorFromKey(targetKey string) (string, bool) {
 		}
 	}
 	if last < 0 {
-		return "", false
+		return "", "", false
 	}
-	return "vtx." + rest[:last], true
+	return "vtx." + rest[:last], rest[last+1:], true
 }
 
 // TestTruncateTarget_EnqueuesEveryPurgedActor is T8 of
@@ -162,4 +174,74 @@ func TestNatsKVAdapter_SatisfiesOutcomeTruncater(t *testing.T) {
 	var a any = &adapter.NatsKVAdapter{}
 	_, ok := a.(adapter.OutcomeTruncater)
 	assert.True(t, ok, "NatsKVAdapter must report the keys its truncate purged")
+}
+
+// TestGrantChangeAnnouncement_CarriesTheAnchorTheKeyNames pins the producer
+// half of the delta publication's grant scope
+// (personal-lens-delta-publication-design.md §4.3).
+//
+// The token this hands the sink is the whole difference between republishing
+// one anchor's row and republishing the actor's entire set. It is asserted
+// against the KEY's own trailing segment rather than against a constant, and
+// rather than merely being non-empty: a producer that passed some other NanoID
+// would scope the consumer's publish to a row the grant never touched, and the
+// device would keep a stale one with nothing to say so.
+func TestGrantChangeAnnouncement_CarriesTheAnchorTheKeyNames(t *testing.T) {
+	t.Run("a per-entry key announces its trailing anchor", func(t *testing.T) {
+		keys := []string{
+			"cap-read.identity.Hj4kPmRtw9nbCxz5vQ2y.Zwq9PmRtw3nbCxz5vQ2y",
+			"cap-read.identity.Hj4kPmRtw9nbCxz5vQ2y.Ywq9PmRtw3nbCxz5vQ2x",
+			"cap-read.identity.Kx3TmZpq7RvwNsY2Hc9L.Nb7RvwKx3TmZpq2Hc9Ls",
+		}
+		adpt := &purgingTruncater{failAfter: -1, keys: keys}
+		sink := &recordingGrantSink{}
+		p := &Pipeline{ruleID: "cap-read-producer"}
+		p.SetGrantChangeSink(sink, capReadAnchorFromKey)
+
+		require.NoError(t, p.truncateTarget(context.Background(), adpt))
+
+		want := make([]string, 0, len(keys))
+		for _, k := range keys {
+			want = append(want, k[strings.LastIndexByte(k, '.')+1:])
+		}
+		assert.Equal(t, want, sink.entries,
+			"each announcement names the anchor its own key names, in the order the keys were purged")
+	})
+
+	t.Run("a lens whose keys name no anchor announces an empty token", func(t *testing.T) {
+		// The doc-mode shape: one key per actor, so the inverse recovers an
+		// actor and no anchor. The consumer reads the empty token as "the whole
+		// actor moved", which is the only correct reading of a key that names
+		// no single anchor.
+		adpt := &purgingTruncater{failAfter: -1, keys: []string{"cap.roles.identity.Hj4kPmRtw9nbCxz5vQ2y"}}
+		sink := &recordingGrantSink{}
+		p := &Pipeline{ruleID: "doc-mode-producer"}
+		p.SetGrantChangeSink(sink, func(targetKey string) (string, string, bool) {
+			rest, ok := strings.CutPrefix(targetKey, "cap.roles.")
+			if !ok {
+				return "", "", false
+			}
+			return "vtx." + rest, "", true
+		})
+
+		require.NoError(t, p.truncateTarget(context.Background(), adpt))
+
+		require.Equal(t, []string{"vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"}, sink.actors)
+		assert.Equal(t, []string{""}, sink.entries)
+	})
+
+	t.Run("an actor-level announcement names no anchor", func(t *testing.T) {
+		// notifyActorGrantChange's caller holds the actor and no key at all —
+		// an out-of-band shred against a target that derives no per-key
+		// liveness — so it can name no anchor and must not invent one.
+		sink := &recordingGrantSink{}
+		p := &Pipeline{ruleID: "shredding-producer"}
+		p.SetGrantChangeSink(sink, capReadAnchorFromKey)
+
+		p.notifyActorGrantChange("vtx.identity.Hj4kPmRtw9nbCxz5vQ2y")
+
+		require.Equal(t, []string{"vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"}, sink.actors)
+		assert.Equal(t, []string{""}, sink.entries,
+			"a coarse announcement must widen the consumer's publish, never scope it to a guess")
+	})
 }

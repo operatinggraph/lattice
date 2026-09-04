@@ -22,19 +22,30 @@ import (
 //
 // actorKey is the full Contract #1 vertex key (vtx.identity.<id>), recovered
 // from the written target key through the lens's own declared inverse
-// (projection.OutputDescriptor.AnchorFromKey) — not the bare NanoID, and not
-// the entry body's audit-only anchorType.
+// (projection.OutputDescriptor.AnchorEntryFromKey) — not the bare NanoID, and
+// not the entry body's audit-only anchorType.
+//
+// entryID is the anchor whose grant moved, the bare NanoID a per-entry
+// producer's key carries in its trailing segment. It is EMPTY when the
+// announcement names no single anchor — a non-per-entry producer, or a caller
+// that holds the actor and no key at all — which a consumer reads as "the whole
+// actor moved" (personal-lens-delta-publication-design.md §4.3).
 //
 // Implementations must not block: this is called on the pipeline's consumer
 // goroutine, inline with the write it describes.
 type GrantChangeSink interface {
-	GrantChanged(actorKey string)
+	GrantChanged(actorKey, entryID string)
 }
 
 // SetGrantChangeSink installs the read-grant change edge on this pipeline:
 // sink receives every actor whose grant this lens's writes flip, and
-// anchorFromKey is the lens's own target-key → anchor-vertex-key inversion
-// (the same one the convergence sweep claims orphans with).
+// anchorFromKey is the lens's own target-key → (anchor vertex key, entry token)
+// inversion — projection.OutputDescriptor.AnchorEntryFromKey, whose actor half
+// is the same one the convergence sweep claims orphans with.
+//
+// The inversion is INJECTED rather than called for: internal/refractor/projection
+// imports this package, so a descriptor method reached from here would be an
+// import cycle.
 //
 // Both must be non-nil or neither is installed — a sink with no inversion has
 // nothing to name, and an inversion with no sink has nowhere to send it.
@@ -48,7 +59,7 @@ type GrantChangeSink interface {
 // A missing sink is fail-SLOW, never fail-open: the D1 gate itself is
 // unchanged, so a pipeline with no sink costs latency (its consumers converge
 // on the standing healer instead), never a grant honoured after revocation.
-func (p *Pipeline) SetGrantChangeSink(sink GrantChangeSink, anchorFromKey func(targetKey string) (string, bool)) {
+func (p *Pipeline) SetGrantChangeSink(sink GrantChangeSink, anchorFromKey func(targetKey string) (actorKey, entryID string, ok bool)) {
 	if sink == nil || anchorFromKey == nil {
 		return
 	}
@@ -167,7 +178,7 @@ func (p *Pipeline) HasGrantChangeSink() bool {
 // cypher evaluations a minute across the personal plane, permanently, as an
 // accidental coupling to another lens family's cadence.
 //
-// It is fail-closed on the inversion: AnchorFromKey reporting false means this
+// It is fail-closed on the inversion: the inverse reporting false means this
 // lens does not own that key, so no signal is emitted and the standing healer
 // covers it. That is the safe direction for a routing failure — a MISSING
 // signal costs latency, whereas routing on the entry body's anchorType (which
@@ -182,6 +193,10 @@ func (p *Pipeline) notifyGrantChange(targetKey string, transition adapter.GrantT
 // emitted nothing — an unclassified liveness, or a key the lens's own inverse
 // does not claim — leaves the caller holding a revocation nobody heard, and the
 // caller often still holds the actor by name.
+//
+// The entry token the inverse recovers rides along to the sink, which is what
+// lets the consumer publish the one anchor's row rather than the whole actor's.
+// A non-per-entry producer inverts to an empty token, read as the whole actor.
 func (p *Pipeline) notifyGrantChangeSignalled(targetKey string, transition adapter.GrantTransition) bool {
 	if p.grantSink == nil || p.grantAnchorFromKey == nil || targetKey == "" {
 		return false
@@ -193,15 +208,20 @@ func (p *Pipeline) notifyGrantChangeSignalled(targetKey string, transition adapt
 		// must not collapse into the same silent no-op just because neither
 		// signals. A sequence-less guarded write returns before reading any
 		// stored body, so this key's liveness is genuinely unclassified and the
-		// standing healer — not this edge — is what covers it. Saying so is the
-		// only way the distinction the type draws is observable at all.
-		slog.Info("pipeline: grant change: write carried no ordering token, so its liveness is unclassified — no signal emitted; the convergence sweep covers this key",
+		// standing healer — not this edge — is what covers it, on its two
+		// cadences: a REVOCATION converges on the healer's next pass, whose
+		// frame omits the key and prunes it on the device, while a grant that
+		// LANDED needs the row itself and so converges on the healer's content
+		// cycle (within grantchange.PersonalContentHealInterval) or on the
+		// device's next hydrate. Saying so is the only way the distinction the
+		// type draws is observable at all.
+		slog.Info("pipeline: grant change: write carried no ordering token, so its liveness is unclassified — no signal emitted; the convergence sweep's next pass re-frames this actor, and a grant that landed reaches the device on its content cycle",
 			"ruleId", p.ruleID, "key", targetKey)
 		return false
 	default:
 		return false
 	}
-	actorKey, ok := p.grantAnchorFromKey(targetKey)
+	actorKey, entryID, ok := p.grantAnchorFromKey(targetKey)
 	if !ok {
 		// projection.IsReadGrantProducer probes this inverse against a
 		// synthetic key of the lens's own pattern before wiring the sink, so a
@@ -213,7 +233,7 @@ func (p *Pipeline) notifyGrantChangeSignalled(targetKey string, transition adapt
 			"ruleId", p.ruleID, "key", targetKey)
 		return false
 	}
-	p.grantSink.GrantChanged(actorKey)
+	p.grantSink.GrantChanged(actorKey, entryID)
 	return true
 }
 
@@ -237,13 +257,17 @@ func (p *Pipeline) notifyGrantChangeSignalled(targetKey string, transition adapt
 // whose keys were already gone.
 //
 // actorKey is the full Contract #1 vertex key, the same shape the inversion
-// yields. The grantSink nil-guard is the same one notifyGrantChange keeps: only
-// a read-grant producer carries a sink, and a lens with none has nobody to tell.
+// yields. The entry token is EMPTY, and that is the honest reading: this caller
+// retracts an actor's whole child set at once and names no single anchor, so
+// the consumer re-publishes the whole actor rather than one anchor's row.
+//
+// The grantSink nil-guard is the same one notifyGrantChange keeps: only a
+// read-grant producer carries a sink, and a lens with none has nobody to tell.
 func (p *Pipeline) notifyActorGrantChange(actorKey string) {
 	if p.grantSink == nil || actorKey == "" {
 		return
 	}
-	p.grantSink.GrantChanged(actorKey)
+	p.grantSink.GrantChanged(actorKey, "")
 }
 
 // truncateTarget clears the lens's rows and, on a lens carrying the

@@ -67,7 +67,7 @@ RETURN identity.key AS anchor, "identity" AS kind, identity.key AS entityId
 	t.Run("the reprojection frame claims the post-evaluation revision", func(t *testing.T) {
 		p, target := newPipe(t)
 
-		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA))
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
 
 		frames := target.snapshot()
 		require.Len(t, frames, 1)

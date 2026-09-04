@@ -124,6 +124,15 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 		}
 	}
 
+	// A hydrate is real output — a device asked for this actor and the rows and
+	// frame it asked for have landed — so it stamps the read-model's last-touch
+	// clock, the same posture a signalled ReprojectPersonalActor's frame takes.
+	// Stamped outside the keyset assertion because the stamp is about the
+	// hydrate, not the adapter's shape: an actor whose whole set is empty writes
+	// no row, and a clock left frozen through such a hydrate reads as though
+	// nothing had been published.
+	p.recordProjected()
+
 	if marker, ok := adpt.(adapter.HydrationMarkerPublisher); ok {
 		if err := marker.PublishHydrationComplete(ctx, identityID, highWater); err != nil {
 			return 0, fmt.Errorf("pipeline: hydrate %q: marker: %w", identityID, err)

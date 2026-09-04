@@ -303,8 +303,10 @@ func TestPersonalLensActivationAssertsTheDerivationLicence(t *testing.T) {
 // test reads is about the pass, not about any one lens's reprojection.
 type noopPersonalPipeline struct{}
 
-func (noopPersonalPipeline) ReprojectPersonalActor(context.Context, string) error { return nil }
-func (noopPersonalPipeline) OrderingTokenSeeded() bool                            { return true }
+func (noopPersonalPipeline) ReprojectPersonalActor(context.Context, string, pipeline.PublishScope) error {
+	return nil
+}
+func (noopPersonalPipeline) OrderingTokenSeeded() bool { return true }
 func (noopPersonalPipeline) RecordGrantReprojectIssue(context.Context, string, string) error {
 	return nil
 }

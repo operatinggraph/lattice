@@ -167,8 +167,8 @@ func TestPersonalSweep_PublishesItsPositionToEveryRegisteredLens(t *testing.T) {
 	r.RegisterPersonal("lens-2", second)
 	// Two actors owed a reprojection by the fast path, so the depth the sweep
 	// publishes is a number and not a constant zero.
-	r.GrantChanged(substrate.VertexKey("identity", actorA))
-	r.GrantChanged(substrate.VertexKey("identity", actorB))
+	r.GrantChanged(substrate.VertexKey("identity", actorA), "")
+	r.GrantChanged(substrate.VertexKey("identity", actorB), "")
 
 	s := grantchange.NewPersonalSweeper(r, lister, nil)
 	s.SetBounds(2, 0)

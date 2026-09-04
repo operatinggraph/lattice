@@ -9,9 +9,15 @@ import (
 // recordingGrantSink satisfies pipeline.GrantChangeSink and remembers what it
 // was told, so an installation test can prove the edge is wired rather than
 // merely that install returned true.
-type recordingGrantSink struct{ actors []string }
+type recordingGrantSink struct {
+	actors  []string
+	entries []string
+}
 
-func (s *recordingGrantSink) GrantChanged(actorKey string) { s.actors = append(s.actors, actorKey) }
+func (s *recordingGrantSink) GrantChanged(actorKey, entryID string) {
+	s.actors = append(s.actors, actorKey)
+	s.entries = append(s.entries, entryID)
+}
 
 // TestInstallActorAggregate_GrantChangeSinkClassification is T2 of
 // personal-lens-grant-change-trigger-design.md §10: the sink reaches exactly

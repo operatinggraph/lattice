@@ -33,6 +33,28 @@ const (
 	DefaultPersonalSweepBatch    = 5
 )
 
+// PersonalContentHealInterval is how often a sweep CYCLE republishes rows
+// rather than the frame alone (personal-lens-delta-publication-design.md §4.4).
+//
+// Every pass publishes the authoritative keyset frame, which is the product of
+// both inclusion gates and therefore re-asks exactly what the healer was put
+// there to re-ask. Rows are content, and content converges on the CDC path; a
+// content cycle is the bounded backstop for the row whose upsert was dropped or
+// whose event the derivation missed on a device that stays connected and never
+// re-hydrates.
+//
+// A day is that backstop's window, at one whole-actor republish per actor per
+// day.
+//
+// It is a bound on the heal, not a period: rows are republished by a whole
+// CYCLE, so a cycle is a content cycle when the one after it would close past
+// this window. The heal therefore lands AT LEAST once per interval and at most
+// once per cycle. A deployment whose cycle is already longer than the interval
+// — population / batch × tick interval ≥ 24 h, roughly 7,200 identities at the
+// default bounds — makes every cycle a content cycle, and the frames-only
+// saving there is nil.
+const PersonalContentHealInterval = 24 * time.Hour
+
 // CoreKVLister is the one Core KV capability the sweep needs: enumerate the
 // identity population. Narrow on purpose — the sweeper reads nothing else, and
 // a one-method surface is what lets its unit tests hand it a scripted
@@ -127,6 +149,29 @@ type PersonalSweeper struct {
 	// has closed over it.
 	cycleCompletedAt time.Time
 
+	// lastContentCycleStart is when a CONTENT cycle last began, and contentCycle
+	// is whether the cycle now in progress is one. Both are latched together at
+	// ensurePopulation's re-list — the site that actually starts a cycle — and
+	// read by every pass of that cycle, so a cycle's kind cannot change under
+	// the batches that make it up.
+	//
+	// The latch compares this against where the cycle now starting will END
+	// (elapsed + the projected cycle length), so the heal lands at least once
+	// per PersonalContentHealInterval and at most once per cycle.
+	//
+	// LIFETIME: the zero lastContentCycleStart makes the FIRST cycle after boot
+	// a content cycle, so a process that just started republishes rows once
+	// before settling into frames. Neither survives the process: a restart costs
+	// one content pass per actor over the next cycle, which is the same
+	// re-work-never-skip direction the unpersisted cursor takes.
+	lastContentCycleStart time.Time
+	contentCycle          bool
+
+	// now is the clock the content-cycle latch reads. Defaulted to time.Now by
+	// NewPersonalSweeper; a test replaces it to cross a day's interval without
+	// waiting one out.
+	now func() time.Time
+
 	// verdict is what the LAST PASS achieved, replaced wholesale under this
 	// same lock at the end of every pass and read live by the personal
 	// derivation licence (pipeline.PersonalHealerVerdict).
@@ -161,6 +206,7 @@ func NewPersonalSweeper(r *Reprojector, coreKV CoreKVLister, healthKV HealthKVLi
 		nudge:    make(chan struct{}, 1),
 		batch:    DefaultPersonalSweepBatch,
 		interval: DefaultPersonalSweepInterval,
+		now:      time.Now,
 	}
 	if r != nil {
 		// A registration is what turns a pass from a no-op into the verdict the
@@ -276,8 +322,10 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 		// whole-population Core-KV listing bought for nothing. Checked per tick
 		// rather than latched, because a lens registering later — during boot,
 		// or on a hot install — must simply resume the walk. Deliberately NOT
-		// the drain's registry-COMPLETENESS gate: this sweep is the healer for
-		// the lens that registers late, so holding it until every lens is
+		// the drain's registry-COMPLETENESS gate: this sweep is what covers the
+		// lens that registers late — its next pass frames that lens's actors,
+		// and its content cycle republishes their rows within
+		// PersonalContentHealInterval — so holding it until every lens is
 		// present would be the mechanism waiting on the thing it repairs.
 		//
 		// No verdict is recorded, and none is owed: a plane with no personal
@@ -329,6 +377,12 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 		EdgeSpansDeployment:   GrantChangeEdgeSpansDeployment,
 	}
 
+	// Decided ONCE for the whole pass, from the kind the cycle latched at its
+	// start. A frames-only pass publishes each swept actor's authoritative
+	// keyset frame and no row; a content cycle republishes the rows too. Read
+	// here rather than per identity so one pass cannot straddle two answers.
+	scope := s.passScope()
+
 	var cursor string
 	var cycleCompletedAt time.Time
 	if populated {
@@ -357,7 +411,7 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 				// continues — while COUNTING, which is what makes this a
 				// verdict rather than a stamp.
 				verdict.Attempted++
-				verdict.Failed += s.r.ReprojectNow(ctx, id)
+				verdict.Failed += s.r.ReprojectNow(ctx, id, scope)
 			}
 			cursor = ids[len(ids)-1]
 		}
@@ -368,6 +422,22 @@ func (s *PersonalSweeper) Sweep(ctx context.Context) {
 	// nothing.
 	verdict.CompletedAt = time.Now()
 	s.recordVerdict(ctx, verdict, cursor, cycleCompletedAt)
+}
+
+// passScope reports what this pass publishes: every row on a content cycle,
+// the frame alone otherwise.
+//
+// Nothing reads what a pass published. The derivation licence's healer conjunct
+// is a liveness statement, the verdict counts reprojections that failed rather
+// than rows that landed, and no health surface distinguishes a row from a
+// frame — so a frames-only pass is the same pass to every consumer of it.
+func (s *PersonalSweeper) passScope() pipeline.PublishScope {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.contentCycle {
+		return pipeline.ScopeAll()
+	}
+	return pipeline.ScopeNone()
 }
 
 // tickInterval reports the cadence this sweeper runs on, which rides on every
@@ -525,8 +595,66 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) (populated, read
 	s.population = ids
 	s.loaded = true
 	s.cursor = ""
+	// The cycle's kind is latched HERE, where a cycle actually starts, and read
+	// unchanged by every pass of it — claim()'s wrap stamps a cycle's END, and a
+	// kind decided per pass would flip mid-cycle the moment the latch was
+	// stamped, leaving the rest of the population frames-only on the very cycle
+	// meant to carry its content.
+	//
+	// The decision is made against where this cycle ENDS, not where it starts.
+	// Rows are only republished by a whole cycle, so asking "has the interval
+	// already elapsed?" bought a heal every cycleLength × ceil(interval /
+	// cycleLength) — 46 h for a 23 h cycle. Asking instead whether the NEXT
+	// cycle would close past the window makes the heal AT LEAST once per
+	// PersonalContentHealInterval and at most once per cycle. Batch and interval
+	// are read in this same locked section as the latch they feed, so a
+	// concurrent SetBounds cannot land between the projection and the decision.
+	batch, interval := s.batch, s.interval
+	cycleLength := projectedCycleLength(len(ids), batch, interval)
+	firstSinceBoot := s.lastContentCycleStart.IsZero()
+	var elapsed time.Duration
+	if !firstSinceBoot {
+		elapsed = s.now().Sub(s.lastContentCycleStart)
+	}
+	contentCycle := firstSinceBoot || elapsed+cycleLength >= PersonalContentHealInterval
+	s.contentCycle = contentCycle
+	if contentCycle {
+		s.lastContentCycleStart = s.now()
+	}
 	s.mu.Unlock()
+	if contentCycle {
+		// Said out loud with the numbers the decision was made on, because the
+		// content heal's window is a claim about a full cycle: a population
+		// large enough that a cycle outruns the interval makes EVERY cycle a
+		// content cycle, and nothing else on the plane would say so.
+		since := elapsed.String()
+		if firstSinceBoot {
+			since = "first since boot"
+		}
+		slog.Info("grantchange: personal sweep is starting a CONTENT cycle — this cycle republishes every swept actor's rows; the cycles between it publish the authoritative frame alone",
+			"elapsedSinceLastContentCycle", since,
+			"projectedCycleLength", cycleLength.String(),
+			"population", len(ids),
+			"batch", batch,
+			"interval", interval.String(),
+			"contentHealInterval", PersonalContentHealInterval.String())
+	}
 	return true, true
+}
+
+// projectedCycleLength is how long the cycle now starting will take to walk the
+// whole population: one pass per batch of identities, one tick interval between
+// passes. It is what the content latch measures against, so that the decision is
+// about where the cycle ENDS.
+//
+// A zero or negative input reports zero, which reduces the latch to "has the
+// interval already elapsed" — the honest answer when the cadence is unknown.
+func projectedCycleLength(population, batch int, interval time.Duration) time.Duration {
+	if population <= 0 || batch <= 0 || interval <= 0 {
+		return 0
+	}
+	passes := (population + batch - 1) / batch
+	return time.Duration(passes) * interval
 }
 
 // claim takes this tick's identities and advances the cursor past them. The

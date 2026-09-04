@@ -123,9 +123,12 @@ func (p *Pipeline) lockPersonalActor(ctx context.Context, actorID string) (func(
 //
 //     Capturing after has a mirror-image cost — an over-claiming frame could
 //     prune a row a concurrent live evaluation wrote at a higher sequence but
-//     has not yet framed. That direction is UNDER-display, the next event or
-//     sweep pass recovers it, and it is the correct side to fail on for a
-//     security filter.
+//     has not yet framed. That direction is UNDER-display, and it is the
+//     correct side to fail on for a security filter. A pruned row is CONTENT,
+//     so what restores it is the next event on that row, the standing healer's
+//     content cycle (within grantchange.PersonalContentHealInterval) or a
+//     hydrate — never the healer's ordinary frames-only pass, which converges
+//     the key set and republishes no row.
 //
 //   - A missing actor publishes the EMPTY frame instead of erroring. A
 //     tombstoned identity is the expected companion of a grant retraction, and
@@ -138,9 +141,15 @@ func (p *Pipeline) lockPersonalActor(ctx context.Context, actorID string) (func(
 //     the client's first-paint gate; emitting it mid-session would release a
 //     gate that is not being held.
 //
+// scope decides which of the evaluated rows are WRITTEN; every non-delete
+// result is framed whatever the scope says (personal-lens-delta-publication-
+// design.md §4.3). A row the scope withholds is one the device already holds
+// unchanged, and the frame naming it is what keeps it from being pruned. The
+// zero value is ScopeAll, which publishes the whole actor.
+//
 // The whole of it runs under the keyed (lens, actor) publish lock, revision
 // capture included — see lockPersonalActor.
-func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string) error {
+func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string, scope PublishScope) error {
 	actorKey := substrate.VertexKey("identity", identityID)
 
 	unlock, err := p.lockPersonalActor(ctx, identityID)
@@ -213,12 +222,19 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 			}
 			continue
 		}
+		// Framed unconditionally, written only when the scope admits it. The
+		// frame is the complete authoritative key set for this (lens, actor) at
+		// this revision, so a key the scope withheld a row for must still be
+		// named or the client prunes the copy it holds.
+		frameKeys = append(frameKeys, result.Keys)
+		if !scope.Admits(result) {
+			continue
+		}
 		err := adpt.Upsert(writeCtx, result.Keys, result.Row, revision)
 		p.recordProjectionWrite()
 		if err != nil {
 			return fmt.Errorf("pipeline: reproject personal actor %q: write: %w", identityID, err)
 		}
-		frameKeys = append(frameKeys, result.Keys)
 	}
 
 	// Every row is known stored before the frame describing them goes out: the
@@ -238,6 +254,22 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 	}
 	if err := publisher.PublishKeySet(ctx, identityID, frameKeys, revision); err != nil {
 		return fmt.Errorf("pipeline: reproject personal actor %q: keyset: %w", identityID, err)
+	}
+	// A SIGNALLED reprojection is real output, so its frame stamps the
+	// read-model's last-touch clock like any landed write: a drain signal, an
+	// interest change or the healer's content cycle each asked this lens a
+	// question, and the frame is the whole answer whenever the admitted row set
+	// is empty — an actor who may now read nothing is retracted BY the frame.
+	//
+	// A ScopeNone pass is not output. That is the standing healer turning over
+	// the population on its own clock, re-asking the inclusion gates rather than
+	// reacting to anything, and it reaches every registered personal lens every
+	// pass. Stamping here would advance all of them forever, which is exactly
+	// the signal LensProjectionStalled reads — lag sustained AND lastProjectedAt
+	// not advancing (lens-projection-liveness-design.md) — so a personal lens
+	// diverging silently could never be detected again.
+	if scope.Kind() != ScopeKindNone {
+		p.recordProjected()
 	}
 	return nil
 }

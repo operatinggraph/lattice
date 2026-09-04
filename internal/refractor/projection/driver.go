@@ -658,9 +658,10 @@ func InstallActorAggregate(
 	// every other installation decision above reads, and only for the lenses
 	// the classification admits.
 	//
-	// The inversion handed over is the descriptor's own AnchorFromKey — the
+	// The inversion handed over is the descriptor's own AnchorEntryFromKey — the
 	// declared, per-lens structural inverse of the key pattern this lens writes
-	// with, whose failure mode is a MISSING signal. The alternative the design
+	// with, naming both the actor and the one anchor whose grant moved, and
+	// whose failure mode is a MISSING signal. The alternative the design
 	// refuses is routing on the entry body's anchorType, which Contract #6
 	// §6.14 makes audit-only and whose failure mode is a signal delivered
 	// somewhere wrong. IsReadGrantProducer's fourth conjunct is what makes the
@@ -687,7 +688,7 @@ func InstallActorAggregate(
 		// where the fail-slow install becomes a fail-closed narrowing.
 		noteReadGrantProducerSink(r.ID, options.grantSink != nil)
 		if options.grantSink != nil {
-			p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
+			p.SetGrantChangeSink(options.grantSink, desc.AnchorEntryFromKey)
 			logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
 		} else {
 			// Fail-SLOW, and said out loud. The lens installs and its grants

@@ -429,12 +429,13 @@ type Pipeline struct {
 
 	// grantSink receives the actor behind every D1 read-grant liveness
 	// transition this lens's writes make, and grantAnchorFromKey is the
-	// lens's own target-key → anchor-vertex-key inversion used to name that
-	// actor. Both nil (the default) means this lens carries no grant-change
-	// edge — the fail-slow posture SetGrantChangeSink documents. They move
-	// together and are only ever set at construction time.
+	// lens's own target-key → (anchor vertex key, entry token) inversion used
+	// to name that actor and the one anchor whose grant moved. Both nil (the
+	// default) means this lens carries no grant-change edge — the fail-slow
+	// posture SetGrantChangeSink documents. They move together and are only
+	// ever set at construction time.
 	grantSink          GrantChangeSink
-	grantAnchorFromKey func(targetKey string) (string, bool)
+	grantAnchorFromKey func(targetKey string) (actorKey, entryID string, ok bool)
 
 	// personalPublishLocks holds one publish slot per actor currently being
 	// reprojected on this lens, and personalPublishMu guards the map itself.
@@ -600,6 +601,20 @@ type Pipeline struct {
 	// lastProjectedAt is the wall-clock of the last successful target write.
 	// Advances only on real output, so a caught-up-but-no-op consumer leaves it
 	// frozen even as lastAppliedSeq moves. Zero until the first projection.
+	//
+	// Real output is a landed row write, a Hydrate, and a SIGNALLED personal
+	// reprojection's keyset frame — a drain signal, an interest change or the
+	// healer's content cycle. Each answers something that happened, and the
+	// frame is the whole answer when the admitted row set is empty, because the
+	// frame is then the retraction.
+	//
+	// The standing healer's frames-only pass (ScopeNone) is NOT output and does
+	// not stamp this. That pass re-asks the inclusion gates on the healer's own
+	// clock across every registered personal lens, so stamping there would
+	// advance every personal lens's clock every pass forever — and this clock
+	// failing to advance while lag is sustained is exactly what
+	// LensProjectionStalled reads (lens-projection-liveness-design.md), the one
+	// signal that catches a personal lens diverging in silence.
 	lastProjectedAt time.Time
 
 	// projectionWrites counts every write this pipeline attempts against its
@@ -691,8 +706,13 @@ func (p *Pipeline) seedAppliedSeqFromAckFloor(ctx context.Context) {
 }
 
 // recordProjected stamps the read-model's last-touch clock. Called only after
-// a successful adapter write (Create/Update/Delete actually reaching the
-// target) — never on ack-and-skip or a write error.
+// real output has reached the target — a successful adapter write
+// (Create/Update/Delete), a Hydrate, or a SIGNALLED personal reprojection's
+// keyset frame (a drain signal, an interest change, the healer's content
+// cycle), whose frame is the whole answer when the admitted row set is empty.
+// Never on ack-and-skip, never on a write error, and never on the standing
+// healer's frames-only pass — see lastProjectedAt for why that last exclusion
+// is what keeps LensProjectionStalled able to fire on a personal lens.
 func (p *Pipeline) recordProjected() {
 	p.progressMu.Lock()
 	p.lastProjectedAt = time.Now()

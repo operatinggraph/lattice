@@ -337,7 +337,7 @@ func TestReprojectPersonalActor_PipelineFlushedBeforeFrame(t *testing.T) {
 	const n = 5
 	seedPersonalLeases(t, fx, personalActorA, n)
 
-	require.NoError(t, p.ReprojectPersonalActor(ctx, personalActorA))
+	require.NoError(t, p.ReprojectPersonalActor(ctx, personalActorA, ScopeAll()))
 
 	frames, rows, rowErrs := target.counts()
 	assert.Equal(t, n, rows)
@@ -355,6 +355,31 @@ func TestReprojectPersonalActor_PipelineFlushedBeforeFrame(t *testing.T) {
 	assert.Equal(t, "keyset", ops[n])
 }
 
+// TestReprojectPersonalActor_ScopeNoneFramesOverAnEmptyPipeline is the standing
+// healer's ordinary pass on the same pipelined path: the row loop admits
+// nothing, the opened pipeline is flushed empty, and the frame — the pass's
+// whole output — still goes out.
+func TestReprojectPersonalActor_ScopeNoneFramesOverAnEmptyPipeline(t *testing.T) {
+	fx := newPersonalSyncFixture(t)
+	target := fx.newTarget(t)
+	p := newPersonalPipelineOn(t, fx.coreKV, fx.adjKV, target)
+	ctx := context.Background()
+	seedPersonalLeases(t, fx, personalActorA, 5)
+
+	require.NoError(t, p.ReprojectPersonalActor(ctx, personalActorA, ScopeNone()))
+
+	frames, rows, rowErrs := target.counts()
+	assert.Zero(t, rows, "a frames-only pass writes no row")
+	assert.Zero(t, rowErrs)
+	assert.Equal(t, 1, frames)
+	assert.Zero(t, target.pendingWhenFramed(),
+		"the pipeline is opened and flushed even with nothing in it, so the frame's ordering guarantee is unchanged")
+
+	ops, _, _ := fx.envelopes(t, personalActorA, "reproject-none", 1)
+	require.Len(t, ops, 1)
+	assert.Equal(t, "keyset", ops[0], "the frame is the only thing this pass puts on the wire")
+}
+
 // TestReprojectPersonalActor_FlushFailureWithholdsTheFrame is the failure half.
 func TestReprojectPersonalActor_FlushFailureWithholdsTheFrame(t *testing.T) {
 	fx := newPersonalSyncFixture(t)
@@ -363,7 +388,7 @@ func TestReprojectPersonalActor_FlushFailureWithholdsTheFrame(t *testing.T) {
 	seedPersonalLeases(t, fx, personalActorA, 4)
 	fx.deleteSyncStream(t)
 
-	err := p.ReprojectPersonalActor(context.Background(), personalActorA)
+	err := p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll())
 
 	require.Error(t, err)
 	frames, _, rowErrs := target.counts()

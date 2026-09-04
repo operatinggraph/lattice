@@ -378,6 +378,9 @@ cost of one `personal.hydrate`, which the platform already pays on every device 
 
 ### 4.3 Increment 2 — the personal convergence sweep
 
+> **Amended 2026-09-04 by [personal-lens-delta-publication-design.md](personal-lens-delta-publication-design.md) §4.4:
+> a pass publishes the frame only; rows once per `PersonalContentHealInterval`.**
+
 A `PersonalSweeper`: one shared ticker that walks the `identity` population in bounded batches and calls
 `ReprojectPersonalActor` for each on every registered personal pipeline.
 

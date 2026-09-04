@@ -24,14 +24,16 @@ const (
 // told about, so a shred test can prove an announcement HAPPENED rather than
 // merely that the delete returned nil.
 type recordingShredSink struct {
-	mu     sync.Mutex
-	actors []string
+	mu      sync.Mutex
+	actors  []string
+	entries []string
 }
 
-func (s *recordingShredSink) GrantChanged(actorKey string) {
+func (s *recordingShredSink) GrantChanged(actorKey, entryID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.actors = append(s.actors, actorKey)
+	s.entries = append(s.entries, entryID)
 }
 
 func (s *recordingShredSink) seen() []string {
@@ -40,25 +42,33 @@ func (s *recordingShredSink) seen() []string {
 	return append([]string(nil), s.actors...)
 }
 
+// seenEntries is the entry token of each announcement, in the same order as
+// seen() — the half that decides how narrowly the consumer republishes.
+func (s *recordingShredSink) seenEntries() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.entries...)
+}
+
 // shredKeyPrefix is the per-entry key shape these tests project into:
 // cap-read.<actor vertex key>.<anchor NanoID>, the same bracketing a real
 // perEntry producer's descriptor renders.
 const shredKeyPrefix = "cap-read."
 
 // shredAnchorFromKey is the descriptor inverse the guarded arm announces
-// through — the same role OutputDescriptor.AnchorFromKey plays in production.
-// It strips the literal prefix and the trailing entry token, and reports false
-// for anything this pattern did not produce.
-func shredAnchorFromKey(targetKey string) (string, bool) {
+// through — the same role OutputDescriptor.AnchorEntryFromKey plays in
+// production. It strips the literal prefix, splits the trailing entry token off
+// as the anchor, and reports false for anything this pattern did not produce.
+func shredAnchorFromKey(targetKey string) (actorKey, entryID string, ok bool) {
 	rest, ok := strings.CutPrefix(targetKey, shredKeyPrefix)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	idx := strings.LastIndexByte(rest, '.')
 	if idx < 0 {
-		return "", false
+		return "", "", false
 	}
-	return rest[:idx], true
+	return rest[:idx], rest[idx+1:], true
 }
 
 // newShredPipeline builds a perEntry pipeline over one target adapter with the
@@ -270,7 +280,7 @@ func TestDeleteAllForActor_GuardedArmFallsBackWhenNoKeySignalled(t *testing.T) {
 		multiEnvelopeFn: fanOutEntryFn,
 	}
 	// An inverse that claims nothing: every per-key announcement declines.
-	p.SetGrantChangeSink(sink, func(string) (string, bool) { return "", false })
+	p.SetGrantChangeSink(sink, func(string) (string, string, bool) { return "", "", false })
 
 	for _, anchor := range []string{shredAnchor, "Nb7RvwKx3TmZpq2Hc9Ls"} {
 		keys := shredChildKey(shredActorA, anchor)
@@ -298,7 +308,7 @@ func TestDelete_DocModeFallsBackWhenNoKeySignalled(t *testing.T) {
 		actorDeleteKey:  func(actor string) string { return shredKeyPrefix + actor },
 		multiEnvelopeFn: fanOutEntryFn,
 	}
-	p.SetGrantChangeSink(sink, func(string) (string, bool) { return "", false })
+	p.SetGrantChangeSink(sink, func(string) (string, string, bool) { return "", "", false })
 
 	keys := shredChildKey(shredActorA, shredAnchor)
 	require.NoError(t, adpt.Upsert(ctx, keys, map[string]any{"key": keys["key"]}, 1))
@@ -306,4 +316,49 @@ func TestDelete_DocModeFallsBackWhenNoKeySignalled(t *testing.T) {
 	require.NoError(t, p.Delete(ctx, keys, shredActorA, math.MaxInt64))
 	require.Equal(t, []string{shredActorA}, sink.seen(),
 		"the doc-mode arm holds the actor too, so a declined per-key announcement must not end in silence")
+}
+
+// TestShredAnnouncements_CarryTheAnchorEachKeyNames pins the entry token on the
+// shred paths (personal-lens-delta-publication-design.md §4.3).
+//
+// The token scopes the consumer's republish, so the two arms must differ and
+// each must be right: a per-key announcement names the anchor its own key
+// names, and the actor-level fallback — which holds the actor and no key —
+// names none, so the consumer republishes the whole actor rather than guessing.
+func TestShredAnnouncements_CarryTheAnchorEachKeyNames(t *testing.T) {
+	ctx := context.Background()
+	anchors := []string{shredAnchor, "Nb7RvwKx3TmZpq2Hc9Ls"}
+
+	t.Run("a per-key announcement names its own key's anchor", func(t *testing.T) {
+		sink := &recordingShredSink{}
+		adpt := newMultiEntryTargetAdapter(t)
+		p := newShredPipeline(t, adpt, sink)
+		for _, anchor := range anchors {
+			keys := shredChildKey(shredActorA, anchor)
+			require.NoError(t, adpt.Upsert(ctx, keys, map[string]any{"key": keys["key"]}, 1))
+		}
+
+		require.NoError(t, p.DeleteAllForActor(ctx, shredActorA, math.MaxInt64))
+
+		require.Equal(t, []string{shredActorA, shredActorA}, sink.seen())
+		require.Equal(t, anchors, sink.seenEntries(),
+			"each announcement carries the trailing anchor of the key it retracted, in that order")
+	})
+
+	t.Run("the actor-level fallback names no anchor", func(t *testing.T) {
+		sink := &recordingShredSink{}
+		adpt := newMultiEntryTargetAdapter(t)
+		adpt.SetGuarded(false)
+		p := newShredPipeline(t, adpt, sink)
+		for _, anchor := range anchors {
+			keys := shredChildKey(shredActorA, anchor)
+			require.NoError(t, adpt.Upsert(ctx, keys, map[string]any{"key": keys["key"]}, 1))
+		}
+
+		require.NoError(t, p.DeleteAllForActor(ctx, shredActorA, math.MaxInt64))
+
+		require.Equal(t, []string{shredActorA}, sink.seen())
+		require.Equal(t, []string{""}, sink.seenEntries(),
+			"an announcement that names no key must widen the consumer's republish, never scope it")
+	})
 }

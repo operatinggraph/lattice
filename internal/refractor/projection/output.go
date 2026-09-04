@@ -390,25 +390,46 @@ func (d OutputDescriptor) OwnsKey(targetKey string) bool {
 // rendered pattern — so its inverse is delegated to anchorFromKeyPerEntry
 // rather than parsed as a bare vertex key.
 func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
+	actorKey, _, ok := d.AnchorEntryFromKey(targetKey)
+	return actorKey, ok
+}
+
+// AnchorEntryFromKey is AnchorFromKey plus the entry token a per-entry key
+// carries: the trailing NanoID naming the one anchor that key's row is about.
+//
+// entryID is EMPTY for every descriptor whose key names the ACTOR alone —
+// EntryKeyColumn unset, with OR without KeyColumn. The KeyColumn form's
+// trailing segment is the actor's own bare NanoID (§10.2 option (b): the type
+// segment comes back from the descriptor), so that key names no single anchor
+// either. A consumer scoping work by anchor reads the empty token as "the whole
+// actor". Both halves come out of the same pattern match, so a key one form
+// claims is a key the other claims.
+//
+// Its reader is the read-grant change edge, which hands the token to the
+// personal plane so a grant landing for one anchor republishes that anchor's
+// row rather than the actor's whole set (personal-lens-delta-publication-
+// design.md §4.3). The edge takes this as an injected closure rather than
+// calling the method: internal/refractor/pipeline cannot import this package.
+func (d OutputDescriptor) AnchorEntryFromKey(targetKey string) (actorKey, entryID string, ok bool) {
 	prefix, suffix, ok := d.patternParts()
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
 	rest, ok := strings.CutPrefix(targetKey, prefix)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	rest, ok = strings.CutSuffix(rest, suffix)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
 	if d.EntryKeyColumn != "" {
 		return d.anchorFromKeyPerEntry(rest)
 	}
 
-	actorKey := substrate.VertexPrefix + "." + rest
+	actorKey = substrate.VertexPrefix + "." + rest
 	if d.KeyColumn != "" {
 		// §10.2 Option (b): the suffix is the anchor's bare NanoID, so the type
 		// segment comes back from the descriptor.
@@ -416,9 +437,9 @@ func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
 	}
 	vtxType, _, parsed := substrate.ParseVertexKey(actorKey)
 	if !parsed || vtxType != d.AnchorType {
-		return "", false
+		return "", "", false
 	}
-	return actorKey, true
+	return actorKey, "", true
 }
 
 // anchorFromKeyPerEntry recovers the owning actor from a per-entry key's
@@ -439,22 +460,22 @@ func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
 // There is no keyColumn branch here: ParseOutputDescriptor refuses the
 // entryKeyColumn+keyColumn combination outright, so the actor suffix is
 // always the default <type>.<id> shape.
-func (d OutputDescriptor) anchorFromKeyPerEntry(rest string) (string, bool) {
+func (d OutputDescriptor) anchorFromKeyPerEntry(rest string) (actorKey, entryID string, ok bool) {
 	idx := strings.LastIndexByte(rest, '.')
 	if idx < 0 {
-		return "", false
+		return "", "", false
 	}
 	actorPart, entryID := rest[:idx], rest[idx+1:]
 	if !substrate.IsValidNanoID(entryID) {
-		return "", false
+		return "", "", false
 	}
 
-	actorKey := substrate.VertexPrefix + "." + actorPart
+	actorKey = substrate.VertexPrefix + "." + actorPart
 	vtxType, _, parsed := substrate.ParseVertexKey(actorKey)
 	if !parsed || vtxType != d.AnchorType {
-		return "", false
+		return "", "", false
 	}
-	return actorKey, true
+	return actorKey, entryID, true
 }
 
 // RealnessFiltered returns the subset of a collect array whose entries are

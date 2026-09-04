@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -64,9 +65,10 @@ const DefaultMaxDirtyActors = 10000
 // reaction. This registry is a second list, it is Refractor-internal, and it
 // crosses nothing.
 type PersonalPipeline interface {
-	// ReprojectPersonalActor re-evaluates this lens for one actor and
-	// publishes the authoritative keyset frame.
-	ReprojectPersonalActor(ctx context.Context, identityID string) error
+	// ReprojectPersonalActor re-evaluates this lens for one actor, publishes
+	// the rows the scope admits, and publishes the authoritative keyset frame
+	// naming every row the actor holds.
+	ReprojectPersonalActor(ctx context.Context, identityID string, scope pipeline.PublishScope) error
 	// OrderingTokenSeeded reports whether this lens's consumer has applied an
 	// event yet, i.e. whether a reprojection could publish a frame at all.
 	//
@@ -104,11 +106,15 @@ type PersonalPipeline interface {
 // directly with no intermediate queue.
 type Reprojector struct {
 	mu sync.Mutex
-	// dirty is the coalescing set: actors owed a reprojection. Created at boot
-	// with the Reprojector, emptied per actor as the drain takes each one, and
+	// dirty is the coalescing set: actors owed a reprojection, each mapped to
+	// the publication scope that reprojection owes them. Created at boot with
+	// the Reprojector, emptied per actor as the drain takes each one, and
 	// deliberately NOT carried across a restart — the sweep is the recovery for
 	// a process that died holding signals.
-	dirty map[string]struct{}
+	//
+	// The scope MERGES per pipeline.PublishScope's law as signals coalesce, so
+	// one reprojection publishes at least what every folded signal asked for.
+	dirty map[string]pipeline.PublishScope
 	// dropped counts signals refused, CUMULATIVELY for the process's life, and
 	// droppedReported is the high-water of that count which has actually been
 	// written to Health. The two are separate so a failed Health write loses
@@ -154,7 +160,7 @@ type Reprojector struct {
 // New builds a Reprojector with the default bound and drain interval.
 func New() *Reprojector {
 	return &Reprojector{
-		dirty:    make(map[string]struct{}),
+		dirty:    make(map[string]pipeline.PublishScope),
 		personal: make(map[string]PersonalPipeline),
 		maxDirty: DefaultMaxDirtyActors,
 		interval: DefaultDrainInterval,
@@ -443,11 +449,19 @@ func (r *Reprojector) DeregisterPersonal(ruleID string) {
 
 // GrantChanged records that one actor's read grants flipped
 // (pipeline.GrantChangeSink). actorKey is the full Contract #1 vertex key the
-// producer's own key-pattern inverse recovered.
+// producer's own key-pattern inverse recovered, and entryID is the anchor whose
+// grant moved — the trailing NanoID of a per-entry producer's key.
+//
+// The entry token decides the reprojection's publication scope: a named anchor
+// scopes the publish to that anchor's rows, since a grant for anchor X changes
+// the inclusion of exactly the rows anchored at X and nothing else's content
+// (personal-lens-delta-publication-design.md §4.3). An EMPTY token names no
+// single anchor — a non-per-entry producer, or the out-of-band shred that holds
+// the actor and no key — and publishes the whole actor.
 //
 // It never blocks and never does I/O: it runs inline on the producing
 // pipeline's consumer goroutine, synchronous with the write it describes.
-func (r *Reprojector) GrantChanged(actorKey string) {
+func (r *Reprojector) GrantChanged(actorKey, entryID string) {
 	// projection.PersonalActorType is the SAME symbol InstallPersonalLens
 	// configures the ActorEnumerator with, not a copy of the literal: the type
 	// this drops on and the type a personal lens actually enumerates cannot be
@@ -467,7 +481,11 @@ func (r *Reprojector) GrantChanged(actorKey string) {
 		return
 	}
 
-	r.enqueue(actorID)
+	if entryID == "" {
+		r.enqueue(actorID, pipeline.ScopeAll())
+		return
+	}
+	r.enqueue(actorID, pipeline.ScopeAnchors([]string{entryID}))
 }
 
 // InterestChanged records that one identity's Personal Lens Interest Set was
@@ -487,31 +505,42 @@ func (r *Reprojector) GrantChanged(actorKey string) {
 // and must invert it. GrantChanged's parse exists to RECOVER an id; there is
 // nothing here to recover.
 //
+// It enqueues ScopeAll: an Interest Set rewrite changes which of the actor's
+// rows are relevant at all, across every anchor, so there is no anchor to scope
+// the publish to.
+//
 // Like GrantChanged it never blocks and never does I/O: it runs inline on the
 // caller's goroutine, synchronous with the registration write it describes.
 func (r *Reprojector) InterestChanged(identityID string) {
 	if identityID == "" {
 		return
 	}
-	r.enqueue(identityID)
+	r.enqueue(identityID, pipeline.ScopeAll())
 }
 
 // enqueue is the shared body behind both change edges: coalesce, bound, count
 // the drop. One implementation so the two edges cannot drift in what they do
 // when the set is full — the direction where a divergence is invisible.
-func (r *Reprojector) enqueue(actorID string) {
+//
+// A signal for an actor already queued MERGES its scope into the waiting entry:
+// the entry was already owed a reprojection, so it is not a new one — it is not
+// weighed against the bound and it drops nothing. What the merge widens is what
+// that one reprojection will publish, per pipeline.PublishScope's law.
+func (r *Reprojector) enqueue(actorID string, scope pipeline.PublishScope) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, already := r.dirty[actorID]; already {
+	if existing, already := r.dirty[actorID]; already {
 		// The coalescing: N transitions for one actor between two drain ticks
-		// cost one reprojection, not N.
+		// cost one reprojection, not N — publishing the union of what they asked
+		// for.
+		r.dirty[actorID] = existing.Merge(scope)
 		return
 	}
 	if len(r.dirty) >= r.maxDirty {
 		r.dropped++
 		return
 	}
-	r.dirty[actorID] = struct{}{}
+	r.dirty[actorID] = scope
 }
 
 // QueueDepth reports how many actors are waiting for a reprojection — the
@@ -567,7 +596,7 @@ func (r *Reprojector) Drain(ctx context.Context) {
 		if drained%dropReportEvery == 0 {
 			r.reportDropped(ctx)
 		}
-		actorID, ok := r.take()
+		actorID, scope, ok := r.take()
 		if !ok {
 			// One last report on the way out, so a drop that landed after the
 			// final in-loop check is not held until the next tick.
@@ -576,9 +605,13 @@ func (r *Reprojector) Drain(ctx context.Context) {
 		}
 		// The failure count is the SWEEPER's input, not the drain's: the drain's
 		// posture on a per-lens failure is unchanged (log, raise the lens's
-		// health fault, do not re-enqueue), and the standing healer behind it is
-		// exactly what it hands the actor to.
-		_ = r.reprojectActor(ctx, actorID)
+		// health fault, do not re-enqueue), and the actor goes to the standing
+		// healer behind it. The lens's health fault is the SIGNAL that this
+		// reprojection failed; the healer is the repair, on its two cadences —
+		// its next pass re-frames the actor, which converges a revocation, and
+		// its content cycle republishes the rows, which is what converges a
+		// grant that landed.
+		_ = r.reprojectActor(ctx, actorID, scope)
 		drained++
 	}
 }
@@ -587,18 +620,18 @@ func (r *Reprojector) Drain(ctx context.Context) {
 // reports while a storm is in progress.
 const dropReportEvery = 50
 
-// take removes and returns one dirty actor. Map iteration order makes the
-// choice arbitrary, which is the right property here: every dirty actor is owed
-// the same work, and an arbitrary order cannot starve one behind another the
-// way a stable order could.
-func (r *Reprojector) take() (string, bool) {
+// take removes and returns one dirty actor with the scope its coalesced signals
+// accumulated. Map iteration order makes the choice arbitrary, which is the
+// right property here: every dirty actor is owed the same work, and an arbitrary
+// order cannot starve one behind another the way a stable order could.
+func (r *Reprojector) take() (string, pipeline.PublishScope, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for actorID := range r.dirty {
+	for actorID, scope := range r.dirty {
 		delete(r.dirty, actorID)
-		return actorID, true
+		return actorID, scope, true
 	}
-	return "", false
+	return "", pipeline.PublishScope{}, false
 }
 
 // reprojectActor re-drives one actor across every registered personal lens, and
@@ -618,7 +651,10 @@ func (r *Reprojector) take() (string, bool) {
 // the Health fault is still its own signal — but the sweeper cannot reach a
 // verdict without it. A lens deregistered mid-walk is skipped, not counted: it
 // is not a failure to heal a lens that no longer runs.
-func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) (failed int) {
+// The scope applies to every one of the actor's lenses. What selected the actor
+// says which of its rows moved, and that is a fact about the actor's graph
+// rather than about any one lens's cypher.
+func (r *Reprojector) reprojectActor(ctx context.Context, actorID string, scope pipeline.PublishScope) (failed int) {
 	for _, ruleID := range r.registeredRuleIDs() {
 		// Re-read the registry immediately before each call rather than trusting
 		// the snapshot. Walking one actor across every personal lens is a window
@@ -631,9 +667,9 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) (faile
 		if !live {
 			continue
 		}
-		if err := p.ReprojectPersonalActor(ctx, actorID); err != nil {
+		if err := p.ReprojectPersonalActor(ctx, actorID, scope); err != nil {
 			failed++
-			slog.Warn("grantchange: reprojection failed for one lens — continuing with this actor's remaining lenses; the convergence sweep is its healer",
+			slog.Warn("grantchange: reprojection failed for one lens — continuing with this actor's remaining lenses; the health fault below is the signal, and the convergence sweep is the repair: its next pass re-frames this actor and its content cycle republishes the rows",
 				"ruleId", ruleID, "actorId", actorID, "err", err)
 			// Checked again after the call, for the same reason: the
 			// reprojection itself spans the window, and a lens deregistered
@@ -656,10 +692,15 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) (faile
 // would be a second place for that posture to drift, over an identical job:
 // the two callers differ only in what selected the actor.
 //
+// The scope is the caller's: the sweeper decides its pass's scope once, from
+// the cycle kind it latched, and hands the same one to every actor in the pass.
+//
 // It returns how many of the actor's lenses could NOT be re-driven, which is
-// what turns the sweeper's pass from a progress stamp into a verdict.
-func (r *Reprojector) ReprojectNow(ctx context.Context, actorID string) (failed int) {
-	return r.reprojectActor(ctx, actorID)
+// what turns the sweeper's pass from a progress stamp into a verdict. The count
+// is a count of reprojections that did not happen, so it is the same number
+// whatever a reprojection published.
+func (r *Reprojector) ReprojectNow(ctx context.Context, actorID string, scope pipeline.PublishScope) (failed int) {
+	return r.reprojectActor(ctx, actorID, scope)
 }
 
 // registered reports the pipeline currently registered under ruleID, if any.

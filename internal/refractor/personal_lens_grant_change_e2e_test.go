@@ -413,13 +413,21 @@ func TestPersonalLensGrantChange_T6_SweepConvergesWithoutTheEdge(t *testing.T) {
 	// authoritative frame is republished for every swept identity on every tick,
 	// by construction, so a drain-until-quiet against a free-running sweeper
 	// never goes quiet and could not tell the frame under test from the next
-	// tick's. The ticker is unit-tested; what this proves is that ONE CYCLE
-	// converges, which is exactly T6's claim.
+	// tick's. The ticker is unit-tested; what this proves is that the sweep
+	// converges on the cadences the design gives it — inclusion through the
+	// frame on EVERY pass, the row itself on a CONTENT cycle.
 	// nil health lister: this test is about the sweep converging a cycle, and
 	// the instance census it would otherwise perform only feeds the derivation
 	// licence, which this fixture does not assert.
+	//
+	// Constructed here, immediately before its first cycle, because that is the
+	// premise the growth half rests on: a sweeper that has never completed a
+	// cycle is on its first, and the first cycle after construction is a
+	// content cycle (grantchange's own unit tests pin the latch).
 	sweeper := grantchange.NewPersonalSweeper(f.reprojector, f.h.coreKV, nil)
 	sweeper.SetBounds(100, 0)
+	require.True(t, sweeper.CycleCompletedAt().IsZero(),
+		"the premise of the growth half below: this sweeper has closed no cycle, so the next one is its boot content cycle")
 	sweepOneCycle := func(t *testing.T) {
 		t.Helper()
 		before := sweeper.CycleCompletedAt()
@@ -440,14 +448,21 @@ func TestPersonalLensGrantChange_T6_SweepConvergesWithoutTheEdge(t *testing.T) {
 	require.Empty(t, drainBriefly(t, cons),
 		"and nothing reaches the device on its own: this is the staleness window the sweep exists to close")
 
+	// This is the sweeper's FIRST cycle — asserted above, before any pass ran —
+	// and the first cycle after construction is a content cycle, so both halves
+	// of the claim are observable in one go: the frame names the newly-readable
+	// row (inclusion, which every pass carries) and the row itself is
+	// republished (content, which only a content cycle carries).
 	sweepOneCycle(t)
 	granted := drainUntilQuiet(t, cons)
 	assert.True(t, frameNames(granted, f.personalLens, "lease-grant-edge"),
 		"the sweep must publish a frame naming the newly-readable row, with no signal and no event on the lens's own subgraph")
 	assert.True(t, upsertHappened(granted, f.personalLens),
-		"and the row itself must reach the device")
+		"and the boot content cycle must carry the row itself to the device")
 
-	// --- the shrink direction, the one that fails open.
+	// --- the shrink direction, the one that fails open. It now runs on a
+	// frames-only cycle, which strengthens the claim: the retraction is carried
+	// by the frame alone, with no row republished behind it.
 	f.revoke(t)
 	f.awaitCapReadLiveness(t, false)
 	require.Zero(t, f.reprojector.QueueDepth(), "still no edge, still only the sweep")

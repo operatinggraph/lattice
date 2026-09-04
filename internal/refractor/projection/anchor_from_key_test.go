@@ -241,3 +241,111 @@ func TestKeyOwnershipRoundTrips_CatchesARepeatedPlaceholder(t *testing.T) {
 		t.Fatal("a repeated placeholder must not report a working inverse")
 	}
 }
+
+// AnchorEntryFromKey is the inverse the read-grant change edge is wired with.
+// It answers the actor half exactly as AnchorFromKey does, plus the one anchor
+// whose grant a per-entry key's row is about — the value that decides how
+// narrowly the personal plane republishes.
+
+func TestAnchorEntryFromKey_PerEntry_RecoversTheTrailingAnchor(t *testing.T) {
+	d := OutputDescriptor{
+		AnchorType:       "identity",
+		OutputKeyPattern: "cap-read.{actorSuffix}",
+		EntryKeyColumn:   "anchorId",
+	}
+	actor := "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	entryID := "Kx3TmZpq7RvwNsY2Hc9L"
+	key := d.BuildKey(actor) + "." + entryID
+
+	gotActor, gotEntry, ok := d.AnchorEntryFromKey(key)
+	if !ok {
+		t.Fatalf("AnchorEntryFromKey rejected a well-formed perEntry key %q", key)
+	}
+	if gotActor != actor {
+		t.Fatalf("actor: got %q, want %q", gotActor, actor)
+	}
+	// Compared against the key's own trailing segment rather than a constant,
+	// so an inverse that returned some other NanoID would fail here.
+	if want := key[strings.LastIndexByte(key, '.')+1:]; gotEntry != want {
+		t.Fatalf("entry: got %q, want the key's trailing segment %q", gotEntry, want)
+	}
+}
+
+func TestAnchorEntryFromKey_DocMode_NamesNoAnchor(t *testing.T) {
+	// A descriptor writing one document per actor names no single anchor, so
+	// the empty token is the honest answer and its consumer reads it as "the
+	// whole actor moved".
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap.roles.{actorSuffix}"}
+	actor := "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+
+	gotActor, gotEntry, ok := d.AnchorEntryFromKey(d.BuildKey(actor))
+	if !ok {
+		t.Fatalf("AnchorEntryFromKey rejected this descriptor's own key")
+	}
+	if gotActor != actor {
+		t.Fatalf("actor: got %q, want %q", gotActor, actor)
+	}
+	if gotEntry != "" {
+		t.Fatalf("entry: got %q, want empty — this key names no single anchor", gotEntry)
+	}
+}
+
+func TestAnchorEntryFromKey_KeyColumn_NamesNoAnchor(t *testing.T) {
+	// A keyColumn descriptor's key ALSO names the actor alone: its trailing
+	// segment is the actor's own bare NanoID, with the type segment supplied by
+	// the descriptor. Returning it as an entry token would hand the change edge
+	// a scope naming the actor as though it were an anchor — a set that matches
+	// no row, withholding every one of them behind a frame that still names them.
+	d := OutputDescriptor{
+		AnchorType:       "leaseapp",
+		OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
+		KeyColumn:        "entityId",
+	}
+	actor := "vtx.leaseapp.Lk2Pn6mQrtwzKbcXvP3T"
+	key := d.BuildKey(actor)
+
+	gotActor, gotEntry, ok := d.AnchorEntryFromKey(key)
+	if !ok {
+		t.Fatalf("AnchorEntryFromKey rejected this descriptor's own key %q", key)
+	}
+	if gotActor != actor {
+		t.Fatalf("actor: got %q, want %q", gotActor, actor)
+	}
+	if gotEntry != "" {
+		t.Fatalf("entry: got %q, want empty — the trailing segment is the actor's own id, not an entry", gotEntry)
+	}
+}
+
+func TestAnchorEntryFromKey_AgreesWithAnchorFromKey(t *testing.T) {
+	// The two must claim the same keys: AnchorFromKey is the convergence
+	// sweep's ownership test and AnchorEntryFromKey the change edge's routing,
+	// and a key one claimed and the other refused would make a row owned by
+	// the sweep unroutable by the edge.
+	//
+	// AnchorFromKey delegates to AnchorEntryFromKey today, so this passes by
+	// construction. It is here for the re-implementation that stops delegating:
+	// two inversions of one key shape drift, and the drift is silent on the wire.
+	descs := []OutputDescriptor{
+		{AnchorType: "identity", OutputKeyPattern: "cap.roles.{actorSuffix}"},
+		{AnchorType: "identity", OutputKeyPattern: "cap-read.{actorSuffix}", EntryKeyColumn: "anchorId"},
+		{AnchorType: "leaseapp", OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}", KeyColumn: "entityId"},
+	}
+	keys := []string{
+		"cap.roles.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap-read.identity.Hj4kPmRtw9nbCxz5vQ2y.Kx3TmZpq7RvwNsY2Hc9L",
+		"leaseApplicationComplete.Lk2Pn6mQrtwzKbcXvP3T",
+		"cap.roles.service.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap-read.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"",
+	}
+	for _, d := range descs {
+		for _, key := range keys {
+			wantActor, wantOK := d.AnchorFromKey(key)
+			gotActor, _, gotOK := d.AnchorEntryFromKey(key)
+			if wantOK != gotOK || wantActor != gotActor {
+				t.Fatalf("pattern %q key %q: AnchorFromKey = (%q,%v) but AnchorEntryFromKey = (%q,%v)",
+					d.OutputKeyPattern, key, wantActor, wantOK, gotActor, gotOK)
+			}
+		}
+	}
+}
