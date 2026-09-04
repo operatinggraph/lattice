@@ -1,6 +1,6 @@
 # Personal lens whole-actor recompute cost — per-evaluation gate scope, batched engine reads, pipelined publishes
 
-**Status:** ✅ Winston-ratified — build-ready (2026-09-03). No architectural fork, no frozen-contract change
+**Status:** ✅ SHIPPED (2026-09-03) — `0712aa14` · `03bcfca1` · `84f9ae8d` · `e5aa6ca2`; live-measured (§10.1). Ratified by Winston, build-ready, 2026-09-03. No architectural fork, no frozen-contract change
 (Andrew, at selection: *"I don't anticipate arch fork, or contract change, so plan and build in one fire"*;
 the 2026-08-20 ratification split routes a fork-free, contract-free design to Winston). **Board row:**
 `[Refractor] edgeInstances is licensed and derives, yet pays ~15 s per pattern-bound event`
@@ -364,6 +364,13 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 | Inc 1 (`0712aa14`, cycled 16:06, read 16:06–16:16, 646 msgs) | **4.72 s / 7.85 s** | — (none in window) | 0.00 s (the window's roots were the supersession purge's soft-deletes) | 116 k → 29 k in 10 min |
 | Inc 1+2 (`03bcfca1`, cycled 16:23, read 16:23–16:33, 651 msgs; licensed at 16:25) | **3.99 s / 7.25 s** | — | 0.00 s | 29 k → 28 k (the window was 86 % `providedTo` events) |
 | Inc 1+2+3 (`84f9ae8d`, cycled 16:50, read 16:50–17:00, 685 msgs; licensed at 16:52) | **3.83 s / 6.96 s** | — | 0.00 s | 27 k → 26 k; the 24-sample profile at this build: 13 in the grant-set drain, 10 in the marked hub's link drain, 0 in publishes — Inc 4's territory |
+| **Inc 1+2+3+4 (`e5aa6ca2`, cycled 17:37, read 17:38–17:48, 9,902 msgs; licensed at 17:39)** | **0.24 s / 0.47 s (max 0.93 s)** | — | 0.00 s | **23.7 k → 13.1 k in 10 min (~16.5 msg/s; 1,980 pattern-bound events at ~3.3/s)** — the §13.1 bar (p50 < 1 s, p90 < 2 s, ≥ 1 msg/s) met with margin |
+
+**C6 re-run on the shipped resolution (17:50, read-only, the widest actor, three runs each):** the two
+`cap-read` wildcards (3,671 keys) **54–80 ms** (was 3.0–3.4 s on the drain); the marked hub's two
+`providedTo` filters (3,638) **75–118 ms** (was 0.8–2.7 s). Per event that is ~0.2 s of reads for the
+widest actor, which is the median the table above shows. The ordering-guard sweep warnings in the window
+(11) are the pre-existing class the earlier log summaries carried (24 at 13:5x), unchanged by this fire.
 
 ## 11. Decomposition for the Steward
 

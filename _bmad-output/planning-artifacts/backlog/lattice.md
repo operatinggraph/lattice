@@ -111,7 +111,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Refractor] Three lenses are underivable — an untyped `-[r]->` matches any relation** | `objectLiveness`/`objectAttachments` and loftspace's Protected `objectIdentityAttachmentsRead` bind an untyped hop, so the anchor index refuses them and every neighbour event runs the relation-blind walk. The refusal's reason is false the way the varlength one was — the walk filters fetched edges, it never indexes by relation name. | ★★ | L | ✅ Andrew-ratified · [design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md) |
-| **[Refractor] `edgeInstances` is licensed and derives, yet pays ~15 s per pattern-bound event** | The derivation names one actor per service/`providedTo`/`.outcome` event; the actor is 1,164–3,638 rows wide and each row pays a D1 point read + key listing, an Interest Set read and two synchronous publishes in series (measured), so it drains at ~0.5 msg/s (71 k backlog). | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md) · next: Inc 3 pipelined publishes, Inc 4 list-then-get past the multi-get cap |
 | **[Refractor] A personal lens republishes its whole actor per event** | One instance changes and every row of the actor (up to 3,638 live) is re-upserted to the device; the two widest actors' SYNC subjects sit at the 10 k per-subject cap, so a device offline across three events re-hydrates. | ★★ | L | 📐 needs designer pass · no-pattern: delta publication for a personal lens (whole-actor frame by ratified design; sub-actor seeded evaluation + per-row delete, or a per-actor publication memo) · [measured](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md) §1.3 |
 
 ### AI-native
@@ -146,6 +145,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-03 · `e5aa6ca2` · [Refractor] `edgeInstances` ~15 s per pattern-bound event → 0.24 s live: gate scope, batched reads, pipelined publishes, resolve-then-get ([design](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md))
 - 2026-09-03 · `c76522e` · [CI] leaseconvergence lens-activation wait root-caused (CoreKVSource's serial MaxPrefetch:1 replay) and fixed, 25s→90s — board row 137(b) resolved, full CI green (run 33816206576)
 - 2026-09-03 · `689eb0c0` · [lease-signing] TombstoneSupersededLeaseServiceInstance (ownership-checked, operator-only) + purge of 12,245 superseded background checks on the dev stack, 0 rejected
 - 2026-09-03 · `7e2ef6b2` · [lease-signing] a background check stays valid 30 days (not 5 min) and the op-meta targets are labeled — the runaway re-check loop stops; leaseApplicationComplete narrows to 7 labels
