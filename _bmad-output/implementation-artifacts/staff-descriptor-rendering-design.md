@@ -90,11 +90,13 @@ vertex field (`build.go:279-280`), which resolves read-free from the anchor body
 (`ruleengine/full/values.go:23-30`) and survives the body-preserving tombstone
 (`step8_commit.go:522-527`) — so the anchor-tombstone Delete
 (`ruleengine/full/anchor_delete.go:40-135`, gated at `pipeline/evaluate.go:246-252`) removes the
-row. **The cypher must NOT contain a `WITH` clause**: `anchorProjectionShape`
-(`anchor_delete.go:179-183`) refuses any query carrying one, which silently disables both the
-tombstone Delete and the filter-retraction presence check — and the tempting copy-paste source,
-`edgeCatalogTail`, OPENS with `WITH op, role` (`lenses.go:588`). Copy its RETURN columns, never
-its opener. (The `capabilityRoleIndex` precedent this design borrows its IntoKey from is itself
+row. **The key column must resolve to the anchor's own binding — through any `WITH`** (superseded
+2026-09-03 by [with-alias-anchor-closure-design.md](with-alias-anchor-closure-design.md): `anchorProjectionShape`
+resolves a key column back through the `WITH` aliases and refuses only a rename of a pattern variable, a
+dropped-then-re-read name, or a key column that resolves to anything but the anchor). The tempting copy-paste
+source, `edgeCatalogTail`, OPENS with `WITH op, role` — a bare carry, which keeps the retraction; what silently
+kills it is carrying the anchor under a different name (`WITH op AS o`), mutation-tested in
+`packages/edge-manifest/lens_cypher_test.go`. (The `capabilityRoleIndex` precedent this design borrows its IntoKey from is itself
 in the lingering class — its key column is not anchor-derived — so opCatalog's anchor-keyed shape
 is deliberately safer than its precedent.)
 

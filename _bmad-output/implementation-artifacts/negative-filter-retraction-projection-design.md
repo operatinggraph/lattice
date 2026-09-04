@@ -22,8 +22,9 @@ design's assumptions (all conservative, none semantic):
   `VariableRef` to silent nil (the OPTIONAL MATCH contract), so the shipped tombstone derivation could
   return `ok=true` with a nil-valued neighbor key column (a wrong partial composite key, latent since
   `679fe25`). Fixed structurally: `exprReferencesOnlyVariable` rejects any key column referencing a
-  non-anchor variable; WITH-bearing queries (name-rebinding defeats the scope check) and aggregator key
-  columns (read-free mode fabricates single-row values) are also never derivable; nil-valued and empty
+  non-anchor variable (judged on the expression RESOLVED through any `WITH` aliases —
+  [with-alias-anchor-closure-design.md](with-alias-anchor-closure-design.md)); aggregator key columns
+  (read-free mode fabricates single-row values) are never derivable; nil-valued and empty
   key maps fall through.
 - **The plain link arm applies the link to adjacency itself** (both directions, link key as EdgeID)
   before re-executing — §2.1's "adjacency must already be updated (it is)" ignored the cross-consumer

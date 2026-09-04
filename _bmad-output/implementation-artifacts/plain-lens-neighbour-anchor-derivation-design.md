@@ -424,14 +424,16 @@ an `AnchorProjectionKey`-`ok=false` lens *"is simply not checked in this directi
 that tolerates a gap is not a write licence.
 
 **The conjunct, and it already exists:** `AnchorProjectionKey`'s **`ok` contract**
-(`anchor_delete.go:53-60`) — no `WITH`, and every key column resolving read-free from the anchor binding to a
+(`anchor_delete.go:53-60`) — every key column resolving read-free from the anchor binding to a
 scalar, *"which holds exactly when the lens projects at most one row per anchor, keyed by the anchor."* That
 is precisely per-anchor closure, it is already computed, already tested, and §6's Delete cannot fire without
 it anyway. The licence takes it whole.
 
 It is deliberately **sufficient rather than necessary**: a neighbour-keyed lens whose rows happen to be
 partitionable by anchor is refused too, and keeps today's behaviour. Widening it needs a real partitionability
-derivation, which is a separate design and not this one. The three `auditEnrolment` conjuncts that *do*
+derivation, which is a separate design and not this one. (The `WITH` half of the old refusal was never about
+partitionability and was lifted 2026-09-03 — [with-alias-anchor-closure-design.md](with-alias-anchor-closure-design.md)
+resolves a key column through its aliases; the partitionability half stands.) The three `auditEnrolment` conjuncts that *do*
 transfer — no `$now`/`$projectedAt` (`CompiledRule.ReferencesParam`, that design's §4.5 primitive), no secure
 decryptor, not actor-aware — are carried alongside it, so the two predicates overlap without one standing in
 for the other.
@@ -969,7 +971,7 @@ the reasoning above, not wave it through.
   source. **Open engineering decision, resolved here:** `AnchorProjectionKey` requires a concrete
   `eventKey`/`eventType`/`eventProps` (it evaluates key-column expressions against a live binding), so it
   cannot be called as-is from a `rs`-only, no-event context like the licence predicate. Its **first**
-  structural half — no `WITH` clause (`:75-79`), anchor found + label match (`:95-109`), and every key
+  structural half — a `WITH`-scope verdict plus alias resolution of each key column (`withalias.go`), anchor found + label match, and every key
   column's expression passing `exprReferencesOnlyVariable(expr, anchorVar)` (`:145-152`, itself defined
   `:189-256`) — is decidable from the **compiled rule alone**, with no event data: `exprReferencesOnlyVariable`
   never inspects a value, only an expression's variable references. The **second** half (`:154-171`:

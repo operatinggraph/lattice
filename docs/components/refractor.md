@@ -773,7 +773,15 @@ row set** — its `WHERE` predicate flipped, a keyed aspect was tombstoned, a re
 link was removed — emits a Delete on that key. The safety keystone: the derivation
 succeeds **only** for a one-row-per-anchor, anchor-keyed lens (every key column
 resolves read-free from the anchor binding alone; a key column referencing a
-**non-anchor variable is rejected structurally**), so a **neighbor-keyed composite**
+**non-anchor variable is rejected structurally**). A `WITH` between the RETURN and the
+pattern does not by itself refuse: the structural half (`anchorProjectionShape`) first takes
+the memoized `WITH`-scope verdict (`withscope.go` — a renamed pattern variable, a
+dropped-then-re-read name, or an unmodelled clause refuses) and then **resolves each key
+column back through the `WITH` aliases** to an expression over pattern variables
+(`withalias.go`, default-deny on any node it does not model), so `nanoIdFromKey(entityKey)`
+behind `WITH app.key AS entityKey` is judged as `nanoIdFromKey(app.key)`. Corpus verdicts are
+pinned per lens by `plain_with_alias_closure_census_test.go` (bucket F = the `WITH`-bearing lenses
+that are closed: `leaseApplicationsRead`, `renewalsRead`, `clinicPatientsRead`). A **neighbor-keyed composite**
 lens (e.g. `read_landlord_lease_applications`, keyed `(app_id, landlord_id)`) falls
 through to the previous linger behaviour — never a wrong or partial Delete. A
 never-matched anchor emits an idempotent Delete against an absent key — a no-op on a

@@ -497,7 +497,15 @@ normally.
 memoized `withScopeReject` verdict, the two-step `anchorProjectionShape`, the census test, the
 `plain_scanroot` re-pin, the unit table, the unparsed-rule arm, and the re-aimed edge-manifest mutation.
 No package or lens declaration changes. Green means: the three F lenses' closure verdicts move and nothing
-else does.
+else does. **What Inc 1 already changes at runtime (amended 2026-09-03, build):** because the four consumers
+share the predicate, the moment Inc 1 lands (a) `leaseApplicationsRead` is *licensed* for narrowing ahead of
+Inc 2's proof, and (b) `clinicPatientsRead`'s **anchor-type** (patient) events take the read-free anchor
+Delete at `evaluate.go:246` / `:320` instead of the whole-corpus rescan + `applyDiffRetraction` — its
+`DiffRetraction` keeps running on every **neighbour** event (`AnchorProjectionKey` is `ok == false` for a
+non-anchor label, so the `!ok && p.diffRetraction` arm still fires there) until Inc 3 removes the
+declaration. A patient event can only stale that patient's own row, which the anchor path now retracts
+precisely, so no row class loses its transport in between; `TestClinic_TombstonePatient` and the
+`clinic-domain` retraction tests stay green on Inc 1 as-is.
 
 **Increment 2 — the payoff, observed.** The `leaseApplicationsRead` withdraw-retraction e2e and the
 narrowing proof, plus the live measurement of §11. Nothing to build in the engine; this increment exists
@@ -678,4 +686,10 @@ load-bearing. Landing shape: **each increment lands on `main`** — Inc 1 alone 
 predicate that only admits shapes it proves), Inc 2 adds a test and a measurement, Inc 3 a declaration removal
 behind an observed cheap transport.
 
-**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-with-alias-<ts>` · done: brief · next: Inc 1.
+**Premise 1 observed live (2026-09-03 20:24, HEAD `9190f85a`, old binary).** Fresh `CreateLeaseApplication`
+`vtx.leaseapp.EUjkWNbxboP5fkysbWs5` (applicant `vtx.identity.xd79qNNcy9MDtatPNcVZ`, unit
+`vtx.unit.zNaJNVmmsQTA3AfJXu4E`): row present in `read_lease_applications` within 5 s (the lens is not
+backlogged), `WithdrawLeaseApplication` accepted, root `isDeleted:true`, and the row still `is_deleted=false`
+after 3 min — the stale-row defect is live, by the root-tombstone arm (`evaluate.go:246`), not by lag.
+
+**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-with-alias-20260903202056` · done: brief · next: Inc 1.
