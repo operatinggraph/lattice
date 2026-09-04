@@ -66,10 +66,13 @@ round trips. Nothing here is compute.
 ### 1.3 The harm this design does NOT retire (the follow-on's measurement)
 
 Each event re-publishes every row of the actor. The two widest actors' SYNC subjects sit at the stream's
-10,000-message per-subject cap (C5), i.e. under three events of history, and the stream holds 736 k deleted
-messages against its 512 MiB cap. A device offline across three events must re-hydrate. That is the harm a
-delta publication would retire; it is not what makes the consumer drain at 0.5 msg/s, and it is filed
-separately (§12).
+10,000-message per-subject cap (C5), and the stream holds 736 k deleted messages against its 512 MiB cap.
+*(Corrected 2026-09-04 by the follow-on's measurement — [personal-lens-delta-publication-design.md](personal-lens-delta-publication-design.md)
+§1.1/§3: the widest subject's 10,000 messages are ~3,000 events of 2 upserts + 1 frame each, because 40 of 40
+sampled `providedTo` instances are tombstoned — the engine walks 3,638 edges to publish 2 rows. The wire flood is
+`edgeCatalog` (91 % of the stream's bytes) and the healer/drain passes (39 % of messages); the "under three
+events of history" inference this paragraph made was wrong.)* That is the harm a delta publication would retire;
+it is not what makes the consumer drain at 0.5 msg/s, and it is filed separately (§12).
 
 ## 2. Grounding ledger (verified in code this fire)
 

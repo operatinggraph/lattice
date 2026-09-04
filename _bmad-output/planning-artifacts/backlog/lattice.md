@@ -112,7 +112,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Refractor] Three lenses are underivable — an untyped `-[r]->` matches any relation** | `objectLiveness`/`objectAttachments` and loftspace's Protected `objectIdentityAttachmentsRead` bind an untyped hop, so the anchor index refuses them and every neighbour event runs the relation-blind walk. The refusal's reason is false the way the varlength one was — the walk filters fetched edges, it never indexes by relation name. | ★★ | L | ✅ Andrew-ratified · [design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md) |
-| **[Refractor] A personal lens republishes its whole actor per event** | One instance changes and every row of the actor (up to 3,638 live) is re-upserted to the device; the two widest actors' SYNC subjects sit at the 10 k per-subject cap, so a device offline across three events re-hydrates. | ★★ | L | 🏗️ designing · owner: Designer fire 2026-09-04 · no-pattern: delta publication for a personal lens · [measured](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md) §1.3 |
+| **[Refractor] A personal lens republishes its whole actor per event** | Every evaluation republishes the actor's whole row set: `edgeCatalog` alone is 91 % of SYNC's 512 MiB, healer/drain passes are 39 % of messages, the byte cap binds at ~12 h for every actor and the audit stream holds one hour. Fix: publish rows by provenance, frame as today; healer frames per pass. | ★★ | L | ✅ ratified (Winston-adjudicated 2026-09-04) · [design](../../implementation-artifacts/personal-lens-delta-publication-design.md) |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |

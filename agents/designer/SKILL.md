@@ -120,6 +120,11 @@ census against it as you would against a stranger's.
   resident heap; "0.3 % of the cap" was orthogonal to the harm. Then **count the instances the bad outcome
   needs**: if it takes two groups to merge and every producer's head binds exactly one actor, the consumer
   cannot express the failure — a structural fail-closed worth a paragraph. (2026-08-02 · grouping key)
+  **Second sighting — a harm filed in one stage's units is a hypothesis about the next stage's.** "3,638 rows
+  per event ⇒ under three events of history" counted *evaluated bindings*; the wire carried two upserts and a
+  2-key frame, because 40/40 sampled neighbours were tombstoned, and the real flood was a different lens on a
+  different path (91 % of bytes). Before designing for a transport harm, read the transport: bucket the live
+  subject by `(op, lens, revision)` and attribute bytes by writer path. (2026-09-04 · personal-lens delta)
 - **Multiply the row's own numbers by a measured unit cost; an order-of-magnitude shortfall is a term on a path
   the row never named.** ~19 hops × 15–20 ms could not reach 250 ms; the cost was `kv.Read`'s lazy `instanceOf`
   fall-through. Run the read-only spike before the shape hardens and ship its numbers as a §measurement table.
