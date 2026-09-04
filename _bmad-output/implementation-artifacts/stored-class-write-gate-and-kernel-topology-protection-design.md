@@ -799,3 +799,29 @@ matching, no positive epoch pre-check.
 **Scope-diff gate:** parts 2–5 trace item-by-item to §2/§9; nothing widened; the only substitution is a path correction
 (bootstrap, not processor, for two files). Dependencies re-verified both ways: Inc 2 needs Inc 1 (the pin reds otherwise);
 Inc 3 needs Inc 2's `prior`-carrying `Commit` only for file locality, not semantics.
+
+### Checkpoint (2026-09-04, after Inc 1 + Inc 2)
+
+- **Landed on `main`:** Inc 1 `4f43d19d` (the three `permittedCommands` lists; wellness 0.22.21, cafe 0.11.31), Inc 2 `160d9d6f`
+  (the gate, the read split, the heal path, fifteen doubles, privacy-base 0.15.8 + lease-signing 0.31.25 comments). All four
+  packages diff-applied on the dev stack (`make reinstall-package`, upgrade committed each) BEFORE `make cycle-processor`
+  (binary 10:07:26 PT); no refusal in the Processor log after the cycle. Worktree `../lattice-wt-stored-class`, branch
+  `fire/stored-class-write-gate`, kept for Inc 3. Landing shape: each increment on `main` when green (§12 part 5).
+- **Inc 2 review classification** (three cold reviewers over the build — blind / edge-case / acceptance — 0 blocking, 10 major,
+  ~12 minor, all folded; one cold reviewer over the fix-round mechanism, pending at this checkpoint): *design-gap* ×5 — the
+  corrupt-body rule removed its own heal path (the §11 M2/C3 doctrine applied to Inc 3 and violated in Inc 2); the hoisted root
+  snapshot widened the protected-root guard's window for a key the batch never conditions; the fault-before-ok order turned an
+  admitting resolution into a redelivery; `committedOnly` stopped one hop short (`classOf`); the auto-complete injection and
+  the `piiKey` create were an unstated exemption; *census* ×1 — the doubles census still carried the parameter-name clause it
+  had been corrected for (15 sites, not 8); *test* ×6 — the `classType` pre-pass, the `classOf` arm, the stored walk's budget,
+  the OCC re-read and the retryable disposition were each revertible with the suite green, and the top-up fixture carried a
+  shape the platform never emits; *convention* ×4 — one history comment, stale step-8 comments, a step-5.5 refusal logged as
+  step 6, four privacy-base comments asserting the closed gap as a property (one inside installed content — version bump).
+- **Dossier routing (close pass will confirm):** Processor — *a fixed-count claim about doubles survives a corrected census
+  only if the CORRECTED command is the one re-run* (second sighting of the census-pattern class on this item alone); the
+  test-harness class *"a mechanism revertible with the suite green"* recurred five times in one increment — the fire brief's
+  checklist #3 was copied in and still not walked per mechanism; a `scripts/lint-*` gate cannot see it, so the mandated shape
+  is: the builder's report lists every guard/branch the increment introduces with its reverting test, and a guard with no
+  test is a report defect before it is a review finding.
+- **Next: Inc 3** (§9 row 3) — kernel topology links protected; then the cumulative close pass over the item's whole diff, the
+  dossier lines, and the row closes.
