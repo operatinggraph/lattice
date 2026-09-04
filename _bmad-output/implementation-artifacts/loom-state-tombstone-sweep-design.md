@@ -656,3 +656,78 @@ reader rows; and that no frozen contract changes.
 | The parent's ratified start-time backfill shape | `loom-instance-enumeration-bounding-design.md` §6 |
 | Contract #10's permanent-record and redrive promises | `docs/contracts/10-orchestration-substrate.md` § *loom-state — Loom's instance promises* |
 | Contract #4: a rejected op lands no tracker | `docs/contracts/04-idempotency-tracker.md` §4.4 |
+
+---
+
+### Tombstone-sweep fire brief (build note, 2026-09-03)
+
+**1. Scope sentence (verbatim, board row + §3).** *`loom-state`'s delete tombstones are five sixths of its growth
+— sweep them.* Andrew: *"the cursor stays, the tombstones go."* Green bar: every Loom removal on `loom-state`
+is a TTL'd purge (no new DEL markers); the 61,731 legacy DEL markers convert at start, paced, CAS'd; `redrive`
+resumes a deadline-failed instance at the failed cursor; a lint gate refuses every permanent-subject removal
+idiom in `internal/loom`; `verify-kernel` asserts the bucket's rollup/TTL posture; all gates green; Loom
+cycled live and the conversion observed.
+
+**2. Verified touch-list (scout, live 2026-09-03).**
+`internal/substrate/batch.go:56-70` (`BatchOp`), `:142-148` (delete render), `:208-211` (size exemption) ·
+`internal/substrate/kv.go:350-364` (`KVPutWithTTL`, the single-publish-with-header precedent), `:372-422`
+(`KVDelete`/`KVDeleteRevision`/`KVPurge`), `:451-463` (`IsRevisionConflict`, already matches `10071`) ·
+`internal/loom/state.go:407,433,467` (batch deletes), `:556,569` (`KVDelete`s), `:263-269` + `:484-489`
+(comments to rewrite), `:388-475` (`transition`), `:422-427` (token `CreateOnly`) · `internal/loom/actuator.go:124`
+· `internal/loom/engine.go:256-276` (`Start` seed; launch point), `:432-443` (resume gate), `:880,1015,1020,
+1080,1084,1143,1170,1339,1402` (derivations — untouched), `:901,1043,1122,1150,1180` (`transition` callers), `:32-36`
+(`userTaskGrantTTL`, the constant's neighbour) · `internal/loom/control.go:318-372` (`RedriveInstance`) ·
+`internal/loom/control_internal_test.go:404-442` (happy path to rewrite), `:556-597` (CAS test), `:66-72`
+(`putInstance`) · `internal/loom/state_internal_test.go:19-26` (bucket fixture: `LimitMarkerTTL: time.Second`) ·
+`internal/substrate/batch_size_test.go:75-96` (`Delete` batch test to mirror) · `internal/bootstrap/verify.go:252-
+264` + `scripts/verify-kernel.go:303-310` (assertion loops) · `scripts/lint-conventions.go:1426,1434,1455`
+(scoping), `:1264-1272` (`finding`), `:3344+` (`selfTest`) · `docs/components/loom.md:308,321,476,497-503,525` ·
+`internal/loom/doc.go:41-45`. Design citations re-verified by the scout: no stale anchors.
+
+**3. Precedents to mirror.** Purge header shape: `nats.go` `jetstream/kv.go:1153-1168` (the client's own
+`Purge`+`PurgeTTL`+`LastRevision`); single-publish-with-header: `kv.go:350-364`; batch member render:
+`batch.go:142-148`; provisioning assertion: `verify.go:252-264`; start-time off-path pass: the parent design
+§6 (unbuilt — greenfield in code, ratified in shape); lint gate: `checkMaxReconnectsDeclared`
+(`lint-conventions.go:2210-2290`) + its self-test cases; real-shaped redrive test: the CAS test at `:556-597`
+seeds through `createInstance` + `transition`. **Read the twenty lines above each** (mirrors-X rule).
+
+**4. Increment order + green checks.**
+Inc 1 → `go test ./internal/substrate/ -run 'AtomicBatch|Purge' -count=1` + `go test ./internal/loom/ -count=1`
++ `go test ./internal/bootstrap/ -count=1`. Inc 2 → `go test ./internal/loom/ -run 'Redrive' -count=1` with the
+mutation proof (restore `CreateOnly` on the redrive path → (a) fails with `10071`). Inc 3 → `go test
+./internal/loom/ -run 'Sweep|Tombstone' -count=1`. Inc 4 → `go run ./scripts/lint-conventions.go` (self-test
+runs first) + `STRICT=1`. Fire → `go build ./... && make vet && golangci-lint run ./... && go run
+./scripts/lint-board.go && make verify-kernel` (needs the live stack) + full `go test ./... -p 4` +
+`make test-*-convergence` / `leaseshortwindow` tag (the leaseconvergence harness constructs a real `Engine`).
+
+**5. In-scope gotchas.** No `packages/` edits (no version bump). `substrate.Message` carries no headers — do
+not try to key the deadline handler on the marker reason. `Conn.bucket` caches the KV handle. The rollup in a
+batch must be the subject's first occurrence — `transition` already guarantees it. `LimitMarkerTTL` ≥ 1 s;
+`Nats-TTL` seconds granularity (`tombstoneTTL = time.Minute` renders `1m0s`, accepted by `time.ParseDuration`
+server-side). Health-KV emission untouched. **Loom dossier (verbatim):** (1) *A `CreateOnly` write against a key
+that was ever DELETED can never commit again … `redrive` re-created the pin this way* — this fire rewrites the
+entry per §3.4. (2) *A fixture that hand-seeds `loom-state` cannot reach the states a real transition leaves
+behind* — seed through `createInstance` + `transition` + `fail`, assert the precondition. (3) *Before removing
+anything the cursor's PRESENCE discharges, enumerate every obligation* — the cursor is untouched here. (4)
+*`loom-state` lifetimes are specified in `10-orchestration-substrate.md`, not `10-orchestration-loom.md`.* (5)
+*`require`/`assert` inside a `require.Eventually` predicate fails from a non-test goroutine* — predicates return
+bool. **Substrate dossier (verbatim, applicable):** *The batch CAS is per-subject*; *A multi-round or incremental
+read must RETRACT, not merely skip, a tombstone* — `KVListTombstones` is single-round by construction; say so in
+its doc comment. **Standing checklist** (`agents/fire-brief-template.md`): 1 lifetime table (§5 done); 2 every
+census/citation is a premise (scout re-verified); 3 negative test needs its positive vector + revert-proof —
+binds Inc 2 hardest (the mutation proof is the deliverable); 4 removal needs transport + observer (§4); 5 one
+deterministic key, one writer (the redrive put under CAS, §3.2); 6 precedent may carry debt (the happy-path
+test is the debt).
+
+**6. Adjacent finds.** Filed before the first edit: the 1 s marker-TTL delivery window (★★★ row, §11). Nothing
+else; a builder that finds more reports it in its final report, never files or widens.
+
+**7. Non-goals.** No change to the cursor, its lifetime, or the parent design's listing increments; no
+control verb; no `Config` knob for the TTL; no header plumbing on `substrate.Message`; no change to any other
+component's `KVDelete` usage; no contract edit.
+
+**Scope-diff gate:** every touch above traces to §3's four increments; no widening; the only dependency
+(bucket posture) is asserted rather than assumed. **Landing shape:** hold the worktree, merge once when the
+whole fire is green (Inc 1 alone would leave the redrive defect time-keyed, §3.2).
+
+**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-loom-tombstones-20260903215143` · done: brief · next: Inc 1.
