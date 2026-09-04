@@ -1414,7 +1414,14 @@ greenfield redesign. Cover, as the feature warrants:
   anecdotes; that detail lives in `docs/components/<c>.md` and the design doc. The tell: a contract
   sentence that a pure refactor would falsify is implementation detail — cut it. When a sub-agent drafts
   an amendment, the brief must say this explicitly (briefs that ask for file:line citations *in the
-  amendment text* produce exactly the paragraphs Andrew deletes). **If an existing convention/constraint creates friction, question
+  amendment text* produce exactly the paragraphs Andrew deletes). **A design that makes the runtime KEEP a
+  promise the contract already makes has NO contract surface — before writing a "§X gains a refusal"
+  clause, quote the existing sentence the fix serves; if the new behaviour is that sentence coming true,
+  write "builds to §X" and stop.** Only a change a consumer could observe *against the current text* is a
+  contract change. (Andrew, 2026-09-03, striking four clauses from the stored-class write-gate design — "an
+  obvious, very basic code issue that should not have existed"; the fourth time this rule has been given.
+  Which document's `class` a gate reads and which keys a guard holds are mechanism.) Corollary: with the
+  contract surface gone, the design is usually Winston-adjudicated, not awaiting-Andrew. **If an existing convention/constraint creates friction, question
   whether the convention deserves to exist** — flag it for Andrew with a proposed touch-up — rather than
   contorting the design around it (trialed 2026-06-27: the §6.4 "PascalCase" prescription was unenforced and
   silly; the right move was to relax it, not work around it).

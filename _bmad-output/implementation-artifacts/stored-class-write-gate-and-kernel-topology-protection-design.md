@@ -1,13 +1,15 @@
 # The write gate reads the entity as STORED — a bare tombstone is governed by the class it removes, and the kernel's own topology links are protected
 
-**Status: 📐 awaiting-Andrew (ratification).** · Designer fire 2026-09-03 · Winston (unattended). **Lane:** Lattice.
+**Status: ✅ RATIFIED (Winston-adjudicated, per the 2026-08-20 delegation) — build-ready.** · Designer fire 2026-09-03 ·
+Winston. Andrew's one direction at review (2026-09-03): *no contract changes — this fixes a basic code issue the contracts
+already promise against; contracts do not spell out implementation details.* The draft's contract surface (§7) is withdrawn.
+**Lane:** Lattice.
 **Board row:** *[Processor] A documentless tombstone skips every DDL-driven write gate, and no link is ever protected* (★★★ / M).
 **Filed by:** the cold review of `TombstoneSupersededLeaseServiceInstance` (commit `d7020963`, 2026-09-03), recorded in
 [bgcheck-runaway-and-broad-filter-design.md](bgcheck-runaway-and-broad-filter-design.md) §6 — quoted verbatim in §0.
-**Contracts:** Contract #1 §1.5 and Contract #8 §8.4 gain a refusal each, Contract #2 §2.6's `ProtectedKey` row widens, Contract
-#7 §7.7's topology sentence gains a scoping clause. Per Andrew's 2026-09-01 rule, a clause asserting a refusal the runtime does
-not yet make lands **with the build's commit** and is held out of the tree until then — the text of record is §7. Nothing is
-staged. Contract #3 §3.3 is **not** edited: the runtime already honours it (§1.3).
+**Contracts:** none change. The design builds to Contract #1 §1.5/§1.6 (`permittedCommands` governs a write), Contract #8 §8.4
+(*"an operation cannot disable auth"*) and Contract #3 §3.3 (a tombstone carries no document) — promises the runtime was
+failing to keep. Which document's `class` the gate reads, and which keys the commit-time guard holds, are mechanism (§7).
 **Adversarial pass:** §11 — run 2026-09-03, two independent passes (mechanism; census + contracts), 24 findings, every body
 section below rewritten in place where a finding landed.
 
@@ -23,7 +25,9 @@ the prior-document pass step 8 already performs, moved ahead of step 6. Alongsid
 six `holdsRole → operator`, six `grantedBy → operator` — join the protected set, by exact key, threaded into the Processor the
 way `SystemActorKeys` already is.
 
-**Why it is here and not Winston-adjudicated.** Three frozen-contract clauses (§7). No architectural fork.
+**Why it is Winston-adjudicated.** No architectural fork and no contract change (§7). The draft carried three contract clauses
+describing the new refusals; Andrew struck them at review — the contracts already promise the outcomes, the clauses were
+narrating how the runtime would keep them.
 
 **Three things want your attention.**
 
@@ -525,41 +529,26 @@ grep -rn 'make_tombstone(instance_of_lnk)' packages --include='*.go' | grep -v _
 Stage 1 lists the six scripts that build such a key (lease-signing ×3, service-domain ×3); stage 2 finds the one that
 tombstones it. Expect exactly one; any new one is a second consumer of the `committedOnly` disposition.
 
-## 7. Contract surface — text of record, held out of the tree until the build
+## 7. Contract surface — none; the design builds to the contracts as written
 
-**Contract #1 §1.5, step 1** (today: *"Read the document's `class` field."*) becomes:
+Andrew, at review (2026-09-03): no contract changes. The draft proposed four clauses (Contract #1 §1.5 step 1 rewritten to
+say which document's `class` governs; Contract #8 §8.4 and Contract #2 §2.6 naming the seeded links; Contract #7 §7.7 scoped).
+Each described *how* the runtime keeps a promise the contract already makes, which is the implementation-detail failure the
+contracts rule exists to stop:
 
-> 1. Determine the governing class. For a `create`, it is the document's `class` field. For an `update` or `tombstone`, it is
->    the `class` of the document **stored** at the key — the entity being rewritten or removed; an `update` is additionally
->    governed by the `class` its document declares, when that differs. A `tombstone` resolves no class of its own: it carries
->    no document.
+- **Contract #1 §1.5/§1.6** promise that a governed class's `permittedCommands` gates the operations that write it. A tombstone
+  is a write of that class. Which stored or declared field the gate reads to find the class is mechanism.
+- **Contract #8 §8.4** promises *"an operation cannot disable auth"* and Contract #7 §7.7 that root capability is topology.
+  A guard that refuses removing the seeded topology is the runtime keeping that promise; the key set it holds is mechanism.
+  §7.7's *"removing the role's inbound `grantedBy` links drops the corresponding capabilities"* describes what a removal does
+  when one happens; it does not promise that the seeded edges are removable, and the bypass suite that proves it builds its
+  own grants (`capadv_runtime_reserved_grant_test.go:105,220,236`), so it keeps proving it.
+- **Contract #2 §2.6**'s `ProtectedKey` row already reads *"the path-independent kernel/auth bricking guard"*; a link that
+  bricks auth is inside that sentence.
+- **Contract #3 §3.3** is already honoured (§1.3).
 
-and step 5 gains one sentence: *"For an `update` or `tombstone`, the chain is followed as committed; a link the same batch
-tombstones is still followed."* §1.5's *"No default class"* paragraph (line 153) is unchanged, and its existing rule that the
-check is against the operation type is what §2.1's name-scoped matching rests on.
-
-**Contract #8 §8.4, authoritative guard paragraph** gains:
-
-> The kernel's seeded topology — each system identity's `holdsRole` link to the operator role and each kernel permission's
-> `grantedBy` link to it — is protected in the same way: a `tombstone` of one of those links, or an `update` that soft-deletes
-> or re-points it, rejects the whole operation with `ProtectedKey`; an `update` that restores the link to its seeded shape is
-> admitted. A link the current kernel did not seed — a package grant, an operator's assignment, or a prior epoch's topology —
-> is not protected by this rule.
-
-**Contract #2 §2.6, `ProtectedKey` row:** *"An update or tombstone of a protected kernel root, an aspect of one, or a removal
-or re-pointing of a link of the kernel's seeded topology, rejected at commit — the path-independent kernel/auth bricking guard."*
-
-**Contract #3 §3.3:** unchanged — the runtime already honours it (§1.3).
-
-**Contract #7 §7.2 item 8:** unchanged; the twelve links it lists are the set. **Contract #7 §7.7** (*"removing the role's
-inbound `grantedBy` links drops the corresponding capabilities … The bypass suite proves this invariant in both directions"*)
-keeps its promise for every link the current kernel did not seed and becomes unreachable for the six seeded `grantedBy` edges;
-its sentence gains the scoping clause *"for a grant the current kernel did not seed"* so that the contract does not promise a
-removal the runtime refuses. `internal/bypass`'s reserved-grant suite builds its own role and permission ids
-(`capadv_runtime_reserved_grant_test.go:105,220,236`), so it still proves the reactive direction; it is added to Inc 3's gates.
-
-No internal names in any clause; the mechanism lives in `docs/components/processor.md` (the build updates *The 9-step write
-path* row 6, *Kernel protection*, and the `reconcile.go` comment).
+The mechanism lives in `docs/components/processor.md` (the build updates *The 9-step write path* row 6, *Kernel protection*,
+and the `reconcile.go` comment) and in this design. `internal/bypass` stays in Inc 3's gates.
 
 ## 8. Reconciliation with the existing mental model
 
@@ -638,8 +627,8 @@ rewritten to describe the gate. **Owns:**
 `retire`'s `ProtectedKey` → epoch-skew diagnosis + help-text precondition, and the comment sweep: `reconcile.go:118-123` (the
 links are now inside the guard; the "never rewrite a soft tombstone" rule stays, for the seeder), `system_actors.go:90-93`
 (stale "does not load"), `install_ddl.go:154-158,225-232` (guard "KVGets each tombstone's root" — now also the link set),
-`opwire.go:172-177` (`ErrCodeProtectedKey` definition), `docs/components/processor.md` *Kernel protection*, and the contract
-clauses of §7 committed with this increment. **Owns:**
+`opwire.go:172-177` (`ErrCodeProtectedKey` definition), and `docs/components/processor.md` *Kernel protection*. No contract
+edit (§7). **Owns:**
 - `TestKernelTopologyLinkKeys_MatchesSeededEntries` (bootstrap) — the six `holdsRole` keys byte-equal to what `PrimordialEntries`
   emits (the grant half is already pinned by `TestKernelGrantLinkKeys_MatchesWhatTheSeederEmits`); twelve total;
   `ErrPrimordialIDsUnloaded` when unloaded, with no panic.
@@ -702,8 +691,8 @@ verified by Winston against the cited lines before folding; the body sections ab
 | C5 | SHOULD-FIX | §6.6's one-line grep prints nothing; the key is built at `:1532` and tombstoned at `:1612` | Folded §6.6 two-stage census; §1.7 |
 | C6 | SHOULD-FIX | `permittedCommands` matches the bare op name; `DebitAccount` is defined by two packages, so the cross-package closure is name-scoped | Folded §2.1 (stated property, residual line), §1.7 census row |
 | C8 | SHOULD-FIX | §1.7's soft-delete row missed `identity-hygiene` (3 sites), incl. the loop that copies the stored class and may write `""` — the one stored/declared divergence in the corpus, and a `holdsRole` *tombstoner* | Folded §1.4, §1.7, §2.3 table, §2.4 |
-| C9 | SHOULD-FIX | Contract #7 has no §7.8; the links are §7.2 item 8, the topology sentence is §7.7; "No default class" is §1.5 not §1.6 | Folded §1.5, §7 |
-| C10 | SHOULD-FIX | Contract #7 §7.7 promises a `grantedBy` removal the runtime will refuse for the six seeded edges, and `internal/bypass` was in no gate list | Folded §7 (scoping clause, text of record), Inc 3 gates |
+| C9 | SHOULD-FIX | Contract #7 has no §7.8; the links are §7.2 item 8, the topology sentence is §7.7; "No default class" is §1.5 not §1.6 | Folded §1.5; §7's contract edits later withdrawn entirely at Andrew's review |
+| C10 | SHOULD-FIX | Contract #7 §7.7 promises a `grantedBy` removal the runtime will refuse for the six seeded edges, and `internal/bypass` was in no gate list | `internal/bypass` added to Inc 3's gates. The proposed scoping clause was withdrawn at review: §7.7 describes what a removal does, not that the seeded edges are removable (§7) |
 | C11 | SHOULD-FIX | §6.1's second command inspected one line after each helper `def` and could not have disagreed | Folded §6.1: command deleted, parser cited |
 | M11 | NOTE | `Root` for a link is synthesised from the key, and `opwire`'s `ErrCodeProtectedKey` definition becomes false | Folded §2.3, Inc 3 sweep |
 | M12 | NOTE | The unconditioned-write window (absent-key update/tombstone) widens across 6, 6.5 (Vault) and 7 | Folded §3, §4 (accepted, same race as today) |
