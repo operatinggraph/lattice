@@ -23,11 +23,16 @@ import (
 //   - acme and globex sit in different cities (a grouping vector needs two
 //     members that read different vertices) and share one HQ city (a memo
 //     vector needs a second row served from the first row's read).
-//   - paris reaches a region and berlin does not, so a two-hop comprehension
-//     in a WHERE genuinely partitions the rows.
+//   - paris reaches a live region and berlin only a tombstoned one, so a
+//     two-hop comprehension in a WHERE genuinely partitions the rows, and the
+//     berlin half dies over a candidate it READ rather than over an empty edge
+//     list.
 //   - acme's lead is tombstoned and globex's is live, so one branch of a hop
 //     dies beside a surviving sibling; nothing has a live escalatesTo, so the
 //     whole of that walk dies.
+//   - both cities host an event and only paris's event has a live chair, so a
+//     walk from either city survives its FIRST hop and only one of them
+//     survives its second.
 func seedProvCorpus(t *testing.T, reg *fixtureRegistry, adjKV, coreKV *substrate.KV) {
 	t.Helper()
 	putVertex(t, reg, coreKV, "alice", "identity", map[string]any{"status": "active"})
@@ -39,11 +44,15 @@ func seedProvCorpus(t *testing.T, reg *fixtureRegistry, adjKV, coreKV *substrate
 	putVertex(t, reg, coreKV, "paris", "city", map[string]any{"country": "EU"})
 	putVertex(t, reg, coreKV, "berlin", "city", map[string]any{"country": "EU"})
 	putVertex(t, reg, coreKV, "europe", "region", nil)
+	putVertex(t, reg, coreKV, "deadregion", "region", map[string]any{"isDeleted": true})
 	putVertex(t, reg, coreKV, "lena", "person", nil)
 	putVertex(t, reg, coreKV, "deadlead", "person", map[string]any{"isDeleted": true})
 	putVertex(t, reg, coreKV, "deadmgr", "person", map[string]any{"isDeleted": true})
 	putVertex(t, reg, coreKV, "deadteam", "team", map[string]any{"isDeleted": true})
 	putVertex(t, reg, coreKV, "deadmayor", "person", map[string]any{"isDeleted": true})
+	putVertex(t, reg, coreKV, "conf", "event", nil)
+	putVertex(t, reg, coreKV, "expo", "event", nil)
+	putVertex(t, reg, coreKV, "deadchair", "person", map[string]any{"isDeleted": true})
 	putAspect(t, reg, coreKV, "acme", "presentation", map[string]any{"name": "Acme Ltd"})
 
 	for _, to := range []string{"acme", "globex", "ghost", "vendorco"} {
@@ -54,11 +63,16 @@ func seedProvCorpus(t *testing.T, reg *fixtureRegistry, adjKV, coreKV *substrate
 	putEdge(t, reg, adjKV, "hq", "acme", "paris")
 	putEdge(t, reg, adjKV, "hq", "globex", "paris")
 	putEdge(t, reg, adjKV, "within", "paris", "europe")
+	putEdge(t, reg, adjKV, "within", "berlin", "deadregion")
 	putEdge(t, reg, adjKV, "hasLead", "acme", "deadlead")
 	putEdge(t, reg, adjKV, "hasLead", "globex", "lena")
 	putEdge(t, reg, adjKV, "escalatesTo", "acme", "deadmgr")
 	putEdge(t, reg, adjKV, "manages", "alice", "deadteam")
 	putEdge(t, reg, adjKV, "mayor", "paris", "deadmayor")
+	putEdge(t, reg, adjKV, "host", "paris", "conf")
+	putEdge(t, reg, adjKV, "host", "berlin", "expo")
+	putEdge(t, reg, adjKV, "chair", "conf", "lena")
+	putEdge(t, reg, adjKV, "chair", "expo", "deadchair")
 }
 
 // runProv evaluates body and returns the rows, checking on every vector that
@@ -619,6 +633,61 @@ func TestProvenance_RequiredClauseExcludingEverySourceRowHandsItOn(t *testing.T)
 			require.Len(t, results, 1)
 			require.EqualValues(t, 1, results[0].Values["n"],
 				"the clause must actually drop one source row")
+			require.Contains(t, provFor(t, results, vtxKey(reg, "alice")), vtxKey(reg, tc.want))
+		})
+	}
+}
+
+// TestProvenance_CommaSeparatedPatternsHandOnTheIntermediateBinding pins the
+// hand-off BETWEEN the patterns of one clause. Comma-separated patterns thread
+// pattern 1's expansions into pattern 2, so an expansion pattern 2 admits
+// nothing of is dropped where the clause cannot see it: it is neither a source
+// binding the clause hands on nor an ancestor of any row the clause projects,
+// and every read taken on its behalf is a leaf hanging off it.
+//
+// Two vectors, and only the second one's reads are stranded there. A pattern
+// that dies at its FIRST hop hands its reads to the frontier's parent, which is
+// the intermediate binding's own ancestor and survives the drop; a pattern that
+// clears a hop and dies at the next records against the intermediate binding
+// itself, so the patterns' own hand-off is the only thing that carries it.
+func TestProvenance_CommaSeparatedPatternsHandOnTheIntermediateBinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	seedProvCorpus(t, reg, adjKV, coreKV)
+
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{
+			// berlin's only region is tombstoned, so globex's intermediate
+			// binding dies at the second pattern's first hop. Un-tombstoning
+			// the region makes the count 2.
+			name: "the second pattern dies at its first hop",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       MATCH (o)-[:in]->(c:city), (c)-[:within]->(r:region)
+			       RETURN i.key AS anchor, count(r) AS n`,
+			want: "deadregion",
+		},
+		{
+			// berlin hosts a live event whose chair is tombstoned, so globex's
+			// intermediate binding clears the second pattern's first hop and
+			// dies at its second — where the read is recorded against the
+			// intermediate binding, which the clause never sees.
+			name: "the second pattern dies at its second hop",
+			body: `MATCH (i:identity {key: $actorKey})-[:worksAt]->(o:org)
+			       MATCH (o)-[:in]->(c:city), (c)-[:host]->(e:event)-[:chair]->(p:person)
+			       RETURN i.key AS anchor, count(p) AS n`,
+			want: "deadchair",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runProv(t, New(), tc.body, actorEC(reg), adjKV, coreKV)
+			require.Len(t, results, 1)
+			require.EqualValues(t, 1, results[0].Values["n"],
+				"the second pattern must actually drop one intermediate binding")
 			require.Contains(t, provFor(t, results, vtxKey(reg, "alice")), vtxKey(reg, tc.want))
 		})
 	}

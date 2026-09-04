@@ -288,17 +288,14 @@ type executor struct {
 	// the evaluating row's dependencies rather than the discarded clones'.
 	//
 	// provFolded memoizes provVertexKeys per node, so a chain shared by many
-	// output rows folds once. provFoldVisits counts the nodes those folds
-	// entered, which is what says the memo is doing its work: a head shared by
-	// every output row is entered while the first row folds and read back on
-	// every row after it.
+	// output rows folds once: a head every output row descends from is folded
+	// while the first row folds and read back on every row after it.
 	//
-	// All of them are nil / zero on the read-free key-resolution executor
+	// All of them are nil on the read-free key-resolution executor
 	// (anchor_delete), which records nothing because it fetches nothing.
-	provHead       *provNode
-	provCursor     *provNode
-	provFolded     map[*provNode][]string
-	provFoldVisits int
+	provHead   *provNode
+	provCursor *provNode
+	provFolded map[*provNode][]string
 }
 
 // hubKey identifies one relation-scoped read of an overflow-marked node: the
@@ -634,7 +631,7 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 	// The clause's stage: a source binding this clause admits no expansion of
 	// is dropped whole, and what it read reaches the rows the clause does
 	// project only through the stage they share.
-	stage := &provNode{}
+	stage := provStage()
 	for _, b := range bindings {
 		expanded, err := ex.matchPatterns(b, m.Patterns, m.Optional)
 		if err != nil {
@@ -784,24 +781,51 @@ func nullBindNewVars(b binding, patterns []PathPattern) binding {
 // single MATCH/OPTIONAL MATCH clause. For OPTIONAL MATCH that yields zero
 // expansions, the original binding is preserved with null assignments for
 // any newly introduced variables.
+//
+// An intermediate binding — pattern 1's expansion, threaded into pattern 2 —
+// is dropped here the way a source binding is dropped by the clause: nothing
+// descends from it, so what it read leaves the evaluation with it unless the
+// bindings standing in for it name it. Each pattern therefore carries its own
+// stage, linked into the bindings that survived the pattern, and handed to the
+// clause's source binding when the pattern leaves none — the clause's own
+// stage absorbs that binding, so the reads carry on to the rows it does
+// project.
 func (ex *executor) matchPatterns(b binding, patterns []PathPattern, optional bool) ([]binding, error) {
 	current := []binding{b}
 	for _, p := range patterns {
 		var next []binding
+		stage := provStage()
 		for _, cb := range current {
 			expansions, err := ex.matchPath(cb, p)
 			if err != nil {
 				return nil, err
 			}
-			if len(expansions) == 0 && optional {
+			switch {
+			case len(expansions) > 0:
+				next = append(next, expansions...)
+			case optional:
 				// Null-bind every new variable introduced by this path.
 				next = append(next, nullBindNewVars(cb, []PathPattern{p}))
-			} else {
-				next = append(next, expansions...)
+			default:
+				// The clause holds b itself and hands it on when it admits
+				// nothing, so only an INTERMEDIATE binding — one an earlier
+				// pattern of this clause made — needs the stage.
+				if chain := provChain(cb); chain != provChain(b) {
+					provAbsorb(stage, chain)
+				}
 			}
 			if err := ex.checkBindings(len(next)); err != nil {
 				return nil, err
 			}
+		}
+		provAttachStage(next, stage)
+		if len(next) == 0 && provStageReaches(stage) {
+			// No binding survives this pattern, so the clause's source binding
+			// carries the stage instead: a required clause absorbs that binding
+			// into a stage of its own, which is what reaches the rows the clause
+			// does project. (An OPTIONAL clause never gets here — every source
+			// binding is null-bound rather than dropped.)
+			provAbsorb(provChain(b), stage)
 		}
 		current = next
 	}
@@ -1665,7 +1689,7 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 	// clause discards takes what the projection and the predicate read on its
 	// behalf out of the evaluation with it unless the rows that survive name
 	// it. It is linked into them once both filters have run.
-	stage := &provNode{}
+	stage := provStage()
 	// WITH DISTINCT de-duplicates the projected rows, first occurrence wins, by
 	// the same injective rendering applyReturn's DISTINCT and the grouping path
 	// key on — never json.Marshal, which renders every *nodeRef as `{}` and so
@@ -2037,7 +2061,7 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 	// The clause's stage, as at every projecting clause: a row RETURN DISTINCT
 	// drops is a leaf, and what it read reaches the published rows only
 	// through what they share.
-	stage := &provNode{}
+	stage := provStage()
 	// Deduplicate rows when RETURN DISTINCT is specified; order is preserved
 	// (first occurrence wins).
 	//

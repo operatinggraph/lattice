@@ -57,9 +57,10 @@
 // posture personal_lens_delta_publication_e2e_test.go's fixture takes.
 //
 // WHAT IS NOT PINNED HERE. Whether a lens is ELIGIBLE for a scoped publish at
-// all — the clock conjunct and the point-seeded-anchor conjunct of §4.2 — is a
-// property of the compiled rule, pinned by personal_derivation_corpus_census_
-// test.go (clock) and the pipeline package's TestPublishScopeRefusal (both).
+// all — the clock conjunct, the label-sigil conjunct and the
+// point-seeded-anchor conjunct of §4.2 — is a property of the compiled rule,
+// pinned by personal_derivation_corpus_census_test.go (clock) and the pipeline
+// package's TestPublishScopeRefusal (all three).
 // This census is about what provenance says once the scope is granted; it
 // deliberately hands the scope in rather than deriving it, so a lens that
 // became scan-seeded would still be measured here and would fail its sibling

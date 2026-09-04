@@ -24,6 +24,11 @@ type provNode struct {
 	parent *provNode
 	merged []*provNode
 	keys   []string
+	// stage marks a clause's or a pattern's stage node (provStage): the one
+	// node linked into EVERY binding that survived a discard, and so the only
+	// node one output row's fold reaches that another output row's fold
+	// reaches too. It is what the fold memoizes a whole subtree for.
+	stage bool
 }
 
 // provChain returns the chain b records onto, or nil for a binding built
@@ -74,12 +79,24 @@ func provAbsorb(dst, src *provNode) {
 // them. That is the mechanism's one deliberate imprecision: a vertex only a
 // discarded row read republishes every row of its clause, never a wrong row.
 func provAttachStage(rows []binding, stage *provNode) {
-	if stage == nil || (len(stage.keys) == 0 && len(stage.merged) == 0) {
+	if !provStageReaches(stage) {
 		return
 	}
 	for _, row := range rows {
 		provAbsorb(provChain(row), stage)
 	}
+}
+
+// provStage is the node a clause or a pattern collects its discards on before
+// linking it into the bindings that survived.
+func provStage() *provNode { return &provNode{stage: true} }
+
+// provStageReaches reports whether a stage holds anything at all — whether the
+// clause or the pattern that owns it discarded something. A stage that
+// discarded nothing is linked nowhere, so the ordinary case costs the fold no
+// traversal.
+func provStageReaches(stage *provNode) bool {
+	return stage != nil && (len(stage.keys) > 0 || len(stage.merged) > 0)
 }
 
 // recordProv notes that this evaluation read key on behalf of the row the
@@ -150,6 +167,11 @@ func AppendProvenanceVertexKeys(dst []string, key string) []string {
 		}
 	case substrate.KindLink:
 		if t1, id1, _, t2, id2, ok := substrate.ParseLinkKey(key); ok {
+			if dst == nil {
+				// Both endpoints land in one slice: sized for the pair up
+				// front, the second append never grows a one-element array.
+				dst = make([]string, 0, 2)
+			}
 			dst = appendProvVertexKey(dst, substrate.VertexKey(t1, id1))
 			return appendProvVertexKey(dst, substrate.VertexKey(t2, id2))
 		}
@@ -227,10 +249,9 @@ func (f *provFolder) fold(cur *provNode, depth int) ([]string, int) {
 	if d, busy := f.inFlight[cur]; busy {
 		return nil, d
 	}
-	f.ex.provFoldVisits++
 	f.inFlight[cur] = depth
 	inherited, cut := f.fold(cur.parent, depth+1)
-	absorbed, absorbedCut := f.absorbed(cur)
+	absorbed, absorbedCut := f.absorbed(cur, depth)
 	delete(f.inFlight, cur)
 	if absorbedCut < cut {
 		cut = absorbedCut
@@ -249,21 +270,62 @@ func (f *provFolder) fold(cur *provNode, depth int) ([]string, int) {
 	return out, cut
 }
 
-// absorbed unions what cur's merged branches reach, as ONE traversal rather
-// than a fold per branch. A grouped row merges every member folded into it and
-// those members share a head: giving each of them a memo of its own would
-// materialize that head's whole answer once per member, where the traversal
-// visits it once between them. A branch that already carries a memo is taken
-// from it, and nothing this traversal computes is memoized.
-func (f *provFolder) absorbed(cur *provNode) ([]string, int) {
+// absorbed unions what cur's merged branches reach. A branch is one of two
+// shapes, and each is walked the way its own sharing calls for:
+//
+//   - A STAGE branch is linked into every binding that survived its clause, so
+//     it is the one branch reached once per OUTPUT ROW. It is folded through
+//     the shared memo, and every row after the first reads its closure back
+//     instead of re-walking the subtree of discards behind it — the cost that
+//     otherwise scales as the rows a clause projects times the bindings it
+//     dropped. The fold's own in-flight guard is what terminates the back-link
+//     from a stage to a binding it absorbed.
+//   - Every OTHER branch is reached through one row's own ancestry or through a
+//     stage — a grouped row's members, an abandoned frontier — so it is reached
+//     once whether or not it carries a memo. Those are walked as ONE traversal
+//     rather than a fold each, because a memo per member would materialize the
+//     head they share once per member where the traversal visits it once
+//     between them. A branch that already carries a memo is taken from it, and
+//     nothing the traversal itself computes is memoized.
+func (f *provFolder) absorbed(cur *provNode, depth int) ([]string, int) {
 	if len(cur.merged) == 0 || provReachesNothing(cur.merged) {
 		return nil, provFoldComplete
 	}
 	cut := provFoldComplete
+	var stages []string
+	var walk []*provNode
+	for _, n := range cur.merged {
+		switch {
+		case n == nil:
+		case n.stage:
+			out, c := f.fold(n, depth+1)
+			if c < cut {
+				cut = c
+			}
+			stages = provMergeSorted(stages, out)
+		default:
+			walk = append(walk, n)
+		}
+	}
+	if len(walk) == 0 {
+		return stages, cut
+	}
+	walked, walkedCut := f.walkBranches(walk)
+	if walkedCut < cut {
+		cut = walkedCut
+	}
+	return provMergeSorted(stages, walked), cut
+}
+
+// walkBranches unions what these branches reach as one traversal, taking each
+// of them the way a fold would: own keys, ancestors, and anything they
+// absorbed in turn.
+func (f *provFolder) walkBranches(branches []*provNode) ([]string, int) {
+	cut := provFoldComplete
 	set := make(map[string]struct{})
-	seen := make(map[*provNode]struct{}, len(cur.merged))
-	stack := make([]*provNode, len(cur.merged))
-	copy(stack, cur.merged)
+	seen := make(map[*provNode]struct{}, len(branches))
+	stack := make([]*provNode, len(branches))
+	copy(stack, branches)
 	for len(stack) > 0 {
 		n := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -286,7 +348,6 @@ func (f *provFolder) absorbed(cur *provNode) ([]string, int) {
 			}
 			continue
 		}
-		f.ex.provFoldVisits++
 		for _, k := range n.keys {
 			set[k] = struct{}{}
 		}
@@ -299,9 +360,10 @@ func (f *provFolder) absorbed(cur *provNode) ([]string, int) {
 }
 
 // provReachesNothing reports whether these branches hold nothing and lead
-// nowhere. It is the stage node a projecting clause stamps on every row it
-// makes and never absorbs into, which is the ordinary case: a clause that
-// discards no row must cost the fold no traversal at all.
+// nowhere. A hand-off is made wherever a binding is abandoned, including where
+// the abandoned binding had read nothing yet — a frontier whose own hop fetched
+// from a memo already folded into its ancestors — and such a branch must cost
+// the fold no traversal at all.
 func provReachesNothing(nodes []*provNode) bool {
 	for _, n := range nodes {
 		if n == nil {

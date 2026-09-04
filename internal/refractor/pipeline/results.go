@@ -99,13 +99,13 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		actorID, _ := result.Keys[adapter.PersonalActorKeyField].(string)
 		if actorID == "" {
 			// A personal result whose keys carry no actor is malformed, and the
-			// hydrate exemption below cannot be asked about it. Written anyway:
-			// the adapter refuses such a write LOUDLY (a personal target keys on
-			// this field), and that error — a Nak, a health fault, a line naming
-			// the lens — is what this row produced before the scope existed.
-			// Reading the missing actor as "not being hydrated" would withhold
-			// it silently instead, turning a reported defect into a row that
-			// simply never appears on a device.
+			// hydrate exemption below cannot be asked about it. Handed to the
+			// adapter anyway, so the adapter is what answers: a personal target
+			// keys on this field and refuses the write LOUDLY — a Nak, a health
+			// fault, a line naming the lens. Reading the missing actor as "not
+			// being hydrated" would withhold the row here in silence instead,
+			// turning a reported defect into a row that simply never appears on
+			// a device.
 			return true
 		}
 		_, beingHydrated := hydrating[actorID]

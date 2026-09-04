@@ -2,7 +2,7 @@ package pipeline
 
 // T3 of personal-lens-delta-publication-design.md §10: the CDC write loop's
 // publication scope — the write loop's own rule, the four producers that build
-// a scope, the two eligibility conjuncts that refuse one, the five call sites
+// a scope, the three eligibility conjuncts that refuse one, the five call sites
 // the scope has to survive being threaded through, and the plain-lens vector
 // that must be untouched by all of it.
 
@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,9 +193,8 @@ func TestWriteResults_TheFrameIsNotTheFreshnessClock(t *testing.T) {
 //
 // The exemption asks whether the row's actor is being hydrated, and a personal
 // result whose keys carry no __actor cannot be asked. Reading that as "not being
-// hydrated" would withhold the row in SILENCE; before the scope existed it
-// reached the adapter and failed loudly there, which is what a malformed result
-// should still do.
+// hydrated" would withhold the row in SILENCE; handing it to the adapter is what
+// makes it fail loudly there, which is what a malformed result should do.
 func TestWriteResults_AResultWithNoActorIsHandedToTheAdapter(t *testing.T) {
 	target := &fakePersonalTarget{}
 	p, _ := newPersonalTestPipeline(t, target)
@@ -1090,7 +1088,9 @@ func waitForHandlerWaiter(t *testing.T, p *Pipeline) {
 		if time.Now().After(deadline) {
 			t.Fatal("nothing ever entered awaitHandlerLeft — the hydrate captured its high-water without waiting for the event in flight")
 		}
-		runtime.Gosched()
+		// The condition is what the loop turns on; the pause between checks
+		// only keeps a spin off the core the waited-for goroutine runs on.
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -1105,6 +1105,6 @@ func waitForHydrateMark(t *testing.T, p *Pipeline, actorID string) {
 		if time.Now().After(deadline) {
 			t.Fatalf("no hydrate took %q's publish slot", actorID)
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }

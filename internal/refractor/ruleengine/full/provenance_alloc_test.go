@@ -30,14 +30,14 @@ const (
 	provWideRows       = 100
 )
 
-// evalMatchReturn runs one MATCH + one RETURN query from a caller-supplied
+// evalMatchWithReturn runs a MATCH / WITH / RETURN query from a caller-supplied
 // root binding, through the same executor methods run() drives. The root is
 // the mechanism's own switch: a root carrying no chain gives every clone
 // nothing to descend from and every read nowhere to record, so the two arms
 // differ in the provenance machinery and in nothing else. Any other clause
 // shape fails rather than being silently skipped, so the measurement can never
 // drift into covering less of the query than it claims.
-func evalMatchReturn(
+func evalMatchWithReturn(
 	t *testing.T, ex *executor, compiled *CompiledRule, root binding,
 ) []ruleengine.ProjectionResult {
 	t.Helper()
@@ -49,12 +49,16 @@ func evalMatchReturn(
 			next, err := ex.applyMatch(bindings, c)
 			require.NoError(t, err)
 			bindings = next
+		case *With:
+			next, err := ex.applyWith(bindings, c)
+			require.NoError(t, err)
+			bindings = next
 		case *Return:
 			res, err := ex.applyReturn(bindings, c)
 			require.NoError(t, err)
 			out = res
 		default:
-			t.Fatalf("this measurement covers MATCH + RETURN only, got %T", clause)
+			t.Fatalf("this measurement covers MATCH, WITH and RETURN only, got %T", clause)
 		}
 	}
 	return out
@@ -102,49 +106,44 @@ func putProvidedToHub(t testing.TB, reg *fixtureRegistry, adjKV *substrate.KV, n
 	require.NoError(t, err)
 }
 
-// TestProvenance_AllocationWithinTwiceTheBaseline pins the cost §4.1 states:
-// one pointer per clone, one slice append per fetch, one fold per output row.
-// Both extremes of the corpus are measured against the same budget, because
-// each is the worst case of a different half of the mechanism:
-//
-//   - 4,000 tombstoned neighbours and 2 live ones is where the RECORD is at
-//     its longest and the output at its narrowest — the candidate set is held
-//     once and folded twice.
-//   - 2,000 candidates and 100 rows is where the FOLD costs most: every row
-//     names the whole candidate set, so the head chain is what the memo has to
-//     keep from being rebuilt a hundred times over.
-//
-// The baseline is the same evaluation over the same graph with a root binding
-// that carries no chain: identical code, identical reads, the mechanism inert.
-func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	t.Run("long chain, two rows", func(t *testing.T) {
-		measureProvAllocation(t, provAllocNeighbours, 2)
-	})
-	t.Run("wide head, many rows", func(t *testing.T) {
-		measureProvAllocation(t, provWideCandidates, provWideRows)
-	})
-}
+// provHubBody projects one row per live neighbour of the hub, discarding none.
+// provHubDiscardBody is the same walk under the tail the corpus's own lenses
+// carry — a WITH over the bound anchor and a WHERE on it — which discards half
+// the projected rows, so the clause's stage holds a subtree of dropped rows
+// that every surviving row's fold has to reach.
+const (
+	provHubBody = `MATCH (i:identity {key: $actorKey})<-[:providedTo]-(inst:service)
+	               RETURN inst.key AS anchor, i.key AS actor`
+	provHubDiscardBody = `MATCH (i:identity {key: $actorKey})<-[:providedTo]-(inst:service)
+	                      WITH i, inst
+	                      WHERE inst.bucket = "keep"
+	                      RETURN inst.key AS anchor, i.key AS actor`
+)
 
-// measureProvAllocation evaluates one MATCH + RETURN over a hub with `dead`
-// tombstoned candidates and `live` bound ones, with the provenance machinery
-// on and off, and fails when recording costs more than twice the evaluation
-// that records nothing.
-func measureProvAllocation(t *testing.T, dead, live int) {
+// provKeepBucket is the property value provHubDiscardBody's WHERE admits; every
+// other live neighbour carries provDropBucket and is discarded.
+const (
+	provKeepBucket = "keep"
+	provDropBucket = "drop"
+)
+
+// seedProvHub writes one hub with `dead` tombstoned providedTo neighbours and
+// `live` bound ones, and returns the hub's vertex key. Live neighbours
+// alternate between the two buckets, so a predicate over the bucket admits
+// exactly half of them.
+func seedProvHub(t *testing.T, dead, live int) (adjKV, coreKV *substrate.KV, hub string) {
 	t.Helper()
 	// The shape is measured on the adjacency DOCUMENT path. A node this wide
 	// latches past the production thresholds and serves its edges out of Core
 	// KV's link keyspace instead, which putEdge does not write — so the
 	// thresholds are raised for the life of this test rather than the fixture
 	// being narrowed to something the widest actor is not.
-	defer adjacency.SetOverflowThresholds(1<<20, 8<<20)()
+	t.Cleanup(adjacency.SetOverflowThresholds(1<<20, 8<<20))
 
-	adjKV, coreKV := startExecKVs(t)
+	adjKV, coreKV = startExecKVs(t)
 	reg := newFixtureRegistry()
 
-	hub := putVertex(t, reg, coreKV, "hub", "identity", nil)
+	hub = putVertex(t, reg, coreKV, "hub", "identity", nil)
 	neighbourNames := make([]string, 0, dead+live)
 	for i := 0; i < dead; i++ {
 		name := fmt.Sprintf("dead%04d", i)
@@ -153,15 +152,64 @@ func measureProvAllocation(t *testing.T, dead, live int) {
 	}
 	for i := 0; i < live; i++ {
 		name := fmt.Sprintf("live%04d", i)
-		putVertex(t, reg, coreKV, name, "service", map[string]any{"n": int64(i)})
+		bucket := provKeepBucket
+		if i%2 == 1 {
+			bucket = provDropBucket
+		}
+		putVertex(t, reg, coreKV, name, "service",
+			map[string]any{"n": int64(i), "bucket": bucket})
 		neighbourNames = append(neighbourNames, name)
 	}
 	putProvidedToHub(t, reg, adjKV, neighbourNames, "hub")
+	return adjKV, coreKV, hub
+}
+
+// TestProvenance_AllocationWithinTwiceTheBaseline pins the cost §4.1 states:
+// one pointer per clone, one slice append per fetch, one fold per output row.
+// Three shapes are measured against the same budget, because each is the worst
+// case of a different part of the mechanism:
+//
+//   - 4,000 tombstoned neighbours and 2 live ones is where the RECORD is at
+//     its longest and the output at its narrowest — the candidate set is held
+//     once and folded twice.
+//   - 2,000 candidates and 100 rows is where the FOLD costs most: every row
+//     names the whole candidate set, so the head chain is what the memo has to
+//     keep from being rebuilt a hundred times over.
+//   - The same width under a DISCARDING tail is where the STAGE costs most:
+//     half the rows are dropped by the WITH's predicate and their chains hang
+//     off the stage the survivors share, so a fold that re-entered that stage
+//     per surviving row would walk the dropped subtree — and rebuild the whole
+//     candidate set out of it — fifty times over.
+//
+// The baseline is the same evaluation over the same graph with a root binding
+// that carries no chain: identical code, identical reads, the mechanism inert.
+func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	t.Run("long chain, two rows", func(t *testing.T) {
+		measureProvAllocation(t, provAllocNeighbours, 2, provHubBody, 2)
+	})
+	t.Run("wide head, many rows", func(t *testing.T) {
+		measureProvAllocation(t, provWideCandidates, provWideRows, provHubBody, provWideRows)
+	})
+	t.Run("wide head, a discarding tail", func(t *testing.T) {
+		measureProvAllocation(t, provWideCandidates, provWideRows,
+			provHubDiscardBody, provWideRows/2)
+	})
+}
+
+// measureProvAllocation evaluates body over a hub with `dead` tombstoned
+// candidates and `live` bound ones, with the provenance machinery on and off,
+// and fails when recording costs more than twice the evaluation that records
+// nothing. wantRows is the row count the query projects, which a discarding
+// tail makes smaller than `live`.
+func measureProvAllocation(t *testing.T, dead, live int, body string, wantRows int) {
+	t.Helper()
+	adjKV, coreKV, hub := seedProvHub(t, dead, live)
 
 	eng := New()
-	cr, err := eng.Parse(
-		`MATCH (i:identity {key: $actorKey})<-[:providedTo]-(inst:service)
-		 RETURN inst.key AS anchor, i.key AS actor`)
+	cr, err := eng.Parse(body)
 	require.NoError(t, err)
 	compiled, ok := cr.(*CompiledRule)
 	require.True(t, ok)
@@ -170,15 +218,15 @@ func measureProvAllocation(t *testing.T, dead, live int) {
 	// One evaluation of each arm first: it warms whatever the substrate client
 	// allocates once, and it is what asserts the two arms agree on the rows and
 	// that the recording arm actually recorded the candidate set.
-	withProv := evalMatchReturn(t,
+	withProv := evalMatchWithReturn(t,
 		eng.newExecutor(context.Background(), compiled, ec, adjKV, coreKV),
 		compiled, binding{provBindingKey: provRoot()})
-	baseRows := evalMatchReturn(t,
+	baseRows := evalMatchWithReturn(t,
 		eng.newExecutor(context.Background(), compiled, ec, adjKV, coreKV),
 		compiled, binding{})
 
-	require.Len(t, withProv, live)
-	require.Len(t, baseRows, live)
+	require.Len(t, withProv, wantRows)
+	require.Len(t, baseRows, wantRows)
 	for i := range withProv {
 		require.Equal(t, withProv[i].Values, baseRows[i].Values)
 		require.Nil(t, baseRows[i].Provenance)
@@ -193,7 +241,7 @@ func measureProvAllocation(t *testing.T, dead, live int) {
 		runtime.ReadMemStats(&before)
 		for i := 0; i < runs; i++ {
 			ex := eng.newExecutor(context.Background(), compiled, ec, adjKV, coreKV)
-			evalMatchReturn(t, ex, compiled, root())
+			evalMatchWithReturn(t, ex, compiled, root())
 		}
 		runtime.ReadMemStats(&after)
 		return after.TotalAlloc - before.TotalAlloc
@@ -217,46 +265,56 @@ func measureProvAllocation(t *testing.T, dead, live int) {
 // the fold has to enter that chain once for the projection rather than once
 // per row, which a memo kept only for the node the caller named would not do.
 //
-// The counter is the pin. Folding one row enters its leaf, the clone it was
-// projected from, the head and the root; every row after it enters its own two
-// and reads the rest back — so the whole projection is 2 per row and a
-// constant, against 4 per row for a fold that re-walked.
+// The head node is the pin, because the fold reads the memo before it walks
+// anything: the head is NOT memoized before the projection, IS memoized after
+// it, and folding it again from there allocates nothing at all. A memo kept
+// only for the node the caller named would leave the head absent and every row
+// after the first re-walking the candidate set.
 func TestProvenance_FoldIsMemoizedPerNode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	adjKV, coreKV := startExecKVs(t)
-	reg := newFixtureRegistry()
-
 	const rows = 50
-	hub := putVertex(t, reg, coreKV, "hub", "identity", nil)
-	neighbourNames := make([]string, 0, rows)
-	for i := 0; i < rows; i++ {
-		name := fmt.Sprintf("live%04d", i)
-		putVertex(t, reg, coreKV, name, "service", map[string]any{"n": int64(i)})
-		neighbourNames = append(neighbourNames, name)
-	}
-	putProvidedToHub(t, reg, adjKV, neighbourNames, "hub")
+	adjKV, coreKV, hub := seedProvHub(t, 0, rows)
 
 	eng := New()
-	cr, err := eng.Parse(
-		`MATCH (i:identity {key: $actorKey})<-[:providedTo]-(inst:service)
-		 RETURN inst.key AS anchor, i.key AS actor`)
+	cr, err := eng.Parse(provHubBody)
 	require.NoError(t, err)
 	compiled, ok := cr.(*CompiledRule)
+	require.True(t, ok)
+	require.Len(t, compiled.Query.Clauses, 2)
+	match, ok := compiled.Query.Clauses[0].(*Match)
+	require.True(t, ok)
+	ret, ok := compiled.Query.Clauses[1].(*Return)
 	require.True(t, ok)
 
 	ex := eng.newExecutor(context.Background(), compiled,
 		ruleengine.EventContext{Parameters: map[string]any{"actorKey": hub}}, adjKV, coreKV)
-	out := evalMatchReturn(t, ex, compiled, binding{provBindingKey: provRoot()})
+
+	inbound, err := ex.applyMatch([]binding{{provBindingKey: provRoot()}}, match)
+	require.NoError(t, err)
+	require.Len(t, inbound, rows)
+
+	// Every row the walk expanded was cloned from the one head binding it
+	// seeded, and that head is what carries the candidate set every row names.
+	head := provParent(inbound[0])
+	require.NotNil(t, head)
+	for _, b := range inbound {
+		require.Same(t, head, provParent(b))
+	}
+	require.NotContains(t, ex.provFolded, head, "nothing is folded before the projection")
+
+	out, err := ex.applyReturn(inbound, ret)
+	require.NoError(t, err)
 	require.Len(t, out, rows)
 	for _, r := range out {
 		require.Len(t, r.Provenance, rows+1, "every candidate and the hub")
 	}
 
-	require.LessOrEqual(t, ex.provFoldVisits, 2*rows+4,
-		"the head every row descends from was entered more than once: %d node visits for %d rows",
-		ex.provFoldVisits, rows)
+	require.Contains(t, ex.provFolded, head,
+		"the head every row descends from must be folded once and read back, not re-walked per row")
 	require.Greater(t, len(ex.provFolded), 2*rows,
 		"a fold that memoized only the node it was asked for holds one entry per row")
+	require.Zero(t, testing.AllocsPerRun(2, func() { ex.provVertexKeys(head) }),
+		"a memoized node's closure is returned, not rebuilt")
 }
