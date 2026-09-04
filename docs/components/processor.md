@@ -629,14 +629,33 @@ composes the set from the loaded `lattice.bootstrap.json`
 step-8 guard refuses
 
 - a `tombstone` of any member, and
-- an `update` of any member whose written document is not the seeded shape —
-  `isDeleted` false, both endpoints and both names equal to the key's own segments.
+- a `create` or `update` of any member whose written document is not the seeded
+  shape — `isDeleted` false, both endpoints and both names equal to the key's own
+  segments, and **no top-level field beyond the six** such an edge carries
+  (`class`, `isDeleted`, `sourceVertex`, `targetVertex`, `localName`, `data`).
 
-That admits exactly one mutation: `AssignRole`'s revive, an update restoring a
-revoked edge. It is the only heal path a deployment already revoked has (the seeder
-never rewrites a soft tombstone, and a `create` conflicts on a tombstoned key), so a
-blanket immutability rule would make an existing brick permanent. The rejection is
-`ProtectedKey`, with the link's source vertex as the reported root.
+The whitelist is closed because nothing else governs these bodies: the
+permission/role provenance guard adjudicates `vtx.permission.*` / `vtx.role.*`
+roots and never reaches a `lnk.*` key, and grant-edge provenance is a convention
+the Starlark scripts keep rather than a rule the committer enforces. Today every
+reader of a kernel link classifies it by key and then reads only `isDeleted`, so a
+tolerated extra field would change no consumer's answer — it would still be caller
+bytes committed at a key the guard exists to hold fixed. `data` is admitted and its
+**contents are not compared** (the revive re-stamps grant-edge provenance exactly as
+a fresh grant would, so requiring it empty would refuse the heal path), but it must
+be an object when present.
+
+The `create` arm closes what create-only leaves open: create-only conflicts on an
+overwrite of a live edge, but says nothing about the body written at an *absent*
+member key — an incompletely seeded kernel, a bucket restored short of an edge. A
+seeded-shape create is left to the create-only conflict / re-establish path.
+
+Over an existing edge that leaves exactly one admitted mutation: `AssignRole`'s
+revive, an update restoring a revoked one. It is the only heal path a deployment
+already revoked has (the seeder never rewrites a soft tombstone, and a `create`
+conflicts on a tombstoned key), so a blanket immutability rule would make an
+existing brick permanent. The rejection is `ProtectedKey`, with the link's source
+vertex as the reported root.
 
 An unset set protects nothing, which is what a test fixture that does not wire it
 gets; empty cannot fail closed, since the fail-closed reading of a protected-key set

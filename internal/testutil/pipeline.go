@@ -258,6 +258,18 @@ type PipelineConfig struct {
 	// primordial `operator` role — the class-aware routing consults. Only read
 	// when RbacRolesActive; empty means every actor is ordinary.
 	SystemActorKeys []string
+	// KernelLinkKeys is the kernel's seeded authorization topology, by exact
+	// key, as the committer's protected-key guard consults it — the harness
+	// mirror of cmd/processor's AuthWiring.KernelLinkKeys.
+	//
+	// Empty is fail-OPEN and is what every fixture that leaves it unset gets:
+	// the fail-closed reading of a protected-key set is "every link is
+	// protected", which would refuse every link write in the deployment. So a
+	// test whose subject is the guard must wire this — with
+	// bootstrap.KernelTopologyLinkKeys() over the same loaded table the graph
+	// was seeded from — or it drives a Processor that protects nothing and
+	// passes for that reason.
+	KernelLinkKeys []string
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -298,7 +310,7 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	hydrator := processor.NewHydratorWithCache(conn, HarnessCoreBucket, cache, logger)
 	hydrator.Vault = v
 	hydrator.PrimordialActors = PrimordialActors(t)
-	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now, nil)
+	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now, cfg.KernelLinkKeys)
 	deps := processor.Deps{
 		Conn:        conn,
 		CoreBucket:  HarnessCoreBucket,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -384,7 +385,7 @@ func submitRevocation(conn *substrate.Conn, actor string, op internalbootstrap.R
 		if reply.Error != nil {
 			code, msg = reply.Error.Code, reply.Error.Message
 		}
-		return revocationRejection(code, msg, op.LinkKey)
+		return revocationRejection(code, msg, op.OperationType, op.LinkKey)
 	}
 	return nil
 }
@@ -392,24 +393,38 @@ func submitRevocation(conn *substrate.Conn, actor string, op internalbootstrap.R
 // revocationRejection renders a rejected revocation reply as the error the run
 // reports.
 //
-// ProtectedKey gets its own diagnosis. Each Processor protects the twelve
-// kernel topology links of the epoch whose lattice.bootstrap.json it loaded at
-// start-up, so a replica that has NOT restarted since the table was regenerated
-// still holds the retired epoch's edges as its own and refuses to revoke them —
-// non-deterministically per op in a mixed roll, since the reply comes from
-// whichever replica took the message. Read as a generic rejection, that looks
-// like the retirement being impossible; read for what it is, it names an
-// operator action (roll the Processors) and a re-run that then succeeds.
-func revocationRejection(code processor.ErrorCode, msg, linkKey string) error {
+// Every rendering names the OP and the LINK KEY, because the reply's own code
+// and message are the two things that may be missing: a rejected reply is not
+// obliged to carry an error object, and a caller that reads code and message
+// off a nil one hands this an empty pair. The scan revokes many edges in one
+// run, so "rejected: — " with neither would name nothing at all and leave the
+// operator with a failure they cannot attribute to an edge.
+//
+// ProtectedKey gets its own diagnosis on top. Each Processor protects the
+// twelve kernel topology links of the epoch whose lattice.bootstrap.json it
+// loaded at start-up, so a replica that has NOT restarted since the table was
+// regenerated still holds the retired epoch's edges as its own and refuses to
+// revoke them — non-deterministically per op in a mixed roll, since the reply
+// comes from whichever replica took the message. Read as a generic rejection,
+// that looks like the retirement being impossible; read for what it is, it
+// names an operator action (roll the Processors) and a re-run that succeeds.
+func revocationRejection(code processor.ErrorCode, msg, opType, linkKey string) error {
+	shownCode := string(code)
+	if shownCode == "" {
+		shownCode = "(no code)"
+	}
+	if strings.TrimSpace(msg) == "" {
+		msg = "(no message)"
+	}
 	if code == processor.ErrCodeProtectedKey {
 		return fmt.Errorf(
-			"rejected: %s — %s: epoch skew — a Processor still holds the RETIRED table, so it protects %s"+
+			"%s on %s rejected: %s — %s: epoch skew — a Processor still holds the RETIRED table, so it protects %s"+
 				" as its own kernel topology. Restart every Processor replica on the current"+
 				" lattice.bootstrap.json and re-run; in a mixed roll this refusal appears on some"+
 				" revocations and not others, depending on which replica takes the message",
-			code, msg, linkKey)
+			opType, linkKey, shownCode, msg, linkKey)
 	}
-	return fmt.Errorf("rejected: %s — %s", code, msg)
+	return fmt.Errorf("%s on %s rejected: %s — %s", opType, linkKey, shownCode, msg)
 }
 
 // printReinstallRecommendations reads declaredBy off every permission this

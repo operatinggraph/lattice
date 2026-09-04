@@ -62,23 +62,25 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 		}
 		kind := substrate.ClassifyKey(m.Key)
 		ref, ok, fault := resolver.resolveGoverningDDLChecked(ctx, class, m.Key, kind, result, state)
-		if fault != nil && !ok {
-			// An EMPTY resolution that follows a live-read fault is not a "not
+		if fault != nil {
+			// A resolution that suffered a live-read fault is not a "not
 			// sensitive" answer — it is no answer at all. Step 6 ran first
 			// against this same shared live-read budget and may have resolved
 			// this very class as sensitive before exhausting it; reading the
-			// empty result as a miss would commit the aspect as PLAINTEXT.
+			// degraded result as a miss would commit the aspect as PLAINTEXT.
 			// Reject the operation instead.
 			//
-			// Both conditions are required. A fault that still ends in a
-			// definitive DDL (a later hop resolved it) told us what we needed,
-			// so it is immaterial and must not fail an otherwise valid write.
+			// The fault ALONE is the test, matching what step 6 does with one:
+			// a fault ENDS the governing-DDL walk where it happened — both the
+			// instanceOf read and the committed-class read stop it and resolve
+			// empty — so no resolution can stand behind one, and a hop this
+			// step could not read is a hop whose DDL may be the sensitive one.
 			//
 			// The rejection is TERMINAL, not a retry: handleStubFailure replies
 			// and Terms the message, and the budget counter is monotone within
 			// an execution, so the submitter resubmits rather than the platform
 			// redelivering into the same exhausted budget.
-			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s came back empty after a live-read fault; refusing to treat it as non-sensitive: %w", m.Key, fault)
+			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s hit a live-read fault; refusing to treat the degraded resolution as non-sensitive: %w", m.Key, fault)
 		}
 		// Only an ASPECT can carry sensitivity — the install refuses `sensitive`
 		// on every other DDL class (internal/pkgmgr/sensitivescope.go) — so a

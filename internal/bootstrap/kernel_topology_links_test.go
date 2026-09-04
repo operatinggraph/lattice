@@ -105,34 +105,66 @@ func TestKernelTopologyLinkKeys_OmitsTheGatewayIdentity(t *testing.T) {
 // protect nothing. The positive vector is the pin above, so this refusal cannot
 // be masking a permanently broken composition.
 //
+// The twelve keys are composed from THIRTEEN identifiers, and a check that
+// covers only some of them refuses on those and composes an empty-segmented key
+// for the rest, with a nil error — the exact failure the refusal exists to
+// prevent, in the half nobody looked at. So the loop covers all thirteen: the
+// operator role, the six holdsRole identities, and the six permissions whose
+// grant edges KernelTopologyLinkKeys composes through KernelGrantLinkKeys.
+//
 // This is an internal test because it drives package vars. No test in this
 // package runs in parallel and the originals are restored, so the mutation is
 // invisible to the rest of the run.
 func TestKernelTopologyLinkKeys_UnloadedIdentifiersError(t *testing.T) {
 	populateForTest(t)
 
-	savedRole, savedLoom := RoleOperatorID, LoomIdentityID
-	t.Cleanup(func() { RoleOperatorID, LoomIdentityID = savedRole, savedLoom })
+	// Each identifier is addressed through a pointer to its package variable,
+	// so blanking one exercises the same global the composition reads.
+	identifiers := []struct {
+		name string
+		id   *string
+	}{
+		{"roleOperator", &RoleOperatorID},
+		{"bootstrapIdentity", &BootstrapIdentityID},
+		{"loomIdentity", &LoomIdentityID},
+		{"weaverIdentity", &WeaverIdentityID},
+		{"bridgeIdentity", &BridgeIdentityID},
+		{"objmgrIdentity", &ObjmgrIdentityID},
+		{"privacyIdentity", &PrivacyIdentityID},
+		{"permCreateMetaVertex", &PermCreateMetaVertexID},
+		{"permUpdateMetaVertex", &PermUpdateMetaVertexID},
+		{"permTombstoneMetaVertex", &PermTombstoneMetaVertexID},
+		{"permInstallPackage", &PermInstallPackageID},
+		{"permUninstallPackage", &PermUninstallPackageID},
+		{"permUpgradePackage", &PermUpgradePackageID},
+	}
 
-	RoleOperatorID = ""
-	keys, err := KernelTopologyLinkKeys()
-	if !errors.Is(err, ErrPrimordialIDsUnloaded) {
-		t.Fatalf("err = %v, want it to wrap ErrPrimordialIDsUnloaded", err)
-	}
-	if keys != nil {
-		t.Errorf("keys = %v, want nil alongside the error", keys)
-	}
-	if !strings.Contains(err.Error(), "roleOperator") {
-		t.Errorf("err = %q, want it to name roleOperator", err)
+	// A sanity floor on the enumeration itself: thirteen identifiers compose
+	// twelve keys, and a row dropped from the list above would silently narrow
+	// what this test covers.
+	if len(identifiers) != 13 {
+		t.Fatalf("the enumeration names %d identifiers, want 13 (1 role + 6 identities + 6 permissions)", len(identifiers))
 	}
 
-	// An empty identity is equally disqualifying: it composes a key with an
-	// empty source segment, which is not the edge the seeder wrote.
-	RoleOperatorID = savedRole
-	LoomIdentityID = ""
-	if _, err := KernelTopologyLinkKeys(); !errors.Is(err, ErrPrimordialIDsUnloaded) {
-		t.Fatalf("empty loomIdentity: err = %v, want it to wrap ErrPrimordialIDsUnloaded", err)
-	} else if !strings.Contains(err.Error(), "loomIdentity") {
-		t.Errorf("err = %q, want it to name loomIdentity", err)
+	for _, ident := range identifiers {
+		t.Run(ident.name, func(t *testing.T) {
+			saved := *ident.id
+			if saved == "" {
+				t.Fatalf("%s is empty on a populated table — the fixture, not the subject, is broken", ident.name)
+			}
+			defer func() { *ident.id = saved }()
+
+			*ident.id = ""
+			keys, err := KernelTopologyLinkKeys()
+			if !errors.Is(err, ErrPrimordialIDsUnloaded) {
+				t.Fatalf("err = %v, want it to wrap ErrPrimordialIDsUnloaded", err)
+			}
+			if keys != nil {
+				t.Errorf("keys = %v, want nil alongside the error", keys)
+			}
+			if !strings.Contains(err.Error(), ident.name) {
+				t.Errorf("err = %q, want it to name %s", err, ident.name)
+			}
+		})
 	}
 }

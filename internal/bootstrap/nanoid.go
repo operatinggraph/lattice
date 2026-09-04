@@ -645,30 +645,80 @@ func persistWithStatus(path string, raw PrimordialIDsRaw, status string) error {
 	return nil
 }
 
-// KernelGrantLinkKeys returns the six `permission grantedBy role` edges the
-// kernel seeds — one per primordial permission (3 meta + 3 package-lifecycle),
-// each granted to the operator role (primordial.go's grantedBy step). Derived
-// from the same primordial ID variables the seeder itself derives them from,
-// so the kernel's grant topology has exactly one owner: a consumer that needs
-// to know which grant edges are kernel-authored (verify-kernel's key
-// enumeration, internal/pkgmgr's grant-link reconciler) asks here rather than
-// re-deriving the shape.
-//
-// The result is only meaningful once LoadOrGenerate or Load has populated the
-// primordial IDs — before that each entry carries empty id segments. The keys
-// are assembled by concatenation rather than substrate.LinkKey deliberately:
-// LinkKey panics on an id that is not a valid NanoID, and this is called from
-// readiness paths (PrimordialVertexKeys) that must be able to run and report
-// on an unloaded process rather than crash it.
-func KernelGrantLinkKeys() []string {
-	return []string{
-		"lnk.permission." + PermCreateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUpdateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermTombstoneMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermInstallPackageID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUpgradePackageID + ".grantedBy.role." + RoleOperatorID,
+// kernelIdentifier pairs one primordial identifier with the name a refusal
+// reports for it, so a caller handed an unloaded table learns WHICH identifier
+// was still empty rather than that "something" was.
+type kernelIdentifier struct {
+	name string
+	id   string
+}
+
+// missingKernelIdentifiers returns, in the order given, the names of those
+// identifiers whose id is still empty.
+func missingKernelIdentifiers(ids []kernelIdentifier) []string {
+	var missing []string
+	for _, i := range ids {
+		if i.id == "" {
+			missing = append(missing, i.name)
+		}
 	}
+	return missing
+}
+
+// kernelGrantPermissions names the six primordial permissions the kernel grants
+// to the operator role — 3 meta + 3 package-lifecycle — paired with the
+// identifier each grant edge's source segment is composed from
+// (primordial.go's grantedBy step).
+func kernelGrantPermissions() []kernelIdentifier {
+	return []kernelIdentifier{
+		{"permCreateMetaVertex", PermCreateMetaVertexID},
+		{"permUpdateMetaVertex", PermUpdateMetaVertexID},
+		{"permTombstoneMetaVertex", PermTombstoneMetaVertexID},
+		{"permInstallPackage", PermInstallPackageID},
+		{"permUninstallPackage", PermUninstallPackageID},
+		{"permUpgradePackage", PermUpgradePackageID},
+	}
+}
+
+// KernelGrantLinkKeys returns the six `permission grantedBy role` edges the
+// kernel seeds — one per primordial permission, each granted to the operator
+// role. Derived from the same primordial ID variables the seeder itself derives
+// them from, so the kernel's grant topology has exactly one owner: a consumer
+// that needs to know which grant edges are kernel-authored (internal/pkgmgr's
+// grant-link reconciler, whose findings `scripts/verify-permission-provenance.go`
+// renders; the Processor's protected link set, via KernelTopologyLinkKeys) asks
+// here rather than re-deriving the shape.
+//
+// Refuses with ErrPrimordialIDsUnloaded, naming every empty identifier, when
+// the operator role or any of the six permissions is unpopulated — rather than
+// composing keys with empty id segments. Such a key is well-formed enough to be
+// carried around and compared against, and matches nothing: a consumer wiring
+// it holds a full-length set that governs none of the six edges it names.
+//
+// The keys are assembled by concatenation rather than substrate.LinkKey
+// deliberately: LinkKey panics on an id that is not a valid NanoID, and a
+// caller reaching this from a process that never loaded the table must be able
+// to report on it rather than crash it.
+func KernelGrantLinkKeys() ([]string, error) {
+	ids := append([]kernelIdentifier{{"roleOperator", RoleOperatorID}}, kernelGrantPermissions()...)
+	if missing := missingKernelIdentifiers(ids); len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrPrimordialIDsUnloaded, strings.Join(missing, ", "))
+	}
+	return composeKernelGrantLinkKeys(), nil
+}
+
+// composeKernelGrantLinkKeys builds the six keys without asking whether the
+// identifiers behind them are loaded. It exists for PrimordialVertexKeys, whose
+// every other entry is an equally unloaded package variable: that enumeration
+// backs a count-only readiness gate, so making its LENGTH depend on load state
+// would break the very comparison the gate performs.
+func composeKernelGrantLinkKeys() []string {
+	perms := kernelGrantPermissions()
+	keys := make([]string, 0, len(perms))
+	for _, p := range perms {
+		keys = append(keys, "lnk.permission."+p.id+".grantedBy.role."+RoleOperatorID)
+	}
+	return keys
 }
 
 // kernelHoldsRoleActors names the six identities the kernel seeds a
@@ -676,17 +726,8 @@ func KernelGrantLinkKeys() []string {
 // source segment is composed from. The Gateway identity is deliberately absent:
 // it is seeded without such an edge and earns identityProvisioner through a
 // one-time ops action instead (primordial.go's step 10a).
-//
-// The name half is what an unloaded-table refusal reports, so a caller learns
-// which identifier was still empty rather than that "something" was.
-func kernelHoldsRoleActors() []struct {
-	name string
-	id   string
-} {
-	return []struct {
-		name string
-		id   string
-	}{
+func kernelHoldsRoleActors() []kernelIdentifier {
+	return []kernelIdentifier{
 		{"bootstrapIdentity", BootstrapIdentityID},
 		{"loomIdentity", LoomIdentityID},
 		{"weaverIdentity", WeaverIdentityID},
@@ -717,7 +758,10 @@ func kernelHoldsRoleActors() []struct {
 //
 // Refuses with ErrPrimordialIDsUnloaded rather than returning keys whose id
 // segments are empty: such keys match nothing, so an unloaded table would hand
-// back a full-length set protecting none of the twelve edges it names.
+// back a full-length set protecting none of the twelve edges it names. All
+// THIRTEEN identifiers the twelve keys are composed from are covered — the
+// operator role and the six identities here, the six permissions inside
+// KernelGrantLinkKeys, whose refusal this one propagates.
 //
 // The keys are assembled by concatenation rather than through the
 // *HoldsRoleLinkKey package variables or substrate.LinkKey, for the reason
@@ -726,21 +770,16 @@ func kernelHoldsRoleActors() []struct {
 // that is not a valid NanoID — while a caller wiring this set must be able to
 // report on an unloaded process rather than crash it.
 func KernelTopologyLinkKeys() ([]string, error) {
-	var missing []string
-	if RoleOperatorID == "" {
-		missing = append(missing, "roleOperator")
-	}
 	actors := kernelHoldsRoleActors()
-	for _, a := range actors {
-		if a.id == "" {
-			missing = append(missing, a.name)
-		}
-	}
-	if len(missing) > 0 {
+	ids := append([]kernelIdentifier{{"roleOperator", RoleOperatorID}}, actors...)
+	if missing := missingKernelIdentifiers(ids); len(missing) > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrPrimordialIDsUnloaded, strings.Join(missing, ", "))
 	}
 
-	grants := KernelGrantLinkKeys()
+	grants, err := KernelGrantLinkKeys()
+	if err != nil {
+		return nil, err
+	}
 	keys := make([]string, 0, len(grants)+len(actors))
 	keys = append(keys, grants...)
 	for _, a := range actors {
@@ -788,7 +827,7 @@ func PrimordialVertexKeys() []string {
 		PermUpgradePackageKey,
 	}
 	// 6 grantedBy links (meta-perm + install/upgrade perms → operator)
-	keys = append(keys, KernelGrantLinkKeys()...)
+	keys = append(keys, composeKernelGrantLinkKeys()...)
 	keys = append(keys,
 		// admin holdsRole link
 		BootstrapHoldsRoleLinkKey,

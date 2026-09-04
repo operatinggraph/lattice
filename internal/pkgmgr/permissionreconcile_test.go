@@ -1352,6 +1352,19 @@ func declareKey(t *testing.T, ctx context.Context, conn *substrate.Conn, manifes
 	})
 }
 
+// kernelGrantEdges is the six seeded `permission grantedBy role` keys, taken
+// from bootstrap itself. It fails the test on an unloaded table rather than
+// indexing a nil slice: the harness populates the identifiers, so a refusal
+// here is a fixture-ordering fault and reads better named than as a panic.
+func kernelGrantEdges(t *testing.T) []string {
+	t.Helper()
+	keys, err := bootstrap.KernelGrantLinkKeys()
+	if err != nil {
+		t.Fatalf("bootstrap.KernelGrantLinkKeys: %v", err)
+	}
+	return keys
+}
+
 // liveGrantLinkClassCounts independently re-derives the classification
 // LoadPermissionReconciliation's gatherer feeds ReconcileGrantLinks, so a test
 // can assert how many kernel/package/runtime/unstamped/unrecognized edges are
@@ -1413,8 +1426,8 @@ func TestLoadPermissionReconciliation_GrantLinks_CleanInstall(t *testing.T) {
 	}
 
 	counts := liveGrantLinkClassCounts(t, ctx, conn)
-	if counts[GrantProvenanceKernel] != len(bootstrap.KernelGrantLinkKeys()) {
-		t.Errorf("kernel class count = %d, want %d", counts[GrantProvenanceKernel], len(bootstrap.KernelGrantLinkKeys()))
+	if want := len(kernelGrantEdges(t)); counts[GrantProvenanceKernel] != want {
+		t.Errorf("kernel class count = %d, want %d", counts[GrantProvenanceKernel], want)
 	}
 	wantPackage := 0
 	for _, p := range def.Permissions {
@@ -1710,7 +1723,7 @@ func TestLoadPermissionReconciliation_DetectsGrantKernelMissing(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	kernelEdge := bootstrap.KernelGrantLinkKeys()[0]
+	kernelEdge := kernelGrantEdges(t)[0]
 	tombstoneKey(t, ctx, conn, kernelEdge)
 
 	got, err := LoadPermissionReconciliation(ctx, conn)
@@ -2138,7 +2151,7 @@ func TestLoadPermissionReconciliation_UndecodableKernelEdgeIsNotAlsoMissing(t *t
 		t.Fatalf("Install: %v", err)
 	}
 
-	kernelEdge := bootstrap.KernelGrantLinkKeys()[0]
+	kernelEdge := kernelGrantEdges(t)[0]
 	writeRawLink(t, ctx, conn, kernelEdge, `not json at all {{{`)
 
 	got, err := LoadPermissionReconciliation(ctx, conn)

@@ -407,6 +407,32 @@ type kvEntry struct {
 	value []byte
 }
 
+// PrimordialEntries returns every key the kernel seeds, mapped to the exact
+// bytes SeedPrimordial writes at it. It is the seeder's own output, so a
+// consumer outside this package can assert against what the kernel ACTUALLY
+// emits rather than against a second description of it — which is the only
+// thing that keeps a derivation of the kernel's shape (the Processor's
+// seeded-link predicate, say) honest about the same entries.
+//
+// The values are the seeder's buffers, not copies. Callers read them.
+//
+// Requires the primordial identifiers to be loaded; on an unloaded table the
+// entries carry empty id segments, exactly as SeedPrimordial would write them.
+func PrimordialEntries() (map[string][]byte, error) {
+	entries, err := buildPrimordialEntries()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		if _, dup := out[e.key]; dup {
+			return nil, fmt.Errorf("primordial entry %q is emitted twice", e.key)
+		}
+		out[e.key] = e.value
+	}
+	return out, nil
+}
+
 // buildPrimordialEntries assembles all primordial KV entries in seeding
 // order for the post-Story-4.7 minimized kernel. Roles consumer/
 // frontOfHouse/backOfHouse, the identity DDL, and the 5 RoleMgmt DDLs

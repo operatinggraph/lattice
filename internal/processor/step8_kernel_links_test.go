@@ -26,6 +26,20 @@ const (
 	strandedRoleID        = "Sv9jKm3tWb6nQx4pRd8y"
 )
 
+// The provenance a stored kernel link carries: the seeder's creation triplet,
+// established once when the edge was seeded, and the lastModified triplet the
+// revocation that tombstoned it left behind. A revive must preserve the first
+// and displace the second.
+const (
+	seederStamp = "2026-01-02T03:04:05.000000006Z"
+	seederActor = "vtx.identity.Bs7kWm2tXn5pQv9jRd3h"
+	seederOp    = "vtx.op.Bp3nKv8wTm4xQj6rYd9s"
+
+	revokeStamp = "2026-06-07T08:09:10.000000011Z"
+	revokeActor = "vtx.identity.Rk5tWn8mXb3pQv7jFd2c"
+	revokeOp    = "vtx.op.Rv2mXk6wTn9pQj4bHd7y"
+)
+
 // kernelHoldsRoleKey / kernelGrantKey are the two shapes the kernel seeds, built
 // through substrate.LinkKey so a test key that could never exist in Core KV
 // fails here rather than passing a guard that parses it.
@@ -91,7 +105,7 @@ func TestCommit_KernelLinkTombstoneIsProtected(t *testing.T) {
 
 	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole, permGrantedBy})
 
-	// A create is exempt from the guard, which is how the seeded edges get to
+	// A seeded-shape create is admitted, which is how the seeded edges get to
 	// exist at all; every refusal below is over a live edge.
 	commitOne(t, ctx, c, "rid-seed-holds", MutationOp{
 		Op: "create", Key: adminHoldsRole,
@@ -200,10 +214,21 @@ func TestCommit_KernelLinkReviveIsAdmitted(t *testing.T) {
 	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole})
 
 	// The already-revoked state, written under the guard rather than through
-	// it — the deployment this heals reached it before the guard shipped.
+	// it — the deployment this heals reached it before the guard shipped. The
+	// body is what buildMutationValue's tombstone arm actually stores: the
+	// seeder's WHOLE prior document, its creation triplet intact, with
+	// isDeleted flipped and a lastModified triplet stamped by the revoking
+	// operation. A fixture that stored only the link fields would let a revive
+	// that re-stamps createdAt pass, since there would be nothing to erase.
 	revoked := seededLinkDoc(adminKey, roleKey, "holdsRole")
 	revoked["isDeleted"] = true
 	revoked["key"] = adminHoldsRole
+	revoked["createdAt"] = seederStamp
+	revoked["createdBy"] = seederActor
+	revoked["createdByOp"] = seederOp
+	revoked["lastModifiedAt"] = revokeStamp
+	revoked["lastModifiedBy"] = revokeActor
+	revoked["lastModifiedByOp"] = revokeOp
 	body, err := json.Marshal(revoked)
 	if err != nil {
 		t.Fatalf("marshal revoked link: %v", err)
@@ -222,6 +247,178 @@ func TestCommit_KernelLinkReviveIsAdmitted(t *testing.T) {
 	if got := revived["targetVertex"]; got != roleKey {
 		t.Errorf("revived targetVertex = %v, want %s", got, roleKey)
 	}
+
+	// The heal must not rewrite the edge's history. The revive is an update,
+	// and an update writes the whole value, so the creation triplet survives
+	// only because preserveImmutableFields carries it over from the stored
+	// document — the script cannot resupply it and this one does not try.
+	// Losing it would leave the kernel's own topology claiming it was authored
+	// by whoever healed it.
+	for field, want := range map[string]string{
+		"createdAt":   seederStamp,
+		"createdBy":   seederActor,
+		"createdByOp": seederOp,
+	} {
+		if got, _ := revived[field].(string); got != want {
+			t.Errorf("revive rewrote %s: got %q, want the seeder's %q", field, got, want)
+		}
+	}
+	// The mirror: the revive IS this operation, so the lastModified triplet
+	// must have moved off the revocation that wrote the tombstone.
+	if got, _ := revived["lastModifiedByOp"].(string); got == revokeOp {
+		t.Errorf("lastModifiedByOp = %q — still the revoking operation, so the revive stamped nothing", got)
+	}
+}
+
+// The admitted shape is a CLOSED whitelist of six top-level fields, not "these
+// five must match and the rest is somebody else's problem". No platform guard
+// governs a link's other fields — rejectPermissionRoleRewrites adjudicates
+// vtx.permission.*/vtx.role.* roots and never sees a lnk.* key — so a tolerated
+// extra field is caller bytes committed verbatim at a key this arm exists to
+// hold fixed.
+func TestCommit_KernelLinkReviveRefusesFieldsOutsideTheSeededShape(t *testing.T) {
+	t.Parallel()
+
+	adminKey := "vtx.identity." + kernelAdminIdentityID
+	roleKey := "vtx.role." + kernelOperatorRoleID
+	adminHoldsRole := kernelHoldsRoleKey(kernelAdminIdentityID, kernelOperatorRoleID)
+
+	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole})
+	commitOne(t, ctx, c, "rid-wl-seed", MutationOp{
+		Op: "create", Key: adminHoldsRole,
+		Document: seededLinkDoc(adminKey, roleKey, "holdsRole"),
+	})
+
+	// Each of these is a live, correctly-endpointed edge by the five compared
+	// fields; each also smuggles a seventh field past them. `revokedAt` and
+	// `deleted` are the dangerous ones — a future consumer reading either
+	// would see a revocation the guard just admitted — and `vertexKey` is the
+	// aspect-shaped field that would make the edge decode as something it is
+	// not.
+	for _, extra := range []struct {
+		field string
+		value interface{}
+	}{
+		{"revokedAt", "2026-09-04T00:00:00Z"},
+		{"deleted", true},
+		{"vertexKey", adminKey},
+		{"note", "harmless-looking"},
+	} {
+		doc := seededLinkDoc(adminKey, roleKey, "holdsRole")
+		doc[extra.field] = extra.value
+		requireProtectedKey(t,
+			commitOneErr(ctx, c, "rid-wl-"+extra.field, MutationOp{Op: "update", Key: adminHoldsRole, Document: doc}),
+			adminHoldsRole, adminKey, "update")
+	}
+
+	// `data` is admitted but must still be a document body. A string or a
+	// number there is not something any reader of these edges could interpret.
+	for _, bad := range []interface{}{"a string", float64(7), []interface{}{"a", "list"}, nil} {
+		doc := seededLinkDoc(adminKey, roleKey, "holdsRole")
+		doc["data"] = bad
+		requireProtectedKey(t,
+			commitOneErr(ctx, c, "rid-wl-data", MutationOp{Op: "update", Key: adminHoldsRole, Document: doc}),
+			adminHoldsRole, adminKey, "update")
+	}
+}
+
+// The deliberate opening in the whitelist: `data` is admitted and its CONTENTS
+// are not compared. rbac-domain's grant_link carries the grant-edge provenance
+// stamp into the revive arm as well as the create arm, so a revive re-stamps
+// exactly as a fresh grant would — requiring `data` empty would refuse the one
+// heal path the arm exists to keep open. This pins that opening as intended
+// rather than as an oversight, and pins its floor: `data` may also be absent,
+// which is what a body assembled without one looks like.
+func TestCommit_KernelLinkReviveAdmitsAnyDataStamp(t *testing.T) {
+	t.Parallel()
+
+	adminKey := "vtx.identity." + kernelAdminIdentityID
+	roleKey := "vtx.role." + kernelOperatorRoleID
+	adminHoldsRole := kernelHoldsRoleKey(kernelAdminIdentityID, kernelOperatorRoleID)
+
+	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole})
+	commitOne(t, ctx, c, "rid-stamp-seed", MutationOp{
+		Op: "create", Key: adminHoldsRole,
+		Document: seededLinkDoc(adminKey, roleKey, "holdsRole"),
+	})
+
+	stamped := seededLinkDoc(adminKey, roleKey, "holdsRole")
+	stamped["data"] = map[string]interface{}{
+		"grantedByPackage": "rbac-domain",
+		"grantOrigin":      "package",
+		"nested":           map[string]interface{}{"anything": "at all"},
+	}
+	committed := commitOne(t, ctx, c, "rid-stamp-update", MutationOp{
+		Op: "update", Key: adminHoldsRole, Document: stamped,
+	})
+	data, _ := committed["data"].(map[string]interface{})
+	if got, _ := data["grantedByPackage"].(string); got != "rbac-domain" {
+		t.Errorf("data stamp did not reach the stored body: %v", committed["data"])
+	}
+
+	// Absent data is the same shape with one field fewer, and the committer
+	// leaves an update's document alone rather than defaulting one in.
+	noData := seededLinkDoc(adminKey, roleKey, "holdsRole")
+	delete(noData, "data")
+	if err := commitOneErr(ctx, c, "rid-stamp-nodata", MutationOp{
+		Op: "update", Key: adminHoldsRole, Document: noData,
+	}); err != nil {
+		t.Fatalf("a body with no data field was refused: %v", err)
+	}
+}
+
+// A create at a member key gets the same shape check an update does. The
+// create-only conflict stops an overwrite of a LIVE edge, but says nothing
+// about the body written at an ABSENT one — an incompletely seeded kernel, a
+// bucket restored short of an edge — where a create commits whatever it
+// carries at a key every authorization consumer looks up by name.
+func TestCommit_KernelLinkCreateTakesTheSeededShapeCheck(t *testing.T) {
+	t.Parallel()
+
+	adminKey := "vtx.identity." + kernelAdminIdentityID
+	roleKey := "vtx.role." + kernelOperatorRoleID
+	adminHoldsRole := kernelHoldsRoleKey(kernelAdminIdentityID, kernelOperatorRoleID)
+
+	ctx, c := buildCommitterWithKernelLinks(t, []string{adminHoldsRole})
+
+	// The key is absent, so nothing but this guard stands between the mutation
+	// and the write. A create naming a different holder is the shape that
+	// matters: it installs an edge at the admin's key that says somebody else
+	// holds the role.
+	resourced := seededLinkDoc("vtx.identity."+ordinaryIdentityID, roleKey, "holdsRole")
+	requireProtectedKey(t,
+		commitOneErr(ctx, c, "rid-create-resourced", MutationOp{
+			Op: "create", Key: adminHoldsRole, Document: resourced,
+		}),
+		adminHoldsRole, adminKey, "create")
+
+	// A create born tombstoned is the other one — a member key that exists and
+	// confers nothing, which reseed will never repair (the seeder refuses to
+	// rewrite a soft tombstone).
+	born := seededLinkDoc(adminKey, roleKey, "holdsRole")
+	born["isDeleted"] = true
+	requireProtectedKey(t,
+		commitOneErr(ctx, c, "rid-create-dead", MutationOp{
+			Op: "create", Key: adminHoldsRole, Document: born,
+		}),
+		adminHoldsRole, adminKey, "create")
+
+	// The seeded-shape create is left alone: re-establishing an absent kernel
+	// edge is legitimate, and against a live one the create-only conflict is
+	// still the adjudicator, exactly as before.
+	commitOne(t, ctx, c, "rid-create-ok", MutationOp{
+		Op: "create", Key: adminHoldsRole,
+		Document: seededLinkDoc(adminKey, roleKey, "holdsRole"),
+	})
+
+	// And a create at a NON-member link key is untouched by the arm, whatever
+	// its body — the set is exact, not a rule over the relation.
+	ordinaryHoldsRole := kernelHoldsRoleKey(ordinaryIdentityID, kernelOperatorRoleID)
+	odd := seededLinkDoc("vtx.identity."+ordinaryIdentityID, roleKey, "holdsRole")
+	odd["revokedAt"] = "2026-09-04T00:00:00Z"
+	commitOne(t, ctx, c, "rid-create-ordinary", MutationOp{
+		Op: "create", Key: ordinaryHoldsRole, Document: odd,
+	})
 }
 
 // The unset set is fail-OPEN by necessity — the fail-closed reading of a

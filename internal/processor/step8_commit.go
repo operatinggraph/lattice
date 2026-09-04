@@ -54,12 +54,14 @@ func (e *ConflictError) Unwrap() error { return e.Cause }
 // UninstallPackage, meta-root mutations, RevokeRole/RevokePermission, and any
 // future DDL) regardless of whether the originating script declared the root in
 // ContextHint.Reads. The commit path maps this onto a `rejected` reply with code
-// `ProtectedKey`. create mutations are exempt — create-only already conflicts on
-// overwrite.
+// `ProtectedKey`. On the data.protected ROOT arm a create is exempt — create-only
+// already conflicts on overwrite; on the kernel-link arm a create at a member key
+// is held to the same seeded shape an update is, since create-only says nothing
+// about the body it writes at an absent key.
 type ProtectedKeyError struct {
 	Key  string // the offending mutation key
 	Root string // the protected root: the derived vtx.<type>.<id>, or a link's source vertex
-	Op   string // the mutation op (update|tombstone)
+	Op   string // the mutation op (create|update|tombstone)
 }
 
 func (e *ProtectedKeyError) Error() string {
@@ -277,7 +279,8 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// if the root document carries data.protected == true. This is the
 	// path-independent kernel/auth bricking backstop — the script-level
 	// install/uninstall checks are best-effort defense-in-depth only.
-	// create mutations are exempt (create-only already conflicts on overwrite).
+	// On this arm create mutations are exempt (create-only already conflicts on
+	// overwrite); the kernel-link arm holds a create to the seeded shape too.
 	//
 	// The same read pass loads the stored document behind every update and
 	// tombstone, which buildMutationValue needs to preserve what the mutation
@@ -897,8 +900,8 @@ func (c *CommitterImpl) readPriorDoc(ctx context.Context, key string) (priorDoc,
 // commit's document cache, so multiple aspects of one root cost a single KVGet
 // — and they are read at COMMIT time (topUpPrior), not with the step-5.5
 // stored-class pass, so a root that turns protected after step 6 is still seen
-// by this guard. A root that does not exist is not protected. create mutations
-// are skipped — create-only conflicts on overwrite already.
+// by this guard. A root that does not exist is not protected. On the ROOT arm,
+// create mutations are skipped — create-only conflicts on overwrite already.
 //
 // kernelLinks is the second arm, over keys that have no vertex root at all: the
 // exact link keys the kernel seeds as its authorization topology
@@ -920,24 +923,32 @@ func (c *CommitterImpl) readPriorDoc(ctx context.Context, key string) (priorDoc,
 //     ways an update reaches the same outcome a tombstone would. A blanket
 //     immutability rule would take the heal path away with it.
 //
+//   - a create takes the same shape check. The create-only conflict is what
+//     stops a create from OVERWRITING a live edge, and it is enough for that —
+//     but it is a conflict on the key, adjudicated by the substrate after this
+//     guard runs, and it says nothing about the body. At a member key that is
+//     ABSENT (an incompletely seeded kernel, a bucket restored short of one
+//     edge) a create commits whatever body it carries. Holding it to the seeded
+//     shape leaves the legitimate re-establish exactly where it was and refuses
+//     the one that would install a differently-shaped edge at a key every
+//     authorization consumer looks up by name.
+//
 // The comparison is against the WRITTEN document, not the stored one: what the
-// guard has to decide is what this mutation leaves behind. The data stamp is not
-// compared — the grant-edge-provenance rules govern it, and a kernel link's data
-// is empty.
+// guard has to decide is what this mutation leaves behind.
 //
 // An empty set protects nothing, which is the test-fixture posture; production
 // wiring is pinned non-empty in cmd/processor. Empty cannot fail closed here:
 // "every link protected" would refuse every link write in the deployment.
 func rejectProtectedMutations(mutations []MutationOp, prior PriorDocs, kernelLinks map[string]struct{}) error {
 	for _, m := range mutations {
-		if m.Op != "update" && m.Op != "tombstone" {
-			continue
-		}
 		root := protectedRootKey(m.Key)
 		if root == "" {
 			if err := rejectKernelLinkMutation(m, kernelLinks); err != nil {
 				return err
 			}
+			continue
+		}
+		if m.Op != "update" && m.Op != "tombstone" {
 			continue
 		}
 		if docIsProtected(prior.doc(root)) {
@@ -956,25 +967,75 @@ func rejectKernelLinkMutation(m MutationOp, kernelLinks map[string]struct{}) err
 	if _, seeded := kernelLinks[m.Key]; !seeded {
 		return nil
 	}
-	if m.Op == "update" && isSeededLinkShape(m.Key, m.Document) {
+	switch m.Op {
+	case "create", "update":
+		if isSeededLinkShape(m.Key, m.Document) {
+			return nil
+		}
+	case "tombstone":
+		// Never the seeded shape: a tombstone leaves no live edge at all.
+	default:
+		// Not a write this guard adjudicates.
 		return nil
 	}
 	return &ProtectedKeyError{Key: m.Key, Root: linkSourceKey(m.Key), Op: m.Op}
 }
 
+// seededLinkFields is the CLOSED set of top-level fields a body written at a
+// kernel topology link key may carry — exactly the six rbac-domain's
+// revive_link emits, and exactly the six the seeder's own link envelope holds
+// once the fields the committer itself injects (`key` and the two provenance
+// triplets, buildMutationValue) are set aside.
+//
+// Closed, rather than "these five must match and anything else is tolerated",
+// because a link's `data` and every field beside it are governed by NO platform
+// guard: rejectPermissionRoleRewrites adjudicates vtx.permission.* and
+// vtx.role.* roots only and never reaches a lnk.* key, and the grant-edge
+// provenance stamp is a convention the Starlark scripts keep, not a rule the
+// committer enforces. Today that openness is inert — every reader of a kernel
+// link classifies it by KEY and then reads `isDeleted`, nothing else — so an
+// admitted revive carrying a `revokedAt`, a `deleted`, or a `vertexKey` would
+// change no consumer's answer. It would still be caller bytes committed at a
+// key the guard exists to hold fixed, and the next consumer to read a second
+// field off one of these edges would inherit them. The whitelist keeps that
+// shut without asserting anything about `data`, which stays uncompared.
+var seededLinkFields = map[string]struct{}{
+	"class":        {},
+	"isDeleted":    {},
+	"sourceVertex": {},
+	"targetVertex": {},
+	"localName":    {},
+	"data":         {},
+}
+
 // isSeededLinkShape reports whether doc is the body the kernel seeds at a link
 // key: live, with both endpoints and both names read straight off the key's own
-// segments. Every kernel link is seeded with its relation as both class and
-// localName, so the key alone says what a faithful body holds and no stored
-// document has to be consulted.
+// segments, and nothing else. Every kernel link is seeded with its relation as
+// both class and localName, so the key alone says what a faithful body holds and
+// no stored document has to be consulted.
 //
-// The comparison is total — an absent field is a mismatch, not a pass. A body
-// missing isDeleted or localName is not the shape the seeder wrote, and the
-// committer would write exactly what it was handed.
+// The comparison is total in both directions — an absent field is a mismatch,
+// not a pass, and an EXTRA top-level field is a mismatch too. A body missing
+// isDeleted or localName is not the shape the seeder wrote, and one carrying a
+// seventh field is not either; the committer would write exactly what it was
+// handed.
+//
+// `data` is the one admitted field whose contents are not compared. The
+// AssignRole revive re-stamps the grant-edge provenance the create wrote
+// (packages/rbac-domain/ddls.go's grant_link carries `data` into both arms, so a
+// revoke-then-re-grant cannot launder the stamp off), so requiring it empty
+// would refuse the heal path this arm exists to keep open. It must be an object
+// when present — a `data` holding a string or a number is not a document body
+// any reader of these edges could interpret.
 func isSeededLinkShape(key string, doc map[string]interface{}) bool {
 	sourceType, sourceID, relation, targetType, targetID, ok := substrate.ParseLinkKey(key)
 	if !ok || doc == nil {
 		return false
+	}
+	for field := range doc {
+		if _, allowed := seededLinkFields[field]; !allowed {
+			return false
+		}
 	}
 	deleted, isBool := doc["isDeleted"].(bool)
 	if !isBool || deleted {
@@ -991,6 +1052,11 @@ func isSeededLinkShape(key string, doc map[string]interface{}) bool {
 	}
 	if s, _ := doc["localName"].(string); s != relation {
 		return false
+	}
+	if data, present := doc["data"]; present {
+		if _, isObject := data.(map[string]interface{}); !isObject {
+			return false
+		}
 	}
 	return true
 }

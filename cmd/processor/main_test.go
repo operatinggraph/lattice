@@ -12,6 +12,8 @@ package main
 // it, through the same load the binary performs at start-up.
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
@@ -49,12 +51,28 @@ func TestBuildAuthWiring_WiresTheLoadedKernelTopologyLinkSet(t *testing.T) {
 
 // An unloaded table must stop start-up rather than wire an empty set. The
 // positive vector above is what proves this refusal is not permanent.
+//
+// The refusal is asserted by CLASS, not as "some error came back": the wiring
+// wraps bootstrap's own sentinel, and a start-up path that one day failed here
+// for an unrelated reason would satisfy a bare non-nil check while proving
+// nothing about the unloaded table.
 func TestBuildAuthWiring_RefusesAnUnloadedTable(t *testing.T) {
+	// Populate first, so the table this blanks one identifier of is a real one
+	// and the refusal cannot be an artefact of nothing having ever loaded.
+	testutil.EnsurePrimordials(t)
+
 	saved := bootstrap.RoleOperatorID
 	bootstrap.RoleOperatorID = ""
 	t.Cleanup(func() { bootstrap.RoleOperatorID = saved })
 
-	if _, err := buildAuthWiring(nil); err == nil {
+	_, err := buildAuthWiring(nil)
+	if err == nil {
 		t.Fatal("buildAuthWiring succeeded on an unloaded table, want a refusal")
+	}
+	if !errors.Is(err, bootstrap.ErrPrimordialIDsUnloaded) {
+		t.Fatalf("err = %v, want it to wrap bootstrap.ErrPrimordialIDsUnloaded", err)
+	}
+	if !strings.Contains(err.Error(), "roleOperator") {
+		t.Errorf("err = %q, want it to name the identifier that was empty", err)
 	}
 }

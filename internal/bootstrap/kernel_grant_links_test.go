@@ -39,7 +39,10 @@ func TestKernelGrantLinkKeys_MatchesWhatTheSeederEmits(t *testing.T) {
 		seeded = append(seeded, e.key)
 	}
 
-	declared := KernelGrantLinkKeys()
+	declared, err := KernelGrantLinkKeys()
+	if err != nil {
+		t.Fatalf("KernelGrantLinkKeys: %v", err)
+	}
 
 	sort.Strings(seeded)
 	sortedDeclared := append([]string(nil), declared...)
@@ -70,7 +73,12 @@ func TestKernelGrantLinkKeys_NameLiveGrantEdges(t *testing.T) {
 
 	idx := entriesByKey(t)
 
-	for _, k := range KernelGrantLinkKeys() {
+	declared, err := KernelGrantLinkKeys()
+	if err != nil {
+		t.Fatalf("KernelGrantLinkKeys: %v", err)
+	}
+
+	for _, k := range declared {
 		raw, ok := idx[k]
 		if !ok {
 			t.Errorf("%s is named by KernelGrantLinkKeys but the seeder writes no entry at it", k)

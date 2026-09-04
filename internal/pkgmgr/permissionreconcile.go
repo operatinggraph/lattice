@@ -1687,8 +1687,13 @@ func kernelGrantLinkKeySet(keys []string) (map[string]bool, error) {
 // bootstrap.KernelGrantLinkKeys so the kernel's grant topology is derived in
 // exactly one place and a change to bootstrap's own derivation cannot silently
 // desync this reconciler from the kernel it reconciles against. Returns an
-// error if bootstrap's globals have not been populated (see
-// kernelGrantLinkKeySet).
+// error if bootstrap's globals have not been populated — from bootstrap itself,
+// which names each empty identifier, with kernelGrantLinkKeySet's per-key shape
+// check standing behind it for a caller-supplied set.
 func kernelGrantLinkKeys() (map[string]bool, error) {
-	return kernelGrantLinkKeySet(bootstrap.KernelGrantLinkKeys())
+	keys, err := bootstrap.KernelGrantLinkKeys()
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: kernel grant-link keys: %w", err)
+	}
+	return kernelGrantLinkKeySet(keys)
 }

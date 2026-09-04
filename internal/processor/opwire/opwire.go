@@ -179,12 +179,13 @@ const (
 	//   - any tombstone of one of the links the kernel seeds as its
 	//     authorization topology — the edges that make the primordial admin and
 	//     the internal service actors root-equivalent, and those that carry the
-	//     kernel operations' grants to the operator role — and any update of one
-	//     that would not leave the seeded edge intact (a soft delete, a
-	//     re-pointed endpoint). Those links carry no document marker of their
+	//     kernel operations' grants to the operator role — and any create or
+	//     update of one that would not leave the seeded edge intact (a soft
+	//     delete, a re-pointed endpoint, a body carrying any field beside the
+	//     six such an edge holds). Those links carry no document marker of their
 	//     own, so they are held by exact key; both endpoints of each are
 	//     themselves protected, and the reply names the source endpoint as the
-	//     root. An update restoring a revoked one to its seeded shape is
+	//     root. A write restoring a revoked one to its seeded shape is
 	//     admitted — it is the heal path for a deployment already revoked.
 	//
 	// It is the kernel/auth bricking guard — the script-level checks are

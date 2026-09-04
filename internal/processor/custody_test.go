@@ -508,11 +508,12 @@ func TestEncryptSensitiveMutations_BudgetExhaustedResolution_IsAnError(t *testin
 	}
 }
 
-// The other half of the same rule, and the reason it is two conditions rather
-// than one: step 6 keeps its fail-open to the permissive default. A budget
-// exhausted during STEP 6's own walk resolves to no DDL and the mutation
-// passes — unchanged, and asserted here so the asymmetry is deliberate rather
-// than incidental.
+// The other half of the same rule: step 6 keeps its fail-open to the permissive
+// default for a CREATE, whose type authority lives in the batch it is
+// submitting. A budget exhausted during that walk resolves to no DDL and the
+// mutation passes — unchanged, and asserted here so the asymmetry with step 6.5
+// (and with step 6's own update path, which treats a fault as terminal) is
+// deliberate rather than incidental.
 func TestStep6_BudgetExhausted_StillFailsOpenToPermissive(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
