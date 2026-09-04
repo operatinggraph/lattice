@@ -263,23 +263,10 @@ func branchReadSet(fp ruleengine.EvalFootprint) []string {
 	return out
 }
 
-// vertexKeysFor folds one Core KV key to the vertex key(s) it belongs to: a
-// vertex is itself, an aspect is its parent, a link is both of its endpoints.
-// Anything else folds to nothing.
+// vertexKeysFor folds one Core KV key to the vertex key(s) it belongs to,
+// through the same fold the engine records provenance with.
 func vertexKeysFor(key string) []string {
-	switch substrate.ClassifyKey(key) {
-	case substrate.KindVertex:
-		return []string{key}
-	case substrate.KindAspect:
-		if parentVtx, _, _, _, ok := substrate.ParseAspectKey(key); ok {
-			return []string{parentVtx}
-		}
-	case substrate.KindLink:
-		if srcType, srcID, _, dstType, dstID, ok := substrate.ParseLinkKey(key); ok {
-			return []string{substrate.VertexKey(srcType, srcID), substrate.VertexKey(dstType, dstID)}
-		}
-	}
-	return nil
+	return full.AppendProvenanceVertexKeys(nil, key)
 }
 
 // mergeRowGroup combines 2+ branches' rows sharing one output key into one

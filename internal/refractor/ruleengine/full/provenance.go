@@ -131,6 +131,16 @@ func provRowTarget(outer *provNode, b binding) *provNode {
 // parent vertex, a link key for both of its endpoints. A key of no Contract #1
 // shape names no vertex and is dropped rather than guessed at.
 func appendProvVertexKeys(dst []string, key string) []string {
+	return AppendProvenanceVertexKeys(dst, key)
+}
+
+// AppendProvenanceVertexKeys is the Contract #1 fold a row's provenance names
+// a read by — the one the engine records with and the pipeline folds a
+// branch's read set with, so the two can never disagree on what vertex a key
+// belongs to. A vertex key is appended as itself, an aspect key as its parent
+// vertex, a link key as both of its endpoints; a key of no Contract #1 shape
+// is dropped. A key equal to the last one appended is not appended again.
+func AppendProvenanceVertexKeys(dst []string, key string) []string {
 	switch substrate.ClassifyKey(key) {
 	case substrate.KindVertex:
 		return appendProvVertexKey(dst, key)
