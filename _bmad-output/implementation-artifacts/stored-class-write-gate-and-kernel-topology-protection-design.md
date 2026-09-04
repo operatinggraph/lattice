@@ -281,6 +281,8 @@ pre-pass gains `class` (string when present); otherwise one admitted write of `{
 including from this gate. A stored class of `""` or an absent `class` field is the absent case: resolves nothing, permissive
 (Contract #1 §1.5 *"No default class"*).
 
+**Amended at build (2026-09-04, Inc 2 review — two cold reviewers, independently):** a corrupt stored body (found-but-undecodable, or a `class` that is not a string) refuses an **`update`** only, with its own `ViolatedConstraint: "storedClass"` so the wire distinguishes it from `permittedCommands`; a **`tombstone`** over it is **admitted** — the heal path this paragraph's first draft removed, by the same doctrine §11 M2/C3 applied to kernel links (a tombstone carries no document and writes no readable content forward, so nothing can be laundered, and a key the operation plane can never touch again is a brick with no remedy under P2).
+
 **Type authority for a stored class resolves against the committed world.** `resolveGoverningDDL`'s chain walk gains a
 `committedOnly` disposition used for the stored-class resolution: `instanceOfTargetOf` skips the in-flight-batch layer (and the
 `batchDead` exclusion) and reads working set → memo → on-demand, so a batch tombstone of the entity's own `instanceOf` cannot
@@ -288,6 +290,8 @@ un-type it for the gate. The declared-class resolution keeps today's batch-first
 the batch). Sharing `DDLResolutionMemo` between the two dispositions is sound: the memo caches only the raw pre-exclusion
 `LiveInstanceOfTargets` answer keyed on the walk node, both layers re-run against this call's mutations on every hit, and a
 fault is never memoised (`step6_resolve_ddl.go:118-136`, `:322-360`; verified §11 M-T2).
+
+**Amended at build (2026-09-04):** the `committedOnly` disposition also governs `classOf`'s batch scan, not only `instanceOfTargetOf` — a batch re-typing of a chain *terminal* would otherwise un-type the entity one hop further out, contradicting this paragraph's own rule; pinned by its own test (a business-vertex terminal re-typed in the batch). The stored-class chain walk is **skipped for `vtx.meta.*` keys** (exact lookup only): kernel meta-vertices carry no `instanceOf` edge by construction, so the walk can only find nothing while paying one `KVGetMulti` per meta root on every `TombstoneMetaVertex` / `UninstallPackage` / `UpgradePackage` cascade. **Two platform-authored mutations are outside the gate by construction and are stated as such in the code and in `docs/components/processor.md`:** the task auto-complete `update` (`autocomplete.go`, appended after step 6 — the `task` DDL admits only the task ops, so gating it would refuse every task-bound business op) and step 6.5's `piiKey` create.
 
 **Neither half of the rule is submitter-exhaustible.** The stored class comes from the prior-document pass (§3), which is off the
 script's live-read budget. The chain walk's on-demand reads — for the stored class **and**, on an `update`, for the declared
@@ -303,6 +307,8 @@ a step-8 read error is handled today — `NakWithDelay`, redelivered, never a re
 made a chain-read fault a terminal `DDLViolation` on step 6.5's precedent; that precedent is terminal because the alternative
 is committing plaintext, a stake this gate does not share, and a transient blip must not permanently reject a valid op (§11 M5).
 `DDLViolation` is reserved for a verdict: the DDL resolved and its `permittedCommands` omits the op, or the stored body is corrupt.
+
+**Amended at build (2026-09-04):** a fault that still ended in a definitive DDL is immaterial — the refuse-as-retryable branch fires only on `fault != nil && !ok`, the precedent step 6.5's `piiKey` resolution already keeps (`step65_encrypt.go`); `classOf` records a fault and continues the walk, so checking the fault first would turn an *admitting* resolution into an unbounded redelivery.
 
 **Refusal surface.** `DDLViolation` with `ViolatedConstraint: "permittedCommands"` and a `Detail` naming the stored class and the
 DDL — the existing wire code; a consumer sees the same refusal an `update` gets today.
@@ -434,11 +440,17 @@ Concretely:
 - `rejectProtectedMutations(mutations, prior, kernelLinks)` — the set is a `map[string]struct{}` built once at `NewCommitter`
   from `AuthWiring.KernelLinkKeys`.
 
+- **Corrected at build (2026-09-04):** the doubles population is **15 method sites**, not 8 — the §6.4 command still ended `..., env \*`, so every double with unnamed params was invisible (`noopCommitter`, `recordingCommitter`, `errCommitter`, `occFakeCommitter` in `internal/processor`; `forgedNoopValidator` / `forgedNoopCommitter` in `internal/bypass`, a package the census never named). The lesson §11 recorded was not applied to the command that recorded it; the census is `grep -rnE 'func \([^)]*\) (Validate|Commit)\(' --include='*.go' .` with no parameter-name clause at all.
+
+- **Amended at build (2026-09-04, Inc 2 review): the reads are split by consumer.** `ReadPrior` at step 5.5 reads only the **mutation keys** (what the stored-class gate needs); `Commit` reads the **root entries** the step-8 guards need (`protectedRootKey` of every aspect mutation) fresh at commit time, plus the top-up. The prior pass's root snapshot would otherwise be three stages older than today for a key the batch never conditions — a root flipped to `data.protected: true` during step 6.5's Vault round trips would not be seen. Net reads per attempt stay at today's count (each mutation key and each root once). The fallback revision `conditionRevision` takes for a non-hydrated key now comes from the 5.5 read, so such an update conflicts (and retries) across a wider window than before — stricter, never weaker.
+
 **Cost.** Zero new reads on the hot path. The stored-class chain walk adds on-demand reads only for a subtype vertex whose
 `instanceOf` is neither declared nor memoised — one `KVGetMulti` per such vertex per execution, the same cost the declared-class
 walk pays today for the same vertex, and memoised on the same `DDLResolutionMemo`. One cost shifts rather than grows: an op
 refused at step 6 for a reason other than key shape now pays the prior reads before its refusal. NFR-S6 is a wire-*shape*
 collapse (`nfr_s6_wire_shape.go:32-58`), not a timing equalisation, and its own refusals are raised at step 5, ahead of 5.5.
+
+**Amended at build (2026-09-04):** "zero new reads" holds for the prior pass, not for the stored-class *walk*: a bare tombstone used to resolve nothing, and now an `update`/`tombstone` whose stored class misses the exact lookup runs the chain walk — one `KVGetMulti` per distinct un-registered business-vertex root, serial inside `validateOne`, off the script's budget, memoised per root, bounded by `maxInstanceOfHops` and the batch cap. The meta-key short-circuit (§2.1 amendment) removes the one population where this was pure waste.
 
 ## 4. State and lifetime
 
