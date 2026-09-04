@@ -120,6 +120,35 @@ const (
 // one".
 var ErrDirectGetAttemptsExhausted = errors.New("substrate: KV get-multi: attempts exhausted")
 
+// directGetSizeSignatureFloor is the least aggregate payload an exhausted
+// attempt must already have received before its failure is read as an OVER-SIZE
+// one, and so as ErrDirectGetAttemptsExhausted.
+//
+// Two different failures exhaust the retry loop, and the error alone does not
+// tell them apart. A response larger than the ceiling the response subscription
+// buffers against ends short deterministically and exhausts every attempt
+// identically — that one a SMALLER request fixes. A mid-stream "404 Message Not
+// Found", a concurrent delete racing the read of a hot subject, exhausts the
+// same way and no smaller request fixes it: splitting it would multiply one
+// caller's wait by the depth of the descent.
+//
+// The bytes separate them. A response near the ceiling has already delivered
+// most of the ceiling before ending short; a racing 404 ends after almost
+// nothing. So the floor is DERIVED from that ceiling rather than written down:
+// an eighth of it is far above what a racing failure delivers and far below any
+// request that could genuinely be over it, and the derivation tracks the client
+// if the default ever moves.
+//
+// The ceiling is the client's own subscription pending-BYTES default, which is
+// what this read's channel subscription is given (nats.go v1.52.0 nats.go:4929
+// sets pBytesLimit = DefaultSubPendingBytesLimit for every subscription, chan
+// ones included). It is deliberately not probed at runtime: PendingLimits()
+// refuses a ChanSubscription outright (nats.go:5657-5659), so a probe here
+// could only ever fall back to this value — an adaptive-looking branch that can
+// never fire. A caller that starts setting per-subscription limits is what would
+// make a probe meaningful, and there is none.
+const directGetSizeSignatureFloor = nats.DefaultSubPendingBytesLimit / 8
+
 var (
 	// errDirectGetShortRead is the internal retry-whole signal: the response
 	// stream ended before a clean EOB. Never returned to a KVGetMulti caller
@@ -129,8 +158,10 @@ var (
 	// errDirectGetTooManyResults is the internal 413 signal that routes
 	// KVGetMulti to the stability-verified fallback. Never returned to callers.
 	errDirectGetTooManyResults = errors.New("substrate: KV get-multi: too many results")
-	// errDirectGetFallbackUnstable means the fallback's double-drain never
-	// agreed within directGetFallbackRetries attempts.
+	// errDirectGetFallbackUnstable means the stability-verified fallback's
+	// double drain never agreed within directGetFallbackRetries attempts. It
+	// belongs to KVGetMulti alone — KVGetMultiNoSnapshot does not drain, and so
+	// has nothing to stabilize.
 	errDirectGetFallbackUnstable = errors.New("substrate: KV get-multi: fallback snapshot did not stabilize")
 	// errDirectGetFallbackNeverDrained means one drain never emptied the
 	// consumer's pending set within directGetFallbackDrainRounds rounds.
@@ -177,8 +208,10 @@ type directGetMultiRequest struct {
 // keys may match at most 1,024 combined subjects on the fast path; beyond
 // that, KVGetMulti transparently falls back to a stability-verified
 // ephemeral-consumer drain (slower; still returns a verified point-in-time
-// snapshot, never a torn one). An empty keys returns an empty map, nil
-// error.
+// snapshot, never a torn one). KVGetMultiNoSnapshot, which does not owe that
+// snapshot, resolves the request to exact keys against the stream's own subject
+// state and reads them in fast-path chunks instead. An empty keys returns an
+// empty map, nil error.
 //
 // LATENCY, and why a caller on a latency-sensitive path must pass a deadline:
 // the fast path is bounded by directGetMultiDefaultTimeout per attempt. The
@@ -190,9 +223,9 @@ type directGetMultiRequest struct {
 // drain and 6 drains = 480s for the whole call — reached only when every
 // round's pull is starved, but reachable. A ctx WITH a deadline caps all of
 // it: each round's wait is clamped to the time remaining, so the call cannot
-// outlive the deadline by more than one round's setup.
-// KVGetMultiNoSnapshot runs a single drain and so is bounded by 80s, or by
-// the caller's deadline.
+// outlive the deadline by more than one round's setup. That ceiling is
+// KVGetMulti's alone: KVGetMultiNoSnapshot does not drain at all, and states
+// its own bound.
 //
 // The fast path's response is also bounded by the connection's negotiated
 // MaxPending (a send-budget ceiling independent of the 1,024-subject cap —
@@ -229,10 +262,13 @@ func (c *Conn) KVGetMulti(ctx context.Context, bucket string, keys []string) (ma
 // What it DROPS: past the 1,024-subject cap, the stability verification.
 // KVGetMulti drains twice and compares the two (key -> revision) maps,
 // retrying until they agree, so the set it returns provably existed
-// simultaneously. This drains ONCE. A write landing mid-drain can therefore
-// leave the result blending two instants — one entry carrying a revision from
-// before the write while another carries one from after, and a key created
-// during the drain appearing or not.
+// simultaneously. This does not drain at all. Past the cap it RESOLVES the
+// request to exact keys — every wildcard's subjects taken from the stream's own
+// state in one request, every literal passed through, the union de-duplicated —
+// and reads those keys on the fast path in chunks of at most 1,024
+// (resolveThenGetFallback). The result can therefore blend instants: one entry
+// carrying a revision from before a write while another carries one from after,
+// and a key created after the resolution not appearing at all.
 //
 // WHY that is the right trade for some callers, and why it is not a general
 // upgrade: the double drain fails, hard, whenever ANY matched key moves
@@ -252,6 +288,21 @@ func (c *Conn) KVGetMulti(ctx context.Context, bucket string, keys []string) (ma
 // re-validated per evaluation by the pipeline's footprint comparison. Under
 // KVGetMulti that read fails whenever the node is taking writes, which for
 // the node that overflowed is essentially always.
+//
+// LATENCY: one stream-info request for the stream handle plus one per DISTINCT
+// wildcard in the request, then ceil(N/1024) fast-path requests over the
+// resolved keys, each bounded by directGetMultiDefaultTimeout. When the caller
+// passes no deadline the client bounds each stream-info call by its default API
+// timeout — and that one budget covers the WHOLE paged loop, so a filter
+// matching more subjects than fit in that budget FAILS rather than taking
+// longer (the client's own note puts the paging threshold around 100k
+// subjects). A fast-path request refused for its aggregate SIZE is retried over
+// halves down to a floor, so the read side's worst case is that descent's
+// requests rather than one; a failure that is NOT the size signature is never
+// descended on and costs one request. There is no drain, and so no 80s
+// round-starved ceiling — which is the difference that matters at this size: a
+// drain of a few thousand subjects costs about a millisecond per key, where
+// resolving the same set and reading it in chunks costs a fraction of that.
 func (c *Conn) KVGetMultiNoSnapshot(ctx context.Context, bucket string, keys []string) (map[string]*KVEntry, error) {
 	return c.kvGetMulti(ctx, bucket, keys, false)
 }
@@ -276,23 +327,192 @@ func (c *Conn) kvGetMulti(ctx context.Context, bucket string, keys []string, ver
 		if verifyStable {
 			return c.kvGetMultiFallback(ctx, bucket, subjects, pre)
 		}
-		return c.drainDirectGetFallback(ctx, bucket, "KV_"+bucket, dedupeStrings(subjects), pre)
+		return c.resolveThenGetFallback(ctx, bucket, subjects, pre)
 	}
 	return nil, err
+}
+
+// directGetSubjectCap is the fast path's cap on MATCHED SUBJECTS: at or under
+// it the whole response is computed under the stream's read lock in one round
+// trip, and past it the server answers 413 and the request needs another
+// strategy. It is also the chunk size the resolved-key read below asks in, so
+// every one of those requests stays on that path.
+const directGetSubjectCap = 1024
+
+// directGetChunkFloor bounds the split-on-failure descent ChunkedMultiGet takes
+// when a chunk of exact keys is refused for its aggregate SIZE rather than its
+// count. Sixteen entries is far under any response ceiling, so a failure there
+// is about something other than size and is the caller's.
+const directGetChunkFloor = 16
+
+// resolveThenGetFallback answers a NoSnapshot request the fast path refused for
+// its matched-subject count, by RESOLVING the request to exact subjects and
+// then reading those on the fast path in chunks.
+//
+// It replaces a consumer drain with two cheap primitives, and the reason is
+// measured: a drain of a few thousand subjects costs about a millisecond per
+// key (seconds for one wide read), while exact-key multi-gets run about ten
+// milliseconds per thousand keys and the resolution is a single API round trip
+// per filter. The drain's expense buys completeness under a writer, and this
+// variant's callers do not need the SNAPSHOT that expense also buys — they hold
+// sets of independent facts and re-validate by another route.
+//
+// The resolution comes from the STREAM's own subject state, not from an
+// enumeration:
+//
+//   - a requested subject carrying `*` or `>` is a FILTER, and its matches are
+//     taken from a stream-info request scoped to it (jetstream.WithSubjectFilter),
+//     whose subject set the server computes under the same stream lock that
+//     serves the fast path itself. It has no count-bounded stop condition, so it
+//     cannot come back short because a subject was being rewritten while it ran
+//     — which is exactly what a consumer-backed key enumeration can do, and why
+//     one is not used here (see KVListKeysFilter, whose own callers tolerate a
+//     hint-grade answer);
+//   - a requested subject naming one key passes through untouched, including
+//     when that key does not exist — the read below simply returns nothing for
+//     it, exactly as the fast path does;
+//   - the request is de-duplicated before resolution, so a repeated filter costs
+//     one round trip, and the union is de-duplicated after it, so a key matched
+//     by two filters, or by a filter and a literal it also matches, is asked for
+//     once. That is stricter than the drain could be: a consumer's FilterSubjects
+//     rejects overlapping filters outright, and here overlap is just a set union.
+//
+// What the subject set does NOT decide is existence. A subject whose last
+// message is a delete or purge MARKER is still a subject of the stream and is
+// still resolved, and the exact-key read below is the arbiter: it drops markers,
+// so such a key is absent from the answer — the same absence the fast path
+// reports for it, and the batched analog of KVGet's ErrKeyNotFound. A soft
+// tombstone ("isDeleted" in its own envelope) is an ordinary live entry to both
+// and IS returned. Revisions are the read's own.
+//
+// The answer is therefore NOT from one instant, which is this variant's whole
+// contract. The subject set is a point in time; each chunk is read at a later
+// one. A key deleted between the two is absent, a key written between them is
+// read at its later revision, and a key created after the resolution is not in
+// the answer at all. KVGetMultiNoSnapshot permits exactly that; a caller that
+// needs simultaneity needs KVGetMulti, whose double drain is the comparison
+// that provides it.
+//
+// A chunk that fails after ChunkedMultiGet has split it to the floor is
+// returned as an error, and so is a resolution that fails. There is no partial
+// answer: an incomplete set from a primitive whose contract is completeness is
+// the silent-wrong answer this fallback exists to avoid.
+func (c *Conn) resolveThenGetFallback(ctx context.Context, bucket string, subjects []string, pre string) (map[string]*KVEntry, error) {
+	infos, requests := 0, 0
+	if hook := kvResolveThenGetHook(ctx); hook != nil {
+		defer func() { hook(infos, requests) }()
+	}
+	streamName := "KV_" + bucket
+
+	// The stream handle is fetched ONCE for the whole resolution: js.Stream is
+	// itself a stream-info round trip, so fetching it per filter would double
+	// the resolution's cost.
+	var stream jetstream.Stream
+	resolve := func(filter string) ([]string, error) {
+		if stream == nil {
+			infos++
+			handle, err := c.js.Stream(ctx, streamName)
+			if err != nil {
+				return nil, fmt.Errorf("substrate: KV get-multi %s: resolve filter %q: %w", bucket, filter, err)
+			}
+			stream = handle
+		}
+		infos++
+		return resolveFilterSubjects(ctx, bucket, stream, filter)
+	}
+
+	keys := make([]string, 0, len(subjects))
+	seen := make(map[string]struct{}, len(subjects))
+	add := func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for _, subject := range dedupeStrings(subjects) {
+		if !strings.ContainsAny(subject, "*>") {
+			add(strings.TrimPrefix(subject, pre))
+			continue
+		}
+		matched, err := resolve(subject)
+		if err != nil {
+			return nil, err
+		}
+		for _, resolved := range matched {
+			add(strings.TrimPrefix(resolved, pre))
+		}
+	}
+
+	if hook := kvResolvedKeysHook(ctx); hook != nil {
+		hook(keys)
+	}
+
+	out := make(map[string]*KVEntry, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	read := func(ctx context.Context, chunk []string) (map[string]*KVEntry, error) {
+		chunkSubjects := make([]string, len(chunk))
+		for i, key := range chunk {
+			chunkSubjects[i] = pre + key
+		}
+		requests++
+		return c.directGetMulti(ctx, bucket, chunkSubjects, pre)
+	}
+	visit := func(_ []string, entries map[string]*KVEntry) error {
+		for key, entry := range entries {
+			out[key] = entry
+		}
+		return nil
+	}
+	if err := ChunkedMultiGet(ctx, keys, directGetSubjectCap, directGetChunkFloor, read, visit); err != nil {
+		return nil, fmt.Errorf("substrate: KV get-multi %s: read %d resolved keys: %w", bucket, len(keys), err)
+	}
+	return out, nil
+}
+
+// resolveFilterSubjects returns every subject of stream matching filter, read
+// from the stream's own state in ONE request.
+//
+// jetstream.WithSubjectFilter scopes a stream-info request to the filter, and
+// the server computes State.Subjects under the stream lock — the same lock that
+// serves the fast path's multi_last — so the set is a point-in-time answer with
+// no stop condition to fire early. The pinned client pages the request itself
+// when the filter matches more subjects than fit one response, looping until it
+// has read every page (nats.go v1.52.0 jetstream/stream.go's Info), and bounds
+// the WHOLE loop by its default API timeout when the caller's ctx carries no
+// deadline (wrapContextWithoutDeadline).
+//
+// filter is a NATS subject filter and is validated by nothing on this side:
+// WithSubjectFilter passes it through, and the SERVER's own subject rules are
+// what an unspellable filter fails against.
+func resolveFilterSubjects(ctx context.Context, bucket string, stream jetstream.Stream, filter string) ([]string, error) {
+	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(filter))
+	if err != nil {
+		return nil, fmt.Errorf("substrate: KV get-multi %s: resolve filter %q: %w", bucket, filter, err)
+	}
+	out := make([]string, 0, len(info.State.Subjects))
+	for subject := range info.State.Subjects {
+		out = append(out, subject)
+	}
+	return out, nil
 }
 
 // directGetMulti runs the fast multi_last path with a bounded retry-whole
 // loop absorbing short reads.
 func (c *Conn) directGetMulti(ctx context.Context, bucket string, subjects []string, pre string) (map[string]*KVEntry, error) {
 	var lastErr error
+	var receivedPerAttempt []int
 	for attempt := 1; attempt <= directGetRetries; attempt++ {
-		entries, err := c.directGetMultiOnce(ctx, bucket, subjects, pre)
+		got, err := c.directGetMultiOnce(ctx, bucket, subjects, pre)
 		if err == nil {
-			return entries, nil
+			return got.entries, nil
 		}
 		if !errors.Is(err, errDirectGetShortRead) {
 			return nil, err
 		}
+		receivedPerAttempt = append(receivedPerAttempt, got.received)
 		lastErr = err
 		if attempt == directGetRetries {
 			break
@@ -303,26 +523,54 @@ func (c *Conn) directGetMulti(ctx context.Context, bucket string, subjects []str
 		case <-time.After(directGetRetryBackoff):
 		}
 	}
-	return nil, fmt.Errorf("substrate: KV get-multi %s: %d attempts: %w: %w",
-		bucket, directGetRetries, ErrDirectGetAttemptsExhausted, lastErr)
+	if exhaustionIsOverSize(receivedPerAttempt, directGetSizeSignatureFloor) {
+		return nil, fmt.Errorf("substrate: KV get-multi %s: %d attempts: %w: %w",
+			bucket, directGetRetries, ErrDirectGetAttemptsExhausted, lastErr)
+	}
+	return nil, fmt.Errorf("substrate: KV get-multi %s: %d attempts exhausted: %w",
+		bucket, directGetRetries, lastErr)
 }
 
-// directGetMultiOnce issues a single multi_last request-response cycle. The
-// subscription is created before the request is published (never the
-// reverse), so no response can arrive before this process is listening.
+// exhaustionIsOverSize decides which of the two exhausting failures a run of
+// short reads was — the whole basis on which ChunkedMultiGet does or does not
+// retry over smaller halves.
 //
-// When ctx carries no deadline, this attempt is bounded by
-// directGetMultiDefaultTimeout — a self-imposed budget, never the caller's
-// own cancellation. Losing the race against that synthetic budget (the
-// caller's ctx is still live) is reported as errDirectGetShortRead so the
-// retry-whole loop absorbs it; the caller's OWN ctx ending is always
-// reported and respected as-is, never retried.
-func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects []string, pre string) (map[string]*KVEntry, error) {
+// EVERY attempt must have received at least floor bytes. A response over the
+// subscription's pending-byte ceiling has already delivered most of that
+// ceiling before ending short, on every attempt, because the ceiling is
+// deterministic; a mid-stream 404 racing a delete ends after almost nothing,
+// and no smaller request fixes it. One small attempt is therefore enough to say
+// the run was not about size. No attempts at all is not an over-size failure
+// either: nothing was observed to classify.
+func exhaustionIsOverSize(receivedPerAttempt []int, floor int) bool {
+	if len(receivedPerAttempt) == 0 {
+		return false
+	}
+	for _, received := range receivedPerAttempt {
+		if received < floor {
+			return false
+		}
+	}
+	return true
+}
+
+// directGetAttempt is one fast-path attempt's outcome: what it collected, and
+// how many payload bytes it received before it ended — the quantity that says
+// which of the two exhausting failures a run of short reads was.
+type directGetAttempt struct {
+	entries  map[string]*KVEntry
+	received int
+}
+
+func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects []string, pre string) (directGetAttempt, error) {
+	// received accumulates the payload bytes this attempt actually got before
+	// it ended, which is what tells an over-size failure from a racing one.
+	received := 0
 	streamName := "KV_" + bucket
 	reqSubj := fmt.Sprintf(directGetMultiAPIT, streamName)
 	body, err := json.Marshal(directGetMultiRequest{MultiLastFor: subjects})
 	if err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: encode request: %w", bucket, err)
+		return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: encode request: %w", bucket, err)
 	}
 
 	attemptCtx := ctx
@@ -339,7 +587,7 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 	ch := make(chan *nats.Msg, directGetChanBuffer)
 	sub, err := c.nc.ChanSubscribe(inbox, ch)
 	if err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: subscribe: %w", bucket, err)
+		return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: subscribe: %w", bucket, err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
@@ -347,7 +595,7 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 	req.Reply = inbox
 	req.Data = body
 	if err := c.nc.PublishMsg(req); err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: publish request: %w", bucket, err)
+		return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: publish request: %w", bucket, err)
 	}
 
 	entries := make(map[string]*KVEntry, len(subjects))
@@ -355,39 +603,40 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 		select {
 		case <-attemptCtx.Done():
 			if cerr := ctx.Err(); cerr != nil {
-				return nil, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, cerr)
+				return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, cerr)
 			}
-			return nil, fmt.Errorf("substrate: KV get-multi %s: %w: no response within %s", bucket, errDirectGetShortRead, directGetMultiDefaultTimeout)
+			return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w: no response within %s", bucket, errDirectGetShortRead, directGetMultiDefaultTimeout)
 		case m, ok := <-ch:
 			if !ok {
-				return nil, fmt.Errorf("substrate: KV get-multi %s: %w: response subscription closed before EOB", bucket, errDirectGetShortRead)
+				return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w: response subscription closed before EOB", bucket, errDirectGetShortRead)
 			}
 			switch status := m.Header.Get(directGetStatusHdr); status {
 			case "":
+				received += len(m.Data)
 				entry, isMarker, perr := parseDirectGetEntry(m, bucket, pre)
 				if perr != nil {
-					return nil, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, perr)
+					return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, perr)
 				}
 				if !isMarker {
 					entries[entry.Key] = entry
 				}
 			case directGetStatusEOB:
 				if pending := m.Header.Get(directGetNumPendingHdr); pending != "0" {
-					return nil, fmt.Errorf("substrate: KV get-multi %s: %w: Nats-Num-Pending=%s at EOB", bucket, errDirectGetShortRead, pending)
+					return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w: Nats-Num-Pending=%s at EOB", bucket, errDirectGetShortRead, pending)
 				}
-				return entries, nil
+				return directGetAttempt{entries: entries, received: received}, nil
 			case directGetStatusNoResults:
 				if m.Header.Get(directGetDescrHdr) == directGetDescrNoResults {
-					return entries, nil
+					return directGetAttempt{entries: entries, received: received}, nil
 				}
 				// A mid-stream "404 Message Not Found": the matched-subject
 				// set was computed, but loading one of its messages then
 				// failed (a concurrent delete/purge racing the read).
-				return nil, fmt.Errorf("substrate: KV get-multi %s: %w: %s", bucket, errDirectGetShortRead, m.Header.Get(directGetDescrHdr))
+				return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: %w: %s", bucket, errDirectGetShortRead, m.Header.Get(directGetDescrHdr))
 			case directGetStatusTooManyResults:
-				return nil, errDirectGetTooManyResults
+				return directGetAttempt{received: received}, errDirectGetTooManyResults
 			default:
-				return nil, fmt.Errorf("substrate: KV get-multi %s: unexpected response status %s %s", bucket, status, m.Header.Get(directGetDescrHdr))
+				return directGetAttempt{received: received}, fmt.Errorf("substrate: KV get-multi %s: unexpected response status %s %s", bucket, status, m.Header.Get(directGetDescrHdr))
 			}
 		}
 	}

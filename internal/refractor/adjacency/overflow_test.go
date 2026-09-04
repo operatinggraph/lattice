@@ -798,39 +798,43 @@ func TestNeighbors_MarkedNodeSkipsUnusableKeysInsteadOfFailing(t *testing.T) {
 	assert.Equal(t, good, edges[0].EdgeID)
 }
 
-func TestNeighbors_MarkedNodeRetractsALinkHardDeletedMidDrain(t *testing.T) {
+func TestNeighbors_MarkedNodeRetractsALinkHardDeletedMidRead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
 	ctx := context.Background()
 	adjKV, coreKV := startKVs(t)
 
-	// A marked node's read drains a consumer over several rounds, accumulating
-	// entries as it goes, and a link can be hard-deleted while that is in
-	// flight: an earlier round collects it as live, and the tombstone arrives
-	// in a later one. If the later round merely skips the tombstone instead of
-	// retracting the entry, the read hands back a revoked link as live — an
-	// over-grant on the capability plane, and one that survives the footprint
-	// check, because two consecutive reads can agree on a fingerprint that
-	// includes the same deleted link.
+	// A marked node's read enumerates its link keyspace and then reads those
+	// keys, and a link can be hard-deleted while that is in flight: the
+	// enumeration lists it as live, and the delete lands before the read that
+	// would have fetched it. If the read handed back the entry the listing
+	// promised rather than what the store now holds, the walk would receive a
+	// REVOKED link as live — an over-grant on the capability plane, and one
+	// that survives the footprint check, because two consecutive reads can
+	// agree on a fingerprint that includes the same deleted link.
 	//
-	// The window is unreachable from outside: a single-round drain always sees
-	// the tombstone as its subject's last message. The hook below opens it by
-	// committing the delete between one round and the next.
+	// The window is unreachable from outside: resolving and reading are one
+	// call, and a delete landing either side of the pair is an ordinary
+	// before-or-after read. The hook below opens it by committing the delete
+	// between the two.
 	hub, want := seedMarkedHub(t, adjKV, coreKV, "mdd", 1100)
 	doomed := want[0]
 	survivors := want[1:]
 
 	deleted := false
-	hookCtx := substrate.WithKVDrainRoundHook(ctx, func(round int) {
+	hookCtx := substrate.WithKVResolvedKeysHook(ctx, func(keys []string) {
 		if deleted {
 			return
 		}
 		deleted = true
+		require.Contains(t, keys, doomed,
+			"the enumeration must have listed the link this test then revokes")
 		// Hard delete, not a soft tombstone: this is the NATS-level marker
-		// the drain has to act on, and the one the primitive strips.
+		// the read has to act on, and the one the primitive strips.
 		require.NoError(t, coreKV.Delete(context.Background(), doomed))
-		// More writes so the drain has a further round to deliver it in.
+		// Rewrite some survivors too, so the read observes a store that moved
+		// under it in more ways than the one deletion.
 		body, err := json.Marshal(map[string]any{"isDeleted": false})
 		require.NoError(t, err)
 		for _, key := range survivors[:50] {
@@ -841,9 +845,9 @@ func TestNeighbors_MarkedNodeRetractsALinkHardDeletedMidDrain(t *testing.T) {
 
 	edges, _, err := adjacency.Neighbors(hookCtx, adjKV, coreKV, hub)
 	require.NoError(t, err)
-	require.True(t, deleted, "the mid-drain delete must actually have run")
+	require.True(t, deleted, "the mid-read delete must actually have run")
 
 	got := edgeIDs(edges)
-	require.NotContains(t, got, doomed, "a link hard-deleted mid-drain must not come back as live")
+	require.NotContains(t, got, doomed, "a link hard-deleted mid-read must not come back as live")
 	require.ElementsMatch(t, survivors, got, "and every surviving link must still be there")
 }

@@ -208,9 +208,10 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   **unparseable** `cap-read` body denies that anchor and logs at Warn instead of erroring (erroring
   would let one corrupt key wedge every evaluation of an actor holding thousands of good ones,
   identically on every redelivery), and the scope's reads are bounded by a **15 s timeout** — a wide
-  actor's grant set is past the multi-get's 1,024-subject fast path, so it drains through a pull
-  consumer whose only other ceiling is the substrate's 80 s, which would stall the lens's consumer
-  silently; exceeding the bound is a loud evaluation error the Nak path already handles.
+  actor's grant set is past the multi-get's 1,024-subject fast path, where the no-snapshot variant
+  resolves each filter to exact keys with a server-side key listing and reads those keys back in
+  fast-path chunks; the bound is what keeps a pathological read from stalling the lens's consumer
+  silently, and exceeding it is a loud evaluation error the Nak path already handles.
 - **D1 read-grant change edge + personal convergence sweep
   (`internal/refractor/grantchange`).** That gate makes a personal row a function of *two*
   inputs — the lens's own Core-KV subgraph, which drives it through CDC, and the `cap-read`

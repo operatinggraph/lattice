@@ -287,21 +287,22 @@ func TestPersonalEnvelopeScope_KVFailurePropagates(t *testing.T) {
 }
 
 // TestPersonalScopeReadTimeout_IsBounded pins that the scope's own ceiling is
-// actually a ceiling. The read it bounds is a consumer drain for every actor
-// that matters, and a drain with no deadline runs to the substrate's 80-second
-// ceiling with the lens's consumer stalled behind it; a zero value here would
-// silently restore exactly that, because context.WithTimeout(ctx, 0) yields an
-// already-expired ctx and any non-zero misreading (a bare `15`, nanoseconds)
-// would too.
+// actually a ceiling. The read it bounds is a wide multi-get for every actor
+// that matters — a filter resolution plus a chunk of exact-key requests, each
+// with a bound of its own but no bound on their SUM — and it runs on the
+// evaluation's context with the lens's consumer stalled behind it. A zero value
+// here would remove the only ceiling over that sum, because
+// context.WithTimeout(ctx, 0) yields an already-expired ctx, and any non-zero
+// misreading (a bare `15`, nanoseconds) would too.
 func TestPersonalScopeReadTimeout_IsBounded(t *testing.T) {
 	if personalScopeReadTimeout <= 0 {
 		t.Fatalf("the scope read timeout must be positive; %v disables the bound", personalScopeReadTimeout)
 	}
 	if personalScopeReadTimeout < time.Second {
-		t.Fatalf("the scope read timeout %v is shorter than the widest live actor's drain; it would fail every wide evaluation", personalScopeReadTimeout)
+		t.Fatalf("the scope read timeout %v is shorter than the widest live actor's read; it would fail every wide evaluation", personalScopeReadTimeout)
 	}
 	if personalScopeReadTimeout >= 80*time.Second {
-		t.Fatalf("the scope read timeout %v is at or past the substrate's own ceiling, so it bounds nothing", personalScopeReadTimeout)
+		t.Fatalf("the scope read timeout %v is long enough to stall the lens's consumer rather than bound it", personalScopeReadTimeout)
 	}
 }
 

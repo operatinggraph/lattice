@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -174,4 +175,100 @@ func TestChunkedMultiGet_AnItemMayBeSeveralSubjects(t *testing.T) {
 	for _, subjects := range requests {
 		require.Zero(t, len(subjects)%2, "a pair is never torn across a request boundary")
 	}
+}
+
+// TestDirectGetSizeSignatureFloor_SeparatesTheTwoExhaustions pins the
+// classification the descent turns on, at the constant that draws it.
+//
+// Two failures exhaust the fast path's retry loop. A response over the
+// connection's byte ceiling has already delivered most of that ceiling before
+// ending short — no smaller request would, and a smaller one is the fix. A
+// mid-stream 404 racing a delete ends after almost nothing, and no smaller
+// request fixes it. The floor sits an eighth of the way to the default ceiling:
+// far above what a racing failure delivers, far below any request that could
+// genuinely be over it.
+func TestDirectGetSizeSignatureFloor_SeparatesTheTwoExhaustions(t *testing.T) {
+	require.Equal(t, 8<<20, directGetSizeSignatureFloor)
+	require.Less(t, directGetSizeSignatureFloor, 64<<20,
+		"the floor must sit well under the default MaxPending ceiling it classifies against")
+	require.Greater(t, directGetSizeSignatureFloor, 1<<20,
+		"and well above what a request that failed on a race delivers")
+}
+
+// TestChunkedMultiGet_OnlyTheSizeSignatureDescends is the pair of vectors the
+// gate exists for, driven through the splitter itself: an over-size exhaustion
+// is halved until it fits, and a non-size exhaustion — the same "attempts
+// exhausted" wording WITHOUT the sentinel — costs exactly one request and
+// surfaces unchanged.
+func TestChunkedMultiGet_OnlyTheSizeSignatureDescends(t *testing.T) {
+	sized := &sizedReader{maxItems: 256}
+	var seen []string
+	require.NoError(t, ChunkedMultiGet(context.Background(), items(1024), 1024, 16, sized.read, collectVisited(&seen)))
+	require.Equal(t, items(1024), seen)
+	require.Equal(t, []int{1024, 512, 256, 256, 512, 256, 256}, sized.requests,
+		"the over-size signature descends until the halves fit")
+
+	raced := &sizedReader{
+		maxItems: 1 << 20,
+		fail:     fmt.Errorf("substrate: KV get-multi b: 3 attempts exhausted: 404 Message Not Found"),
+	}
+	var none []string
+	err := ChunkedMultiGet(context.Background(), items(1024), 1024, 16, raced.read, collectVisited(&none))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrDirectGetAttemptsExhausted)
+	require.Empty(t, none)
+	require.Equal(t, []int{1024}, raced.requests,
+		"an exhaustion that is not the size signature is never descended on")
+}
+
+// TestExhaustionIsOverSize drives the classifier the descent turns on. Dropping
+// its per-attempt guard would make every exhaustion look like an over-size one
+// and reinstate the descent on failures no smaller request fixes.
+func TestExhaustionIsOverSize(t *testing.T) {
+	const floor = 8 << 20
+	cases := []struct {
+		name     string
+		received []int
+		want     bool
+	}{
+		{"every attempt at or above the floor", []int{floor, floor + 1, floor * 2}, true},
+		{"exactly at the floor", []int{floor, floor, floor}, true},
+		{"one attempt below the floor", []int{floor, floor - 1, floor}, false},
+		{"first attempt below the floor", []int{0, floor, floor}, false},
+		{"last attempt below the floor", []int{floor, floor, floor - 1}, false},
+		{"every attempt tiny", []int{0, 0, 0}, false},
+		{"no attempts at all", nil, false},
+	}
+	for _, tc := range cases {
+		if got := exhaustionIsOverSize(tc.received, floor); got != tc.want {
+			t.Errorf("%s: exhaustionIsOverSize(%v, %d) = %v, want %v", tc.name, tc.received, floor, got, tc.want)
+		}
+	}
+}
+
+// TestDirectGetSizeFloor_SitsUnderTheCeilingItClassifiesAgainst pins the
+// relationship the classification depends on. The floor is an eighth of the
+// pending-BYTES ceiling this read's response subscription buffers against, so
+// it must track that constant and sit well under it: a floor at or above the
+// ceiling could never be reached by a response that fits, and every exhaustion
+// would read as "not about size".
+//
+// The ceiling is not probed at runtime because it cannot be: PendingLimits()
+// refuses a ChanSubscription, which is what this read creates — asserted here
+// so the day the client starts answering, this test says so.
+func TestDirectGetSizeFloor_SitsUnderTheCeilingItClassifiesAgainst(t *testing.T) {
+	require.Equal(t, nats.DefaultSubPendingBytesLimit/8, directGetSizeSignatureFloor,
+		"the floor is derived from the ceiling, never written down")
+	require.Less(t, directGetSizeSignatureFloor, nats.DefaultSubPendingBytesLimit)
+	require.Greater(t, directGetSizeSignatureFloor, 1<<20,
+		"and sits well above what a request that failed on a race delivers")
+
+	c, _ := newTestConn(t)
+	ch := make(chan *nats.Msg, 1)
+	sub, err := c.nc.ChanSubscribe(c.nc.NewInbox(), ch)
+	require.NoError(t, err)
+	defer func() { _ = sub.Unsubscribe() }()
+	_, _, err = sub.PendingLimits()
+	require.ErrorIs(t, err, nats.ErrTypeSubscription,
+		"a channel subscription does not report its limits; a runtime probe here would be a branch that never fires")
 }
