@@ -713,3 +713,77 @@ bundle is admitted either way (C-T8); no in-flight design overlaps step 6/8, the
 **Lesson folded to the skill and memory** (designer §6): the draft attacked a branch the parser had already closed under a
 ratified design, and censused an interface with a grep shaped by the expected count. Both are one grep away — "is the shape
 even constructible?" before pricing a fix, and a parameter-name-agnostic, repo-wide pattern for any interface census.
+
+---
+
+## 12. Build notes
+
+### Fire brief (build note, 2026-09-04 — Lattice Steward fire, worktree `../lattice-wt-stored-class`, branch `fire/stored-class-write-gate`)
+
+**1. Scope sentence (verbatim, board row + §2).** *A documentless tombstone skips every DDL-driven write gate, and no link is
+ever protected* — *a mutation is governed by the DDL of every class it touches: for `update` and `tombstone`, the class of the
+document stored at the key; for `create` and `update`, the class the document declares. The kernel's own topology links are
+protected exactly as its vertices are.* Green bar: the §9 owning tests per increment, the two package suites red with Inc 1
+reverted, `go test ./internal/bypass/`, the build-tagged harnesses reached by the `Committer`/`Validator` signature change.
+
+**2. Verified touch-list (two haiku scouts at `221cf2d2`; no commit has touched `internal/processor`, `internal/testutil` or
+`cmd/processor` since the design).** Every §1/§3 citation is live at the cited line. Corrections: `HydratedState` is
+`script_context.go:223` (a wrapper over `ScriptContext` at `:33-73`); `ErrCodeProtectedKey` is `internal/processor/opwire/opwire.go:172-177`;
+the sweep sites `install_ddl.go:154-158,160,225-232,233` and `meta_ddl.go:409-425,431-433` live in **`internal/bootstrap`**, not
+`internal/processor`; `rejectPermissionRoleRewrites` runs to `:928`. Inc 1 lines: `wellness-domain/ddls.go:1103` (`sessionSeatClaim`
+list), `:1188` (`sessionBookerClaim`), `cafe-domain/ddls.go:296` (`cafeOpenTabGuard`, doc comment `:290-291`); versions are
+`manifest.yaml:2` + `package.go` `Definition.Version` (wellness `0.22.20`, cafe `0.11.30`) — there is no separate constant;
+`TestPackage_ManifestMatchesDefinition` pins the pair. Doubles: 9 method sites on 8 doubles (`nfr_r1_test.go:565,577`,
+`step_interfaces.go:86,110`, `optional_reads_test.go:204`, `integration_test.go:445`, `testutil/faultinjector.go:159,177`,
+`identity-domain/testhelpers_test.go:518`); none build-tagged. Bootstrap: `KernelGrantLinkKeys` `nanoid.go:647-671`; the six
+`*HoldsRoleLinkKey` constants declared `nanoid.go:183-188`, initialised `:620-625` (via `LinkKey` — the composition must NOT reuse
+those initialisers on an unloaded table; concatenate); `ErrPrimordialIDsUnloaded` is `system_actors.go:21`; `AuthWiring` literal
+`cmd/processor/main.go:148-162`; `retire.go` help `:50-55`, load `:84-86`, `CurrentEpochOperatorReachable` `:110-127`;
+`AssignRole` revive `rbac-domain/ddls.go:159-172`. Test homes: `step6_validate_test.go` (`buildValidatorWithCache`),
+`step8_commit_test.go` (`buildCommitterPipeline`).
+
+**3. Censuses re-run (all match).** §6.1 79 / 13; §6.2 the three lists still omit their op; §6.3 3; §6.4 9 sites (8 doubles, M7/C7);
+§6.5 `grep -c` 2 loops ⇒ 6 `grantedBy`, 6 `holdsRole`, `RevokeRole` only in `retire.go`; §6.6 `scripts.go:1612`.
+
+**4. Precedents to mirror.** Shape pre-pass: `validateMutationBooleanFields` (`step6_validate.go:96-149`). Off-budget chain walk:
+`resolveGoverningDDLChecked` with nil `LiveReads`. Fail-closed on undecodable prior: `rejectPermissionRoleRewrites` `:846-848`.
+Kernel set threading: `AuthWiring.SystemActorKeys` → `NewCommitter` (`commit_path.go:1171-1199`, `main.go:148-162`); key
+composition: `KernelGrantLinkKeys` (unloaded check first, concatenation); pin: `kernel_grant_links_test.go`. Link `Root`: `ParseLinkKey`.
+Retryable read fault: `readPriorDocuments`' `firstErr` (`:683-690`).
+
+**5. Increment order + green checks.** Landing shape: **each increment lands on `main` when green** — every boundary is safe
+because each adds a loud refusal over a corpus the census shows already conforms (Inc 1 makes it conform first).
+- **Inc 1** (XS, packages, sonnet-tier/inline): the three list additions + the `cafeOpenTabGuard` comment; bump wellness
+  `0.22.20→0.22.21`, cafe `0.11.30→0.11.31` in both files. Green: `go test ./packages/wellness-domain/ ./packages/cafe-domain/`,
+  `go run ./scripts/lint-package-version.go`.
+- **Inc 2** (Processor, posture-changing, opus builder): §3 hoist + §2.1 + §2.2 + the eight doubles + the §9 Inc 2 tests +
+  `docs/components/processor.md` row 6 + the two lease-signing comments. Green: `go test ./internal/processor/ ./internal/testutil/
+  ./packages/identity-domain/ ./packages/wellness-domain/ ./packages/cafe-domain/`, `make test-control-plane-authz`, every
+  `go:build`-tagged harness (`grep -rl "^//go:build " --include=*_test.go internal/` → run each tag), the read-drift baseline
+  suite, `go test ./internal/bypass/`; the two package suites red with Inc 1 reverted (asserted once here, §6.2).
+- **Inc 3** (bootstrap + Processor + cmd, posture-changing, opus builder, after Inc 2 merges — same files): §2.3 + the §9 Inc 3
+  tests + the comment sweep (bootstrap paths above) + `processor.md` *Kernel protection* + `retire` help/diagnosis. Green: the
+  Inc 2 set + `go test ./internal/bootstrap/ ./cmd/processor/ ./cmd/lattice/...`, `make verify-kernel` (live stack).
+- Close: cumulative cold adversarial pass over the whole diff; `make cycle-processor` from the main checkout (MERGED ≠ RUNNING).
+
+**6. In-scope gotchas.** Package edits need the version bump (CLAUDE.md). The `Committer`/`Validator` signature change reaches
+`internal/testutil` (a non-test package) and the build-tagged harnesses — run them, `go test ./...` cannot see them. Absent ≠
+corrupt (§2.1): corrupt refuses, absent is permissive. The declared walk on an `update` goes off-budget; a `create` keeps the
+budget. Never read a tombstone's document at step 6. `KernelLinkKeys` empty = nothing protected, pinned non-empty in
+`cmd/processor`. Dossier entries copied: Processor — *a gate's negative test must first prove its positive vector reaches the
+gate* (revert-prove every refusal; mutate every OTHER surface the fix introduces); *a gate that consults the in-flight batch
+must resolve LAST-write-wins*; *a tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a
+revoked declaration as live*; *an admission rule keyed on "this execution surfaced X" must exclude what the caller NAMED*.
+Bootstrap — *an unloaded primordial identifier reads as a value* (refuse on `ErrPrimordialIDsUnloaded` before reading the graph;
+test through the binary's own load path). Packages — *a cross-package type guard must survive the migration window in both
+directions* (positive vector per live shape). Standing checklist #1–#6 (`agents/fire-brief-template.md`) apply; #3 binds the
+plumbing (`prior` threading) hardest.
+
+**7. Adjacent finds.** None at Phase 0 beyond the design's own residual lines (package-scoped `permittedCommands` matching;
+the `committedOnly` disposition's single consumer), which stay lines, not rows. **Non-goals:** §10's last bullet, verbatim —
+no `holdsRole` creation closure, no DDL for role/permission/roleindex tombstones, no absent-key refusal (H), no package-scoped
+matching, no positive epoch pre-check.
+
+**Scope-diff gate:** parts 2–5 trace item-by-item to §2/§9; nothing widened; the only substitution is a path correction
+(bootstrap, not processor, for two files). Dependencies re-verified both ways: Inc 2 needs Inc 1 (the pin reds otherwise);
+Inc 3 needs Inc 2's `prior`-carrying `Commit` only for file locality, not semantics.
