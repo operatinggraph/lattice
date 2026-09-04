@@ -516,11 +516,11 @@ type interposingValidator struct {
 }
 
 func (v *interposingValidator) Validate(ctx context.Context, env *processor.OperationEnvelope,
-	result processor.ScriptResult, state processor.HydratedState) error {
+	result processor.ScriptResult, state processor.HydratedState, prior processor.PriorDocs) error {
 	if env.OperationType == v.opType {
 		v.once.Do(v.hook)
 	}
-	return v.inner.Validate(ctx, env, result, state)
+	return v.inner.Validate(ctx, env, result, state, prior)
 }
 
 // newRacingPipeline is testutil.CapabilityPipeline with the validator wrapped,

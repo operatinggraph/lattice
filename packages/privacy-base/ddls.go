@@ -38,12 +38,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - `erasureRequested` (meta.ddl.aspectType, NOT sensitive) — the
 //     erasure-request marker, vtx.identity.<NanoID>.erasureRequested. Its
 //     PermittedCommands admits SealIdentityForErasure alone, which refuses a
-//     create/update of that CLASS to any other operation. It carries the same
-//     caveat piiKey's entry above records for the same mechanism, plus one
-//     more: a tombstone carries no document, so its class is empty and no
-//     aspect-type DDL can refuse one. Non-removal of this marker is a
-//     convention held by review, not a step-6 guarantee — see
-//     seal_identity_for_erasure.go.
+//     create/update of that CLASS to any other operation — and a TOMBSTONE of
+//     the marker too: step 6 reads the class STORED at an update's or a
+//     tombstone's key, so removing this aspect is held to this same list
+//     whether or not the mutation carries a document. Non-removal is enforced,
+//     not a review-held convention. The one shape neither class governs is
+//     piiKey's caveat above: a write that declares no class at all resolves
+//     nothing, and on a create there is no stored class either (Contract #1
+//     §1.5, no default class). See seal_identity_for_erasure.go.
 //   - `sealIdentityForErasure` (meta.ddl.vertexType) — the
 //     SealIdentityForErasure op DDL. See seal_identity_for_erasure.go.
 //   - `privacy.erasureRequested` (meta.ddl.eventType) — the registered

@@ -24,10 +24,39 @@ func (e *DDLViolation) Error() string {
 		e.ViolatedConstraint, e.OperationRequestID, e.MutationKey, e.Detail)
 }
 
+// ResolveFaultError is the step-6 failure raised when a governing-DDL
+// resolution could not complete because a live Core KV read faulted — the
+// resolution is DEGRADED, not empty, and the two must not be confused where a
+// gate depends on the answer.
+//
+// It is retryable, never a refusal: a transient blip must not permanently
+// reject a valid operation, and it must not fall through to the permissive
+// default either, which would let a fault decide that an entity is ungoverned.
+// The commit path redelivers on the backoff floor, exactly as it does for a
+// step-8 read fault. DDLViolation stays reserved for a verdict — a DDL
+// resolved and its permittedCommands omits the operation, or the stored body
+// is corrupt.
+type ResolveFaultError struct {
+	MutationKey        string
+	Class              string
+	OperationRequestID string
+	Cause              error
+}
+
+func (e *ResolveFaultError) Error() string {
+	return fmt.Sprintf("step 6: governing-DDL resolution for class %q faulted: requestId=%s mutationKey=%s: %v",
+		e.Class, e.OperationRequestID, e.MutationKey, e.Cause)
+}
+
+func (e *ResolveFaultError) Unwrap() error { return e.Cause }
+
 // ValidatorImpl is the step-6 DDL validator. Step 6 enforces:
 //   - Key pattern validity (Contract #1 §1.1 — must parse via the
 //     substrate parsers).
-//   - permittedCommands when the affected DDL declares the constraint.
+//   - `class`, wherever a written document carries one, is a JSON string.
+//   - permittedCommands against the class a document DECLARES, and — for an
+//     update or a tombstone — against the class STORED at the key, which is
+//     the class of the entity the mutation rewrites or removes.
 //   - Sensitive aspect write-scope — sensitive aspects may attach ONLY
 //     to identity-typed vertices (NFR-S3).
 //   - mutation.op ∈ {create, update, tombstone}.
@@ -36,6 +65,14 @@ func (e *DDLViolation) Error() string {
 // when no DDL is found for a mutation's class, the corresponding
 // schema/permittedCommands/sensitive checks are skipped (a permissive
 // pass-through). Other checks (key pattern, op enum) apply regardless.
+//
+// Two failure shapes leave Validate, and the commit path disposes them
+// differently. A *DDLViolation is a VERDICT the world cannot change — a DDL
+// resolved and refused the mutation, a key does not parse, a written class is
+// not a string, or an update is rewriting a stored body whose class the gate
+// cannot read — and terminates the operation. A *ResolveFaultError is a
+// DEGRADED resolution: a live Core KV read faulted, so the answer is unknown
+// rather than empty, and the operation is redelivered.
 type ValidatorImpl struct {
 	// *ddlResolver carries DDLs + linkReader and the shared governing-DDL /
 	// instanceOf-chain resolution (step6_resolve_ddl.go) — the same
@@ -69,9 +106,14 @@ func NewValidator(cache *DDLCache, conn *substrate.Conn, coreBucket string, logg
 // "any DDL violation terminates the commit path"). state carries the hydrated
 // working set + on-demand KV reader so the step-6 governing-DDL walk
 // (Contract #1 §1.5) can resolve a fine-grained-class vertex's type authority
-// via its instanceOf chain.
-func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState) error {
+// via its instanceOf chain. prior carries the documents stored at the mutation
+// keys, read at step 5.5, from which an update's or tombstone's STORED class —
+// the one that governs the entity being rewritten or removed — is taken.
+func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState, prior PriorDocs) error {
 	rid := env.RequestID
+	if verr := validateMutationKeyShapes(result.Mutations, rid); verr != nil {
+		return verr
+	}
 	if err := validateMutationBooleanFields(result.Mutations, rid); err != nil {
 		return err
 	}
@@ -79,7 +121,7 @@ func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, re
 		return err
 	}
 	for _, m := range result.Mutations {
-		if err := v.validateOne(ctx, env, m, result, state, rid); err != nil {
+		if err := v.validateOne(ctx, env, m, result, state, prior, rid); err != nil {
 			return err
 		}
 	}
@@ -91,6 +133,57 @@ func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, re
 	v.Logger.Info("step 6: validated",
 		"requestId", rid,
 		"mutations", len(result.Mutations))
+	return nil
+}
+
+// validateMutationKeyShapes is the batch-wide pre-pass the commit path runs at
+// step 5.5, BEFORE the prior-document read and therefore before any Core KV
+// round trip the mutation set can provoke. Two rules:
+//
+//   - every mutation key must parse as a vertex, aspect, or link key
+//     (Contract #1 §1.1), refused `keyPattern` exactly as the per-mutation
+//     check below refuses it. Step 6 is the only mutation-key gate — the
+//     Starlark runner builds a MutationOp with no shape check — and the prior
+//     read hands a key straight to KVGet, which answers a malformed one with an
+//     error. Read as a read fault that would turn a terminal refusal into an
+//     unbounded redelivery loop, so the shape verdict must be reached first.
+//   - a `class` field, when present, must be a JSON string. A Go type assertion
+//     reads any other JSON type as absent, so `{"class": 7}` would otherwise
+//     commit and then read as classless forever — ungoverned by the very gate
+//     that reads the stored class back (§2.1), with no later mutation able to
+//     restore the governance.
+//
+// Batch-wide rather than per-mutation for the same reason as the boolean
+// pre-pass below: a later mutation's malformed value is observable to an
+// earlier mutation's DDL resolution before the loop reaches its own turn.
+//
+// The return type is the concrete *DDLViolation, not error: every failure this
+// pre-pass can reach is a terminal verdict, so the step-5.5 caller disposes it
+// as a rejection with no type switch and no fallback branch to keep correct.
+func validateMutationKeyShapes(mutations []MutationOp, rid string) *DDLViolation {
+	for _, m := range mutations {
+		if substrate.ClassifyKey(m.Key) == substrate.KindUnknown {
+			return &DDLViolation{
+				ViolatedConstraint: "keyPattern",
+				MutationKey:        m.Key,
+				OperationRequestID: rid,
+				Detail:             "key does not match Contract #1 vertex/aspect/link patterns",
+			}
+		}
+		if m.Document == nil {
+			continue
+		}
+		if cv, present := m.Document["class"]; present {
+			if _, ok := cv.(string); !ok {
+				return &DDLViolation{
+					ViolatedConstraint: "classType",
+					MutationKey:        m.Key,
+					OperationRequestID: rid,
+					Detail:             fmt.Sprintf("class must be a JSON string, got %T", cv),
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -178,9 +271,12 @@ func validateExternalEgressGuard(result ScriptResult, state HydratedState, rid s
 	return nil
 }
 
-// validateOne enforces the per-mutation rules. Public-shape returned
-// error is always *DDLViolation when violation; nil on success.
-func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope, m MutationOp, result ScriptResult, state HydratedState, rid string) error {
+// validateOne enforces the per-mutation rules. It returns nil on success, a
+// *DDLViolation for a verdict (the mutation is refused and the operation
+// terminates), or a *ResolveFaultError when a governing-DDL resolution the
+// verdict depends on was degraded by a live-read fault (the operation is
+// redelivered — the answer is unknown, not empty).
+func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope, m MutationOp, result ScriptResult, state HydratedState, prior PriorDocs, rid string) error {
 	// 1. op enum.
 	switch m.Op {
 	case "create", "update", "tombstone":
@@ -244,7 +340,16 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 		}
 	}
 
-	// 3. Class derivation from document. For tombstones the document is
+	// 3. Stored-class governance: an update or a tombstone is governed by the
+	// DDL of the class stored at the key — the entity it rewrites or removes —
+	// whatever the script's own document declares, or declares nothing at all.
+	if m.Op == "update" || m.Op == "tombstone" {
+		if err := v.validateStoredClass(ctx, env, m, kind, result, state, prior, rid); err != nil {
+			return err
+		}
+	}
+
+	// 4. Class derivation from document. For tombstones the document is
 	// optional — if absent, skip DDL lookups.
 	class := ""
 	if m.Document != nil {
@@ -253,12 +358,17 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 		}
 	}
 
-	// 4. DDL-driven checks (only when a governing DDL resolves — permissive
-	// default per Contract #1 §1.5/§1.6). Resolution is exact class→DDL first
-	// (today's fast path), then the bounded instanceOf-chain walk to the type
-	// authority for a fine-grained discriminator class that has no direct DDL.
+	// 5. DDL-driven checks on the DECLARED class (only when a governing DDL
+	// resolves — permissive default per Contract #1 §1.5/§1.6). Resolution is
+	// exact class→DDL first (today's fast path), then the bounded
+	// instanceOf-chain walk to the type authority for a fine-grained
+	// discriminator class that has no direct DDL.
 	if class != "" {
-		if ref, ok := v.resolveGoverningDDL(ctx, class, m.Key, kind, result, state); ok {
+		ref, ok, err := v.resolveDeclaredClass(ctx, m, class, kind, result, state, rid)
+		if err != nil {
+			return err
+		}
+		if ok {
 			// Abstract class gate (§8 row 4): a document's class must not
 			// resolve to an abstract DDL. This is an ADDITION to Contract #1
 			// §1.5's permissive default, not a contradiction — §1.5 covers "no
@@ -316,6 +426,143 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 	}
 
 	return nil
+}
+
+// validateStoredClass enforces permittedCommands against the class of the
+// document STORED at an update's or tombstone's key (Contract #1 §1.5). The
+// class a script proposes governs what it writes; the class already there
+// governs what it rewrites or removes — and a bare tombstone proposes nothing
+// at all, so the stored class is the only class it has.
+//
+// Absent and corrupt are different states, and only absent is permissive:
+//
+//   - the key holds nothing → resolves nothing, permissive. This is today's
+//     behaviour for a tombstone of an absent key, which the meta-vertex
+//     tombstone cascade relies on.
+//   - the entry exists but did not decode, or its `class` is present and not a
+//     string → an UPDATE of it is refused; a TOMBSTONE of it is admitted. See
+//     refuseUnreadableStoredClass.
+//   - `class` absent or "" → resolves nothing, permissive (Contract #1 §1.5,
+//     "No default class").
+//
+// Only permittedCommands is enforced on the stored class. The abstract-class
+// and sensitive-custody gates read what is being WRITTEN and stay exempt on a
+// tombstone for the reasons the key-segment gates give above.
+func (v *ValidatorImpl) validateStoredClass(ctx context.Context, env *OperationEnvelope, m MutationOp, kind substrate.KeyKind, result ScriptResult, state HydratedState, prior PriorDocs, rid string) error {
+	doc, found, decoded := prior.lookup(m.Key)
+	if !found {
+		return nil
+	}
+	if !decoded {
+		return refuseUnreadableStoredClass(m, rid, "the document stored at this key did not decode")
+	}
+	raw, present := doc["class"]
+	if !present {
+		return nil
+	}
+	stored, ok := raw.(string)
+	if !ok {
+		return refuseUnreadableStoredClass(m, rid,
+			fmt.Sprintf("the document stored at this key carries a non-string class (%T)", raw))
+	}
+	if stored == "" {
+		return nil
+	}
+
+	// The stored class's type authority is a fact about the committed graph:
+	// resolveCommittedOnly keeps this batch from un-typing the entity by
+	// tombstoning its own instanceOf link, and the nil live-read budget keeps
+	// the walk off the script's own allowance — a gate whose subject is
+	// computed from submitter-supplied input is not a gate if the submitter can
+	// exhaust it.
+	ref, ok, fault := v.resolveGoverningDDLCommitted(ctx, stored, m.Key, kind, result, offBudget(state))
+	if fault != nil && !ok {
+		// Both conditions are required. A fault that still ended in a definitive
+		// DDL — a later hop of the walk resolved one — told the gate exactly what
+		// it needed, so it is immaterial and must not fail an otherwise valid
+		// write. Only an EMPTY resolution behind a fault is no answer at all, and
+		// that one must not reach the permissive default.
+		return &ResolveFaultError{MutationKey: m.Key, Class: stored, OperationRequestID: rid, Cause: fault}
+	}
+	if !ok || len(ref.PermittedCommands) == 0 {
+		return nil
+	}
+	if !stringInSlice(env.OperationType, ref.PermittedCommands) {
+		return &DDLViolation{
+			ViolatedConstraint: "permittedCommands",
+			MutationKey:        m.Key,
+			OperationRequestID: rid,
+			Detail: fmt.Sprintf("operationType %q not permitted by DDL meta-vertex %q (permittedCommands %v) governing the stored class %q at this key",
+				env.OperationType, ref.MetaVertexKey, ref.PermittedCommands, stored),
+		}
+	}
+	return nil
+}
+
+// refuseUnreadableStoredClass disposes a mutation over a stored body whose
+// class the gate cannot read — an entry that did not decode, or one whose
+// `class` is present and not a string.
+//
+// An UPDATE is refused: rewriting content the gate cannot read is not a write
+// anything governs, and admitting it would let one unreadable body launder
+// arbitrary rewrites of the entity forever.
+//
+// A TOMBSTONE is admitted, and that is the heal path. It carries no document,
+// and the batch builder writes no readable content forward for it, so there is
+// nothing to launder through the removal; refusing it instead would make an
+// already-corrupt key permanently unremovable through the operation plane —
+// the only write plane there is. This is the same doctrine that keeps the
+// kernel's own protected links revivable rather than frozen.
+//
+// The constraint is `storedClass`, distinct from `permittedCommands`, so a
+// consumer can tell "the DDL refused this operation" from "the gate could not
+// read the entity" on the wire.
+func refuseUnreadableStoredClass(m MutationOp, rid, what string) error {
+	if m.Op != "update" {
+		return nil
+	}
+	return &DDLViolation{
+		ViolatedConstraint: "storedClass",
+		MutationKey:        m.Key,
+		OperationRequestID: rid,
+		Detail:             what + ", so the class governing a rewrite of it cannot be read",
+	}
+}
+
+// resolveDeclaredClass resolves the governing DDL of the class a mutation's own
+// document declares.
+//
+// On an `update` the walk runs off the script's live-read budget and reports a
+// read fault instead of swallowing it: the class an update declares may DIFFER
+// from the one stored (Contract #1 §1.3 makes `class` mutable), so this is the
+// conjunct that keeps a re-typing inside the new class's own permittedCommands
+// — and a conjunct a submitter can switch off by spending its own budget, or by
+// making a read fault, is not one. A `create` keeps the budgeted, fail-open
+// walk: its type authority lives in the batch it is submitting, and the
+// exact-miss read is its own cost.
+func (v *ValidatorImpl) resolveDeclaredClass(ctx context.Context, m MutationOp, class string, kind substrate.KeyKind, result ScriptResult, state HydratedState, rid string) (MetaVertexRef, bool, error) {
+	if m.Op != "update" {
+		ref, ok := v.resolveGoverningDDL(ctx, class, m.Key, kind, result, state)
+		return ref, ok, nil
+	}
+	ref, ok, fault := v.resolveGoverningDDLChecked(ctx, class, m.Key, kind, result, offBudget(state))
+	if fault != nil && !ok {
+		// A fault behind a DEFINITIVE resolution is immaterial: a later hop
+		// answered the question, so failing the write would reject a valid
+		// operation over a read the gate did not end up needing.
+		return MetaVertexRef{}, false, &ResolveFaultError{MutationKey: m.Key, Class: class, OperationRequestID: rid, Cause: fault}
+	}
+	return ref, ok, nil
+}
+
+// offBudget returns state with the script's live-read budget detached, so a
+// resolution the gate performs on its own behalf neither charges the script's
+// allowance nor can be starved by it (a nil tracker is unlimited). Everything
+// else — the hydrated working set, the resolution memo — is shared, so the
+// off-budget walk still warms and reuses the same per-execution answers.
+func offBudget(state HydratedState) HydratedState {
+	state.Context.LiveReads = nil
+	return state
 }
 
 // validateSensitiveCustody enforces the sensitive-aspect anchoring rule for

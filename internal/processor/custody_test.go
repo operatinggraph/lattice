@@ -97,7 +97,7 @@ func aspectMutation(key, class string) MutationOp {
 func validateOneMutation(t *testing.T, v *ValidatorImpl, ctx context.Context, m MutationOp) error {
 	t.Helper()
 	env := newTestEnvelope(testNanoID1)
-	return v.Validate(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, HydratedState{})
+	return v.Validate(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, HydratedState{}, nil)
 }
 
 // THE POSITIVE VECTOR, and the reason this whole design exists: a sensitive
@@ -521,7 +521,7 @@ func TestStep6_BudgetExhausted_StillFailsOpenToPermissive(t *testing.T) {
 	m := aspectMutation("vtx.appointment."+testNanoID2+".notes", "unregistered.v2")
 	state := HydratedState{Context: ScriptContext{LiveReads: &liveReadBudgetTracker{budget: 0}}}
 	env := newTestEnvelope(testNanoID1)
-	if err := v.Validate(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, state); err != nil {
+	if err := v.Validate(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, state, nil); err != nil {
 		t.Fatalf("step 6 must still fail open to the permissive default, got: %v", err)
 	}
 }

@@ -131,14 +131,18 @@ func (forgedNoopHydrator) Hydrate(_ context.Context, _ *processor.OperationEnvel
 type forgedNoopValidator struct{}
 
 func (forgedNoopValidator) Validate(_ context.Context, _ *processor.OperationEnvelope,
-	_ processor.ScriptResult, _ processor.HydratedState) error {
+	_ processor.ScriptResult, _ processor.HydratedState, _ processor.PriorDocs) error {
 	return nil
 }
 
 type forgedNoopCommitter struct{}
 
+func (forgedNoopCommitter) ReadPrior(_ context.Context, _ []processor.MutationOp) (processor.PriorDocs, error) {
+	return processor.PriorDocs{}, nil
+}
+
 func (forgedNoopCommitter) Commit(_ context.Context, _ *processor.OperationEnvelope,
-	_ processor.ScriptResult, _ processor.Tracker) (processor.CommitAck, error) {
+	_ processor.ScriptResult, _ processor.Tracker, _ processor.PriorDocs) (processor.CommitAck, error) {
 	return processor.CommitAck{}, nil
 }
 

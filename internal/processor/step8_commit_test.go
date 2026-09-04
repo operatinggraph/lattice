@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestCommit_CleanWriteTrackerAndMutation(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	ack, err := c.Commit(ctx, env, result, tracker)
+	ack, err := c.Commit(ctx, env, result, tracker, nil)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestCommit_RevisionConflictSurfacesConflictError(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	_, err := c.Commit(ctx, env, result, tracker)
+	_, err := c.Commit(ctx, env, result, tracker, nil)
 	if err == nil {
 		t.Fatalf("expected error from conflicting create")
 	}
@@ -121,7 +122,7 @@ func TestCommit_BatchTooLarge_MutationCount(t *testing.T) {
 	}
 	result := ScriptResult{Mutations: mutations}
 	tracker := NewTracker(env, time.Now())
-	_, err := c.Commit(ctx, env, result, tracker)
+	_, err := c.Commit(ctx, env, result, tracker, nil)
 	if err == nil {
 		t.Fatalf("expected error from an over-limit batch")
 	}
@@ -165,7 +166,7 @@ func TestCommit_BatchTooLarge_ValueSize(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	_, err := c.Commit(ctx, env, result, tracker)
+	_, err := c.Commit(ctx, env, result, tracker, nil)
 	if err == nil {
 		t.Fatalf("expected error from an oversized value")
 	}
@@ -202,7 +203,7 @@ func TestCommit_MetaVertexMutation_InvalidatesCache(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, result, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, result, tracker, nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// Cache should now know about "brandnew".
@@ -228,7 +229,7 @@ func TestCommit_TombstoneSetsIsDeleted(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, result, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, result, tracker, nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	entry, err := c.Conn.KVGet(ctx, testCoreBucket, key)
@@ -259,7 +260,7 @@ func TestCommit_MixedTTLBatch_TrackerHasTTLOthersDont(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, result, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, result, tracker, nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// Both keys exist immediately after commit (TTL is 24h — tracker
@@ -289,7 +290,7 @@ func TestCommit_TrackerCarriesMutationKeysAndEventClasses(t *testing.T) {
 		Events: []EventSpec{{Class: "identity.created", Data: map[string]interface{}{"x": 1}}},
 	}
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, result, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, result, tracker, nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	entry, err := c.Conn.KVGet(ctx, testCoreBucket, tracker.Key)
@@ -332,7 +333,7 @@ func TestCommit_WritesOutboxAspectWithFaithfulEvents(t *testing.T) {
 		}}},
 	}
 	tracker := NewTracker(env, time.Now())
-	ack, err := c.Commit(ctx, env, result, tracker)
+	ack, err := c.Commit(ctx, env, result, tracker, nil)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -403,7 +404,7 @@ func TestCommit_ZeroEventsWritesNoOutboxAspect(t *testing.T) {
 		}},
 	}
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, result, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, result, tracker, nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if _, err := c.Conn.KVGet(ctx, testCoreBucket, OutboxAspectKey(env.RequestID)); !errors.Is(err, substrate.ErrKeyNotFound) {
@@ -428,7 +429,7 @@ func TestCommit_ZeroMutationEventOnly(t *testing.T) {
 		}}},
 	}
 	tracker := NewTracker(env, time.Now())
-	ack, err := c.Commit(ctx, env, result, tracker)
+	ack, err := c.Commit(ctx, env, result, tracker, nil)
 	if err != nil {
 		t.Fatalf("zero-mutation event-only Commit must succeed, got: %v", err)
 	}
@@ -460,7 +461,7 @@ func commitOne(t *testing.T, ctx context.Context, c *CommitterImpl, rid string, 
 	env := newTestEnvelope(testNanoID1)
 	env.RequestID = rid
 	tracker := NewTracker(env, time.Now())
-	if _, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker); err != nil {
+	if _, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker, nil); err != nil {
 		t.Fatalf("Commit(%s %s): %v", m.Op, m.Key, err)
 	}
 	entry, err := c.Conn.KVGet(ctx, testCoreBucket, m.Key)
@@ -673,7 +674,7 @@ func commitOneErr(ctx context.Context, c *CommitterImpl, rid string, m MutationO
 	env := newTestEnvelope(testNanoID1)
 	env.RequestID = rid
 	tracker := NewTracker(env, time.Now())
-	_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker)
+	_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker, nil)
 	return err
 }
 
@@ -1001,87 +1002,143 @@ func TestCommit_TombstoneThenReviveCannotRewriteProvenance(t *testing.T) {
 	}
 }
 
-// buildMutationValue seeds a tombstone's written body from the stored document
-// and then overlays the mutation's own, so a tombstone CARRYING a document
-// rewrites exactly what an update would. parseMutations refuses such a mutation
-// today, but this guard does not depend on that: it holds at step 8 for any
-// path, present or future, that reaches commit with one.
-func TestCommit_TombstoneCarryingDocumentCannotRewriteProvenance(t *testing.T) {
+// Contract #3 §3.3: a tombstone carries no document, and one supplied is not
+// honored — a tombstone can never modify, blank, or reclaim the stored body.
+// The mutation parser refuses the shape outright (a Starlark tombstone with a
+// `document` is an InvalidReturnShape), so this is a unit assertion over a
+// mutation no production path can construct. It pins the property at the
+// enforcement point, so no path reaching commit with one — present or future —
+// can launder a rewrite through a delete.
+func TestCommit_TombstoneDocumentBranchRemoved(t *testing.T) {
 	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
-	roleID := "Fd2jAc8evUor3nG9qHkN"
-	key := "vtx.role." + roleID + ".canonicalName"
 
-	commitOne(t, ctx, c, "rid-tsdoc-create", MutationOp{
-		Op: "create", Key: key,
-		Document: roleCanonicalNameDoc("vtx.role."+roleID, "consoleOperator"),
+	t.Run("a role canonicalName aspect", func(t *testing.T) {
+		roleID := "Fd2jAc8evUor3nG9qHkN"
+		key := "vtx.role." + roleID + ".canonicalName"
+		commitOne(t, ctx, c, "rid-tsdoc-create", MutationOp{
+			Op: "create", Key: key,
+			Document: roleCanonicalNameDoc("vtx.role."+roleID, "consoleOperator"),
+		})
+
+		if err := commitOneErr(ctx, c, "rid-tsdoc-launder", MutationOp{
+			Op: "tombstone", Key: key,
+			Document: roleCanonicalNameDoc("vtx.role."+roleID, "operator"),
+		}); err != nil {
+			t.Fatalf("Commit(tombstone carrying a document): %v", err)
+		}
+
+		doc := readStoredDoc(t, ctx, c, key)
+		data, _ := doc["data"].(map[string]interface{})
+		if data["value"] != "consoleOperator" {
+			t.Fatalf("stored canonicalName = %v, want the stored body untouched (consoleOperator)", data["value"])
+		}
+		if doc["isDeleted"] != true {
+			t.Fatalf("isDeleted = %v, want true", doc["isDeleted"])
+		}
+		if doc["class"] != "canonicalName" {
+			t.Fatalf("class = %v, want the stored class carried over", doc["class"])
+		}
 	})
 
-	err := commitOneErr(ctx, c, "rid-tsdoc-launder", MutationOp{
-		Op: "tombstone", Key: key,
-		Document: roleCanonicalNameDoc("vtx.role."+roleID, "operator"),
-	})
-	var provErr *PermissionProvenanceError
-	if !errors.As(err, &provErr) {
-		t.Fatalf("Commit(tombstone carrying a rewritten value): %v, want *PermissionProvenanceError", err)
-	}
-	if provErr.Field != "value" {
-		t.Fatalf("rejected on field %q, want value", provErr.Field)
-	}
+	t.Run("a roleindex root", func(t *testing.T) {
+		roleindexID := "Kn8pRt3vWy6cDf9hJm2q"
+		key := "vtx.roleindex." + roleindexID
+		commitOne(t, ctx, c, "rid-rits-create", MutationOp{
+			Op: "create", Key: key,
+			Document: roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
+		})
 
-	// The laundering tombstone left the committed value alone.
-	entry, gerr := c.Conn.KVGet(ctx, testCoreBucket, key)
-	if gerr != nil {
-		t.Fatalf("KVGet %s: %v", key, gerr)
-	}
-	var doc map[string]interface{}
-	if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
-		t.Fatalf("unmarshal %s: %v", key, uerr)
-	}
-	data, _ := doc["data"].(map[string]interface{})
-	if data["value"] != "consoleOperator" {
-		t.Fatalf("stored canonicalName = %v, want consoleOperator", data["value"])
-	}
+		if err := commitOneErr(ctx, c, "rid-rits-launder", MutationOp{
+			Op: "tombstone", Key: key,
+			Document: roleindexDoc("consoleOperator", "Jm7nPr2tVwz5fEs3xFq8"),
+		}); err != nil {
+			t.Fatalf("Commit(tombstone carrying a document): %v", err)
+		}
+
+		doc := readStoredDoc(t, ctx, c, key)
+		data, _ := doc["data"].(map[string]interface{})
+		if data["roleId"] != "Hk6mNq9sUvyz4eCr1wDp" {
+			t.Fatalf("stored roleId = %v, want the stored body untouched", data["roleId"])
+		}
+		if doc["isDeleted"] != true {
+			t.Fatalf("isDeleted = %v, want true", doc["isDeleted"])
+		}
+	})
 }
 
-// Same laundering attempt as TestCommit_TombstoneCarryingDocumentCannotRewriteProvenance,
-// retargeted at a vtx.roleindex.<id> root: a tombstone carrying a rewritten
-// roleId must be rejected, not laundered through as a delete.
-func TestCommit_TombstoneCarryingDocumentCannotRewriteRoleindexProvenance(t *testing.T) {
-	t.Parallel()
-	ctx, c, _ := buildCommitterPipeline(t)
-	roleindexID := "Kn8pRt3vWy6cDf9hJm2q"
-	key := "vtx.roleindex." + roleindexID
-
-	commitOne(t, ctx, c, "rid-rits-create", MutationOp{
-		Op: "create", Key: key,
-		Document: roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
-	})
-
-	err := commitOneErr(ctx, c, "rid-rits-launder", MutationOp{
-		Op: "tombstone", Key: key,
-		Document: roleindexDoc("consoleOperator", "Jm7nPr2tVwz5fEs3xFq8"),
-	})
-	var provErr *PermissionProvenanceError
-	if !errors.As(err, &provErr) {
-		t.Fatalf("Commit(tombstone carrying a rewritten roleId): %v, want *PermissionProvenanceError", err)
-	}
-	if provErr.Field != "data" {
-		t.Fatalf("rejected on field %q, want data", provErr.Field)
-	}
-
-	// The laundering tombstone left the committed roleId alone.
-	entry, gerr := c.Conn.KVGet(ctx, testCoreBucket, key)
-	if gerr != nil {
-		t.Fatalf("KVGet %s: %v", key, gerr)
+// readStoredDoc decodes what Core KV holds at key.
+func readStoredDoc(t *testing.T, ctx context.Context, c *CommitterImpl, key string) map[string]interface{} {
+	t.Helper()
+	entry, err := c.Conn.KVGet(ctx, testCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
 	}
 	var doc map[string]interface{}
 	if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
 		t.Fatalf("unmarshal %s: %v", key, uerr)
 	}
-	data, _ := doc["data"].(map[string]interface{})
-	if data["roleId"] != "Hk6mNq9sUvyz4eCr1wDp" {
-		t.Fatalf("stored roleId = %v, want Hk6mNq9sUvyz4eCr1wDp", data["roleId"])
+	return doc
+}
+
+// The mutation set Commit receives is not always the set step 6 validated: the
+// task auto-completion appends an update of the task root AFTER validation, and
+// re-derives it on a batch conflict. Every consumer of the prior map degrades
+// silently on a missing entry, so Commit tops the map up for what it was not
+// handed — without which the injected update re-stamps the task's creation
+// provenance from the current operation.
+//
+// The injected mutation is built the way readTaskAutoCompletion builds it,
+// ExpectedRevision and all: that is the only shape the platform emits, so a
+// fixture without one would pin a path production never takes.
+func TestCommit_TopsUpPriorForInjectedMutation(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	key := "vtx.task.Rq7tVx2zBd5gJn8kMp3s"
+
+	creator := newTestEnvelope(testNanoID1)
+	creator.RequestID = "rid-topup-create"
+	creator.Actor = "vtx.identity." + testNanoID1
+	ack, err := c.Commit(ctx, creator, ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: key,
+		Document: map[string]interface{}{"class": "task", "isDeleted": false,
+			"data": map[string]interface{}{"status": "open"}},
+	}}}, NewTracker(creator, time.Now()), nil)
+	if err != nil {
+		t.Fatalf("Commit(create task): %v", err)
+	}
+	created := readStoredDoc(t, ctx, c, key)
+	rev := ack.Revisions[key]
+	if rev == 0 {
+		t.Fatalf("create ack must name the task root's revision: %v", ack.Revisions)
+	}
+
+	// The injected shape: an update of a key the handed map does not cover,
+	// CAS'd on the revision the auto-complete read.
+	injected := ScriptResult{Mutations: []MutationOp{{
+		Op: "update", Key: key, ExpectedRevision: &rev,
+		Document: map[string]interface{}{"class": "task", "isDeleted": false,
+			"data": map[string]interface{}{"status": "complete", "expiresAt": ""}},
+	}}}
+
+	completer := newTestEnvelope(testNanoID2)
+	completer.RequestID = "rid-topup-complete"
+	completer.Actor = "vtx.identity." + testNanoID2
+	if _, err := c.Commit(ctx, completer, injected, NewTracker(completer, time.Now()), PriorDocs{}); err != nil {
+		t.Fatalf("Commit(injected update with an unread prior): %v", err)
+	}
+
+	after := readStoredDoc(t, ctx, c, key)
+	for _, f := range []string{"createdAt", "createdBy", "createdByOp"} {
+		if after[f] != created[f] {
+			t.Fatalf("%s = %v after the injected update, want the creating operation's %v", f, after[f], created[f])
+		}
+	}
+	if after["createdBy"] != creator.Actor {
+		t.Fatalf("createdBy = %v, want the creating actor %q", after["createdBy"], creator.Actor)
+	}
+	if data, _ := after["data"].(map[string]interface{}); data["status"] != "complete" {
+		t.Fatalf("status = %v, want complete", data["status"])
 	}
 }
 
@@ -1196,7 +1253,7 @@ func commitPackageOpErr(ctx context.Context, c *CommitterImpl, rid, operationTyp
 	payload, _ := json.Marshal(map[string]any{"name": packageName})
 	env.Payload = payload
 	tracker := NewTracker(env, time.Now())
-	_, err := c.Commit(ctx, env, ScriptResult{Mutations: mutations}, tracker)
+	_, err := c.Commit(ctx, env, ScriptResult{Mutations: mutations}, tracker, nil)
 	return err
 }
 
@@ -1905,7 +1962,7 @@ func TestCommit_PackageScopeRejectsAnUndecodablePayloadIncludingCreates(t *testi
 		env.Class = "UpgradePackage"
 		env.Payload = json.RawMessage(`{"name": `)
 		tracker := NewTracker(env, time.Now())
-		_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker)
+		_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker, nil)
 		return err
 	}
 
@@ -1950,7 +2007,7 @@ func TestCommit_PackageScopeFollowsAPayloadCarriedClass(t *testing.T) {
 	tracker := NewTracker(env, time.Now())
 	_, err = c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{
 		{Op: "update", Key: victimKey, Document: entityDoc("permission")},
-	}}, tracker)
+	}}, tracker, nil)
 
 	var pkgErr *PackageScopeError
 	if !errors.As(err, &pkgErr) {
@@ -1959,4 +2016,251 @@ func TestCommit_PackageScopeFollowsAPayloadCarriedClass(t *testing.T) {
 	if pkgErr.Reason != "unscoped" || pkgErr.Key != victimKey {
 		t.Fatalf("rejected as %+v, want unscoped on %s", pkgErr, victimKey)
 	}
+}
+
+// The step-8 guards read a mutation's protected ROOT at commit time, not with
+// the step-5.5 stored-class pass, so a root that turns protected between
+// validation and the batch is still refused. An aspect's root is in no batch
+// and conditions nothing, so nothing else on the path would notice the flip —
+// unlike a mutation key, whose own read revision conditions the write.
+func TestCommit_ProtectedRootFlippedAfterValidateIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root := "vtx.identity." + testNanoID2
+	aspect := root + ".ssn"
+	seedIdentityRootProtection(t, ctx, conn, root, false)
+	seedAspect(t, ctx, conn, aspect, "ssn")
+	seedScriptSource(t, ctx, conn, "identity", `
+def execute(state, op):
+    return {"mutations": [{"op": "tombstone", "key": "`+aspect+`"}], "events": []}
+`)
+
+	logger := testLogger()
+	cache := NewDDLCache(conn, testCoreBucket, logger)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("ddl cache refresh: %v", err)
+	}
+	// The interposed hook is a concurrent operator marking the root protected
+	// in the window step 6 has just left.
+	flipped := &hookedValidator{inner: NewValidator(cache, conn, testCoreBucket, logger), after: func() {
+		seedIdentityRootProtection(t, ctx, conn, root, true)
+	}}
+	cp, cons := newInjectedPipeline(t, ctx, conn,
+		NewCommitter(conn, testCoreBucket, cache, logger, time.Now), flipped, "root-flip")
+
+	env := newTestEnvelope(testNanoID1)
+	sub := publishWithReply(t, conn, env)
+	driveOne(t, ctx, cp, cons, OutcomeRejected)
+
+	reply := awaitReply(t, sub)
+	if reply.Error == nil || reply.Error.Code != ErrCodeProtectedKey {
+		t.Fatalf("reply error = %+v, want ProtectedKey", reply.Error)
+	}
+	if got := reply.Error.Details["root"]; got != root {
+		t.Fatalf("details.root = %v, want %s", got, root)
+	}
+	if doc := readStoredDocConn(t, ctx, conn, aspect); doc["isDeleted"] == true {
+		t.Fatalf("the refused tombstone must not have landed")
+	}
+}
+
+// hookedValidator runs a side effect the instant step 6 returns — the seam a
+// test uses to move the world in the window between validation and the batch.
+type hookedValidator struct {
+	inner Validator
+	after func()
+}
+
+func (h *hookedValidator) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState, prior PriorDocs) error {
+	err := h.inner.Validate(ctx, env, result, state, prior)
+	if h.after != nil {
+		h.after()
+	}
+	return err
+}
+
+// seedIdentityRootProtection writes an identity root carrying data.protected.
+func seedIdentityRootProtection(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, protected bool) {
+	t.Helper()
+	doc := []byte(fmt.Sprintf(
+		`{"class":"identity","isDeleted":false,"data":{"protected":%t}}`, protected))
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, doc); err != nil {
+		t.Fatalf("seed root %s: %v", key, err)
+	}
+}
+
+// seedAspect writes a minimal committed aspect envelope.
+func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string) {
+	t.Helper()
+	doc := []byte(fmt.Sprintf(`{"class":%q,"isDeleted":false,"data":{}}`, class))
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, doc); err != nil {
+		t.Fatalf("seed aspect %s: %v", key, err)
+	}
+}
+
+// readStoredDocConn decodes what Core KV holds at key, off a bare connection.
+func readStoredDocConn(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) map[string]interface{} {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]interface{}
+	if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
+		t.Fatalf("unmarshal %s: %v", key, uerr)
+	}
+	return doc
+}
+
+// The task auto-completion's injected update is a PLATFORM-AUTHORED mutation
+// appended after step 6, and it is exempt from permittedCommands by design: the
+// `task` DDL admits the task operations alone, so gating the injection would
+// refuse every task-bound business operation the moment it closed its own task.
+// The exemption is pinned in both directions — the same mutation set IS refused
+// when put through the validator, and commits when it rides the injection path.
+//
+// It doubles as the end-to-end top-up pin: the injected key is one no prior
+// pass read, so the task root's creation provenance survives only because
+// Commit reads it for itself.
+func TestCommit_InjectedTaskUpdateIsNotGatedByPermittedCommands(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	// A task DDL whose permittedCommands names the task operations and not the
+	// business operation below — the shipped shape.
+	if _, err := conn.KVPut(ctx, testCoreBucket, "vtx.meta.task", []byte(
+		`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{"canonicalName":"task","permittedCommands":["CompleteTask","CancelTask"]}}`,
+	)); err != nil {
+		t.Fatalf("seed task DDL: %v", err)
+	}
+	logger := testLogger()
+	cache := NewDDLCache(conn, testCoreBucket, logger)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	c := NewCommitter(conn, testCoreBucket, cache, logger, time.Now)
+
+	taskKey := "vtx.task.Wq4tYx7zBd2gJn5kMp8s"
+	creator := newTestEnvelope(testNanoID1)
+	creator.RequestID = "rid-inject-create"
+	creator.Actor = "vtx.identity." + testNanoID1
+	if _, err := c.Commit(ctx, creator, ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: taskKey,
+		Document: map[string]interface{}{"class": "task", "isDeleted": false,
+			"data": map[string]interface{}{"status": "open", "expiresAt": "2030-01-01T00:00:00Z"}},
+	}}}, NewTracker(creator, time.Now()), nil); err != nil {
+		t.Fatalf("Commit(create task): %v", err)
+	}
+	created := readStoredDocConn(t, ctx, conn, taskKey)
+
+	env := newTestEnvelope(testNanoID2)
+	env.RequestID = "rid-inject-complete"
+	env.OperationType = "ApproveLease" // the task DDL does not admit it
+	env.Actor = "vtx.identity." + testNanoID2
+	business := ScriptResult{Mutations: []MutationOp{{
+		Op:  "create",
+		Key: "vtx.leaseapp." + testNanoID1,
+		Document: map[string]interface{}{"class": "leaseapp", "isDeleted": false,
+			"data": map[string]interface{}{"state": "approved"}},
+	}}}
+
+	// What step 6 would say about the injection, had it seen it.
+	ac, err := readTaskAutoCompletion(ctx, conn, testCoreBucket, taskKey)
+	if err != nil || !ac.open {
+		t.Fatalf("readTaskAutoCompletion: open=%v err=%v", ac.open, err)
+	}
+	v := NewValidator(cache, conn, testCoreBucket, logger)
+	prior := PriorDocs{taskKey: priorDoc{Doc: created, Revision: ac.revision, Found: true}}
+	if err := v.Validate(ctx, env, business, HydratedState{}, prior); err != nil {
+		t.Fatalf("the business mutation itself must validate: %v", err)
+	}
+	augmented := injectTaskAutoCompletion(business, ac)
+	verr := v.Validate(ctx, env, augmented, HydratedState{}, prior)
+	var ddlErr *DDLViolation
+	if !errors.As(verr, &ddlErr) || ddlErr.MutationKey != taskKey {
+		t.Fatalf("the injected update must be what step 6 would refuse, got %T %v", verr, verr)
+	}
+
+	// And the injection path commits it regardless — that is the exemption.
+	cp := acTestCommitPath(conn, c)
+	if _, err := cp.commitWithTaskAutoComplete(ctx, env, business, NewTracker(env, time.Now()),
+		acTaskPathPermission(taskKey), PriorDocs{}); err != nil {
+		t.Fatalf("the platform-authored injection must commit: %v", err)
+	}
+
+	after := readStoredDocConn(t, ctx, conn, taskKey)
+	if data, _ := after["data"].(map[string]interface{}); data["status"] != "complete" {
+		t.Fatalf("status = %v, want complete", data["status"])
+	}
+	for _, f := range []string{"createdAt", "createdBy", "createdByOp"} {
+		if after[f] != created[f] {
+			t.Fatalf("%s = %v after the injection, want the creating operation's %v", f, after[f], created[f])
+		}
+	}
+}
+
+// The prior pass runs inside the OCC retry loop, once per attempt. A key
+// discovered at execution time is conditioned on the revision that pass read,
+// so a write landing in the window makes the batch conflict — and the retry
+// must re-read, or attempt two conditions on the same stale revision and the
+// operation can never converge.
+func TestCommitPath_OCCRetryReReadsPriorDocuments(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	key := "vtx.identity." + testNanoID2
+	seedAspect(t, ctx, conn, key, "identity")
+	seedScriptSource(t, ctx, conn, "identity", `
+def execute(state, op):
+    return {"mutations": [{"op": "update", "key": "`+key+`",
+                           "document": {"class": "identity", "isDeleted": False,
+                                        "data": {"name": "Andrew"}}}], "events": []}
+`)
+	logger := testLogger()
+	cache := NewDDLCache(conn, testCoreBucket, logger)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("ddl cache refresh: %v", err)
+	}
+	racer := &racingPriorCommitter{
+		inner: NewCommitter(conn, testCoreBucket, cache, logger, time.Now),
+		bump: func() {
+			seedAspect(t, ctx, conn, key, "identity")
+		},
+	}
+	cp, cons := newInjectedPipeline(t, ctx, conn, racer, nil, "occ-reread")
+
+	env := newTestEnvelope(testNanoID1)
+	publishEnvelope(t, conn, env)
+	driveOne(t, ctx, cp, cons, OutcomeAccepted)
+
+	if got := racer.reads.Load(); got != 2 {
+		t.Fatalf("ReadPrior calls = %d, want 2 (the retry must re-read)", got)
+	}
+	if got := racer.commits.Load(); got != 2 {
+		t.Fatalf("Commit calls = %d, want 2 (attempt one conflicts, attempt two commits)", got)
+	}
+	if doc := readStoredDocConn(t, ctx, conn, key); doc["class"] != "identity" {
+		t.Fatalf("committed class = %v", doc["class"])
+	}
+}
+
+// racingPriorCommitter is the real committer with one concurrent writer wedged
+// into the window the prior pass opens: after the FIRST read it moves the key,
+// so that attempt's batch is conditioned on a revision the world has left.
+type racingPriorCommitter struct {
+	inner   *CommitterImpl
+	bump    func()
+	reads   atomic.Uint64
+	commits atomic.Uint64
+}
+
+func (r *racingPriorCommitter) ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error) {
+	prior, err := r.inner.ReadPrior(ctx, mutations)
+	if err == nil && r.reads.Add(1) == 1 {
+		r.bump()
+	}
+	return prior, err
+}
+
+func (r *racingPriorCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error) {
+	r.commits.Add(1)
+	return r.inner.Commit(ctx, env, result, tracker, prior)
 }

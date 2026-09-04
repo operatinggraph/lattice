@@ -201,13 +201,17 @@ type raceCommitter struct {
 	calls atomic.Uint64
 }
 
-func (r *raceCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error) {
+func (r *raceCommitter) ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error) {
+	return r.inner.ReadPrior(ctx, mutations)
+}
+
+func (r *raceCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error) {
 	if r.calls.Add(1) == 1 {
 		if _, err := r.conn.KVPut(ctx, testCoreBucket, r.key, r.value); err != nil {
 			return CommitAck{}, fmt.Errorf("raceCommitter: inject winner: %w", err)
 		}
 	}
-	return r.inner.Commit(ctx, env, result, tracker)
+	return r.inner.Commit(ctx, env, result, tracker, prior)
 }
 
 // TestOptionalReads_SameCommitRace_E2E is the design's load-bearing AC (§3.1

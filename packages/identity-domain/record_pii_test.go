@@ -696,7 +696,7 @@ func TestRecordPII_SensitiveSSNOnNonIdentityRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := validator.Validate(ctx, env, reject, processor.HydratedState{})
+	err := validator.Validate(ctx, env, reject, processor.HydratedState{}, nil)
 	var ddlErr *processor.DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("sensitive ssn on lease: expected *DDLViolation, got %T: %v", err, err)
@@ -719,7 +719,7 @@ func TestRecordPII_SensitiveSSNOnNonIdentityRejected(t *testing.T) {
 			},
 		}},
 	}
-	if err := validator.Validate(ctx, env, rejectDob, processor.HydratedState{}); !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "sensitiveAspectScope" {
+	if err := validator.Validate(ctx, env, rejectDob, processor.HydratedState{}, nil); !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "sensitiveAspectScope" {
 		t.Fatalf("sensitive dob on lease: want sensitiveAspectScope, got %v", err)
 	}
 
@@ -738,7 +738,7 @@ func TestRecordPII_SensitiveSSNOnNonIdentityRejected(t *testing.T) {
 			},
 		}},
 	}
-	if err := validator.Validate(ctx, env, accept, processor.HydratedState{}); err != nil {
+	if err := validator.Validate(ctx, env, accept, processor.HydratedState{}, nil); err != nil {
 		t.Fatalf("sensitive ssn on identity: want pass, got %v", err)
 	}
 }
@@ -836,7 +836,7 @@ func TestRecordPII_SensitivePIIOnNonIdentityRejected(t *testing.T) {
 				},
 			}},
 		}
-		err := validator.Validate(ctx, env, reject, processor.HydratedState{})
+		err := validator.Validate(ctx, env, reject, processor.HydratedState{}, nil)
 		var ddlErr *processor.DDLViolation
 		if !errors.As(err, &ddlErr) {
 			t.Fatalf("sensitive %q on widget: expected *DDLViolation, got %T: %v", class, err, err)
@@ -861,7 +861,7 @@ func TestRecordPII_SensitivePIIOnNonIdentityRejected(t *testing.T) {
 				},
 			}},
 		}
-		if err := validator.Validate(ctx, env, accept, processor.HydratedState{}); err != nil {
+		if err := validator.Validate(ctx, env, accept, processor.HydratedState{}, nil); err != nil {
 			t.Fatalf("sensitive %q on identity: want pass, got %v", class, err)
 		}
 	}

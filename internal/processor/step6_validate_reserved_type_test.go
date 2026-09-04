@@ -112,7 +112,7 @@ func TestValidate_ReservedTypeName_CanonicalNameAspect_Rejected(t *testing.T) {
 					canonicalNameAspectMutation("create", testMetaNanoID1, name),
 				},
 			}
-			err := v.Validate(ctx, env, result, HydratedState{})
+			err := v.Validate(ctx, env, result, HydratedState{}, nil)
 			expectReservedTypeViolation(t, err)
 		})
 	}
@@ -133,7 +133,7 @@ func TestValidate_ReservedTypeName_RootDocument_Rejected(t *testing.T) {
 					metaRootMutation("create", testMetaNanoID1, "meta.ddl.vertexType", name),
 				},
 			}
-			err := v.Validate(ctx, env, result, HydratedState{})
+			err := v.Validate(ctx, env, result, HydratedState{}, nil)
 			expectReservedTypeViolation(t, err)
 		})
 	}
@@ -157,7 +157,7 @@ func TestValidate_ReservedTypeName_AnyMetaVertexClass_Rejected(t *testing.T) {
 					canonicalNameAspectMutation("create", testMetaNanoID1, "meta"),
 				},
 			}
-			err := v.Validate(ctx, env, result, HydratedState{})
+			err := v.Validate(ctx, env, result, HydratedState{}, nil)
 			expectReservedTypeViolation(t, err)
 		})
 		t.Run(class+"/root", func(t *testing.T) {
@@ -166,7 +166,7 @@ func TestValidate_ReservedTypeName_AnyMetaVertexClass_Rejected(t *testing.T) {
 			result := ScriptResult{
 				Mutations: []MutationOp{metaRootMutation("create", testMetaNanoID1, class, "op")},
 			}
-			err := v.Validate(ctx, env, result, HydratedState{})
+			err := v.Validate(ctx, env, result, HydratedState{}, nil)
 			expectReservedTypeViolation(t, err)
 		})
 	}
@@ -194,7 +194,7 @@ func TestValidate_ReservedTypeName_AbstractLensBrickShape_Rejected(t *testing.T)
 	result := ScriptResult{
 		Mutations: []MutationOp{root, canonicalNameAspectMutation("create", testMetaNanoID1, "meta")},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectReservedTypeViolation(t, err)
 }
 
@@ -233,7 +233,7 @@ func TestValidate_ReservedTypeName_LensThenClassFlip_DiesAtTheRegistration(t *te
 		metaRootMutation("create", testMetaNanoID1, "meta.lens", ""),
 		canonicalNameAspectMutation("create", testMetaNanoID1, "meta"),
 	}}
-	err := v.Validate(vctx, newTestEnvelope(testNanoID1), opA, HydratedState{})
+	err := v.Validate(vctx, newTestEnvelope(testNanoID1), opA, HydratedState{}, nil)
 	expectReservedTypeViolation(t, err)
 }
 
@@ -251,7 +251,7 @@ func TestValidate_ReservedTypeName_InstalledMetaVertexRenamed_Rejected(t *testin
 	result := ScriptResult{
 		Mutations: []MutationOp{canonicalNameAspectMutation("update", testMetaNanoID1, "meta")},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectReservedTypeViolation(t, err)
 }
 
@@ -265,7 +265,7 @@ func TestValidate_ReservedTypeName_AspectAloneRejected(t *testing.T) {
 	result := ScriptResult{
 		Mutations: []MutationOp{canonicalNameAspectMutation("create", testMetaNanoID2, "op")},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectReservedTypeViolation(t, err)
 }
 
@@ -284,7 +284,7 @@ func TestValidate_ReservedTypeName_OrdinaryNameAccepted(t *testing.T) {
 				canonicalNameAspectMutation("create", testMetaNanoID1, "workorder"),
 			},
 		}
-		if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 			t.Fatalf("registering an ordinary name must pass: %v", err)
 		}
 	})
@@ -296,7 +296,7 @@ func TestValidate_ReservedTypeName_OrdinaryNameAccepted(t *testing.T) {
 				metaRootMutation("create", testMetaNanoID1, "meta.ddl.vertexType", "workorder"),
 			},
 		}
-		if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 			t.Fatalf("registering an ordinary name must pass: %v", err)
 		}
 	})
@@ -309,7 +309,7 @@ func TestValidate_ReservedTypeName_OrdinaryNameAccepted(t *testing.T) {
 				canonicalNameAspectMutation("create", testMetaNanoID1, "availableListings"),
 			},
 		}
-		if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 			t.Fatalf("registering an ordinary lens name must pass: %v", err)
 		}
 	})
@@ -332,7 +332,7 @@ func TestValidate_ReservedTypeName_TombstoneExempt(t *testing.T) {
 		result := ScriptResult{
 			Mutations: []MutationOp{canonicalNameAspectMutation("tombstone", testMetaNanoID1, "meta")},
 		}
-		if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 			t.Fatalf("tombstoning a reserved-name registration must be exempt: %v", err)
 		}
 	})
@@ -344,7 +344,7 @@ func TestValidate_ReservedTypeName_TombstoneExempt(t *testing.T) {
 				metaRootMutation("tombstone", testMetaNanoID1, "meta.ddl.vertexType", "op"),
 			},
 		}
-		if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 			t.Fatalf("tombstoning a reserved-name registration must be exempt: %v", err)
 		}
 	})
@@ -371,7 +371,7 @@ func TestValidate_ReservedTypeName_NonMetaVertexUnaffected(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a canonicalName aspect on a business vertex reaches no registration index and must pass: %v", err)
 	}
 }
@@ -396,7 +396,7 @@ func TestValidate_ReservedTypeName_OtherMetaAspectUnaffected(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a non-canonicalName aspect of a meta-vertex registers nothing and must pass: %v", err)
 	}
 }
@@ -420,7 +420,7 @@ func TestValidate_ReservedTypeName_LinkMutationUnaffected(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a link mutation registers no name and must pass: %v", err)
 	}
 	if substrate.ClassifyKey(linkKey) != substrate.KindLink {

@@ -51,7 +51,7 @@ func TestValidate_CleanPass(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -71,7 +71,7 @@ func TestValidate_PermittedCommandsViolation(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -98,7 +98,7 @@ func TestValidate_SensitiveAspectOnNonIdentityRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -124,7 +124,7 @@ func TestValidate_SensitiveAspectOnIdentityAllowed(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (allowed): %v", err)
 	}
 }
@@ -142,7 +142,7 @@ func TestValidate_KeyPatternViolation(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -165,7 +165,7 @@ func TestValidate_UnknownOpRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -193,7 +193,7 @@ func TestValidate_UndeclaredClassIsPermissive(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (permissive): %v", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestValidate_IsDeletedTypeStringRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -244,7 +244,7 @@ func TestValidate_IsDeletedTypeNumberOnUpdateRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -270,7 +270,7 @@ func TestValidate_IsDeletedTypeBoolAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (well-typed isDeleted): %v", err)
 	}
 }
@@ -290,7 +290,7 @@ func TestValidate_IsDeletedTypeAbsentAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (absent isDeleted): %v", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestValidate_ProtectedTypeStringRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -339,7 +339,7 @@ func TestValidate_ProtectedTypeNumberOnUpdateRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -364,7 +364,7 @@ func TestValidate_ProtectedTypeBoolAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (well-typed data.protected): %v", err)
 	}
 }
@@ -384,7 +384,7 @@ func TestValidate_ProtectedTypeAbsentAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (absent data.protected): %v", err)
 	}
 }
@@ -403,7 +403,7 @@ func TestValidate_SensitiveTypeStringRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -433,7 +433,7 @@ func TestValidate_SensitiveTypeNumberOnUpdateRejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
@@ -458,7 +458,7 @@ func TestValidate_SensitiveTypeBoolAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (well-typed data.sensitive): %v", err)
 	}
 }
@@ -478,7 +478,7 @@ func TestValidate_SensitiveTypeAbsentAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("Validate (absent data.sensitive): %v", err)
 	}
 }

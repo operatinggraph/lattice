@@ -218,7 +218,13 @@ func NewCommitter(conn *substrate.Conn, coreBucket string, cache *DDLCache, logg
 // tracker; the Committer enriches `data` with `mutationKeys` and `eventClasses`
 // (Contract #4 §4.2) before serialization so it holds the authoritative
 // serialization moment.
-func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error) {
+//
+// prior is the map ReadPrior produced for the validated mutation set. Commit
+// tops it up for any update/tombstone key it was handed that the map does not
+// cover (the task auto-completion's injected update), so the guards and the
+// body preservation below never see a missing entry. A nil map is legal and
+// costs a full pass.
+func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error) {
 	now := c.Clock()
 	rid := env.RequestID
 
@@ -254,7 +260,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// The same read pass loads the stored document behind every update and
 	// tombstone, which buildMutationValue needs to preserve what the mutation
 	// does not resupply.
-	prior, err := c.readPriorDocuments(ctx, result.Mutations)
+	prior, err = c.topUpPrior(ctx, result.Mutations, prior)
 	if err != nil {
 		return CommitAck{}, err
 	}
@@ -303,7 +309,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 			// cascade does) reaches commit with ExpectedRevision nil.
 			//
 			// Such a write is not left unconditioned: this value is built from the
-			// document read moments ago at step 8 — the whole document, for a
+			// document the prior pass read at step 5.5 — the whole document, for a
 			// tombstone — so it is conditioned on THAT revision instead. Without
 			// it, a commit landing in the window between that read and this batch
 			// would be silently reverted by the value written here. This fallback
@@ -507,26 +513,28 @@ var immutableEnvelopeFields = [...]string{"createdAt", "createdBy", "createdByOp
 //     immutable creation triplet is carried over from `prior`, overriding any
 //     value the script supplied. An update over an absent key materially creates
 //     it, so the triplet is stamped fresh rather than left missing.
-//   - tombstone — the script supplies no document at all (the mutation parser
-//     only reads `document` for create/update). The prior document is carried
-//     over WHOLE and only `isDeleted` + the lastModified triplet change, so a
-//     tombstoned link keeps the `class`/`sourceVertex`/`targetVertex` that make
-//     it readable as a link, and a tombstoned entity keeps the provenance a
-//     later revive needs.
+//   - tombstone — the written body is the prior document WHOLE, and only
+//     `isDeleted` + the lastModified triplet change, so a tombstoned link keeps
+//     the `class`/`sourceVertex`/`targetVertex` that make it readable as a link,
+//     and a tombstoned entity keeps the provenance a later revive needs. A
+//     tombstone carries no document (Contract #3 §3.3 — one supplied is not
+//     honored, and the mutation parser refuses the shape outright), and none is
+//     read here: a tombstone can never modify, blank, or reclaim the stored
+//     body.
 func buildMutationValue(env *OperationEnvelope, m MutationOp, at time.Time, trackerKey string, prior map[string]interface{}) ([]byte, error) {
 	stamp := substrate.FormatTimestamp(at)
 
-	// Start from the base this mutation preserves, then layer the script's
-	// document over it (a fresh map so we mutate neither the caller's struct
-	// nor the commit's prior-document cache).
+	// A fresh map, so we mutate neither the caller's struct nor the commit's
+	// prior-document cache.
 	doc := map[string]interface{}{}
 	if m.Op == "tombstone" {
 		for k, v := range prior {
 			doc[k] = v
 		}
-	}
-	for k, v := range m.Document {
-		doc[k] = v
+	} else {
+		for k, v := range m.Document {
+			doc[k] = v
+		}
 	}
 	doc["key"] = m.Key
 
@@ -583,31 +591,48 @@ func preserveImmutableFields(doc, prior map[string]interface{}, env *OperationEn
 	}
 }
 
-// priorDoc is a stored document read at step 8, with the revision it was read
-// at. Doc is nil when the key is absent (or unparseable, which yields nothing
-// to preserve and cannot be confirmed protected — treated as absent so one
-// corrupt value does not wedge commits).
+// priorDoc is a stored document read by the prior pass, with the revision it
+// was read at. Doc is nil when the key is absent, and also when the stored
+// value did not parse — Found stays true for the latter, so a consumer that
+// must tell the two apart uses PriorDocs.lookup.
+//
+// Absent and undecodable are both permissive for the step-8 guards: an
+// unparseable body yields nothing to preserve and cannot be confirmed
+// protected, and one corrupt value must not wedge every commit that touches
+// its root. The step-6 stored-class gate draws the line differently, because it
+// reads the body to decide what governs the write: it admits a TOMBSTONE of an
+// undecodable body (nothing readable is written forward, and a corrupt key must
+// stay removable) and refuses an UPDATE of one.
 type priorDoc struct {
 	Doc      map[string]interface{}
 	Revision uint64
 	Found    bool
 }
 
-// priorDocs is the per-commit cache of stored documents, keyed by KV key. One
-// KVGet per distinct key per commit serves both the protected-key guard and
-// provenance preservation.
-type priorDocs map[string]priorDoc
+// PriorDocs is the per-operation cache of stored documents, keyed by KV key.
+// One KVGet per distinct key per operation serves the step-6 stored-class
+// gate, the protected-key guard, and provenance preservation.
+//
+// A key with an entry has been read, and the entry's Found reports whether Core
+// KV held anything — but the accessors below do NOT expose that distinction:
+// both doc() and lookup() answer "absent" for a key the map never read. That is
+// sound because the production pipeline always runs ReadPrior over the mutation
+// set before Validate, and Commit tops the map up for anything appended after,
+// so every key a consumer asks about has been read. A caller that skips those
+// passes — a test handing Commit a nil map, say — validates and commits as if
+// every key were absent, which is the permissive direction.
+type PriorDocs map[string]priorDoc
 
-func (p priorDocs) doc(key string) map[string]interface{} { return p[key].Doc }
+func (p PriorDocs) doc(key string) map[string]interface{} { return p[key].Doc }
 
-// lookup reports the stored document behind a key for a write-once comparison,
-// separating the three states doc() collapses into one. found is false when the
-// key holds nothing at all — unconstrained, there is no earlier value to
-// preserve. decoded is false when an entry exists but its body did not parse:
-// readPriorDoc keeps such an entry rather than failing the commit, so a guard
-// that must fail closed has to treat it as a body it cannot prove unchanged,
-// not as an absent one.
-func (p priorDocs) lookup(key string) (doc map[string]interface{}, found, decoded bool) {
+// lookup reports the stored document behind a key, separating the two states
+// doc() collapses into one. found is false when Core KV held nothing at the key
+// (and, per the type doc above, when the key was never read at all —
+// indistinguishable here, and permissive either way). decoded is false when an
+// entry exists but its body did not parse: readPriorDoc keeps such an entry
+// rather than failing the commit, so a consumer that reads the body to reach a
+// verdict has to treat it as a body it cannot read, not as an absent one.
+func (p PriorDocs) lookup(key string) (doc map[string]interface{}, found, decoded bool) {
 	pd, ok := p[key]
 	if !ok || !pd.Found {
 		return nil, false, false
@@ -621,11 +646,28 @@ func (p priorDocs) lookup(key string) (doc map[string]interface{}, found, decode
 // serial round trips on the operation's own deadline.
 const priorReadConcurrency = 16
 
-// readPriorDocuments reads the stored document for every update/tombstone
-// mutation key, plus each distinct protected root. Reading here — rather than
-// trusting step-4 hydration — keeps preservation unconditional: a tombstone
-// carries no script document at all, and a script that never declared the key
-// as a read still must not erase what it did not supply.
+// ReadPrior reads the stored document for every update/tombstone MUTATION key.
+// Reading these — rather than trusting step-4 hydration — keeps the reads
+// unconditional: a tombstone carries no script document at all, and a script
+// that never declared the key as a read still must not erase what it did not
+// supply, nor escape the gate on the class stored there.
+//
+// It runs at step 5.5, once per pipeline attempt, ahead of step 6: the class
+// stored at an update's or tombstone's key is what governs that mutation
+// (Contract #1 §1.5), so the gate needs the same documents step 8 needs for
+// preservation. Every key reaching here has already passed the batch-wide
+// key-shape pre-pass (validateMutationKeyShapes), which is what keeps a
+// malformed key a terminal keyPattern refusal rather than an ErrInvalidKey the
+// caller must treat as a retryable read fault.
+//
+// The protected ROOTS the step-8 guards read are deliberately NOT in this pass;
+// Commit reads them itself (see commitKeysFor). The split is by consumer: a
+// mutation key read here is also the key the batch is conditioned on, so a
+// concurrent write between this read and the commit makes the batch conflict
+// and the whole pipeline re-run. An aspect's parent root is in no batch and
+// conditions nothing, so a read of it here would let a root turn protected
+// between step 6 and step 8 with no one the wiser. Total round trips per commit
+// are unchanged either way: each key is read once.
 //
 // The read is a moment later than the step-4 revision the batch asserts, but a
 // commit that succeeds proves no write landed in between, so the document read
@@ -637,35 +679,110 @@ const priorReadConcurrency = 16
 // that landed in the window.
 //
 // The pass is bounded by c.Timeout so a large cascade cannot burn the lane
-// deadline and livelock on redelivery.
-func (c *CommitterImpl) readPriorDocuments(ctx context.Context, mutations []MutationOp) (priorDocs, error) {
-	keys := make([]string, 0, 2*len(mutations))
+// deadline and livelock on redelivery. An error is a read fault: the caller
+// redelivers, never refuses and never proceeds on a partial map.
+func (c *CommitterImpl) ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error) {
+	return c.readKeys(ctx, priorKeysFor(mutations, nil))
+}
+
+// priorKeysFor lists the distinct update/tombstone MUTATION keys a prior pass
+// must read, skipping any key `have` already holds an entry for. A nil `have`
+// asks for the whole set.
+func priorKeysFor(mutations []MutationOp, have PriorDocs) []string {
+	keys := make([]string, 0, len(mutations))
 	seen := map[string]struct{}{}
-	addKey := func(k string) {
-		if k == "" {
-			return
+	for _, m := range mutations {
+		if m.Op != "update" && m.Op != "tombstone" {
+			continue
 		}
-		if _, dup := seen[k]; dup {
-			return
-		}
+		addPriorKey(&keys, seen, have, m.Key)
+	}
+	return keys
+}
+
+// commitKeysFor lists what Commit's own pass must read on top of the map it was
+// handed: every update/tombstone mutation key the map does not cover (a
+// mutation appended after validation), then every distinct protected root the
+// step-8 guards consult that neither the map nor this list already covers.
+//
+// Roots come second and last so they are read at COMMIT time — the guards'
+// verdict on a root that turned protected after step 6 must be the fresh one.
+// A root the handed map already holds needs no re-read: that only happens when
+// the root is itself a mutation key, and such a key is batch-conditioned on the
+// revision it was read at, so a concurrent flip makes the commit conflict and
+// the pipeline re-run from hydration.
+func commitKeysFor(mutations []MutationOp, have PriorDocs) []string {
+	keys := priorKeysFor(mutations, have)
+	seen := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
 		seen[k] = struct{}{}
-		keys = append(keys, k)
 	}
 	for _, m := range mutations {
 		if m.Op != "update" && m.Op != "tombstone" {
 			continue
 		}
-		addKey(m.Key)
-		addKey(protectedRootKey(m.Key))
+		addPriorKey(&keys, seen, have, protectedRootKey(m.Key))
 	}
+	return keys
+}
+
+// addPriorKey appends key to keys unless it is empty, already listed, or
+// already held by have.
+func addPriorKey(keys *[]string, seen map[string]struct{}, have PriorDocs, key string) {
+	if key == "" {
+		return
+	}
+	if _, dup := seen[key]; dup {
+		return
+	}
+	if _, known := have[key]; known {
+		return
+	}
+	seen[key] = struct{}{}
+	*keys = append(*keys, key)
+}
+
+// topUpPrior returns prior extended with what Commit's consumers need and the
+// step-5.5 pass did not read: the protected roots of every aspect mutation,
+// read fresh here, and any mutation key the handed map does not cover.
+//
+// The mutation set Commit receives is not always the set step 6 validated — the
+// task auto-completion appends an update of the task root after validation, and
+// re-derives it on a batch conflict — and every consumer of the map degrades
+// silently on a missing entry: provenance would be re-stamped from the current
+// operation and the guards would read the injected key as absent.
+func (c *CommitterImpl) topUpPrior(ctx context.Context, mutations []MutationOp, prior PriorDocs) (PriorDocs, error) {
+	missing := commitKeysFor(mutations, prior)
+	if len(missing) == 0 {
+		if prior == nil {
+			return PriorDocs{}, nil
+		}
+		return prior, nil
+	}
+	read, err := c.readKeys(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+	merged := make(PriorDocs, len(prior)+len(read))
+	for k, pd := range prior {
+		merged[k] = pd
+	}
+	for k, pd := range read {
+		merged[k] = pd
+	}
+	return merged, nil
+}
+
+// readKeys performs the bounded concurrent pass over an explicit key list.
+func (c *CommitterImpl) readKeys(ctx context.Context, keys []string) (PriorDocs, error) {
 	if len(keys) == 0 {
-		return priorDocs{}, nil
+		return PriorDocs{}, nil
 	}
 
 	rctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
-	prior := make(priorDocs, len(keys))
+	prior := make(PriorDocs, len(keys))
 	var (
 		mu       sync.Mutex
 		firstErr error
@@ -722,10 +839,12 @@ func (c *CommitterImpl) readPriorDoc(ctx context.Context, key string) (priorDoc,
 // guard. For every update/tombstone mutation it derives the 3-segment root
 // (vtx.<type>.<id>) and rejects the whole operation with *ProtectedKeyError if
 // the root document carries data.protected == true. Roots are served from the
-// commit's document cache, so multiple aspects of one root cost a single KVGet.
-// A root that does not exist is not protected. create mutations are skipped —
-// create-only conflicts on overwrite already.
-func rejectProtectedMutations(mutations []MutationOp, prior priorDocs) error {
+// commit's document cache, so multiple aspects of one root cost a single KVGet
+// — and they are read at COMMIT time (topUpPrior), not with the step-5.5
+// stored-class pass, so a root that turns protected after step 6 is still seen
+// by this guard. A root that does not exist is not protected. create mutations
+// are skipped — create-only conflicts on overwrite already.
+func rejectProtectedMutations(mutations []MutationOp, prior PriorDocs) error {
 	for _, m := range mutations {
 		if m.Op != "update" && m.Op != "tombstone" {
 			continue
@@ -813,22 +932,20 @@ var committerManagedFields = map[string]bool{
 //     consumer resolves through it, redirect a canonical role name to a
 //     different role's grants with no new grant step.
 //
-// Like the protected-key guard this is path-independent — it fires for any
-// script or future primitive emitting such a mutation, and does not rely on a
-// Starlark-layer check to have run. A create is out of scope: there is no
-// stored body to hold write-once. A bare tombstone is out of scope too, because
-// buildMutationValue seeds the written body from the stored document and a
-// tombstone that carries no document has nothing to overlay onto it; a
-// tombstone that DOES carry a document overlays it exactly as an update does,
-// so it is held to the same comparison.
-func rejectPermissionRoleRewrites(mutations []MutationOp, prior priorDocs) error {
+// Like the protected-key guard, the update arm is path-independent — it fires
+// for any script or future primitive emitting such a mutation, and does not
+// rely on a Starlark-layer check to have run. A create is out of scope: there
+// is no stored body to hold write-once. A tombstone is out of scope by
+// construction, not by policy: it carries no document (the mutation parser
+// refuses one) and buildMutationValue writes the stored body back whole,
+// flipping only isDeleted, so there is no supplied value for this guard to
+// compare — hence the bare `continue` on that arm.
+func rejectPermissionRoleRewrites(mutations []MutationOp, prior PriorDocs) error {
 	for _, m := range mutations {
 		switch m.Op {
 		case "update":
 		case "tombstone":
-			if m.Document == nil {
-				continue
-			}
+			continue
 		default:
 			continue
 		}
@@ -1047,7 +1164,7 @@ func (s *packageScope) ownsOrCreates(key string) bool {
 //     one onto its own — the more so because a vtx.meta.* write invalidates the
 //     DDL cache in-commit, so a forged aspect on a primordial op-meta root is
 //     live immediately.
-func (c *CommitterImpl) rejectPackageScopeViolations(ctx context.Context, env *OperationEnvelope, mutations []MutationOp, prior priorDocs) error {
+func (c *CommitterImpl) rejectPackageScopeViolations(ctx context.Context, env *OperationEnvelope, mutations []MutationOp, prior PriorDocs) error {
 	// Every operation in the platform passes through here, so the envelope's own
 	// fields settle the question before the payload is touched: a class-carrying
 	// envelope needs no decode at all, and only a class-less one pays for the
@@ -1138,7 +1255,7 @@ func rejectForgedManifestCreates(scope *packageScope, mutations []MutationOp) er
 // creates. An upgrade or uninstall resolves the named package's vertex key
 // server-side and reads its manifest: a name that resolves to no live manifest
 // yields an unresolved scope, which owns nothing.
-func (c *CommitterImpl) resolvePackageScope(ctx context.Context, lifecycle string, payload map[string]interface{}, payloadDecoded bool, mutations []MutationOp, prior priorDocs) (*packageScope, error) {
+func (c *CommitterImpl) resolvePackageScope(ctx context.Context, lifecycle string, payload map[string]interface{}, payloadDecoded bool, mutations []MutationOp, prior PriorDocs) (*packageScope, error) {
 	scope := &packageScope{
 		created: make(map[string]struct{}, len(mutations)),
 		owned:   map[string]struct{}{},
@@ -1223,7 +1340,7 @@ func (c *CommitterImpl) resolvePackageScope(ctx context.Context, lifecycle strin
 // the work: liveness is read from the prior-document map the commit already
 // loaded, so a manifest listing thousands of keys costs no reads at all rather
 // than one round trip each.
-func validatedManifestClaims(scope *packageScope, priorDeclared map[string]struct{}, mutations []MutationOp, prior priorDocs) (map[string]struct{}, error) {
+func validatedManifestClaims(scope *packageScope, priorDeclared map[string]struct{}, mutations []MutationOp, prior PriorDocs) (map[string]struct{}, error) {
 	revived := map[string]struct{}{}
 	for _, m := range mutations {
 		if m.Op == "update" || m.Op == "tombstone" {
@@ -1391,7 +1508,7 @@ func protectedRootKey(key string) string {
 // identically here). ok is false when the mutation has neither an explicit
 // revision nor a prior document to condition on (a write to a key that does
 // not yet exist — stays unconditioned, as today).
-func conditionRevision(m MutationOp, prior priorDocs) (rev uint64, ok bool, fallback bool) {
+func conditionRevision(m MutationOp, prior PriorDocs) (rev uint64, ok bool, fallback bool) {
 	if m.ExpectedRevision != nil {
 		return *m.ExpectedRevision, true, false
 	}

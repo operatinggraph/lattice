@@ -562,11 +562,11 @@ type nfrValidator struct {
 	trip  func() error
 }
 
-func (n *nfrValidator) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState) error {
+func (n *nfrValidator) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState, prior PriorDocs) error {
 	if err := n.trip(); err != nil {
 		return err
 	}
-	return n.inner.Validate(ctx, env, result, state)
+	return n.inner.Validate(ctx, env, result, state, prior)
 }
 
 type nfrCommitter struct {
@@ -574,11 +574,15 @@ type nfrCommitter struct {
 	trip  func() error
 }
 
-func (n *nfrCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error) {
+func (n *nfrCommitter) ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error) {
+	return n.inner.ReadPrior(ctx, mutations)
+}
+
+func (n *nfrCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error) {
 	if err := n.trip(); err != nil {
 		return CommitAck{}, err
 	}
-	return n.inner.Commit(ctx, env, result, tracker)
+	return n.inner.Commit(ctx, env, result, tracker, prior)
 }
 
 type nfrAcker struct {

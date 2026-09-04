@@ -1598,15 +1598,17 @@ def execute(state, op):
             fail("SubjectMismatch: " + superseded_by + " is not providedTo " + subject_key)
 
         # Tombstone the root + its two links via the bare op:tombstone form
-        # (no document): step 6 derives the class field ONLY from a mutation's
-        # OWN document (step6_validate.go), so a documentless tombstone carries no
-        # class and skips DDL/permittedCommands resolution entirely (Contract
-        # #1 §1.5/§1.6 permissive default) -- the storage layer carries the
-        # prior class/sourceVertex/targetVertex over unchanged and flips only
-        # isDeleted (step8_commit.go buildMutationValue). Adjacency then
-        # returns no edge for either link, so the readiness aggregate stops
-        # reading this instance at all (a tombstoned root alone is still read
-        # before being filtered, ruleengine/full/executor.go).
+        # (no document): the write gate reads the class STORED at each key, so
+        # the root tombstone is governed by service.<family>.instance and its
+        # type authority must name this op in permittedCommands
+        # (leaseServiceInstance's DDL does), while the two link tombstones carry
+        # relation classes no linkType DDL registers and stay permissive
+        # (Contract #1 §1.5/§1.6). The storage layer carries the prior
+        # class/sourceVertex/targetVertex over unchanged and flips only
+        # isDeleted. Adjacency then returns no edge for either link, so the
+        # readiness aggregate stops reading this instance at all (a tombstoned
+        # root alone is still read before being filtered,
+        # ruleengine/full/executor.go).
         mutations = [
             make_tombstone(instance_key),
             make_tombstone(instance_of_lnk),

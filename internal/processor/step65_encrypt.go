@@ -275,6 +275,15 @@ func (cp *CommitPath) ensureKeyHolderKey(ctx context.Context, vertexKey string, 
 	if cerr != nil {
 		return vault.Envelope{}, fmt.Errorf("create identity key for %s: %w", vertexKey, cerr)
 	}
+	// A PLATFORM-AUTHORED mutation, appended after step 6 and therefore exempt
+	// from the permittedCommands gate — the standing exemption the task
+	// auto-complete injection documents (autocomplete.go). Gating it would
+	// refuse every operation that writes an identity's FIRST sensitive aspect,
+	// since the `piiKey` DDL names the privacy operations and not the business
+	// one that triggered the mint. It is sound for the same reason: every field
+	// below is fixed by the Processor — the class, the vertex it holds a key
+	// for, its local name, and the Vault envelope this call just created — with
+	// nothing submitter-supplied riding along for a gate to adjudicate.
 	*extra = append(*extra, MutationOp{
 		Op:  "create",
 		Key: piiKeyKey,

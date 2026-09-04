@@ -367,24 +367,54 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				return cp.handleStubFailure(ctx, msg, env, "execute", err)
 			}
 		}
+		// --- Step 5.5: key shapes, then the prior-document read. ---
+		//
+		// The shape verdict is reached before the first read: a malformed key
+		// handed to KVGet answers with an error, which this stage would have to
+		// treat as a read fault, turning a terminal keyPattern refusal into an
+		// unbounded redelivery loop.
+		//
+		// The read serves both step 6 and step 8: the class stored at an
+		// update's or tombstone's key is what governs that mutation, and it is
+		// the same document the batch builder preserves. One pass, one KVGet per
+		// distinct key, off the script's own live-read budget.
+		if verr := validateMutationKeyShapes(result.Mutations, env.RequestID); verr != nil {
+			return cp.rejectDDLViolation(ctx, msg, env, verr, "step 5.5")
+		}
+		var prior PriorDocs
+		if cp.deps.Committer != nil {
+			prior, err = cp.deps.Committer.ReadPrior(ctx, result.Mutations)
+			if err != nil {
+				// A read fault, never a refusal and never the permissive
+				// default: redeliver on the backoff floor exactly as a step-8
+				// read fault does. The world is unchanged, so the redelivery
+				// re-reads from scratch.
+				cp.deps.Logger.Warn("step 5.5: prior-document read failed; redelivering on the backoff floor",
+					"requestId", env.RequestID, "error", err)
+				return OutcomeRetryable, substrate.NakWithDelay
+			}
+		}
+
 		// --- Step 6: validate. ---
 		if cp.deps.Validator != nil {
-			if err := cp.deps.Validator.Validate(ctx, env, result, state); err != nil {
+			if err := cp.deps.Validator.Validate(ctx, env, result, state, prior); err != nil {
+				// A DEGRADED governing-DDL resolution is a read fault, not a
+				// verdict: redeliver rather than refuse (a transient blip must
+				// not permanently reject a valid operation) and rather than fall
+				// through to the permissive default.
+				var faultErr *ResolveFaultError
+				if errors.As(err, &faultErr) {
+					cp.deps.Logger.Warn("step 6: governing-DDL resolution faulted; redelivering on the backoff floor",
+						"requestId", env.RequestID,
+						"mutationKey", faultErr.MutationKey,
+						"class", faultErr.Class,
+						"error", faultErr.Cause)
+					return OutcomeRetryable, substrate.NakWithDelay
+				}
 				// DDL violations terminate the commit path (no redelivery, no retry).
 				var ddlErr *DDLViolation
 				if errors.As(err, &ddlErr) {
-					cp.deps.Metrics.OpsRejected.Add(1)
-					cp.deps.Logger.Info("step 6: DDL violation; rejecting",
-						"requestId", env.RequestID,
-						"constraint", ddlErr.ViolatedConstraint,
-						"mutationKey", ddlErr.MutationKey,
-						"detail", ddlErr.Detail)
-					cp.replyRejection(ctx, msg, env, ErrCodeDDLViolation,
-						ddlErr.Error(), map[string]any{
-							"constraint":  ddlErr.ViolatedConstraint,
-							"mutationKey": ddlErr.MutationKey,
-						}, "")
-					return OutcomeRejected, substrate.Term
+					return cp.rejectDDLViolation(ctx, msg, env, ddlErr, "step 6")
 				}
 				return cp.handleStubFailure(ctx, msg, env, "validate", err)
 			}
@@ -440,7 +470,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		now := cp.deps.Clock()
 		tracker := NewTracker(env, now)
 		tracker.SupersedesRevision = trackerSupersedes
-		commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission)
+		commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission, prior)
 		if err == nil {
 			// Event publication is outbox-only: the faithful EventList was persisted
 			// in the step-8 atomic batch (vtx.op.<id>.events) and the durable outbox
@@ -874,12 +904,13 @@ func (cp *CommitPath) commitWithTaskAutoComplete(
 	result ScriptResult,
 	tracker Tracker,
 	rp *ResolvedPermission,
+	prior PriorDocs,
 ) (CommitAck, error) {
 	taskKey := taskKeyFromTaskPathDecision(rp)
 	if taskKey == "" {
 		// Not a task-path op (role/service/platform auth, or stub) — nothing
 		// to auto-complete. Commit the op as-is.
-		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+		return cp.deps.Committer.Commit(ctx, env, result, tracker, prior)
 	}
 
 	ac, err := readTaskAutoCompletion(ctx, cp.deps.Conn, cp.deps.CoreBucket, taskKey)
@@ -890,13 +921,13 @@ func (cp *CommitPath) commitWithTaskAutoComplete(
 		// CAS-on-open keeps that idempotent.
 		cp.deps.Logger.Warn("auto-complete: task root read failed; committing op without closure",
 			"requestId", env.RequestID, "taskKey", taskKey, "error", err)
-		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+		return cp.deps.Committer.Commit(ctx, env, result, tracker, prior)
 	}
 	if !ac.open {
 		// Task absent / cancelled / already complete → inject nothing (no
 		// double-complete, no cancelled-resurrection; the stale-grant window is
 		// a harmless no-op).
-		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+		return cp.deps.Committer.Commit(ctx, env, result, tracker, prior)
 	}
 
 	// The completion of a task whose granted op just ran is a platform behaviour
@@ -907,7 +938,7 @@ func (cp *CommitPath) commitWithTaskAutoComplete(
 	cp.deps.Logger.Info("auto-complete: injecting task closure into the atomic batch",
 		"requestId", env.RequestID, "taskKey", taskKey, "autoComplete", true)
 	augmented := injectTaskAutoCompletion(result, ac)
-	commitAck, err := cp.deps.Committer.Commit(ctx, env, augmented, tracker)
+	commitAck, err := cp.deps.Committer.Commit(ctx, env, augmented, tracker, prior)
 	if err == nil {
 		return commitAck, nil
 	}
@@ -936,7 +967,7 @@ func (cp *CommitPath) commitWithTaskAutoComplete(
 		// Still open but at a newer revision — retry the injection once with the
 		// fresh CAS handle.
 		retry := injectTaskAutoCompletion(result, recheck)
-		retryAck, retryErr := cp.deps.Committer.Commit(ctx, env, retry, tracker)
+		retryAck, retryErr := cp.deps.Committer.Commit(ctx, env, retry, tracker, prior)
 		if retryErr == nil {
 			return retryAck, nil
 		}
@@ -946,7 +977,7 @@ func (cp *CommitPath) commitWithTaskAutoComplete(
 	}
 	cp.deps.Logger.Info("auto-complete: task closed or moved under a concurrent transition; committing op without closure",
 		"requestId", env.RequestID, "taskKey", taskKey)
-	return cp.deps.Committer.Commit(ctx, env, result, tracker)
+	return cp.deps.Committer.Commit(ctx, env, result, tracker, prior)
 }
 
 // primaryKeyInCommit reports whether a script-named primaryKey lies within the
@@ -1014,6 +1045,28 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Messa
 	code, details := classifyStepError(err)
 	cp.replyRejection(ctx, msg, env, code,
 		fmt.Sprintf("step %s failed: %s", step, err.Error()), details, outcome)
+	return OutcomeRejected, substrate.Term
+}
+
+// rejectDDLViolation disposes a DDL violation: a verdict the world cannot
+// change, so it terminates with a rejection reply rather than redelivering.
+// stage names the pipeline stage that reached the verdict — "step 5.5" for the
+// batch-wide shape pre-pass, "step 6" for validation — so an operator reading
+// the log can tell a refusal raised before the prior-document read from one
+// raised after it.
+func (cp *CommitPath) rejectDDLViolation(ctx context.Context, msg substrate.Message, env *OperationEnvelope, ddlErr *DDLViolation, stage string) (MessageOutcome, substrate.Decision) {
+	cp.deps.Metrics.OpsRejected.Add(1)
+	cp.deps.Logger.Info(stage+": DDL violation; rejecting",
+		"requestId", env.RequestID,
+		"stage", stage,
+		"constraint", ddlErr.ViolatedConstraint,
+		"mutationKey", ddlErr.MutationKey,
+		"detail", ddlErr.Detail)
+	cp.replyRejection(ctx, msg, env, ErrCodeDDLViolation,
+		ddlErr.Error(), map[string]any{
+			"constraint":  ddlErr.ViolatedConstraint,
+			"mutationKey": ddlErr.MutationKey,
+		}, "")
 	return OutcomeRejected, substrate.Term
 }
 

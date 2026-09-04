@@ -52,7 +52,11 @@ func (e stubExecutor) Execute(_ context.Context, _ *OperationEnvelope, _ Hydrate
 // operations always fail before step 8.
 type noopCommitter struct{}
 
-func (noopCommitter) Commit(context.Context, *OperationEnvelope, ScriptResult, Tracker) (CommitAck, error) {
+func (noopCommitter) ReadPrior(context.Context, []MutationOp) (PriorDocs, error) {
+	return PriorDocs{}, nil
+}
+
+func (noopCommitter) Commit(context.Context, *OperationEnvelope, ScriptResult, Tracker, PriorDocs) (CommitAck, error) {
 	return CommitAck{}, errors.New("noopCommitter: step 8 is unreachable in this fixture")
 }
 

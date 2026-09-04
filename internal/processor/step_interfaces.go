@@ -27,14 +27,25 @@ type Executor interface {
 
 // Validator (step 6+7) — DDL JSON Schema validation, write-scope check,
 // sensitivity rule, event-schema validation. Stories 1.7 + 1.9.
+//
+// prior carries the documents stored at the mutation keys (step 5.5's
+// Committer.ReadPrior), because the DDL governing an update or a tombstone is
+// the one of the class stored at the key, not only the one the script's own
+// document declares.
 type Validator interface {
-	Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState) error
+	Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState, prior PriorDocs) error
 }
 
-// Committer (step 8) — assembles the atomic batch (tracker + mutations)
-// and commits it to Core KV.
+// Committer (step 8) — reads the stored documents the write path needs
+// (step 5.5) and assembles + commits the atomic batch (tracker + mutations)
+// to Core KV.
+//
+// ReadPrior runs before step 6 so the validator and the commit share one pass;
+// Commit takes that map back and tops it up for any mutation appended after
+// validation. An error from ReadPrior is a read fault — the caller redelivers.
 type Committer interface {
-	Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error)
+	ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error)
+	Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error)
 }
 
 // CommitAck mirrors substrate.BatchAck for the commit path. Events carries
@@ -83,7 +94,7 @@ func DefaultAckerFactory(msg jetstream.Msg, logger *slog.Logger) Acker {
 
 type StubValidator struct{ logger *slog.Logger }
 
-func (s *StubValidator) Validate(_ context.Context, env *OperationEnvelope, _ ScriptResult, _ HydratedState) error {
+func (s *StubValidator) Validate(_ context.Context, env *OperationEnvelope, _ ScriptResult, _ HydratedState, _ PriorDocs) error {
 	s.logger.Info("step 6+7: stubbed", "step", "validate", "requestId", env.RequestID)
 	return nil
 }
@@ -105,9 +116,15 @@ func NewStubCommitter(conn *substrate.Conn, bucket string, logger *slog.Logger, 
 	return &StubCommitter{conn: conn, bucket: bucket, logger: logger, clock: clock}
 }
 
+// ReadPrior reads nothing: the stub writes no business mutation, so there is no
+// stored document for the gate or the batch builder to consult.
+func (s *StubCommitter) ReadPrior(_ context.Context, _ []MutationOp) (PriorDocs, error) {
+	return PriorDocs{}, nil
+}
+
 // Commit writes the tracker via substrate.AtomicBatch with a single-op
 // payload. CreateOnly + 24h TTL. Returns the BatchAck.
-func (s *StubCommitter) Commit(ctx context.Context, env *OperationEnvelope, _ ScriptResult, tracker Tracker) (CommitAck, error) {
+func (s *StubCommitter) Commit(ctx context.Context, env *OperationEnvelope, _ ScriptResult, tracker Tracker, _ PriorDocs) (CommitAck, error) {
 	s.logger.Info("step 8: stubbed (tracker-only atomic batch)",
 		"step", "commit", "requestId", env.RequestID, "trackerKey", tracker.Key)
 	val, err := tracker.Marshal()

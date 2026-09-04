@@ -156,11 +156,11 @@ type FaultyValidator struct {
 	Trip  func() error
 }
 
-func (f *FaultyValidator) Validate(ctx context.Context, env *processor.OperationEnvelope, result processor.ScriptResult, state processor.HydratedState) error {
+func (f *FaultyValidator) Validate(ctx context.Context, env *processor.OperationEnvelope, result processor.ScriptResult, state processor.HydratedState, prior processor.PriorDocs) error {
 	if err := f.Trip(); err != nil {
 		return err
 	}
-	return f.Inner.Validate(ctx, env, result, state)
+	return f.Inner.Validate(ctx, env, result, state, prior)
 }
 
 // FailValidatorAfterN returns a Validator that fails on its Nth call.
@@ -174,11 +174,17 @@ type FaultyCommitter struct {
 	Trip  func() error
 }
 
-func (f *FaultyCommitter) Commit(ctx context.Context, env *processor.OperationEnvelope, result processor.ScriptResult, tracker processor.Tracker) (processor.CommitAck, error) {
+// ReadPrior delegates untripped: the fault this injector models is the commit
+// itself, and tripping the read instead would spend the budget one step early.
+func (f *FaultyCommitter) ReadPrior(ctx context.Context, mutations []processor.MutationOp) (processor.PriorDocs, error) {
+	return f.Inner.ReadPrior(ctx, mutations)
+}
+
+func (f *FaultyCommitter) Commit(ctx context.Context, env *processor.OperationEnvelope, result processor.ScriptResult, tracker processor.Tracker, prior processor.PriorDocs) (processor.CommitAck, error) {
 	if err := f.Trip(); err != nil {
 		return processor.CommitAck{}, err
 	}
-	return f.Inner.Commit(ctx, env, result, tracker)
+	return f.Inner.Commit(ctx, env, result, tracker, prior)
 }
 
 // FailCommitterAfterN returns a Committer that fails on its Nth call.

@@ -324,7 +324,7 @@ func TestInstallFlow_AbstractLocationRefusedAsInstance(t *testing.T) {
 	const victim = "vtx.location.LDabstractHJKMNPQRST"
 
 	validate := func(m processor.MutationOp) error {
-		return v.Validate(ctx, env, processor.ScriptResult{Mutations: []processor.MutationOp{m}}, processor.HydratedState{})
+		return v.Validate(ctx, env, processor.ScriptResult{Mutations: []processor.MutationOp{m}}, processor.HydratedState{}, nil)
 	}
 	// refusedBy asserts the mutation is rejected AND names WHICH gate rejected
 	// it. Asserting only "an error came back" would let a malformed key

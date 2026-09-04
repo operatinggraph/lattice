@@ -332,25 +332,34 @@ def sweep_indexes(hits, subject_key):
     # residue, and if a repoint already tombstoned it this is an idempotent
     # no-op -- so convergence is unaffected by anything the gate skips.
     #
-    # THE SOURCE'S KEY SHAPE IS CHECKED, and it is the only thing standing
-    # between this op and an arbitrary-vertex delete primitive. Three facts
-    # compose: the enumeration's server filter is lnk.*.*.indexes.identity.<id>,
-    # so the source TYPE is a wildcard; sourceVertex is derived faithfully from
-    # whatever the key says; and a document-less tombstone carries no class, so
-    # step 6 skips DDL resolution and never consults permittedCommands on the
-    # key being destroyed. Nothing else on the path constrains what gets
-    # tombstoned -- the indexes linkType ships permittedCommands empty by
-    # design (multi-writer, open posture), so any writer able to create a link
-    # could name a victim's identity root as the source and have this op
-    # destroy it. No shipped op creates a non-identityindex-sourced indexes
-    # link, but that is a property of the current corpus, not an invariant the
-    # platform enforces, and this op holds a scope:any grant.
+    # THE SOURCE'S KEY SHAPE IS CHECKED, because nothing about the enumeration
+    # constrains what this op would otherwise name: the server filter is
+    # lnk.*.*.indexes.identity.<id>, so the source TYPE is a wildcard;
+    # sourceVertex is derived faithfully from whatever the key says; the
+    # indexes linkType ships permittedCommands empty by design (multi-writer,
+    # open posture); and this op holds a scope:any grant. No shipped op creates
+    # a non-identityindex-sourced indexes link, but that is a property of the
+    # current corpus, not an invariant the platform enforces.
+    #
+    # What the platform DOES enforce is the class stored at the key a tombstone
+    # removes: step 6 resolves it and applies its permittedCommands even though
+    # the mutation carries no document. So a planted link naming a victim's
+    # vtx.identity.<id> as its source cannot have this op destroy that identity
+    # -- the identity DDL's list names the ten identity-domain operations and
+    # not this one, so the platform refuses the tombstone. The
+    # shape check is what keeps that refusal from becoming THIS op's problem,
+    # and it is still load-bearing on its own account: a class with no DDL, or
+    # one whose permittedCommands is empty, resolves to the permissive default,
+    # and vtx.identityindex.* -- the class this op legitimately destroys -- is
+    # exactly such a class.
     #
     # A foreign source is skipped rather than fatal, and the LINK still goes:
     # the link is genuinely the subject's inbound edge and removing it is what
-    # shrinks the residue, so convergence is unaffected. Refusing the whole
-    # sweep instead would let one planted link make a person unerasable --
-    # trading a destructive failure for a fail-open one.
+    # shrinks the residue, so convergence is unaffected. Emitting the tombstone
+    # and letting the gate refuse it would fail the whole sweep, so one planted
+    # link would make a person unerasable. That is the fail-open trade this skip
+    # exists to avoid, reachable through a refusal as much as through a
+    # destroyed vertex.
     mutations = []
     for lk in hits:
         if lk.sourceVertex.startswith("vtx.identityindex."):

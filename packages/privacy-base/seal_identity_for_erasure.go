@@ -84,9 +84,9 @@ func ErasureRequestedAspectDDL() pkgmgr.DDLSpec {
 			"CredentialReconcileRejected: erased. " +
 			"Distinct from piiKey.shredded by design: shredded means the key is dead (a retention-class " +
 			"shred will one day mean it for non-erasure reasons), erasureRequested means the person " +
-			"invoked erasure. Only SealIdentityForErasure may write this CLASS; non-removal is a " +
-			"review-held convention, not a step-6 guarantee — a tombstone carries no document, so no " +
-			"aspect-type DDL can refuse one.",
+			"invoked erasure. Only SealIdentityForErasure may write this CLASS, and only " +
+			"SealIdentityForErasure may REMOVE it: the write gate reads the class stored at the key, so a " +
+			"documentless tombstone of this marker is held to the same permittedCommands list as a write.",
 		Script: erasureRequestedAspectDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"requestedAt":{"type":"string","description":"RFC3339 instant the erasure request was sealed (the first SealIdentityForErasure commit; preserved verbatim across re-seals)."},` +

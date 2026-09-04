@@ -607,12 +607,14 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 		// by operationType (ClassForCommand).
 		//
 		// TombstoneSupersededLeaseServiceInstance's mutations carry NO document (the
-		// bare op:tombstone form), so step 6 derives no class for them at all and
-		// this PermittedCommands list never gates the instanceOf / providedTo link
-		// tombstones it emits (Contract #1 §1.5/§1.6 permissive default —
-		// step6_validate.go's class derivation reads only a mutation's OWN document);
-		// it is listed here only because the op's PRINCIPAL mutation (the instance
-		// root tombstone) still targets a service.<family>.instance-classed key.
+		// bare op:tombstone form), and this list is what admits them: an update or a
+		// tombstone is governed by the class STORED at its key, so the instance root
+		// tombstone resolves service.<family>.instance, walks the instanceOf chain to
+		// this meta-vertex — against the COMMITTED graph, so the instanceOf tombstone
+		// riding the same batch cannot un-type it — and must name this op here. The
+		// instanceOf / providedTo link tombstones carry the link relation as their
+		// stored class, and no linkType DDL registers those names: Contract #1
+		// §1.5/§1.6's permissive default, unchanged.
 		PermittedCommands: []string{"CreateLeaseServiceInstance", "TombstoneSupersededLeaseServiceInstance"},
 		Description: "ExternalTask instanceOp DDL (Contract #10 §10.5). The op Loom submits for an externalTask step: " +
 			"payload {instanceKey (the bare handle Loom minted), subjectKey (the applicant identity), adapter, replyOp, " +

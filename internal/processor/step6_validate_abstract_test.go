@@ -68,7 +68,7 @@ func TestValidate_AbstractTypeSegment_VertexRoot_Rejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractTypeSegment")
 }
 
@@ -90,7 +90,7 @@ func TestValidate_AbstractTypeSegment_AspectOwner_Rejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractTypeSegment")
 }
 
@@ -112,7 +112,7 @@ func TestValidate_AbstractTypeSegment_LinkSourceEndpoint_Rejected(t *testing.T) 
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractTypeSegment")
 }
 
@@ -135,7 +135,7 @@ func TestValidate_AbstractTypeSegment_LinkTargetEndpoint_Rejected(t *testing.T) 
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractTypeSegment")
 }
 
@@ -157,7 +157,7 @@ func TestValidate_AbstractTypeSegment_ConcreteTypeStillAccepted(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a concrete-typed mutation must pass even when an abstract DDL is in the cache: %v", err)
 	}
 }
@@ -180,7 +180,7 @@ func TestValidate_AbstractClass_Rejected(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractClass")
 }
 
@@ -197,7 +197,7 @@ func TestValidate_AbstractTypeSegment_TombstoneExempt(t *testing.T) {
 			Key: "vtx.location." + testNanoID2,
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a tombstone of an abstract-typed key must be exempt from the segment gate: %v", err)
 	}
 }
@@ -217,7 +217,7 @@ func TestValidate_AbstractClass_TombstoneExempt(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a tombstone whose class resolves to an abstract DDL must be exempt from the class gate: %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestValidate_AbstractTypeSegment_RealInstallShape(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractTypeSegment")
 }
 
@@ -285,7 +285,7 @@ func TestValidate_AbstractClass_RealInstallShape(t *testing.T) {
 			},
 		}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractClass")
 }
 
@@ -298,7 +298,7 @@ func TestValidate_AbstractEventClass_Rejected(t *testing.T) {
 	result := ScriptResult{
 		Events: []EventSpec{{Class: "location", Data: map[string]interface{}{}}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractEventClass")
 }
 
@@ -317,7 +317,7 @@ func TestValidate_AbstractEventClass_ConcreteAccepted(t *testing.T) {
 	result := ScriptResult{
 		Events: []EventSpec{{Class: "identity", Data: map[string]interface{}{}}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("an event whose class resolves to a concrete DDL must pass: %v", err)
 	}
 }
@@ -333,7 +333,7 @@ func TestValidate_AbstractEventClass_RealInstallShape(t *testing.T) {
 	result := ScriptResult{
 		Events: []EventSpec{{Class: "reallocation", Data: map[string]interface{}{}}},
 	}
-	err := v.Validate(ctx, env, result, HydratedState{})
+	err := v.Validate(ctx, env, result, HydratedState{}, nil)
 	expectAbstractViolation(t, err, "abstractEventClass")
 }
 
@@ -357,7 +357,7 @@ func TestValidate_NonAbstractWorld_Regression(t *testing.T) {
 			},
 		}},
 	}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("an ordinary write must be unaffected by an unrelated abstract DDL's presence: %v", err)
 	}
 }

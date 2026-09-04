@@ -19,7 +19,11 @@ type recordingCommitter struct {
 	commits int
 }
 
-func (c *recordingCommitter) Commit(_ context.Context, _ *OperationEnvelope, result ScriptResult, _ Tracker) (CommitAck, error) {
+func (c *recordingCommitter) ReadPrior(_ context.Context, _ []MutationOp) (PriorDocs, error) {
+	return PriorDocs{}, nil
+}
+
+func (c *recordingCommitter) Commit(_ context.Context, _ *OperationEnvelope, result ScriptResult, _ Tracker, _ PriorDocs) (CommitAck, error) {
 	c.calls = append(c.calls, result)
 	i := c.commits
 	c.commits++
@@ -103,7 +107,7 @@ func TestAutoComplete_OpenTask_InjectsCompletion(t *testing.T) {
 
 	rc := &recordingCommitter{}
 	cp := acTestCommitPath(conn, rc)
-	_, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey))
+	_, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -138,7 +142,7 @@ func TestAutoComplete_AlreadyComplete_NoInjection(t *testing.T) {
 
 	rc := &recordingCommitter{}
 	cp := acTestCommitPath(conn, rc)
-	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey)); err != nil {
+	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	hasMut, hasEvent := committedHasTaskCompletion(rc.calls[0], taskKey)
@@ -158,7 +162,7 @@ func TestAutoComplete_Cancelled_NotResurrected(t *testing.T) {
 
 	rc := &recordingCommitter{}
 	cp := acTestCommitPath(conn, rc)
-	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey)); err != nil {
+	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	committed := rc.calls[0]
@@ -184,7 +188,7 @@ func TestAutoComplete_NonTaskPath_NoInjection(t *testing.T) {
 	rc := &recordingCommitter{}
 	cp := acTestCommitPath(conn, rc)
 	plat := &ResolvedPermission{Path: "platform", PlatformPermission: &PlatformPermission{OperationType: "X", Scope: "any"}}
-	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, plat); err != nil {
+	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, plat, nil); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	committed := rc.calls[0]
@@ -225,7 +229,7 @@ func TestAutoComplete_OCCRace_StillOpen_RetriesSucceeds(t *testing.T) {
 	}
 
 	cp := acTestCommitPath(conn, rc)
-	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey)); err != nil {
+	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil); err != nil {
 		t.Fatalf("a task-side OCC race must not fail the user's op, got: %v", err)
 	}
 	if rc.commits < 2 {
@@ -253,7 +257,7 @@ func TestAutoComplete_ConflictOnUserMutation_Surfaces(t *testing.T) {
 	rc := &recordingCommitter{errs: []error{conflict}}
 
 	cp := acTestCommitPath(conn, rc)
-	_, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey))
+	_, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil)
 	if err == nil {
 		t.Fatalf("a conflict on the user's own mutation must surface, got nil")
 	}
@@ -291,7 +295,7 @@ func TestAutoComplete_OCCRace_TaskClosed_DropsInjection(t *testing.T) {
 	}
 
 	cp := acTestCommitPath(conn, rc)
-	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey)); err != nil {
+	if _, err := cp.commitWithTaskAutoComplete(ctx, acEnv(), acUserResult(), Tracker{}, acTaskPathPermission(taskKey), nil); err != nil {
 		t.Fatalf("a closed-task race must not fail the user's op, got: %v", err)
 	}
 	// The final commit-alone call carries the user op but NO task completion.

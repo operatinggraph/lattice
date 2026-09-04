@@ -80,6 +80,21 @@ func readTaskAutoCompletion(ctx context.Context, conn *substrate.Conn, coreBucke
 		"expiresAt": expiresAt,
 	}
 
+	// This update is a PLATFORM-AUTHORED mutation and is deliberately exempt
+	// from the step-6 permittedCommands gate, on both the class it declares and
+	// the class stored at the key. It is appended after validation
+	// (commitWithTaskAutoComplete → injectTaskAutoCompletion), so step 6 never
+	// sees it, and the exemption is what makes the auto-complete possible at
+	// all: the `task` DDL admits the task operations alone, so gating this
+	// injection would refuse EVERY task-bound business operation the moment it
+	// closed its own task.
+	//
+	// It is sound because the Processor, not a submitter, both authors the
+	// document and fixes its shape: the stored entity's class, its isDeleted
+	// flag, and the two platform-owned scalars of Contract #10 §10.1, CAS'd on
+	// the revision just read. No submitter-supplied field rides it, so there is
+	// nothing here for the write gate to have adjudicated. The same reasoning
+	// covers step 6.5's piiKey create (ensureKeyHolderKey).
 	rev := entry.Revision
 	out.open = true
 	out.revision = rev

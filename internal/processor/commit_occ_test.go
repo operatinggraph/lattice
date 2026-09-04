@@ -94,7 +94,7 @@ func TestConditionRevision(t *testing.T) {
 	t.Run("explicit ExpectedRevision wins even when prior also has an entry", func(t *testing.T) {
 		explicit := uint64(3)
 		m := MutationOp{Op: "update", Key: key, ExpectedRevision: &explicit}
-		prior := priorDocs{key: priorDoc{Revision: 99, Found: true}}
+		prior := PriorDocs{key: priorDoc{Revision: 99, Found: true}}
 		rev, ok, fallback := conditionRevision(m, prior)
 		if !ok || fallback {
 			t.Fatalf("ok=%v fallback=%v, want ok=true fallback=false", ok, fallback)
@@ -106,7 +106,7 @@ func TestConditionRevision(t *testing.T) {
 
 	t.Run("nil ExpectedRevision + key present in prior → fallback-conditioned", func(t *testing.T) {
 		m := MutationOp{Op: "update", Key: key}
-		prior := priorDocs{key: priorDoc{Revision: 42, Found: true}}
+		prior := PriorDocs{key: priorDoc{Revision: 42, Found: true}}
 		rev, ok, fallback := conditionRevision(m, prior)
 		if !ok || !fallback {
 			t.Fatalf("ok=%v fallback=%v, want ok=true fallback=true", ok, fallback)
@@ -118,7 +118,7 @@ func TestConditionRevision(t *testing.T) {
 
 	t.Run("nil ExpectedRevision + key absent from prior → unconditioned", func(t *testing.T) {
 		m := MutationOp{Op: "update", Key: key}
-		prior := priorDocs{}
+		prior := PriorDocs{}
 		if _, ok, _ := conditionRevision(m, prior); ok {
 			t.Fatalf("a key with no prior document must be unconditioned")
 		}
@@ -126,7 +126,7 @@ func TestConditionRevision(t *testing.T) {
 
 	t.Run("nil ExpectedRevision + key present but not Found → unconditioned", func(t *testing.T) {
 		m := MutationOp{Op: "update", Key: key}
-		prior := priorDocs{key: priorDoc{Found: false}}
+		prior := PriorDocs{key: priorDoc{Found: false}}
 		if _, ok, _ := conditionRevision(m, prior); ok {
 			t.Fatalf("a prior entry with Found=false must be unconditioned")
 		}
@@ -222,7 +222,11 @@ type occFakeCommitter struct {
 	viaFallback bool
 }
 
-func (c *occFakeCommitter) Commit(ctx context.Context, _ *OperationEnvelope, _ ScriptResult, _ Tracker) (CommitAck, error) {
+func (c *occFakeCommitter) ReadPrior(_ context.Context, _ []MutationOp) (PriorDocs, error) {
+	return PriorDocs{}, nil
+}
+
+func (c *occFakeCommitter) Commit(ctx context.Context, _ *OperationEnvelope, _ ScriptResult, _ Tracker, _ PriorDocs) (CommitAck, error) {
 	n := int(c.calls.Add(1))
 	if c.alwaysFail || n <= c.failFor {
 		var fallback map[string]uint64
@@ -536,7 +540,7 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 		Op: "create", Key: root,
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A"}},
 	}}}
-	ack, err := committer.Commit(ctx, env, createRes, NewTracker(env, time.Now()))
+	ack, err := committer.Commit(ctx, env, createRes, NewTracker(env, time.Now()), nil)
 	if err != nil {
 		t.Fatalf("create commit: %v", err)
 	}
@@ -552,7 +556,7 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 		Op: "update", Key: root, ExpectedRevision: &r,
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B"}},
 	}}}
-	if _, err := committer.Commit(ctx, env2, updRes, NewTracker(env2, time.Now())); err != nil {
+	if _, err := committer.Commit(ctx, env2, updRes, NewTracker(env2, time.Now()), nil); err != nil {
 		t.Fatalf("conditioned update on current revision should succeed: %v", err)
 	}
 
@@ -562,7 +566,7 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 		Op: "update", Key: root, ExpectedRevision: &r, // r is now stale (root moved to rev+1)
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "C"}},
 	}}}
-	_, err = committer.Commit(ctx, env3, staleRes, NewTracker(env3, time.Now()))
+	_, err = committer.Commit(ctx, env3, staleRes, NewTracker(env3, time.Now()), nil)
 	var confErr *ConflictError
 	if err == nil || !errors.As(err, &confErr) {
 		t.Fatalf("a stale conditioned update must be rejected as a ConflictError, got %v", err)
@@ -596,7 +600,7 @@ func TestRealCommitter_FallbackConditioning(t *testing.T) {
 		Op: "create", Key: keyB,
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B"}},
 	}}}
-	ackB, err := committer.Commit(ctx, envSeedB, createB, NewTracker(envSeedB, time.Now()))
+	ackB, err := committer.Commit(ctx, envSeedB, createB, NewTracker(envSeedB, time.Now()), nil)
 	if err != nil {
 		t.Fatalf("seed B: %v", err)
 	}
@@ -611,7 +615,7 @@ func TestRealCommitter_FallbackConditioning(t *testing.T) {
 		Op: "create", Key: keyA,
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A"}},
 	}}}
-	if _, err := committer.Commit(ctx, envSeedA, createA, NewTracker(envSeedA, time.Now())); err != nil {
+	if _, err := committer.Commit(ctx, envSeedA, createA, NewTracker(envSeedA, time.Now()), nil); err != nil {
 		t.Fatalf("seed A: %v", err)
 	}
 
@@ -625,7 +629,7 @@ func TestRealCommitter_FallbackConditioning(t *testing.T) {
 		{Op: "create", Key: keyA, Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A-again"}}},
 		{Op: "update", Key: keyB, Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B-updated"}}},
 	}}
-	_, err = committer.Commit(ctx, envConflict, conflictRes, NewTracker(envConflict, time.Now()))
+	_, err = committer.Commit(ctx, envConflict, conflictRes, NewTracker(envConflict, time.Now()), nil)
 	var confErr *ConflictError
 	if err == nil || !errors.As(err, &confErr) {
 		t.Fatalf("a create-once collision on A must reject the whole batch as a ConflictError, got %v", err)
@@ -708,7 +712,7 @@ func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
 		}},
 		Events: []EventSpec{{Class: "identity.created", Data: map[string]any{"k": "v"}}},
 	}
-	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now())); err != nil {
+	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now()), nil); err != nil {
 		t.Fatalf("resubmit over outbox tombstone residue must commit, got: %v", err)
 	}
 
@@ -750,7 +754,7 @@ func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
 		Op: "create", Key: "vtx.identity." + testNanoID1,
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B"}},
 	}}}
-	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now())); err == nil {
+	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now()), nil); err == nil {
 		t.Fatalf("create-only tracker write over a live tombstoned value should conflict")
 	}
 
@@ -761,7 +765,7 @@ func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
 		Op: "create", Key: "vtx.identity." + testNanoID1 + ".profile",
 		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "C"}},
 	}}}
-	if _, err := committer.Commit(ctx, env, res2, fresh); err != nil {
+	if _, err := committer.Commit(ctx, env, res2, fresh, nil); err != nil {
 		t.Fatalf("supersede-conditioned tracker write must commit, got: %v", err)
 	}
 

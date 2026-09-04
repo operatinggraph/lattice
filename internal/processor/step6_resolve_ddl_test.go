@@ -91,13 +91,13 @@ func TestResolveGoverningDDL_InBatchOneHop(t *testing.T) {
 		instanceVertexMut("create", instID),
 		instanceOfLinkMut(instID, "meta", svcTypeID),
 	}}
-	if err := v.Validate(ctx, pass, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, pass, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("admitted op should PASS via instanceOf walk: %v", err)
 	}
 
 	deny := newTestEnvelope(testNanoID1)
 	deny.OperationType = "DeleteWidgetInstance" // not in the widget DDL's list
-	err := v.Validate(ctx, deny, result, HydratedState{})
+	err := v.Validate(ctx, deny, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) {
 		t.Fatalf("non-admitted op should violate permittedCommands, got %T: %v", err, err)
@@ -122,7 +122,7 @@ func TestResolveGoverningDDL_TwoHopBatchPlusCommitted(t *testing.T) {
 		instanceVertexMut("update", instID),
 		instanceOfLinkMut(instID, "widget", tplID), // instance → template, in-batch
 	}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("2-hop admitted op should PASS: %v", err)
 	}
 }
@@ -143,7 +143,7 @@ func TestResolveGoverningDDL_TwoHopWorkingSet(t *testing.T) {
 		instanceVertexMut("update", instID),
 		instanceOfLinkMut(instID, "widget", tplID),
 	}}
-	if err := v.Validate(ctx, env, result, state); err != nil {
+	if err := v.Validate(ctx, env, result, state, nil); err != nil {
 		t.Fatalf("2-hop (working-set) admitted op should PASS: %v", err)
 	}
 }
@@ -157,7 +157,7 @@ func TestResolveGoverningDDL_NoInstanceOfPermissive(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteWidgetInstance" // not admitted, but no DDL resolves
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("fine-grained class without instanceOf must hit the permissive default: %v", err)
 	}
 }
@@ -171,7 +171,7 @@ func TestResolveGoverningDDL_TombstonedLinkPermissive(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteWidgetInstance"
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("tombstoned instanceOf must resolve permissive, got: %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestResolveGoverningDDL_CycleTerminates(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteWidgetInstance"
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("update", instID)}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("cycle must terminate at the permissive default, got: %v", err)
 	}
 }
@@ -215,7 +215,7 @@ func TestResolveGoverningDDL_DepthBound(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteWidgetInstance"
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("update", instID)}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("a chain beyond the hop bound must resolve permissive, got: %v", err)
 	}
 }
@@ -237,13 +237,13 @@ func TestResolveGoverningDDL_ExactFastPath(t *testing.T) {
 
 	pass := newTestEnvelope(testNanoID1)
 	pass.OperationType = "CreateWidgetTemplate"
-	if err := v.Validate(ctx, pass, ScriptResult{Mutations: []MutationOp{coarse}}, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, pass, ScriptResult{Mutations: []MutationOp{coarse}}, HydratedState{}, nil); err != nil {
 		t.Fatalf("coarse class admitted op should PASS via exact lookup: %v", err)
 	}
 
 	deny := newTestEnvelope(testNanoID1)
 	deny.OperationType = "DeleteWidgetInstance"
-	err := v.Validate(ctx, deny, ScriptResult{Mutations: []MutationOp{coarse}}, HydratedState{})
+	err := v.Validate(ctx, deny, ScriptResult{Mutations: []MutationOp{coarse}}, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "permittedCommands" {
 		t.Fatalf("coarse class non-admitted op should violate permittedCommands, got %T: %v", err, err)
@@ -294,7 +294,7 @@ func TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous(t *testing.T) {
 	single := HydratedState{Context: ScriptContext{Hydrated: map[string]VertexDoc{
 		lkWidget: {Key: lkWidget, Class: "instanceOf"},
 	}}}
-	if err := v.Validate(ctx, env, result, single); err == nil {
+	if err := v.Validate(ctx, env, result, single, nil); err == nil {
 		t.Fatalf("a single strict instanceOf must reject the non-admitted op")
 	}
 
@@ -304,7 +304,7 @@ func TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous(t *testing.T) {
 		lkGadget: {Key: lkGadget, Class: "instanceOf"},
 	}}}
 	for i := 0; i < 50; i++ {
-		if err := v.Validate(ctx, env, result, both); err != nil {
+		if err := v.Validate(ctx, env, result, both, nil); err != nil {
 			t.Fatalf("iter %d: ambiguous (2 live links) must resolve permissive, got: %v", i, err)
 		}
 	}
@@ -323,7 +323,7 @@ func TestResolveGoverningDDL_BatchCreateThenTombstoneNetDead(t *testing.T) {
 		{Op: "create", Key: lk, Document: map[string]interface{}{"class": "instanceOf", "isDeleted": false}},
 		{Op: "tombstone", Key: lk, Document: map[string]interface{}{"class": "instanceOf", "isDeleted": true}},
 	}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("net-dead in-batch link must resolve permissive, got: %v", err)
 	}
 }
@@ -341,7 +341,7 @@ func TestResolveGoverningDDL_BatchTombstoneSuppressesCommitted(t *testing.T) {
 		instanceVertexMut("update", instID),
 		{Op: "tombstone", Key: lk, Document: map[string]interface{}{"class": "instanceOf", "isDeleted": true}},
 	}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("batch tombstone must suppress the committed link → permissive, got: %v", err)
 	}
 }
@@ -367,7 +367,7 @@ func TestResolveGoverningDDL_MetaTargetNonVertexType(t *testing.T) {
 		instanceVertexMut("create", instID),
 		instanceOfLinkMut(instID, "meta", aspTypeID), // → aspectType meta, not a vertexType
 	}}
-	if err := v2.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v2.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("aspectType meta terminal must not enforce → permissive, got: %v", err)
 	}
 }
@@ -388,7 +388,7 @@ func TestResolveGoverningDDL_OnDemandReadErrorFailsOpen(t *testing.T) {
 	env.OperationType = "DeleteWidgetInstance"
 	// No batch/working-set link → the walk reaches the on-demand reader, which errors.
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
-	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, env, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("on-demand read error must fail open to permissive, got: %v", err)
 	}
 }
@@ -410,13 +410,13 @@ func TestResolveGoverningDDL_OneHopClassOfTerminal(t *testing.T) {
 
 	pass := newTestEnvelope(testNanoID1)
 	pass.OperationType = "CreateWidgetInstance"
-	if err := v.Validate(ctx, pass, result, state); err != nil {
+	if err := v.Validate(ctx, pass, result, state, nil); err != nil {
 		t.Fatalf("one-hop classOf terminal admitted op should PASS: %v", err)
 	}
 
 	deny := newTestEnvelope(testNanoID1)
 	deny.OperationType = "DeleteWidgetInstance"
-	if err := v.Validate(ctx, deny, result, state); err == nil {
+	if err := v.Validate(ctx, deny, result, state, nil); err == nil {
 		t.Fatalf("one-hop classOf terminal non-admitted op should be rejected")
 	}
 }
@@ -441,13 +441,13 @@ func TestResolveGoverningDDL_AspectMutationWalksParent(t *testing.T) {
 
 	pass := newTestEnvelope(testNanoID1)
 	pass.OperationType = "CreateWidgetInstance"
-	if err := v.Validate(ctx, pass, result, HydratedState{}); err != nil {
+	if err := v.Validate(ctx, pass, result, HydratedState{}, nil); err != nil {
 		t.Fatalf("aspect mutation gated by parent type DDL, admitted op should PASS: %v", err)
 	}
 
 	deny := newTestEnvelope(testNanoID1)
 	deny.OperationType = "DeleteWidgetInstance"
-	err := v.Validate(ctx, deny, result, HydratedState{})
+	err := v.Validate(ctx, deny, result, HydratedState{}, nil)
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "permittedCommands" {
 		t.Fatalf("aspect mutation non-admitted op should violate permittedCommands, got %T: %v", err, err)
@@ -469,7 +469,7 @@ func TestResolveGoverningDDL_OnDemandReadChargesLiveReadBudget(t *testing.T) {
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
 	tracker := &liveReadBudgetTracker{budget: DefaultLiveReadBudget}
 	state := HydratedState{Context: ScriptContext{LiveReads: tracker}}
-	if err := v.Validate(ctx, env, result, state); err != nil {
+	if err := v.Validate(ctx, env, result, state, nil); err != nil {
 		t.Fatalf("admitted op via on-demand instanceOf resolution should PASS: %v", err)
 	}
 	if tracker.spent == 0 {
@@ -489,7 +489,7 @@ func TestResolveGoverningDDL_LiveReadBudgetExhaustedFailsOpen(t *testing.T) {
 	env.OperationType = "DeleteWidgetInstance" // not admitted by widget
 	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
 	state := HydratedState{Context: ScriptContext{LiveReads: &liveReadBudgetTracker{budget: 0}}}
-	if err := v.Validate(ctx, env, result, state); err != nil {
+	if err := v.Validate(ctx, env, result, state, nil); err != nil {
 		t.Fatalf("exhausted live-read budget must fail open to permissive, got: %v", err)
 	}
 }

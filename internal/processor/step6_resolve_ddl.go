@@ -237,6 +237,33 @@ func (r *ddlResolver) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// resolveDisposition selects which layers the governing-DDL walk may consult.
+//
+//   - resolveWithBatch is the walk over the world the batch is proposing: the
+//     in-flight mutations are the authoritative layer (a batch tombstone of a
+//     link suppresses the same link committed below), then the hydrated working
+//     set, then a bounded on-demand Core KV read. It governs the class a
+//     document DECLARES — for a create, the batch is the only place that class's
+//     type authority can exist.
+//   - resolveCommittedOnly is the walk over the world as STORED: the in-flight
+//     layer is skipped entirely, in both the instanceOf walk and the
+//     class-of-terminal lookup, so neither a batch tombstone of a vertex's own
+//     instanceOf link nor a batch re-typing of a chain terminal can un-type the
+//     entity for the gate. It governs the class stored at an update's or
+//     tombstone's key, whose type authority is a fact about the committed graph
+//     and not a proposal the same batch can move. A meta-rooted key resolves by
+//     the exact class lookup alone under this disposition — see resolveWithFault.
+//
+// Both dispositions share one ddlResolutionMemo: it caches only the raw
+// live-read answer per walk node, before any in-flight exclusion, so an entry
+// warmed under either disposition answers the same question for the other.
+type resolveDisposition uint8
+
+const (
+	resolveWithBatch resolveDisposition = iota
+	resolveCommittedOnly
+)
+
 // resolveGoverningDDL resolves the DDL that gates a mutation's write
 // (Contract #1 §1.5). It first tries the exact class→DDL lookup (today's fast
 // path, unchanged); on a miss it walks the mutation's vertex root up its
@@ -252,6 +279,18 @@ func (r *ddlResolver) logger() *slog.Logger {
 func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool) {
 	ref, ok, _ := r.resolveGoverningDDLChecked(ctx, class, key, kind, result, state)
 	return ref, ok
+}
+
+// resolveGoverningDDLCommitted resolves the DDL that gates a mutation's write
+// from the committed graph alone (resolveCommittedOnly), reporting a live-read
+// fault the way resolveGoverningDDLChecked does. It is how a stored class —
+// the class of the document an update or tombstone rewrites or removes — finds
+// its type authority: the entity as stored has one, and the same batch must not
+// be able to move it.
+func (r *ddlResolver) resolveGoverningDDLCommitted(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool, error) {
+	var fault error
+	ref, ok := r.resolveWithFault(ctx, class, key, kind, result, state, resolveCommittedOnly, &fault)
+	return ref, ok, fault
 }
 
 // resolveGoverningDDLChecked is resolveGoverningDDL plus the one thing the
@@ -270,11 +309,11 @@ func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string
 // step 6.5 takes the error and fails the operation instead.
 func (r *ddlResolver) resolveGoverningDDLChecked(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool, error) {
 	var fault error
-	ref, ok := r.resolveWithFault(ctx, class, key, kind, result, state, &fault)
+	ref, ok := r.resolveWithFault(ctx, class, key, kind, result, state, resolveWithBatch, &fault)
 	return ref, ok, fault
 }
 
-func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState, fault *error) (MetaVertexRef, bool) {
+func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState, disp resolveDisposition, fault *error) (MetaVertexRef, bool) {
 	if ref, ok := r.DDLs.Lookup(class); ok {
 		return ref, true // exact match — unchanged Contract #1 §1.5 step-3 path
 	}
@@ -283,11 +322,22 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 	if root == "" {
 		return MetaVertexRef{}, false // links / unparseable → permissive default (today's behavior)
 	}
+	if disp == resolveCommittedOnly && isMetaVertexKey(root) {
+		// A meta-vertex is typed by the kernel, not by an instanceOf edge. The
+		// seeder emits no meta-rooted link at all, and the only ones the
+		// installer builds are `subtypeOf` (the taxonomy) and `offeredTo` (a
+		// pane's role), so a `lnk.meta.<id>.instanceOf.>` read can only come
+		// back empty. Short-circuiting keeps a package uninstall or a
+		// meta-vertex tombstone cascade — bulk, and exclusively meta keys —
+		// paying the exact class lookup alone, the same way a link key takes
+		// the early return above.
+		return MetaVertexRef{}, false
+	}
 
 	visited := map[string]bool{root: true}
 	cur := root
 	for hop := 0; hop < maxInstanceOfHops; hop++ {
-		target, ok := r.instanceOfTargetOf(ctx, cur, result, state, fault)
+		target, ok := r.instanceOfTargetOf(ctx, cur, result, state, disp, fault)
 		if !ok {
 			break // no instanceOf link → no type authority
 		}
@@ -308,7 +358,7 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 
 		// A business vertex whose own class is itself a registered DDL is also a
 		// terminal (the one-hop instance→type domain shape).
-		if tclass, ok := r.classOf(ctx, target, result, state, fault); ok {
+		if tclass, ok := r.classOf(ctx, target, result, state, disp, fault); ok {
 			if ref, ok := r.DDLs.Lookup(tclass); ok {
 				return ref, true
 			}
@@ -330,10 +380,18 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 // the gate). The in-flight batch is the authoritative layer (last op per link
 // key wins; a tombstone in the batch suppresses the same link committed below);
 // then the hydrated working set, then a single bounded on-demand Core KV read.
-func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState, fault *error) (string, bool) {
-	batchLive, batchDead := reconcileBatchInstanceOf(vtxRoot, result.Mutations)
-	if len(batchLive) > 0 {
-		return soleTarget(batchLive)
+//
+// Under resolveCommittedOnly the in-flight layer is skipped and its tombstones
+// suppress nothing: the caller is asking what the entity's type authority IS,
+// not what this batch proposes it become.
+func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState, disp resolveDisposition, fault *error) (string, bool) {
+	var batchDead map[string]bool
+	if disp == resolveWithBatch {
+		var batchLive []instanceOfEdge
+		batchLive, batchDead = reconcileBatchInstanceOf(vtxRoot, result.Mutations)
+		if len(batchLive) > 0 {
+			return soleTarget(batchLive)
+		}
 	}
 	if edges := workingSetInstanceOfEdges(vtxRoot, state.Context.Hydrated, batchDead); len(edges) > 0 {
 		return soleTarget(edges)
@@ -473,16 +531,21 @@ func sortEdges(edges []instanceOfEdge) {
 // never reaches Core KV — and a decoy create placed ahead of the real update
 // would steer the governing-DDL walk at will. reconcileBatchInstanceOf folds
 // the link side of this same walk under exactly that rule.
-func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, fault *error) (string, bool) {
+// Under resolveCommittedOnly the batch scan is skipped: a terminal the batch
+// re-types or removes still answers with the class it carries as stored, so a
+// stored class's authority is the committed one at every hop of the walk.
+func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, disp resolveDisposition, fault *error) (string, bool) {
 	var last *MutationOp
-	for i := range result.Mutations {
-		m := &result.Mutations[i]
-		if m.Key != targetKey {
-			continue
-		}
-		switch m.Op {
-		case "create", "update", "tombstone":
-			last = m
+	if disp == resolveWithBatch {
+		for i := range result.Mutations {
+			m := &result.Mutations[i]
+			if m.Key != targetKey {
+				continue
+			}
+			switch m.Op {
+			case "create", "update", "tombstone":
+				last = m
+			}
 		}
 	}
 	if last != nil {

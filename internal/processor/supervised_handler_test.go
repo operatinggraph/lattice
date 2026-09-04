@@ -25,7 +25,11 @@ func messageFromEnvelope(t *testing.T, env *OperationEnvelope) substrate.Message
 // error, modelling a transient KV/infra failure on the commit step.
 type errCommitter struct{}
 
-func (errCommitter) Commit(context.Context, *OperationEnvelope, ScriptResult, Tracker) (CommitAck, error) {
+func (errCommitter) ReadPrior(context.Context, []MutationOp) (PriorDocs, error) {
+	return PriorDocs{}, nil
+}
+
+func (errCommitter) Commit(context.Context, *OperationEnvelope, ScriptResult, Tracker, PriorDocs) (CommitAck, error) {
 	return CommitAck{}, errors.New("simulated commit infra failure")
 }
 

@@ -442,13 +442,17 @@ type racyCommitter struct {
 	calls atomic.Uint64
 }
 
-func (r *racyCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error) {
+func (r *racyCommitter) ReadPrior(ctx context.Context, mutations []MutationOp) (PriorDocs, error) {
+	return r.inner.ReadPrior(ctx, mutations)
+}
+
+func (r *racyCommitter) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker, prior PriorDocs) (CommitAck, error) {
 	r.calls.Add(1)
 	val, _ := tracker.Marshal()
 	if _, err := r.conn.KVCreate(ctx, testCoreBucket, tracker.Key, val); err != nil && !errors.Is(err, substrate.ErrRevisionConflict) {
 		return CommitAck{}, fmt.Errorf("racy pre-seed: %w", err)
 	}
-	return r.inner.Commit(ctx, env, result, tracker)
+	return r.inner.Commit(ctx, env, result, tracker, prior)
 }
 
 // ReplyShape: unit-level assertion that BuildAcceptedReply produces the

@@ -520,12 +520,14 @@ def execute(state, op):
         # re-shred -- restamps, which is what makes an erasure attestable more
         # than once.
         #
-        # Read TOMBSTONE-BLIND. No aspect-type DDL can refuse a tombstone (a
-        # tombstone carries no document, so step 6 never resolves this class),
-        # so any package script can remove this attestation. Recovery is the
-        # good part -- the residue lens reopens the gap and this op rewrites it
-        # -- but a live-only read would make that recovery silently restamp the
-        # erasure date to now, which is the one field here with legal meaning.
+        # Read TOMBSTONE-BLIND. The write gate holds a documentless tombstone
+        # to the class STORED at the key, so this attestation's own
+        # permittedCommands -- SealIdentityForErasureComplete alone -- refuses
+        # its removal by any other op. The blind read stays regardless: it
+        # costs nothing, and were the attestation removed some other way, a
+        # live-only read would silently restamp the erasure date to now -- the
+        # one field here with legal meaning -- while the residue lens reopened
+        # the gap and this op rewrote it.
         prior = any_data(kv.Read(attestation_key))
         if prior != None and prior.get("sealedForShreddedAt") == shredded_at:
             prior_sealed_at = prior.get("sealedAt")
