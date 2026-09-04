@@ -34,9 +34,11 @@ type instanceOfEdge struct {
 // errInstanceOfLiveReadBudgetExceeded is returned by the on-demand instanceOf
 // readers when charging their round trips against the shared live-read budget
 // (Contract #2 §2.5 "What the ceiling does not cover") pushes the execution
-// over it. It reaches instanceOfTargetOf / classOf as an ordinary read error,
-// so it fails open to the permissive default exactly like any other read fault
-// — never a wrong DDL, never a partial resolution.
+// over it. It reaches instanceOfTargetOf / classOf as an ordinary read error:
+// the walk stops at that hop and the resolution comes back empty with the fault
+// recorded — never a wrong DDL, never a partial resolution. Whether the empty
+// answer is then the permissive default or a retryable refusal is the caller's
+// disposition (resolveGoverningDDL vs the Checked/Committed variants).
 var errInstanceOfLiveReadBudgetExceeded = errors.New("step 6 instanceOf: live-read budget exceeded")
 
 // instanceOfTargetReader enumerates a vertex's live instanceOf-link targets from
@@ -111,22 +113,33 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	return edges, nil
 }
 
-// ddlResolutionMemo caches the on-demand instanceOf-edge answer per walk node
-// within one execution (Fire 1 Inc 2b), collapsing G10's defect: a fresh
-// ddlResolver per read otherwise re-walks the SAME shared nodes (e.g. a
+// ddlResolutionMemo caches the on-demand answers of the governing-DDL walk per
+// walk node within one execution (Fire 1 Inc 2b), collapsing G10's defect: a
+// fresh ddlResolver per read otherwise re-walks the SAME shared nodes (e.g. a
 // template vertex every sibling aspect's chain passes through) once per read.
 //
-// It caches ONLY the live-read layer's raw answer — the edges
-// LiveInstanceOfTargets returned, before any in-flight-batch exclusion —
-// never the batch/working-set layers or the final soleTarget disposition:
-// those are re-derived from THIS call's result.Mutations every time, memo
-// hit or not (instanceOfTargetOf below), so a batch tombstone landing after
-// the memo warms is still honored. Keyed on the walk node (the vertex being
-// asked "what do you point at"), not on the class or the read that started
-// the walk: two vertices of the same class can resolve differently if their
-// own instanceOf edges differ, and the root varies per read (defeating
-// reuse) while an intermediate/terminal node is what siblings actually
-// share.
+// Two answers are cached, one per on-demand reader, under the same discipline:
+//
+//   - edges — what LiveInstanceOfTargets returned for a node ("what does this
+//     vertex point at").
+//   - classes — what the vertexClassReader returned for a node ("what class
+//     does this vertex carry"), the read classOf makes to recognise a chain
+//     terminal whose own class is a registered DDL. A batch of mutations whose
+//     stored classes chain to ONE terminal asks that terminal its class once
+//     per mutation; without this each asks Core KV again.
+//
+// Both cache ONLY the live-read layer's RAW answer — before any in-flight-batch
+// exclusion or re-typing — never the batch/working-set layers or the final
+// disposition: those are re-derived from THIS call's result.Mutations every
+// time, memo hit or not (instanceOfTargetOf and classOf below), so a batch
+// tombstone or re-typing landing after the memo warms is still honored. A
+// FAULT is never cached by either: a transient read error must not calcify into
+// a permanent answer for the rest of the execution.
+//
+// Keyed on the walk node (the vertex being asked), not on the class or the read
+// that started the walk: two vertices of the same class can resolve differently
+// if their own edges differ, and the root varies per read (defeating reuse)
+// while an intermediate/terminal node is what siblings actually share.
 //
 // Lifetime: created lazily on the first on-demand resolution in an
 // execution; owned by ScriptContext (never the resolver, which may outlive
@@ -135,7 +148,16 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 // one ScriptContext, one memo, it dies with the context. Nil-safe = "no
 // memoization", the same convention as liveReadBudgetTracker.
 type ddlResolutionMemo struct {
-	edges map[string][]instanceOfEdge
+	edges   map[string][]instanceOfEdge
+	classes map[string]memoizedClass
+}
+
+// memoizedClass is one node's committed class as the on-demand reader answered
+// it. ok=false is a real answer — the key holds nothing, or holds a tombstoned
+// or unparseable body — and is memoized as such.
+type memoizedClass struct {
+	class string
+	ok    bool
 }
 
 // get returns the memoized live-read edges for vtxRoot and whether this
@@ -161,6 +183,30 @@ func (m *ddlResolutionMemo) set(vtxRoot string, edges []instanceOfEdge) {
 		m.edges = make(map[string][]instanceOfEdge)
 	}
 	m.edges[vtxRoot] = edges
+}
+
+// getClass returns the memoized committed class of vtxKey and whether this
+// execution has already asked Core KV for it. found=false means "never asked",
+// never "asked and the key was empty" — that is found=true carrying ok=false.
+func (m *ddlResolutionMemo) getClass(vtxKey string) (answer memoizedClass, found bool) {
+	if m == nil {
+		return memoizedClass{}, false
+	}
+	answer, found = m.classes[vtxKey]
+	return answer, found
+}
+
+// setClass records vtxKey's committed class, including the negative (a key that
+// holds nothing, or a body that is tombstoned or unparseable), so a later
+// mutation whose chain reaches the same terminal does not re-pay the round trip.
+func (m *ddlResolutionMemo) setClass(vtxKey string, answer memoizedClass) {
+	if m == nil {
+		return
+	}
+	if m.classes == nil {
+		m.classes = make(map[string]memoizedClass)
+	}
+	m.classes[vtxKey] = answer
 }
 
 // ddlResolver carries the DDL cache + the on-demand instanceOf reader behind
@@ -331,6 +377,15 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 		// meta-vertex tombstone cascade — bulk, and exclusively meta keys —
 		// paying the exact class lookup alone, the same way a link key takes
 		// the early return above.
+		//
+		// That premise is a closed-set census over the whole corpus, run in CI,
+		// not an assertion: internal/pkgmgr's
+		// TestPackages_NeverEmitAMetaRootedInstanceOfLink builds every
+		// registered package's install batch through the installer's own
+		// builder, and internal/bootstrap's
+		// TestPrimordialEntries_NeverEmitAMetaRootedInstanceOfLink covers the
+		// seeder. A package that ever needs one fails them before it reaches
+		// this branch.
 		return MetaVertexRef{}, false
 	}
 
@@ -358,7 +413,24 @@ func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, k
 
 		// A business vertex whose own class is itself a registered DDL is also a
 		// terminal (the one-hop instance→type domain shape).
-		if tclass, ok := r.classOf(ctx, target, result, state, disp, fault); ok {
+		tclass, ok, err := r.classOf(ctx, target, result, state, disp)
+		if err != nil {
+			// The walk STOPS here, exactly as it stops on an instanceOf read
+			// fault. This hop's node may itself be the type authority — a
+			// terminal whose permittedCommands refuses the operation — and its
+			// class is what says so. Walking past it would let a FARTHER
+			// authority, which may admit what this one refuses, decide the
+			// gate's verdict on the strength of a read that failed: fail-open,
+			// and non-deterministically so. The fault is recorded, the
+			// resolution comes back empty, and the caller that cannot tolerate
+			// a degraded answer (validateStoredClass, resolveDeclaredClass)
+			// turns it into a retryable refusal.
+			recordResolveFault(fault, err)
+			r.logger().Warn("step 6: committed class read failed; stopping the governing-DDL walk",
+				"vtxKey", target, "error", err)
+			return MetaVertexRef{}, false
+		}
+		if ok {
 			if ref, ok := r.DDLs.Lookup(tclass); ok {
 				return ref, true
 			}
@@ -521,8 +593,8 @@ func sortEdges(edges []instanceOfEdge) {
 }
 
 // classOf resolves the class of the vertex at targetKey, preferring the batch,
-// then the working set, then a single on-demand Core KV read. Used to detect a
-// terminal whose own class is itself a registered DDL.
+// then the working set, then the execution's memo, then a single on-demand Core
+// KV read. Used to detect a terminal whose own class is itself a registered DDL.
 //
 // Within the batch the LAST mutation on the key wins, which is why the scan
 // runs to the end rather than returning at its first match: a batch carrying
@@ -534,7 +606,11 @@ func sortEdges(edges []instanceOfEdge) {
 // Under resolveCommittedOnly the batch scan is skipped: a terminal the batch
 // re-types or removes still answers with the class it carries as stored, so a
 // stored class's authority is the committed one at every hop of the walk.
-func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, disp resolveDisposition, fault *error) (string, bool) {
+//
+// A read fault is REPORTED, not swallowed: the caller stops the walk on it. The
+// memo is warmed only by an answer the reader actually gave, so a fault leaves
+// the node unmemoized and the next resolution that reaches it retries.
+func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, disp resolveDisposition) (string, bool, error) {
 	var last *MutationOp
 	if disp == resolveWithBatch {
 		for i := range result.Mutations {
@@ -554,29 +630,36 @@ func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result Scri
 			// at all and must not resolve through the committed layers below —
 			// the in-flight batch is the truth, the same way batchDead
 			// suppresses a committed link the batch tombstoned.
-			return "", false
+			return "", false, nil
 		}
 		if c, ok := last.Document["class"].(string); ok {
-			return c, true
+			return c, true, nil
 		}
 		// A write that restates no class leaves the committed one standing, so
 		// fall through to the layers below rather than call the vertex classless.
 	}
 	if doc, ok := state.Context.Hydrated[targetKey]; ok && !doc.IsDeleted {
-		return doc.Class, true
+		return doc.Class, true, nil
+	}
+	// A memo hit skips ONLY the Core KV round trip below — the batch and
+	// working-set layers above already ran fresh for THIS call, so a batch
+	// re-typing added after the memo warms still wins over the memoized
+	// committed answer.
+	memo := state.Context.DDLResolutionMemo
+	if answer, found := memo.getClass(targetKey); found {
+		return answer.class, answer.ok, nil
 	}
 	if r.classReader != nil {
 		class, ok, err := r.classReader.ClassOf(ctx, targetKey, state.Context.LiveReads)
 		if err != nil {
-			// Same posture as the instanceOf reader above: degrade to the
-			// permissive default, but record that the resolution was degraded
-			// rather than genuinely empty.
-			recordResolveFault(fault, err)
-		} else if ok {
-			return class, true
+			return "", false, err
+		}
+		memo.setClass(targetKey, memoizedClass{class: class, ok: ok})
+		if ok {
+			return class, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // recordResolveFault keeps the FIRST live-read fault of a resolution. First,

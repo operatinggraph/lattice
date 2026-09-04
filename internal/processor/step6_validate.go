@@ -476,12 +476,14 @@ func (v *ValidatorImpl) validateStoredClass(ctx context.Context, env *OperationE
 	// computed from submitter-supplied input is not a gate if the submitter can
 	// exhaust it.
 	ref, ok, fault := v.resolveGoverningDDLCommitted(ctx, stored, m.Key, kind, result, offBudget(state))
-	if fault != nil && !ok {
-		// Both conditions are required. A fault that still ended in a definitive
-		// DDL — a later hop of the walk resolved one — told the gate exactly what
-		// it needed, so it is immaterial and must not fail an otherwise valid
-		// write. Only an EMPTY resolution behind a fault is no answer at all, and
-		// that one must not reach the permissive default.
+	if fault != nil {
+		// The fault alone is the test, with no conjunct on the resolution. A
+		// fault stops the walk at the hop that raised it (resolveWithFault), so
+		// there is no such thing as a fault behind a DDL a LATER hop resolved —
+		// and there must not be: a closer authority whose permittedCommands
+		// refuses this operation is exactly what an unread hop hides, so
+		// admitting on a farther one's verdict is fail-open. A single test is
+		// also the fail-closed one if that invariant ever loosens.
 		return &ResolveFaultError{MutationKey: m.Key, Class: stored, OperationRequestID: rid, Cause: fault}
 	}
 	if !ok || len(ref.PermittedCommands) == 0 {
@@ -546,10 +548,11 @@ func (v *ValidatorImpl) resolveDeclaredClass(ctx context.Context, m MutationOp, 
 		return ref, ok, nil
 	}
 	ref, ok, fault := v.resolveGoverningDDLChecked(ctx, class, m.Key, kind, result, offBudget(state))
-	if fault != nil && !ok {
-		// A fault behind a DEFINITIVE resolution is immaterial: a later hop
-		// answered the question, so failing the write would reject a valid
-		// operation over a read the gate did not end up needing.
+	if fault != nil {
+		// The fault alone is the test, for the reason validateStoredClass gives:
+		// a fault ends the walk where it happened, so no resolution can stand
+		// behind one, and a hop the gate could not read is a hop whose
+		// permittedCommands may be the one that refuses this write.
 		return MetaVertexRef{}, false, &ResolveFaultError{MutationKey: m.Key, Class: class, OperationRequestID: rid, Cause: fault}
 	}
 	return ref, ok, nil

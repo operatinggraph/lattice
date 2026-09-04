@@ -92,45 +92,128 @@ func TestValidate_StoredClassWalkIsOffTheScriptsBudget(t *testing.T) {
 	}
 }
 
-// A fault at one hop of the chain walk is immaterial when a LATER hop resolves
-// a definitive DDL: the gate got the answer it needed, so refusing (or, worse,
-// redelivering forever) would reject a valid operation over a read that turned
-// out not to matter.
-func TestValidate_StoredClassFaultBehindADefinitiveDDLIsImmaterial(t *testing.T) {
+// A fault at ANY hop of the chain walk stops it. The hop the gate could not
+// read may itself be the type authority, and a CLOSER authority is the one
+// whose permittedCommands governs; walking past it lets a FARTHER one — which
+// may admit exactly what the closer one refuses — decide the verdict on the
+// strength of a read that failed. That is fail-open, and non-deterministic with
+// it, so the fault is retryable instead.
+//
+// The chain: vtx.widget.<inst> (stored class resolvable only through the chain)
+// → vtx.widget.<tpl>, whose committed class IS registered DDL A and A refuses
+// CreateWidgetInstance → vtx.meta.<B>, a vertexType DDL that ADMITS it.
+func TestValidate_StoredClassFaultAtACloserHopIsRetryable(t *testing.T) {
 	t.Parallel()
-	v, ctx, conn := buildWidgetValidator(t)
-	// instance → template → the widget type meta-vertex. classOf(template) is
-	// asked at the first hop and faults; the walk continues and hop two lands on
-	// the meta terminal, which resolves.
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	// DDL B, the FARTHER authority: admits CreateWidgetInstance.
+	seedWidgetTypeDDL(t, ctx, conn)
+	// DDL A, the CLOSER authority: the template's own committed class. Its one
+	// permitted command is named by no other DDL here, so the two authorities
+	// disagree about CreateWidgetInstance and about nothing else.
+	seedVertexTypeDDLAs(t, ctx, conn, testMetaNanoID2, "widget.deluxe.template", `["ReviseWidgetTemplate"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	v := NewValidator(cache, conn, testCoreBucket, testLogger())
+
+	tplKey := "vtx.widget." + tplID
+	seedCommittedVertexClass(t, ctx, conn, tplKey, "widget.deluxe.template")
 	seedCommittedLink(t, ctx, conn,
 		fmt.Sprintf("lnk.widget.%s.instanceOf.widget.%s", instID, tplID), false)
 	seedCommittedLink(t, ctx, conn,
 		fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", tplID, svcTypeID), false)
-	v.classReader = errClassReader{}
 
 	key := "vtx.widget." + instID
 	prior := PriorDocs{key: storedDoc("widget.deluxe.instance")}
 	tombstone := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: key}}}
 
-	admitted := newTestEnvelope(testNanoID1)
-	admitted.OperationType = "CreateWidgetInstance"
-	if err := v.Validate(ctx, admitted, tombstone, HydratedState{}, prior); err != nil {
-		t.Fatalf("a fault behind a definitive resolution must not fail the operation: %T %v", err, err)
-	}
-
-	// The positive vector: the same faulting walk reaches a real verdict, so the
-	// admission above is the gate answering, not the gate absent.
+	// The positive vector, with no fault: the closer authority is reachable and
+	// it REFUSES, so the walk never consults the admitting one behind it.
 	denied := newTestEnvelope(testNanoID1)
-	denied.OperationType = "DeleteWidgetInstance"
+	denied.OperationType = "CreateWidgetInstance"
 	expectPermittedCommandsViolation(t, v.Validate(ctx, denied, tombstone, HydratedState{}, prior), key)
+
+	// Now the read of that closer authority's class faults. The answer must be
+	// "come back later", never the admission the farther DDL would have given.
+	v.classReader = errClassReader{}
+	err := v.Validate(ctx, denied, tombstone, HydratedState{}, prior)
+	var faultErr *ResolveFaultError
+	if !errors.As(err, &faultErr) {
+		t.Fatalf("a fault at the closer hop must surface as *ResolveFaultError, got %T: %v", err, err)
+	}
+	if faultErr.MutationKey != key || faultErr.Class != "widget.deluxe.instance" {
+		t.Fatalf("fault names key %q class %q", faultErr.MutationKey, faultErr.Class)
+	}
+	// (TestValidate_StoredClassReadFaultIsRetryable pins that a
+	// *ResolveFaultError leaves the commit path as OutcomeRetryable with nothing
+	// committed.)
 }
 
 // errClassReader fails every committed class read, so a walk that consults it
-// records a fault and continues to the next hop.
+// records a fault and stops at that hop.
 type errClassReader struct{}
 
 func (errClassReader) ClassOf(context.Context, string, *liveReadBudgetTracker) (string, bool, error) {
 	return "", false, errors.New("injected class-read fault")
+}
+
+// countingClassReader answers a fixed class per key and counts the round trips,
+// so a test can assert how many times one node was asked.
+type countingClassReader struct {
+	class map[string]string
+	calls map[string]int
+}
+
+func (f *countingClassReader) ClassOf(_ context.Context, key string, _ *liveReadBudgetTracker) (string, bool, error) {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[key]++
+	class, ok := f.class[key]
+	return class, ok, nil
+}
+
+// A cascade's mutations share their chain terminal — one template every subtype
+// instance points at — and the terminal's own class is the read that says
+// whether it is a registered type authority. Memoized per node, that read is
+// paid once for the whole batch; unmemoized it is paid once per mutation, which
+// is the shape the instanceOf edge memo already collapses on the other half of
+// the same walk.
+func TestValidate_StoredClassTerminalClassReadIsMemoisedPerNode(t *testing.T) {
+	t.Parallel()
+	v, ctx, conn := buildWidgetValidator(t)
+	tplKey := "vtx.widget." + tplID
+	reader := &countingClassReader{class: map[string]string{tplKey: "widget"}}
+	v.classReader = reader
+
+	prior := PriorDocs{}
+	var muts []MutationOp
+	for i := 0; i < 5; i++ {
+		id := mustNanoID(t)
+		seedCommittedLink(t, ctx, conn,
+			fmt.Sprintf("lnk.widget.%s.instanceOf.widget.%s", id, tplID), false)
+		key := "vtx.widget." + id
+		prior[key] = storedDoc("widget.deluxe.instance")
+		muts = append(muts, MutationOp{Op: "tombstone", Key: key})
+	}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: &ddlResolutionMemo{}}}
+
+	admitted := newTestEnvelope(testNanoID1)
+	admitted.OperationType = "CreateWidgetInstance"
+	if err := v.Validate(ctx, admitted, ScriptResult{Mutations: muts}, state, prior); err != nil {
+		t.Fatalf("five tombstones the widget DDL admits must validate: %v", err)
+	}
+	if got := reader.calls[tplKey]; got != 1 {
+		t.Fatalf("calls[terminal] = %d, want 1 — five mutations sharing one chain terminal must ask its class once", got)
+	}
+
+	// The positive vector: the gate really did resolve through that terminal, so
+	// the single read is a memo hit and not a seam nobody used.
+	denied := newTestEnvelope(testNanoID1)
+	denied.OperationType = "DeleteWidgetInstance"
+	expectPermittedCommandsViolation(t,
+		v.Validate(ctx, denied, ScriptResult{Mutations: muts}, state, prior), muts[0].Key)
 }
 
 // An update is governed by BOTH classes: the one stored at the key (the entity

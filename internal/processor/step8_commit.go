@@ -535,6 +535,7 @@ var immutableEnvelopeFields = [...]string{"createdAt", "createdBy", "createdByOp
 //     immutable creation triplet is carried over from `prior`, overriding any
 //     value the script supplied. An update over an absent key materially creates
 //     it, so the triplet is stamped fresh rather than left missing.
+//
 //   - tombstone — the written body is the prior document WHOLE, and only
 //     `isDeleted` + the lastModified triplet change, so a tombstoned link keeps
 //     the `class`/`sourceVertex`/`targetVertex` that make it readable as a link,
@@ -543,6 +544,14 @@ var immutableEnvelopeFields = [...]string{"createdAt", "createdBy", "createdByOp
 //     honored, and the mutation parser refuses the shape outright), and none is
 //     read here: a tombstone can never modify, blank, or reclaim the stored
 //     body.
+//
+//     "Whole" is the whole of what could be READ. `prior` is nil both for an
+//     absent key and for a stored body that did not decode, so tombstoning an
+//     undecodable entity writes `{key, isDeleted:true}` plus a creation triplet
+//     stamped from THIS operation — the prior triplet is unreadable, so
+//     preserveImmutableFields has nothing to carry over. That is the heal path,
+//     not a loss: the corrupt body was already unreadable to every consumer,
+//     and the alternative is a key the operation plane can never remove.
 func buildMutationValue(env *OperationEnvelope, m MutationOp, at time.Time, trackerKey string, prior map[string]interface{}) ([]byte, error) {
 	stamp := substrate.FormatTimestamp(at)
 
@@ -684,12 +693,14 @@ const priorReadConcurrency = 16
 //
 // The protected ROOTS the step-8 guards read are deliberately NOT in this pass;
 // Commit reads them itself (see commitKeysFor). The split is by consumer: a
-// mutation key read here is also the key the batch is conditioned on, so a
+// mutation key this pass FINDS is also a key the batch is conditioned on, so a
 // concurrent write between this read and the commit makes the batch conflict
 // and the whole pipeline re-run. An aspect's parent root is in no batch and
 // conditions nothing, so a read of it here would let a root turn protected
-// between step 6 and step 8 with no one the wiser. Total round trips per commit
-// are unchanged either way: each key is read once.
+// between step 6 and step 8 with no one the wiser — and a mutation key this
+// pass finds ABSENT conditions nothing either, which is why Commit re-reads
+// that one alongside the roots (commitKeysFor). Total round trips per commit
+// are unchanged for a key that exists: it is read once, here.
 //
 // The read is a moment later than the step-4 revision the batch asserts, but a
 // commit that succeeds proves no write landed in between, so the document read
@@ -708,7 +719,7 @@ func (c *CommitterImpl) ReadPrior(ctx context.Context, mutations []MutationOp) (
 }
 
 // priorKeysFor lists the distinct update/tombstone MUTATION keys a prior pass
-// must read, skipping any key `have` already holds an entry for. A nil `have`
+// must read, skipping any key `have` already COVERS (addPriorKey). A nil `have`
 // asks for the whole set.
 func priorKeysFor(mutations []MutationOp, have PriorDocs) []string {
 	keys := make([]string, 0, len(mutations))
@@ -729,10 +740,21 @@ func priorKeysFor(mutations []MutationOp, have PriorDocs) []string {
 //
 // Roots come second and last so they are read at COMMIT time — the guards'
 // verdict on a root that turned protected after step 6 must be the fresh one.
-// A root the handed map already holds needs no re-read: that only happens when
-// the root is itself a mutation key, and such a key is batch-conditioned on the
-// revision it was read at, so a concurrent flip makes the commit conflict and
-// the pipeline re-run from hydration.
+// A root the handed map already read and FOUND needs no re-read: that only
+// happens when the root is itself a mutation key, and a found mutation key is
+// batch-conditioned on the revision it was read at (conditionRevision), so a
+// concurrent flip makes the commit conflict and the pipeline re-run from
+// hydration.
+//
+// A key the handed map read and did NOT find is a different matter, and is why
+// addPriorKey tests Found rather than mere presence: an absent update/tombstone
+// key carries no revision, so the batch writes it unconditioned, and an entity
+// created in the window between step 5.5 and this batch — a root stamped
+// data.protected, a permission whose provenance the batch would rewrite — would
+// be committed over with no guard ever seeing it. Such a key is re-read here, at
+// the same commit-time moment as the roots, and the fresh entry replaces the
+// absent one (topUpPrior). The FOUND case costs exactly the round trips it costs
+// today.
 func commitKeysFor(mutations []MutationOp, have PriorDocs) []string {
 	keys := priorKeysFor(mutations, have)
 	seen := make(map[string]struct{}, len(keys))
@@ -749,7 +771,13 @@ func commitKeysFor(mutations []MutationOp, have PriorDocs) []string {
 }
 
 // addPriorKey appends key to keys unless it is empty, already listed, or
-// already held by have.
+// already COVERED by have.
+//
+// Coverage is `have` holding an entry that was FOUND, not merely holding an
+// entry: a read that came back absent stores an entry too, and an absent
+// update/tombstone key is the one shape the batch leaves unconditioned, so
+// nothing makes the earlier read still true at commit time. Presence alone
+// would let a later pass believe a key it has no current answer for.
 func addPriorKey(keys *[]string, seen map[string]struct{}, have PriorDocs, key string) {
 	if key == "" {
 		return
@@ -757,7 +785,7 @@ func addPriorKey(keys *[]string, seen map[string]struct{}, have PriorDocs, key s
 	if _, dup := seen[key]; dup {
 		return
 	}
-	if _, known := have[key]; known {
+	if pd, known := have[key]; known && pd.Found {
 		return
 	}
 	seen[key] = struct{}{}
@@ -773,6 +801,11 @@ func addPriorKey(keys *[]string, seen map[string]struct{}, have PriorDocs, key s
 // re-derives it on a batch conflict — and every consumer of the map degrades
 // silently on a missing entry: provenance would be re-stamped from the current
 // operation and the guards would read the injected key as absent.
+//
+// A freshly read entry REPLACES the handed one, which is what makes the re-read
+// of an absent-at-5.5 key worth anything: the entity created in the window
+// arrives here with its stored body, so the guards adjudicate it and the batch
+// conditions on the revision it now has.
 func (c *CommitterImpl) topUpPrior(ctx context.Context, mutations []MutationOp, prior PriorDocs) (PriorDocs, error) {
 	missing := commitKeysFor(mutations, prior)
 	if len(missing) == 0 {
