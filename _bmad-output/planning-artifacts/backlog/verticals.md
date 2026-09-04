@@ -40,6 +40,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **4 of 6 live recurring visit series belong to deleted patients, keep advancing forever, and no hat can see or end them** | `visitSeriesDue` makes `forPatient` OPTIONAL and never tests the patient ([visitseries.go:1102](../../../packages/clinic-reminders/visitseries.go:1102)); `visitSeriesRead` makes it REQUIRED ([:1231](../../../packages/clinic-reminders/visitseries.go:1231)). Live: 4 series on patients tombstoned 2026-08-23 advanced again 08-31/09-02, `read_visit_series` holds 2 rows, both reads answer healthy. | Clinic | pkg | ★★★ | S | 📋 ready · one population, both specs |
 | **The Care→Wellness referral picker offers 44 dead classes and defaults to one from six weeks ago** | `openWellnessBooking` filters on seats alone ([app.js:4620](../../../cmd/clinic-app/web/app.js:4620)) and the proxy sorts oldest-first ([wellness.go:99](../../../cmd/clinic-app/wellness.go:99)): of 48 rows 44 already ended (earliest 2026-07-20), all with free seats. Each is a dead end — `CreateBooking` fails `SessionInPast` ([ddls.go:3626](../../../packages/wellness-domain/ddls.go:3626)). | Clinic | FE | ★★ | XS | 📋 ready · drop past sessions, soonest-first |
 | **7 of the clinic's 8 follow-up requests will never come due, and nothing surfaces them** | Live: 7 completed August visits carry `followUpRequested` with no `followUpDate`, and the worklist only ever matches on the date — no hat can find them. The repair is reachable (`RecordEncounter` is a re-runnable upsert, [ddls.go:3418](../../../packages/clinic-domain/ddls.go:3418)) but nothing names the population needing it. | Clinic | pkg + FE | ★★ | S | 📋 ready · a requested-but-undated gap on the follow-up worklist |
+| **The front desk is sent to collect from two residents it cannot name** | A tombstoned unit empties `cafeIdentitiesRead`'s workplace fan-out ([lenses.go:429](../../../packages/cafe-domain/lenses.go:429)), so the row keeps only its self-anchor and a staffer reads 46 of 118 names. Live: two debtors ($4.50/23d, $10.00/30d) render as truncated NanoIDs — the leases `cafeLeaseWorkplaces` already rescues via `missingLocation` (`097aa843`). | Café | pkg | ★★ | S | 📋 ready · give the identity lens the sibling's fallback |
+| **Every café item shows twice in the picker and half the choices are refused** | Both pickers render `name — price` ([app.js:886](../../../cmd/cafe-app/web/app.js:886)), but 4 items = 2 names × 2 serving locations. Live: the unit-served Croissant on a building lease is refused `AuthDenied: … not served at tab …'s building`, 3 of 4 submits. `/api/menu` already carries `servedAt`. | Café | FE | ★★ | XS | 📋 ready · filter to the tab's own covering set |
+| **A voided item stays on the permanent statement and the correction has no amount** | `itemsMemo` is append-only: VoidCharge keeps the item's name and appends a bare `Void correction` ([ddls.go:1239](../../../packages/cafe-domain/ddls.go:1239)), Settle freezes it as the ledger memo. Live: a 3-line tab, line-1 voided, posted `Croissant, Latte, Latte, Void correction` for $9.00. | Café | pkg + FE | ★★ | S | 📋 ready · rebuild the memo from live `.status.lines` at Settle |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -59,10 +62,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×30, Clinic ×30, Café ×20, Wellness ×17.
+- **Rotation to date:** LoftSpace ×30, Clinic ×30, Café ×21, Wellness ×17.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-31:** Wellness — drove member/front-desk hats live through schedule/series/book/waitlist/promote/cancel/refund/bill; the waitlist bills before it seats and the desk can neither cancel a class nor see who owes; filed 4.
 - **2026-09-01:** LoftSpace — drove landlord + applicant hats live through listings/apply/decide/renew/tasks/ledger/one-bill/account; the attach KPI is dark and nothing names the sign-in you are on; filed 2 + 1 platform.
 - **2026-09-01:** Clinic — drove patient/provider/front-desk hats live through book/status/document/follow-up/time-off/ledger; a terminal status is uncorrectable and the follow-up net self-clears on no-shows; filed 3.
 - **2026-09-02:** Café — drove front-of-house + resident hats live through menu/tab/charge/void/settle/ledger; a staff settle is unsettleable and arrears hide when the tab closes; filed 3.
@@ -73,7 +75,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-09-03:** Wellness — drove member + front-desk hats through schedule/book/waitlist/capacity/series/roster/ledger/arrears; a capacity raise strands the waitlist and a term takes six ops to call off; filed 3.
 - **2026-09-04:** LoftSpace — drove landlord + tenant hats through portfolio/listings/apply/renewal/tasks/ledger/one-bill/self-pay/search; a tenant cannot sign a renewal that ends in 2 days and one live tenancy bills nothing; filed 2 + 1 platform.
 - **2026-09-04:** Clinic — drove patient/provider/front-desk hats through appointments/encounters/visit-series/follow-ups/ledger/wellness-referral; four live cadences run on deleted patients and the referral picker is 92% dead classes; filed 3.
-- **Next:** Café.
+- **2026-09-04:** Café — drove front-of-house + resident hats through menu/POS/open/charge/void/settle/ledger/payment/arrears; two debtors have no name and every menu item shows twice; filed 3.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
