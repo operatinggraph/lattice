@@ -44,16 +44,21 @@ func (e *ConflictError) Error() string {
 func (e *ConflictError) Unwrap() error { return e.Cause }
 
 // ProtectedKeyError is the typed step-8 failure surfaced when an update or
-// tombstone mutation targets a root document carrying data.protected == true.
+// tombstone mutation targets a root document carrying data.protected == true,
+// or one of the exact link keys the kernel seeds as its authorization topology
+// (bootstrap.KernelTopologyLinkKeys — the six holdsRole and six grantedBy edges
+// that make the admin and the service actors root-equivalent and carry the
+// kernel operations' grants; both endpoints of each are themselves protected).
 // This is the authoritative, path-independent kernel-protection backstop: it
 // closes the bricking hole for EVERY op at once (InstallPackage,
-// UninstallPackage, meta-root mutations, and any future DDL) regardless of
-// whether the originating script declared the root in ContextHint.Reads.
-// The commit path maps this onto a `rejected` reply with code `ProtectedKey`.
-// create mutations are exempt — create-only already conflicts on overwrite.
+// UninstallPackage, meta-root mutations, RevokeRole/RevokePermission, and any
+// future DDL) regardless of whether the originating script declared the root in
+// ContextHint.Reads. The commit path maps this onto a `rejected` reply with code
+// `ProtectedKey`. create mutations are exempt — create-only already conflicts on
+// overwrite.
 type ProtectedKeyError struct {
 	Key  string // the offending mutation key
-	Root string // the derived protected root (vtx.<type>.<id>)
+	Root string // the protected root: the derived vtx.<type>.<id>, or a link's source vertex
 	Op   string // the mutation op (update|tombstone)
 }
 
@@ -187,10 +192,19 @@ type CommitterImpl struct {
 	Clock      func() time.Time
 	// Timeout bounds the round trip on the substrate.AtomicBatch call.
 	Timeout time.Duration
+	// KernelLinkKeys is the kernel's seeded authorization topology, by exact
+	// key, as the protected-key guard's link arm consults it. Empty protects
+	// no link, which is what every fixture that does not wire it gets; see
+	// rejectProtectedMutations.
+	KernelLinkKeys map[string]struct{}
 }
 
-// NewCommitter constructs the real Committer.
-func NewCommitter(conn *substrate.Conn, coreBucket string, cache *DDLCache, logger *slog.Logger, clock func() time.Time) *CommitterImpl {
+// NewCommitter constructs the real Committer. kernelLinkKeys is the seeded
+// kernel topology link set (bootstrap.KernelTopologyLinkKeys, carried in
+// through AuthWiring); it is indexed once here rather than per commit. Nil or
+// empty means no link is protected — the posture a fixture that does not wire
+// it gets, pinned non-empty for production in cmd/processor.
+func NewCommitter(conn *substrate.Conn, coreBucket string, cache *DDLCache, logger *slog.Logger, clock func() time.Time, kernelLinkKeys []string) *CommitterImpl {
 	if conn == nil {
 		panic("processor: NewCommitter requires Conn")
 	}
@@ -203,13 +217,21 @@ func NewCommitter(conn *substrate.Conn, coreBucket string, cache *DDLCache, logg
 	if clock == nil {
 		clock = time.Now
 	}
+	var kernelLinks map[string]struct{}
+	if len(kernelLinkKeys) > 0 {
+		kernelLinks = make(map[string]struct{}, len(kernelLinkKeys))
+		for _, k := range kernelLinkKeys {
+			kernelLinks[k] = struct{}{}
+		}
+	}
 	return &CommitterImpl{
-		Conn:       conn,
-		CoreBucket: coreBucket,
-		DDLs:       cache,
-		Logger:     logger,
-		Clock:      clock,
-		Timeout:    5 * time.Second,
+		Conn:           conn,
+		CoreBucket:     coreBucket,
+		DDLs:           cache,
+		Logger:         logger,
+		Clock:          clock,
+		Timeout:        5 * time.Second,
+		KernelLinkKeys: kernelLinks,
 	}
 }
 
@@ -264,7 +286,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	if err != nil {
 		return CommitAck{}, err
 	}
-	if err := rejectProtectedMutations(result.Mutations, prior); err != nil {
+	if err := rejectProtectedMutations(result.Mutations, prior, c.KernelLinkKeys); err != nil {
 		return CommitAck{}, err
 	}
 	// Sibling guard over the same read pass: a permission vertex's provenance
@@ -844,13 +866,45 @@ func (c *CommitterImpl) readPriorDoc(ctx context.Context, key string) (priorDoc,
 // stored-class pass, so a root that turns protected after step 6 is still seen
 // by this guard. A root that does not exist is not protected. create mutations
 // are skipped — create-only conflicts on overwrite already.
-func rejectProtectedMutations(mutations []MutationOp, prior PriorDocs) error {
+//
+// kernelLinks is the second arm, over keys that have no vertex root at all: the
+// exact link keys the kernel seeds as its authorization topology
+// (bootstrap.KernelTopologyLinkKeys, threaded in through AuthWiring). Those
+// edges carry no document marker of their own — nothing distinguishes one from
+// any other link by reading it — so membership is by key. For a member:
+//
+//   - a tombstone is refused. Every one of these edges is one RevokeRole /
+//     RevokePermission away from removing the operator grant behind a kernel
+//     operation or an engine's root-equivalence, and nothing restores it: the
+//     seeder never rewrites a soft tombstone, and a create conflicts on a
+//     tombstoned key.
+//
+//   - an update is refused unless the written document is the link's SEEDED
+//     shape. That admits exactly one mutation — the revive an already-revoked
+//     deployment heals with (rbac-domain's revive_link, an update that flips
+//     isDeleted back to false and re-writes the same endpoints) — and refuses a
+//     soft delete (isDeleted: true) and a re-pointed endpoint, which are the two
+//     ways an update reaches the same outcome a tombstone would. A blanket
+//     immutability rule would take the heal path away with it.
+//
+// The comparison is against the WRITTEN document, not the stored one: what the
+// guard has to decide is what this mutation leaves behind. The data stamp is not
+// compared — the grant-edge-provenance rules govern it, and a kernel link's data
+// is empty.
+//
+// An empty set protects nothing, which is the test-fixture posture; production
+// wiring is pinned non-empty in cmd/processor. Empty cannot fail closed here:
+// "every link protected" would refuse every link write in the deployment.
+func rejectProtectedMutations(mutations []MutationOp, prior PriorDocs, kernelLinks map[string]struct{}) error {
 	for _, m := range mutations {
 		if m.Op != "update" && m.Op != "tombstone" {
 			continue
 		}
 		root := protectedRootKey(m.Key)
 		if root == "" {
+			if err := rejectKernelLinkMutation(m, kernelLinks); err != nil {
+				return err
+			}
 			continue
 		}
 		if docIsProtected(prior.doc(root)) {
@@ -858,6 +912,66 @@ func rejectProtectedMutations(mutations []MutationOp, prior PriorDocs) error {
 		}
 	}
 	return nil
+}
+
+// rejectKernelLinkMutation is the kernel-topology-link arm of the protected-key
+// guard: it refuses m unless m leaves the seeded edge intact. Keys outside the
+// set pass untouched — an ordinary identity's holdsRole, a package's own links,
+// and a stranded prior epoch's edges (whose operator role is not this table's,
+// so their keys are not members) all stay revocable.
+func rejectKernelLinkMutation(m MutationOp, kernelLinks map[string]struct{}) error {
+	if _, seeded := kernelLinks[m.Key]; !seeded {
+		return nil
+	}
+	if m.Op == "update" && isSeededLinkShape(m.Key, m.Document) {
+		return nil
+	}
+	return &ProtectedKeyError{Key: m.Key, Root: linkSourceKey(m.Key), Op: m.Op}
+}
+
+// isSeededLinkShape reports whether doc is the body the kernel seeds at a link
+// key: live, with both endpoints and both names read straight off the key's own
+// segments. Every kernel link is seeded with its relation as both class and
+// localName, so the key alone says what a faithful body holds and no stored
+// document has to be consulted.
+//
+// The comparison is total — an absent field is a mismatch, not a pass. A body
+// missing isDeleted or localName is not the shape the seeder wrote, and the
+// committer would write exactly what it was handed.
+func isSeededLinkShape(key string, doc map[string]interface{}) bool {
+	sourceType, sourceID, relation, targetType, targetID, ok := substrate.ParseLinkKey(key)
+	if !ok || doc == nil {
+		return false
+	}
+	deleted, isBool := doc["isDeleted"].(bool)
+	if !isBool || deleted {
+		return false
+	}
+	if s, _ := doc["sourceVertex"].(string); s != "vtx."+sourceType+"."+sourceID {
+		return false
+	}
+	if s, _ := doc["targetVertex"].(string); s != "vtx."+targetType+"."+targetID {
+		return false
+	}
+	if s, _ := doc["class"].(string); s != relation {
+		return false
+	}
+	if s, _ := doc["localName"].(string); s != relation {
+		return false
+	}
+	return true
+}
+
+// linkSourceKey returns the vertex key a link key sources from — the 3-segment
+// key the ProtectedKeyError names as the offending mutation's root, so a
+// refused revocation reads as being about the actor or permission whose grant it
+// would have removed. Returns "" for a key that is not a well-formed link key.
+func linkSourceKey(key string) string {
+	sourceType, sourceID, _, _, _, ok := substrate.ParseLinkKey(key)
+	if !ok {
+		return ""
+	}
+	return "vtx." + sourceType + "." + sourceID
 }
 
 // permissionProvenanceFields is the set of vtx.permission.<id> root data fields

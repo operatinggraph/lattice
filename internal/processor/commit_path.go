@@ -1246,6 +1246,22 @@ type AuthWiring struct {
 	// the empty string, so the comparison rejects every real actor. A pipeline
 	// that drives such an op therefore has to wire this.
 	PrimordialActors map[string]string
+	// KernelLinkKeys are the exact link keys the kernel seeds as its
+	// authorization topology (bootstrap.KernelTopologyLinkKeys: six
+	// `identity holdsRole role` edges plus six `permission grantedBy role`
+	// edges), which the step-8 protected-key guard refuses to tombstone or
+	// reshape. Composed from the loaded bootstrap table and held for the
+	// process lifetime, so a regenerated table (a new epoch) takes effect on
+	// restart — which is also what stops the set from protecting a stranded
+	// epoch's edges against the retire verb that exists to revoke them.
+	//
+	// Unset is the OPPOSITE posture to PrimordialActors above: it protects
+	// nothing, which is today's behaviour. Empty cannot fail closed here,
+	// because the fail-closed reading of a protected-key set is "every link is
+	// protected", and that refuses every link write in the deployment. The
+	// production wiring is pinned instead — a cmd/processor test asserts the
+	// wired set is bootstrap.KernelTopologyLinkKeys() and non-empty after Load.
+	KernelLinkKeys []string
 }
 
 // MakePipeline is the production wiring entry point. capabilityBucket is the
@@ -1325,7 +1341,7 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 	hydrator.Vault = v
 	hydrator.PrimordialActors = authWiring.PrimordialActors
 
-	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now)
+	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now, authWiring.KernelLinkKeys)
 	cp := NewCommitPath(Deps{
 		Conn:            conn,
 		CoreBucket:      coreBucket,

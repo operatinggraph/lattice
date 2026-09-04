@@ -617,6 +617,42 @@ The caller must declare the target `metaKey` in `ContextHint.Reads` (already
 required by the `vertex_alive` liveness check), so the root document — and its
 `protected` flag — is in the script's hydrated `state`.
 
+### Kernel topology links
+
+A link has no vertex root, so `data.protected` cannot reach it and no seeded link
+carries a marker of its own. The twelve links the kernel seeds — six
+`identity holdsRole role` edges making the primordial admin and the five internal
+service actors root-equivalent, six `permission grantedBy role` edges carrying the
+kernel operations' grants — are therefore protected **by exact key**: `cmd/processor`
+composes the set from the loaded `lattice.bootstrap.json`
+(`bootstrap.KernelTopologyLinkKeys`) and threads it in through `AuthWiring`, and the
+step-8 guard refuses
+
+- a `tombstone` of any member, and
+- an `update` of any member whose written document is not the seeded shape —
+  `isDeleted` false, both endpoints and both names equal to the key's own segments.
+
+That admits exactly one mutation: `AssignRole`'s revive, an update restoring a
+revoked edge. It is the only heal path a deployment already revoked has (the seeder
+never rewrites a soft tombstone, and a `create` conflicts on a tombstoned key), so a
+blanket immutability rule would make an existing brick permanent. The rejection is
+`ProtectedKey`, with the link's source vertex as the reported root.
+
+An unset set protects nothing, which is what a test fixture that does not wire it
+gets; empty cannot fail closed, since the fail-closed reading of a protected-key set
+is "every link is protected". Production wiring is pinned by a `cmd/processor` test
+instead.
+
+**Epoch precondition.** The set names *this* table's operator role, which is what
+keeps a stranded prior epoch's edges revocable by `lattice bootstrap
+retire-stranded-epoch`. It is composed once at start-up and held for the process
+lifetime, so **every Processor replica must have restarted on the current
+`lattice.bootstrap.json` before that command runs** — a replica still holding the
+retired table protects the very edges the command is revoking, and refuses them
+(non-deterministically per op in a mixed roll). `retire-stranded-epoch` reports a
+`ProtectedKey` reply on a revocation as epoch skew by name; the remedy is to roll the
+Processors and re-run.
+
 ---
 
 ## Failure modes

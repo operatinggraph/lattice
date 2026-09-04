@@ -115,12 +115,17 @@ func storedIsDeleted(raw []byte) bool {
 //   - The bootstrap op tracker is excluded outright. It is the sentinel
 //     PrimordialSeeded and DecideReseed probe and the two-phase-commit marker
 //     (Contract #7 §7.4) — seeding-state machinery, not kernel content.
-//   - A stored document carrying a soft tombstone is never rewritten. The
-//     primordial links are outside the Processor's protected-key guard by
-//     design (protectedRootKey returns "" for anything not vertex-rooted), and
-//     rbac-domain's RevokeRole/RevokePermission tombstone exactly those key
-//     shapes. Rewriting one would silently restore a revoked grant — turning a
-//     boot into an unlogged privilege escalation.
+//   - A stored document carrying a soft tombstone is never rewritten.
+//     rbac-domain's RevokeRole/RevokePermission tombstone exactly the key
+//     shapes this seeder writes, and rewriting one would silently restore a
+//     revoked grant — turning a boot into an unlogged privilege escalation.
+//     The rule holds even though the twelve kernel topology links
+//     (KernelTopologyLinkKeys) are inside the Processor's protected-key guard,
+//     which refuses those revocations at commit time: the guard is keyed on the
+//     RUNNING Processor's loaded epoch, so a stranded epoch's links and every
+//     other link this seeder can reach stay revocable, and healing a revoked
+//     kernel link is an explicit AssignRole revive rather than a side effect of
+//     booting a binary.
 //   - Only kernel definitions (vtx.meta.*) are rewritten at all. Identities,
 //     roles, permissions and links are topology whose ongoing lifecycle belongs
 //     to operations, not to the seeder; their divergence is reported, never

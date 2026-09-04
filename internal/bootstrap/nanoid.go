@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -668,6 +669,84 @@ func KernelGrantLinkKeys() []string {
 		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
 		"lnk.permission." + PermUpgradePackageID + ".grantedBy.role." + RoleOperatorID,
 	}
+}
+
+// kernelHoldsRoleActors names the six identities the kernel seeds a
+// `holdsRole → operator` edge for, paired with the identifier each edge's
+// source segment is composed from. The Gateway identity is deliberately absent:
+// it is seeded without such an edge and earns identityProvisioner through a
+// one-time ops action instead (primordial.go's step 10a).
+//
+// The name half is what an unloaded-table refusal reports, so a caller learns
+// which identifier was still empty rather than that "something" was.
+func kernelHoldsRoleActors() []struct {
+	name string
+	id   string
+} {
+	return []struct {
+		name string
+		id   string
+	}{
+		{"bootstrapIdentity", BootstrapIdentityID},
+		{"loomIdentity", LoomIdentityID},
+		{"weaverIdentity", WeaverIdentityID},
+		{"bridgeIdentity", BridgeIdentityID},
+		{"objmgrIdentity", ObjmgrIdentityID},
+		{"privacyIdentity", PrivacyIdentityID},
+	}
+}
+
+// KernelTopologyLinkKeys returns the twelve links the kernel seeds: the six
+// `permission grantedBy role` grant edges (KernelGrantLinkKeys) plus the six
+// `identity holdsRole role` edges that make the primordial admin and the five
+// internal service actors root-equivalent. Together they ARE the deployment's
+// root authorization topology — root capability is established by graph
+// topology (Contract #7 §7.7), so removing one of these edges is how a
+// deployment loses the operator grant behind a kernel operation, or an engine
+// its own root-equivalence, with nothing on any path that puts it back.
+//
+// The Processor holds the result as an exact-key protected set: a tombstone of
+// one of these keys is refused, and an update is refused unless it rewrites the
+// link back to its seeded shape. Exact keys, rather than a rule over the edges'
+// endpoints, is what makes the set epoch-aware for free — the keys name THIS
+// table's operator role, so a stranded prior epoch's edges (which `lattice
+// bootstrap retire-stranded-epoch` must be able to revoke) are not in it. The
+// set is therefore a function of the loaded table, and a process that has not
+// reloaded a regenerated lattice.bootstrap.json still names the old epoch's
+// edges.
+//
+// Refuses with ErrPrimordialIDsUnloaded rather than returning keys whose id
+// segments are empty: such keys match nothing, so an unloaded table would hand
+// back a full-length set protecting none of the twelve edges it names.
+//
+// The keys are assembled by concatenation rather than through the
+// *HoldsRoleLinkKey package variables or substrate.LinkKey, for the reason
+// KernelGrantLinkKeys' doc comment gives: those variables are derived at load
+// time, so an unloaded table leaves them empty, and LinkKey panics on an id
+// that is not a valid NanoID — while a caller wiring this set must be able to
+// report on an unloaded process rather than crash it.
+func KernelTopologyLinkKeys() ([]string, error) {
+	var missing []string
+	if RoleOperatorID == "" {
+		missing = append(missing, "roleOperator")
+	}
+	actors := kernelHoldsRoleActors()
+	for _, a := range actors {
+		if a.id == "" {
+			missing = append(missing, a.name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrPrimordialIDsUnloaded, strings.Join(missing, ", "))
+	}
+
+	grants := KernelGrantLinkKeys()
+	keys := make([]string, 0, len(grants)+len(actors))
+	keys = append(keys, grants...)
+	for _, a := range actors {
+		keys = append(keys, "lnk.identity."+a.id+".holdsRole.role."+RoleOperatorID)
+	}
+	return keys, nil
 }
 
 // PrimordialVertexKeys returns the kernel's top-level vertex keys — only

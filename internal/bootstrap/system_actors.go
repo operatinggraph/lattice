@@ -88,9 +88,12 @@ func SystemActorKeys(ctx context.Context, conn *substrate.Conn) ([]string, error
 // the crypto-shred finalization listeners (internal/privacyworker and
 // internal/refractor/keyshredded, vault-crypto-shredding-design.md Fire 4b)
 // submit RecordShredFinalization under. Graph discovery mirrors
-// SystemActorKeys: the hosting binaries (cmd/processor, cmd/refractor)
-// deliberately do not load lattice.bootstrap.json, so the actor is found by
-// its class the way the step-3 platform routing finds the protected set.
+// SystemActorKeys: the actor is found by its class, the way the step-3 platform
+// routing finds the protected set, rather than by an id read off the primordial
+// table. The hosting binaries do load lattice.bootstrap.json (cmd/processor and
+// cmd/refractor both call Load before wiring), so this is a choice of predicate
+// — a deployment bootstrapped before the privacy actor existed has no id for it
+// in its table at all, and class discovery answers for that deployment too.
 //
 // Returns "" (no error) when the actor is absent — a deployment bootstrapped
 // before version 15. Callers treat that as "finalization recording disabled",

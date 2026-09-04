@@ -156,7 +156,7 @@ func runNFRWithDeps(t *testing.T, label string, buildDeps func(d Deps) Deps, fir
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("ddl cache refresh: %v", err)
 	}
-	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now)
+	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil)
 	baseDeps := Deps{
 		Conn:        conn,
 		CoreBucket:  testCoreBucket,
@@ -244,7 +244,7 @@ func TestNFR_R1_FaultAtStep1(t *testing.T) {
 		Hydrator:    NewHydratorWithCache(conn, testCoreBucket, cache, logger),
 		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
 		Validator:   NewValidator(cache, conn, testCoreBucket, logger),
-		Committer:   NewCommitter(conn, testCoreBucket, cache, logger, time.Now),
+		Committer:   NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil),
 		Metrics:     metrics,
 		Heartbeater: hb,
 		Logger:      logger,
@@ -466,7 +466,7 @@ func TestNFR_R1_FaultAtStep9(t *testing.T) {
 	hb := NewHealthHeartbeater(conn, testHealthBucket, "proc-test-step9", 10*time.Second, metrics, logger)
 	cache := NewDDLCache(conn, testCoreBucket, logger)
 	_ = cache.Refresh(ctx)
-	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now)
+	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil)
 	cp := NewCommitPath(Deps{
 		Conn:       conn,
 		CoreBucket: testCoreBucket,

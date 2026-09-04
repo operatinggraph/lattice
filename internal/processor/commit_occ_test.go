@@ -530,7 +530,7 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
-	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now, nil)
 
 	root := "vtx.identity." + testNanoID2
 	env := newTestEnvelope(testNanoID1)
@@ -589,7 +589,7 @@ func TestRealCommitter_FallbackConditioning(t *testing.T) {
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
-	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now, nil)
 
 	keyA := "vtx.identity." + testNanoID1
 	keyB := "vtx.identity." + testNanoID2
@@ -689,7 +689,7 @@ func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
-	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now, nil)
 
 	rid := testNanoID1
 	env := newTestEnvelope(rid)
@@ -731,7 +731,7 @@ func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
-	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now, nil)
 
 	rid := testNanoID2
 	env := newTestEnvelope(rid)

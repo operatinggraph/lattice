@@ -298,7 +298,7 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	hydrator := processor.NewHydratorWithCache(conn, HarnessCoreBucket, cache, logger)
 	hydrator.Vault = v
 	hydrator.PrimordialActors = PrimordialActors(t)
-	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now)
+	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now, nil)
 	deps := processor.Deps{
 		Conn:        conn,
 		CoreBucket:  HarnessCoreBucket,

@@ -71,6 +71,16 @@ lattice.bootstrap.json actually corresponds to the target NATS deployment
 the deployment's real, live, current operator role as "stranded", and
 revoking it would brick the deployment. Refuses outright if that check fails.
 
+PRECONDITION: every Processor replica must already have restarted on the
+CURRENT lattice.bootstrap.json before this command runs. Each Processor holds
+its own epoch's twelve kernel topology links as a protected set, composed from
+the table it loaded at start-up; a replica still running on the table this
+command is retiring holds the stranded epoch's edges as its own and refuses to
+revoke them. This command verifies the id file against Core KV, not against the
+running Processors, so it cannot check that for you — but a revocation refused
+that way is reported as epoch skew by name, and the remedy is to roll the
+Processors and re-run.
+
 Exit 0 only if nothing is stranded, or every stranded epoch was fully and
 verifiably neutralized (re-checked after the run, never assumed from
 submission replies alone) and every reinstall recommendation was printed.
@@ -374,9 +384,32 @@ func submitRevocation(conn *substrate.Conn, actor string, op internalbootstrap.R
 		if reply.Error != nil {
 			code, msg = reply.Error.Code, reply.Error.Message
 		}
-		return fmt.Errorf("rejected: %s — %s", code, msg)
+		return revocationRejection(code, msg, op.LinkKey)
 	}
 	return nil
+}
+
+// revocationRejection renders a rejected revocation reply as the error the run
+// reports.
+//
+// ProtectedKey gets its own diagnosis. Each Processor protects the twelve
+// kernel topology links of the epoch whose lattice.bootstrap.json it loaded at
+// start-up, so a replica that has NOT restarted since the table was regenerated
+// still holds the retired epoch's edges as its own and refuses to revoke them —
+// non-deterministically per op in a mixed roll, since the reply comes from
+// whichever replica took the message. Read as a generic rejection, that looks
+// like the retirement being impossible; read for what it is, it names an
+// operator action (roll the Processors) and a re-run that then succeeds.
+func revocationRejection(code processor.ErrorCode, msg, linkKey string) error {
+	if code == processor.ErrCodeProtectedKey {
+		return fmt.Errorf(
+			"rejected: %s — %s: epoch skew — a Processor still holds the RETIRED table, so it protects %s"+
+				" as its own kernel topology. Restart every Processor replica on the current"+
+				" lattice.bootstrap.json and re-run; in a mixed roll this refusal appears on some"+
+				" revocations and not others, depending on which replica takes the message",
+			code, msg, linkKey)
+	}
+	return fmt.Errorf("rejected: %s — %s", code, msg)
 }
 
 // printReinstallRecommendations reads declaredBy off every permission this

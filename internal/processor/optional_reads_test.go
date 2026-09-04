@@ -258,7 +258,7 @@ def execute(state, op):
 
 	winnerDoc := []byte(`{"key":"` + dedupKey + `","class":"task","isDeleted":false,"data":{"origin":"winner"}}`)
 	committer := &raceCommitter{
-		inner: NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now),
+		inner: NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now, nil),
 		conn:  conn,
 		key:   dedupKey,
 		value: winnerDoc,

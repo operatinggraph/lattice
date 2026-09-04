@@ -13,7 +13,9 @@
 //	NATS_CREDS                        path to a NATS JWT creds file (alternative to NATS_NKEY; at most one is set)
 //	BOOTSTRAP_JSON_PATH               path to lattice.bootstrap.json (default: ./lattice.bootstrap.json) — supplies
 //	                                  bootstrap.RoleOperatorID, which the system-actor discovery probe below
-//	                                  (bootstrap.SystemActorKeys) matches holdsRole links against.
+//	                                  (bootstrap.SystemActorKeys) matches holdsRole links against, and the
+//	                                  primordial ids the kernel topology link set is composed from
+//	                                  (bootstrap.KernelTopologyLinkKeys, held immutable by the step-8 guard).
 //	LATTICE_AUTH_MODE                 capability (default) | stub (test/dev — emits stub-auth-active alert)
 //	LATTICE_AUTH_TRACE_ALLOW_DECISIONS  "true" to also trace ALLOWED decisions (default: "false" — denial-only per FR23)
 //	PROCESSOR_INSTANCE                instance id (default: auto-generated proc-<NanoID>)
@@ -145,24 +147,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("discover system actor keys: %w", err)
 	}
-	authWiring := processor.AuthWiring{
-		RbacRolesActive: true,
-		SystemActorKeys: systemActorKeys,
-		// The trusted platform engines' primordial actor keys, surfaced to
-		// package scripts as the `primordialActor` global. Both entries back a
-		// live call site whose operator grant is `Scope:"any"`: the externalTask
-		// instanceOps Loom relays pin op.actor against "loom" before touching the
-		// subject their payload names, and the augur reasoning claim Weaver
-		// dispatches as a directOp pins against "weaver" before minting over the
-		// entity/target its payload names. Unlike SystemActorKeys this needs no
-		// discovery — the keys are bootstrap-derived and fixed.
-		PrimordialActors: map[string]string{
-			"loom":   bootstrap.LoomIdentityKey,
-			"weaver": bootstrap.WeaverIdentityKey,
-		},
+	authWiring, err := buildAuthWiring(systemActorKeys)
+	if err != nil {
+		return err
 	}
 	logger.Info("step-3 platform routing wired (class-aware, unconditional)",
-		"systemActors", len(systemActorKeys))
+		"systemActors", len(systemActorKeys),
+		"kernelTopologyLinks", len(authWiring.KernelLinkKeys))
 
 	v, err := loadVault(logger)
 	if err != nil {
@@ -395,6 +386,41 @@ func loadVault(logger *slog.Logger) (*vault.LocalBackend, error) {
 	}
 	logger.Info("vault wired", "backend", "local")
 	return v, nil
+}
+
+// buildAuthWiring assembles the authorization inputs the pipeline cannot
+// compute for itself: the discovered system actors, the fixed primordial engine
+// actor keys, and the kernel's seeded topology link set. It runs after
+// bootstrap.Load, and refuses if the table is not loaded rather than wiring a
+// set that names nothing.
+func buildAuthWiring(systemActorKeys []string) (processor.AuthWiring, error) {
+	// The twelve links the kernel seeds as its authorization topology, which
+	// the step-8 protected-key guard holds immutable except for a revive. Read
+	// from the loaded table, so the set names THIS epoch's edges and a stranded
+	// prior epoch's stay revocable by `lattice bootstrap retire-stranded-epoch`
+	// — with the operational precondition that every replica has restarted on
+	// the current lattice.bootstrap.json before that verb runs.
+	kernelLinkKeys, err := bootstrap.KernelTopologyLinkKeys()
+	if err != nil {
+		return processor.AuthWiring{}, fmt.Errorf("compose kernel topology link set: %w", err)
+	}
+	return processor.AuthWiring{
+		RbacRolesActive: true,
+		SystemActorKeys: systemActorKeys,
+		// The trusted platform engines' primordial actor keys, surfaced to
+		// package scripts as the `primordialActor` global. Both entries back a
+		// live call site whose operator grant is `Scope:"any"`: the externalTask
+		// instanceOps Loom relays pin op.actor against "loom" before touching the
+		// subject their payload names, and the augur reasoning claim Weaver
+		// dispatches as a directOp pins against "weaver" before minting over the
+		// entity/target its payload names. Unlike SystemActorKeys this needs no
+		// discovery — the keys are bootstrap-derived and fixed.
+		PrimordialActors: map[string]string{
+			"loom":   bootstrap.LoomIdentityKey,
+			"weaver": bootstrap.WeaverIdentityKey,
+		},
+		KernelLinkKeys: kernelLinkKeys,
+	}, nil
 }
 
 func envOrDefault(key, def string) string {

@@ -169,11 +169,26 @@ const (
 	// Steps 6/8 typed failure codes.
 	ErrCodeDDLViolation     ErrorCode = "DDLViolation"
 	ErrCodeRevisionConflict ErrorCode = "RevisionConflict"
-	// ErrCodeProtectedKey is the step-8 authoritative backstop: any update or
-	// tombstone whose root document carries data.protected == true is rejected
-	// at commit time, path-independent (InstallPackage, UninstallPackage,
-	// meta-root, or any future DDL). It is the kernel/auth bricking guard —
-	// the script-level checks are best-effort defense-in-depth only.
+	// ErrCodeProtectedKey is the step-8 authoritative backstop. It covers two
+	// kernel shapes, at commit time and path-independently (InstallPackage,
+	// UninstallPackage, meta-root, RevokeRole/RevokePermission, or any future
+	// DDL):
+	//
+	//   - any update or tombstone whose root document carries
+	//     data.protected == true;
+	//   - any tombstone of one of the links the kernel seeds as its
+	//     authorization topology — the edges that make the primordial admin and
+	//     the internal service actors root-equivalent, and those that carry the
+	//     kernel operations' grants to the operator role — and any update of one
+	//     that would not leave the seeded edge intact (a soft delete, a
+	//     re-pointed endpoint). Those links carry no document marker of their
+	//     own, so they are held by exact key; both endpoints of each are
+	//     themselves protected, and the reply names the source endpoint as the
+	//     root. An update restoring a revoked one to its seeded shape is
+	//     admitted — it is the heal path for a deployment already revoked.
+	//
+	// It is the kernel/auth bricking guard — the script-level checks are
+	// best-effort defense-in-depth only.
 	ErrCodeProtectedKey ErrorCode = "ProtectedKey"
 	// ErrCodePermissionProvenance is the step-8 rejection when an update would
 	// rewrite a vtx.permission.<id> root's operationType, scope, origin or

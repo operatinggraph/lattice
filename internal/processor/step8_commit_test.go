@@ -22,7 +22,7 @@ func buildCommitterPipeline(t *testing.T) (context.Context, *CommitterImpl, *DDL
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	c := NewCommitter(conn, testCoreBucket, cache, testLogger(), time.Now)
+	c := NewCommitter(conn, testCoreBucket, cache, testLogger(), time.Now, nil)
 	return ctx, c, cache
 }
 
@@ -2046,7 +2046,7 @@ def execute(state, op):
 		seedIdentityRootProtection(t, ctx, conn, root, true)
 	}}
 	cp, cons := newInjectedPipeline(t, ctx, conn,
-		NewCommitter(conn, testCoreBucket, cache, logger, time.Now), flipped, "root-flip")
+		NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil), flipped, "root-flip")
 
 	env := newTestEnvelope(testNanoID1)
 	sub := publishWithReply(t, conn, env)
@@ -2137,7 +2137,7 @@ func TestCommit_InjectedTaskUpdateIsNotGatedByPermittedCommands(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	c := NewCommitter(conn, testCoreBucket, cache, logger, time.Now)
+	c := NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil)
 
 	taskKey := "vtx.task.Wq4tYx7zBd2gJn5kMp8s"
 	creator := newTestEnvelope(testNanoID1)
@@ -2220,7 +2220,7 @@ def execute(state, op):
 		t.Fatalf("ddl cache refresh: %v", err)
 	}
 	racer := &racingPriorCommitter{
-		inner: NewCommitter(conn, testCoreBucket, cache, logger, time.Now),
+		inner: NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil),
 		bump: func() {
 			seedAspect(t, ctx, conn, key, "identity")
 		},

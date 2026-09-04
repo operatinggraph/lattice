@@ -96,7 +96,7 @@ func newPipelineWithRealEvents(t *testing.T, ctx context.Context, conn *substrat
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("ddl cache refresh: %v", err)
 	}
-	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now)
+	committer := NewCommitter(conn, testCoreBucket, cache, logger, time.Now, nil)
 	cp := NewCommitPath(Deps{
 		Conn:        conn,
 		CoreBucket:  testCoreBucket,

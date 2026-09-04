@@ -25,8 +25,11 @@ package bootstrap
 // protected-key backstop is the Processor commit-time guard
 // (rejectProtectedMutations in internal/processor/step8_commit.go): for every
 // update/tombstone it KVGets the 3-segment root and rejects the whole
-// operation with ErrCodeProtectedKey when data.protected == true. That guard
-// is path-independent and covers InstallPackage, UninstallPackage, meta-root,
+// operation with ErrCodeProtectedKey when data.protected == true, and it
+// rejects the same way for a mutation of one of the kernel's own topology
+// links (bootstrap.KernelTopologyLinkKeys), which have no vertex root to
+// carry a marker and are held by exact key instead. That guard is
+// path-independent and covers InstallPackage, UninstallPackage, meta-root,
 // and any future DDL at once. InstallPackage is additionally safe by
 // construction (create-only → CreateOnly conflicts on overwrite of any
 // existing protected root).
@@ -154,8 +157,10 @@ def execute(state, op):
         # NOTE: protected-key (kernel/auth) protection is enforced
         # authoritatively by the Processor commit-time guard (step 8
         # rejectProtectedMutations), which KVGets each tombstone's root and
-        # rejects the whole op when data.protected == true. This script does
-        # NOT (and cannot, with empty hydrated state) backstop that.
+        # rejects the whole op when data.protected == true, and rejects a
+        # tombstone of one of the kernel's own topology links by exact key.
+        # This script does NOT (and cannot, with empty hydrated state)
+        # backstop that.
 
         mut = {"op": "tombstone", "key": key}
         if expected != None:
@@ -224,8 +229,9 @@ def execute(state, op):
             fail("InvalidArgument: illegal key shape: " + str(key))
         # NOTE: protected-key (kernel/auth) protection is enforced
         # authoritatively by the Processor commit-time guard (step 8
-        # rejectProtectedMutations) for every update/tombstone, not here —
-        # the upgrade script runs with empty hydrated state.
+        # rejectProtectedMutations) for every update/tombstone — the protected
+        # root it KVGets, and the kernel's own topology links by exact key —
+        # not here: the upgrade script runs with empty hydrated state.
         if _is_aspect_key(key):
             local = _aspect_local_name(key)
             if len(local) > 0 and local[0] == "_":

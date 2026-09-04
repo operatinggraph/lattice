@@ -45,7 +45,7 @@ func sharedCachePipeline(
 	logger := testutil.TestLogger()
 	metrics := &processor.Metrics{}
 	hb := processor.NewHealthHeartbeater(conn, testutil.HarnessHealthBucket, durable, 10*time.Second, metrics, logger)
-	committer := processor.NewCommitter(conn, testutil.HarnessCoreBucket, cache, logger, time.Now)
+	committer := processor.NewCommitter(conn, testutil.HarnessCoreBucket, cache, logger, time.Now, nil)
 	cp := processor.NewCommitPath(processor.Deps{
 		Conn:        conn,
 		CoreBucket:  testutil.HarnessCoreBucket,
