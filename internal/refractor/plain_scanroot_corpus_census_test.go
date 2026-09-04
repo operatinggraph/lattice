@@ -53,14 +53,13 @@ const (
 	rootNoLabel        = "the anchor pattern position carries no label"
 	rootKeyPinned      = "the anchor pattern is pinned by its own key"
 	rootExpandedAnchor = "taxonomy-expansion sigil"
-	rootUntypedHop     = "pattern carries an untyped relationship"
 	rootWithDropped    = "a WITH dropped"
 	rootWithUnmodelled = "the WITH scope walk cannot model"
 	rootUngrounded     = "not reached from the anchor"
 )
 
 var scanRootConjuncts = []string{
-	rootNoLabel, rootKeyPinned, rootExpandedAnchor, rootUntypedHop,
+	rootNoLabel, rootKeyPinned, rootExpandedAnchor,
 	rootWithDropped, rootWithUnmodelled, rootUngrounded,
 }
 
@@ -150,8 +149,17 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// Acted on — see cafeLeaseWorkplaces.
-	"menuCatalog":                   {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"objectIdentityAttachmentsRead": {hasNeighbour: true, reason: rootUntypedHop},
+	"menuCatalog": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	// The corpus's one untyped-hop plain lens. Its `-[r]->` is a wildcard hop —
+	// no relation named, every relation admitted — so the index is complete and
+	// the closure question is asked of it for the first time. It answers
+	// refused: the lens is anchored on the LINK and its key is
+	// (oid_id, owner_id, link_name) — `owner_id` and `type(r)` both need the
+	// edge the empty synthetic probe body carries no relationship for, the same
+	// PROBE-side divergence opCatalog's row names. The plain arm never acts on it
+	// either way: it declares DiffRetraction, which plainDerivationIndex refuses
+	// on independently.
+	"objectIdentityAttachmentsRead": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"oneBillCafeEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"oneBillClinicEntries":          {hasNeighbour: true, reason: rootUngrounded},
 	"oneBillRentEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
@@ -251,11 +259,11 @@ func deriveScanRootVerdict(t *testing.T, eng *full.Engine, name, spec string, ru
 	// !exhaustive (an untyped relationship anywhere in the query) must also
 	// count as "has a neighbour": ReferencedRelations silently drops an
 	// untyped hop from rels rather than naming it, so len(rels) > 0 alone
-	// would misclassify such a lens as single-node ("no neighbour endpoint
-	// at all") instead of reaching ScanRootHopIndex's own rootUntypedHop
-	// refusal path. The live corpus happens to carry zero untyped-hop plain
-	// lenses today, so this widens no verdict currently pinned — it closes a
-	// classification gap the corpus could hit on its next edit.
+	// would misclassify such a lens as single-node ("no neighbour endpoint at
+	// all"). The corpus carries one such lens — objectIdentityAttachmentsRead,
+	// whose `MATCH (o:object)-[r]->(owner:identity)` names no relation — and its
+	// ScanRootHopIndex records that hop as a wildcard, so it is a neighbour
+	// endpoint the closure question is genuinely asked about.
 	rels, exhaustive := fullCR.ReferencedRelations()
 	v := plainScanRootVerdict{hasNeighbour: len(rels) > 0 || !exhaustive}
 

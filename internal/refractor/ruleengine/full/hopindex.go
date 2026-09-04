@@ -460,14 +460,13 @@ func (cr *CompiledRule) ScanRootHopIndex() HopIndex {
 // It is deliberately independent of Complete. noteAnchor fires while
 // addPattern walks a pattern's NODES, ahead of every hop-level and
 // grounding-level refusal, and the completeness switch only writes Incomplete —
-// so a query this index cannot walk (an untyped or variable-length hop, a
-// re-reference across a WITH, an ungrounded pattern head) still reports its
-// declaration truthfully. Which is exactly the question the caller asks:
+// so a query this index cannot walk (a ranged hop whose lower bound exceeds
+// one, a re-reference across a WITH, an ungrounded pattern head) still reports
+// its declaration truthfully. Which is exactly the question the caller asks:
 // pipeline.ConsumerFilter needs to know whether the lens was WRITTEN to be
 // actor-anchored, not whether the affected-anchor derivation can run on it.
 // Reading Anchor only when Complete would report the shapes that refuse for
-// some other reason — objectAttachments, capabilityServiceAccess and half the
-// edge-manifest corpus among them — as plain.
+// some other reason — half the edge-manifest corpus among them — as plain.
 //
 // The one shape it under-reports is a `{key: $actorKey}` node buried inside an
 // Expr addExpr does not model: that arm default-denies WITHOUT descending, so
@@ -716,12 +715,38 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 			b.rejectOnce("pattern has more relationships than node gaps")
 			return
 		}
+		// An UNTYPED hop (r.Type == "") is recorded as a WILDCARD hop, carrying
+		// Rel == "". It takes the same fixed/ranged arms below as a named one —
+		// `-[r*1..3]->` is still a ranged hop, and MinHops > 1 still refuses.
+		//
+		// Rel == "" means "this hop names no relation", and every consumer reads
+		// it as ADMIT-ANY: AnchorSideSeeds treats the hop as a candidate for
+		// every relation, and edgeTakesStep admits an adjacency entry whatever
+		// its name. That is the same sentence stepAdmitsFarEnd states in the
+		// label dimension — "cannot confirm the label must widen the set, not
+		// narrow it" — and it is character for character the predicate
+		// rel_traverse.go applies when the executor actually binds the hop.
+		//
+		// SOUNDNESS BOUND, not a blanket. Recording the hop also adds an edge to
+		// the binding graph distances() walks, and AnchorSideSeeds' consider
+		// drops the endpoint whose distance is the larger. Adding an edge can
+		// only SHORTEN distances, so on a graph of three or more positions a
+		// wildcard hop incident to the anchor can push one endpoint below
+		// another and drop a seed a hopless index would have kept — and since
+		// OPTIONAL MATCH records Binding: true, the shortening edge need not
+		// exist in the data. So: a wildcard hop is sound where it is the ONLY
+		// hop between the anchor and a position it is incident to. Anything
+		// wider needs the seed-both-endpoints treatment consider's `ds < 0 ||
+		// dd < 0` arm already gives an incomparable pair. The bound is
+		// conservative at the walk — walkToAnchors crosses the triggering hop
+		// back from whichever endpoint was seeded, so a moved seed still reaches
+		// the same anchors — but it is stated as the licence and pinned on its
+		// own dimension: TestCorpusAnchorHopIndex_WildcardHopGraphsStayInsideTheBound
+		// fails any corpus lens whose wildcard-hop graph has a third position or
+		// a wildcard hop not incident to the anchor. (The per-relation census,
+		// TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation,
+		// checks relation coverage and says nothing about position count.)
 		switch {
-		case r.Type == "":
-			// An untyped hop matches any relation, so it cannot be indexed by
-			// relation name — the arm ReferencedRelations fails exhaustiveness
-			// on, for the same reason.
-			b.rejectOnce("pattern carries an untyped relationship")
 		case r.MinHops > 1:
 			// A ranged hop whose LOWER bound exceeds 1 is refused, and the
 			// reason is in the SEEDING rather than in the walk.
@@ -992,7 +1017,9 @@ func (ix HopIndex) AnchorSideSeeds(srcType, rel, dstType string) []Seed {
 		}
 	}
 	for _, h := range ix.Hops {
-		if h.Rel != rel {
+		// A WILDCARD hop (Rel == "") names no relation, so it is a candidate for
+		// every one of them.
+		if h.Rel != "" && h.Rel != rel {
 			continue
 		}
 		if (h.Dir == DirOut || h.Dir == DirBoth) && admits(h.From, srcType) && admits(h.To, dstType) {

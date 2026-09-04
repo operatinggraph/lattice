@@ -85,9 +85,10 @@ const corpusWalkScopeMinimum = 55
 // sorted by type, then the relations followable at EVERY type (an unlabeled
 // pattern position, or a variable-length hop, whose expansion stands on
 // unlabeled intermediates). A type whose entry is `*` follows every relation,
-// which an untyped hop at a labelled position would produce and which no
-// shipped cypher reaches: AnchorHopIndex refuses an untyped relationship
-// outright, so such a lens lands on `nil` instead.
+// which an untyped hop at a LABELLED position produces and which no shipped
+// cypher reaches: the corpus's one untyped hop, objectAttachments', is at an
+// unlabeled position, and there the scope has nothing left to bound at all —
+// addIndex refuses the whole index and the lens lands on `nil` instead.
 //
 // `none` AND `nil` ARE OPPOSITE ANSWERS, and objectLiveness is the row that
 // makes the difference load-bearing. `nil` is a REFUSED scope — the walk stays
@@ -181,7 +182,12 @@ var corpusActorWalkScopeDigests = map[string]string{
 var corpusActorWalkScopeRefusals = map[string]string{
 	"edgeManifestReadGrants":      "a branch's pattern graph is incomplete",
 	"edgeManifestStaffReadGrants": "a branch's pattern graph is incomplete",
-	"objectAttachments":           "a branch's pattern graph is incomplete",
+	// Its `(o:object)-[r]->(owner)` is a wildcard hop at an unlabeled position:
+	// any relation, at any type, so nothing is left to scope. The affected-anchor
+	// derivation reads that same index and DOES act on it — the two arms disagree
+	// by design, because the scope narrows a walk while the derivation replaces
+	// one.
+	"objectAttachments": "a branch carries an untyped relationship at an unlabeled position",
 }
 
 // corpusWalkScopeDerivation installs every actor-aware cypher the corpus ships

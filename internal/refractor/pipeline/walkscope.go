@@ -136,6 +136,7 @@ const (
 	walkScopeRefusalIncompleteIndex     = "a branch's pattern graph is incomplete"
 	walkScopeRefusalUnresolvedExpansion = "a branch carries a `*` position with no resolved expansion"
 	walkScopeRefusalUntypedHopUnlabeled = "a branch carries an untyped relationship at an unlabeled position"
+	walkScopeRefusalRangedWildcardHop   = "a branch carries a ranged untyped relationship"
 	walkScopeRefusalMalformedIndex      = "a branch's pattern graph names a position it does not hold"
 	walkScopeWildcardRelation           = "*"
 )
@@ -242,12 +243,15 @@ func deriveWalkScope(engineKind string, rules []ruleengine.CompiledRule, expansi
 // addIndex folds one branch's pattern graph into the scope, returning "" on
 // success or the refusal that makes the whole scope unusable.
 //
-// Both refusals it can return are reachable only from a HopIndex built directly
-// (the unit tests do): AnchorHopIndex refuses a pattern carrying an untyped
-// relationship, the caller declines an incomplete index before reaching here,
-// and its builder never emits a hop naming a position outside Labels. They are
-// handled rather than assumed away so the rule this type states holds for any
-// index it is handed.
+// walkScopeRefusalUntypedHopUnlabeled is reached by any complete index carrying
+// a WILDCARD hop (Rel == "") the scope cannot bound — an endpoint that admits
+// every type, or a ranged wildcard whose intermediates do. AnchorHopIndex
+// records an untyped hop as such a wildcard, so this is the arm the shipped
+// untyped-hop lenses land on. walkScopeRefusalMalformedIndex stays reachable
+// only from a HopIndex built directly (the unit tests do): the builder never
+// emits a hop naming a position outside Labels, and the caller declines an
+// incomplete index before reaching here. It is handled rather than assumed away
+// so the rule this type states holds for any index it is handed.
 func (s *walkScope) addIndex(ix full.HopIndex) string {
 	// Both refusals are decided over the WHOLE index before anything is folded
 	// in, so a refused index leaves the scope untouched rather than half-built.
@@ -270,6 +274,18 @@ func (s *walkScope) addIndex(ix full.HopIndex) string {
 					return walkScopeRefusalUntypedHopUnlabeled
 				}
 			}
+		}
+		if h.Rel == "" && h.Max > 1 {
+			// A RANGED wildcard hop, even between two labeled endpoints. Its
+			// expansion stands on unlabeled intermediates — a type no position
+			// names — and crosses a relation the hop does not name either, so
+			// the walk follows every relation at every type in the middle of
+			// it. Folding only the endpoints' types into wildcard would scope
+			// the walk to less than it must cross, which is the narrowing and
+			// therefore unsound direction; the whole index is refused instead,
+			// under its own reason so an operator reading the refusal is told
+			// about the range and not about a position their cypher lacks.
+			return walkScopeRefusalRangedWildcardHop
 		}
 	}
 

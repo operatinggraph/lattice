@@ -43,10 +43,10 @@ func mustParse(t *testing.T, eng *full.Engine, spec string) ruleengine.CompiledR
 // The three shapes a branch-carrying lens can be refused on, plus the two the
 // pattern graphs agree on.
 const (
-	branchSpecMayRead   = "MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor"
-	branchSpecMayBook   = "MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"
-	branchSpecUntyped   = "MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"
-	branchSpecOtherType = "MATCH (org:org {key: $actorKey})-[:owns]->(x:unit)\nRETURN x.key AS anchor"
+	branchSpecMayRead    = "MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor"
+	branchSpecMayBook    = "MATCH (identity:identity {key: $actorKey})-[:mayBook]->(x:unit)\nRETURN x.key AS anchor"
+	branchSpecUnreadable = "MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor"
+	branchSpecOtherType  = "MATCH (org:org {key: $actorKey})-[:owns]->(x:unit)\nRETURN x.key AS anchor"
 )
 
 // TestBranchAnchorHopsRefusal_EveryConjunctNamesItself is the closed vocabulary's
@@ -76,11 +76,11 @@ func TestBranchAnchorHopsRefusal_EveryConjunctNamesItself(t *testing.T) {
 
 	t.Run("a walk whose graph cannot answer names the incomplete conjunct AND carries that walk's own reason", func(t *testing.T) {
 		_, refusal := deriveBranchAnchorHops(ruleengine.EngineFull, []ruleengine.CompiledRule{
-			good[0], mustParse(t, eng, branchSpecUntyped),
+			good[0], mustParse(t, eng, branchSpecUnreadable),
 		}, nil)
 		require.Contains(t, refusal, DerivationBranchIncompleteRefusal)
 		require.Contains(t, refusal, "walk 1")
-		require.Contains(t, refusal, "pattern carries an untyped relationship",
+		require.Contains(t, refusal, "lower bound exceeds one hop",
 			"the refused walk's OWN reason must survive: 'one of the walks declined' alone sends an operator nowhere")
 	})
 
@@ -183,7 +183,7 @@ func TestRuleState_BranchAnchorHopsSurvivePublication(t *testing.T) {
 	refused := &Pipeline{ruleID: "round-trip-refused"}
 	require.NoError(t, refused.UseFullEngineBranches(eng, mustParse(t, eng, branchSpecMayRead), []ruleengine.CompiledRule{
 		mustParse(t, eng, branchSpecMayRead),
-		mustParse(t, eng, branchSpecUntyped),
+		mustParse(t, eng, branchSpecUnreadable),
 	}))
 	rs = refused.ruleState()
 	require.Contains(t, rs.anchorHopsPerBranchRefusal, DerivationBranchIncompleteRefusal)
@@ -227,7 +227,7 @@ func TestBranchAnchorHops_ReloadReplacesThemWholesale(t *testing.T) {
 	// And back up again, to a body whose walks no longer agree: the graphs are
 	// replaced by the refusal, not left as the previous body's usable set.
 	require.NoError(t, p.UseFullEngineBranches(eng, three[0], []ruleengine.CompiledRule{
-		three[0], mustParse(t, eng, branchSpecUntyped),
+		three[0], mustParse(t, eng, branchSpecUnreadable),
 	}))
 	rs = p.ruleState()
 	require.Empty(t, rs.anchorHopsPerBranch)

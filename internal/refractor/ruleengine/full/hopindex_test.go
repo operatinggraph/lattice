@@ -250,11 +250,6 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			want: "not reached from the anchor",
 		},
 		{
-			name: "an untyped relationship cannot be indexed by relation name",
-			body: `MATCH (i:identity {key: $actorKey})-[]->(x:role) RETURN i.key AS k, x.key AS r`,
-			want: "untyped relationship",
-		},
-		{
 			// The adversarial case: a scan-seeded position RESCUED by a hop
 			// that does not bind it. Reachability in the hop graph says
 			// "connected"; the executor still scans every unit and every
@@ -951,13 +946,16 @@ func TestDeclaresActorAnchor_IsIndependentOfCompleteness(t *testing.T) {
 			wantDeclared: true,
 		},
 		{
+			// An untyped relationship — objectAttachments' shape. It is a
+			// WILDCARD hop, not a refusal: the index is complete and the hop
+			// names no relation. TestAnchorHopIndex_UntypedHopIsAWildcard pins
+			// what the hop then admits.
 			name: "untyped relationship — objectAttachments' shape",
 			body: `
 MATCH (identity:identity {key: $actorKey})-[]->(o:object)
 RETURN identity.key AS actorKey, o.key AS ok
 `,
-			wantDeclared:   true,
-			wantIncomplete: "pattern carries an untyped relationship",
+			wantDeclared: true,
 		},
 		{
 			name: "pattern head the anchor never reaches — the ungrounded refusal",
@@ -1104,12 +1102,6 @@ func TestScanRootHopIndex_Refusals(t *testing.T) {
 			want:     "taxonomy-expansion sigil",
 		},
 		{
-			name:     "an untyped hop cannot be indexed by relation name",
-			refused:  `MATCH (pr:provider)-[]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
-			positive: positive,
-			want:     "untyped relationship",
-		},
-		{
 			// The conjunct AnchorHopIndex's own `b.anchor < 0` early-out
 			// swallows for every plain lens: there is no $actorKey position
 			// to judge groundedness relative to, so AnchorHopIndex's switch
@@ -1224,4 +1216,48 @@ func TestScanRootHopIndex_UnnamedRootPins(t *testing.T) {
 	require.True(t, ix.Complete, "%s", ix.Incomplete)
 	require.Equal(t, "provider", ix.Labels[ix.Anchor], "the unnamed anchor pattern is still the terminus")
 	require.Equal(t, []int{0, 1}, ix.Dist, "the neighbour identity sits one binding hop from the unnamed root")
+}
+
+// TestAnchorHopIndex_UntypedHopIsAWildcard pins what an untyped `-[r]->`
+// becomes: a hop carrying Rel == "" on a COMPLETE index, which every consumer
+// reads as admit-any in the relation dimension.
+//
+// The negative vector is what gives the positive one meaning. A wildcard hop
+// admits by RELATION and still discriminates by TYPE: the pattern's positions
+// are as labeled as they ever were, so a link whose endpoints cannot sit at them
+// seeds nothing, and the empty answer stays the licence to skip that
+// AnchorSideSeeds' contract says it is.
+func TestAnchorHopIndex_UntypedHopIsAWildcard(t *testing.T) {
+	ix := indexOf(t, `
+MATCH (a:object {key: $actorKey})-[r]->(b)
+RETURN a.key AS actorKey, b.key AS bk
+`)
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+	require.Len(t, ix.Hops, 1)
+	require.Equal(t, "", ix.Hops[0].Rel,
+		"an untyped hop names no relation, and that empty name IS the wildcard")
+
+	for _, rel := range []string{"photoOf", "avatarOf", "someRelationNoPatternMentions"} {
+		require.NotEmptyf(t, ix.AnchorSideSeeds("object", rel, "identity"),
+			"a wildcard hop is a candidate for every relation, `%s` included", rel)
+	}
+
+	// The far end is unlabeled, so it admits every destination type too.
+	require.NotEmpty(t, ix.AnchorSideSeeds("object", "photoOf", "object"))
+
+	// Discrimination by type survives: `a` must be an `object`, so a link whose
+	// source is an identity binds no hop and the executor could not have bound
+	// it either.
+	require.Empty(t, ix.AnchorSideSeeds("identity", "holdsRole", "role"),
+		"the wildcard admits by relation; the pattern's own labels still decide the type")
+
+	// ScanRootHopIndex reads the same builder, so the plain arm records the same
+	// wildcard — objectIdentityAttachmentsRead's shape.
+	rx := rootIndexOf(t, `
+MATCH (pr:provider)-[r]->(id:identity)
+RETURN pr.key AS key, id.key AS idk
+`)
+	require.True(t, rx.Complete, "%s", rx.Incomplete)
+	require.Len(t, rx.Hops, 1)
+	require.Equal(t, "", rx.Hops[0].Rel)
 }

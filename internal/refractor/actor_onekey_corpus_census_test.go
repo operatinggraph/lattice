@@ -132,13 +132,15 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"leaseExpiry":                    oneKey,
 	"leaseRentSettlement":            oneKey,
 	"myTasks":                        walkMultiPosition,
-	"objectAttachments":              walkIncompleteIndex,
-	"objectLiveness":                 oneKey, // PositionsBinding("object") is exactly {Anchor}.
-	"orphanedTaskGrants":             walkMultiPosition,
-	"pastDueAppointments":            oneKey,
-	"pastDueBookings":                oneKey,
-	"renewalComplete":                oneKey,
-	"staleAssignedTasks":             oneKey,
+	// PositionsBinding("object") is {0, 1}: the `(owner)` end is unlabeled, so it
+	// admits every type — an object attached to another object included.
+	"objectAttachments":   walkMultiPosition,
+	"objectLiveness":      oneKey, // PositionsBinding("object") is exactly {Anchor}.
+	"orphanedTaskGrants":  walkMultiPosition,
+	"pastDueAppointments": oneKey,
+	"pastDueBookings":     oneKey,
+	"renewalComplete":     oneKey,
+	"staleAssignedTasks":  oneKey,
 	// (t)-[:forOperation]->(op:meta) is label-typed, so op can never bind the
 	// task actor type — every hop off t (identity/leaseapp/renewal/meta) now
 	// excludes task, and the task anchor type binds only at the anchor.

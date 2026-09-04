@@ -162,11 +162,11 @@ func TestDeriveAnchors_IncompleteIndexRefuses(t *testing.T) {
 	f.vertex("l1", "location")
 	f.edge("residesIn", "alice", "l1")
 
-	// An untyped hop cannot be indexed by relation name, so the index is
-	// incomplete and every arm falls back.
+	// A ranged hop whose LOWER bound exceeds one hop cannot be seeded soundly,
+	// so the index is incomplete and every arm falls back.
 	p := derivationPipeline(t, adjKV, `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[]->(loc)<-[:availableAt]-(svc:service)
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*2..3]->(loc)<-[:availableAt]-(svc:service)
 RETURN identity.key AS actorKey, svc.key AS s
 `)
 	rs := p.ruleState()
@@ -246,7 +246,7 @@ func TestShadow_SamplingAndDeclineAreBothCounted(t *testing.T) {
 	f.vertex("alice", "identity")
 	p := derivationPipeline(t, adjKV, `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(l0)-[]->(l)
+OPTIONAL MATCH (identity)-[:residesIn]->(l0)-[:containedIn*2..3]->(l)
 RETURN identity.key AS actorKey, l.key AS lk
 `)
 	p.SetAnchorDerivationSampling(1)
@@ -345,4 +345,60 @@ func TestAnchorHops_ReloadLifetime(t *testing.T) {
 
 	p.UseFullEngine(eng, one)
 	require.True(t, p.ruleState().anchorHops.Complete, "a reload back to one walk re-arms the derivation")
+}
+
+// TestWalkToAnchors_WildcardStepFollowsEveryRelation is the data half of the
+// wildcard hop: objectAttachments' shape, whose `-[r]->` names no relation.
+//
+// Three things are asserted together, because each without the others would
+// pass on a broken predicate. The step crosses TWO DIFFERENT relation names —
+// bare equality against Rel == "" would cross neither. It still PRUNES ON THE
+// FAR END'S LABEL — an untyped hop widens the relation dimension only, and the
+// pattern's own labels keep deciding the type. And it still honours DIRECTION —
+// an untyped hop says nothing about the relation, but the arrow is written and
+// the executor's own matcher reads it.
+func TestWalkToAnchors_WildcardStepFollowsEveryRelation(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+	f.vertex("alice", "identity")
+	f.vertex("bob", "identity")
+	f.vertex("carol", "identity")
+	f.vertex("admin", "role")
+	f.vertex("photo1", "object")
+
+	// Two relation names into the same object, from two identities.
+	f.edge("photoOf", "alice", "photo1")
+	f.edge("avatarOf", "bob", "photo1")
+	// Same direction, wrong far-end type: the pattern labels that end `identity`.
+	f.edge("grantsOn", "admin", "photo1")
+	// Right type, wrong direction: the pattern's arrow runs identity -> object.
+	f.edge("storedFor", "photo1", "carol")
+
+	p := derivationPipeline(t, adjKV, `
+MATCH (identity:identity {key: $actorKey})-[r]->(o:object)
+RETURN identity.key AS actorKey, o.key AS ok
+`)
+	rs := p.ruleState()
+	require.True(t, rs.anchorHops.Complete, "%s", rs.anchorHops.Incomplete)
+
+	derived, ok, err := p.deriveAnchorsForVertex(context.Background(), rs,
+		f.key("photo1", "object"), "object")
+	require.NoError(t, err)
+	require.True(t, ok, "a wildcard-hop index answers rather than refusing")
+	require.ElementsMatch(t, []string{
+		f.key("alice", "identity"), f.key("bob", "identity"),
+	}, derived,
+		"the wildcard step crosses photoOf AND avatarOf, prunes the role end on its label, "+
+			"and refuses the outbound storedFor edge on direction")
+
+	// A link event over a relation the pattern never names still seeds, for the
+	// same reason: the hop names none of them.
+	for _, rel := range []string{"photoOf", "avatarOf", "somethingElseEntirely"} {
+		derived, ok, err = p.deriveAnchorsForLink(context.Background(), rs,
+			f.link(rel, "alice", "identity", "photo1", "object"))
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.ElementsMatchf(t, []string{f.key("alice", "identity")}, derived,
+			"a `%s` link binds the wildcard hop and seeds its anchor-side endpoint", rel)
+	}
 }

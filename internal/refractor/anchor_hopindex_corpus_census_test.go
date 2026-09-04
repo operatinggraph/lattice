@@ -46,7 +46,6 @@ const (
 	// hopIndexed is the answer, not a refusal: the pattern graph is
 	// authoritative and the pipeline seeds from it instead of enumerating.
 	hopIndexed        = ""
-	hopUntypedHop     = "pattern carries an untyped relationship"
 	hopUngroundedSeed = "not reached from the anchor"
 	hopMultiAnchor    = "several pattern positions bind $actorKey"
 	hopExpandedAnchor = "taxonomy-expansion sigil"
@@ -122,24 +121,26 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	// dropped at one stage boundary and re-bound at the next. Lifting that
 	// refusal is Increment 2 of the varlength-anchor-derivation design, held at
 	// ratification behind a live measurement.
-	"edgeManifestReadGrants":            hopWithDropped,
-	"edgeManifestStaffReadGrants":       hopWithDropped, // Same shape, dropping `role`.
-	"edgeProviderQueue":                 hopIndexed,
-	"edgeProviderSchedule":              hopIndexed,
-	"edgeServices":                      hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeStaffPanes":                    hopIndexed,
-	"edgeStaffWorkOrders":               hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeTasks#0":                       hopIndexed,
-	"edgeTasks#1":                       hopIndexed,
-	"followUpReminders":                 hopIndexed,
-	"applicantOnboarding":               hopIndexed,
-	"identityAnchors":                   hopIndexed,
-	"identityErasureResidue":            hopIndexed,
-	"leaseApplicationComplete":          hopIndexed,
-	"leaseExpiry":                       hopIndexed,
-	"leaseRentSettlement":               hopIndexed,
-	"myTasks":                           hopIndexed,
-	"objectAttachments":                 hopUntypedHop,
+	"edgeManifestReadGrants":      hopWithDropped,
+	"edgeManifestStaffReadGrants": hopWithDropped, // Same shape, dropping `role`.
+	"edgeProviderQueue":           hopIndexed,
+	"edgeProviderSchedule":        hopIndexed,
+	"edgeServices":                hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeStaffPanes":              hopIndexed,
+	"edgeStaffWorkOrders":         hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeTasks#0":                 hopIndexed,
+	"edgeTasks#1":                 hopIndexed,
+	"followUpReminders":           hopIndexed,
+	"applicantOnboarding":         hopIndexed,
+	"identityAnchors":             hopIndexed,
+	"identityErasureResidue":      hopIndexed,
+	"leaseApplicationComplete":    hopIndexed,
+	"leaseExpiry":                 hopIndexed,
+	"leaseRentSettlement":         hopIndexed,
+	"myTasks":                     hopIndexed,
+	// Its untyped `-[r]->` is a WILDCARD hop: it names no relation, and every
+	// consumer of the index reads that as admit-any.
+	"objectAttachments":                 hopIndexed,
 	"objectLiveness":                    hopIndexed, // One anchored node, no hops to index.
 	"orphanedTaskGrants":                hopIndexed,
 	"pastDueAppointments":               hopIndexed,
@@ -230,9 +231,15 @@ func TestCorpusAnchorHopIndex_PinnedConjuncts(t *testing.T) {
 // relation, and on a COMPLETE index anchor_derivation reads empty as "no anchor
 // can change" and skips the reprojection.
 //
-// A non-exhaustive relation set is skipped rather than failed: it means an
-// untyped or variable-length hop, and both refuse the index on their own
-// conjunct.
+// A NON-EXHAUSTIVE relation set is checked exactly like an exhaustive one. The
+// two answers differ only in whether the pattern carries an untyped hop, and
+// ReferencedRelations still returns every TYPED relation it found beside the
+// cleared flag: `MATCH (a:X {key:$actorKey})-[:foo]->(b) OPTIONAL MATCH
+// (a)-[r]->(c)` returns ({foo}, exhaustive=false). A wildcard hop is a distinct
+// key in `indexed` and covers no named relation, so exempting such a lens — or
+// passing it merely because some hop carries Rel == "" — would let `foo` go
+// unindexed and reinstate verbatim the skipped reprojection this test exists to
+// catch. The loop runs unconditionally.
 func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testing.T) {
 	eng := full.New()
 	checked := 0
@@ -245,10 +252,7 @@ func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testi
 		if !ix.Complete {
 			return
 		}
-		rels, exhaustive := fullCR.ReferencedRelations()
-		if !exhaustive {
-			return
-		}
+		rels, _ := fullCR.ReferencedRelations()
 		indexed := map[string]struct{}{}
 		for _, h := range ix.Hops {
 			indexed[h.Rel] = struct{}{}
@@ -266,6 +270,52 @@ func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testi
 		"only %d indexable cyphers reached this gate — the corpus enumeration or the derivation moved", checked)
 }
 
+// TestCorpusAnchorHopIndex_WildcardHopGraphsStayInsideTheBound pins the
+// soundness bound a wildcard hop (Rel == "") is admitted under, on the bound's
+// OWN dimension: recording the hop adds an edge to the binding graph
+// distances() walks, and AnchorSideSeeds' consider drops the farther endpoint,
+// so on a graph of three or more positions a wildcard hop incident to the
+// anchor can push one endpoint's distance below another's and move a seed. The
+// per-relation census beside this one checks relation COVERAGE and passes a
+// four-position wildcard graph untouched, so it cannot hold this bound. This
+// one fails any corpus lens whose complete index carries a wildcard hop on a
+// graph with a third position, or a wildcard hop not incident to the anchor —
+// the two shapes the bound excludes — and floors the population at one so an
+// enumeration that stops reaching the wildcard lenses cannot read as a pass.
+func TestCorpusAnchorHopIndex_WildcardHopGraphsStayInsideTheBound(t *testing.T) {
+	eng := full.New()
+	wildcardLenses := 0
+	forEachCorpusCypher(t, func(name, spec string, _ *lens.Rule, _, _ bool) {
+		cr, err := eng.Parse(spec)
+		require.NoErrorf(t, err, "%s must parse", name)
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.Truef(t, isFull, "%s must compile to the full engine", name)
+		ix := fullCR.AnchorHopIndex()
+		if !ix.Complete {
+			return
+		}
+		wildcards := 0
+		for _, h := range ix.Hops {
+			if h.Rel != "" {
+				continue
+			}
+			wildcards++
+			require.Truef(t, h.From == ix.Anchor || h.To == ix.Anchor,
+				"%s carries a wildcard hop %d→%d not incident to its anchor (position %d) — outside the bound AnchorHopIndex admits a wildcard under; type the relation or seed both endpoints",
+				name, h.From, h.To, ix.Anchor)
+		}
+		if wildcards == 0 {
+			return
+		}
+		wildcardLenses++
+		require.Lenf(t, ix.Labels, 2,
+			"%s carries a wildcard hop on a %d-position graph — a third position lets the wildcard shorten distances() and move a seed; the bound admits a wildcard only as the sole hop between the anchor and a position incident to it",
+			name, len(ix.Labels))
+	})
+	require.GreaterOrEqualf(t, wildcardLenses, 1,
+		"no complete corpus index carries a wildcard hop — objectAttachments should; the enumeration or the derivation moved")
+}
+
 // TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct default-denies the
 // vocabulary above. A conjunct added to the predicate without a constant here
 // would otherwise land in the table as whichever existing substring happened to
@@ -274,7 +324,6 @@ func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testi
 // nobody pinned.
 func TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct(t *testing.T) {
 	known := []string{
-		hopUntypedHop,
 		hopUngroundedSeed,
 		hopMultiAnchor,
 		hopExpandedAnchor,

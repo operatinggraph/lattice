@@ -230,13 +230,13 @@ OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
 RETURN identity.key AS actorKey, role.key AS rk
 `)
 	require.NoError(t, err)
-	untyped, err := eng.Parse(untypedRolesSpec)
+	unreadable, err := eng.Parse(unindexableRolesSpec)
 	require.NoError(t, err)
 
 	p := &Pipeline{ruleID: "mixedLens", adjKV: adjKV}
 	p.SetActorEnumerator(NewActorEnumerator(adjKV, nil, "identity"))
 	p.SetPersonalPlaneHealer(true)
-	require.NoError(t, p.UseFullEngineBranches(eng, typed, []ruleengine.CompiledRule{typed, untyped}))
+	require.NoError(t, p.UseFullEngineBranches(eng, typed, []ruleengine.CompiledRule{typed, unreadable}))
 
 	_, _, scoped := p.WalkScope()
 	require.False(t, scoped)
@@ -244,12 +244,13 @@ RETURN identity.key AS actorKey, role.key AS rk
 		"the healer is installed, so the refusal reported is the PATTERN one")
 }
 
-// TestWalkScope_UntypedHopRefusesTheScope pins the refusal on a real cypher.
-// AnchorHopIndex declines a pattern carrying an untyped relationship outright,
-// so the whole index is unreadable and the walk stays relation-blind.
-func TestWalkScope_UntypedHopRefusesTheScope(t *testing.T) {
+// TestWalkScope_UnreadableCypherRefusesTheScope pins the refusal on a real
+// cypher. A pattern graph the completeness predicate declines says nothing about
+// which relations it traverses, so the whole index is unreadable and the walk
+// stays relation-blind.
+func TestWalkScope_UnreadableCypherRefusesTheScope(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
-	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p := derivationPipeline(t, adjKV, unindexableRolesSpec)
 	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
 
 	byType, anyType, scoped := p.WalkScope()
@@ -260,11 +261,35 @@ func TestWalkScope_UntypedHopRefusesTheScope(t *testing.T) {
 		"the healer is installed, so the refusal reported is the PATTERN one")
 }
 
-// TestDeriveWalkScope_UntypedHopAtAnUnlabeledPositionIsWildcard reaches the
-// conjunct no shipped cypher can: an untyped hop at a position binding any type
-// leaves nothing to scope, so the whole scope is refused rather than narrowed.
-// It is asked of a hand-built pattern graph because AnchorHopIndex refuses an
-// untyped relationship before the derivation ever sees one.
+// TestWalkScope_UntypedHopAtLabeledEndsScopesPerType is the same question asked
+// of a wildcard hop, and the answer differs: the relation is unknowable, but the
+// TYPES its two labeled positions admit are not, so exactly those types follow
+// every relation and no other type follows any. Reached from a real cypher —
+// AnchorHopIndex now records an untyped relationship as a wildcard rather than
+// refusing it.
+func TestWalkScope_UntypedHopAtLabeledEndsScopesPerType(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
+
+	_, _, scoped := p.WalkScope()
+	require.True(t, scoped)
+	require.Empty(t, p.WalkScopeRefusal())
+
+	s := p.ruleState().walkScope
+	require.NotNil(t, s)
+	require.True(t, s.allows("identity", "anythingAtAll"))
+	require.True(t, s.allows("role", "anythingAtAll"))
+	require.False(t, s.allows("service", "anythingAtAll"),
+		"a type neither position admits still follows nothing")
+}
+
+// TestDeriveWalkScope_UntypedHopAtAnUnlabeledPositionIsWildcard states the
+// conjunct on its own: an untyped hop at a position binding any type leaves
+// nothing to scope, so the whole scope is refused rather than narrowed. The
+// pattern graph is hand-built so the index carries this shape and nothing else;
+// objectAttachments is the shipped cypher that lands on it, pinned by
+// actor_walk_scope_corpus_census_test.go.
 func TestDeriveWalkScope_UntypedHopAtAnUnlabeledPositionIsWildcard(t *testing.T) {
 	ix := full.HopIndex{
 		Labels:   []string{"identity", ""},
@@ -440,7 +465,7 @@ func TestWalkScope_PersonalPlaneHealerAlsoLicensesTheScope(t *testing.T) {
 // oneKeyAnswerSound, which tests p.sweeper before its own pattern half.
 func TestWalkScope_HealerRefusalIsReportedAheadOfThePatternOne(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
-	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p := derivationPipeline(t, adjKV, unindexableRolesSpec)
 
 	require.Nil(t, p.ruleState().walkScope, "this cypher's pattern half refuses too")
 	require.Equal(t, walkScopeRefusalIncompleteIndex, p.ruleState().walkScopeRefusal)
@@ -542,7 +567,7 @@ func TestWalkScopeMode_OffRestoresTheRelationBlindWalk(t *testing.T) {
 // told about a healer they did not touch or a cypher they did not write.
 func TestWalkScopeMode_OperatorRefusalOutranksEveryOther(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
-	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p := derivationPipeline(t, adjKV, unindexableRolesSpec)
 	require.Equal(t, walkScopeRefusalNoHealer, p.WalkScopeRefusal(),
 		"no healer and an unreadable cypher: the install-level reason wins")
 
@@ -605,4 +630,50 @@ func TestShadowMode_BaselineIsTheRelationBlindWalk(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, append([]string{holder}, peers...), baseline,
 		"shadow measures against the relation-blind walk, and acts on that wider answer")
+}
+
+// TestWalkScope_RangedWildcardHopRefusesWhileAFixedOneScopes holds the two
+// wildcard shapes side by side, because the scope's answer to them differs and
+// only the pair proves the refusal is the ranged hop's doing.
+//
+// A FIXED wildcard hop between two labeled endpoints is scopeable: the relation
+// is unknowable, but the hop stands on exactly the types those two positions
+// admit, so those types — and no others — follow every relation.
+//
+// A RANGED one is not. Its expansion stands on the unlabeled intermediates
+// between the two bound positions, crossing a relation the hop does not name at
+// a type no position names, so folding only the endpoints' types into wildcard
+// would scope the walk to less than it must cross. That is the narrowing
+// direction, and the whole index is refused instead.
+func TestWalkScope_RangedWildcardHopRefusesWhileAFixedOneScopes(t *testing.T) {
+	newScope := func() *walkScope {
+		return &walkScope{
+			byType:   map[string]map[string]struct{}{},
+			anyType:  map[string]struct{}{},
+			wildcard: map[string]struct{}{},
+		}
+	}
+	labels := []string{"identity", "role"}
+
+	fixed := newScope()
+	require.Empty(t, fixed.addIndex(full.HopIndex{
+		Labels:   labels,
+		Hops:     []full.PatternHop{{Rel: "", From: 0, To: 1, Dir: full.DirOut, Min: 1, Max: 1, Binding: true}},
+		Anchor:   0,
+		Complete: true,
+	}), "a fixed wildcard hop between labeled endpoints is scopeable")
+	require.True(t, fixed.allows("identity", "anything"))
+	require.True(t, fixed.allows("role", "anything"))
+	require.False(t, fixed.allows("unit", "anything"),
+		"a type neither endpoint admits is not on the hop and follows nothing")
+
+	ranged := newScope()
+	require.Equal(t, walkScopeRefusalRangedWildcardHop, ranged.addIndex(full.HopIndex{
+		Labels:   labels,
+		Hops:     []full.PatternHop{{Rel: "", From: 0, To: 1, Dir: full.DirOut, Min: 1, Max: 3, Binding: true}},
+		Anchor:   0,
+		Complete: true,
+	}), "a ranged wildcard hop's intermediates cross any relation at any type, so the scope refuses it under its own reason")
+	require.False(t, ranged.allows("identity", "anything"),
+		"a refused index leaves the scope untouched rather than half-built")
 }

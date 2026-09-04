@@ -608,7 +608,8 @@ func TestPersonalDerivationLicence_AMultiWalkLensLogsANamedReason(t *testing.T) 
 	// A genuinely multi-walk rule, published through the SAME installer
 	// cmd/refractor uses, so the graphs under test are the ones ruleinstall.go
 	// really leaves behind rather than ones a test hand-built. One walk carries
-	// an untyped relationship, which is what its graph refuses on.
+	// a ranged hop whose lower bound exceeds one, which is what its graph
+	// refuses on.
 	eng := full.New()
 	branch := func(spec string) ruleengine.CompiledRule {
 		cr, err := eng.Parse(spec)
@@ -616,9 +617,9 @@ func TestPersonalDerivationLicence_AMultiWalkLensLogsANamedReason(t *testing.T) 
 		return cr
 	}
 	head := branch("MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
-	untyped := branch("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
+	unreadable := branch("MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
 	p := &Pipeline{ruleID: "multi-walk-personal"}
-	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{head, untyped}))
+	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{head, unreadable}))
 	p.SetPersonalPlaneHealer(true)
 	verdictOf(p, licensedWiring(), cleanVerdict())
 
@@ -631,7 +632,7 @@ func TestPersonalDerivationLicence_AMultiWalkLensLogsANamedReason(t *testing.T) 
 	p.noteStaticDerivationRefusal(rs, "")
 	require.Contains(t, buf.String(), DerivationBranchIncompleteRefusal,
 		"a licensed multi-walk lens must log a NAMED reason; an empty one is swallowed by the latch and reads as silence")
-	require.Contains(t, buf.String(), "pattern carries an untyped relationship",
+	require.Contains(t, buf.String(), "lower bound exceeds one hop",
 		"and the refused walk's own reason must reach the operator")
 	require.NotContains(t, buf.String(), `reason=""`)
 
@@ -737,7 +738,7 @@ func TestStaticDerivationRefusal_EveryArmNamesItself(t *testing.T) {
 
 	arm(t, "a MULTI-WALK lens with a walk that cannot answer names that conjunct", DerivationBranchIncompleteRefusal, func() (*Pipeline, ruleState, string) {
 		return multiWalk(t, "multi-walk-incomplete", []ruleengine.CompiledRule{
-			single, parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
+			single, parse("MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor"),
 		})
 	})
 
@@ -783,13 +784,13 @@ func TestStaticDerivationRefusal_EveryArmNamesItself(t *testing.T) {
 		return p, rs, ""
 	})
 
-	arm(t, "a cypher-level refusal carries the index's own reason", "pattern carries an untyped relationship", func() (*Pipeline, ruleState, string) {
-		// An untyped hop: the index refuses and names itself, so this arm is the
-		// control — it proves the sweep above is not passing because every arm
-		// happens to take the same branch.
-		p := &Pipeline{ruleID: "untyped-hop"}
-		untyped := parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor")
-		require.NoError(t, p.UseFullEngine(eng, untyped))
+	arm(t, "a cypher-level refusal carries the index's own reason", "lower bound exceeds one hop", func() (*Pipeline, ruleState, string) {
+		// A ranged hop the seeding cannot cover: the index refuses and names
+		// itself, so this arm is the control — it proves the sweep above is not
+		// passing because every arm happens to take the same branch.
+		p := &Pipeline{ruleID: "unseedable-ranged-hop"}
+		unreadable := parse("MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor")
+		require.NoError(t, p.UseFullEngine(eng, unreadable))
 		p.SetPatternClosedOutput(true)
 		p.SetPersonalPlaneHealer(true)
 		require.NotEmpty(t, p.ruleState().anchorHops.Incomplete,
@@ -922,14 +923,14 @@ func TestDerivationIndexForAct_IndexIsAskedBeforeTheLicence(t *testing.T) {
 	}
 	head := parse(personalLicenceSpec)
 
-	// A multi-walk personal lens one of whose walks carries an untyped
-	// relationship — so its per-branch graph set refuses — and whose licence
-	// would ALSO refuse. Both conjuncts are live; only one may be reported, and
-	// it must be the index's.
+	// A multi-walk personal lens one of whose walks carries a ranged hop the
+	// seeding cannot cover — so its per-branch graph set refuses — and whose
+	// licence would ALSO refuse. Both conjuncts are live; only one may be
+	// reported, and it must be the index's.
 	p := &Pipeline{ruleID: "order-multi-walk"}
 	require.NoError(t, p.UseFullEngineBranches(eng, head, []ruleengine.CompiledRule{
 		head,
-		parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
+		parse("MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor"),
 	}))
 	p.SetPersonalPlaneHealer(true)
 	failing := cleanVerdict()

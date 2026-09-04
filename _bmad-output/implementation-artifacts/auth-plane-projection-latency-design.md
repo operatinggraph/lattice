@@ -1208,6 +1208,20 @@ derives; the caller falls back to the shipped BFS.
    through *no link at all* — an adjacency walk cannot see the dependency and would under-approximate.
 2. **Every relationship carries a `Type`.** An untyped hop matches any relation, so it cannot be indexed by
    relation name — the same arm `ReferencedRelations` fails exhaustiveness on (`relations.go:62-65`).
+
+   > **AMENDED 2026-09-04 — conjunct 2 above is falsified.** The stated reason ("it cannot be indexed
+   > by relation name") was refuted by the consumer: the walk never indexes *by* relation name, it
+   > filters already-fetched adjacency entries *on* it, and the executor's own matcher admits every
+   > edge on an untyped selector. The refusal has been lifted — see
+   > [untyped-hop-anchor-derivation-design.md](untyped-hop-anchor-derivation-design.md). The predicate
+   > now **admits** an untyped hop as a **wildcard** (`Rel == ""`), which every consumer reads as
+   > admit-any in the relation dimension — the same "cannot confirm ⇒ widen" rule the far end's label
+   > already carried. Two things still refuse. `MinHops > 1` refuses a ranged wildcard hop exactly as
+   > it refuses a typed one. And the walk **SCOPE** — a different mechanism, which narrows a walk
+   > rather than replacing it — still refuses an untyped hop at an unlabeled position, and now also a
+   > ranged wildcard hop, whose intermediates stand at exactly that shape. The two arms disagreeing on
+   > the same index is by design.
+
 3. **No variable-length hop** (`MinHops != 1 || MaxHops != 1`) anywhere in the graph. The intermediate
    nodes are the problem, not the relation: a back-chain crossing one cannot be walked hop-by-hop.
 4. **The anchor position is identified** — exactly one position carrying literally `{key: $actorKey}`. The

@@ -1121,7 +1121,10 @@ Every shape the scope cannot resolve keeps the relation-blind walk unchanged: no
 healer, a non-full engine, a branch that is not a compiled full rule, a pattern graph that
 is `Incomplete`, an unresolved `*` expansion, or an untyped relationship at an unlabeled
 position — the install-level refusals reported ahead of the cypher-level ones, since they
-hold for the life of the wiring. The per-lens verdicts are pinned by the corpus census
+hold for the life of the wiring. The affected-anchor derivation reads that same pattern
+graph and does *not* refuse an untyped relationship — it walks the hop as a wildcard,
+admitting every relation — so on such a lens the two arms disagree by design: the scope
+narrows a walk, the derivation replaces one. The per-lens verdicts are pinned by the corpus census
 (`internal/refractor/actor_walk_scope_corpus_census_test.go`), which supplies the same
 install production does and records which healer arm each lens landed on; the act-mode
 tally line carries `walkScoped` so an operator can see which posture a lens is running.

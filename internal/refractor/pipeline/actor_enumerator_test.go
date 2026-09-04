@@ -306,17 +306,26 @@ OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)
 RETURN identity.key AS actorKey, report.data.name AS reportName
 `
 
-// untypedRolesSpec is rolesSpec with its one hop left untyped — a shape
-// AnchorHopIndex refuses outright ("pattern carries an untyped relationship",
-// live on `objectAttachments`), so nothing about the
-// pattern's positions is knowable and the one-key answer cannot be proven.
-//
-// A WITH used to serve this vector; Increment 4a-1 narrowed that refusal to the
-// dropped-variable hazard, so `WITH identity, role` now indexes completely and
-// the vector had to move to a conjunct the corpus still declines on.
+// untypedRolesSpec is rolesSpec with its one hop left untyped —
+// `objectAttachments`' relation dimension, with both ends labeled.
+// AnchorHopIndex records that hop as a WILDCARD, so the index is complete and
+// every consumer reads the empty relation name as admit-any.
 const untypedRolesSpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[r]->(role:role)
+RETURN identity.key AS actorKey, role.key AS rk
+`
+
+// unindexableRolesSpec is rolesSpec on a conjunct the completeness predicate
+// still declines: a ranged hop whose LOWER bound exceeds one hop, which
+// AnchorSideSeeds cannot seed without dropping an anchor. It is the vector for
+// every case that needs an index refusing at the CYPHER level — nothing about
+// the pattern's positions is knowable and the one-key answer cannot be proven.
+// The vector's job is the refusal, not the conjunct: a WITH that keeps its
+// variables and an untyped hop both index completely, so neither can serve it.
+const unindexableRolesSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:holdsRole*2..3]->(role:role)
 RETURN identity.key AS actorKey, role.key AS rk
 `
 
@@ -381,11 +390,11 @@ func TestEnumerateAnchors_IncompleteIndexUnionsTheWalk(t *testing.T) {
 	f.edge("holdsRole", "alice", "admin")
 	f.edge("holdsRole", "bob", "admin")
 
-	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p := derivationPipeline(t, adjKV, unindexableRolesSpec)
 	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
 	rs := p.ruleState()
 	require.False(t, rs.anchorHops.Complete)
-	require.Contains(t, rs.anchorHops.Incomplete, "untyped relationship")
+	require.Contains(t, rs.anchorHops.Incomplete, "lower bound exceeds one hop")
 	require.False(t, p.oneKeyAnswerSound(rs))
 
 	anchors, err := p.enumerateAnchors(context.Background(), rs, alice, "identity")

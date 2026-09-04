@@ -506,7 +506,7 @@ func TestCorpusPersonalDerivation_TheBranchConjunctsAreLatentNotAbsent(t *testin
 	}, nil), "positive vector: two walks that agree must admit, or the negatives below prove nothing")
 
 	require.Contains(t, pipeline.BranchDerivationRefusal([]ruleengine.CompiledRule{
-		sound, parse("MATCH (identity:identity {key: $actorKey})-[r]->(x:unit)\nRETURN x.key AS anchor"),
+		sound, parse("MATCH (identity:identity {key: $actorKey})-[:mayRead*2..3]->(x:unit)\nRETURN x.key AS anchor"),
 	}, nil), personalIndexBranchIncomplete,
 		"a walk whose graph cannot answer must refuse the LENS: the derived set is a union, and a union with an unknown in it is a superset of nothing")
 

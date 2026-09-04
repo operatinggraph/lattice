@@ -462,8 +462,16 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 // edgeTakesStep reports whether an adjacency entry is the relationship this
 // step moves along: the pattern's relation name, read in the direction
 // edgeDirFor resolved for the end the walk is standing on.
+//
+// A step carrying no relation name (Rel == "" — the pattern's hop is untyped)
+// admits an entry whatever its name, which is the same "cannot confirm ⇒ widen"
+// rule stepAdmitsFarEnd applies to the far end's label. Direction is still
+// honoured: an untyped hop says nothing about the relation, but it still says
+// which way the arrow points. These are exactly the two conjuncts
+// rel_traverse.go applies when the executor binds the hop for real.
 func edgeTakesStep(step full.PatternStep, e adjacency.EdgeEntry) bool {
-	return e.Name == step.Rel && adjacency.DirectionMatches(e.Direction, step.EdgeDir)
+	return (step.Rel == "" || e.Name == step.Rel) &&
+		adjacency.DirectionMatches(e.Direction, step.EdgeDir)
 }
 
 // stepAdmitsFarEnd applies the pattern's own evidence about the node being

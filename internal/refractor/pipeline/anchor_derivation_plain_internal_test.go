@@ -312,10 +312,10 @@ func TestPlainDerivationIndex_Conjuncts(t *testing.T) {
 		require.False(t, ready)
 	})
 
-	t.Run("an incomplete rootHops refuses — an untyped hop cannot be indexed by relation name", func(t *testing.T) {
+	t.Run("an incomplete rootHops refuses — a ranged hop's lower bound exceeds one", func(t *testing.T) {
 		p := plainDerivationPipeline(t, adjKV, `
 MATCH (pr:provider)
-OPTIONAL MATCH (pr)-[]->(org:org)
+OPTIONAL MATCH (pr)-[:employedBy*2..3]->(org:org)
 RETURN pr.key AS key, org.key AS orgKey
 `)
 		rs := p.ruleState()
@@ -431,7 +431,7 @@ func TestShadowPlainDerivation_RecordsSampledAndNotReady(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
 	p := plainDerivationPipeline(t, adjKV, `
 MATCH (pr:provider)
-OPTIONAL MATCH (pr)-[]->(org:org)
+OPTIONAL MATCH (pr)-[:employedBy*2..3]->(org:org)
 RETURN pr.key AS key, org.key AS orgKey
 `)
 	p.SetAnchorDerivationSampling(1)
