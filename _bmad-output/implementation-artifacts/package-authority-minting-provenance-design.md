@@ -1178,3 +1178,5 @@ Two premises the pass tried to break and could not: kernel permissions carry `da
 **both** the meta and install sets (`internal/bootstrap/primordial.go:742-752, 753-765`), so §5.1.1's
 first row is sound; and §5.4's stamp cannot fight `rejectPermissionRoleRewrites`, which runs first
 (`step8_commit.go:265`) and skips `create` outright (`:823-831`).
+
+- **(2026-09-04, from the stored-class write gate)** The denial direction on `holdsRole`/`grantedBy` stays open by DDL on purpose (that design §2.4): eight ops across seven packages create `holdsRole` links, the create side is this design's R0/R1, and closing one direction alone would be dead scaffolding — both directions close together on this design's revive trigger (`consoleOperator` delegated below root). The twelve kernel-seeded links are protected by exact key regardless.
