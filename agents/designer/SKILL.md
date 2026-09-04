@@ -238,6 +238,10 @@ census against it as you would against a stranger's.
   also hashed the per-row `entityID`, so sharing the token collapsed nothing); before N callers share an
   identity, grep for a caller that deliberately mints a **fresh** one (two re-mint on reclaim, on purpose).
   (2026-09-01 · duplicate human task)
+- **A deleted function's tests pinned PROPERTIES, and the census must name each one's successor.** Deleting
+  `disarmDeadline` deleted the pin that a genuine substrate error is returned, not read as absent — the function
+  that inherited the fork had no test until a cold review asked. Per deleted test: the property, the code that now
+  carries it, the test that now pins it. (2026-09-04 · deadline provenance)
 - **A REMOVAL census runs per entity and never excludes `_test.go`, docs or examples.** `internal/hellolattice`
   (an integration-tagged, required CI job) and the shipped tutorial submit two of a "dead" trio; per-op they
   split, and the split was the design. Classify hits (declaration vs submit) and ask what a surprising caller
@@ -359,6 +363,11 @@ census against it as you would against a stranger's.
   label and the shred event is dropped twice); ask whether all N shipped consumers satisfy it structurally or
   incidentally, and grep to find out. Shape-dependent becomes mechanism-dependent in the same design; and check
   a guard is on your consumer's path before re-deriving its obligation. (2026-08-02 · subject-anchored aspects)
+- **A revision CAS guards only the READ→WRITE window; a trigger that can already be stale BEFORE the read needs
+  a currency test on the trigger's own state.** The deadline marker for step N was read after N's completion had
+  armed N+1, so the CAS passed and a healthy step was failed; the fix was one level-triggered read (the key's
+  presence), the CAS staying for the write window. Write both windows in the state table. (2026-09-04 · deadline
+  provenance)
 - **Read the ADJACENT fields' comments for the fail-open someone already paid for** — twelve lines below a new
   allow-list, `WebsocketAllowedOrigins` documented that an empty list is allow-any. Whenever an empty
   list/set/map must mean something, write what empty renders to and what the consumer does with it.

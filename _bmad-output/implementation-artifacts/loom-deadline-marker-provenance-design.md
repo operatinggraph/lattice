@@ -1,6 +1,6 @@
 # Loom deadline probe — the expiry signal is the server's `MaxAge` marker, not any empty body
 
-**✅ RATIFIED (Winston-adjudicated, per the 2026-08-20 delegation) — 2026-09-03.** Adversarial pass in §15
+**✅ SHIPPED `1982952e` (2026-09-04) — RATIFIED (Winston-adjudicated, per the 2026-08-20 delegation) 2026-09-03.** Adversarial pass in §15
 (one cold reviewer; 1 BLOCKING + 2 MAJOR found and folded). Filed from
 [`loom-state-tombstone-sweep-design.md`](loom-state-tombstone-sweep-design.md) §11.2; board row
 *[Loom] A re-delivered step-deadline marker fails a parked instance after 24 h*
@@ -294,7 +294,11 @@ moved on under the probe"*) and returns nil ⇒ Ack — the drop `advance` takes
 (`engine.go:809-812`). The three writers of `instance.<id>` are `createInstance` (`state.go:284`, `CreateOnly`),
 `transition` (`:449`) and `redrive` (`:552`); none bumps the revision while leaving the pending step in place
 (review §15, held), so a bump under a *running* read is always another actor's advance, completion or fail, and
-the marker's step is no longer pending. No Nak: a `MaxAge` marker lives one second, so a Nak requests a
+the marker's step is no longer pending. **One probe write stays unconditioned:** the "not yet relayed" re-arm
+(`rearmDeadline`, a plain PUT). An advance landing between the currency read and that PUT overwrites step N+1's
+fresh arm with the old step's TTL — not a wedge (a marker still fires for the overwriting arm) and not a
+terminal, so it is excluded from the write guard and named in `onDeadline`'s doc comment. No Nak: a `MaxAge`
+marker lives one second, so a Nak requests a
 redelivery that will not exist, and the re-probe would find nothing to do.
 
 ### 4.3 Inc 3 — the premise assertion, docs, the stale claims, the dossier
@@ -345,9 +349,12 @@ replayed. States: **terminal** · **running, in flight** (op submitted, not comm
 | never-written / re-created | — | no message; a re-created arm is a body ⇒ ack | — | — |
 
 Two replicas: both receive the same marker (a queue group is not set; `DeliverGroup` empty, `engine.go`'s
-`deadlineSpec`). Replica A re-arms (outbox pending); replica B's currency read sees the key present ⇒ stale ⇒
-Ack. Replica A fails; B's CAS is refused ⇒ Ack. Replica A finds committed and returns; B does the same. Every
-pairing converges.
+`deadlineSpec`). Replica A fails; B's CAS is refused ⇒ Ack. Replica A finds committed and returns; B does the
+same. Replica A re-arms (outbox pending) and B's currency read ran *after* A's PUT ⇒ stale ⇒ Ack; if B's read ran
+*before* A's PUT, B walks on and its `probeFail` commits at the still-current revision — the one pairing that
+does not converge to A's outcome. It resolves to *fail*, which is what a single replica reaches one re-arm
+later for an op that is still unrelayed; pre-existing, unchanged here, and stated in the probe's doc comments
+rather than claimed away (review §15 close pass, #4).
 
 ## 6. Consumer table
 
@@ -373,7 +380,10 @@ arm**. Two things could break it — a server that emits the marker for other re
 `MaxAge` on `KV_loom-state`** (`filestore.go:6824-6829` writes the identical marker for an age-limit removal that
 empties a subject; `isSubjectDeleteMarker` exempts `PURGE` and reason-marked messages but **not a legacy `DEL`**,
 `sdm.go:41-43`). The bucket is provisioned with no age limit (`primordial.go:109-121`); Inc 3 asserts it at boot
-and in `verify-kernel`, so the day someone bounds the bucket by age the kernel gate says why not.
+and in `verify-kernel`, so the day someone bounds the bucket by age the kernel gate says why not. A third,
+dormant: the currency read is a `KVGet`, i.e. a direct get, and on an R>1 `loom-state` (the shelved HA-NATS
+row) a follower could serve the pre-marker value and read a genuine expiry as *armed*. R1 today; the HA-NATS
+design must make the currency read a non-direct get before it lands.
 
 ## 8. Executable censuses (run 2026-09-03 at `ae3bb648`; Phase 0 re-runs them)
 
@@ -561,6 +571,57 @@ the step.
 | Bucket provisioning; verify loops | `bootstrap/primordial.go:109-121`; `bootstrap/verify.go:274-283`; `scripts/verify-kernel.go:303-340` |
 | Live population | §1.6 censuses, 2026-09-03 |
 | The docs already claim the distinction | `docs/components/loom.md` *Provisioning + index posture*; `internal/loom/doc.go` |
+
+---
+
+## 16. Build record and close pass (2026-09-04)
+
+**Shipped in one fire: `1982952e`** (worktree `steward-lattice-deadline-provenance`, base `94a06d8a`). All three
+increments; 18 files, ~+1,000/−270 (the substrate mechanism fixture and the five Loom tests are most of the
+addition). Gates: build · vet · golangci (0) · all 15 `lint-*.go` · full `go test ./... -p 4` · `make
+test-lease-convergence` · `make verify-kernel` from the worktree against the live NATS (`OK no stream age
+limit … KV_loom-state`). Live close: §16.3.
+
+### 16.1 What the reviews found, classified
+
+One cold design review (§15) and one cold code review, both opus, neither the implementer.
+
+| Finding | Class | Routed |
+|---|---|---|
+| The CAS closed only the read→write half of the race; emission→read needed the key's presence (§15 #1) | design-gap | fixed in design before build |
+| A stream age limit forges the `MaxAge` marker (§15 #3) | design-gap (unpinned premise) | `verify-kernel` assertion + test |
+| Coordinates and censuses stale after the sweep merged mid-design (§15 #2) | process — parallel-fire base skew | re-grounded at HEAD before build |
+| The deleted `TestDisarmDeadline_PropagatesGenuineGetFailure` was not re-aimed at the function that inherited its fork (code #1) | brief-gap (the brief listed the deletion, not the pin it carried) | test ported: `TestDeadlineArmed_PropagatesGenuineGetFailure` |
+| Every probe error Naks a marker the server removes in one second (code #2) | pre-existing; the sibling marker-TTL row's mechanism | documented in `onDeadline`; sibling row sharpened |
+| "Second replica is a no-op" over-claimed a re-arm-vs-fail race (code #4) | comment accuracy | narrowed in code + §5 |
+| The re-arm PUT is the one unconditioned probe write (code #8) | design omission, not a defect | §4.2 names the exclusion |
+| Literal headers on the producer side of `batch.go`; a vendor comment naming reasons the pin never emits; a sync assertion on async delivery; a dead conjunct (code #5, #6, #7, #9) | implementation hygiene | fixed |
+| The currency read is a direct get — unsafe on R>1 (code, watch item) | premise expiring under a shelved fork | §7 names it for the HA-NATS design |
+
+**Dossier:** one entry appended to `docs/components/loom.md` (§4.3's). Twice-seen class: *a removal census that
+deletes a function must list what its tests pinned* — this is the second time (the sweep's close pass caught the
+same shape on `redrive`'s happy-path test); promotion candidate for `agents/fire-brief-template.md`'s standing
+checklist #4 rather than a lint (a test's *reason* is not greppable).
+
+### 16.2 Accounting
+
+Every discovery above resolved in this fire or lands on an existing row: the Nak-loses-the-expiry class on
+*[Bootstrap/Loom] The 1 s marker TTL is the delivery window …* (`📋 ready`, its `What` now names the Nak); the
+direct-get watch item on the HA-NATS design (`🚧 shelved`, §7 here). No new row filed.
+
+### 16.3 Live close
+
+Loom cycled from the main checkout via `make orchestration` after the merge (`pkill -x loom`; the recipe rebuilt
+and relaunched the tier). `bin/loom` mtime = the merge minute; the new instance `loom-VhgqosgUBf6BC5jHEtzC`
+reports `healthy` in Health KV with `loom-deadline: running`, one running instance; `nats consumer info
+KV_loom-state loom-deadline`: 0 unprocessed, 0 redelivered. `verify-kernel` from the worktree against the live
+NATS printed the new line (`OK no stream age limit … KV_loom-state`). **Not observed live, and said so:** a
+genuine `MaxAge` probe under the new binary — the dev stack armed no deadline in the observation window (the
+consumer's last delivery predates the cycle), and the only pattern-start paths available (`lattice loom start` on
+a lease-signing or identityErasure pattern) carry real side effects on the dev data, so none was forced. The
+positive path is pinned by the four unchanged e2es (real 2 s expiries) and the classification test's positive
+vector; the DeliverAll replay has no live population to replay (zero `deadline.>` subjects after the sweep) and is
+pinned through `ResetAwaitReopen` in-repo. CI on `1982952e`: see the commit that lands this section.
 
 ---
 
