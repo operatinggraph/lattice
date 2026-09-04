@@ -301,6 +301,7 @@ three GrantTable members stay refused on the auth-plane conjunct, which comes fi
 `retained` direction is gated on `AnchorProjectionKey` (`audit.go:753`), and a lens that *uses*
 `DiffRetraction` is one where that derivation declines: six of the seven are pinned `closureRefused` /
 `rootUntypedHop` (`plain_scanroot_corpus_census_test.go:139,147,148,154,168,179`) and gain **`missing` and
+*(Amended 2026-09-04: `rootUntypedHop` no longer exists — `objectIdentityAttachmentsRead`'s index is complete and it is refused on its `DiffRetraction` declaration instead; see [untyped-hop-anchor-derivation-design.md](untyped-hop-anchor-derivation-design.md).)*
 `stale` only**; `clinicPatientsRead` (closureHolds, `:133`) gains all three. The health entry's
 `divergentRows` already carries only the classes that fired, so an absent `retained` on those six reads as
 "not detected in this direction" — the doc comment on the conjunct says so explicitly.

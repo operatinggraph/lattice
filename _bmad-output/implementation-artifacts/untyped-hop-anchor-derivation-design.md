@@ -367,6 +367,15 @@ Four edits, three of them one line:
    `walkScopeRefusalUntypedHopUnlabeled`. Its doc comment claiming those arms are reachable only from
    a directly-built index is the one line that changes there.
 
+   > **AMENDED AT BUILD 2026-09-04 — item 4 is false as written.** Once an untyped hop is recorded, a
+   > RANGED wildcard (`-[r*1..3]->`) between two labeled endpoints reaches `addIndex`, whose ranged-
+   > intermediate line handled only a typed relation; folding just the endpoints' types into `wildcard`
+   > would scope the walk to less than its unlabeled intermediates cross — the narrowing, unsound
+   > direction. `addIndex` now refuses that index in its all-or-nothing pre-pass under its own reason,
+   > `walkScopeRefusalRangedWildcardHop`; a refusal yields the nil scope, i.e. today's relation-blind
+   > walk, so the edit only ever adds a refusal. Pinned both ways by
+   > `TestWalkScope_RangedWildcardHopRefusesWhileAFixedOneScopes`. No corpus lens has the shape.
+
 `StepsFrom` needs no edit: it copies `h.Rel` into `PatternStep.Rel` verbatim, and `edgeDirFor` is
 relation-independent.
 
@@ -405,9 +414,17 @@ hop over a two-position graph, where `consider(0,1)` gives `ds = 0 ≤ dd = 1` a
 anchor. But Increment 2 licenses the shape corpus-wide. So the invariant is stated as a **bound, not
 a blanket**: *a wildcard hop is sound where it is the only hop between the anchor and a position it is
 incident to*; anything wider needs the seed-both-endpoints treatment `consider`'s `ds < 0 || dd < 0`
-arm already gives an incomparable pair. §10's census edit is what keeps the corpus inside the bound —
-which is exactly why the skip it removes must not be replaced with a weaker one (§10, and the M3
-finding in §12).
+arm already gives an incomparable pair.
+
+> **AMENDED AT BUILD 2026-09-04 — the sentence that followed here named the wrong enforcer.** It said
+> §10's relation-coverage census keeps the corpus inside the bound. The close review ran a four-position
+> wildcard graph through that census and it passed: it checks relation *coverage* and says nothing about
+> position count or hop incidence. The bound is now pinned on its own dimension by
+> `TestCorpusAnchorHopIndex_WildcardHopGraphsStayInsideTheBound` (a complete index carrying a wildcard hop
+> must be a two-position graph with the hop incident to the anchor; population floored at one). The
+> review also showed the bound is **conservative at the walk**: `walkToAnchors` crosses the triggering hop
+> back from whichever endpoint was seeded, so a moved seed still derives the same anchors on the shape
+> that moves it. The M3 point stands unchanged — the coverage census's skip is deleted, not weakened.
 
 The two places an empty derived set could still be read as a licence to skip are both correct:
 
@@ -489,6 +506,7 @@ Each reader evaluated on an index that is `Complete` **because** the untyped-hop
 | 4 | `actor_enumerator.go:413` `ActorTypeBindsAnchorOnly` (via `oneKeyAnswerSound`) | Licenses the **one-key answer** — the narrowest answer in the system | Reads `Labels` and `Anchor` only; `Hops` never enters it. A wildcard hop cannot move its verdict for any lens. For `objectAttachments` specifically it returns **false**: `PositionsBinding("object")` = `{0, 1}` (pos 1 is unlabeled and admits every type), which is correct — an object may be attached to another object. |
 | 5 | `anchor_derivation_mode.go:208` `noteStaticDerivationRefusal` | Chooses a **log reason** | Reason string only; the untyped reason simply stops being emitted. |
 | 6 | `anchor_derivation_plain.go:880` `noteStaticPlainDerivationRefusal` | Log reason only | Same. |
+| 7 | `anchor_derivation_branches.go:136` `branchAnchorHopsRefusal` (added by the multi-walk fire `9725f42e`, after C3 ran) | Reader 1's predicate over a per-branch index set | **Multi-branch lenses only**; none of the three is multi-branch (`branch_decomposition` pins them single-walk through `BranchDerivationRefusal`). Same verdict as reader 1 where it ever applies. |
 
 **The dead-scaffolding direction is inverted here, and worth stating:** reader 3 is scaffolding that
 has been dead since it shipped. Increment 2 does not build inert machinery — it makes existing inert
@@ -695,11 +713,12 @@ Every test below is **owned by a named increment**; none is left unowned.
     `walkScopeRefusalUntypedHopUnlabeled` — and `TestCorpusActorWalkScope_EveryRefusalIsKnown`
     matches the vocabulary by **equality**, so an un-updated table fails there rather than silently
     passing. **After Increment 1, `objectLiveness` leaves `scopeNil` entirely**: with no hops at all
-    `addIndex` folds in nothing, so `corpusActorWalkScopeDigests` pins the **empty string**, not
-    `scopeNil = "nil"` (`:69`). An empty digest is a real, distinct state — "a scope that follows no
-    relation from any type" — and it is correct: no pattern path exists, so following nothing reaches
-    every anchor the pattern can reach. It must be pinned as `""` deliberately, with that sentence
-    beside it, or the next reader will read the blank as an omission and "fix" it.
+    `addIndex` folds in nothing, so `corpusActorWalkScopeDigests` pins the **derived-and-empty** scope,
+    not `scopeNil = "nil"` (`:69`). *(Amended at build: `walkScopeDigest` renders that scope as the literal
+    `"none"`, which five other rows already carry — the draft said `""`, which would be red.)* An empty scope
+    is a real, distinct state — "a scope that follows no relation from any type" — and it is correct: no
+    pattern path exists, so following nothing reaches every anchor the pattern can reach. It is pinned
+    deliberately, with that sentence beside it, or the next reader will read it as a refusal by another name.
   - `actor_onekey_corpus_census_test.go:137-138` — both lenses are pinned `walkIncompleteIndex`.
     Increment 1 moves `objectLiveness` to the **one-key** verdict (§6.1); Increment 2 moves
     `objectAttachments` to multi-position.
@@ -765,6 +784,16 @@ becomes one subject), not the number. If the post-fix backlog on these two consu
 drained, Increment 2's justification narrows to the per-event cost and the standing cliff for the next
 untyped-hop author — still sufficient, but Andrew should see that honestly rather than ratify a
 headline that may have expired.
+
+> **Re-measured at build, 2026-09-04 (fire brief premise 2).** All three consumers were at **zero**
+> backlog before either increment shipped; the 40 k had drained with the enumerator fixes. The payoff
+> shipped is the mechanism: `objectLiveness`'s filter `$KV.core-kv.>` → `$KV.core-kv.vtx.object.>`
+> (`narrowed-relation`, `LabelCount: 1`, read live after the in-place package apply at 15:04:54 PT), and
+> the `pattern carries an untyped relationship` refusal gone for all three ids after the 16:08 cycle of
+> `bin/refractor`. The act-mode tally for `objectAttachments` is proven on the embedded stack
+> (`TestObjectAttachments_DerivationActsOnANeighbourEvent_E2E`); its live line is periodic (every 50
+> events); read live at 16:12:05 PT after 60 events: `acted: 50, actedAnchors: 0, fellBack: 0, walkScoped: false` —
+> the derivation answers every event, the walk scope still (correctly) refuses, nothing falls back to the BFS.
 
 ### 11.2 Acceptance
 
@@ -913,7 +942,7 @@ builds it in the increment order of §13."* Green bar per increment is §10's; a
   `internal/refractor/`: `label_derivation_corpus_census_test.go:290`; `grouping_reduction_corpus_census_test.go:161`;
   `branch_decomposition_corpus_census_pins_test.go:96,259`; `rel_projection_corpus_census_test.go:52` + the
   closed population `:122-124`; `actor_onekey_corpus_census_test.go:136-137` (`objectLiveness` → one-key);
-  `actor_walk_scope_corpus_census_test.go:147-148` (digest → `""`, deliberately) + `:176-177` (`objectLiveness`
+  `actor_walk_scope_corpus_census_test.go:147-148` (digest → `"none"`, the derived-and-empty literal) + `:176-177` (`objectLiveness`
   leaves the refusal table); `anchor_hopindex_corpus_census_test.go:142-143` (`objectLiveness` → complete).
   Gate: `internal/objectgc/objectgc_test.go` (`//go:build objectgc`), `Makefile:1919`, `ci.yml:469`.
 - Inc 2: `ruleengine/full/hopindex.go:720-724` (the refusal; reason string inlined — the `hopUntypedHop`
@@ -962,7 +991,8 @@ census shape: `forEachCorpusCypher` (`label_derivation_corpus_census_test.go:573
 - **Inc 1 — de-hop `objectLiveness`** (`opus` builder — narrows a consumer filter, three posture axes §6.1;
   full review naming §6.1's table). Green: `go test ./packages/objects-base/ -count=1` · `go test
   ./internal/refractor/ -run 'Corpus|Census' -count=1` (exactly the §10 Inc-1 pins move, no other row) ·
-  `DIFF_BASE=b9a49338 go run ./scripts/lint-package-version.go` · `make test-object-gc` · revert-proof: restore
+  `go run ./scripts/lint-package-version.go` (local mode — the `DIFF_BASE` form compares committed refs and is
+  vacuous on an uncommitted tree; CI runs `DIFF_BASE`) · `make test-object-gc` · revert-proof: restore
   the `OPTIONAL MATCH` in a `/tmp` copy and `TestObjectLiveness_ConsumerFilterIsRelationNarrowed` goes red.
   Land: merge to `main`, `make reinstall-package PKG=packages/objects-base`, read `objectLiveness`'s filter
   health entry live (`narrowed-relation`, `LabelCount: 1`) and the projected `weaver-targets` rows unchanged.
@@ -1000,3 +1030,10 @@ filed.
 **7. Non-goals.** `anchorwalk.go`'s parse refusal (§8 alt 5); the walk scope's untyped arm (refuses by
 design); `objectIdentityAttachmentsRead`'s `DiffRetraction`; `withScopeReject` (varlength Inc 2); anything in
 the `fire/personal-lens-delta` worktree.
+
+**Close (2026-09-04).** Inc 1 `f27d2b99`, Inc 2 `ade79cee`, both CI-green on `main`; package applied in place
+(0.3.9), `bin/refractor` / `bin/loupe` / `bin/bridge` / `bin/lattice` rebuilt from `main`. Findings classified: 1
+design-gap (the bound's enforcer — pinned, dossier entry appended to the parent class), 2 brief-gaps (the walkscope
+deviation record; the refuted reason in four sibling designs — all amended), the rest convention. Adjacent find taken
+as the batch's next unit: `attach_object`'s replace leg derives neither the prior link nor the prior object vertex,
+so an un-hydrated replace leaves a stale `liveLinks` (a leaked object). Worktree `lattice-wt-untyped-hop` retired.

@@ -111,7 +111,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor] Three lenses are underivable — an untyped `-[r]->` matches any relation** | `objectLiveness`/`objectAttachments` and loftspace's `objectIdentityAttachmentsRead` bind an untyped hop, so the anchor index refuses them and every neighbour event runs the relation-blind walk. The refusal's reason is false: the walk filters fetched edges, never indexes by relation. | ★★ | L | 🏗️ building · owner: fire/untyped-hop-anchor · [design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md) · next: Inc 1 de-hop objectLiveness |
 | **[Refractor] A personal lens republishes its whole actor per event** | Every evaluation republishes the actor's whole row set: `edgeCatalog` alone is 91 % of SYNC's 512 MiB, healer/drain passes are 39 % of messages, the byte cap binds at ~12 h for every actor and the audit stream holds one hour. Fix: publish rows by provenance, frame as today; healer frames per pass. | ★★ | L | 🏗️ building · owner: fire/personal-lens-delta · [design](../../implementation-artifacts/personal-lens-delta-publication-design.md) · next: T7 re-run ≥ 2026-09-05 06:45 PT, then close pass |
 
 ### AI-native
@@ -147,6 +146,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
 - 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))
 - 2026-09-04 · `c38af84` · [CI] lint-build split into lint-build + lint-static, parallel not serial — 131s/163s vs old combined 171–206s, full CI green (run 33893636046)
 - 2026-09-04 · `1982952e` · [Loom] deadline probe keys on the `MaxAge` marker + key presence + a conditioned fail, never an empty body; `disarmDeadline` deleted ([design](../../implementation-artifacts/loom-deadline-marker-provenance-design.md))
@@ -171,9 +171,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-08-30 · `9d0bec7` · [CI] main un-reddened — cafe-app's Relocate action recorded in the op-literal ceiling
 - 2026-08-29 · `bcc2681` · [Pkgmgr] descriptor-declared kv.Links walks SHIPPED — the fourth declaration surface end to end, cafe's 8 ops declaring through it, 7 baseline rows retired; 3 cold reviews, 1 BLOCKING severed hop + 4 MAJOR closed
 - 2026-08-29 · `5699325` · [Processor/testutil] read-drift ratchet SHIPPED — scripts record what they actually read; guard armed on every CapabilityPipeline blocks new undeclared reads/walks; cold review: 1 BLOCKING + 4 MAJOR closed
-- 2026-08-29 · `3c2e21c` · [Weaver] GapWithoutPlaybook orphan columns CLOSED — the two deliberate orphans declared `surface` + a projected-`missing_*` ⊆ gaps CI gate; 2 cold reviews, 1 BLOCKING + 3 MAJOR closed
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `83eb57b`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `3c2e21c`)*

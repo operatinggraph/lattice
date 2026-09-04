@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-29 · `3c2e21c` · [Weaver] GapWithoutPlaybook orphan columns CLOSED — the two deliberate orphans declared `surface` + a projected-`missing_*` ⊆ gaps CI gate; 2 cold reviews, 1 BLOCKING + 3 MAJOR closed
 - 2026-08-29 · `83eb57b` · [Loupe/Pkgmgr] capability-proposal install receipt — create-only `.install` binding; unproven newPackage close refused; 4 cold reviews, 5 BLOCKING/MAJOR closed
 - 2026-08-29 · `343260a` · [Loom] redrive repaired (could never re-pin over the terminal DEL marker) + heartbeat count moved to the pin index; 3 cold reviews, 2 BLOCKING
 - 2026-08-29 · `7d3e31b` · [Weaver] gap-action declaration surface CLOSED — optionalReads + the `json:<literal>` param token, refused at dispatch/load/install; 3 cold reviews, 1 BLOCKING privilege escape closed; ReplayTarget fix `0fd3e8f`

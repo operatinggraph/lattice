@@ -103,6 +103,7 @@ names what did not drain, and why:
   (`packages/objects-base/lenses.go:32`, `:48`) writing `weaver-targets`, for which
   `projection/driver.go:502` **does** set `patternClosedOutput = true`. They are refused on query shape —
   `"pattern carries an untyped relationship"` (`hopindex.go:724`, from `OPTIONAL MATCH (o)-[r]->(owner)`) —
+  *(Amended 2026-09-04: that refusal no longer exists — an untyped hop is recorded as a wildcard and both lenses derive; see [untyped-hop-anchor-derivation-design.md](untyped-hop-anchor-derivation-design.md).)*
   a refusal this licence does not touch and cannot touch. Their closer is a different row.
 - `edgeCatalog` is refused by the personal exclusion **and, independently, by being multi-walk**. Lifting only
   the exclusion delivers it nothing (§3.2). That is where the headline 128 k lives.

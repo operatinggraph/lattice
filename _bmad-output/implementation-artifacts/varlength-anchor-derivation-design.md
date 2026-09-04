@@ -531,6 +531,7 @@ go test ./internal/refractor/ -run 'TestCorpusAnchorHopIndex_PinnedConjuncts|Tes
 ```
 *Run this fire:* 56 anchored rows pinned — 44 `hopIndexed`, **10 `hopVarLengthHop`**, 2
 `hopUntypedHop`; **6** plain rows pinned `rootVarLengthHop`. Unit: **installed lens declarations after
+*(Amended 2026-09-04: `hopUntypedHop` and `rootUntypedHop` are gone from both censuses — the untyped hop is a wildcard; see [untyped-hop-anchor-derivation-design.md](untyped-hop-anchor-derivation-design.md).)*
 walk expansion**, not source-file hop sites — a source grep reports 14 (or 25 uncorrected) and misses
 the two generated producers entirely, which is where the live symptom lives.
 
