@@ -517,3 +517,47 @@ func TestVerifyKernel_DetectsLoomStateRemovalPostureLoss(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyKernel_DetectsLoomStateAgeLimit pins the one loom-state assertion
+// that guards a SOUNDNESS premise rather than a mechanism its writers need.
+//
+// Loom's deadline probe acts on the server's MaxAge marker and on nothing else:
+// a marker with that reason is the expiry of a live deadline arm, while every
+// removal of the key carries a KV-Operation header instead. A stream-level age
+// limit breaks exactly that, because the server writes a byte-identical MaxAge
+// marker when an age limit empties a subject — so bounding the bucket by age
+// would turn every standing removal marker into something the probe reads as
+// an expiry, and fail parked instances that were never due.
+//
+// The real provisioning sets no age limit, so the failing case is built by
+// putting one on: the freshly-seeded bucket must pass, and the same bucket
+// bounded by age must not.
+func TestVerifyKernel_DetectsLoomStateAgeLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	const wantFailure = "MaxAge IS set on KV_" + bootstrap.LoomStateBucket
+
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
+	require.Condition(t, func() bool { return !containsSubstring(failures, wantFailure)() },
+		"the real provisioning carries no age limit, got %v", failures)
+
+	js := conn.JetStream()
+	streamName := "KV_" + bootstrap.LoomStateBucket
+	stream, err := js.Stream(ctx, streamName)
+	require.NoError(t, err)
+	cfg := stream.CachedInfo().Config
+	cfg.MaxAge = 48 * time.Hour
+	updated, err := js.UpdateStream(ctx, cfg)
+	require.NoError(t, err, "the age-limited stream must be creatable — otherwise the check guards nothing")
+	info, err := updated.Info(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 48*time.Hour, info.Config.MaxAge, "the server must have stored the injected age limit")
+
+	failures, _ = bootstrap.VerifyKernel(ctx, conn)
+	require.Condition(t, containsSubstring(failures, wantFailure),
+		"an age-limited loom-state must fail verification, got %v", failures)
+	require.Condition(t, containsSubstring(failures, "the deadline probe keys on the server's MaxAge marker"),
+		"the failure must say why, got %v", failures)
+}

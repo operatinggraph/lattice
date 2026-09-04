@@ -359,8 +359,8 @@ func TestOnboardingE2E_RejectedCreateTaskFails(t *testing.T) {
 // TestOnboardingE2E_CreatedTaskDisarmsForUnboundedWait proves the other half of
 // the deadline+probe: a userTask whose CreateTask COMMITS but whose human does
 // NOT act for longer than CreateTaskTimeout must not be false-failed. The bounded
-// creation-deadline fires, the probe finds the task vertex present, DISARMS the
-// deadline, and the instance stays running. When the user finally acts — well
+// creation-deadline expires, the probe finds the task vertex present, re-arms
+// nothing, and the instance stays running. When the user finally acts — well
 // after the creation-deadline — the cursor still advances exactly once. This
 // proves the unbounded human wait survives the bounded creation-deadline.
 func TestOnboardingE2E_CreatedTaskDisarmsForUnboundedWait(t *testing.T) {
@@ -405,9 +405,9 @@ func TestOnboardingE2E_CreatedTaskDisarmsForUnboundedWait(t *testing.T) {
 	taskKey0 := waitTaskKey(t, ctx, conn, instanceID, 0)
 	waitTaskCreated(t, fp, taskKey0, "step 0 CreateTask must commit (task vertex minted)")
 
-	// Wait WELL PAST the creation-deadline without acting. The deadline fires, the
-	// probe sees the task vertex, disarms, and the instance stays running at
-	// cursor 0 on the same live token — never false-failed.
+	// Wait WELL PAST the creation-deadline without acting. The deadline expires,
+	// the probe sees the task vertex, nothing re-arms, and the instance stays
+	// running at cursor 0 on the same live token — never false-failed.
 	time.Sleep(3 * createDeadline)
 	inst, err := getInstance(ctx, conn, instanceID)
 	require.NoError(t, err)
@@ -429,7 +429,7 @@ func TestOnboardingE2E_CreatedTaskDisarmsForUnboundedWait(t *testing.T) {
 	}
 	done := waitInstanceStatus(t, ctx, conn, instanceID, "complete")
 	require.Equal(t, 3, done.Cursor)
-	require.Equal(t, 3, fp.createTaskCount(), "exactly one CreateTask per step despite the fired-then-disarmed creation-deadline")
+	require.Equal(t, 3, fp.createTaskCount(), "exactly one CreateTask per step despite the expired creation-deadline")
 }
 
 // getInstance reads the persisted instance record (test helper).

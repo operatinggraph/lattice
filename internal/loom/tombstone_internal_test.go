@@ -73,7 +73,7 @@ func TestTransition_TerminalBatchLeavesExpiringMarkers(t *testing.T) {
 	// Step 0: a live token plus an armed deadline, so the terminal batch has
 	// all three removals to make.
 	inst.PendingToken = "tok-0"
-	require.NoError(t, s.transition(ctx, inst, "tok-0", "", tokenCreateOnly, nil, time.Minute))
+	require.NoError(t, s.transition(ctx, inst, "tok-0", "", tokenCreateOnly, nil, time.Minute, 0))
 	_, err := s.conn.KVGet(ctx, s.bucket, deadlineKey(inst.InstanceID))
 	require.NoError(t, err, "precondition: the deadline must be armed")
 
@@ -81,7 +81,7 @@ func TestTransition_TerminalBatchLeavesExpiringMarkers(t *testing.T) {
 	// superseded by a new one.
 	inst.Status = StatusComplete
 	inst.PendingToken = "tok-1"
-	require.NoError(t, s.transition(ctx, inst, "tok-1", "tok-0", tokenCreateOnly, nil, 0))
+	require.NoError(t, s.transition(ctx, inst, "tok-1", "tok-0", tokenCreateOnly, nil, 0, 0))
 
 	requireExpiringPurgeMarker(ctx, t, s, patternPinKey(inst.InstanceID))
 	requireExpiringPurgeMarker(ctx, t, s, deadlineKey(inst.InstanceID))
@@ -97,11 +97,13 @@ func TestTransition_TerminalBatchLeavesExpiringMarkers(t *testing.T) {
 	require.Empty(t, tombstones, "the cursor family must carry no tombstone")
 }
 
-// TestDisarmDeadline_LeavesExpiringMarker pins the single-publish removal path
-// (disarmDeadline, deleteToken) in the same shape, and that the re-entry no-op
-// the deadline watcher depends on still holds when the standing marker is a
-// purge rather than a DEL.
-func TestDisarmDeadline_LeavesExpiringMarker(t *testing.T) {
+// TestDeleteToken_RepeatedRemovalPublishesNothingNew pins the single-publish
+// removal path — the guarded shape deleteToken uses — against repetition: the
+// second call runs against the marker the first one left and must publish
+// nothing at all. Without the present-key guard an unconditioned purge is
+// accepted by the server, so every repeat would mint a fresh marker on a
+// subject that already carries one.
+func TestDeleteToken_RepeatedRemovalPublishesNothingNew(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -110,19 +112,21 @@ func TestDisarmDeadline_LeavesExpiringMarker(t *testing.T) {
 	defer cancel()
 
 	s := newLoomStateStore(ctx, t)
-	const instanceID = "inst-disarm"
+	const token = "tok-repeat"
 
-	require.NoError(t, s.rearmDeadline(ctx, instanceID, time.Minute))
-	require.NoError(t, s.disarmDeadline(ctx, instanceID))
-	requireExpiringPurgeMarker(ctx, t, s, deadlineKey(instanceID))
+	ptrBody, err := json.Marshal(tokenPointer{InstanceID: "inst-repeat"})
+	require.NoError(t, err)
+	_, err = s.conn.KVPut(ctx, s.bucket, tokenKey(token), ptrBody)
+	require.NoError(t, err)
 
-	// The watcher's re-fire: a second disarm against the standing purge marker
-	// must write nothing new, or the disarm loop never breaks.
-	_, before := markerOn(ctx, t, s, deadlineKey(instanceID))
-	require.NoError(t, s.disarmDeadline(ctx, instanceID))
-	_, after := markerOn(ctx, t, s, deadlineKey(instanceID))
-	require.Equal(t, before, after, "a re-fired disarm must not publish a fresh marker")
-	requireExpiringPurgeMarker(ctx, t, s, deadlineKey(instanceID))
+	require.NoError(t, s.deleteToken(ctx, token))
+	requireExpiringPurgeMarker(ctx, t, s, tokenKey(token))
+
+	_, before := markerOn(ctx, t, s, tokenKey(token))
+	require.NoError(t, s.deleteToken(ctx, token))
+	_, after := markerOn(ctx, t, s, tokenKey(token))
+	require.Equal(t, before, after, "a repeated removal must not publish a fresh marker")
+	requireExpiringPurgeMarker(ctx, t, s, tokenKey(token))
 }
 
 // TestDeleteToken_LeavesExpiringMarker pins the reverse-pointer removal, and

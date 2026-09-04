@@ -133,13 +133,15 @@ type outboxRecord struct {
 }
 
 // deadlineMark is the thin value stored under deadline.<instanceId> (Contract
-// #10 §10.3). It carries a per-key TTL = the current step's deadline; the
-// server's marker for that expiry (Nats-Marker-Reason: MaxAge, which decodes as
-// a KeyValuePurge) is the off-stream failed/rejected backstop (§10.6). What the
-// handler keys on is the empty body, which every marker on this key shares —
-// an explicit removal decodes the same way. The value is observability-only:
-// the step-deadline-exceeded handler reconstructs everything from
-// instance.<instanceId>.
+// #10 §10.3): the ARM. It carries a per-key TTL = the current step's deadline,
+// and the server's marker for that expiry (Nats-Marker-Reason: MaxAge, which
+// decodes as a KeyValuePurge) is the SIGNAL — the off-stream failed/rejected
+// backstop (§10.6). The handler keys on that reason header, not on the empty
+// body every removal of this key also carries; and the key's own PRESENCE is
+// the currency test, since a marker's emission empties the subject and only a
+// later step's arm can put a value back. The value itself is
+// observability-only: the step-deadline-exceeded probe reconstructs everything
+// from instance.<instanceId>.
 type deadlineMark struct {
 	SetAt string `json:"setAt"`
 }
@@ -440,14 +442,24 @@ const (
 // resume commits first and the redrive's put rewrites the same pointer, cursor
 // and outbox record with identical content, the doubled op collapsing on the
 // Contract #4 tracker.
-func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, tokenMode tokenWriteMode, outbox *outboxRecord, deadlineTTL time.Duration) error {
+//
+// expectedRevision, when non-zero, conditions the instance-record write on the
+// revision the caller read it at (getInstanceAtRevision) — redrive's CAS shape,
+// applied to a batch. Zero writes it unconditionally. The deadline probe is the
+// caller that needs it: it decides a terminal from a record it read some round
+// trips ago, and an advance landing in that window must refuse the write rather
+// than flip an instance that has already moved to its next step.
+func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, tokenMode tokenWriteMode, outbox *outboxRecord, deadlineTTL time.Duration, expectedRevision uint64) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
 	}
-	ops := []substrate.BatchOp{
-		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
+	instOp := substrate.BatchOp{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body}
+	if expectedRevision != 0 {
+		instOp.HasRevision = true
+		instOp.Revision = expectedRevision
 	}
+	ops := []substrate.BatchOp{instOp}
 	if inst.Status != StatusRunning {
 		// Terminal (complete/failed): remove the pattern pin in the SAME batch
 		// that flips the status. The pin's removal is what lets the reconcile
@@ -573,6 +585,25 @@ func (s *stateStore) outboxExists(ctx context.Context, token string) (bool, erro
 	return true, nil
 }
 
+// deadlineArmed reports whether deadline.<instanceId> currently holds a value —
+// the probe's currency test (§10.6). A MaxAge marker's emission empties the
+// subject, so a value present when the probe runs was put there afterwards: an
+// advance to a later step (every running step arms) or another replica's
+// re-arm. Either way the arm this marker expired is no longer the current one.
+// A removal marker — DEL or purge — reads absent exactly like a never-written
+// key, which is what makes absence the right answer for "the arm that expired
+// is still the one this instance is on".
+func (s *stateStore) deadlineArmed(ctx context.Context, instanceID string) (bool, error) {
+	_, err := s.conn.KVGet(ctx, s.bucket, deadlineKey(instanceID))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("loom: read deadline %q: %w", instanceID, err)
+	}
+	return true, nil
+}
+
 // rearmDeadline re-arms deadline.<instanceId> with a fresh TTL outside a
 // transition batch — used by the probe's "relay not yet delivered" branch to
 // extend the deadline without advancing the cursor (§10.6).
@@ -587,46 +618,16 @@ func (s *stateStore) rearmDeadline(ctx context.Context, instanceID string, ttl t
 	return nil
 }
 
-// disarmDeadline removes deadline.<instanceId> without touching the cursor or
-// token — used by the userTask creation-deadline probe once the task vertex
-// exists: the bounded creation wait is over, so the deadline is removed and the
-// wait for the human becomes unbounded (§10.6).
-//
-// The removal is guarded on the key already being present. This matters because
-// disarming a still-running instance does NOT change instance state, so the
-// onDeadline handler does not self-guard against re-entry: the disarm's own
-// marker re-fires the deadline watcher, which probes and disarms again. Skipping
-// the removal when the key is already gone makes the second pass a true no-op
-// (no fresh marker) and breaks that loop. A missing key is not an error — and
-// the probe is what supplies that, since an unconditioned purge of an absent
-// key is accepted by the server rather than reported as not-found.
-func (s *stateStore) disarmDeadline(ctx context.Context, instanceID string) error {
-	if _, err := s.conn.KVGet(ctx, s.bucket, deadlineKey(instanceID)); err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return nil
-		}
-		return fmt.Errorf("loom: probe deadline %q: %w", instanceID, err)
-	}
-	if err := s.conn.KVPurgeWithTTL(ctx, s.bucket, deadlineKey(instanceID), tombstoneTTL, 0); err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return nil
-		}
-		return fmt.Errorf("loom: disarm deadline %q: %w", instanceID, err)
-	}
-	return nil
-}
-
 // deleteToken removes a token.<token> reverse pointer (used when a redelivered
 // completion resolves to an already-advanced instance and the stale pointer must
 // be cleared). A missing pointer is not an error.
 //
-// The removal is guarded on the key being present, the same probe
-// disarmDeadline runs and for the same reason: an unconditioned purge of an
-// absent key is accepted by the server rather than reported as not-found, so
-// it CREATES a marker on a subject that held nothing. advance calls this on
-// every redelivered completion that no longer matches the cursor, so an
-// unguarded purge would mint a fresh subject per redelivery on a token that
-// may never have been written at all.
+// The removal is guarded on the key being present because an unconditioned
+// purge of an absent key is accepted by the server rather than reported as
+// not-found, so it CREATES a marker on a subject that held nothing. advance
+// calls this on every redelivered completion that no longer matches the cursor,
+// so an unguarded purge would mint a fresh subject per redelivery on a token
+// that may never have been written at all.
 func (s *stateStore) deleteToken(ctx context.Context, token string) error {
 	if _, err := s.conn.KVGet(ctx, s.bucket, tokenKey(token)); err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {

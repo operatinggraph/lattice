@@ -94,8 +94,8 @@ type Config struct {
 	// whose dispatch never commits parks forever. It is sized ≫ any commit
 	// latency (NOT a human/bridge response window): once the probe confirms the
 	// dispatch committed (the task vertex exists, or the instanceOp's tracker
-	// exists), the deadline is disarmed and the wait for the completer (human or
-	// bridge) becomes unbounded (§10.6). Must be >= 1s (NATS per-key TTL floor).
+	// exists), the expired deadline is not re-armed and the wait for the
+	// completer (human or bridge) runs on unbounded (§10.6). Must be >= 1s (NATS per-key TTL floor).
 	// Default 60s.
 	CreateTaskTimeout time.Duration
 	// HeartbeatEvery is the Contract #5 heartbeat cadence. The 10s default is
@@ -525,7 +525,7 @@ func (e *Engine) resumeStepZero(ctx context.Context, inst *Instance) substrate.D
 		if errors.Is(err, errPatternPinMissing) {
 			// Same posture as advance: an operator-visible failed terminal, never a
 			// Nak loop on an unrecoverable invariant break.
-			if ferr := e.fail(ctx, inst, "", "pattern pin missing"); ferr != nil {
+			if ferr := e.fail(ctx, inst, "", "pattern pin missing", 0); ferr != nil {
 				e.logger.Error("loom: fail on missing pin failed; nak", "instanceId", inst.InstanceID, "err", ferr)
 				return substrate.Nak
 			}
@@ -822,7 +822,7 @@ func (e *Engine) advance(ctx context.Context, instanceID, token string) error {
 	pattern, err := e.state.getPinnedPattern(ctx, inst.InstanceID)
 	if err != nil {
 		if errors.Is(err, errPatternPinMissing) {
-			return e.fail(ctx, inst, token, "pattern pin missing")
+			return e.fail(ctx, inst, token, "pattern pin missing", 0)
 		}
 		return err
 	}
@@ -940,7 +940,7 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.StepTimeout); err != nil {
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.StepTimeout, 0); err != nil {
 		return err
 	}
 	e.logger.Info("loom step write-ahead",
@@ -1037,9 +1037,10 @@ func userTaskOptionalReads(taskKey, subjectKey string) []string {
 // probe applied to the task-creation path): waiting for the task vertex to be
 // CREATED is a machine action with a tight latency bound, so a rejected/lost
 // CreateTask must not park the token forever. The deadline backstops only the
-// creation; once onDeadline's probe confirms the task vertex exists, it disarms
-// the deadline and the wait for the human becomes unbounded (§10.6) — a
-// human may take days, and false-failing that wait would be a correctness bug.
+// creation: its expiry is the one thing that wakes the probe, and once the probe
+// confirms the task vertex exists nothing re-arms, so the wait for the human runs
+// on unbounded (§10.6) — a human may take days, and false-failing that wait would
+// be a correctness bug.
 func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string, tokenMode tokenWriteMode) error {
 	// opMetaKey resolves LIVE (not pinned): it maps the step's operationType to
 	// the op's CURRENT meta-vertex key, which becomes the task's forOperation
@@ -1082,7 +1083,7 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout); err != nil {
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout, 0); err != nil {
 		return err
 	}
 	e.logger.Info("loom userTask write-ahead",
@@ -1113,8 +1114,8 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 // the instanceOp to COMMIT (the machine action that mints the claim vertex +
 // emits the external.<adapter> event), then an unbounded wait for the bridge to
 // post the replyOp. The deadline bounds only the submission; once the instanceOp
-// commits it is disarmed and the bridge wait is unbounded (onExternalTaskDeadline)
-// — so the bound is CreateTaskTimeout (the machine-action creation-wait), not the
+// commits nothing re-arms the expired deadline and the bridge wait is unbounded
+// (onExternalTaskDeadline) — so the bound is CreateTaskTimeout (the machine-action creation-wait), not the
 // StepTimeout external round-trip. Loom stays substrate-only: the
 // external.<adapter> event is emitted by the instanceOp DDL's transactional
 // outbox, never by Loom — the relay just submits the instanceOp like any op.
@@ -1159,9 +1160,9 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 		return err
 	}
 	// The deadline bounds the instanceOp submission (a machine action), like a
-	// userTask's CreateTask creation-deadline — not the external round-trip; it
-	// disarms once the instanceOp commits (onExternalTaskDeadline).
-	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout); err != nil {
+	// userTask's CreateTask creation-deadline — not the external round-trip; its
+	// expiry is not re-armed once the instanceOp commits (onExternalTaskDeadline).
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout, 0); err != nil {
 		return err
 	}
 	e.logger.Info("loom externalTask write-ahead",
@@ -1189,7 +1190,7 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0); err != nil {
+	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0, 0); err != nil {
 		return err
 	}
 	e.logger.Info("loom pattern complete", "instanceId", inst.InstanceID, "patternId", pattern.PatternID)
@@ -1203,9 +1204,14 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 
 // fail flips the instance to status=failed (the off-stream rejected/timeout
 // terminal, §10.6) and writes the FailPattern lifecycle op into the outbox in
-// the same AtomicBatch (which also deletes the pending pointer and disarms the
-// deadline). Delivery of the announcement is durable, like complete.
-func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason string) error {
+// the same AtomicBatch (which also deletes the pending pointer and removes the
+// deadline arm). Delivery of the announcement is durable, like complete.
+//
+// expectedRevision conditions the record write on the revision the caller read
+// the instance at; 0 writes it unconditionally. The deadline probe supplies it
+// (see probeFail); advance and the trigger path pass 0 — their writes are
+// serialized by the new token's create-only condition instead.
+func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason string, expectedRevision uint64) error {
 	inst.Status = StatusFailed
 	inst.PendingToken = ""
 	inst.RetryCount++
@@ -1219,7 +1225,7 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0); err != nil {
+	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0, expectedRevision); err != nil {
 		return err
 	}
 	e.logger.Warn("loom instance failed",
@@ -1227,6 +1233,32 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 	// Same drain trigger as complete: the terminal batch deleted the pattern pin.
 	go e.reconcileConsumers()
 	return nil
+}
+
+// probeFail is fail on the deadline-probe path: the terminal write is
+// conditioned on the revision the probe read the instance at, and a refused
+// condition is the answer, not an error.
+//
+// The window it closes is the probe's own: it reads the record, asks the
+// lattice.op.status RPC and the outbox, and only then writes — and a completion
+// landing anywhere in there advances the instance to a step this probe knows
+// nothing about. The record's three writers are createInstance (create-only),
+// transition and redrive, and none of them bumps the revision while leaving the
+// pending step in place, so a bump under a running read is always another
+// actor's advance, completion or fail. Dropping is then exactly right, and it
+// is the same drop advance takes on a stale completion.
+//
+// The drop is a nil return (⇒ Ack), never a Nak: a MaxAge marker lives one
+// second, so a Nak asks for a redelivery that will not exist, and a re-probe
+// would find nothing to do anyway.
+func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason string, expectedRevision uint64) error {
+	err := e.fail(ctx, inst, oldToken, reason, expectedRevision)
+	if err != nil && substrate.IsRevisionConflict(err) {
+		e.logger.Info("loom: instance moved on under the probe; deadline verdict dropped",
+			"instanceId", inst.InstanceID, "expectedRevision", expectedRevision, "reason", reason)
+		return nil
+	}
+	return err
 }
 
 // userTaskTokenPrefix is the key prefix of a userTask write-ahead token (the
@@ -1251,11 +1283,32 @@ const lifecycleCursor = -1
 // deadlineDurable is the deadline watcher's durable consumer name.
 const deadlineDurable = "loom-deadline"
 
-// handleDeadline reacts to a deadline.<instanceId> delete/expiry marker (empty
-// body). A value write (the re-arm PUT) carries a body and is ignored.
+// handleDeadline reacts to the EXPIRY of a deadline.<instanceId> arm — the
+// server's own MaxAge marker, and nothing else (Contract #10 §10.3/§10.6).
+//
+// A message on deadline.> is one of three things, told apart by the headers the
+// substrate delivers (consumer.go newMessage):
+//   - the arm itself: a body (the deadlineMark) — nothing to do;
+//   - the server's expiry marker, Nats-Marker-Reason: MaxAge — THE signal:
+//     run the read-before-act probe;
+//   - Loom's own removal of the key (KV-Operation DEL or PURGE: a terminal
+//     transition, the tombstone sweep) — not an expiry. These are what a
+//     rebuilt DeliverAll durable replays, and the probe's evidence (the 24 h
+//     Contract #4 tracker) says nothing about a step that was never due.
 func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg substrate.Message) substrate.Decision {
 	if len(msg.Body) != 0 {
-		// A re-arm PUT, not an expiry/delete — nothing to do.
+		// A re-arm PUT, not an expiry — nothing to do.
+		return substrate.Ack
+	}
+	if msg.Header == nil {
+		// Only a hand-built Message has no header source; the supervised path
+		// always installs one. Refuse to guess on a destructive path.
+		e.logger.Error("loom: deadline message carries no header source; ignored", "subject", msg.Subject)
+		return substrate.Ack
+	}
+	if msg.Header(substrate.MarkerReasonHeader) != substrate.MarkerReasonMaxAge {
+		e.logger.Debug("loom: deadline key removed, not expired; ignored", "subject", msg.Subject,
+			"op", msg.Header(substrate.KVOperationHeader), "reason", msg.Header(substrate.MarkerReasonHeader))
 		return substrate.Ack
 	}
 	instanceID := strings.TrimPrefix(strings.TrimPrefix(msg.Subject, subjPrefix), deadlinePrefix)
@@ -1270,14 +1323,36 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 }
 
 // onDeadline runs the read-before-act probe for an instance whose step deadline
-// fired (Contract #10 §10.6): ask the lattice.op.status RPC (Processor-hosted,
+// EXPIRED (Contract #10 §10.6): ask the lattice.op.status RPC (Processor-hosted,
 // the sole sanctioned Core-KV reader; op-status-read-surface-design.md Fire 3)
 // whether the Contract #4 op tracker for the pending token COMMITTED — present
 // → the op committed but its event was missed → advance + alert; absent but
 // the outbox record still present → the relay has not delivered → re-arm;
-// absent and no outbox record → rejected → fail. Every branch re-reads
-// instance state and is CAS-on-running (the advance/fail paths verify the
-// pending token), so a redelivered marker / second replica is a no-op.
+// absent and no outbox record → rejected → fail.
+//
+// Three things keep the verdict about the arm that actually expired. The caller
+// admits only the server's MaxAge marker, so the probe never runs on a removal
+// of the key. deadlineArmed is then read FIRST: a value on deadline.<id> means a
+// later step re-armed after this marker's arm expired, so the marker is stale
+// and the probe stops before spending the tracker RPC. And every terminal write
+// below is conditioned on the revision the record was read at (probeFail), so a
+// completion landing between the read and the write refuses the write rather
+// than flipping an instance that has already moved on. A redelivered marker is
+// a no-op on all three counts; two replicas converge on every pairing except
+// re-arm vs fail, which resolves to fail — the same outcome a single replica
+// reaches one re-arm later.
+//
+// The re-arm PUT itself is unconditioned, which excludes one ordering from that
+// convergence: an advance landing between the currency read and the re-arm PUT
+// overwrites step N+1's fresh arm with the old step's TTL — not a wedge, since a
+// marker still fires for the overwriting arm.
+//
+// Every error return from this probe Naks the marker that woke it, and that
+// marker is a MaxAge marker the server removes one second after emission — so a
+// transient failure on ANY read here (the record, the deadline key, the pattern
+// pin, the lattice.op.status RPC, the outbox) loses that expiry outright. There
+// is deliberately no retry loop: the marker's TTL, not this handler, is where
+// the redelivery window for an expiry signal is sized.
 //
 // The pending step's kind selects the probe:
 //   - userTask (vtx.task.<id> token) → onUserTaskDeadline: the deadline is
@@ -1286,12 +1361,12 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 //     mints the task vertex in the same Processor commit, so the tracker
 //     alone is the created signal — no separate task-vertex read).
 //   - externalTask → onExternalTaskDeadline: bounded on the instanceOp
-//     SUBMISSION only (symmetric to a userTask), so the probe disarms on commit
-//     for an unbounded bridge wait rather than advancing. The pending token is
-//     the bare instance handle, but the instanceOp's tracker/outbox are keyed by
-//     the instanceOp's own requestId (not the handle), so the probe MUST
-//     re-derive that requestId — it cannot reuse the systemOp branch (which
-//     probes the pending token directly).
+//     SUBMISSION only (symmetric to a userTask), so on commit the expiry simply
+//     stands and the bridge wait runs on unbounded, rather than advancing. The
+//     pending token is the bare instance handle, but the instanceOp's
+//     tracker/outbox are keyed by the instanceOp's own requestId (not the
+//     handle), so the probe MUST re-derive that requestId — it cannot reuse the
+//     systemOp branch (which probes the pending token directly).
 //   - systemOp → the inline probe below: the pending token IS the op requestId,
 //     so trackerExists(token)/outboxExists(token) probe the right keys.
 //
@@ -1303,33 +1378,43 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 // unrecoverable invariant break advance handles, turned into a failed terminal
 // rather than an infinite Nak loop).
 func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
-	inst, err := e.state.getInstance(ctx, instanceID)
+	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	if err != nil {
 		return err
 	}
 	if inst == nil || inst.Status != StatusRunning {
-		// Already terminal, or a stale marker (e.g. the disarm delete from a
-		// normal advance/terminal). No-op.
+		// Already terminal. No-op.
 		return nil
 	}
 	token := inst.PendingToken
 	if token == "" {
 		return nil
 	}
+
+	armed, err := e.state.deadlineArmed(ctx, instanceID)
+	if err != nil {
+		return err
+	}
+	if armed {
+		e.logger.Info("loom: deadline marker is stale; a later step re-armed",
+			"instanceId", instanceID, "cursor", inst.Cursor)
+		return nil
+	}
+
 	if isUserTaskToken(token) {
-		return e.onUserTaskDeadline(ctx, inst)
+		return e.onUserTaskDeadline(ctx, inst, revision)
 	}
 
 	pattern, err := e.state.getPinnedPattern(ctx, inst.InstanceID)
 	if err != nil {
 		if errors.Is(err, errPatternPinMissing) {
-			return e.fail(ctx, inst, token, "pattern pin missing")
+			return e.probeFail(ctx, inst, token, "pattern pin missing", revision)
 		}
 		return err
 	}
 	if inst.Cursor >= 0 && inst.Cursor < len(pattern.Steps) &&
 		pattern.Steps[inst.Cursor].Kind == StepKindExternalTask {
-		return e.onExternalTaskDeadline(ctx, inst)
+		return e.onExternalTaskDeadline(ctx, inst, revision)
 	}
 
 	committed, err := e.trackerExists(ctx, token)
@@ -1357,7 +1442,8 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 	}
 
 	// Tracker absent and the op was relayed (no outbox record) → rejected/lost.
-	return e.fail(ctx, inst, token, fmt.Sprintf("step %d deadline exceeded; op rejected or lost", inst.Cursor))
+	return e.probeFail(ctx, inst, token,
+		fmt.Sprintf("step %d deadline exceeded; op rejected or lost", inst.Cursor), revision)
 }
 
 // onUserTaskDeadline runs the read-before-act probe for a userTask whose bounded
@@ -1368,29 +1454,32 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 // task vertex in the same Processor commit (no separate vtx.task.<id> read):
 //
 //  1. CreateTask tracker committed → the flow is now in the legitimate
-//     unbounded human wait → disarm the creation-deadline (the cursor/token
-//     are untouched) and stop; the human may take days.
+//     unbounded human wait → the expired creation-deadline simply stands, not
+//     re-armed, cursor and token untouched; the human may take days.
 //  2. Not committed, outbox record still present → the relay has not
 //     delivered CreateTask yet → re-arm.
 //  3. Not committed, no outbox record → CreateTask rejected/lost → fail.
 //
-// Every branch re-reads instance state via the caller and is CAS-on-running (the
-// fail path verifies the pending token), so a redelivered marker / second replica
-// is a no-op.
-func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance) error {
+// The caller has already established that the instance is running, that its
+// deadline key is absent (so the arm that expired is the current one) and the
+// revision it read all that at; the fail path verifies the pending token and
+// conditions its write on that revision, so a redelivered marker is a no-op and
+// two replicas converge on every pairing except re-arm vs fail, which resolves
+// to fail — the same outcome a single replica reaches one re-arm later.
+func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance, revision uint64) error {
 	opRequestID := deriveRequestID(inst.InstanceID, inst.Cursor)
 	committed, err := e.trackerExists(ctx, opRequestID)
 	if err != nil {
 		return err
 	}
 	if committed {
-		// CreateTask committed — the task vertex now exists and the bounded
-		// creation wait is over; the unbounded human wait begins. Disarm the
-		// deadline without touching the cursor/token — the instance stays
-		// running until the human acts.
-		e.logger.Info("loom: CreateTask committed; disarming creation-deadline for unbounded human wait",
+		// CreateTask committed: the task vertex exists and the bounded creation
+		// wait is over. The deadline that woke this probe has expired — that is
+		// the only thing that wakes it — and is not re-armed: the human wait is
+		// unbounded (§10.6). Cursor and token are untouched.
+		e.logger.Info("loom: CreateTask committed; creation-deadline expired, unbounded human wait",
 			"instanceId", inst.InstanceID, "cursor", inst.Cursor, "createTaskRequestId", opRequestID)
-		return e.state.disarmDeadline(ctx, inst.InstanceID)
+		return nil
 	}
 
 	outboxPending, err := e.state.outboxExists(ctx, opRequestID)
@@ -1407,8 +1496,8 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance) error {
 	// No tracker, no outbox record → the CreateTask was rejected or lost. Fail
 	// the instance rather than park the token forever (§10.6: never a silent
 	// wedge).
-	return e.fail(ctx, inst, inst.PendingToken,
-		fmt.Sprintf("step %d CreateTask rejected", inst.Cursor))
+	return e.probeFail(ctx, inst, inst.PendingToken,
+		fmt.Sprintf("step %d CreateTask rejected", inst.Cursor), revision)
 }
 
 // onExternalTaskDeadline runs the read-before-act probe for an externalTask
@@ -1429,17 +1518,21 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance) error {
 // re-derives the instanceOp requestId (exactly as onUserTaskDeadline re-derives
 // the CreateTask requestId) while the fail path acts on the pending handle token:
 //
-//  1. tracker present → the instanceOp committed → disarm the creation-deadline
-//     (cursor/token untouched) and stop; the bridge wait is now unbounded.
+//  1. tracker present → the instanceOp committed → the expired
+//     creation-deadline simply stands, not re-armed, cursor and token
+//     untouched; the bridge wait is now unbounded.
 //  2. tracker absent, outbox record present → the relay has not delivered the
 //     instanceOp yet → re-arm.
 //  3. tracker absent, outbox absent → the instanceOp was rejected/lost → fail
 //     (FR29 — the submission is never a silent wedge).
 //
-// Every branch re-reads instance state via the caller and is CAS-on-running (the
-// fail path verifies the pending token), so a redelivered marker / second replica
-// is a no-op.
-func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance) error {
+// The caller has already established that the instance is running, that its
+// deadline key is absent (so the arm that expired is the current one) and the
+// revision it read all that at; the fail path verifies the pending token and
+// conditions its write on that revision, so a redelivered marker is a no-op and
+// two replicas converge on every pairing except re-arm vs fail, which resolves
+// to fail — the same outcome a single replica reaches one re-arm later.
+func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance, revision uint64) error {
 	token := inst.PendingToken
 	opRequestID := deriveRequestID(inst.InstanceID, inst.Cursor)
 
@@ -1450,12 +1543,13 @@ func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance) err
 	if committed {
 		// The instanceOp committed: the claim vertex exists and the
 		// external.<adapter> event was emitted, so the bridge will reply. The
-		// bounded creation wait is over and the unbounded bridge wait begins.
-		// Disarm the deadline without touching the cursor/token — the cursor
-		// advances only on orchestration.externalTaskCompleted.
-		e.logger.Info("loom: instanceOp committed; disarming creation-deadline for unbounded bridge wait",
+		// deadline that woke this probe has expired — that is the only thing
+		// that wakes it — and is not re-armed: the bridge wait is unbounded
+		// (§10.6). Cursor and token are untouched; the cursor advances only on
+		// orchestration.externalTaskCompleted.
+		e.logger.Info("loom: instanceOp committed; creation-deadline expired, unbounded bridge wait",
 			"instanceId", inst.InstanceID, "instanceKey", token, "instanceOpRequestId", opRequestID)
-		return e.state.disarmDeadline(ctx, inst.InstanceID)
+		return nil
 	}
 
 	outboxPending, err := e.state.outboxExists(ctx, opRequestID)
@@ -1472,8 +1566,8 @@ func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance) err
 
 	// Tracker absent and the instanceOp was relayed (no outbox record) →
 	// rejected/lost. Fail on the pending handle token.
-	return e.fail(ctx, inst, token,
-		fmt.Sprintf("step %d instanceOp rejected", inst.Cursor))
+	return e.probeFail(ctx, inst, token,
+		fmt.Sprintf("step %d instanceOp rejected", inst.Cursor), revision)
 }
 
 // trackerExistsTimeout bounds Loom's own wait on the lattice.op.status RPC

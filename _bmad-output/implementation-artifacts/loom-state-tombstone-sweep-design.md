@@ -177,8 +177,11 @@ newToken`, `state.go:429`), `outbox.<req>`, and exactly one `deadline.<id>` op (
 | the relay's outbox delete (`actuator.go:124`) | `KVDelete` | same |
 
 `tombstoneTTL = time.Minute`, a package constant with its reasoning in the doc comment. Any value ≥ 1 s is
-correct (the server's floor, `server/stream.go:5346-5348`; seconds granularity); nothing reads a marker for
-its own sake (§4), so the minimum would do. One minute is chosen so that `nats kv history` on a key an operator
+correct (the server's floor, `server/stream.go:5346-5348`; seconds granularity); ~~nothing reads a marker for
+its own sake (§4), so the minimum would do~~ — **struck 2026-09-04:** the deadline handler read every marker on
+`deadline.>`; it now reads the marker reason and ignores the removal shapes
+([`loom-deadline-marker-provenance-design.md`](loom-deadline-marker-provenance-design.md)), so the minimum
+would do for a different reason. One minute is chosen so that `nats kv history` on a key an operator
 is looking at *right now* still shows the removal that just happened, and it costs single-digit transient
 subjects (§2). It is deliberately **not** a `Config` field: there is no operational reason to tune it, and a
 knob invites the belief that some consumer depends on the value.
@@ -320,7 +323,10 @@ marker on such an instance is a destructive signal, not a no-op, and pacing cann
 family carries a **guard**: each marker's `instance.<id>` is read first and the marker is converted only when
 the instance exists and is terminal; a running or unreadable instance's marker is skipped (`skippedRunning`)
 and stays DEL until the terminal batch's own purge rolls it up. (Found by the close pass, §13; the §4 table's
-"probe → no-op" cell was wrong for a running instance and is corrected there.) Unpaced, 12,346 deadline conversions would put a
+"probe → no-op" cell was wrong for a running instance and is corrected there.) **Note 2026-09-04:** the guard
+is left in place but is **no longer load-bearing** — the handler now acts only on the server's `MaxAge` expiry
+marker, so a converted removal marker is acked without a read
+([`loom-deadline-marker-provenance-design.md`](loom-deadline-marker-provenance-design.md)). Unpaced, 12,346 deadline conversions would put a
 multi-second backlog on `loom-deadline`, and §11 says a real expiry marker survives one second in the stream:
 **the pass must never let that durable lag.** So the two CDC-filtered families are converted at a fixed pace,
 `legacySweepRate` ≈ 100 publishes/s (a probe costs ~1 ms, so the durable drains faster than the pass feeds
@@ -615,8 +621,10 @@ the body above; recorded here so the next reader knows which claims were *tested
    each fire the deadline probe; unpaced, that backlog collides with §11's one-second marker window. The
    CDC-filtered families are now paced (`legacySweepRate`), the consumer-less families run first and
    unpaced, the "no health issue" sentence became a stated bound observed at the live close. (The sharper
-   fix — keying the handler on `Nats-Marker-Reason` — needs headers on `substrate.Message`, which the consumer
-   path does not carry; deliberately not widened into.)
+   fix — keying the handler on `Nats-Marker-Reason` — ~~needs headers on `substrate.Message`, which the consumer
+   path does not carry; deliberately not widened into~~ — **struck 2026-09-04:** `substrate.Message.Header` is
+   installed on every delivery path and has been since `c16f7391`; the handler now keys on the reason
+   ([`loom-deadline-marker-provenance-design.md`](loom-deadline-marker-provenance-design.md) §1.4).)
 3. **§3.1 — a rollup runs the server's per-subject purge path and walks every consumer's pending map.** New
    per-removal server work a DEL never did; stated, and the sibling-subject survival is pinned in Inc 1's fixture.
 4. **§3.4 — the gate missed the two shapes that reintroduce a permanent subject**: a bare `KVPurge` and a
@@ -737,8 +745,10 @@ runs first) + `STRICT=1`. Fire → `go build ./... && make vet && golangci-lint 
 ./scripts/lint-board.go && make verify-kernel` (needs the live stack) + full `go test ./... -p 4` +
 `make test-*-convergence` / `leaseshortwindow` tag (the leaseconvergence harness constructs a real `Engine`).
 
-**5. In-scope gotchas.** No `packages/` edits (no version bump). `substrate.Message` carries no headers — do
-not try to key the deadline handler on the marker reason. `Conn.bucket` caches the KV handle. The rollup in a
+**5. In-scope gotchas.** No `packages/` edits (no version bump). ~~`substrate.Message` carries no headers — do
+not try to key the deadline handler on the marker reason.~~ **Struck 2026-09-04:** it does carry them, and the
+handler now keys on the marker reason
+([`loom-deadline-marker-provenance-design.md`](loom-deadline-marker-provenance-design.md)). `Conn.bucket` caches the KV handle. The rollup in a
 batch must be the subject's first occurrence — `transition` already guarantees it. `LimitMarkerTTL` ≥ 1 s;
 `Nats-TTL` seconds granularity (`tombstoneTTL = time.Minute` renders `1m0s`, accepted by `time.ParseDuration`
 server-side). Health-KV emission untouched. **Loom dossier (verbatim):** (1) *A `CreateOnly` write against a key

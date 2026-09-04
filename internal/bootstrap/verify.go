@@ -259,6 +259,13 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 	// so a bucket that forbids rollups, forbids purges, or ignores message TTLs
 	// fails every step transition. Asserting the posture here makes such a
 	// bucket fail verification rather than fail Loom at runtime.
+	//
+	// loom-state's absent stream age limit is asserted for a different reason:
+	// it is a soundness premise, not a mechanism the writers need. The server
+	// writes a byte-identical MaxAge marker whether a per-message TTL or a
+	// stream age limit emptied the subject, so bounding the bucket by age would
+	// silently turn every standing removal marker into something the deadline
+	// probe reads as an expiry.
 	for _, bucket := range []string{CoreKVBucket, LoomStateBucket} {
 		stream, err := js.Stream(ctx, "KV_"+bucket)
 		if err != nil {
@@ -280,6 +287,11 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 		}
 		if !cfg.AllowMsgTTL {
 			failures = append(failures, fmt.Sprintf("AllowMsgTTL NOT set on KV_%s (a Loom removal's marker carries a TTL)", bucket))
+		}
+		if cfg.MaxAge != 0 {
+			failures = append(failures, fmt.Sprintf(
+				"MaxAge IS set on KV_%s (%s): the deadline probe keys on the server's MaxAge marker; an age limit would mint one for every removal marker",
+				bucket, cfg.MaxAge))
 		}
 	}
 

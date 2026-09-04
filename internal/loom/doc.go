@@ -43,9 +43,10 @@
 //     TTL: the server's marker for that expiry (Nats-Marker-Reason: MaxAge,
 //     decoding as a KeyValuePurge) trips a read-before-act probe (GET
 //     vtx.op.<token>: committed → advance + alert; not yet relayed → re-arm;
-//     rejected → fail) — never a synchronous submit-reply. The probe's predicate
-//     is the empty body every marker on the key carries, so it is re-entrant
-//     against an explicit removal's marker too (§10.6);
+//     rejected → fail) — never a synchronous submit-reply. That reason header IS
+//     the predicate: a removal of the key (KV-Operation DEL or PURGE) is not an
+//     expiry and is acked unread, and a key found present at probe time means a
+//     later step re-armed, so the marker is stale (§10.6);
 //   - the per-instance cursor, the co-located token reverse index, the outbox
 //     record, and the deadline mark all live in the operational loom-state bucket;
 //     each step transition is one AtomicBatch.

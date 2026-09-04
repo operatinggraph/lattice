@@ -62,7 +62,7 @@ func seedRunningInstance(ctx context.Context, t *testing.T, s *stateStore, insta
 	// An hour, not a minute: a deadline that could expire inside the test's
 	// own budget would move the subject's sequence, and the live-key
 	// assertions compare exactly that.
-	require.NoError(t, s.transition(ctx, inst, token, "", tokenCreateOnly, ob, time.Hour))
+	require.NoError(t, s.transition(ctx, inst, token, "", tokenCreateOnly, ob, time.Hour, 0))
 	for _, key := range []string{
 		instanceKey(instanceID), patternPinKey(instanceID),
 		tokenKey(token), outboxKey(token), deadlineKey(instanceID),
@@ -94,6 +94,29 @@ func seedTerminalInstance(ctx context.Context, t *testing.T, s *stateStore, inst
 	inst := seedRunningInstance(ctx, t, s, instanceID, token)
 	markTerminal(ctx, t, s, inst)
 	return inst
+}
+
+// removeDeadlineArm removes an armed deadline.<instanceId> the way every Loom
+// removal does — a purge carrying tombstoneTTL, guarded on the key being
+// present so an absent key mints nothing. Loom itself only removes a deadline
+// arm as part of a terminal transition's batch, so a parked-but-running
+// instance's disarm-shaped marker is minted here directly.
+func removeDeadlineArm(ctx context.Context, t *testing.T, s *stateStore, instanceID string) {
+	t.Helper()
+	_, err := s.conn.KVGet(ctx, s.bucket, deadlineKey(instanceID))
+	require.NoError(t, err, "seed precondition: %s must be armed", deadlineKey(instanceID))
+	require.NoError(t, s.conn.KVPurgeWithTTL(ctx, s.bucket, deadlineKey(instanceID), tombstoneTTL, 0))
+}
+
+// maxAgeHeader is the header source a server-minted expiry marker delivers:
+// Nats-Marker-Reason: MaxAge and no KV-Operation at all. A hand-built
+// substrate.Message needs it to reach the probe, since the handler admits only
+// that provenance.
+func maxAgeHeader(key string) string {
+	if key == substrate.MarkerReasonHeader {
+		return substrate.MarkerReasonMaxAge
+	}
+	return ""
 }
 
 // legacyDelete removes a key the way a plain KV delete does: a permanent DELETE
@@ -512,9 +535,9 @@ func TestSweepLegacyTombstones_StopsAtTheFirstFailureAndTheNextPassFinishes(t *t
 // bucket populations a real start meets at once: a terminated instance's
 // legacy residue in all four families, which converts; a live running
 // instance whose keys are all values, which the pass never addresses; and a
-// running instance whose deadline was disarmed long ago and whose disarm left
-// a legacy DEL marker, which the pass must leave exactly as it is — converting
-// it would re-fire the deadline probe on a live human wait.
+// running instance whose deadline arm was removed long ago, leaving a legacy
+// DEL marker, which the pass must leave exactly as it is — converting it would
+// republish on the deadline family of a live human wait.
 func TestEngineStart_RunsTheConversionPass(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -537,7 +560,7 @@ func TestEngineStart_RunsTheConversionPass(t *testing.T) {
 
 	const waitID, waitToken = "instStartWait1", "tokStartWait1"
 	seedRunningInstance(ctx, t, s, waitID, waitToken)
-	require.NoError(t, s.disarmDeadline(ctx, waitID))
+	removeDeadlineArm(ctx, t, s, waitID)
 	legacyDelete(ctx, t, s, deadlineKey(waitID))
 	_, disarmedSeq := markerOn(ctx, t, s, deadlineKey(waitID))
 
@@ -689,8 +712,9 @@ func TestEngineStart_JoinsTheConversionPassBeforeReturning(t *testing.T) {
 
 // TestConvertFamily_SkipsARunningInstancesDeadlineMarker is the guard's central
 // proof, on the shape that produces it in production: a userTask instance whose
-// bounded creation deadline was DISARMED — through the real disarm path — while
-// the instance stays running, parked on an unbounded human wait. Its deadline
+// bounded creation deadline's arm was REMOVED — through the same guarded purge
+// every Loom removal writes — while the instance stays running, parked on an
+// unbounded human wait. Its deadline
 // subject carries a marker; converting it would deliver a fresh empty-body
 // message to the deadline durable, whose probe on a running instance looks for
 // a Contract #4 tracker that expired 24h after the op committed, finds nothing,
@@ -709,10 +733,10 @@ func TestConvertFamily_SkipsARunningInstancesDeadlineMarker(t *testing.T) {
 	const instanceID, token = "instWaiting1", "tokWaiting1"
 	seedRunningInstance(ctx, t, s, instanceID, token)
 
-	// The real disarm, then the legacy DEL shape on top of the marker it left:
-	// this package's own removals purge with a TTL, so the residue the pass
-	// exists to clear cannot be produced by production code any more.
-	require.NoError(t, s.disarmDeadline(ctx, instanceID))
+	// The removal, then the legacy DEL shape on top of the marker it left: this
+	// package's own removals purge with a TTL, so the residue the pass exists to
+	// clear cannot be produced by production code any more.
+	removeDeadlineArm(ctx, t, s, instanceID)
 	legacyDelete(ctx, t, s, deadlineKey(instanceID))
 	_, before := markerOn(ctx, t, s, deadlineKey(instanceID))
 
@@ -822,6 +846,9 @@ func TestHandleDeadline_TerminalInstanceIsASilentNoOp(t *testing.T) {
 	decision := e.handleDeadline(ctx, subjPrefix, substrate.Message{
 		Subject: subjPrefix + deadlineKey(instanceID),
 		Body:    nil,
+		// The expiry marker's own header, so the handler admits the message and
+		// the probe is what returns — the status check, not the classifier.
+		Header: maxAgeHeader,
 	})
 	require.Equal(t, substrate.Ack, decision)
 	require.Equal(t, before, streamLastSeq(ctx, t, s),

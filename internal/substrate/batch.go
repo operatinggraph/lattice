@@ -196,7 +196,7 @@ func (c *Conn) AtomicBatch(ctx context.Context, ops []BatchOp) (*BatchAck, error
 			// header. The server removes the visible value; subsequent reads
 			// return ErrKeyNotFound.
 			m.Data = nil
-			m.Header.Set("KV-Operation", "DEL")
+			m.Header.Set(KVOperationHeader, KVOperationDelete)
 		case op.Purge:
 			// NATS KV purge marker: an empty body whose subject rollup discards
 			// the subject's prior messages (the value, or an older marker) as it
@@ -206,7 +206,7 @@ func (c *Conn) AtomicBatch(ctx context.Context, ops []BatchOp) (*BatchAck, error
 			// server/jetstream_batching.go:887-907), which every Loom transition
 			// batch satisfies — each key is named at most once.
 			m.Data = nil
-			m.Header.Set("KV-Operation", "PURGE")
+			m.Header.Set(KVOperationHeader, KVOperationPurge)
 			m.Header.Set("Nats-Rollup", "sub")
 		}
 		if op.CreateOnly && !op.Delete && !op.Purge {

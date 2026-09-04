@@ -412,7 +412,7 @@ func driveToFailedAtStepZero(t *testing.T, ctx context.Context, e *Engine, pat *
 	require.NoError(t, e.submitStep(ctx, inst, pat, "", tokenCreateOnly))
 	token := deriveRequestID(instanceID, 0)
 	require.Equal(t, token, inst.PendingToken, "precondition: step 0 parked on its derived token")
-	require.NoError(t, e.fail(ctx, inst, token, "step 0 deadline exceeded; op rejected or lost"))
+	require.NoError(t, e.fail(ctx, inst, token, "step 0 deadline exceeded; op rejected or lost", 0))
 	return token
 }
 
@@ -495,7 +495,7 @@ func TestRedriveInstance_HappyPath_ResumesAtCursor(t *testing.T) {
 	onStepOne, err := e.state.getInstance(ctx, "inst1")
 	require.NoError(t, err)
 	require.Equal(t, 1, onStepOne.Cursor)
-	require.NoError(t, e.fail(ctx, onStepOne, deriveRequestID("inst1", 1), "step 1 deadline exceeded; op rejected or lost"))
+	require.NoError(t, e.fail(ctx, onStepOne, deriveRequestID("inst1", 1), "step 1 deadline exceeded; op rejected or lost", 0))
 	_, err = e.state.getPinnedPattern(ctx, "inst1")
 	require.ErrorIs(t, err, errPatternPinMissing, "precondition: the terminal batch deleted the pin")
 
@@ -644,7 +644,7 @@ func TestStateStore_Redrive_ConcurrentCASRejectsLoser(t *testing.T) {
 	seed := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 	require.NoError(t, store.createInstance(ctx, seed, pat))
 	seed.Status = StatusFailed
-	require.NoError(t, store.transition(ctx, seed, "", "", tokenCreateOnly, nil, 0))
+	require.NoError(t, store.transition(ctx, seed, "", "", tokenCreateOnly, nil, 0, 0))
 	_, err := store.getPinnedPattern(ctx, "inst1")
 	require.ErrorIs(t, err, errPatternPinMissing, "precondition: the terminal batch deleted the pin")
 

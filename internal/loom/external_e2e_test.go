@@ -23,7 +23,7 @@ import (
 // correlates by externalRef and advances ONLY on that completion event.
 //
 // The externalTask is symmetric to a userTask: the bounded creation-deadline
-// backstops the instanceOp SUBMISSION only — committed instanceOp → disarm to an
+// backstops the instanceOp SUBMISSION only — committed instanceOp → run on into an
 // unbounded bridge wait; rejected/lost instanceOp → FailPattern (FR29);
 // not-yet-relayed → re-arm. The deadline never advances the cursor.
 //
@@ -295,9 +295,9 @@ func TestExternalE2E_RejectedInstanceOpFails(t *testing.T) {
 // TestExternalE2E_CommittedNoReply_DisarmsToUnboundedWait is the load-bearing
 // proof that an externalTask is symmetric to a userTask, NOT a systemOp: the
 // instanceOp COMMITS (claim vertex + tracker minted) but the reply NEVER arrives.
-// The bounded creation-deadline fires, the probe finds the instanceOp's tracker
-// present (keyed off its OWN requestId, NOT the parked handle) and DISARMS the
-// deadline — the bridge wait is now unbounded. The instance must stay running at
+// The bounded creation-deadline expires, the probe finds the instanceOp's tracker
+// present (keyed off its OWN requestId, NOT the parked handle) and re-arms
+// nothing — the bridge wait is now unbounded. The instance must stay running at
 // the SAME cursor (NOT advanced — advancing on a committed-but-unreplied
 // instanceOp would skip the external result — and NOT failed); the cursor moves
 // only when orchestration.externalTaskCompleted arrives.
@@ -324,7 +324,8 @@ func TestExternalE2E_CommittedNoReply_DisarmsToUnboundedWait(t *testing.T) {
 
 	// The instanceOp commits (mints the claim vertex + tracker) but NO replyOp is
 	// ever submitted — so no completion event arrives. The deadline+probe must
-	// DISARM off the instanceOp's own tracker and leave the instance running.
+	// read the instanceOp's own tracker, re-arm nothing, and leave the instance
+	// running.
 	fp := newExternalProcessor(conn)
 	fp.run(ctx, t)
 
@@ -349,19 +350,20 @@ func TestExternalE2E_CommittedNoReply_DisarmsToUnboundedWait(t *testing.T) {
 	require.Eventually(t, func() bool { return readVertexData(t, ctx, conn, claimKey) != nil },
 		10*time.Second, 100*time.Millisecond, "instanceOp must commit (claim vertex minted)")
 
-	// Let several creation-deadlines fire (CreateTaskTimeout=2s). Each probe must
-	// find the tracker present and DISARM — never advance, never fail. The
-	// instance must stay running at the same cursor, unbounded.
+	// Let the creation-deadline (CreateTaskTimeout=2s) expire. Exactly one probe
+	// runs — its expiry is the only wake-up — it finds the tracker present, and
+	// nothing re-arms: never advance, never fail. The instance must stay running
+	// at the same cursor, unbounded.
 	time.Sleep(5 * time.Second)
 	entry, err := conn.KVGet(ctx, loomStateBucket, "instance."+instanceID)
 	require.NoError(t, err)
 	var parked loom.Instance
 	require.NoError(t, json.Unmarshal(entry.Value, &parked))
-	require.Equal(t, "running", parked.Status, "a committed-but-unreplied instanceOp must DISARM to an unbounded wait, not advance or fail")
+	require.Equal(t, "running", parked.Status, "a committed-but-unreplied instanceOp must run on into an unbounded wait, not advance or fail")
 	require.Equal(t, 0, parked.Cursor, "the cursor must NOT advance off the deadline (advancing would skip the external result)")
 	require.Equal(t, handle, parked.PendingToken, "the instance stays parked on the same handle for the bridge reply")
 
-	// The deadline was disarmed (no completion, no failure announced).
+	// The expiry stands, re-armed by nothing (no completion, no failure announced).
 	_, err = completedSub.NextMsg(500 * time.Millisecond)
 	require.Error(t, err, "a committed-but-unreplied instanceOp must NOT advance to completion off the deadline")
 	_, err = failedSub.NextMsg(500 * time.Millisecond)

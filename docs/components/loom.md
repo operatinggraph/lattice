@@ -182,7 +182,9 @@ StartLoomPattern{patternRef, subjectKey}  →  outbox  →  events.loom.patternS
   ← completion event (user submits bound op → orchestration.taskCompleted, or system op commits)
        on a per-domain consumer
        → GET token.<requestId | payload.taskKey> → instance → advance cursor (atomic batch) → next step
-  ⌛ deadline.<instanceId> TTL expiry (no completion seen) → read-before-act probe
+  ⌛ deadline.<instanceId> TTL expiry — the server's Nats-Marker-Reason: MaxAge marker, the only
+       wake-up: a removal of the key is not an expiry, and a key present at probe time means a
+       later step re-armed → read-before-act probe
        → GET vtx.op.<token>: committed → advance+alert; not yet relayed → re-arm; else → fail
   pattern exhausted → CompletePattern{instanceId} (via outbox) → events.loom.patternCompleted
 ```
@@ -195,8 +197,9 @@ durable reverse pointer — domain-independent and multi-instance-safe; the per-
 decides *which events Loom sees*, never *which instance* (§10.6). Waiting for user input does not break
 the loop — the advancing event is simply user-triggered.
 **Long waits** (a user takes days) are correct by construction: a userTask arms a **bounded
-creation-deadline** (`CreateTaskTimeout`) that **disarms once the task vertex exists** (Contract #10
-§10.6), after which the human wait is **unbounded** — the durable cursor + live `token.<taskKey>`
+creation-deadline** (`CreateTaskTimeout`) whose **expiry IS the disarm**: the probe finds the task
+vertex already minted and **nothing re-arms** (Contract #10 §10.6), after which the human wait is
+**unbounded** — the durable cursor + live `token.<taskKey>`
 pointer survive any restart, so when the user finally acts the completion correlates and the cursor
 advances. A rejected/lost `CreateTask` is failed by the creation-deadline probe (never a silent wedge);
 a mis-declared `completionDomains` is caught by a load-time warn.
@@ -231,9 +234,9 @@ to a userTask (dispatch to an async completer, then park; the completer is a hum
 - **Loom stays pure:** the external event rides the **instanceOp's outbox**, not a Loom-held NATS handle
   — the `internal/loom` substrate-only boundary is unchanged.
 - **The deadline is handled like a userTask, not a systemOp** (§10.6): it is a **bounded creation-deadline
-  on the `instanceOp` submission**, probed via the `instanceOp`'s own `vtx.op.<opRequestId>` tracker. Once
-  the `instanceOp` commits the deadline **disarms** and the wait for the bridge's `replyOp` is
-  **unbounded** — it **never advances the cursor** (only `orchestration.externalTaskCompleted` does). A
+  on the `instanceOp` submission**, probed via the `instanceOp`'s own `vtx.op.<opRequestId>` tracker. Its
+  **expiry IS the disarm**: the probe finds the `instanceOp` committed, **nothing re-arms**, and the wait
+  for the bridge's `replyOp` is **unbounded** — it **never advances the cursor** (only `orchestration.externalTaskCompleted` does). A
   rejected/lost `instanceOp` → `FailPattern` (FR29, never a silent wedge). A dead bridge surfaces on the
   **bridge's own** Health, not a per-instance Loom timeout — symmetric to the unbounded human wait.
 
@@ -304,6 +307,12 @@ story latitude):
 2. **Guardless steps complete only via their token.** A step with no guard has no guard-replay
    signal, so its completion comes solely from its pending token — re-drive must not re-run a step
    whose token is still pending, or it double-submits.
+3. **The deadline probe's terminal write is revision-conditioned on the record it read.** The probe
+   decides a terminal from a record read several round trips earlier (a tracker RPC, an outbox
+   read), and a completion landing in that window has already advanced the instance to a step the
+   probe knows nothing about. Its `fail` therefore carries the revision the record was read at, and
+   a refused condition is the answer, not an error: the verdict is dropped and the marker acked —
+   the same drop an advance takes on a stale completion.
 
 **Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
 on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,
@@ -322,10 +331,15 @@ index bucket** (dual-write atomicity / drift); the co-located disjoint-prefix `t
 instance, so one key always denotes the current step's clock — and because a TTL expiry marker is a
 delete-marker carrying no old value: the subject itself must carry the instanceId, where a
 `token.`-keyed TTL would lose the reverse mapping. The expiry arrives via the loom-state CDC as
-`KeyValuePurge` / `Nats-Marker-Reason: MaxAge` and drives the step-deadline-exceeded handler, which keys
-on the empty body every marker on the key carries — so a removal's own TTL'd purge marker re-fires the
-same probe harmlessly, no-opping on a terminal instance or an absent key; the value is thin (`setAt`,
-observability only) — the handler reconstructs from `instance.<instanceId>`.
+`KeyValuePurge` / `Nats-Marker-Reason: MaxAge`, and the step-deadline-exceeded handler **reads that
+reason**: only a `MaxAge` marker is an expiry, while Loom's own removals of the key carry `KV-Operation:
+DEL` or `PURGE` and are acked without a read — so neither a terminal transition's purge nor a rebuilt
+`DeliverAll` durable replaying every standing marker can put a parked instance through a probe whose
+evidence expired long before. The bucket therefore carries **no stream age limit** (`MaxAge == 0`,
+asserted by `verify-kernel` beside the removal posture): the server writes a byte-identical `MaxAge`
+marker when an age limit empties a subject, which would make every removal marker read as an expiry.
+The value is thin (`setAt`, observability only) — the handler reconstructs from
+`instance.<instanceId>`.
 
 **The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
 recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
@@ -546,9 +560,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `max_msgs_per_subject=1` bucket — exactly the growth this design exists to stop. Minted: the same fire.
   Check: `lint-conventions`' `checkLoomStateDelete` (mechanized at ship; this entry records the why, the
   gate does the catching).
-- **A message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it backstops.** Any
-  empty-body message on a `deadline.<id>` subject re-runs the step-deadline probe, and for a running instance
-  parked in an unbounded wait the probe's evidence (the 24 h tracker) is gone long before the wait ends — so
-  a replayed or re-published marker fails the instance. Never republish on that family for a running
-  instance; the conversion pass reads the record first. Minted: the same fire's close pass. Check:
+- **A message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it backstops.** For
+  a running instance parked in an unbounded wait, the step-deadline probe's evidence (the 24 h tracker) is
+  gone long before the wait ends, so anything that puts such an instance through the probe fails it. The
+  handler now admits only the server's expiry marker, and the conversion pass still reads the record before
+  touching that family — belt and braces on a destructive path. Minted: the same fire's close pass. Check:
   `TestConvertFamily_SkipsARunningInstancesDeadlineMarker`.
+- **A handler that acts on "empty body" acts on every removal shape the bucket can produce.** An expiry, a
+  delete and a purge are indistinguishable without the headers the substrate delivers — name the header
+  (`substrate.MarkerReasonHeader` / `KVOperationHeader`), never the shape. And when a probe's evidence has a
+  shorter life than the wait it guards, its trigger set — *and* the currency of what it read — are the first
+  things to audit. Minted: the 2026-09-04 deadline-provenance fire. Check:
+  `TestHandleDeadline_ActsOnTheExpiryAndNotOnARemoval`,
+  `TestOnDeadline_APresentDeadlineKeyMeansALaterStepRearmed`.

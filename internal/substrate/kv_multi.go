@@ -13,6 +13,32 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// Headers that tell apart the shapes a KV subject can carry once its value is
+// gone. A removal the client asked for carries KVOperationHeader — DEL for a
+// plain delete, PURGE for a purge; a marker the SERVER minted carries no
+// KV-Operation at all and instead names why in MarkerReasonHeader —
+// MarkerReasonMaxAge when a per-message TTL (or a stream age limit) expired the
+// subject's last message.
+//
+// ADR-43 also declares "Purge" and "Remove" as marker reasons for a stream-admin
+// removal, but at nats-server@v2.14.0 they are declared and never written: the
+// only sites that mint a limit marker (filestore.go:6954, memstore.go:1374) set
+// MaxAge, so MaxAge is the one reason a reader can actually observe at our pin.
+// Vendor-grounded against nats-server@v2.14.0 (server/stream.go:641,688-689 for
+// the declarations; filestore.go:6948-6963; ADR-43 Limit Markers) and
+// nats.go@v1.52.0 (jetstream/kv.go:494-496, :1153-1161).
+//
+// Two readers key on them: this file's direct-get marker parse, and Loom's
+// deadline watcher, which acts only on the server's expiry marker — a removal
+// of the key is not an expiry (Contract #10 §10.3/§10.6).
+const (
+	KVOperationHeader  = "KV-Operation"
+	KVOperationDelete  = "DEL"
+	KVOperationPurge   = "PURGE"
+	MarkerReasonHeader = "Nats-Marker-Reason"
+	MarkerReasonMaxAge = "MaxAge"
+)
+
 // Raw JetStream Direct Get "multi_last" protocol constants, vendor-grounded
 // live against nats-server@v2.14.0 / nats.go@v1.52.0 (docs/vendors.md) — not
 // exposed by nats.go's client (grep of the pinned module: zero hits), so
@@ -42,15 +68,6 @@ const (
 	directGetSequenceHdr   = "Nats-Sequence"
 	directGetTimeStampHdr  = "Nats-Time-Stamp"
 	directGetNumPendingHdr = "Nats-Num-Pending"
-
-	// KV tombstone markers: KV-Operation: DEL|PURGE
-	// (nats.go/jetstream/kv.go:494-496) or, for a TTL/rollup marker with no
-	// KV-Operation header, Nats-Marker-Reason: MaxAge|Purge|Remove
-	// (nats-server/server/stream.go:641,687-689).
-	directGetKVOpHdr         = "KV-Operation"
-	directGetKVOpDelete      = "DEL"
-	directGetKVOpPurge       = "PURGE"
-	directGetMarkerReasonHdr = "Nats-Marker-Reason"
 
 	// directGetRetries bounds the fast-path retry-whole loop. A short read
 	// (a mid-stream "404 Message Not Found", or a lost/dropped response) is
@@ -652,10 +669,10 @@ func parseDirectGetEntry(m *nats.Msg, bucket, pre string) (entry *KVEntry, isMar
 	if subj == "" {
 		return nil, false, fmt.Errorf("data message missing %s header", directGetSubjectHdr)
 	}
-	if op := m.Header.Get(directGetKVOpHdr); op == directGetKVOpDelete || op == directGetKVOpPurge {
+	if op := m.Header.Get(KVOperationHeader); op == KVOperationDelete || op == KVOperationPurge {
 		return nil, true, nil
 	}
-	if m.Header.Get(directGetMarkerReasonHdr) != "" {
+	if m.Header.Get(MarkerReasonHeader) != "" {
 		return nil, true, nil
 	}
 
@@ -871,10 +888,10 @@ func (c *Conn) drainDirectGetFallback(ctx context.Context, bucket, streamName st
 func parseDirectGetFallbackEntry(msg jetstream.Msg, bucket, pre string) (key string, entry *KVEntry, err error) {
 	key = strings.TrimPrefix(msg.Subject(), pre)
 	hdr := msg.Headers()
-	if op := hdr.Get(directGetKVOpHdr); op == directGetKVOpDelete || op == directGetKVOpPurge {
+	if op := hdr.Get(KVOperationHeader); op == KVOperationDelete || op == KVOperationPurge {
 		return key, nil, nil
 	}
-	if hdr.Get(directGetMarkerReasonHdr) != "" {
+	if hdr.Get(MarkerReasonHeader) != "" {
 		return key, nil, nil
 	}
 	meta, err := msg.Metadata()
