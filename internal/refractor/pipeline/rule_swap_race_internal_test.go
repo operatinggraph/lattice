@@ -241,13 +241,13 @@ func TestWriteResults_SupersededRuleIsNakedNotWritten(t *testing.T) {
 	// A MATCH hot-reload lands while that event is still evaluating.
 	p.UseFullEngineBranches(eng, crB, nil)
 
-	dec, werr := p.writeResults(ctx, rs, msg, "vtx.unit.x", results, nil)
+	dec, werr := p.writeResults(ctx, rs, msg, "vtx.unit.x", results, nil, ScopeAll())
 	require.NoError(t, werr)
 	require.Equal(t, substrate.Nak, dec, "a superseded evaluation must be handed back, not written")
 	require.Zero(t, ad.writes, "no row derived from a replaced rule may reach the target")
 
 	// The redelivery — snapshot taken after the swap — writes normally.
-	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.unit.x", results, nil)
+	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.unit.x", results, nil, ScopeAll())
 	require.NoError(t, werr)
 	require.Equal(t, substrate.Ack, dec)
 	require.Equal(t, 1, ad.writes, "the re-evaluation under the current rule writes")

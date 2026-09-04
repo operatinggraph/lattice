@@ -31,7 +31,16 @@ import (
 // applied (no retry-enqueue, no terminal DLQ) — a partially-disposed batch
 // emits no frame, so a would-be-retracting frame can never race ahead of
 // the write it is supposed to describe.
-func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
+//
+// scope decides which non-delete results are WRITTEN on a personal target
+// (personal-lens-delta-publication-design.md §4.2). A declined result is
+// neither written, audited, counted toward the freshness clock, nor entered
+// into the retry queue or the DLQ: it is unchanged on the device, and the
+// frame naming it is what keeps the copy the device holds. EVERY non-delete
+// result is still framed, and a Delete is never scoped — a retraction is not a
+// content change. On any other target the scope is ScopeAll by construction
+// and this loop is what it has always been.
+func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string, scope PublishScope) (substrate.Decision, error) {
 	if p.supersededRule(rs) {
 		slog.Info("pipeline: rule swapped mid-event — naking so redelivery evaluates the new rule",
 			"ruleId", p.ruleID, "entityId", key, "seq", msg.Sequence)
@@ -51,6 +60,46 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	// else: without this the edge would ship a working grant-lands trigger and
 	// a dead grant-revoked one.
 	deleteOutcomeAdpt, reportsDeleteOutcome := adpt.(adapter.OutcomeDeleter)
+	// The publication scope governs a personal target and nothing else. It is
+	// read off the adapter captured above, so it cannot flip mid-call, and the
+	// classification is the one reprojectActors makes for the same reason: a
+	// HotReloadInto only swaps between adapters of one target type.
+	_, scoped := adpt.(adapter.KeySetPublisher)
+	// Guard 1 of §4.6: an actor whose publish slot a cold Hydrate holds is
+	// published WHOLE whatever the scope says. The hydrate is republishing that
+	// actor's every row at a LOWER revision, so a scoped publish here would
+	// advance the device's frame high-water past the hydrate's and cost it
+	// every row it does not already hold. Asked once per enumerated actor
+	// rather than per row: the answer is a property of the actor, the row loop
+	// below is thousands of iterations wide, and a hydrate that begins after
+	// this read is closed by guard 2 on its own side.
+	var hydrating map[string]struct{}
+	if scoped && scope.Kind() != ScopeKindAll {
+		for _, actorVtxKey := range enumeratedActors {
+			_, actorID, ok := substrate.ParseVertexKey(actorVtxKey)
+			if !ok || !p.hydrateInFlight(actorID) {
+				continue
+			}
+			if hydrating == nil {
+				hydrating = map[string]struct{}{}
+			}
+			hydrating[actorID] = struct{}{}
+		}
+	}
+	// admits answers the one question the loop asks per row: does this result
+	// get written. A non-personal target and a Delete both answer yes without
+	// consulting anything.
+	admits := func(result ruleengine.EvalResult) bool {
+		if !scoped || result.Delete {
+			return true
+		}
+		if scope.Admits(result) {
+			return true
+		}
+		actorID, _ := result.Keys[adapter.PersonalActorKeyField].(string)
+		_, beingHydrated := hydrating[actorID]
+		return beingHydrated
+	}
 
 	// Two publish pipelines, deliberately separate, and neither one reaches
 	// anything but its own loop.
@@ -96,6 +145,13 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		results[i].ProjectionSeq = msg.Sequence
 	}
 	for _, result := range results {
+		if !admits(result) {
+			// Withheld, not failed. The row is unchanged on the device, so
+			// nothing is written, audited, counted or disposed for it — and it
+			// still reaches emitPersonalFrames below, which is what stops the
+			// client pruning the copy it holds.
+			continue
+		}
 		var writeErr error
 		committed := true
 		writtenKey := ""
@@ -303,9 +359,16 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 
 	p.emitPersonalFrames(ctx, adpt, enumeratedActors, results, msg.Sequence)
 
-	slog.Info("pipeline: processed",
-		"ruleId", p.ruleID, "entityId", key,
-		"stage", "pipeline", "adapter", p.adapterName)
+	attrs := []any{"ruleId", p.ruleID, "entityId", key, "stage", "pipeline", "adapter", p.adapterName}
+	if scoped {
+		// The scope this event published under, on the line that already
+		// reports the event — an operator asking why a device did not receive a
+		// row it expected is asking exactly this, and nothing else records it.
+		// Carried as the value rather than its rendering, so slog formats the
+		// set only when the line is actually emitted.
+		attrs = append(attrs, "publishScope", scope)
+	}
+	slog.Info("pipeline: processed", attrs...)
 	return substrate.Ack, nil
 }
 

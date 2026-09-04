@@ -17,7 +17,18 @@ import (
 // handleTracked wraps handle to advance the projection-liveness forward
 // cursor (lastAppliedSeq) on every Ack — including ack-and-skip — but never on
 // Nak (redelivery means the message has not actually been consumed yet).
+//
+// It also publishes which sequence the handler is INSIDE for as long as it
+// runs. That is not a clock: a cold Hydrate reads it to find the one event that
+// may already be past its publication-scope decision, and waits for this
+// handler to return before capturing its own high-water
+// (personal-lens-delta-publication-design.md §4.6, guard 2). The mark clears
+// whatever the decision, because a Naked event never reaches recordAppliedSeq
+// and a waiter released only by the cursor would wait out its whole deadline
+// for one.
 func (p *Pipeline) handleTracked(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
+	leave := p.enterHandling(msg.Sequence)
+	defer leave()
 	decision, err := p.handle(ctx, msg)
 	if decision == substrate.Ack {
 		p.recordAppliedSeq(msg.Sequence)
@@ -155,7 +166,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// Evaluate against the full engine ([]ProjectionResult{Key,Values,Delete}).
 	// evaluateForEntry normalises and applies the envelope so the downstream
 	// write path sees a single []ruleengine.EvalResult shape.
-	results, enumeratedActors, err := p.evaluateForEntry(ctx, rs, entry)
+	results, enumeratedActors, scope, err := p.evaluateForEntry(ctx, rs, entry)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "entityId", key,
@@ -167,7 +178,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// terminal DLQ, retry enqueue, ack discipline). The adapter is captured
 	// once inside writeResults so all results in this message use a consistent
 	// instance even if HotReloadInto swaps it between messages.
-	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors, scope)
 }
 
 // evalLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
@@ -190,7 +201,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, rs ruleState, msg substra
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
 
-	results, enumeratedActors, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted)
+	results, enumeratedActors, scope, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted)
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -200,7 +211,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, rs ruleState, msg substra
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
-	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors, scope)
 }
 
 // evalPlainAspectReprojection handles a KindAspect CDC event on a plain
@@ -231,7 +242,10 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, rs ruleState
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, nil)
 	}
-	return p.writeResults(ctx, rs, msg, key, results, nil)
+	// A plain lens's target publishes no keyset frame, so no row of it is ever
+	// withheld: the scope is ScopeAll at the producer as well as at the
+	// consumer, and this arm's publication is byte-identical to today's.
+	return p.writeResults(ctx, rs, msg, key, results, nil, ScopeAll())
 }
 
 // evalPlainLinkReprojection handles a KindLink CDC event on a plain
@@ -315,7 +329,8 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 			combined = append(combined, r)
 		}
 	}
-	return p.writeResults(ctx, rs, msg, key, combined, nil)
+	// Plain, so ScopeAll — see evalPlainAspectReprojection.
+	return p.writeResults(ctx, rs, msg, key, combined, nil, ScopeAll())
 }
 
 // evalAspectFanOut handles a KindAspect CDC event on the actor-aware
@@ -329,7 +344,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 // (the reprojection cypher re-reads current Core KV state), so a tombstone
 // (empty body) and a value change take the same path.
 func (p *Pipeline) evalAspectFanOut(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
-	results, enumeratedActors, err := p.evaluateAspectFanOut(ctx, rs, key)
+	results, enumeratedActors, scope, err := p.evaluateAspectFanOut(ctx, rs, key)
 	if err != nil {
 		slog.Error("pipeline: aspect fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -339,7 +354,7 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, rs ruleState, msg subst
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
-	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors, scope)
 }
 
 // dispositionEvalErr maps an evaluate-stage error to a Decision (+ error for the

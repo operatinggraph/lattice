@@ -19,6 +19,15 @@ import (
 type actorPublishLock struct {
 	ch      chan struct{}
 	waiters int
+	// hydrating counts the Hydrate calls currently holding this slot — 0 or 1
+	// in practice, since the slot admits one holder, and a counter rather than
+	// a flag so a second hydrate path could not clear the mark out from under
+	// the first. It is what tells the CDC write loop that this actor's rows are
+	// being republished WHOLE at a LOWER revision by a cold hydrate, which is
+	// the one case a scoped publish leaves the device short
+	// (personal-lens-delta-publication-design.md §4.6, guard 1). Guarded by the
+	// pipeline's personalPublishMu, like waiters.
+	hydrating int
 }
 
 // lockPersonalActor serializes everything one reprojection does for one actor —
@@ -90,6 +99,51 @@ func (p *Pipeline) lockPersonalActor(ctx context.Context, actorID string) (func(
 		<-l.ch
 		drop()
 	}, nil
+}
+
+// markHydrating records that the caller — which must already HOLD actorID's
+// publish slot — is a Hydrate, and returns the func that clears the mark. The
+// slot's entry cannot be reclaimed while it is held, so the mark always finds
+// one; a caller that has not taken the slot would create an entry nobody ever
+// drops, which is why this is unexported and called only from Hydrate.
+func (p *Pipeline) markHydrating(actorID string) func() {
+	p.personalPublishMu.Lock()
+	l, ok := p.personalPublishLocks[actorID]
+	if ok {
+		l.hydrating++
+	}
+	p.personalPublishMu.Unlock()
+	return func() {
+		if !ok {
+			return
+		}
+		p.personalPublishMu.Lock()
+		l.hydrating--
+		p.personalPublishMu.Unlock()
+	}
+}
+
+// hydrateInFlight reports whether a Hydrate currently holds actorID's publish
+// slot — the CDC write loop's guard 1
+// (personal-lens-delta-publication-design.md §4.6).
+//
+// A hydrate publishes this actor's whole row set at a high-water it captured
+// BEFORE evaluating, so its rows and its frame both sit BELOW a live event's
+// sequence. A scoped live publish landing in that window would advance the
+// device's frame high-water past the hydrate's, and every hydrate row for a key
+// the device does not yet hold would then be dropped by the client's
+// resurrection guard — leaving a cold device holding only the one row the scope
+// admitted. Publishing that actor whole instead makes the live event's own
+// output the complete set at its own, higher revision, which is what the client
+// keeps.
+//
+// actorID is the bare NanoID the slot is keyed by, the same value a personal
+// lens publishes as keys[adapter.PersonalActorKeyField].
+func (p *Pipeline) hydrateInFlight(actorID string) bool {
+	p.personalPublishMu.Lock()
+	defer p.personalPublishMu.Unlock()
+	l, ok := p.personalPublishLocks[actorID]
+	return ok && l.hydrating > 0
 }
 
 // ReprojectPersonalActor re-evaluates this personal pipeline for one actor and

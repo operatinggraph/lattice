@@ -592,12 +592,30 @@ type Pipeline struct {
 	started chan struct{}
 
 	// progressMu guards lastAppliedSeq / lastProjectedAt — the lens's
-	// projection-liveness clocks (lens-projection-liveness-design.md §3.1).
+	// projection-liveness clocks (lens-projection-liveness-design.md §3.1) —
+	// plus handlingSeq and progressChanged beside them.
 	progressMu sync.Mutex
 	// lastAppliedSeq is the Core KV stream sequence of the last event this
 	// consumer acked, including ack-and-skip. Advances whenever the lens
 	// consumes anything; a wedged consumer (delivering nothing) leaves it frozen.
 	lastAppliedSeq uint64
+	// handlingSeq is the stream sequence of the event the consumer goroutine is
+	// inside RIGHT NOW, and 0 whenever it is between messages. It is not a
+	// clock: it exists so Hydrate can ask "is an event already past its scope
+	// decision and not yet acked" before capturing its own high-water
+	// (personal-lens-delta-publication-design.md §4.6, guard 2).
+	//
+	// One goroutine writes it — the supervised handler — so at most one event
+	// is ever named. It is stamped BEFORE the handler runs and cleared after it
+	// returns, whatever the decision: a Naked event never advanced
+	// lastAppliedSeq and never published a frame, so a waiter must be released
+	// by the handler LEAVING, not by the sequence being applied.
+	handlingSeq uint64
+	// progressChanged is closed and replaced on every move of the two fields
+	// above, so a waiter can select on it alongside its own context instead of
+	// polling. Nil until someone waits: nothing allocates a channel for a
+	// pipeline nobody hydrates.
+	progressChanged chan struct{}
 	// lastProjectedAt is the wall-clock of the last successful target write.
 	// Advances only on real output, so a caught-up-but-no-op consumer leaves it
 	// frozen even as lastAppliedSeq moves. Zero until the first projection.
@@ -634,6 +652,11 @@ type Pipeline struct {
 	// once on that type would re-arm on a package reinstall — exactly the
 	// moment an operator would be reading the entry.
 	unsanctionedGrantKeyOnce sync.Once
+	// publishScopeRefusedOnce bounds the publication-scope refusal to one log
+	// line per lens. The reason is a property of the compiled rule, so it is
+	// the same answer on every event — logging per event would put one line per
+	// CDC message on a lens that is simply not scopeable (R4).
+	publishScopeRefusedOnce sync.Once
 }
 
 // ProjectionProgress is the lens's forward-progress snapshot for the health
@@ -674,7 +697,76 @@ func (p *Pipeline) OrderingTokenSeeded() bool {
 func (p *Pipeline) recordAppliedSeq(seq uint64) {
 	p.progressMu.Lock()
 	p.lastAppliedSeq = seq
+	p.notifyProgressLocked()
 	p.progressMu.Unlock()
+}
+
+// enterHandling stamps the sequence the consumer goroutine is about to handle
+// and returns the func that clears it once the handler has returned — whatever
+// decision it reached. See handlingSeq for what a waiter reads it for.
+func (p *Pipeline) enterHandling(seq uint64) func() {
+	p.progressMu.Lock()
+	p.handlingSeq = seq
+	p.notifyProgressLocked()
+	p.progressMu.Unlock()
+	return func() {
+		p.progressMu.Lock()
+		p.handlingSeq = 0
+		p.notifyProgressLocked()
+		p.progressMu.Unlock()
+	}
+}
+
+// handlingSequence reports the event the consumer goroutine is inside right
+// now, 0 when it is between messages.
+func (p *Pipeline) handlingSequence() uint64 {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	return p.handlingSeq
+}
+
+// notifyProgressLocked releases every waiter on the current progress channel.
+// Must be called with progressMu held: the channel is swapped under the same
+// lock a waiter takes to read the state and subscribe, which is what makes the
+// subscribe-then-recheck sequence in awaitHandlerLeft free of lost wakeups.
+func (p *Pipeline) notifyProgressLocked() {
+	if p.progressChanged != nil {
+		close(p.progressChanged)
+		p.progressChanged = nil
+	}
+}
+
+// awaitHandlerLeft blocks until the consumer goroutine is no longer inside the
+// event named by seq, then returns. A seq of 0 (nothing was in flight) returns
+// immediately. The wait is abandonable on ctx — every caller is answering an
+// RPC with a deadline of its own — and reports ctx's error when it gives up.
+//
+// It waits for the handler to LEAVE rather than for lastAppliedSeq to reach
+// seq, because a Naked event never reaches it: the handler returning is the
+// event's terminus either way, and only after it has returned is the pipeline's
+// applied cursor a complete statement about that event.
+func (p *Pipeline) awaitHandlerLeft(ctx context.Context, seq uint64) error {
+	if seq == 0 {
+		return nil
+	}
+	for {
+		p.progressMu.Lock()
+		if p.handlingSeq != seq {
+			p.progressMu.Unlock()
+			return nil
+		}
+		if p.progressChanged == nil {
+			p.progressChanged = make(chan struct{})
+		}
+		changed := p.progressChanged
+		p.progressMu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // seedAppliedSeqFromAckFloor seeds lastAppliedSeq from the durable consumer's
@@ -1397,7 +1489,9 @@ func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, rs ruleState, vt
 		NodeLabel:  vtxType,
 		Properties: props,
 	}
-	results, _, err := p.evaluateForEntry(ctx, rs, entry)
+	// The scope is discarded: a plain arm publishes every row it derives, and
+	// this helper's two callers pass ScopeAll to writeResults themselves.
+	results, _, _, err := p.evaluateForEntry(ctx, rs, entry)
 	return results, err
 }
 

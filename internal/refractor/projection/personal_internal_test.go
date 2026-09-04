@@ -427,3 +427,45 @@ RETURN identity.key AS actorKey, collect(role.key) AS roles
 		t.Fatalf("an actor-aggregate lens's row is a function of its compiled pattern alone")
 	}
 }
+
+// TestInstallPersonalLens_DeclaresRetry_Refuses is
+// personal-lens-delta-publication-design.md §4.2's structural closure of the
+// retry replay.
+//
+// The retry queue replays a captured row at its ORIGINAL, lower ordering token.
+// On a personal target that lands below whatever keyset frame a later event has
+// since published, and the client drops it for any key it does not already hold
+// attributed at that revision — so the write the queue exists to rescue is lost
+// instead of retried. Refusing the lens is the closure; the check sits here
+// because cmd/refractor calls SetRetryQueue AFTER this install, so the rule's
+// own declaration is the only thing knowable in the right order.
+func TestInstallPersonalLens_DeclaresRetry_Refuses(t *testing.T) {
+	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor"})
+	r.Retry = lens.RetryConfig{MaxAttempts: 3, Backoff: "PT5S"}
+	p := newPersonalPipeline(t)
+
+	if InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger()) {
+		t.Fatalf("a personal lens declaring a retry queue must refuse installation")
+	}
+}
+
+// TestPersonalLensRetryRefusal is the predicate itself, so a corpus census can
+// call it rather than restate it — and so the boundary is pinned rather than
+// argued: a declared retry refuses, everything else installs.
+func TestPersonalLensRetryRefusal(t *testing.T) {
+	base := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor"})
+
+	if got := PersonalLensRetryRefusal(base); got != "" {
+		t.Fatalf("a lens declaring no retry must not be refused, got %q", got)
+	}
+	// A backoff with no attempts is not a retry queue: SetRetryQueue is gated
+	// on MaxAttempts, so this lens gets no queue and nothing to replay.
+	base.Retry = lens.RetryConfig{Backoff: "PT5S"}
+	if got := PersonalLensRetryRefusal(base); got != "" {
+		t.Fatalf("a backoff without attempts configures no queue, got %q", got)
+	}
+	base.Retry = lens.RetryConfig{MaxAttempts: 1}
+	if got := PersonalLensRetryRefusal(base); got == "" {
+		t.Fatalf("a lens declaring retry attempts must be refused")
+	}
+}

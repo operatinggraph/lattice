@@ -7,6 +7,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // walkOwnedColumns classifies a multi-walk Personal lens's compiled branches
@@ -86,6 +87,7 @@ func (p *Pipeline) executeBranches(
 
 	branchOuts := make([][]ruleengine.ProjectionResult, len(rs.branches))
 	footprints := make([]ruleengine.EvalFootprint, len(rs.branches))
+	readSets := make([][]string, len(rs.branches))
 	var stats ruleengine.EvalStats
 	for i, cr := range rs.branches {
 		out, fp, branchStats, err := rs.engine.ExecuteWithStats(ctx, cr, ec, p.adjKV, p.coreKV)
@@ -97,8 +99,9 @@ func (p *Pipeline) executeBranches(
 		}
 		branchOuts[i] = out
 		footprints[i] = fp
+		readSets[i] = branchReadSet(fp)
 	}
-	merged, err := mergeBranchRows(branchOuts, rs.walkOwnedColumns)
+	merged, err := mergeBranchRows(branchOuts, readSets, rs.walkOwnedColumns)
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, stats, err
 	}
@@ -122,39 +125,161 @@ func (p *Pipeline) executeBranches(
 // only mean the one branch that owns the column matched it more than once
 // for this anchor (e.g. a multi-hat actor reaching one op via 2+ roles) — so
 // mergeRowGroup resolves it deterministically instead of failing.
-func mergeBranchRows(branchOuts [][]ruleengine.ProjectionResult, walkOwned map[string]int) ([]ruleengine.ProjectionResult, error) {
+//
+// Every merged row's PROVENANCE is recomputed here rather than inherited, and
+// the recomputation is what makes a multi-walk lens scopeable at all — see
+// mergedProvenance.
+func mergeBranchRows(branchOuts [][]ruleengine.ProjectionResult, readSets [][]string, walkOwned map[string]int) ([]ruleengine.ProjectionResult, error) {
 	type group struct {
 		rows []ruleengine.ProjectionResult
+		// recorded answers, per branch that yielded a row for this key,
+		// whether that row carried its own provenance. mergedProvenance reads
+		// it to decide which branches speak for themselves and which are
+		// covered by their whole read set; a branch absent from the map yielded
+		// no row for the key at all.
+		recorded map[int]bool
 	}
 	byKey := map[string]*group{}
 	order := make([]string, 0)
-	for _, branch := range branchOuts {
+	for i, branch := range branchOuts {
 		for _, row := range branch {
 			k := serializeRowKey(row.Key)
 			g, ok := byKey[k]
 			if !ok {
-				g = &group{}
+				g = &group{recorded: map[int]bool{}}
 				byKey[k] = g
 				order = append(order, k)
 			}
 			g.rows = append(g.rows, row)
+			g.recorded[i] = g.recorded[i] || len(row.Provenance) > 0
 		}
 	}
 
 	merged := make([]ruleengine.ProjectionResult, 0, len(order))
 	for _, k := range order {
-		rows := byKey[k].rows
-		if len(rows) == 1 {
-			merged = append(merged, rows[0])
-			continue
+		g := byKey[k]
+		row := g.rows[0]
+		if len(g.rows) > 1 {
+			var err error
+			row, err = mergeRowGroup(g.rows, walkOwned)
+			if err != nil {
+				return nil, err
+			}
 		}
-		row, err := mergeRowGroup(rows, walkOwned)
-		if err != nil {
-			return nil, err
-		}
+		row.Provenance = mergedProvenance(g.rows, g.recorded, readSets)
 		merged = append(merged, row)
 	}
 	return merged, nil
+}
+
+// mergedProvenance is the merged row's provenance: every branch contributes,
+// and each contributes what it can say about this key
+// (personal-lens-delta-publication-design.md §4.1, site 7).
+//
+//   - A branch that PRODUCED a row for the key contributes that row's own
+//     provenance, or — when it recorded none — its whole read set. A read set
+//     is a superset of what any one of that branch's rows needed, so the
+//     coarser answer only ever over-publishes; taking "recorded nothing" as
+//     "read nothing" would be the withholding direction.
+//   - A branch that produced NO row for the key contributes its whole read set,
+//     and this half is load-bearing. A walk-owned column is null on the merged
+//     row precisely when its owner branch matched nothing for this anchor, and
+//     the vertex that made it stop matching is one that branch READ and did not
+//     bind — so it appears in no row's provenance anywhere. Without it, a
+//     `grantedBy` tombstone that nulls `edgeCatalog`'s `viaRole` would leave the
+//     surviving base-branch row looking untouched and the device holding a
+//     stale role name.
+//
+// A key present in only one branch therefore gets the same treatment as a
+// shared one. An empty union is returned as nil: "nothing was recorded", which
+// ScopeVertices admits, rather than "provenance that meets nothing", which
+// would withhold every row.
+func mergedProvenance(rows []ruleengine.ProjectionResult, recorded map[int]bool, readSets [][]string) []string {
+	union := map[string]struct{}{}
+	add := func(keys []string) {
+		for _, key := range keys {
+			union[key] = struct{}{}
+		}
+	}
+	for _, r := range rows {
+		add(r.Provenance)
+	}
+	for branch, set := range readSets {
+		if spoke, produced := recorded[branch]; produced && spoke {
+			continue
+		}
+		add(set)
+	}
+	if len(union) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(union))
+	for key := range union {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// branchReadSet is every VERTEX one branch's evaluation read, folded from its
+// footprint — the certificate the engine already builds, so the read set costs
+// no extra bookkeeping in the executor.
+//
+// NodeRevisions carries whatever Core KV key the evaluation point-read, so an
+// aspect folds to its parent vertex and a link to BOTH endpoints — the same
+// fold ProjectionResult.Provenance applies, and the granularity the CDC arms
+// name. EdgeRevisions/EdgeSelectors carry adjacency node IDs, which are bare
+// NanoIDs: a walk only ever reads the adjacency of a node it fetched first, so
+// the vertex key for each is already in the NodeRevisions fold, and the index
+// below resolves it. An id no fetched vertex named is carried through as
+// itself — it names a real read, and ScopeVertices, which matches vertex keys,
+// simply never matches it.
+func branchReadSet(fp ruleengine.EvalFootprint) []string {
+	set := map[string]struct{}{}
+	byID := make(map[string]string, len(fp.NodeRevisions))
+	for key := range fp.NodeRevisions {
+		for _, vtx := range vertexKeysFor(key) {
+			set[vtx] = struct{}{}
+			if _, id, ok := substrate.ParseVertexKey(vtx); ok {
+				byID[id] = vtx
+			}
+		}
+	}
+	for nodeID := range edgeFootprintNodes(fp) {
+		if vtx, ok := byID[nodeID]; ok {
+			set[vtx] = struct{}{}
+			continue
+		}
+		set[nodeID] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// vertexKeysFor folds one Core KV key to the vertex key(s) it belongs to: a
+// vertex is itself, an aspect is its parent, a link is both of its endpoints.
+// Anything else folds to nothing.
+func vertexKeysFor(key string) []string {
+	switch substrate.ClassifyKey(key) {
+	case substrate.KindVertex:
+		return []string{key}
+	case substrate.KindAspect:
+		if parentVtx, _, _, _, ok := substrate.ParseAspectKey(key); ok {
+			return []string{parentVtx}
+		}
+	case substrate.KindLink:
+		if srcType, srcID, _, dstType, dstID, ok := substrate.ParseLinkKey(key); ok {
+			return []string{substrate.VertexKey(srcType, srcID), substrate.VertexKey(dstType, dstID)}
+		}
+	}
+	return nil
 }
 
 // mergeRowGroup combines 2+ branches' rows sharing one output key into one

@@ -278,7 +278,7 @@ func TestExecuteFullForActor_MultiBranch_AnchorDerivedDisagreementFailsClosed(t 
 	out1 := []ruleengine.ProjectionResult{
 		{Key: map[string]any{"anchor": "op1"}, Values: map[string]any{"anchor": "op1", "title": "right"}},
 	}
-	_, err := mergeBranchRows([][]ruleengine.ProjectionResult{out0, out1}, nil)
+	_, err := mergeBranchRows([][]ruleengine.ProjectionResult{out0, out1}, nil, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, `column "title" disagrees across walks`)
 }

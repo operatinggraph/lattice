@@ -137,8 +137,21 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   publishes the frame alone — the standing healer's ordinary pass. `ScopeAnchors(A)` publishes the rows
   whose `anchor` alias names a NanoID in `A`, bounded at 64 anchors before it widens to `ScopeAll` — a
   D1 grant change, which moves the inclusion of exactly the rows anchored at the anchor whose grant
-  flipped and nothing else's content. The frame itself counts as output: publishing one advances the
-  lens's freshness clock, on a reprojection and on a hydrate alike.
+  flipped and nothing else's content. `ScopeVertices(V)` publishes the rows whose **provenance** — the
+  vertex keys their evaluation read, recorded per row by the engine — meets `V`, the vertices one CDC
+  event touched: the event vertex, an aspect's parent vertex, a link's two endpoints, or the actor's
+  own key. A row that recorded no provenance is published, so a path recording none reproduces the
+  whole-actor publication rather than silencing the device. Two properties of the compiled rule refuse
+  the scope and publish the whole actor: a row reading `$now` or `$projectedAt` changes with no vertex
+  changing, and a scan-seeded anchor makes every row depend on a key list's membership rather than on
+  any vertex. A personal lens declaring a retry queue is refused at install — a retried write replays
+  at its original, lower ordering token, which a later frame makes the client drop. The frame itself
+  counts as output: publishing one advances the lens's freshness clock, on a live event, a
+  reprojection and a hydrate alike.
+  A cold `Hydrate` publishes the whole actor at a high-water captured before it evaluates, so two
+  guards keep a scoped live publish from racing ahead of it: the write loop publishes an actor whole
+  while a hydrate holds that actor's publish slot, and a hydrate waits for the event already in flight
+  to leave the handler before capturing.
 - **Stream provisioning.** The adapter JIT-provisions the backing stream via `substrate.EnsureStream`
   (mirrors the `nats_kv` case's JIT bucket creation) rather than a bootstrap pre-provision, and
   **unions** the lens's `subjectPrefix` wildcard into the stream's existing `Subjects` rather than

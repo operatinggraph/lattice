@@ -218,7 +218,7 @@ func TestWriteResults_FlushesRowPipelineBeforeFrame(t *testing.T) {
 	results := personalUpserts(personalActorA, n)
 	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
 		substrate.VertexKey("identity", personalActorA), results,
-		[]string{substrate.VertexKey("identity", personalActorA)})
+		[]string{substrate.VertexKey("identity", personalActorA)}, ScopeAll())
 
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, decision)
@@ -263,7 +263,7 @@ func TestWriteResults_FlushFailureNaks(t *testing.T) {
 	results := personalUpserts(personalActorA, 6)
 	decision, _ := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
 		substrate.VertexKey("identity", personalActorA), results,
-		[]string{substrate.VertexKey("identity", personalActorA)})
+		[]string{substrate.VertexKey("identity", personalActorA)}, ScopeAll())
 
 	require.Equal(t, substrate.Nak, decision,
 		"a write loop whose rows did not land must redeliver, never ack")
@@ -409,7 +409,7 @@ func TestWriteResults_AuditPipelineLandsEveryEntry(t *testing.T) {
 
 	const n = 7
 	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
-		substrate.VertexKey("identity", personalActorA), personalUpserts(personalActorA, n), nil)
+		substrate.VertexKey("identity", personalActorA), personalUpserts(personalActorA, n), nil, ScopeAll())
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, decision)
 
@@ -436,7 +436,7 @@ func TestWriteResults_AuditFlushFailureStillAcks(t *testing.T) {
 	const n = 4
 	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
 		substrate.VertexKey("identity", personalActorA), personalUpserts(personalActorA, n),
-		[]string{substrate.VertexKey("identity", personalActorA)})
+		[]string{substrate.VertexKey("identity", personalActorA)}, ScopeAll())
 
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, decision, "an audit failure must never decide a message's fate")
@@ -546,7 +546,7 @@ func TestWriteResults_WindowAwaitFailureNaksAndRetriesNothing(t *testing.T) {
 		enumerated = append(enumerated, substrate.VertexKey("identity", a))
 	}
 	decision, _ := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
-		substrate.VertexKey("identity", actors[0]), perActorUpserts(actors), enumerated)
+		substrate.VertexKey("identity", actors[0]), perActorUpserts(actors), enumerated, ScopeAll())
 
 	require.Equal(t, substrate.Nak, decision,
 		"a row that never landed must redeliver — acking it loses the row with no retry and no DLQ behind it")
@@ -580,7 +580,7 @@ func TestWriteResults_FlushFailureAuditsNothingAndDoesNotAdvanceTheClock(t *test
 
 	decision, _ := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42},
 		substrate.VertexKey("identity", personalActorA), personalUpserts(personalActorA, 5),
-		[]string{substrate.VertexKey("identity", personalActorA)})
+		[]string{substrate.VertexKey("identity", personalActorA)}, ScopeAll())
 
 	require.Equal(t, substrate.Nak, decision)
 

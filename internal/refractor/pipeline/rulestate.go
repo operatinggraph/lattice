@@ -207,6 +207,97 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.personalClockRefusal = rs.personalClockRefusal
 }
 
+// The publication-scope eligibility vocabulary — the reason a CDC event's rows
+// are published whole instead of scoped to what the event touched
+// (personal-lens-delta-publication-design.md §4.2). Each names one conjunct, so
+// a log line and a test read the same string.
+const (
+	// PublishScopeClockRefusal is the personal narrowing licence's clock
+	// conjunct, reused here: a row whose value depends on $now or
+	// $projectedAt changes with no vertex changing, so no vertex set can
+	// name the rows an event moved.
+	PublishScopeClockRefusal = "row references $now or $projectedAt"
+	// PublishScopeScanSeededAnchor is the second conjunct: the compiled
+	// anchor is not point-seeded by $actorKey, so the pattern's head is a
+	// scan over `vtx.<label>.` and every row also depends on the MEMBERSHIP
+	// of that key list, which no per-vertex provenance set can name.
+	PublishScopeScanSeededAnchor = "anchor is not point-seeded by $actorKey"
+	// PublishScopeBranchSetRefused is the multi-walk form of the same
+	// conjunct: the branch set could not be read as a whole, so no claim can
+	// be made about every branch's anchor.
+	PublishScopeBranchSetRefused = "multi-walk branch set refused"
+)
+
+// publishScopeRefusal names the conjunct that makes this rule's CDC events
+// publish the whole actor, or "" when an event's rows may be scoped to the
+// vertices it touched (personal-lens-delta-publication-design.md §4.2).
+//
+// Both conjuncts are correctness requirements, and both fail toward ScopeAll —
+// today's publication, which costs bytes and never withholds a row:
+//
+//   - The row must not depend on the WALL CLOCK. Scoping asserts that a row
+//     whose provenance misses the event is unchanged on the device; a row
+//     recomputed from $now is not, and the licence already derives this fact
+//     per compiled rule (personalClockRefusal).
+//   - The compiled anchor must be POINT-SEEDED by $actorKey (HopIndex.Anchor
+//     >= 0, the same reading DeclaresActorAnchor makes). A scan-seeded head
+//     enumerates `vtx.<label>.` and its rows depend on that key list's
+//     membership, which is not any single vertex's key — so a create of a new
+//     member would be withheld by a provenance set that could never have
+//     named it.
+//
+// For a multi-walk lens the anchor conjunct is asked of EVERY branch, not of
+// the union: one scan-seeded branch is enough to make the lens's merged rows
+// depend on a key list. A refused branch set (anchorHopsPerBranchRefusal) is
+// no answer at all and refuses here too.
+func (rs ruleState) publishScopeRefusal() string {
+	if rs.personalClockRefusal != "" {
+		return PublishScopeClockRefusal
+	}
+	if rs.anchorHopsPerBranchRefusal != "" {
+		return PublishScopeBranchSetRefused
+	}
+	if len(rs.anchorHopsPerBranch) > 0 {
+		for _, ix := range rs.anchorHopsPerBranch {
+			if !pointSeededByActor(ix) {
+				return PublishScopeScanSeededAnchor
+			}
+		}
+		return ""
+	}
+	if !pointSeededByActor(rs.anchorHops) {
+		return PublishScopeScanSeededAnchor
+	}
+	return ""
+}
+
+// pointSeededByActor reports whether ix's anchor position is pinned by
+// `$actorKey` — DeclaresActorAnchor's reading, plus the requirement that the
+// position it names EXISTS.
+//
+// The existence check is what a never-derived index needs. Anchor's
+// incomparable sentinel is -1, so an index that was never built reads 0, which
+// is a real position number and would pass the sentinel test alone — granting a
+// scope to a lens whose pattern graph nobody derived, in the WITHHOLDING
+// direction. A built index always carries a Labels entry for its anchor.
+func pointSeededByActor(ix full.HopIndex) bool {
+	return ix.Anchor >= 0 && ix.Anchor < len(ix.Labels)
+}
+
+// publishScopeFor builds the publication scope for an event that touched
+// vertices: ScopeVertices when both eligibility conjuncts hold, ScopeAll when
+// either refuses.
+//
+// The refusal is a property of the compiled rule, so it is read off the same
+// snapshot the event is judged and evaluated under — a hot reload mid-event
+// cannot show the scope one rule and the evaluation another.
+func (rs ruleState) publishScopeFor(vertices []string) PublishScope {
+	if rs.publishScopeRefusal() != "" {
+		return ScopeAll()
+	}
+	return ScopeVertices(vertices)
+}
+
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may
 // seed this lens's evaluation with — narrowing it to that one anchor — or ""
 // when the evaluation must recompute the lens's whole row set as it always

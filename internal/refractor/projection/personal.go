@@ -83,6 +83,33 @@ func ThreadKeyColumns(cr *full.CompiledRule, branches []ruleengine.CompiledRule,
 	return nil
 }
 
+// PersonalLensRetryRefusal names why a personal lens declaring a retry queue
+// must not be registered, or "" when the rule declares none
+// (personal-lens-delta-publication-design.md §4.2).
+//
+// The retry queue replays a captured row at its ORIGINAL, lower projectionSeq.
+// On a personal target that replay lands below whatever keyset frame a later
+// event has since published, and the client drops it for any key it does not
+// hold attributed at that revision — so the write the queue exists to rescue is
+// silently lost. Today's whole-actor republish masks it: the next event
+// republishes the row anyway. A scoped publish does not, so the mask is gone
+// and the path must be closed rather than left to fail quietly.
+//
+// It is closed at INSTALL, on the rule's own declaration, because that is the
+// only place the fact is knowable in the right order: cmd/refractor calls
+// SetRetryQueue after this install, so a pipeline-side check would read a queue
+// that is not wired yet and pass.
+//
+// No shipped lens declares one — pkgmgr's LensSpec carries no retry field at
+// all, so no package can author it — which makes this a gate on a path nothing
+// travels rather than a change to any lens's behaviour.
+func PersonalLensRetryRefusal(r *lens.Rule) string {
+	if r.Retry.MaxAttempts > 0 {
+		return "a personal lens must not declare a retry queue — a retried write replays at its original, lower ordering token, which a later keyset frame makes the client drop, so the rescued write is lost rather than retried"
+	}
+	return ""
+}
+
 // InstallPersonalLens wires the Fire 2 personal pipeline
 // (personal-secure-lens-design.md §3.3): the existing ActorEnumerator
 // (actorType "identity") drives per-recipient re-execution of the lens
@@ -119,6 +146,12 @@ func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, inte
 		}
 		logger.Warn("personal lens installed WITHOUT the D1 read-grant security gate — trusted/test-only posture, never production",
 			"lensId", r.ID)
+	}
+
+	if refusal := PersonalLensRetryRefusal(r); refusal != "" {
+		logger.Error("personal lens registration REFUSED: "+refusal, "lensId", r.ID,
+			"retryMaxAttempts", r.Retry.MaxAttempts)
+		return false
 	}
 
 	businessKeys := PersonalBusinessKeys(r)

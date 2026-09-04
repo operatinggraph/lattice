@@ -304,14 +304,14 @@ func TestWriteResults_NoRetryEnqueueWhileBatchLeftPending(t *testing.T) {
 
 	// First delivery: infra on "b" leaves the message pending; "a" must NOT
 	// have been enqueued.
-	dec, werr := p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil)
+	dec, werr := p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil, ScopeAll())
 	assert.Equal(t, substrate.Nak, dec)
 	require.Error(t, werr)
 	assert.Equal(t, 0, rq.Len(), "no retry entry while the message is left pending")
 
 	// Redelivery while the infra failure persists (each pause/resume cycle):
 	// still no accumulation.
-	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil)
+	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil, ScopeAll())
 	assert.Equal(t, substrate.Nak, dec)
 	require.Error(t, werr)
 	assert.Equal(t, 0, rq.Len(), "redelivery must not accumulate retry entries")
@@ -319,7 +319,7 @@ func TestWriteResults_NoRetryEnqueueWhileBatchLeftPending(t *testing.T) {
 	// Infra recovers; the transient failure persists → the batch disposes via
 	// the retry queue exactly once and the message is acked.
 	delete(ad.errs, "b")
-	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil)
+	dec, werr = p.writeResults(ctx, p.ruleState(), msg, "vtx.agreement.x", results, nil, ScopeAll())
 	assert.Equal(t, substrate.Ack, dec)
 	require.NoError(t, werr)
 	assert.Equal(t, 1, rq.Len(), "exactly one retry entry once the batch disposes")

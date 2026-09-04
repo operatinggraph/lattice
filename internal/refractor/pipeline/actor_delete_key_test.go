@@ -65,7 +65,7 @@ const (
 
 func TestActorTombstone_EphemeralDeleteKey(t *testing.T) {
 	p := newDeleteKeyPipeline(t, ephemeralDeleteKey)
-	results, _, err := p.evaluateForEntry(context.Background(), p.ruleState(), ruleengine.NodeEntry{
+	results, _, _, err := p.evaluateForEntry(context.Background(), p.ruleState(), ruleengine.NodeEntry{
 		CoreKVKey: deleteKeyActor,
 		NodeLabel: "identity",
 		IsDeleted: true,
@@ -85,7 +85,7 @@ func TestReprojectActors_MissingActor_EphemeralDeleteKey(t *testing.T) {
 func TestActorTombstone_DefaultDeleteKey_Unchanged(t *testing.T) {
 	// No actorDeleteKey installed → primary capability lens behaviour: cap.<actor>.
 	p := newDeleteKeyPipeline(t, nil)
-	results, _, err := p.evaluateForEntry(context.Background(), p.ruleState(), ruleengine.NodeEntry{
+	results, _, _, err := p.evaluateForEntry(context.Background(), p.ruleState(), ruleengine.NodeEntry{
 		CoreKVKey: deleteKeyActor,
 		NodeLabel: "identity",
 		IsDeleted: true,

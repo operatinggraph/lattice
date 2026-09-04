@@ -428,7 +428,7 @@ func TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands
 		{Keys: map[string]any{"key": "child.a1"}, Row: map[string]any{"key": "child.a1", "id": "a1"}},
 	}
 	msg := substrate.Message{Sequence: 42}
-	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.identity.x", results, nil)
+	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.identity.x", results, nil, ScopeAll())
 	require.Error(t, err, "the FailClosed tombstone's failure must surface, not be swallowed")
 	require.Equal(t, substrate.Nak, decision, "a FailClosed write failure must Nak the whole message for full redelivery")
 

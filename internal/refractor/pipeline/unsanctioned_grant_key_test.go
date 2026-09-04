@@ -73,7 +73,7 @@ func TestWriteResults_UnsanctionedKeyIsTerminalAheadOfFailClosed(t *testing.T) {
 		{Delete: true, Keys: map[string]any{"key": grantKey}, FailClosed: true},
 		{Keys: map[string]any{"key": grantKey + ".sibling"}, Row: map[string]any{"v": 1}},
 	}
-	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42}, "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y", results, nil)
+	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 42}, "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y", results, nil, ScopeAll())
 
 	require.Equal(t, substrate.Ack, decision,
 		"a FailClosed retraction refused by the namespace guard must ACK: redelivering it spins the lens forever against a rule redelivery cannot change")

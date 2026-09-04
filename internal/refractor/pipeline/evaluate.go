@@ -73,15 +73,22 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // enumerated set, not just the actors results happened to name, because an
 // actor whose evaluation surfaced zero surviving rows must still get an
 // empty retraction frame). Nil for a plain lens.
-func (p *Pipeline) evaluateForEntry(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
-	results, enumeratedActors, err := p.evaluateForEntryRaw(ctx, rs, entry)
+//
+// The third is the publication scope this event's rows are written under
+// (personal-lens-delta-publication-design.md §4.2): the vertices the event
+// touched, or ScopeAll for a lens or a target the scope does not govern. It
+// rides back beside the actor list because both are properties of the EVENT
+// that only the arm classifying it knows, and both are read by the one
+// writeResults call that arm makes.
+func (p *Pipeline) evaluateForEntry(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, PublishScope, error) {
+	results, enumeratedActors, scope, err := p.evaluateForEntryRaw(ctx, rs, entry)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ScopeAll(), err
 	}
 	if err := p.applySecureDecrypt(ctx, results); err != nil {
-		return nil, nil, err
+		return nil, nil, ScopeAll(), err
 	}
-	return results, enumeratedActors, nil
+	return results, enumeratedActors, scope, nil
 }
 
 // applySecureDecrypt runs the installed SecureDecryptor over results; a no-op
@@ -140,10 +147,19 @@ func (p *Pipeline) alarmSecureRedactions(ctx context.Context, redactions []Secur
 }
 
 // evaluateForEntryRaw is evaluateForEntry's core, pre-decrypt.
-func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
+//
+// The VERTEX arm's publication scope is the event's own vertex, and it is the
+// scope of every path out of here: the actor's own vertex re-evaluating itself
+// (where that key is bound in every binding, so the scope admits every row —
+// byte-identical to today), the peer-anchor case (where the peers' rows are
+// framed and the scope correctly admits only the rows binding the event
+// identity), the tombstone arms (whose Deletes are never scoped), and the
+// cross-vertex fan-out (where the event vertex is what the walk started from).
+func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, PublishScope, error) {
 	if rs.engine == nil || rs.cr == nil {
-		return nil, nil, fmt.Errorf("pipeline: full engine/compiled rule unset for rule %q", p.ruleID)
+		return nil, nil, ScopeAll(), fmt.Errorf("pipeline: full engine/compiled rule unset for rule %q", p.ruleID)
 	}
+	scope := p.eventPublishScope(rs, []string{entry.CoreKVKey})
 
 	// Cross-vertex fan-out: on a non-actor event with an ActorEnumerator
 	// installed, expand the event into the set of affected actors and
@@ -181,17 +197,18 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	if p.actorEnumerator != nil {
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 		if eventType != p.actorEnumerator.actorType {
-			return p.evaluateFanOut(ctx, rs, entry)
+			results, actors, err := p.evaluateFanOut(ctx, rs, entry)
+			return results, actors, scope, err
 		}
 		var err error
 		if p.peerAnchorsEnabled() {
 			if peers, err = p.peerAnchorsOf(ctx, rs, entry.CoreKVKey, eventType); err != nil {
-				return nil, nil, err
+				return nil, nil, ScopeAll(), err
 			}
 		}
 		if len(peers) > 0 {
 			if peerResults, err = p.reprojectActors(ctx, rs, peers); err != nil {
-				return nil, nil, err
+				return nil, nil, ScopeAll(), err
 			}
 		}
 	}
@@ -218,21 +235,21 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			// The event actor leads the list with no rows of its own, so its
 			// frame is empty and retracts; each peer's frame carries the keys
 			// its reprojection just produced.
-			return peerResults, append([]string{entry.CoreKVKey}, peers...), nil
+			return peerResults, append([]string{entry.CoreKVKey}, peers...), scope, nil
 		}
 		if p.multiEnvelopeFn != nil {
 			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil)
 			if rerr != nil {
-				return nil, nil, rerr
+				return nil, nil, ScopeAll(), rerr
 			}
-			return append(tombstones, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
+			return append(tombstones, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), scope, nil
 		}
 		delKey := p.actorDeleteKeyFor(entry.CoreKVKey)
 		return append([]ruleengine.EvalResult{{
 			Delete: true,
 			Keys:   map[string]any{"key": delKey},
 			Row:    nil,
-		}}, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
+		}}, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), scope, nil
 	}
 
 	// Plain-projection anchor tombstone: retract the row the deleted anchor
@@ -247,7 +264,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 		if keys, ok := rs.engine.AnchorDeleteResult(
 			rs.cr, entry.CoreKVKey, eventType, entry.Properties); ok {
-			return []ruleengine.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil, nil
+			return []ruleengine.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil, scope, nil
 		}
 	}
 
@@ -301,7 +318,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ScopeAll(), err
 	}
 	// Filter-retraction presence check (plain projection lenses): when a
 	// live event anchor no longer appears in the re-derived row set — a
@@ -329,7 +346,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			var derr error
 			results, derr = p.applyDiffRetraction(ctx, results)
 			if derr != nil {
-				return nil, nil, derr
+				return nil, nil, ScopeAll(), derr
 			}
 		}
 	}
@@ -350,7 +367,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	// actor rides along: dropping it would break actorsTouchedWithPeers' retry
 	// contract below, and its marginal cost is one frame on an event that is
 	// already publishing a frame per peer.
-	return append(results, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
+	return append(results, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), scope, nil
 }
 
 // actorsTouchedWithPeers names every actor an actor-type vertex event's write
@@ -820,9 +837,14 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 				return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: multi-envelope: %w", envErr)
 			}
 			for _, e := range entries {
+				// Every entry a perEntry lens splits one row into inherits
+				// that row's provenance: they were all produced by the one
+				// evaluation, so an event that reached the row reached each
+				// of them (personal-lens-delta-publication-design.md §4.1).
 				results = append(results, ruleengine.EvalResult{
-					Keys: e.Keys,
-					Row:  e.Row,
+					Keys:       e.Keys,
+					Row:        e.Row,
+					Provenance: r.Provenance,
 				})
 			}
 			continue
@@ -833,6 +855,8 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 				continue
 			}
 			if errors.Is(envErr, ErrDeleteProjection) {
+				// A Delete carries no provenance: a retraction is never
+				// scoped, so nothing would read it.
 				results = append(results, ruleengine.EvalResult{
 					Delete: true,
 					Keys:   newKeys,
@@ -846,10 +870,16 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 			row = newRow
 			keys = newKeys
 		}
+		// The engine's row provenance is carried onto the write loop here —
+		// the one seam every non-manufactured result passes through. An
+		// engine that records none leaves it nil, which ScopeVertices admits
+		// (publishscope.go), so this reproduces today's publication rather
+		// than silencing the device.
 		results = append(results, ruleengine.EvalResult{
-			Delete: r.Delete,
-			Keys:   keys,
-			Row:    row,
+			Delete:     r.Delete,
+			Keys:       keys,
+			Row:        row,
+			Provenance: r.Provenance,
 		})
 	}
 	// Zero-row retraction (doc-mode EmptyBehavior delete/softDelete): a
@@ -1111,11 +1141,11 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry rulee
 // (create) / removes (tombstone) by EdgeID, so the dedicated consumer's later
 // Build for the same edge is a no-op. This guarantees the reprojection never
 // races ahead of the edge that triggered it.
-func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, []string, error) {
+func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, []string, PublishScope, error) {
 	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(linkKey)
 	if !ok {
 		// ClassifyKey already gated KindLink; unreachable in practice.
-		return nil, nil, fmt.Errorf("pipeline: link fan-out: not a Contract #1 link key: %q", linkKey)
+		return nil, nil, ScopeAll(), fmt.Errorf("pipeline: link fan-out: not a Contract #1 link key: %q", linkKey)
 	}
 
 	// Idempotently reflect this link in adjKV before enumerating. The link key
@@ -1124,12 +1154,16 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 	// dedicated consumer's directional events exactly.
 	for _, evt := range adjacency.EventsForLink(linkKey, srcType, srcID, linkName, dstType, dstID, isDeleted) {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
-			return nil, nil, fmt.Errorf("pipeline: link fan-out: adjacency build for %q: %w", linkKey, err)
+			return nil, nil, ScopeAll(), fmt.Errorf("pipeline: link fan-out: adjacency build for %q: %w", linkKey, err)
 		}
 	}
 
 	srcVtx := substrate.VertexKey(srcType, srcID)
 	dstVtx := substrate.VertexKey(dstType, dstID)
+	// The LINK arm's publication scope is both endpoints: a link create binds
+	// them together in the new binding, and a link tombstone leaves the near
+	// endpoint bound or fetched on the row that lost its far side.
+	scope := p.eventPublishScope(rs, []string{srcVtx, dstVtx})
 
 	// Chosen before the empty-set return, not after: "this event reached nobody"
 	// is a real answer either arm can give, and skipping the choice on the quiet
@@ -1159,15 +1193,15 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 			return out, nil
 		})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ScopeAll(), err
 	}
 	if len(actorKeys) == 0 {
 		// A link whose endpoints reach no actors (e.g. a book→author link)
 		// is a correct no-op.
-		return nil, nil, nil
+		return nil, nil, scope, nil
 	}
 	results, err := p.reprojectActors(ctx, rs, actorKeys)
-	return results, actorKeys, err
+	return results, actorKeys, scope, err
 }
 
 // evaluateAspectFanOut handles an aspect CDC event (mutation or tombstone) on
@@ -1185,12 +1219,16 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 //
 // Adjacency is untouched — an aspect change never alters graph topology — so,
 // unlike the link fan-out, no adjacency.Build is performed here.
-func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspectKey string) ([]ruleengine.EvalResult, []string, error) {
+func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspectKey string) ([]ruleengine.EvalResult, []string, PublishScope, error) {
 	parentVtx, parentType, _, _, ok := substrate.ParseAspectKey(aspectKey)
 	if !ok {
 		// ClassifyKey already gated KindAspect; unreachable in practice.
-		return nil, nil, fmt.Errorf("pipeline: aspect fan-out: not a Contract #1 aspect key: %q", aspectKey)
+		return nil, nil, ScopeAll(), fmt.Errorf("pipeline: aspect fan-out: not a Contract #1 aspect key: %q", aspectKey)
 	}
+	// The ASPECT arm's publication scope is the aspect's PARENT vertex: an
+	// aspect key folds to it in provenance, which is the granularity this arm
+	// names.
+	scope := p.eventPublishScope(rs, []string{parentVtx})
 
 	actorKeys, err := p.affectedAnchors(ctx, rs, aspectKey,
 		func() ([]string, bool, error) {
@@ -1200,15 +1238,15 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspec
 			return p.enumerateAnchorsWalk(ctx, rs, parentVtx, parentType, scoped)
 		})
 	if err != nil {
-		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
+		return nil, nil, ScopeAll(), fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
 	}
 	// No affected actors → no projection to write (e.g. a meta-vertex aspect,
 	// or a vertex no actor reaches). A correct no-op.
 	if len(actorKeys) == 0 {
-		return nil, nil, nil
+		return nil, nil, scope, nil
 	}
 	results, err := p.reprojectActors(ctx, rs, actorKeys)
-	return results, actorKeys, err
+	return results, actorKeys, scope, err
 }
 
 // reprojectActors re-executes the capability cypher for each actor key and
@@ -1286,7 +1324,11 @@ func (p *Pipeline) reprojectActors(ctx context.Context, rs ruleState, actorKeys 
 
 // emitPersonalFrames publishes one keyset frame per enumerated actor
 // through adpt, when it is KeySetPublisher-capable (personal-lens-
-// retraction-design.md §3.1-3.2, R1). adpt must be the SAME adapter
+// retraction-design.md §3.1-3.2, R1), and stamps the read-model's last-touch
+// clock for each frame that lands: the freshness clock counts what the lens
+// PUBLISHED, and under a publication scope an event whose rows were all
+// unchanged still delivers a frame (personal-lens-delta-publication-design.md
+// §4.2). adpt must be the SAME adapter
 // instance the caller already wrote results through (writeResults captures
 // it once via currentAdapter() and passes it here) — re-resolving
 // currentAdapter() independently at this later point would let a
@@ -1334,7 +1376,16 @@ func (p *Pipeline) emitPersonalFrames(ctx context.Context, adpt adapter.Adapter,
 		if err := publisher.PublishKeySet(ctx, actorID, byActor[actorID], revision); err != nil {
 			slog.Error("pipeline: publish keyset frame",
 				"ruleId", p.ruleID, "actorId", actorID, "err", err)
+			continue
 		}
+		// The frame is output on this path, so it stamps the read-model's
+		// last-touch clock like a landed row — the freshness clock counts what
+		// the lens PUBLISHED, and under a publication scope an event whose rows
+		// were all unchanged still delivers one
+		// (personal-lens-delta-publication-design.md §4.2). This is the live
+		// event path, so it is exactly the clock LensProjectionStalled reads:
+		// a lens still framing its actors is a lens still projecting.
+		p.recordProjected()
 	}
 }
 

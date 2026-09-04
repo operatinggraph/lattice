@@ -42,6 +42,16 @@ import (
 // reproject_personal.go), which makes the ordering matter more, not less: the
 // lock is what stops the two captures from being interleaved with the two
 // publishes.
+//
+// That under-claiming capture is also what puts a cold hydrate BEHIND the live
+// consumer, which does not take this lock: a scoped live publish landing
+// mid-hydrate carries a frame above this one's, and the device would then drop
+// this hydrate's frame and every row it does not already hold. The two guards
+// of personal-lens-delta-publication-design.md §4.6 close it — the mark this
+// call sets, which makes a live event publish the whole actor, and the wait
+// below for the one event that was already past that decision. Neither touches
+// the capture itself: capturing after, as the reprojection path does, would let
+// an over-claiming hydrate frame prune a row a concurrent live event wrote.
 func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, error) {
 	// Abandonable on ctx: this call answers a device-attach RPC with a deadline
 	// of its own, and the slot it wants can be held across a drain worker's
@@ -51,6 +61,35 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 		return 0, fmt.Errorf("pipeline: hydrate %q: awaiting the publish slot: %w", identityID, err)
 	}
 	defer unlock()
+
+	// The mark is taken after the slot and dropped before it, so it stands for
+	// every moment this call could publish anything. From here on, an event
+	// reaching its scope decision sees a hydrate in flight for this actor and
+	// publishes that actor WHOLE — guard 1 of §4.6.
+	unmark := p.markHydrating(identityID)
+	defer unmark()
+
+	// Guard 2 (personal-lens-delta-publication-design.md §4.6). An event that
+	// made its scope decision BEFORE the mark was set is already past guard 1:
+	// it can publish a scoped row set and a frame at its own, HIGHER sequence
+	// while this hydrate is still evaluating, and the client would then drop
+	// this hydrate's frame and every row it carries for a key the device does
+	// not yet hold — leaving a cold device holding one row. Waiting for that
+	// one event's handler to return before capturing the high-water closes it:
+	// afterwards the applied cursor is a complete statement about that event,
+	// and every LATER event sees the mark.
+	//
+	// At most one event can be in that position. The consumer goroutine stamps
+	// the sequence it is entering under the same lock this reads, so an event
+	// that started before this read is named here, and one that starts after it
+	// finds the mark already set. The wait is bounded by the attach RPC's own
+	// context, and it waits for the handler to LEAVE rather than for the cursor
+	// to reach the sequence, because a Naked event never advances the cursor.
+	if inFlight := p.handlingSequence(); inFlight != 0 {
+		if werr := p.awaitHandlerLeft(ctx, inFlight); werr != nil {
+			return 0, fmt.Errorf("pipeline: hydrate %q: awaiting the event in flight at seq %d: %w", identityID, inFlight, werr)
+		}
+	}
 
 	highWater := p.Progress().LastAppliedSeq
 	actorKey := substrate.VertexKey("identity", identityID)

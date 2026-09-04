@@ -106,7 +106,7 @@ func TestWriteResults_PerEntryLens_TransientFailure_ReevaluatesActorNotRawReplay
 		Row:  map[string]any{"key": "child.a1", "id": "a1"},
 	}}
 
-	decision, err := p.writeResults(ctx, p.ruleState(), msg, actorKey, results, nil)
+	decision, err := p.writeResults(ctx, p.ruleState(), msg, actorKey, results, nil, ScopeAll())
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, decision, "a transient write failure disposes the message; the retry queue owns the eventual write")
 	require.Equal(t, 1, rq.Len(), "the transient failure must enqueue exactly one retry entry")
@@ -185,7 +185,7 @@ func TestWriteResults_PerEntryLens_TransientFailure_FanOut_ReprojectsEveryEnumer
 		Row:  map[string]any{"key": "child." + actorA + ".a1", "id": "a1"},
 	}}
 
-	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.residence.someLink", results, []string{actorA, actorB})
+	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.residence.someLink", results, []string{actorA, actorB}, ScopeAll())
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, decision)
 	require.Equal(t, 2, rq.Len(), "one reproject-retry entry per enumerated actor")
@@ -369,7 +369,7 @@ func TestWriteResults_PerEntryLens_TransientFailure_NoActorEnumerator_RefusesClo
 		Row:  map[string]any{"key": "child.a1", "id": "a1"},
 	}}
 
-	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.residence.someLink", results, nil)
+	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.residence.someLink", results, nil, ScopeAll())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ActorEnumerator")
 	require.Equal(t, substrate.Nak, decision, "a missing ActorEnumerator pairing is a structural defect, not a transient one")

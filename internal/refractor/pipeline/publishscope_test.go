@@ -193,3 +193,188 @@ func TestPublishScope_BoundVectorsUseRealNanoIDs(t *testing.T) {
 		require.True(t, substrate.IsValidNanoID(id), "generated anchor id %q is not a NanoID", id)
 	}
 }
+
+// scopeVertexA/B/C are the vertex keys a CDC arm hands ScopeVertices.
+var (
+	scopeVertexA = substrate.VertexKey("lease", scopeAnchorA)
+	scopeVertexB = substrate.VertexKey("lease", scopeAnchorB)
+	scopeVertexC = substrate.VertexKey("identity", scopeAnchorC)
+)
+
+// provenanceRow builds the shape ScopeVertices reads: a non-delete result
+// carrying the vertex keys its evaluation recorded.
+func provenanceRow(vertexKeys ...string) ruleengine.EvalResult {
+	return ruleengine.EvalResult{Row: map[string]any{"anchor": scopeVertexA}, Provenance: vertexKeys}
+}
+
+// scopeVertexKeys generates n distinct valid vertex keys, for the bound vectors.
+func scopeVertexKeys(n int) []string {
+	keys := make([]string, 0, n)
+	for _, id := range scopeIDs(n) {
+		keys = append(keys, substrate.VertexKey("lease", id))
+	}
+	return keys
+}
+
+func TestPublishScope_VerticesAdmits(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope PublishScope
+		row   ruleengine.EvalResult
+		want  bool
+	}{
+		{"a row whose provenance meets the set is admitted",
+			ScopeVertices([]string{scopeVertexA}), provenanceRow(scopeVertexA), true},
+		{"a row whose provenance misses the set is withheld",
+			ScopeVertices([]string{scopeVertexA}), provenanceRow(scopeVertexB), false},
+		{"one member of the provenance meeting the set is enough",
+			ScopeVertices([]string{scopeVertexB}), provenanceRow(scopeVertexA, scopeVertexC, scopeVertexB), true},
+		{"one member of the SET being met is enough",
+			ScopeVertices([]string{scopeVertexB, scopeVertexC}), provenanceRow(scopeVertexC), true},
+		// The fail-open reading, and the one this arm's correctness rests on:
+		// a result nothing recorded provenance for must publish as it does
+		// today, not be silenced.
+		{"a row with NO provenance is admitted",
+			ScopeVertices([]string{scopeVertexA}), provenanceRow(), true},
+		{"a row with nil provenance is admitted",
+			ScopeVertices([]string{scopeVertexA}), ruleengine.EvalResult{}, true},
+		{"an empty constructor set is ScopeAll, never 'admit nothing'",
+			ScopeVertices(nil), provenanceRow(scopeVertexB), true},
+		{"a set of blank tokens is ScopeAll",
+			ScopeVertices([]string{"", ""}), provenanceRow(scopeVertexB), true},
+		// A token provenance can never carry is ScopeNone wearing this arm's
+		// name — the reading the constructor refuses to produce by accident.
+		{"a set of non-vertex tokens is ScopeAll",
+			ScopeVertices([]string{"nope", substrate.LinkKey("identity", scopeAnchorA, "holds", "lease", scopeAnchorB)}),
+			provenanceRow(scopeVertexB), true},
+		{"a non-vertex token is dropped from a set that keeps a real one",
+			ScopeVertices([]string{"nope", scopeVertexB}), provenanceRow(scopeVertexB), true},
+		{"and dropping it does not widen the set that survives",
+			ScopeVertices([]string{"nope", scopeVertexB}), provenanceRow(scopeVertexA), false},
+		{"an over-bound constructor set is ScopeAll",
+			ScopeVertices(scopeVertexKeys(MaxScopedAnchors + 1)), provenanceRow(scopeVertexC), true},
+		{"ScopeNone withholds a row whatever its provenance",
+			ScopeNone(), provenanceRow(scopeVertexA), false},
+		{"ScopeAll admits a row whatever its provenance",
+			ScopeAll(), provenanceRow(scopeVertexA), true},
+		// The two set arms answer different questions and must never read each
+		// other's set: an anchor scope judges the "anchor" alias, which every
+		// provenanceRow here carries as scopeVertexA.
+		{"ScopeAnchors ignores provenance entirely",
+			ScopeAnchors([]string{scopeAnchorA}), provenanceRow(scopeVertexB), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.scope.Admits(tc.row))
+		})
+	}
+}
+
+func TestPublishScope_VerticesKindAndString(t *testing.T) {
+	assert.Equal(t, ScopeKindVertices, ScopeVertices([]string{scopeVertexA}).Kind())
+	assert.Equal(t, ScopeKindAll, ScopeVertices(nil).Kind(), "an empty set names no vertices, so it is All")
+	assert.Equal(t, ScopeKindAll, ScopeVertices([]string{"nope"}).Kind(),
+		"a set that empties out under the vertex-key filter is All too, never 'admit nothing'")
+	assert.Equal(t, "vertices(2):"+scopeVertexA+","+scopeVertexB,
+		ScopeVertices([]string{scopeVertexB, scopeVertexA, scopeVertexB}).String(),
+		"the printed set is sorted and de-duplicated, so two equal scopes print identically")
+}
+
+// TestPublishScope_MergeVertices extends the merge law with the vertex arm.
+//
+// The mixed arm is the one no live path produces today — no producer enqueues a
+// vertex scope into the coalescing dirty set — and it is pinned anyway: the law
+// has to answer for every pair it can be handed, and All is the only answer
+// that admits everything either operand admits when neither set can express the
+// other's question.
+func TestPublishScope_MergeVertices(t *testing.T) {
+	verticesA := ScopeVertices([]string{scopeVertexA})
+	verticesB := ScopeVertices([]string{scopeVertexB})
+	anchorsA := ScopeAnchors([]string{scopeAnchorA})
+
+	cases := []struct {
+		name     string
+		left     PublishScope
+		right    PublishScope
+		wantKind ScopeKind
+		admits   []ruleengine.EvalResult
+		declines []ruleengine.EvalResult
+	}{
+		{
+			name: "All ⊔ Vertices = All", left: ScopeAll(), right: verticesA,
+			wantKind: ScopeKindAll, admits: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name: "Vertices ⊔ All = All", left: verticesA, right: ScopeAll(),
+			wantKind: ScopeKindAll, admits: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name: "None ⊔ Vertices = Vertices", left: ScopeNone(), right: verticesA,
+			wantKind: ScopeKindVertices,
+			admits:   []ruleengine.EvalResult{provenanceRow(scopeVertexA)},
+			declines: []ruleengine.EvalResult{provenanceRow(scopeVertexB)},
+		},
+		{
+			name: "Vertices ⊔ None = Vertices", left: verticesA, right: ScopeNone(),
+			wantKind: ScopeKindVertices,
+			admits:   []ruleengine.EvalResult{provenanceRow(scopeVertexA)},
+			declines: []ruleengine.EvalResult{provenanceRow(scopeVertexB)},
+		},
+		{
+			name: "Vertices(V) ⊔ Vertices(W) = Vertices(V ∪ W)", left: verticesA, right: verticesB,
+			wantKind: ScopeKindVertices,
+			admits:   []ruleengine.EvalResult{provenanceRow(scopeVertexA), provenanceRow(scopeVertexB)},
+			declines: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name:     "a vertex union AT the bound stays scoped",
+			left:     ScopeVertices(scopeVertexKeys(MaxScopedAnchors - 1)),
+			right:    verticesA,
+			wantKind: ScopeKindVertices,
+			admits:   []ruleengine.EvalResult{provenanceRow(scopeVertexA)},
+			declines: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name:     "a vertex union PAST the bound widens to All",
+			left:     ScopeVertices(scopeVertexKeys(MaxScopedAnchors)),
+			right:    verticesA,
+			wantKind: ScopeKindAll,
+			admits:   []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name: "Vertices ⊔ Anchors = All", left: verticesA, right: anchorsA,
+			wantKind: ScopeKindAll, admits: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+		{
+			name: "Anchors ⊔ Vertices = All", left: anchorsA, right: verticesA,
+			wantKind: ScopeKindAll, admits: []ruleengine.EvalResult{provenanceRow(scopeVertexC)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.left.Merge(tc.right)
+			require.Equal(t, tc.wantKind, got.Kind(), "merged scope: %s", got)
+			for _, row := range tc.admits {
+				assert.True(t, got.Admits(row), "the merge must admit %v", row.Provenance)
+			}
+			for _, row := range tc.declines {
+				assert.False(t, got.Admits(row), "the merge must not admit %v", row.Provenance)
+			}
+		})
+	}
+}
+
+// TestPublishScope_MergeVerticesDoesNotMutateItsOperands is the vertex arm's
+// half of the immutability the coalescing queue rests on.
+func TestPublishScope_MergeVerticesDoesNotMutateItsOperands(t *testing.T) {
+	left := ScopeVertices([]string{scopeVertexA})
+	right := ScopeVertices([]string{scopeVertexB})
+
+	merged := left.Merge(right)
+
+	require.True(t, merged.Admits(provenanceRow(scopeVertexB)))
+	assert.False(t, left.Admits(provenanceRow(scopeVertexB)),
+		"the left operand must still name only its own vertex")
+	assert.False(t, right.Admits(provenanceRow(scopeVertexA)),
+		"and the right operand only its own")
+}
