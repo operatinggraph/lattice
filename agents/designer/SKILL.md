@@ -142,7 +142,11 @@ census against it as you would against a stranger's.
   (`rel_traverse.go` steps the hop `hopindex.go` refuses — three designs repeated the reason verbatim); confirm
   a cited precedent still exists **and** read the review section of its doc (one was overturned in-doc, then
   deleted with its package); diff any security comment against the design that shipped it. Correct a
-  divergence in the same fire. (2026-08-27 · hopindex)
+  divergence in the same fire. (2026-08-27 · hopindex) **Second sighting — name the FUNCTION the
+  refusal's consumer actually calls and grep it for the thing the reason fears.** Two audit conjuncts cited
+  "plaintext" and "the diff" against `executeFullForAudit`, which calls neither decryptor nor diff; a
+  licence conjunct described a real plumbing seam as a soundness bound. And a transport with a CAP has a
+  fallback: find its counter and check it reaches a published surface. (2026-09-04 · Secure plain lens)
 - **This codebase's comments can be affirmatively WRONG about a security property.** A comment you would quote
   as a guarantee gets vendor-claim treatment — open the deciding code. `matrix.go` called `$JS.ACK.>` "protocol
   plumbing"; a `+NXT` ack payload reads any pull consumer on any stream. (2026-08-21 · app-tier read scope)
