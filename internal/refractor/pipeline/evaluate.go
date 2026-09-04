@@ -1324,11 +1324,17 @@ func (p *Pipeline) reprojectActors(ctx context.Context, rs ruleState, actorKeys 
 
 // emitPersonalFrames publishes one keyset frame per enumerated actor
 // through adpt, when it is KeySetPublisher-capable (personal-lens-
-// retraction-design.md §3.1-3.2, R1), and stamps the read-model's last-touch
-// clock for each frame that lands: the freshness clock counts what the lens
-// PUBLISHED, and under a publication scope an event whose rows were all
-// unchanged still delivers a frame (personal-lens-delta-publication-design.md
-// §4.2). adpt must be the SAME adapter
+// retraction-design.md §3.1-3.2, R1).
+//
+// It does NOT stamp the read-model's last-touch clock. Every event of a
+// personal lens publishes a frame here, whatever its rows did — under a
+// publication scope, most events publish nothing else — so stamping would make
+// lastProjectedAt an event heartbeat, and a lens silently withholding every row
+// would read as freshly projecting on the one signal built to catch it
+// (lastProjectedAt's doc, LensProjectionStalled). The clock advances on this
+// path only through the rows that actually landed, in writeResults.
+//
+// adpt must be the SAME adapter
 // instance the caller already wrote results through (writeResults captures
 // it once via currentAdapter() and passes it here) — re-resolving
 // currentAdapter() independently at this later point would let a
@@ -1376,16 +1382,7 @@ func (p *Pipeline) emitPersonalFrames(ctx context.Context, adpt adapter.Adapter,
 		if err := publisher.PublishKeySet(ctx, actorID, byActor[actorID], revision); err != nil {
 			slog.Error("pipeline: publish keyset frame",
 				"ruleId", p.ruleID, "actorId", actorID, "err", err)
-			continue
 		}
-		// The frame is output on this path, so it stamps the read-model's
-		// last-touch clock like a landed row — the freshness clock counts what
-		// the lens PUBLISHED, and under a publication scope an event whose rows
-		// were all unchanged still delivers one
-		// (personal-lens-delta-publication-design.md §4.2). This is the live
-		// event path, so it is exactly the clock LensProjectionStalled reads:
-		// a lens still framing its actors is a lens still projecting.
-		p.recordProjected()
 	}
 }
 

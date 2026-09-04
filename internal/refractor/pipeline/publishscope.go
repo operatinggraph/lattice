@@ -266,22 +266,69 @@ func mergeKeySets(a, b map[string]struct{}) map[string]struct{} {
 // ever swaps between adapters of the same target type, so it cannot flip
 // mid-event even when the instance does.
 //
-// The eligibility refusal is logged ONCE per lens, not per event: it is a
-// property of the compiled rule, so every event of a refused lens would
-// otherwise print the same line.
+// The eligibility refusal is logged when the REASON CHANGES, not per event: it
+// is a property of the compiled rule, so every event of a refused lens would
+// otherwise print the same line — while a hot reload that swaps one refused
+// rule for a differently-refused one has a new answer to give, and an operator
+// reading the old conjunct would be reading about a rule that is no longer
+// installed. See publishScopeRefusalChanged.
 func (p *Pipeline) eventPublishScope(rs ruleState, vertices []string) PublishScope {
 	if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); !isPersonal {
 		return ScopeAll()
 	}
-	if refusal := rs.publishScopeRefusal(); refusal != "" {
-		p.publishScopeRefusedOnce.Do(func() {
-			slog.Info("pipeline: personal lens publishes the whole actor per event — the publication scope is refused",
-				"ruleId", p.ruleID, "reason", refusal)
-		})
+	refusal := rs.publishScopeRefusal()
+	if p.publishScopeRefusalChanged(refusal) && refusal != "" {
+		slog.Info("pipeline: personal lens publishes the whole actor per event — the publication scope is refused",
+			"ruleId", p.ruleID, "reason", refusal)
+	}
+	if refusal != "" {
 		return ScopeAll()
 	}
 	return ScopeVertices(vertices)
 }
+
+// publishScopeRefusalChanged records reason as the lens's current publication-
+// scope refusal and reports whether it differs from the one already recorded.
+//
+// It is called with the refusal of EVERY event, "" included, which is what
+// re-arms the log across a reload in both directions: a lens reloaded from
+// refused to scopeable clears the record, so a later re-refusal is a change
+// again, and a lens reloaded from one conjunct to another logs the new one.
+// A sync.Once could do neither — it would have printed conjunct A's line and
+// then stayed silent for the life of the process while the running rule was
+// refused for conjunct B.
+//
+// It lives on the PIPELINE, which outlives its rules and its adapters, and
+// under ruleMu with the rule it describes: the reason is a property of the
+// published rule, so the record of it belongs beside the publication that can
+// invalidate it.
+func (p *Pipeline) publishScopeRefusalChanged(reason string) bool {
+	p.ruleMu.RLock()
+	same := p.publishScopeRefusalLogged == reason
+	p.ruleMu.RUnlock()
+	if same {
+		return false
+	}
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	// Re-read under the write lock: two goroutines can reach here with
+	// different reasons, and only the one that actually moves the record may
+	// claim the line.
+	if p.publishScopeRefusalLogged == reason {
+		return false
+	}
+	p.publishScopeRefusalLogged = reason
+	return true
+}
+
+// LogValue renders the scope for slog as the string String builds.
+//
+// Without it the JSON handler production installs (cmd/refractor's
+// slog.NewJSONHandler) ships `"publishScope":{}` — its Any arm marshals the
+// value and never consults fmt.Stringer, and every field of this struct is
+// unexported. slog.LogValuer is the interface BOTH handlers honour, so the
+// attr reads the same in a text-handler test and on the wire.
+func (s PublishScope) LogValue() slog.Value { return slog.StringValue(s.String()) }
 
 // String names the scope for a log line or a test failure: "all", "none", or
 // the set, sorted so two equal scopes print identically.

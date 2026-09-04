@@ -104,6 +104,15 @@ type ruleState struct {
 	// otherwise run on every CDC event of every personal lens to answer a
 	// question whose answer cannot change until the body does.
 	personalClockRefusal string
+	// expandsLabelSigil is true when this rule's query — or any of its branches
+	// — binds a pattern position through the `*` taxonomy sigil, which is the
+	// publication-scope vocabulary's PublishScopeLabelExpansion conjunct.
+	//
+	// Derived at publication for personalClockRefusal's reason: it is an
+	// exhaustive walk of the compiled rule's clauses answering a question that
+	// cannot change until the body does, and the conjunct that reads it is
+	// asked on every CDC event of every personal lens.
+	expandsLabelSigil bool
 }
 
 // ruleState returns the pipeline's current compiled rule as one snapshot.
@@ -160,6 +169,7 @@ func (p *Pipeline) ruleState() ruleState {
 		// back in publishRuleState, and read and written through the same
 		// Pipeline field.
 		personalClockRefusal: p.personalClockRefusal,
+		expandsLabelSigil:    p.expandsLabelSigil,
 	}
 }
 
@@ -205,6 +215,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.labelExpansion = rs.labelExpansion
 	p.plainNarrowingBlocked = rs.narrowingBlocked
 	p.personalClockRefusal = rs.personalClockRefusal
+	p.expandsLabelSigil = rs.expandsLabelSigil
 }
 
 // The publication-scope eligibility vocabulary — the reason a CDC event's rows
@@ -217,12 +228,26 @@ const (
 	// $projectedAt changes with no vertex changing, so no vertex set can
 	// name the rows an event moved.
 	PublishScopeClockRefusal = "row references $now or $projectedAt"
-	// PublishScopeScanSeededAnchor is the second conjunct: the compiled
-	// anchor is not point-seeded by $actorKey, so the pattern's head is a
-	// scan over `vtx.<label>.` and every row also depends on the MEMBERSHIP
-	// of that key list, which no per-vertex provenance set can name.
+	// PublishScopeLabelExpansion is the second conjunct: a pattern position
+	// carries the `*` taxonomy sigil, so what the position binds is decided
+	// by the label closure — meta vertices and their isA links, resolved
+	// OUTSIDE the executor and handed to it as a set. Those vertices enter no
+	// row's provenance while a row over such a position changes when a type
+	// joins or leaves the closure, so a scope built from an event's own
+	// vertices would withhold exactly the rows a taxonomy edit moved.
+	PublishScopeLabelExpansion = "a pattern position expands a label sigil"
+	// PublishScopeScanSeededAnchor is the third conjunct: the compiled anchor
+	// is not point-seeded by $actorKey, so the pattern's head is a scan over
+	// `vtx.<label>.`.
+	//
+	// The refusal is DEGENERACY, not a withheld row: the scan lists the type's
+	// keys and fetches each one, so the new member IS recorded on the rows
+	// that read it and a provenance set can name it. What it cannot do is name
+	// it usefully — a scan puts the whole type on every row's provenance, so
+	// the scope admits everything, and the whole-actor publish is byte for
+	// byte the same output reached without asking the question per row.
 	PublishScopeScanSeededAnchor = "anchor is not point-seeded by $actorKey"
-	// PublishScopeBranchSetRefused is the multi-walk form of the same
+	// PublishScopeBranchSetRefused is the multi-walk form of the anchor
 	// conjunct: the branch set could not be read as a whole, so no claim can
 	// be made about every branch's anchor.
 	PublishScopeBranchSetRefused = "multi-walk branch set refused"
@@ -232,27 +257,39 @@ const (
 // publish the whole actor, or "" when an event's rows may be scoped to the
 // vertices it touched (personal-lens-delta-publication-design.md §4.2).
 //
-// Both conjuncts are correctness requirements, and both fail toward ScopeAll —
-// today's publication, which costs bytes and never withholds a row:
+// Every conjunct fails toward ScopeAll — today's publication, which costs bytes
+// and never withholds a row. Two are correctness requirements and one is a
+// degeneracy:
 //
 //   - The row must not depend on the WALL CLOCK. Scoping asserts that a row
 //     whose provenance misses the event is unchanged on the device; a row
 //     recomputed from $now is not, and the licence already derives this fact
 //     per compiled rule (personalClockRefusal).
+//   - No pattern position may EXPAND A LABEL SIGIL. A `(x:type*)` position
+//     binds through the taxonomy closure the resolver hands the executor, so
+//     the meta vertices and isA links that decide the closure are read by
+//     nobody the evaluation records — while a row over that position changes
+//     when a type joins or leaves it. A scope built from an event's vertices
+//     would withhold exactly the rows such an edit moved.
 //   - The compiled anchor must be POINT-SEEDED by $actorKey (HopIndex.Anchor
-//     >= 0, the same reading DeclaresActorAnchor makes). A scan-seeded head
-//     enumerates `vtx.<label>.` and its rows depend on that key list's
-//     membership, which is not any single vertex's key — so a create of a new
-//     member would be withheld by a provenance set that could never have
-//     named it.
+//     >= 0, the same reading DeclaresActorAnchor makes). This one is not a
+//     withheld row: a scan-seeded head lists its type's keys and fetches each,
+//     so the scan's own reads ARE recorded and a created member is named. It
+//     is that every row then carries the whole type, so the scope admits
+//     everything and the whole-actor publish is the identical output, decided
+//     once instead of per row.
 //
-// For a multi-walk lens the anchor conjunct is asked of EVERY branch, not of
-// the union: one scan-seeded branch is enough to make the lens's merged rows
-// depend on a key list. A refused branch set (anchorHopsPerBranchRefusal) is
-// no answer at all and refuses here too.
+// For a multi-walk lens the anchor and sigil conjuncts are asked of EVERY
+// branch, not of the union: one scan-seeded or sigil-expanding branch is enough
+// to make the lens's merged rows depend on something no vertex set names. A
+// refused branch set (anchorHopsPerBranchRefusal) is no answer at all and
+// refuses here too.
 func (rs ruleState) publishScopeRefusal() string {
 	if rs.personalClockRefusal != "" {
 		return PublishScopeClockRefusal
+	}
+	if rs.expandsLabelSigil {
+		return PublishScopeLabelExpansion
 	}
 	if rs.anchorHopsPerBranchRefusal != "" {
 		return PublishScopeBranchSetRefused
@@ -284,18 +321,46 @@ func pointSeededByActor(ix full.HopIndex) bool {
 	return ix.Anchor >= 0 && ix.Anchor < len(ix.Labels)
 }
 
-// publishScopeFor builds the publication scope for an event that touched
-// vertices: ScopeVertices when both eligibility conjuncts hold, ScopeAll when
-// either refuses.
+// ruleSetExpandsALabelSigil reports whether cr or any of branches binds a
+// pattern position through the `*` taxonomy sigil — the value published into
+// ruleState.expandsLabelSigil.
 //
-// The refusal is a property of the compiled rule, so it is read off the same
-// snapshot the event is judged and evaluated under — a hot reload mid-event
-// cannot show the scope one rule and the evaluation another.
-func (rs ruleState) publishScopeFor(vertices []string) PublishScope {
-	if rs.publishScopeRefusal() != "" {
-		return ScopeAll()
+// The question is asked of the COMPILED AST (CompiledRule.ExpansionLabels,
+// which walks every place an oC_NodePattern can appear: MATCH, OPTIONAL MATCH,
+// WHERE existence tests, pattern comprehensions), never of the resolved
+// LabelExpansion map beside it: that map is populated only where a taxonomy
+// resolver ran, so an empty one is equally "no sigil" and "a sigil nobody
+// resolved" — and the second reading is the withholding one.
+//
+// It is asked of every branch, not only the head: one sigil-expanding branch is
+// enough to make the lens's merged rows depend on the closure.
+//
+// A nil rule declares nothing — the shape a pipeline that has published no rule
+// carries, which the anchor conjunct refuses on its own. A compiled rule of any
+// other engine's type cannot be read for the fact at all, which is not a
+// licence: it counts as expanding.
+func ruleSetExpandsALabelSigil(cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) bool {
+	if ruleExpandsALabelSigil(cr) {
+		return true
 	}
-	return ScopeVertices(vertices)
+	for _, branch := range branches {
+		if ruleExpandsALabelSigil(branch) {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleExpandsALabelSigil is ruleSetExpandsALabelSigil's per-rule reading.
+func ruleExpandsALabelSigil(cr ruleengine.CompiledRule) bool {
+	if cr == nil {
+		return false
+	}
+	compiled, ok := cr.(*full.CompiledRule)
+	if !ok {
+		return true
+	}
+	return len(compiled.ExpansionLabels()) > 0
 }
 
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may

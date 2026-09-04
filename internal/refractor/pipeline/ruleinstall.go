@@ -412,6 +412,12 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// question that cannot change until this function runs again.
 	next.personalClockRefusal = PersonalDerivationRuleRefusal(next.cr)
 
+	// The publication scope's label-sigil conjunct, derived here for the same
+	// reason — and over the BRANCH SET as well as the head, because one branch
+	// binding a `*` position is enough to make the merged rows depend on a
+	// taxonomy closure no row's provenance names.
+	next.expandsLabelSigil = ruleSetExpandsALabelSigil(next.cr, next.branches)
+
 	// Pin the anchor label(s) an anchor-labeled event can seed the evaluation
 	// with, and the single-walk pattern graphs. Derived unconditionally like the
 	// label set above, and for the same reason: a reload must never leave a

@@ -179,6 +179,11 @@ type Pipeline struct {
 	// mutexes and atomics. A new field belongs to one of those three classes;
 	// one written after Run with no guard is a bug.
 	//
+	// publishScopeRefusalLogged is written after Run by the consumer goroutine
+	// and guarded here too, though useFullEngineBranches does not write it: it
+	// records a property OF the published rule, so it belongs under the lock
+	// whose critical section is the only thing that can invalidate it.
+	//
 	// Read through ruleState(), never field-by-field. Two properties are the
 	// whole fix:
 	//
@@ -564,6 +569,11 @@ type Pipeline struct {
 	// the rest of the compiled rule.
 	personalClockRefusal string
 
+	// expandsLabelSigil is the published half of the publication scope's
+	// label-sigil conjunct — see ruleState's field of the same name. Guarded by
+	// ruleMu with the rest of the compiled rule.
+	expandsLabelSigil bool
+
 	// personalLicence carries the host's assertion of the personal narrowing
 	// licence's wiring conjuncts plus the accessor its live conjuncts read
 	// (anchor_derivation_personal.go). Nil — a host that asserted nothing — is
@@ -626,13 +636,24 @@ type Pipeline struct {
 	// frame is the whole answer when the admitted row set is empty, because the
 	// frame is then the retraction.
 	//
-	// The standing healer's frames-only pass (ScopeNone) is NOT output and does
-	// not stamp this. That pass re-asks the inclusion gates on the healer's own
-	// clock across every registered personal lens, so stamping there would
-	// advance every personal lens's clock every pass forever — and this clock
-	// failing to advance while lag is sustained is exactly what
+	// TWO frames are NOT output and do not stamp this, for one reason:
+	//
+	//   - The standing healer's frames-only pass (ScopeNone). That pass re-asks
+	//     the inclusion gates on the healer's own clock across every registered
+	//     personal lens, so stamping there would advance every personal lens's
+	//     clock every pass forever.
+	//   - The CDC write loop's frame (emitPersonalFrames). Every event of a
+	//     personal lens publishes one, whatever its rows did, so stamping there
+	//     would make this clock an event heartbeat: a lens whose events all
+	//     withheld — a provenance record site missed, a scope built from the
+	//     wrong vertices — would read as freshly projecting while it delivered
+	//     nothing at all.
+	//
+	// This clock failing to advance while lag is sustained is exactly what
 	// LensProjectionStalled reads (lens-projection-liveness-design.md), the one
-	// signal that catches a personal lens diverging in silence.
+	// signal that catches a personal lens diverging in silence. A frame that
+	// names rows is not a claim that any of them moved, so it cannot be the
+	// evidence that signal is built on.
 	lastProjectedAt time.Time
 
 	// projectionWrites counts every write this pipeline attempts against its
@@ -652,11 +673,15 @@ type Pipeline struct {
 	// once on that type would re-arm on a package reinstall — exactly the
 	// moment an operator would be reading the entry.
 	unsanctionedGrantKeyOnce sync.Once
-	// publishScopeRefusedOnce bounds the publication-scope refusal to one log
-	// line per lens. The reason is a property of the compiled rule, so it is
-	// the same answer on every event — logging per event would put one line per
-	// CDC message on a lens that is simply not scopeable (R4).
-	publishScopeRefusedOnce sync.Once
+	// publishScopeRefusalLogged is the publication-scope refusal this lens has
+	// already reported — "" when the running rule is scopeable, or has not been
+	// judged yet. The reason is a property of the compiled rule, so it is the
+	// same answer on every event and logging per event would put one line per
+	// CDC message on a lens that is simply not scopeable (R4); logging on the
+	// CHANGE bounds it to that without going silent across a hot reload, which
+	// is the one moment the answer can differ. Guarded by ruleMu — see
+	// publishScopeRefusalChanged.
+	publishScopeRefusalLogged string
 }
 
 // ProjectionProgress is the lens's forward-progress snapshot for the health
@@ -802,9 +827,14 @@ func (p *Pipeline) seedAppliedSeqFromAckFloor(ctx context.Context) {
 // (Create/Update/Delete), a Hydrate, or a SIGNALLED personal reprojection's
 // keyset frame (a drain signal, an interest change, the healer's content
 // cycle), whose frame is the whole answer when the admitted row set is empty.
-// Never on ack-and-skip, never on a write error, and never on the standing
-// healer's frames-only pass — see lastProjectedAt for why that last exclusion
-// is what keeps LensProjectionStalled able to fire on a personal lens.
+//
+// Never on ack-and-skip, never on a write error, and never on a frame that is
+// not itself output: the standing healer's frames-only pass, and the CDC write
+// loop's frame, which every event publishes whatever its rows did. Stamping
+// either would turn this clock into a heartbeat for the pass or the event
+// rather than for the projection — see lastProjectedAt for why those two
+// exclusions are what keep LensProjectionStalled able to fire on a personal
+// lens at all.
 func (p *Pipeline) recordProjected() {
 	p.progressMu.Lock()
 	p.lastProjectedAt = time.Now()
