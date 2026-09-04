@@ -1,5 +1,13 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-28 · `7b68919f` · [Tooling] op-name declaration gate — internal/ + cmd/ declare package-owned verbs, carve-out ⊆ NFR-S6 pinned; 3 cold reviews, 1 BLOCKING; found+fixed 2 live claim-attempts accounting defects
+- 2026-08-28 · `77650a8` · [Refractor] varlength anchor derivation Inc 1 — the derivation steps the ranged hop its executor already walks; 3 cold reviews, 3 BLOCKING found + closed (Min>1 seeding, empty expansion, work budget)
+- 2026-08-28 · `81a1c94` · [Weaver] decline-retry CLOSED — declines Nak on a 5m floor by fix path + `ReplayTarget` verb; live `ReplayTarget clinicSiteBackfill` still owed (needs a live stack)
+- 2026-08-28 · `2d1b7ef` · [Processor] NFR-S6 release quantum DELETED — timing equalized where it is made (script fails once, tombstoned sensitive read pays the live decrypt); 3 cold reviews, 2 MAJOR + T2 unmet found and closed
+- 2026-08-27 · (triage, no code) · [Refractor] "wedged rebuild / event loss" row retired — refuted by `e63cff5` + a live Health-KV re-check; residue folded into the varlength-anchor row.
+- 2026-08-27 · (triage, no code) · [Processor] Reads-template `:type` segment retired — DetachObject is served package-only by objects-base `derive_reads`; revive: a client-side type-extraction demand.
+- 2026-08-27 · (live-stack op run) · [Bootstrap] stranded operator epoch `b153d120` tooled but never run — 42 edges revoked, 5 packages reinstalled (the tool's derived set, not the design's guess); unblocks 2 verticals.md rows.
+- 2026-08-26 · `b558d163` · [CI] natsperm carved out of unit-4 into its own job — local build/vet/test green, CI-unproven (see flagged row)
 - 2026-08-25 · `f12c428` · [rbac/Pkgmgr] grant-edge provenance CLOSED — the `grantedBy` edge stamps origin at both channels; five-class reconciler + CI gate on the edge plane; kernel-regrant rule not keyed on the stamp; 3 cold reviews
 - 2026-08-25 · `ffd7769` · [Weaver] the `data:` latch's clears re-paired to facts CLOSED — template fact split off the gap column's read, retirement at all three close legs, clock-keyed log pacing that dates the issue; 6 MAJORs over 3 reviews
 - 2026-08-25 · `ad15f91` · [CI] unit-1/unit-3 shard rebalance SHIPPED — refractor growth made unit-1 the pole (332s vs 154s summed); moved 84s of whole-package globs to unit-3; unit-1 277s→170s, run 282s→198s

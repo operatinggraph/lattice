@@ -771,4 +771,4 @@ whole fire is green (Inc 1 alone would leave the redrive defect time-keyed, §3.
 61,731 DEL markers, per family as §1.2; six delete sites and nine derivation sites at the brief's anchors; no
 stale citation.
 
-**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-loom-tombstones-20260903215143` · done: brief, Inc 1–4 built and green, close pass folded · next: merge, CI, live cycle.
+**Shipped.** `a5f4ef2e` on `main`, 2026-09-03, CI green (run 33845694737). Loom cycled on the dev stack at 23:46: the conversion pass converted 61,741 markers (pin 12,348 · token 12,348 · outbox 24,697 · deadline 12,348), 0 mismatches, 0 skipped-running, 0 errors, 6 m 20 s; `loom-deadline` unprocessed stayed at 0 through the paced phase; after the marker TTL `KV_loom-state` holds **12,351 subjects for 12,351 live keys** (from 74,080), 4.1 MiB (from 13 MiB). The live redrive of a deadline-failed instance was not run unattended (it re-submits a real flow's op on the dev stack); the redrive proof is the real-shaped test plus its 10071 mutation. Worktree retired.
