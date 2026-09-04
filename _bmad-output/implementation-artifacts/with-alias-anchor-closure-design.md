@@ -559,3 +559,123 @@ the wrong order.
 
 Partitionability for a neighbour-keyed lens; Secure Lens narrowing; modelling `WITH` renames in the hop
 index; any change to `ScanRootHopIndex`'s own `WITH` conjuncts (that is the varlength Inc 2 row).
+
+---
+
+### WITH-alias closure fire brief (build note, 2026-09-03)
+
+Compiled at `a575f7f5` by the Lattice Steward (Phase 0, `agents/fire-brief-template.md`). One brief for the
+item; increment checkpoints amend this note.
+
+**1. Scope sentence (verbatim, banner).** *"✅ Andrew-ratified 2026-09-02 — build as designed, §13's three
+increments in order."* Green bar per increment is §13's; the item's acceptance is §11's table.
+
+**2. Verified touch-list (live at `a575f7f5`; every §14.2 anchor re-checked, none rotted).**
+- `internal/refractor/ruleengine/full/anchor_delete.go:168-248` `anchorProjectionShape` (wholesale loop
+  `:181-185`); `:40-44` `AnchorDeleteResult` → `:66-73` `AnchorProjectionKey` (the **root-tombstone Delete
+  shares the shape** — so a `WithdrawLeaseApplication` tombstone is refused at the same predicate as the
+  filter-retraction; this is the mechanism behind premise 1); `:267-270`, `:304-315`, `:322-340`,
+  `:348-415` (aggregate refusal `:375-381`).
+- `full/withscope.go:33-121` `withScopeReject(clauses []Clause) string`; `:144-171` `withCarries`;
+  `:173-175` `withReReference`; `:253-255` `varScan` default-deny; `:19-21` the `$actorKey` licence whose
+  reason §4.4 re-derives. Callers today: `full/hopindex.go:242,363` only (index build, not per event) — the
+  per-event caller this fire adds is what makes memoization mandatory (§4.3).
+- `full/full.go:235-240` `Parse` constructs `CompiledRule` (`groupingRedundant: analyseGroupingRedundancy(...)`)
+  — `withAliasEnv` / `withAliasResolved` / the memoized `withScopeReject` verdict are computed here.
+  `full/ast.go:252-300` `CompiledRule` (lifetime comment `:277-286`, `:295-297`). `Expr` universe
+  `ast.go:125-248`: 13 concrete types; the resolver models exactly `nil, Literal, ParameterRef, VariableRef,
+  PropertyAccess, FunctionCall` and returns unmodelled for the other 7. `projectionAutoAlias`
+  `full/executor.go:1869`.
+- `internal/refractor/plain_scanroot_corpus_census_test.go:133` (`clinicPatientsRead`), `:150`
+  (`leaseApplicationsRead`), `:169` (`renewalsRead`) — the three `closureRefused` pins that move; `:22-27`
+  header; `:317-330` three-route equality; `TestScanRootCorpusCensus_PinnedVerdicts` `:387`.
+  `forEachCorpusCypher` `label_derivation_corpus_census_test.go:573`.
+- `packages/edge-manifest/lens_cypher_test.go:824-876` (MUTATION 1 `:850-858`, MUTATION 2 `:865-866`).
+- `packages/clinic-domain/lenses.go:308-333` comment, `:341` `DiffRetraction: true`; version
+  `packages/clinic-domain/package.go:139` + `manifest.yaml:2` (`0.34.19`).
+- `packages/lease-signing/lenses.go:1165-1210` `leaseApplicationsReadSpec` (`MATCH (app:leaseapp)` `:1166`,
+  `WITH app.key AS entityKey` `:1173-1174`, `nanoIdFromKey(entityKey) AS app_id` `:1210`); declaration
+  `:207-214` (`IntoKey ["app_id"]`, no `SecureColumns`, no `DiffRetraction`).
+  `renewal_lenses.go:100-128` (`SecureColumns` `:126`).
+- Consumers, read-only: `pipeline/anchor_derivation_plain.go:329,341-342,512`; `pipeline/evaluate.go:246-248`
+  (root tombstone) and `:320-334` (filter-retraction); `pipeline/audit.go:695,757-767`.
+- Docs: `docs/components/edge-manifest.md:113`; `staff-descriptor-rendering-design.md:93`;
+  `plain-lens-neighbour-anchor-derivation-design.md:433`.
+
+**Scout drift, corrected by hand:** the `haiku` scout reported `leaseApplicationsRead` as `WITH`-less (it read
+the declaration at `:207`, not the spec at `:1165`). Verified: the `WITH` is at `:1173`. Nothing else drifted.
+
+**Premises (§14.1), re-derived live at fire start:**
+1. *Stale-row defect is live* — **not yet observed, cannot be from existing state:** `read_lease_applications`
+   holds 57 live rows and **0** of their `vtx.leaseapp.*` roots are tombstoned in Core KV (no withdraw has ever
+   run on this stack). Mechanism confirmed from code (root tombstone → `AnchorDeleteResult` → the same
+   refused shape). Inc 2 proves it by a fresh create-then-withdraw; if the row leaves, stop and open the path.
+2. *`renewalsRead` reachability* — **no op tombstones a `renewal` vertex** (grep of `packages/lease-signing`):
+   structural gap only, §11 reports it as such.
+3. *No other licence blocker on `leaseApplicationsRead`* — live refusal at 2026-09-03 18:27 is exactly the
+   partition conjunct (`reason: "its rows do not partition by anchor …"`, ruleId `gP3FBEn7iiWVt1hVgP3F`);
+   the audit reaches verdicts (`lastAuditVerdictAt` set). Positive verdict to be read after Inc 1.
+4. *Census as of `ec3058d8`* — the census test was never committed; Inc 1 ships it and pins F at the fire's base.
+
+**3. Precedents to mirror.** Default-deny walk: `withscope.go:253-255`. Parse-time immutable analysis field:
+`ast.go:277-286` + `full.go:235-240`. Census test shape: `TestScanRootCorpusCensus_PinnedVerdicts`
+(`plain_scanroot_corpus_census_test.go:387`) over `forEachCorpusCypher`. Mutation test shape:
+`lens_cypher_test.go:850-866`. Absence-gate test shape: `TestAnchorHopIndex_EmptyExpansionIsUnresolved`
+(both vectors, revert-proven). Walk-completeness gate: `full/variable_refs_completeness_test.go` (discovers
+`Expr` types from source — the resolver's unmodelled arm must stay a refusal, never a passthrough).
+
+**4. Increment order + green checks.**
+- **Inc 1 — the predicate** (posture-changing → `opus` builder, full review). Green:
+  `go test ./internal/refractor/ruleengine/full/ -count=1` · `go test ./internal/refractor/ -run
+  'TestPlainWithAliasClosureCensus|TestScanRootCorpusCensus' -count=1 -v` (F = exactly the three names, total
+  ≥ 65; the three pins move `closureRefused → closureHolds`, no other row moves) · `go test
+  ./packages/edge-manifest/ -run TestOpCatalog_TombstonedOpMetaRetractsItsRow -count=1` (re-aimed MUTATION 1) ·
+  revert-proof: with the substitution disabled the three F verdicts return to refused · then `go build ./...`,
+  `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `go test
+  ./internal/refractor/... ./packages/... -count=1`. Land on `main`, `make cycle-refractor`, read the
+  positive licence verdict for `gP3FBEn7iiWVt1hVgP3F` and the still-refused (Secure) verdicts for
+  `H1CvFXsBn5TFsag2H1Cv` (`renewalsRead`) and `KnMmwVvJ6To8kdsjKnMm` (`clinicPatientsRead`).
+- **Inc 2 — the payoff, observed** (Winston inline + `sonnet` for the e2e). Live: seed applicant + unit,
+  `CreateLeaseApplication`, row present, `WithdrawLeaseApplication`, row leaves `read_lease_applications`
+  (`is_deleted` or gone). E2e in `internal/leaseconvergence` (tag `leaseshortwindow`; harness
+  `harness_test.go:162,605,644,715`), red at the parent commit. Narrowing proof at the pipeline seam. Report
+  msg/s + the audit's `stale` count on the lens (10 divergent rows every 15 min at fire start).
+- **Inc 3 — `clinicPatientsRead` drops `DiffRetraction`** (`sonnet`). `packages/clinic-domain/lenses.go:341`
+  removed + comment rewritten (§9) + `package.go:139` and `manifest.yaml:2` bumped; `DIFF_BASE=<base> go run
+  ./scripts/lint-package-version.go`; `go test ./packages/clinic-domain/ -count=1`; `make reinstall-package
+  PKG=packages/clinic-domain` then `make verify-package-clinic-domain` on the live stack; rows identical
+  before/after. Sequenced after Inc 1 is observed live. Docs of §9's table in the same commit.
+
+**5. In-scope gotchas.** `docs/components/refractor.md` standing rule (census calls the REAL predicate, ships
+with the analysis). `go test ./...` is not the gate set — run `ci.yml`'s lint set; no interface changes, so the
+tagged harnesses are not reached except `make test-lease-convergence`, which Inc 2 extends. Inc 3 is a package
+edit ⇒ version bump. The wholesale-`WITH` refusal prose must vanish everywhere (`anchor_delete.go:174-180`,
+`AnchorProjectionKey`'s doc "no WITH" at `:63`, the three docs). **Dossier entries that bind this fire
+(`docs/components/refractor.md` "Review keeps catching"):** *a lifted refusal reveals the conjunct behind it,
+and a GRANTED licence logs nothing — prove the payoff by the POSITIVE verdict, read live* · *refuting a
+refusal's REASON does not establish the whole refusal was wrong — re-derive the boundary from the CONSUMERS*
+(§4.4 is that derivation; the reviewer checks it against all four consumers incl. the root-tombstone Delete)
+· *`len(x)==0` vs `nil` — a present-but-empty and a missing answer must not collide* (`withAliasResolved` is
+the separator; test both vectors) · *an authoring gate and its runtime resolver must agree* (the resolver's
+unmodelled arm refuses) · *a fixture that establishes the favourable ARM is an argument, not a test* (Inc 2's
+e2e must take `evaluate.go:246` root-tombstone arm with a real `WithdrawLeaseApplication`) · *a widened
+operation silently drops the bound its narrow predecessor carried* (the memoized verdict is the bound here).
+**Standing checklist** (`fire-brief-template.md`): 1 state needs a lifetime (§4.3 table) · 2 every census is a
+premise (re-run at base) · 3 negative test needs a positive vector; prove by revert · 4 removal needs a
+transport AND an observer (Inc 3 enumerates what `DiffRetraction` was doing) · 5 one deterministic key, one
+writer · 6 precedent may carry debt.
+
+**6. Adjacent finds.** (a) Audit on `leaseApplicationsRead` reports `classes:{stale:10}` every 15 min at HEAD —
+a lag symptom of the whole-corpus rescan; measured, not filed: Inc 2 reports it after the licence lands.
+(b) None other.
+
+**7. Non-goals.** §14.4 verbatim: partitionability for a neighbour-keyed lens; Secure Lens narrowing; `WITH`
+renames in the hop index; `ScanRootHopIndex`'s own `WITH` conjuncts (the varlength Inc 2 row).
+
+**Scope-diff gate:** every touch above traces to §13's three increments; nothing widened; the one dependency
+(`expiry-as-a-recorded-fact` → this) is satisfied at HEAD (`d6960bda`); the onward row (varlength Inc 2) is not
+load-bearing. Landing shape: **each increment lands on `main`** — Inc 1 alone is green and safe (a widened
+predicate that only admits shapes it proves), Inc 2 adds a test and a measurement, Inc 3 a declaration removal
+behind an observed cheap transport.
+
+**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-with-alias-<ts>` · done: brief · next: Inc 1.
