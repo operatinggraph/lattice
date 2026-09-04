@@ -132,17 +132,21 @@ requests — so every `NoSnapshot` caller past the cap (the grant set, the marke
 that overflows) pays ~0.1–0.2 ms per key instead of ~1 ms. The snapshot-verified `KVGetMulti` keeps its
 double drain: its guarantee is the comparison, which list-then-get cannot offer.
 
-*(Amended at build, 2026-09-03 — found by a real test failure, `TestNeighbors_MarkedNodeIsNeverQuietlyShort`.)*
-**A single listing is not a sound resolution.** nats.go's `ListKeysFiltered` is a `WatchFiltered(…,
-IgnoreDeletes(), MetaOnly())` whose "initial values received" marker fires on `received >= initPending ||
-delta == 0` with `initPending` captured at consumer creation (nats.go v1.52.0 `jetstream/kv.go`) — the same
-count-bounded stop condition `drainDirectGetFallback`'s own doc identifies as unsound on a history-1 stream:
-a rewrite during the enumeration erases the message the count counted and appends a new one later, the
-counts balance, and the enumeration ends with keys undelivered. On the capability plane a short listing is a
-silently disappearing grant. So the resolution enumerates each filter **twice and requires the key sets to
-agree** (bounded retries, else a loud error), which is cheap because a rewrite never changes the key set:
-the widest actor's listing cost is ~0.36 s, against the 3.0–3.4 s drain. The stop condition is now a
-load-bearing vendor behaviour and has its row in `docs/vendors.md`.
+*(Amended at build, 2026-09-03 — first by a real test failure, `TestNeighbors_MarkedNodeIsNeverQuietlyShort`,
+then by the Inc 4 cold review.)* **A key listing is not a sound resolution, singly or paired.** nats.go's
+`ListKeysFiltered` is a `WatchFiltered(…, IgnoreDeletes(), MetaOnly())` whose "initial values received" marker
+fires on `received >= initPending || delta == 0` with `initPending` captured at consumer creation
+(nats.go v1.52.0 `jetstream/kv.go:1293-1300`) — the count-bounded stop condition `drainDirectGetFallback`'s own
+doc calls unsound on a history-1 stream: a rewrite during the enumeration erases the counted message and
+appends a new one later, the counts balance, and the enumeration ends with keys undelivered. The build's
+first answer — enumerate twice and require the key sets to agree — was refuted by the review's probe: the
+loss is *caused* by the rewrite, so rewrites correlated on a hot subset drop the same key from both
+enumerations (18 of 20 reads short on a hot key; the pre-increment drain lost it 17 of 20 and never
+erred). On the capability plane that is a silently disappearing grant. **The resolution is therefore
+`$JS.API.STREAM.INFO` with a subject filter** — the subject set computed under the same stream lock as the
+fast path, server-side paged, no stop condition — one round trip per filter, then the ≤ 1,024-key atomic
+gets, which remain the arbiter of existence (a subject whose last message is a DEL/PURGE marker is listed
+and reads absent). Both vendor behaviours have their row in `docs/vendors.md`.
 
 ## 4. The shape
 
@@ -358,6 +362,7 @@ rule-engine rows (batched reads, pipelined publishes, the per-actor gate scope).
 | baseline (C1, 13:02–14:00) | 9.03 s / 22.0 s | 8.86 s / 22.6 s | 8.90 s / 22.9 s | 71 k → 116 k (growing) |
 | Inc 1 (`0712aa14`, cycled 16:06, read 16:06–16:16, 646 msgs) | **4.72 s / 7.85 s** | — (none in window) | 0.00 s (the window's roots were the supersession purge's soft-deletes) | 116 k → 29 k in 10 min |
 | Inc 1+2 (`03bcfca1`, cycled 16:23, read 16:23–16:33, 651 msgs; licensed at 16:25) | **3.99 s / 7.25 s** | — | 0.00 s | 29 k → 28 k (the window was 86 % `providedTo` events) |
+| Inc 1+2+3 (`84f9ae8d`, cycled 16:50, read 16:50–17:00, 685 msgs; licensed at 16:52) | **3.83 s / 6.96 s** | — | 0.00 s | 27 k → 26 k; the 24-sample profile at this build: 13 in the grant-set drain, 10 in the marked hub's link drain, 0 in publishes — Inc 4's territory |
 
 ## 11. Decomposition for the Steward
 
