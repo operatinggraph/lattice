@@ -199,7 +199,10 @@ Three publishers reach a device's subject — the CDC write loop, `ReprojectPers
 > **A row is published iff the scope admits it; every surviving row is framed.** `ScopeAll` (hydrate, interest
 > change, the daily content pass, an unlicensed lens) is today's behaviour. `ScopeNone` (the healer's ordinary pass)
 > publishes the frame alone. `ScopeVertices(V)` (the CDC path) admits a row whose provenance meets `V`.
-> `ScopeAnchors(A)` (a grant change) admits a row whose `anchor` alias names a NanoID in `A`.
+> `ScopeAnchors(A)` (a grant change) admits a row whose `anchor` alias names a NanoID in `A`. *(Build, 2026-09-04:
+> `A` is a set of valid NanoIDs — blank or malformed tokens are dropped — and an `A` that is EMPTY is `ScopeAll`, never
+> "admit nothing"; a row with no or an unparseable `anchor` is not admitted under `ScopeAnchors`, a branch
+> `personalEnvelopeFn` already makes unreachable.)*
 > **The zero value is `ScopeAll`** — a caller that forgets to set one reproduces today's behaviour (over-publish:
 > bytes, never a wrong row); because that failure is silent on the wire, T3 pins every scope-bearing call site.
 
@@ -328,7 +331,7 @@ transport to be exact).
   `ScopeAll`. The legacy parent-document Delete (`evaluate.go:953-957`) does not reach the sink today (its key
   fails `anchorFromKeyPerEntry`) and is the healer's, unchanged. `InterestChanged` enqueues `ScopeAll`.
 - **The dirty set coalesces scope.** `dirty map[actorID]publishScope`; merge law: `All ⊔ x = All`;
-  `Anchors(A) ⊔ Anchors(B) = Anchors(A ∪ B)` while `|A ∪ B| ≤ 64`, else `All`. `take` hands the scope to
+  `None ⊔ x = x`; `Anchors(A) ⊔ Anchors(B) = Anchors(A ∪ B)` while `|A ∪ B| ≤ 64`, else `All`. `take` hands the scope to
   `reprojectActor`, which applies it on every registered lens. The bound and the drop accounting are unchanged.
 - **Scope match for anchors:** `nanoIdFromKey(row["anchor"]) ∈ A` — the same alias the D1 gate decides on (§2
   row 9). Exact: a grant for anchor X changes the inclusion of exactly the rows anchored at X, and nothing else's
@@ -348,9 +351,22 @@ transport to be exact).
   makes the first cycle after boot a content cycle. It is the bounded answer to a connected device that never
   re-hydrates: a row whose upsert was dropped or whose event the derivation missed is republished within a day, at
   one whole-actor republish per actor per day (the measured passes are 7–15 per 12 h).
-- **What a lost signal costs is unchanged in kind, cheaper in bytes:** a dropped grant transition converges on the
-  next frame (inclusion), which is what the sweep existed for (grant-change trigger design §4.3: *"bounds only the
-  un-signalled worst case"*).
+- **What a lost signal costs — corrected at build (2026-09-04, three cold reviewers):** the frame carries inclusion
+  REMOVAL only. A key the frame names but the device does not hold is ignored by the client store (*"its row arrives
+  as a separate upsert"*), so a lost or failed grant-ADD signal — `TransitionUnknown`, an unclaimed key, a `maxDirty`
+  drop, a failed drain reprojection (its lens raises `RecordGrantReprojectIssue`), a producer installed with no sink, a
+  lens registering after its actors were swept — converges on the **content cycle** (≤ `PersonalContentHealInterval`,
+  or a hydrate), where it converged within one sweep cycle before. Revocation — the over-grant direction the sweep
+  exists for — still converges on the next frame. The drain keeps its no-re-enqueue posture (a persistent fault would
+  spin it); the health fault is the signal. Named as R7.
+- **The latch measures against the projected cycle END** (build correction): with cycle length `T = ⌈N/batch⌉ ×
+  interval`, a cycle starting now is a content cycle iff the previous latch is zero or `elapsed + T ≥ interval` — the
+  heal runs at least once per interval and at most once per cycle. A cycle longer than the interval (≈ 7,200 identities
+  at the shipped 5/min) makes every cycle a content cycle and the frames-only saving nil; the content-cycle log carries
+  the elapsed time and `T` so R4 is observable.
+- **The healer's frames-only pass does not stamp `lastProjectedAt`** (build correction to §4.2's "nothing alarms on
+  that clock": `LensProjectionStalled` reads it). A signalled reprojection (drain, interest change, content cycle) and
+  a hydrate stamp it on their frame; a `ScopeNone` pass is not output.
 
 ### 4.5 Rebuild, reload — `ScopeAll` by construction
 
@@ -411,6 +427,8 @@ are unaffected. `docs/components/edge.md` needs no edit.
 | `ProjectionResult.Provenance` / `EvalResult.Provenance` | at `applyReturn` | with the result slice (after `writeResults` / the frame) | a retry-queue capture copies the result, provenance included (the replay re-scopes identically) | n/a |
 | Reprojector dirty-set scope (`map[actorID]publishScope`) | on `GrantChanged` / `InterestChanged` | on `take`; lost with the process (today's dirty set already is — the sweep covers it) | held through the registry-ready hold, merging as it waits | the merge law (§4.3); never by arrival |
 | Sweeper `lastContentCycleStart` | first cycle after boot (zero ⇒ that cycle is a content cycle) | with the process — a restart costs one content pass per actor over the next cycle | n/a | the sweeper's own clock |
+| Sweeper `contentCycle` (build, 2026-09-04) | latched with `lastContentCycleStart` at `ensurePopulation`'s re-list, read by every pass of that cycle | with the process; re-latched at the next re-list | held across the cycle's batches — a per-pass clock test would flip the moment the latch was stamped | the re-list |
+| Sweeper `now` clock (build) | `time.Now` at construction; a test replaces it | n/a | n/a | n/a |
 | Per-event scope (`ScopeVertices`) | in the fan-out arm | with the message | a Nak'd redelivery recomputes it from the same event | n/a |
 
 No state is written to any KV, stream or file. The Refractor remembers nothing about what it sent (vault §4.1).
@@ -475,6 +493,7 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 | R4 | The healer's content cycle never triggers because the population walk never wraps (a population larger than 5 × 1,440 = 7,200 identities per day). | The daily content heal degrades to "once per full cycle" — ~33 h at 10k identities, the cadence the trigger design already accepted for the un-signalled worst case. | Stated; the sweeper logs the content-cycle start with its cycle length. |
 | R6 | A hydrate row the client's resurrection guard drops is no longer repaired by the next event's whole-actor republish. | A cold device short of rows until the content pass. | §4.6's two guards (pinned T3/T6); the exposure that remains is a hydrate whose RPC ctx expires while waiting on an in-flight event — it fails loud and the device re-attaches. |
 | R5 | A device relying on the sweep's row republish to repair a store it corrupted itself. | Repaired within a day instead of ~80 min. | The store is a disposable cache; `Rehydrate` is the operator/client remedy the vault names. |
+| R7 (build) | A lost or failed grant-ADD signal's row reaches a connected device only on the content cycle (§4.4). | Under-display ≤ `PersonalContentHealInterval`; never over-grant. | The drain's health fault names the failed reprojection; the frame retracts on every pass; a re-attach hydrates. |
 | **Residual** | **The per-event frame is the count floor.** After scoping, a dense actor publishes 1–2 messages per event; the widest subject's ~6 events/min is 8,640/day against a 10,000 cap sized as a backstop to the 24 h `MaxAge`. Not a byte problem (a 2-key frame is ~150 B). | A device on such an actor offline > ~28 h re-hydrates anyway (`MaxAge`); the cap binds only past ~7 events/min. | Revive trigger for row 1/row 2: a subject at the count cap whose messages are ≥ 50 % frames, measured by the Inc 3 probe. Re-deriving `syncStreamMaxMsgsPerSubject` as an *event* count is a one-constant follow-on once the count is a count of events. |
 
 ---

@@ -269,7 +269,7 @@ to derive the transition.
   rendered `Key` — never re-derived at the call site (`adapter.go:222-227`).
 - **Every other adapter:** announce **once per actor**, directly on the sink, with the `actorKey` the shred
   call already holds. This is the answer to "the fallback has no key to announce with" (§13 M4): the sink's
-  consumer wants an identity key — `Reprojector.GrantChanged(actorKey)` parses exactly that
+  consumer wants an identity key — `Reprojector.GrantChanged(actorKey, entryID)` parses exactly that
   (`reprojector.go:312-318`) — and `notifyGrantChange`'s key-pattern inverse exists only to *recover* one.
   Announcing per actor is coarser than per key and strictly safe: the reprojection is per-actor anyway.
 

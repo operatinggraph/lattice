@@ -229,7 +229,7 @@ A new exported entry point on `Pipeline`, a **sibling** of `Hydrate`, not a wide
 // ReprojectPersonalActor re-evaluates this personal pipeline for one actor and
 // publishes the resulting deltas plus an authoritative keyset frame. It is
 // Hydrate without the terminal hydrationComplete marker.
-func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string) error
+func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string, scope PublishScope) error // scope: personal-lens-delta-publication-design.md §4.3 (2026-09-04)
 ```
 
 Mirroring `Hydrate` (G6) clause by clause:
@@ -338,7 +338,7 @@ already take.
 **The sink.** `Pipeline` gains an optional injected sink:
 
 ```go
-type GrantChangeSink interface{ GrantChanged(actorKey string) }
+type GrantChangeSink interface{ GrantChanged(actorKey, entryID string) } // entryID: the anchor whose grant moved (delta-publication design §4.3, 2026-09-04)
 ```
 
 installed by `projection/driver.go` for exactly the lenses the classification admits. Absent sink ⇒ no signal
