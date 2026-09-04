@@ -35,4 +35,11 @@ type EvalResult struct {
 	// stale grant this write meant to retire survive alongside a sibling's
 	// successful fresh write in the very same pass.
 	FailClosed bool
+	// Provenance is ProjectionResult.Provenance carried onto the write loop:
+	// the vertex keys this row's evaluation read. A personal pipeline's CDC
+	// write loop publishes a non-delete result iff the event's vertex set
+	// meets it (PublishScope.Admits under ScopeVertices). Nil on a Delete, on
+	// a result an engine did not record provenance for, and on a
+	// pipeline-manufactured result (a tombstone, a zero-row retraction).
+	Provenance []string
 }

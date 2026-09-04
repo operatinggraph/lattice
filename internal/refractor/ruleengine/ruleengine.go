@@ -74,6 +74,15 @@ type ProjectionResult struct {
 	Key    map[string]any
 	Values map[string]any
 	Delete bool
+	// Provenance is the set of Core KV VERTEX keys whose body, aspects or
+	// adjacency the evaluation read while producing this row: every vertex
+	// bound in the row's bindings, every candidate the walk fetched and
+	// rejected on the way to them, every vertex a WHERE, projection item,
+	// pattern comprehension or existence predicate dereferenced while
+	// evaluating them. Aspect and link keys fold to their parent / endpoint
+	// vertices — the granularity a CDC arm names. Sorted, deduplicated. Nil
+	// from an engine or path that records nothing (the read-free executor).
+	Provenance []string
 }
 
 // EvalFootprint is the read-surface certificate one full-engine ExecuteWith
