@@ -516,9 +516,9 @@ which is why B2's fix and B3's fix are one change.
 
 **The first draft's exemplar was wrong and is withdrawn.** It named `wellnessMemberAccounts` as a lens this
 closes. That lens is refused **twice** by the very predicate the retraction depends on
-(`packages/wellness-ledger/lenses.go:326-333`): it carries `WITH DISTINCT id`, rejected wholesale at
-`anchor_delete.go:75-79`, and every key column binds `id`/`a` rather than its anchor variable `bk`, rejected
-at `:145-153`. Its anchor is `bk:booking` at distance **0**, not 2. **This design closes nothing for that
+(`packages/wellness-ledger/lenses.go:326-333`): its `WITH DISTINCT id` resolves, and every key column
+binds `id`/`a` rather than its anchor variable `bk`, rejected by `exprReferencesOnlyVariable`
+(`anchor_delete.go`) — the census bucket G of `with-alias-anchor-closure-design.md` §2.1. Its anchor is `bk:booking` at distance **0**, not 2. **This design closes nothing for that
 lens** — its board row stands untouched, and the two facts are related: the reason it has no retraction
 transport is the reason it cannot be narrowed.
 

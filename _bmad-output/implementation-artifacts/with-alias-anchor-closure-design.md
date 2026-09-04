@@ -290,8 +290,9 @@ Four claims, each discharged by a conjunct that already exists or by a pinned te
    `exprReferencesOnlyVariable` refuses it by name (`:374-381`). So an admitted key column resolves through
    a chain of **non-aggregating** projection items only — and a non-aggregating item is, by
    `projectItems`' own grouping rule, part of its boundary's grouping key. Every aggregation boundary the
-   chain passes through is therefore grouped by a value that identifies the anchor, so every aggregate in
-   the row spans that anchor's matches alone. This is the same argument `ProjectsOneRowPerAnchor`'s doc
+   chain passes through is therefore grouped by a key that **includes** a value identifying the anchor, so
+   every aggregate in the row spans that anchor's matches alone (a wider grouping key can only split the
+   anchor's rows further, which is the pre-existing last-writer-wins property below, never merge two anchors). This is the same argument `ProjectsOneRowPerAnchor`'s doc
    comment (`:272-303`) already makes for the no-`WITH` case; the substitution is what lets it be made
    through a boundary.
 4. **A `WITH`'s own `WHERE` is not a hazard.** It filters already-projected rows, so it can only remove a
@@ -309,8 +310,8 @@ row set for that anchor either way.
 | Consumer | Before | After |
 |---|---|---|
 | Narrowing licence | 3 F lenses refused at the partition conjunct | `leaseApplicationsRead` licensed (the other two still refuse on Secure Lens) |
-| Filter-retraction | `leaseApplicationsRead`, `renewalsRead`: **nothing retracts**. `clinicPatientsRead`: `DiffRetraction`'s full `ListKeys()` per event | all three take the read-free anchor `Delete`; `clinicPatientsRead` can drop `DiffRetraction` (§13 Inc 3) |
-| Audit should-not-exist | `AuditClassRetained` never asked on the three | asked; a lost retraction on a protected table becomes an audit divergence |
+| Filter-retraction | `leaseApplicationsRead`, `renewalsRead`: **nothing retracts**. `clinicPatientsRead`: `DiffRetraction`'s full `ListKeys()` per event | all three take the read-free anchor `Delete`; `clinicPatientsRead` **keeps** `DiffRetraction` as its orphan healer (§13 Inc 3, amended at build) |
+| Audit should-not-exist | `AuditClassRetained` never asked on the three | asked on `leaseApplicationsRead`; **not** on `renewalsRead` or `clinicPatientsRead` — a Secure Lens is refused enrolment outright (`audit.go`, no plaintext re-derivation off-request), so their gain is retraction only (amended 2026-09-03, close pass) |
 
 ---
 
@@ -457,8 +458,8 @@ Every test below is **owned by a named increment** in §13.
 | `leaseApplicationsRead` per-message cost | msg/s at steady state | the ~1 msg/min whole-corpus floor (§2.6) lifts. **The number is not predicted here** — the sibling fires' own posture: report the measurement, do not assert a target |
 | A withdrawn application's row | `read_lease_applications` | **leaves** the table on `WithdrawLeaseApplication`. Red at the parent commit |
 | `renewalsRead` retraction | e2e | the anchor `Delete` resolves; whether any op reaches it live is Phase 0's answer (§2.7) |
-| `clinicPatientsRead` | `read_clinic_patients` | identical rows before/after dropping `DiffRetraction`; the per-event `ListKeys()` disappears from the target adapter's counters |
-| `AuditClassRetained` | audit log | now reachable on all three; **0** on a converged lens |
+| `clinicPatientsRead` | `read_clinic_patients` | identical rows before/after; the anchor Delete is the transport, `DiffRetraction` stays as the healer (its `ListKeys()` per event is the price of the only standing observer a Secure Lens has) |
+| `AuditClassRetained` | audit log | reachable on `leaseApplicationsRead` (the only non-Secure of the three); **0** on a converged lens |
 | `renewalsRead` / `landlordLeaseApplicationsRead` licence | refractor log | **still refused, on Secure Lens** — assert both, so an admission that should not have happened is caught |
 
 ---
@@ -511,11 +512,17 @@ precisely, so no row class loses its transport in between; `TestClinic_Tombstone
 narrowing proof, plus the live measurement of §11. Nothing to build in the engine; this increment exists
 because a widened predicate with no observed consumer is a claim, not a payoff.
 
-**Increment 3 — `clinicPatientsRead` drops `DiffRetraction`.** One declaration field, the package version
-bump the edit requires (`DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`), the rewritten
-declaration comment (§9), and the existing clinic retraction e2e green without it. **Sequenced after Inc 1
-lands and is observed** — dropping the dear-but-working transport before the cheap one is proven live is
-the wrong order.
+**Increment 3 — `clinicPatientsRead` keeps `DiffRetraction`; the declaration comment and pin are rewritten
+(amended 2026-09-03 at build — the original increment dropped the field, and the close pass falsified the
+claim behind it).** `DiffRetraction` was priced here as a dearer *transport*; it is also the lens's only
+*continuous healer* — a whole-target key diff on every event removes a row orphaned by a missed or failed
+retraction event, which the event-scoped anchor Delete and presence check never revisit — and the two
+observers this design offered as compensating both refuse a Secure Lens (the audit refuses off-request
+plaintext re-derivation; the sweep enrols auth-plane actor-aggregate lenses only). On a PHI table that trade
+is one healer for none, so the field stays; the retraction transport the predicate now gives it is pinned by
+`TestClinicPatientsRead_TombstonedPatientRetractsItsRow`, and §10.8's "existing clinic retraction e2e" did
+not exist (the tombstone test proved the root, not the row). The healer gap for Secure plain lenses that
+never declared `DiffRetraction` (`renewalsRead`) is pre-existing and filed as a designer row.
 
 ---
 
@@ -692,4 +699,41 @@ behind an observed cheap transport.
 backlogged), `WithdrawLeaseApplication` accepted, root `isDeleted:true`, and the row still `is_deleted=false`
 after 3 min — the stale-row defect is live, by the root-tombstone arm (`evaluate.go:246`), not by lag.
 
-**Checkpoint.** worktree: `/tmp/lattice-worktrees/lattice-with-alias-20260903202056` · done: brief · next: Inc 1.
+**Inc 1 observed live (2026-09-03 21:21–21:49, `595ea540`, `make cycle-refractor`).** The partition refusal is gone
+from `leaseApplicationsRead`; the next conjunct was the audit's first post-restart verdict, reached at 21:39:13,
+after which the licence's positive verdict is the tally line (`acted:6900 actedAnchors:3450 fellBack:0` by
+21:48). Throughput on the lens's consumer: ~1 msg/s (whole-corpus rescan, 12,428 unprocessed at 21:26) →
+~22 msg/s licensed (1,381 processed/min at 21:45); the backlog drained to 0 by 21:49. Both withdrawn probe
+applications (`EUjkWNbxboP5fkysbWs5` from the old binary, `LCGdCpz9UuZFBufvqixV` from the new) flipped to
+`is_deleted=true` in `read_lease_applications` when the consumer reached their tombstone events — a
+whole-corpus rescan re-upserts every live row but never retracts a tombstoned anchor's, which is why a row can
+appear in 5 s behind a 12k backlog and still need the Delete. `renewalsRead` still refuses on Secure Lens (no
+audit enrolled), `clinicPatientsRead` refused on `DiffRetraction` until Inc 3. The audit's `stale:10` sample on
+`leaseApplicationsRead` predates the drain; re-read at the next fire.
+
+**Inc 2 shipped `dd4d43bf`** — `TestLeaseConvergence_WithdrawRetractsReadModelRow` (real op, real cypher and
+`Into.Key`, a KV bucket standing in for the Postgres table; red at the parent predicate, 1.2 s green).
+
+**Inc 3 shipped `352b9763`** — `clinicPatientsRead` 0.34.20 without `DiffRetraction`; live `make
+reinstall-package` diff-applied 4 entities, Refractor hot-reloaded the lens INTO in place (21:48:53),
+`verify-package-clinic-domain` 405 OK, `read_clinic_patients` rows byte-identical before/after.
+`TestClinicPatientsRead_TombstonedPatientRetractsItsRow` pins the remaining transport on the real spec.
+
+**Close pass (cold, whole diff `9190f85a..352b9763`): 0 blocking, 4 major, 6 minor — classified.**
+- *design-gap* — the audit-coverage claim held for one lens, not three (a Secure Lens is refused enrolment;
+  §4.5/§11 corrected); `DiffRetraction`'s healing obligation was never enumerated (§13 Inc 3 rewritten, the
+  declaration reinstated at 0.34.21); §4.4 claim 3 overstated the grouping key (restated).
+- *brief-gap* — §10.8's "existing clinic retraction e2e" did not exist; the arm is proven by Inc 2's e2e plus
+  the reviewer's trace that a Secure Lens reaches the root-tombstone arm before decrypt
+  (`SecureDecryptor.Apply` skips `Delete` results) and by the direct `AnchorDeleteResult` pin. §9's doc table
+  was half-landed at Inc 1 (three more sites in `staff-descriptor-rendering-design.md`, one in the plain-lens
+  design; fixed).
+- *implementation-bug* — census bucket G's label named a cause the classifier does not test (relabelled);
+  the e2e lacked `t.Parallel()` and its poll comment denied its own interval sleep (fixed).
+- *convention* — one history-narration clause and one self-contradicting lens comment (fixed).
+- *review-over-reach* — none.
+Routed: `agents/fire-brief-template.md` standing checklist #4 sharpened (a removal's healing is a separate
+obligation from its transport; run every compensating observer through its own enrolment predicate for THIS
+lens). Filed: `[Refractor] A Secure plain lens has no orphan healer` — `📐 needs designer pass`.
+
+**Checkpoint.** item complete; all increments on `main`.

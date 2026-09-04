@@ -74,7 +74,12 @@ stops being walked). The builder walks it before the first edit; the reviewers w
    everything it was silently doing and account for each: finding one obligation and moving on is the
    same defect wearing a smaller hat (cold-sign-in Fire 2 — the design found the server ack floor's
    poison-disposal job, missed that it also held the resume position behind un-acked holes, and shipped a
-   permanent-skip path that only cold review caught).
+   permanent-skip path that only cold review caught). **A retraction mechanism's HEALING is a separate
+   obligation from its transport:** list (a) what it retracted that some event names and (b) what it healed
+   that no event names — and for every observer you offer as compensating, open that observer's enrolment
+   predicate and run THIS consumer's own declaration through it; a refused observer publishes a refusal, not
+   a verdict (WITH-alias closure Inc 3 — a whole-target key diff dropped as a "dearer transport" was a PHI
+   table's only continuous healer, and both named observers refuse a Secure Lens).
 5. **One deterministic key, one writer** — a create-only writer bricks the second; a second writer needs an
    explicit arbitration or a single owner, decided before it is added.
 6. **Precedent may carry debt** — verify a mirrored pattern against the rule it claims to follow before

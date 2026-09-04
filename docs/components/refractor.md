@@ -832,7 +832,11 @@ backstop: a lens that references `$actorKey` anywhere fails to activate rather t
 mass-retracting every other live anchor's rows on its first event — the diff's
 soundness rests entirely on that invariant. `read_landlord_lease_applications`
 (`(app_id, landlord_id)`, D1.3 Increment 2, Vault 5b's manages-unassign consumer) is the
-first and only live `DiffRetraction` lens; a convergence
+reference `DiffRetraction` lens; eight more declare it today (`grep -rn "DiffRetraction: true"
+packages/*/lenses.go`); a lens whose key resolves to its anchor — through a `WITH` or
+not — needs none of it for the retraction and takes the anchor Delete; a Secure plain lens
+keeps the declaration as its only continuous orphan healer (the audit refuses it —
+`clinicPatientsRead`). A convergence
 (`violating`-flag) lens never opts in, so its never-retract contract is untouched.
 
 ### Property model (how lens cypher reads a node)

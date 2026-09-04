@@ -300,10 +300,10 @@ the build starts from what was verified, not what was drafted:
   `{context.<field>}`; Inc 1 honestly migrates 5 of 7, Inc 3 finishes.
 - **B2** — the role collect silently drops zero-permission ops unless `OPTIONAL MATCH` → stated
   normatively with the rbac precedent.
-- **B3** — the draft asserted retraction while citing a precedent (`edgeCatalogTail`) whose `WITH`
-  opener disables the whole anchor-delete path (`anchorProjectionShape` refuses `WITH`) → the
-  no-`WITH` rule is stated, and Inc 1's tests gained the tombstone-retraction pin with the `WITH`
-  mutation.
+- **B3** — the draft asserted retraction while citing a precedent (`edgeCatalogTail`) without proving
+  its key column resolves to the anchor → the resolvable-key-column rule is stated (§2.1), and Inc 1's
+  tests gained the tombstone-retraction pin with a rename mutation (`WITH op AS o`), the shape that
+  does kill the retraction.
 - **B4** — the fresh renderer implementation had no stated anti-fallback rule, the exact defect
   class the Standard §8 filed → normative rule + the Facet pattern citation in §2.2.
 - Corrections: plain-lens keying is `IntoKey`, not `Output`/BuildKey (actorAggregate-only); the
@@ -375,10 +375,10 @@ carrying only `leaseAppKey` (required), empty `FieldDescriptions` beyond it.
    `LensSpec` entry in the `Lenses()` slice (currently 15 Personal/`nats-subject` entries, lines
    68-388; `LensSpec` supports both shapes in one struct per `internal/pkgmgr/definition.go:1030+`).
    Mirror `packages/rbac-domain/lenses.go:65-72` (`capabilityRoleIndex`) for the plain-lens
-   shape/`IntoKey:["operationType"]`, but do **NOT** copy `edgeCatalogTail`'s `WITH op, role` opener
-   (`packages/edge-manifest/lenses.go:588`) — `internal/refractor/ruleengine/full/anchor_delete.go:179-182`
-   (`anchorProjectionShape`) type-asserts every clause and refuses wholesale on any `*With` node,
-   which silently disables both the tombstone-delete AND the retraction pin. Copy
+   shape/`IntoKey:["operationType"]`. `edgeCatalogTail`'s `WITH op, role` opener
+   (`packages/edge-manifest/lenses.go:588`) is a bare carry and keeps the retraction; what
+   `anchorProjectionShape` refuses is carrying the anchor under a different name (`WITH op AS o`) or a
+   key column that resolves to anything but the anchor. Copy
    `edgeCatalogTail`'s RETURN columns only (`lenses.go:596-613`, incl. `op.sensitive.data.value` at
    `:613`), plus the two it omits per §2.1: `grantedToRoles` via `OPTIONAL MATCH
    (op)<-[:forOperation]-(perm:permission)-[:grantedBy]->(role:role)` +
@@ -392,7 +392,7 @@ carrying only `leaseAppKey` (required), empty `FieldDescriptions` beyond it.
    mechanics. Pins (§6): full-vocabulary row; bare-meta row (null schema); role-granted op carries
    role names; a zero-permission op still projects (the OPTIONAL, mutate to required MATCH and
    assert the row vanishes); **a tombstoned op-meta's row is DELETED** (mutate by inserting a
-   `WITH` clause and assert the retraction assertion REDS — the `anchorProjectionShape` trap);
+   `WITH op AS o, role` rename and assert the retraction assertion REDS — the `anchorProjectionShape` trap);
    second mutation: drop the `operationType <> null` filter and assert non-op metas leak. Every
    mutation must be shown to fail before being reverted. Plus the pilot end-to-end: loftspace task
    modal renders `SetRenewalTerms` from catalog data.
