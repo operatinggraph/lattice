@@ -561,3 +561,70 @@ the step.
 | Bucket provisioning; verify loops | `bootstrap/primordial.go:109-121`; `bootstrap/verify.go:274-283`; `scripts/verify-kernel.go:303-340` |
 | Live population | §1.6 censuses, 2026-09-03 |
 | The docs already claim the distinction | `docs/components/loom.md` *Provisioning + index posture*; `internal/loom/doc.go` |
+
+---
+
+### Deadline-provenance fire brief (build note, 2026-09-04)
+
+**1. Scope sentence (verbatim, board row + §4).** *The deadline probe acts on every empty body, not on the
+expiry it backstops.* Green bar: `handleDeadline` probes only on `Nats-Marker-Reason: MaxAge`; the probe reads
+`deadline.<id>` first and acks a present key as stale; the probe's four `fail`s carry the record's revision and
+ack a conflict as moved-on; `disarmDeadline` deleted; `verify-kernel` + `bootstrap verify` assert `MaxAge == 0`
+on `KV_loom-state`; the mechanism fixture, classification, replay, currency, write-window and premise tests
+each with their mutation proof; all gates green; Loom cycled live, `loom-deadline` reset and drained with zero
+`loom instance failed` lines.
+
+**2. Verified touch-list (design §8, run at `ae3bb648`; base `0a7f1eb7` is docs-only on top).**
+`internal/loom/engine.go:1256-1271` (handler), `:1305-1360` (`onDeadline`; `fail` at `:1360`), `:1380-1410`
+(`onUserTaskDeadline`; disarm `:1393`, fail `:1410`), `:1442-1475` (`onExternalTaskDeadline`; disarm `:1458`,
+fail `:1475`), `:1326` (pin-missing fail), `:1208-1231` (`fail`), `:809-812` (`advance`'s drop branch — the
+moved-on precedent), `:528`/`:825` (the two `fail`s left unconditioned) · `internal/loom/state.go:170`
+(`getInstanceAtRevision`), `:443-525` (`transition`; instance member `:449`; deadline arm/purge `:495-519`),
+`:542-560` (`redrive`, the CAS precedent — read its twenty lines above), `:579` (`rearmDeadline`, stays),
+`:590-611` (`disarmDeadline`, delete), `:624-640` (`deleteToken`, the surviving twin), `:135-143`
+(`deadlineMark` comment) · `internal/substrate/kv_multi.go:50-53` (constants to export), `consumer.go:114-121`
+(`Header`), `kv.go` (`IsRevisionConflict`) · tests: `internal/loom/state_internal_test.go:17-69` (three
+disarm tests, delete), `tombstone_internal_test.go:101-124` (retarget to `deleteToken`),
+`tombstone_sweep_internal_test.go:540`, `:715` (fixture helper), `:804-830` (add the `MaxAge` header),
+`external_e2e_test.go:352-355`, `onboarding_e2e_test.go:407-410` (comments) · `internal/bootstrap/verify.go:274-283`,
+`scripts/verify-kernel.go:303-340` (the `KV_loom-state` assertion block) · docs: `docs/components/loom.md`
+(⌛ line, two *disarms* sentences, *Provisioning + index posture*, crash-safety invariants, dossier),
+`internal/loom/doc.go` (rejected/lost bullet), `loom-state-tombstone-sweep-design.md` §3.1 / §13.2 / build-note §5.
+
+**3. Precedents to mirror.** Header read in a handler: `consumer.go:114-121`'s own stated purpose. CAS'd
+instance write: `state.go:542-560` (`redrive`) — the batch member shape at `:552`. Moved-on drop:
+`engine.go:809-812`. Guarded single-publish removal (the surviving twin the retargeted test pins):
+`state.go:624-640`. Sweep-test fixture that publishes a legacy DEL through the raw header form: the sweep's
+`legacyDelete` helper (`tombstone_sweep_internal_test.go`). Reset barrier: `ResetAwaitReopen`
+(`substrate/consumer_supervisor.go:273`). The §1.3 scratch run is the mechanism fixture's shape.
+
+**4. Increment order + green checks.** Inc 1 (provenance + deletion) → `go test ./internal/substrate/ -run
+'Marker|Header' -count=1` + `go test ./internal/loom/ -count=1`, with the mutation proof (restore the empty-body
+predicate → the classification and replay tests fail). Inc 2 (currency + conditioned write) → `go test
+./internal/loom/ -run 'Deadline|Probe|Currency|Race' -count=1`, mutation proofs (drop the presence read →
+N+1 failed; drop `HasRevision` → the stale fail commits). Inc 3 (premise + docs) → `go test ./internal/bootstrap/
+-count=1`; `make verify-kernel` (live stack). Fire → `go build ./... && make vet && golangci-lint run ./... &&
+STRICT=1 go run ./scripts/lint-conventions.go && go run ./scripts/lint-board.go` + every other `scripts/lint-*.go`
++ full `go test ./... -p 4` + the build-tagged harnesses reaching `internal/loom` / `internal/substrate`.
+
+**5. In-scope gotchas + dossiers.** No `packages/` edit (no version bump). The sweep's `checkLoomStateDelete`
+gate refuses `KVDelete` / `Delete: true` in `internal/loom` — the classification test's legacy DEL goes through
+the raw header publish, never the substrate delete. `KVGet` maps DEL and PURGE markers to not-found, so the
+currency read sees *present* only for a live arm. `Nak` is never the answer to a stale marker (it lives one
+second). `Header == nil` only on a hand-built `Message`; the one existing hand-built call gets a `MaxAge` header.
+**Loom dossier (verbatim, applicable):** (2) *A fixture that hand-seeds `loom-state` cannot reach the states a
+real transition leaves behind* — seed through `createInstance` + `transition`; (5) *`require`/`assert` inside a
+`require.Eventually` predicate fails from a non-test goroutine* — predicates return bool. **Substrate dossier:**
+*the batch CAS is per-subject* — the instance member carries the revision, nothing else in the batch does.
+**Standing checklist** (`agents/fire-brief-template.md`): 1 no new state (§7); 2 every citation re-verified at
+`ae3bb648`; 3 every negative test carries its positive vector + mutation proof (§13) — binds Inc 1 and 2
+hardest; 4 the removed function's other obligations enumerated (§4.1: none beyond the re-fire guard); 5 one
+deterministic key, one writer — unchanged; 6 the precedent carries debt: the two disarm e2es use `time.Sleep`
+(CLAUDE.md) — their *assertions* stand, their comments are Inc 3's, their sleeps are not this fire's to
+rewrite unless the builder touches those tests for another reason.
+
+**6. Adjacent finds.** None new beyond the design: the sibling ★★★ marker-TTL row already carries the
+Nak-loses-the-signal input (§10). A builder that finds more reports it upward, never files or widens.
+
+**7. Non-goals.** The marker TTL (sibling row); `TrackerTTL`; the sweep's guard (left in place); the two
+token-serialized `fail`s; any record-shape change.
