@@ -2,6 +2,7 @@ package full
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -48,6 +50,48 @@ func evalMatchReturn(
 	return out
 }
 
+// putProvidedToHub seeds a "providedTo" edge from every name in names to hub.
+// Each neighbour's own outbound document holds exactly one entry, so those
+// still go through the incremental adjacency.Build one edge at a time — O(1)
+// each. Hub's inbound document is the one every one of those edges lands on,
+// so building it the same incremental way re-marshals and rewrites hub's
+// whole, ever-growing document on every call: O(N) work N times over. This
+// collects every inbound EdgeEntry first and writes hub's document once,
+// through the package's own AdjValue encoding — the same shape upsertEdge
+// itself marshals — so the seed stays linear in len(names) instead of
+// quadratic.
+func putProvidedToHub(t testing.TB, reg *fixtureRegistry, adjKV *substrate.KV, names []string, hubName string) {
+	t.Helper()
+	ctx := context.Background()
+	hubID := reg.idByName[hubName]
+	hubType := reg.typeByID[hubID]
+	require.NotEmpty(t, hubID, "fixture: %q not registered", hubName)
+
+	inbound := make([]adjacency.EdgeEntry, 0, len(names))
+	for _, name := range names {
+		fromID := reg.idByName[name]
+		fromType := reg.typeByID[fromID]
+		require.NotEmpty(t, fromID, "fixture: %q not registered", name)
+
+		edgeID := "providedTo_" + fromID + "_" + hubID
+		coreKvKey := "lnk." + fromType + "." + fromID + ".providedTo." + hubType + "." + hubID
+
+		require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
+			CoreKvKey: coreKvKey, EdgeID: edgeID, Name: "providedTo",
+			Direction: "outbound", NodeID: fromID, OtherNodeID: hubID, OtherType: hubType,
+		}))
+		inbound = append(inbound, adjacency.EdgeEntry{
+			CoreKvKey: coreKvKey, EdgeID: edgeID, Name: "providedTo",
+			Direction: "inbound", OtherNodeID: fromID, OtherType: fromType,
+		})
+	}
+
+	data, err := json.Marshal(adjacency.AdjValue{Edges: inbound})
+	require.NoError(t, err)
+	_, err = adjKV.Create(ctx, subjects.AdjKey(hubID), data)
+	require.NoError(t, err)
+}
+
 // TestProvenance_AllocationWithinTwiceTheBaseline pins the cost §4.1 states:
 // one pointer per clone, one slice append per fetch, one fold per output row.
 // The fixture is the widest actor's shape — 4,000 tombstoned neighbours and 2
@@ -72,16 +116,18 @@ func TestProvenance_AllocationWithinTwiceTheBaseline(t *testing.T) {
 	reg := newFixtureRegistry()
 
 	hub := putVertex(t, reg, coreKV, "hub", "identity", nil)
+	neighbourNames := make([]string, 0, provAllocNeighbours+2)
 	for i := 0; i < provAllocNeighbours; i++ {
 		name := fmt.Sprintf("dead%04d", i)
 		putVertex(t, reg, coreKV, name, "service", map[string]any{"isDeleted": true})
-		putEdge(t, reg, adjKV, "providedTo", name, "hub")
+		neighbourNames = append(neighbourNames, name)
 	}
 	for i := 0; i < 2; i++ {
 		name := fmt.Sprintf("live%02d", i)
 		putVertex(t, reg, coreKV, name, "service", map[string]any{"n": int64(i)})
-		putEdge(t, reg, adjKV, "providedTo", name, "hub")
+		neighbourNames = append(neighbourNames, name)
 	}
+	putProvidedToHub(t, reg, adjKV, neighbourNames, "hub")
 
 	eng := New()
 	cr, err := eng.Parse(
