@@ -1323,6 +1323,27 @@ func main() {
 	}
 	logger.Info("hub read-scope mode", "mode", hubReadScope.String())
 
+	// REFRACTOR_ENGINE_PREFETCH is the way back from the full engine's batched
+	// node/aspect/adjacency prefetch (prefetchAspects/prefetchNodes/
+	// prefetchEdges in internal/refractor/ruleengine/full): `on` (the default)
+	// batches the reads a stage's expressions are about to make into few round
+	// trips, `off` puts every evaluation back on the point-read path — one Core
+	// KV or Adjacency KV round trip per key, exactly as before the batching
+	// landed. Read here for the same reason the modes above are: engines are
+	// constructed wherever a pipeline is built and one of those sites could be
+	// missed.
+	enginePrefetch := full.DefaultPrefetchMode()
+	if v := os.Getenv("REFRACTOR_ENGINE_PREFETCH"); v != "" {
+		m, err := full.ParsePrefetchMode(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_ENGINE_PREFETCH; keeping the default", "value", v, "err", err)
+		} else {
+			full.SetDefaultPrefetchMode(m)
+			enginePrefetch = m
+		}
+	}
+	logger.Info("engine prefetch mode", "mode", enginePrefetch.String())
+
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0, which the

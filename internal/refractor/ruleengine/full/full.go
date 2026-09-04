@@ -6,6 +6,7 @@ package full
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/antlr4-go/antlr/v4"
 
@@ -27,11 +28,15 @@ type Engine struct {
 	// engine alone; HubReadScopeModeUnset (the zero value) takes the default.
 	hubReadScope HubReadScopeMode
 
-	// prefetchDisabled takes this engine's evaluations down the point-read
-	// path for every node and aspect read — one key per round trip, no batched
-	// prefetch. The zero value batches, which is what a registered engine does;
-	// the comparison tests that pin the two paths to the same rows and the same
-	// read-surface footprint are what set it.
+	// prefetchDisabled is a per-engine override that forces this engine's
+	// evaluations down the point-read path for every node, aspect and
+	// adjacency read — one key per round trip, no batched prefetch. It is set
+	// only by the test-only prefetchOff helper (the comparison tests that pin
+	// the two paths to the same rows and the same read-surface footprint);
+	// every registered engine leaves it false (the zero value) and instead
+	// takes the package-wide posture — prefetchModeDisabled resolves that to
+	// batching unless an operator has turned it off (DefaultPrefetchMode,
+	// REFRACTOR_ENGINE_PREFETCH).
 	prefetchDisabled bool
 }
 
@@ -57,6 +62,86 @@ func (e *Engine) WithHubReadScopeMode(m HubReadScopeMode) *Engine {
 	c := *e
 	c.hubReadScope = m
 	return &c
+}
+
+// PrefetchMode is the posture deciding whether prefetchAspects, prefetchEdges
+// and prefetchNodes batch the node, aspect and adjacency reads an evaluation
+// is about to make into few round trips, or leave every one of them to its
+// own point read.
+type PrefetchMode int
+
+const (
+	// PrefetchModeUnset means "take the package default", and is the zero
+	// value deliberately: an engine carries the mode as a plain field whose
+	// unset state is zero, so zero must mean unset rather than a real mode.
+	PrefetchModeUnset PrefetchMode = iota
+	PrefetchModeOff
+	PrefetchModeOn
+)
+
+func (m PrefetchMode) String() string {
+	switch m {
+	case PrefetchModeOff:
+		return "off"
+	case PrefetchModeOn:
+		return "on"
+	default:
+		return "unset"
+	}
+}
+
+// ParsePrefetchMode maps an operator-supplied string onto a mode, rejecting
+// rather than guessing — a typo resolving silently to `off` would put every
+// evaluation back on the one-key-at-a-time path with nothing saying so.
+func ParsePrefetchMode(s string) (PrefetchMode, error) {
+	switch s {
+	case "on":
+		return PrefetchModeOn, nil
+	case "off":
+		return PrefetchModeOff, nil
+	default:
+		return PrefetchModeUnset, fmt.Errorf("full engine: unknown prefetch mode %q (want on or off)", s)
+	}
+}
+
+// defaultPrefetchMode is the process-wide posture every engine without its own
+// override uses. Package-level for the same reason defaultHubReadScopeMode is:
+// the operator decision is one per process (cmd/refractor reads
+// REFRACTOR_ENGINE_PREFETCH once) while engines are constructed wherever a
+// pipeline is built, and threading a startup flag through every construction
+// site makes it possible to miss one.
+//
+// LIFETIME: written once at boot, by cmd/refractor's env read. Tests take the
+// per-engine prefetchOff copy instead and leave this alone, so no test can
+// change the posture another test is running under. Read per evaluation, at
+// executor construction, for the same reason defaultHubReadScopeMode is: it is
+// an operator posture, not evaluation state, so it is deliberately NOT reset or
+// re-derived at rebuild, replay, reconnect, tombstone or rule hot-reload. It
+// does not survive the process, which is correct: the env var is re-read at
+// the next boot.
+var defaultPrefetchMode atomic.Int64
+
+// SetDefaultPrefetchMode sets the posture every engine without its own
+// override uses. PrefetchModeUnset restores the built-in.
+func SetDefaultPrefetchMode(m PrefetchMode) { defaultPrefetchMode.Store(int64(m)) }
+
+// DefaultPrefetchMode reports that posture resolved to a real mode rather than
+// to Unset, so a host can state at boot which behaviour it runs.
+func DefaultPrefetchMode() PrefetchMode {
+	if m := PrefetchMode(defaultPrefetchMode.Load()); m != PrefetchModeUnset {
+		return m
+	}
+	return PrefetchModeOn
+}
+
+// prefetchModeDisabled resolves this engine's prefetch-batching posture to the
+// bool prefetchAspects/prefetchEdges/prefetchNodes gate on: this engine's own
+// prefetchDisabled override when it is set, the package default otherwise.
+func (e *Engine) prefetchModeDisabled() bool {
+	if e.prefetchDisabled {
+		return true
+	}
+	return DefaultPrefetchMode() == PrefetchModeOff
 }
 
 // Name implements ruleengine.RuleEngine.

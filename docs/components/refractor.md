@@ -150,8 +150,14 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   Two bounds keep the mechanism honest — an unacknowledged publish resolves as a timeout rather than
   hanging a flush forever, and the connection-wide ceiling on outstanding acks is sized above
   `personal lenses × pipelines × window` so a wide write step cannot exhaust the budget every lens on
-  the process shares. Nothing is recorded until the flush returns clean: the audit entry claiming a
-  row's hash and the lens's freshness clock both advance only for rows the flush stands behind.
+  the process shares. Concretely: the ceiling (`substrate.PublishAsyncMaxPending`, 8,192) is shared
+  per connection: the 15 personal lenses' own CDC write steps reserve 3,840 of it (15 × 2 pipelines —
+  row and audit — × the 128-wide default window), and the uncapped dimension is concurrent
+  whole-actor `Hydrate`/reprojection calls, which open one pipeline apiece — about 34 of those
+  running at once reach the ceiling, fail-closed (the stalled publish surfaces at that call's own
+  `Flush`; a hydrate errors and the device re-attaches). Nothing is recorded until the flush returns
+  clean: the audit entry claiming a row's hash and the lens's freshness clock both advance only for
+  rows the flush stands behind.
 - **Interest Set (Fire PL.2, `internal/refractor/personalinterest`).** A per-device relevance
   filter — a **bandwidth optimization, never a security control**: no registered device for a
   recipient (or a device that declares no `types`/`anchors`) admits everything; a declared filter
@@ -209,9 +215,11 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   would let one corrupt key wedge every evaluation of an actor holding thousands of good ones,
   identically on every redelivery), and the scope's reads are bounded by a **15 s timeout** — a wide
   actor's grant set is past the multi-get's 1,024-subject fast path, where the no-snapshot variant
-  resolves each filter to exact keys with a server-side key listing and reads those keys back in
-  fast-path chunks; the bound is what keeps a pathological read from stalling the lens's consumer
-  silently, and exceeding it is a loud evaluation error the Nak path already handles.
+  resolves each filter to its subjects with a STREAM.INFO subject filter (computed under the
+  stream lock; a key listing is explicitly not the resolution — it is count-bounded and can end
+  short) and reads them in ≤ 1,024-key atomic requests; the bound is what keeps a pathological
+  read from stalling the lens's consumer silently, and exceeding it is a loud evaluation error
+  the Nak path already handles.
 - **D1 read-grant change edge + personal convergence sweep
   (`internal/refractor/grantchange`).** That gate makes a personal row a function of *two*
   inputs — the lens's own Core-KV subgraph, which drives it through CDC, and the `cap-read`

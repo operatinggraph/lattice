@@ -362,19 +362,21 @@ func grantKey(domain, actorSuffix, anchorID string) string {
 	return "cap-read." + domain + "." + actorSuffix + "." + anchorID
 }
 
-// TestReadableAnchors_PastTheFastPathCap_TakesTheDrain exercises the only
-// shape production ever runs. The widest live actor holds ~3,644 grant keys,
-// so the multi-get's 1,024-matched-subject fast path always answers 413 and
-// the read falls through to a pull-consumer drain whose FilterSubjects are
-// ReadableAnchors' TWO wildcards — and a JetStream consumer rejects
-// overlapping filter subjects outright (err_code 10138). A fixture that stays
-// under the cap proves nothing about either the overlap or the drain's
+// TestReadableAnchors_PastTheFastPathCap_ResolvesThenChunks exercises the
+// only shape production ever runs. The widest live actor holds ~3,644 grant
+// keys, so the multi-get's 1,024-matched-subject fast path always answers
+// 413 and the read falls through to the resolve-then-get fallback: each of
+// ReadableAnchors' TWO wildcards is resolved to exact keys against the
+// stream's subject state, the two resolved sets are unioned, and the union
+// is read in atomic chunks. A fixture that stays under the cap proves
+// nothing about either the two filters resolving together or the fallback's
 // completeness, so this one seeds past it.
 //
 // Three things are asserted at once: the two filters are accepted together,
-// the drain returns the COMPLETE seeded set, and the membership it yields
-// still equals IsReadable's answer anchor by anchor across every class.
-func TestReadableAnchors_PastTheFastPathCap_TakesTheDrain(t *testing.T) {
+// the resolved read returns the COMPLETE seeded set, and the membership it
+// yields still equals IsReadable's answer anchor by anchor across every
+// class.
+func TestReadableAnchors_PastTheFastPathCap_ResolvesThenChunks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")
 	}
@@ -383,9 +385,11 @@ func TestReadableAnchors_PastTheFastPathCap_TakesTheDrain(t *testing.T) {
 
 	const (
 		// fastPathCap is substrate's 1,024-matched-subject ceiling: at or
-		// under it the read is one atomic multi_last, past it a drain. The
-		// seeded key count must exceed it, or this degenerates into the
-		// fast-path case the other tests already cover.
+		// under it the read is one atomic multi_last, past it a
+		// resolve-then-get fallback (a STREAM.INFO resolution per wildcard,
+		// then the resolved keys read in atomic chunks). The seeded key
+		// count must exceed it, or this degenerates into the fast-path case
+		// the other tests already cover.
 		fastPathCap = 1024
 		groups      = 110 // 110 x 11 keys = 1,210 matched subjects
 		wideActorID = "wideactorNanoidaaaaa"
@@ -417,10 +421,10 @@ func TestReadableAnchors_PastTheFastPathCap_TakesTheDrain(t *testing.T) {
 		}
 	}
 	require.Greater(t, seededKeys, fastPathCap,
-		"the seeded matched-subject count must exceed the multi-get fast-path cap, or the drain is never exercised")
+		"the seeded matched-subject count must exceed the multi-get fast-path cap, or the resolve-then-get fallback is never exercised")
 
 	// A second actor holding some of the SAME anchor ids, in both key shapes.
-	// The drain's filters pin the actor suffix as a literal token pair, so
+	// The resolved filters pin the actor suffix as a literal token pair, so
 	// none of these may be collected.
 	nextOnlyAnchor := nanoIDFor("capAnchor", 50000)
 	putPerAnchorEntry(t, kv, grantKey("", nextSuffix, nextOnlyAnchor), false)
@@ -430,16 +434,17 @@ func TestReadableAnchors_PastTheFastPathCap_TakesTheDrain(t *testing.T) {
 		putPerAnchorEntry(t, kv, grantKey("clinic", nextSuffix, shared), false)
 	}
 
-	// The primitive itself, on the two filters this reader passes: a consumer
-	// refusing them as overlapping, or a drain returning short, surfaces here
-	// rather than as a membership difference nobody can attribute.
+	// The primitive itself, on the two filters this reader passes: either
+	// filter's resolution failing, or the resolved read coming back short,
+	// surfaces here rather than as a membership difference nobody can
+	// attribute.
 	entries, err := kv.GetMultiNoSnapshot(ctx, []string{
 		"cap-read." + wideSuffix + ".*",
 		"cap-read.*." + wideSuffix + ".*",
 	})
 	require.NoError(t, err, "the two whole-actor filters must be accepted together past the fast-path cap")
 	require.Len(t, entries, seededKeys,
-		"the drain must return the actor's complete key set, tombstones included, and nothing of the sibling actor's")
+		"the resolved read must return the actor's complete key set, tombstones included, and nothing of the sibling actor's")
 
 	set, err := capabilityread.ReadableAnchors(ctx, kv, "identity", wideActorID)
 	require.NoError(t, err)
@@ -468,7 +473,7 @@ func TestReadableAnchors_PastTheFastPathCap_TakesTheDrain(t *testing.T) {
 		want, ierr := capabilityread.IsReadable(ctx, kv, "identity", wideActorID, e.anchorID)
 		require.NoError(t, ierr)
 		require.Equal(t, want, set.Admits(e.anchorID),
-			"anchor %q (class %s): the drained set must answer exactly what IsReadable answers", e.anchorID, e.class)
+			"anchor %q (class %s): the resolved set must answer exactly what IsReadable answers", e.anchorID, e.class)
 		require.Equal(t, e.live, want, "anchor %q (class %s): the class's own verdict", e.anchorID, e.class)
 		seenClasses[e.class]++
 		checked++

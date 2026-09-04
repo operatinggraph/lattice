@@ -129,6 +129,13 @@ REFRACTOR_WALK_SCOPE ?=
 # an evaluation's own traversal reads
 # (refractor-hub-walk-and-periodic-load-design.md 9.1).
 REFRACTOR_HUB_READ_SCOPE ?=
+# REFRACTOR_ENGINE_PREFETCH — whether the full engine batches the node,
+# aspect and adjacency reads a stage's expressions are about to make into few
+# round trips: `on` (empty/default) batches, `off` puts every evaluation back
+# on the point-read path — one Core KV or Adjacency KV round trip per key,
+# exactly as before the batching landed. `off` is a containment lever for an
+# operator who suspects the batching itself, not a posture to deploy in.
+REFRACTOR_ENGINE_PREFETCH ?=
 NKEY_BOOTSTRAP ?= $(NKEY_DIR)/bootstrap.nk
 NKEY_PROCESSOR ?= $(NKEY_DIR)/processor.nk
 NKEY_REFRACTOR ?= $(NKEY_DIR)/refractor.nk
@@ -258,7 +265,7 @@ up: assert-main-checkout
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait; \
 		$(MAKE) provision-vault-kek; \
 		echo "==> Starting refractor in background..."; \
-		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) REFRACTOR_WALK_SCOPE=$(REFRACTOR_WALK_SCOPE) REFRACTOR_HUB_READ_SCOPE=$(REFRACTOR_HUB_READ_SCOPE) ./bin/refractor >refractor.log 2>&1 </dev/null & \
+		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) REFRACTOR_WALK_SCOPE=$(REFRACTOR_WALK_SCOPE) REFRACTOR_HUB_READ_SCOPE=$(REFRACTOR_HUB_READ_SCOPE) REFRACTOR_ENGINE_PREFETCH=$(REFRACTOR_ENGINE_PREFETCH) ./bin/refractor >refractor.log 2>&1 </dev/null & \
 		echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver + Bridge + objmgr + privacy cap.* projections land)..."; \
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap; \
 		echo "==> Building processor binary..."; \
@@ -282,7 +289,7 @@ cycle-refractor: assert-main-checkout
 	@echo "==> Rebuilding bin/refractor..."
 	go build -o bin/refractor ./cmd/refractor
 	@echo "==> Starting refractor in background..."
-	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) REFRACTOR_WALK_SCOPE=$(REFRACTOR_WALK_SCOPE) REFRACTOR_HUB_READ_SCOPE=$(REFRACTOR_HUB_READ_SCOPE) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) REFRACTOR_WALK_SCOPE=$(REFRACTOR_WALK_SCOPE) REFRACTOR_HUB_READ_SCOPE=$(REFRACTOR_HUB_READ_SCOPE) REFRACTOR_ENGINE_PREFETCH=$(REFRACTOR_ENGINE_PREFETCH) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -x refractor >/dev/null && echo "==> refractor running (PID $$(pgrep -x refractor))" || { echo "!! refractor failed to start — see refractor.log"; exit 1; }
 
 ## cycle-loupe — Rebuild bin/loupe from the current tree and relaunch it against

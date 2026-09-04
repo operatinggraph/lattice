@@ -981,3 +981,82 @@ func TestTraverseRel_PrefetchesEachHopsFrontier(t *testing.T) {
 		"two requests: hop 1's Core KV frontier, and hop 2's adjacency over every node it reached")
 	require.Zero(t, off.batchReads)
 }
+
+// TestParsePrefetchMode pins the parser: it round-trips the two modes and
+// rejects anything else rather than guessing, and Unset reports "unset".
+func TestParsePrefetchMode(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want PrefetchMode
+	}{
+		{"on", PrefetchModeOn},
+		{"off", PrefetchModeOff},
+	} {
+		got, err := ParsePrefetchMode(tc.in)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got)
+		require.Equal(t, tc.in, got.String(), "String must round-trip what Parse accepts")
+	}
+	require.Equal(t, "unset", PrefetchModeUnset.String())
+
+	for _, bad := range []string{"", "ON", "true", "1", "disabled", " on"} {
+		got, err := ParsePrefetchMode(bad)
+		require.Errorf(t, err, "%q must be rejected, never guessed at", bad)
+		require.Equal(t, PrefetchModeUnset, got)
+	}
+}
+
+// TestDefaultPrefetchMode_Off_TakesPointReadPath pins the package-wide lever
+// (REFRACTOR_ENGINE_PREFETCH): a plain New() engine — no per-engine override,
+// exactly the form every production call site uses — batches under an unset
+// or On default, and takes the point-read path the moment the default is Off,
+// indistinguishable from the test-only prefetchOff helper's own override.
+func TestDefaultPrefetchMode_Off_TakesPointReadPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	// The package default is asserted, so pin it to its unset state first and
+	// put back whatever was there — the same form
+	// TestHubReadScopeMode_ParseAndPrecedence uses, so package state is never
+	// left disturbed for another test.
+	restore := PrefetchMode(defaultPrefetchMode.Load())
+	t.Cleanup(func() { SetDefaultPrefetchMode(restore) })
+	SetDefaultPrefetchMode(PrefetchModeUnset)
+
+	require.Equal(t, PrefetchModeOn, DefaultPrefetchMode(), "an unset package default resolves to on")
+	require.False(t, New().prefetchModeDisabled(), "an engine with no override batches under the default")
+
+	const neighbours = 20
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	hub, _ := seedHub(t, reg, adjKV, coreKV, neighbours)
+	body := `MATCH (i:identity {key: $k})<-[:providedTo]-(inst:service) RETURN inst.key AS anchor`
+	params := map[string]any{"k": hub}
+
+	// The default still On: a plain New() engine batches exactly like the
+	// earlier prefetch tests already pin.
+	on, onRows, _ := runCounted(t, New(), body, params, adjKV, coreKV)
+	require.Len(t, onRows, neighbours)
+	require.Equal(t, 1, on.batchReads)
+
+	// Flip the default off. A brand-new engine — still no per-engine
+	// override — now takes the point-read path.
+	SetDefaultPrefetchMode(PrefetchModeOff)
+	require.True(t, New().prefetchModeDisabled(), "an engine with no override now takes the default's off")
+
+	off, offRows, _ := runCounted(t, New(), body, params, adjKV, coreKV)
+	require.Equal(t, anchorRows(offRows), anchorRows(onRows),
+		"the package default must change how the read happens, never what the pattern binds")
+	require.Zero(t, off.batchReads, "the default's off must reach a plain New() engine with no override")
+	require.Equal(t, neighbours, off.pointReads-on.pointReads,
+		"every neighbour must now cost its own point read once the default is off, matching prefetchOff's path")
+
+	// prefetchOff's per-engine override must still force the point-read path
+	// regardless of the package default.
+	SetDefaultPrefetchMode(PrefetchModeOn)
+	stillOff, stillOffRows, _ := runCounted(t, prefetchOff(New()), body, params, adjKV, coreKV)
+	require.Equal(t, anchorRows(offRows), anchorRows(stillOffRows))
+	require.Zero(t, stillOff.batchReads)
+	require.Equal(t, off.pointReads, stillOff.pointReads,
+		"the per-engine override must cost exactly what the package default's off costs")
+}

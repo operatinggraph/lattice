@@ -154,15 +154,19 @@ const (
 
 // personalScopeReadTimeout bounds the whole per-evaluation gate read.
 //
-// A wide actor's grant set is past the multi-get's 1,024-subject fast path, so
-// the read runs as a consumer drain, and that drain is bounded by the caller's
-// deadline or — with none — by the primitive's own 80-second ceiling
-// (substrate.Conn.KVGetMultiNoSnapshot). An evaluation is on the consumer's hot
-// path: 80 seconds of a starved drain is the whole lens stalled with nothing
-// said about it. Exceeding this bound is a loud evaluation error instead, which
-// the pipeline already classifies and Naks for redelivery. The widest live
-// actor's drain (3,644 keys) completes in well under a second, so the bound is
-// two orders of magnitude of headroom, not a tuning parameter.
+// A wide actor's grant set is past the multi-get's 1,024-subject fast path,
+// so the read resolves each distinct wildcard against the stream's subject
+// state (one STREAM.INFO request per wildcard) and then reads the resolved
+// keys in ⌈N/1,024⌉ atomic direct-get requests
+// (substrate.Conn.KVGetMultiNoSnapshot's resolve-then-get fallback). Each
+// leg is bounded by the client's own default API timeout only when the ctx
+// carries no deadline; this 15-second deadline is the single ceiling on
+// their sum. An evaluation is on the consumer's hot path: a stalled read
+// here is the whole lens stuck with nothing said about it, so exceeding the
+// bound is a loud evaluation error instead, which the pipeline already
+// classifies and Naks for redelivery. The widest live actor's set (3,671
+// keys) reads in well under a second on this path — the lead measured it —
+// so 15 seconds is generous headroom, not a tuning knob.
 const personalScopeReadTimeout = 15 * time.Second
 
 // personalEnvelopeScope builds the EnvelopeScopeFn that answers a whole

@@ -485,7 +485,7 @@ func (e *Engine) newExecutor(
 		seedAnchor:        seedAnchorFor(compiled.Query, ec.SeedAnchor, compiled.LabelExpansion),
 		nodes:             map[string]*nodeRef{},
 		prefetched:        map[string]*nodeRef{},
-		prefetchDisabled:  e.prefetchDisabled,
+		prefetchDisabled:  e.prefetchModeDisabled(),
 		edges:             map[string][]adjacency.EdgeEntry{},
 		prefetchedEdges:   map[string]adjacency.Prefetched{},
 		edgeRevisions:     map[string]uint64{},
@@ -1098,8 +1098,14 @@ func (ex *executor) stage(key string, ref *nodeRef) {
 //
 // Collecting a key the evaluation then does not dereference — a CASE branch not
 // taken, a short-circuited AND, a coalesce that stopped at its first argument —
-// costs the batched read and nothing else: a staged entry enters the memo, and
-// so the read-surface footprint, only when fetchNode promotes it.
+// mostly costs the batched read and nothing else: a staged entry enters the
+// memo, and so the read-surface footprint, only when fetchNode promotes it. A
+// decode failure on such a key really does cost nothing more (prefetchNodes
+// warns and leaves it unstaged, so a branch that never dereferences it never
+// notices) — but a TRANSPORT failure on its chunk fails the whole evaluation
+// regardless of which keys any binding was actually going to dereference
+// (fail-closed: the error Naks the message for redelivery), so an unused key
+// is not entirely free.
 func (ex *executor) prefetchAspects(bindings []binding, exprs []Expr) error {
 	if ex.prefetchDisabled || ex.coreKV == nil || ex.nodes == nil || len(bindings) == 0 {
 		return nil

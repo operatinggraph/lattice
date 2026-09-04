@@ -193,11 +193,15 @@ func filterEdgesByRelation(edges []EdgeEntry, rels map[string]struct{}) []EdgeEn
 //
 // The request drops the point-in-time guarantee (GetMultiNoSnapshot, not
 // GetMulti). A node marked on the degree arm has more matched subjects than
-// the batched fast path admits, so its read takes the consumer drain — and
-// the stability-verified drain fails outright whenever any of those thousands
-// of links moves between its two passes, which on a node busy enough to have
-// overflowed is the ordinary case rather than the exception. Requiring that
-// would reinstate, on the read side, the failure the latch exists to end.
+// the batched fast path admits, so its read resolves the link filters
+// against the stream's own subject state (STREAM.INFO under a subject
+// filter, computed under the stream's read lock) and reads the resolved
+// keys in atomic chunks — and the stability-verified consumer drain
+// GetMulti falls back to instead fails outright whenever any of those
+// thousands of links moves between its two passes, which on a node busy
+// enough to have overflowed is the ordinary case rather than the exception.
+// Requiring that would reinstate, on the read side, the failure the latch
+// exists to end.
 // (A node marked on the BYTE arm, or one whose links were later retracted,
 // can sit under the cap and take the atomic fast path after all; the weaker
 // primitive is only weaker past the cap, so that case loses nothing.)
@@ -205,9 +209,11 @@ func filterEdgesByRelation(edges []EdgeEntry, rels map[string]struct{}) []EdgeEn
 // It is also more atomicity than this read ever had: each edge is an
 // independent fact, and an evaluation that depends on the set re-reads it and
 // compares fingerprints (pipeline.footprintValid) rather than trusting one
-// read's instant. Completeness is what matters here, and completeness is what
-// the drain still guarantees — including retracting a link hard-deleted while
-// the drain is in flight, so a revoked edge never reaches a walk.
+// read's instant. Completeness is what matters here: it comes from the
+// resolution being computed under the stream lock, and a link hard-deleted
+// between resolution and read is absent from the answer because the
+// exact-key get is the arbiter of existence — a DEL/PURGE marker reads
+// absent, so a revoked edge never reaches a walk.
 //
 // The result is sorted, so a marked node's edge order is stable across reads
 // instead of following a map's iteration order.
