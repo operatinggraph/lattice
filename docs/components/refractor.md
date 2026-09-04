@@ -1698,7 +1698,7 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   move — and the only evidence either way was a refusal line whose absence proves nothing. Check: a payoff
   claimed as "refusal X gone" is proved by the licence's POSITIVE verdict (enrolment log / audit verdict /
   a tally that acts), read live after the fix; and a design lifting conjunct N reads conjuncts N+1..end
-  against the lens before it promises the payoff.
+  against the lens before it promises the payoff. **Third sighting, one level up (personal-lens whole-actor cost, 2026-09-03): a review that REPLACES the mechanism refutes the measurement that justified the old one.** The read-cost probe timed a key listing; the listing was then refuted (a count-bounded stop condition drops a hot key from two agreeing enumerations) and replaced by a STREAM.INFO resolution — and the design kept citing the listing's numbers until the close pass. Check: when a mechanism is swapped at build, re-run the census/probe on the SHIPPED one before the row closes; numbers about deleted code are not evidence.
 - **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
@@ -1725,9 +1725,17 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   enumerate what the other side does between the write and the read, and interpose it. Pinned by
   `TestHealthSink_RestoredStructuralCauseSurvivesTheReseededInfraGate`. (Displaced *"lens lag is not
   read-model incompleteness"*, which the capability-projection-reconciliation design still carries.)
-- **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
-  over-grant. Minted: negative/retraction design pass (designer SKILL §2). Check: none yet (the retraction
-  primitive is its own backlog item).
+- **A widened operation silently drops the bound or budget its narrow predecessor carried.** A per-row read
+  inherited nats.go's default API timeout; the whole-actor scope read on the consumer's deadline-less ctx had
+  none (R7). A synchronous publish was bounded at 5 s; its async replacement could wedge a flush forever (R8).
+  A resolution's legs were unbounded on the same ctx. And a window sized per pipeline against a
+  per-CONNECTION async budget (R9). Minted: personal-lens whole-actor cost (2026-09-03) — the same defect
+  three times, found by three cold reviewers. Check: every new substrate primitive or batch states, in its
+  doc, what bounds it when the ctx carries no deadline and against which SHARED budget it is sized (name the
+  denominator); a new exported ctx-taking substrate func without that sentence is the smell. Promotion
+  candidate: a `lint-conventions` rule over `internal/substrate`'s exported ctx-taking funcs. (Displaced the
+  check-less *"an upsert-only reprojection retracts nothing whose key drops out"* note — its subject is the
+  delta-publication row on the board, not a review check.)
 - **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒
   widen the filter" reads as safe and is, for delivery; the same unresolved answer also published an empty
   matcher, so the lens went to zero rows and a retracting lens to a mass Delete. Minted: dynamic-type-taxonomy
@@ -1756,7 +1764,7 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   every absence gate over a resolved-set field asserts BOTH vectors, resolved and empty, against the same
   index (`TestAnchorHopIndex_EmptyExpansionIsUnresolved`), and the empty one is proven by reverting the
   predicate. Standing rule for the reader: `len(x) == 0`, not `x == nil`, wherever "no answer" and "the
-  answer is nothing" must behave alike.
+  answer is nothing" must behave alike. **Second sighting, the SET-read form (personal-lens whole-actor cost, 2026-09-03): a corrupt member of a set read fails the whole set where the per-item read it replaced failed only the item that needed it** — one unparseable `cap-read` body wedged an actor's entire personal plane into redelivery (R6); a corrupt never-dereferenced Core-KV key failed the evaluation (R6 mirrored). Check — MECHANIZED as a mandated test shape: any batch/set reader ships a corrupt-member test proving the failure stays scoped to the member (`TestReadableAnchors_MalformedBodyDeniesOnlyThatAnchor`, `TestPrefetch_CorruptBodyFailsOnlyWhereItIsUsed`).
 - **An authoring gate and its runtime resolver must agree, or the gate is advisory.** A parse-time refusal
   named the projectable surface of a relationship binding while `resolveProperty`'s arm resolved *whatever
   reached it*, so any shape the parse walk did not model served the value anyway: `WITH coalesce(r, r) AS rr`
@@ -1791,7 +1799,7 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   the fixture takes the same branch of `handle`'s `KindLink` case; write the test in `cmd/`'s actual
   startup sequence, or assert the ordering in `cmd/` directly; and barrier on the EFFECT — poll until the
   row's own revision advances past the last pre-purge write — never on pending alone. The generalization:
-  before asserting, name what the fixture ARRANGED that production does not, and arrange the other way.
+  before asserting, name what the fixture ARRANGED that production does not, and arrange the other way. **Fourth and fifth sightings (personal-lens whole-actor cost, 2026-09-03), with the generalization the fire adds: pin the mechanism's COST absolutely, not only its result.** Every zero-read assertion counted per-key reads, so a shrunken chunk constant (1,024 → 4) passed both packages green with the whole payoff gone; before-frame tests were carried by send order alone with the flush short-circuited; an engine-params isolation test could not fail. Check: a batching or pipelining mechanism ships a request-count pin (`batchReads`, `Pending() == 0` at the seam) and an absolute pin on its constants, each revert-proven.
 - **A zero or empty reading that cannot be distinguished from "not measured" must read UNREADABLE, and a
   census owes a reached-ness counter.** Minted: personal-lens licence, four sightings in one item — an
   empty `health.refractor.*` listing would have licensed a two-instance deployment (a live Refractor that
