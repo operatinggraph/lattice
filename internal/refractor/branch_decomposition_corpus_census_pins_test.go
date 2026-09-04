@@ -13,7 +13,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"backgroundCheckFreshness":       {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
 	"cafeIdentitiesRead":             {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeLeaseAccounts":              {"g1/o1!no-aggregating-item", 0, 1},
-	"cafeLeaseWorkplaces":            {"g0/o0!no-aggregating-item", 0, 0},
+	"cafeLeaseWorkplaces":            {"g1/o1!no-aggregating-item", 0, 1},
 	"cafeLedgerHistory":              {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeStaleTabSettlement":         {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeTabSettlement":              {"g3/o3!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 3},
