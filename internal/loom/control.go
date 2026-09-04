@@ -300,9 +300,9 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 //   - status must be exactly StatusFailed (errInstanceNotFailed) — running is
 //     already progressing, complete has nothing to resume;
 //   - the instance's pattern must still be loaded in the live source
-//     (errPatternNotLoaded) — the FAILED instance's own pin was deleted in the
-//     terminal batch (§10.3), so redrive re-pins from the CURRENT live
-//     definition, not the one it originally ran against;
+//     (errPatternNotLoaded) — the terminal batch purges a FAILED instance's own
+//     pin (§10.3), so redrive re-pins from the CURRENT live definition, not the
+//     one it originally ran against;
 //   - the recorded cursor must index a real step in that CURRENT definition
 //     (errCursorOutOfRange) — if the pattern was edited (steps
 //     added/removed/reordered) since the failure, resuming at the old cursor
@@ -315,6 +315,14 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 // completion domain, and the step at the cursor is evaluated exactly like a
 // fresh trigger's step 0 — guard-skip straight to completion if every
 // remaining guard is now false, otherwise re-submit it.
+//
+// The resumed step's token pointer is written as a put (tokenPutUnderRedriveCAS)
+// rather than create-if-absent. The step token is derived from (instanceId,
+// cursor), so resuming at the recorded cursor re-derives the very token the
+// failing transition removed, onto a subject that carries that removal's marker;
+// create-if-absent would be refused there, after the redrive batch has already
+// flipped the record to running. The guard this path relies on instead is that
+// batch's compare-and-set (transition's doc comment carries the argument).
 func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	if err != nil {
@@ -358,7 +366,7 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 			"instanceId", instanceID, "patternId", pattern.PatternID)
 		return nil
 	}
-	if err := e.submitStep(ctx, inst, pattern, ""); err != nil {
+	if err := e.submitStep(ctx, inst, pattern, "", tokenPutUnderRedriveCAS); err != nil {
 		return fmt.Errorf("loom: redrive %q: submit step: %w", instanceID, err)
 	}
 	e.logger.Info("loom instance resumed on redrive", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)

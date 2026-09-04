@@ -563,6 +563,41 @@ var (
 	// variable back to this assignment rather than false-flagging the call for
 	// not spelling MaxReconnects inline.
 	substrateConnectOptsAssign = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*substrate\.ConnectOpts\s*\{`)
+	// loomStateBatchOpLiteral anchors a BatchOp composite literal's opening
+	// brace (qualified `substrate.BatchOp{` or the bare `BatchOp{` form used
+	// inside package substrate itself) — the match ends on the brace itself,
+	// so checkLoomStateDelete walks the literal's own span forward from
+	// there via balanced-brace counting, the technique
+	// checkLensProtectedByDefault uses for a LensSpec entry.
+	loomStateBatchOpLiteral = regexp.MustCompile(`\bBatchOp\{`)
+	// loomStateSliceHead recognises the `[]` (with an optional package
+	// qualifier between it and the type name) that makes a matched
+	// `BatchOp{` a SLICE literal rather than one element. A slice's span
+	// covers every element, so checkLoomStateDelete walks its elements one
+	// by one — a TTL in a sibling element must never satisfy a purge in
+	// another.
+	loomStateSliceHead   = regexp.MustCompile(`\[\](?:[A-Za-z_][A-Za-z0-9_]*\.)?$`)
+	loomStateDeleteField = regexp.MustCompile(`\bDelete:\s*true\b`)
+	loomStatePurgeField  = regexp.MustCompile(`\bPurge:\s*true\b`)
+	// loomStateTTLField matches only the literal `TTL: tombstoneTTL`. The
+	// package constant is the whole requirement: `TTL: 0` is a permanent
+	// marker, and any other expression is a value the gate cannot evaluate,
+	// so neither satisfies a purge.
+	loomStateTTLField = regexp.MustCompile(`\bTTL:\s*tombstoneTTL\b`)
+	// loomStateRemovalAssign matches a removal expressed as a field
+	// assignment (`op.Purge = true`). Such a purge is assembled across
+	// statements, so no literal span carries its TTL and the gate cannot
+	// check one — it is refused outright.
+	loomStateRemovalAssign = regexp.MustCompile(`\.(Delete|Purge)\s*=\s*true\b`)
+	// loomStateKVDeleteCall / loomStateKVDeleteRevisionCall / loomStateKVPurgeCall
+	// each anchor their call token immediately followed by "(", so
+	// loomStateKVPurgeCall does not match ".KVPurgeWithTTL(" (the next
+	// character after "KVPurge" there is "W", not "(") and
+	// loomStateKVDeleteCall does not match ".KVDeleteRevision(" for the same
+	// reason.
+	loomStateKVDeleteCall         = regexp.MustCompile(`\.KVDelete\(`)
+	loomStateKVDeleteRevisionCall = regexp.MustCompile(`\.KVDeleteRevision\(`)
+	loomStateKVPurgeCall          = regexp.MustCompile(`\.KVPurge\(`)
 	// pkgmgrNewInstallerCall anchors a package-qualified pkgmgr.NewInstaller
 	// call. internal/pkgmgr's own callers (including IsPackageInstalled) invoke
 	// the unqualified NewInstaller and so never match this — the qualified form
@@ -1453,6 +1488,13 @@ func scanSource(path string, data []byte) []finding {
 	// should not).
 	if !isTest && isUnderCmd(slash) {
 		out = append(out, checkMaxReconnectsDeclared(path, string(data))...)
+	}
+	// loom-state-delete scope: every non-test internal/loom/** file. Tests are
+	// out — the e2e fixtures clean up with real KVDelete calls legitimately
+	// (guard_e2e_test.go:28, pinning_e2e_test.go:456), which is a test's own
+	// bucket-state teardown, not a Loom removal path.
+	if !isTest && strings.HasPrefix(slash, "internal/loom/") {
+		out = append(out, checkLoomStateDelete(path, string(data))...)
 	}
 	// internal/spike holds standalone `main` benchmarks with no *testing.T, so the
 	// fixture (which is t-bound by construction) is not available to them.
@@ -2345,6 +2387,164 @@ func checkListThenGet(path, src string, kvBatchAt map[int]annotation) []finding 
 			continue
 		}
 		out = append(out, finding{file: path, line: callLine, msg: "kv-batch: " + keysVar + " is listed via KVListKeysPrefix/KVListKeysFilter then read with a per-key KVGet in a loop — one round trip per matched key; batch the value reads with KVGetMulti (script-live-read-round-trip-collapse-design.md Fire 1), or declare `// kv-batch: (single|ordered|bounded-1) <why>` on this line if a batch genuinely does not apply here"})
+	}
+	return out
+}
+
+// loomStateScanWindow bounds how far checkLoomStateDelete walks forward from
+// a BatchOp{ match to find the literal's own closing brace — a safety cap,
+// well beyond any real BatchOp entry in this package (the widest, the
+// transition terminal batch, is under 500 bytes).
+const loomStateScanWindow = 2000
+
+// loomStateFixSentence is the remedy every loom-state-delete finding ends with.
+const loomStateFixSentence = "; use BatchOp{Purge: true, TTL: tombstoneTTL} or Conn.KVPurgeWithTTL instead (loom-state-tombstone-sweep-design.md §3.4)"
+
+// checkLoomStateDelete refuses every removal idiom in internal/loom that
+// leaves a permanent subject on loom-state, a max_msgs_per_subject=1 bucket:
+// a BatchOp element carrying Delete: true; a BatchOp element carrying
+// Purge: true without the literal TTL: tombstoneTTL (a purge marker with no
+// TTL, or with a zero one, never expires, and being a subject-delete marker
+// itself it is never re-marked — invisible to the start-time conversion pass,
+// which lists DEL ops only); a removal assembled by field assignment
+// (.Delete = true / .Purge = true), whose TTL lives outside any literal span
+// and so cannot be checked at all; and a bare .KVDelete( / .KVDeleteRevision(
+// / .KVPurge( call (.KVPurgeWithTTL( is a different call and is not matched).
+// The sanctioned shape is BatchOp{Purge: true, TTL: tombstoneTTL} or
+// Conn.KVPurgeWithTTL — see loom-state-tombstone-sweep-design.md §3.4.
+//
+// The TTL requirement is the package constant spelled out, not any TTL field:
+// TTL: 0 is the permanent marker itself, and any other expression is a value
+// the gate cannot evaluate.
+//
+// Findings are per ELEMENT. A slice literal is walked element by element, so a
+// TTL in one element cannot cover a purge in another, and every bad element in
+// one literal is reported rather than only the first.
+//
+// The walk fails CLOSED: a literal whose closing brace is not inside the scan
+// window is a finding of its own, because an unbounded literal is exactly
+// where an unchecked removal would hide.
+//
+// There is no annotation escape hatch: the design leaves no sanctioned bare
+// removal in this package, and the one legitimate future exception (a removal
+// that must leave a permanent marker) is a decision made by editing this gate,
+// with the reason recorded beside it — not by suppressing a finding.
+func checkLoomStateDelete(path, src string) []finding {
+	var out []finding
+	lineOf := func(pos int) int { return strings.Count(src[:pos], "\n") + 1 }
+	// inComment reports whether pos sits after a `//` on its own line, so a
+	// call token or field named inside a comment — a whole commented-out line,
+	// or a trailing `x := y // see conn.KVDelete(` — is not matched as code.
+	inComment := func(pos int) bool {
+		lineStart := strings.LastIndexByte(src[:pos], '\n') + 1
+		return strings.Contains(src[lineStart:pos], "//")
+	}
+	report := func(pos int, msg string) {
+		if inComment(pos) {
+			return
+		}
+		out = append(out, finding{file: path, line: lineOf(pos), msg: msg})
+	}
+
+	// closingBrace returns the index of the brace matching the one at open,
+	// or -1 when it is not found inside the scan window.
+	closingBrace := func(open int) int {
+		limit := open + loomStateScanWindow
+		if limit > len(src) {
+			limit = len(src)
+		}
+		balance := 1
+		for i := open + 1; i < limit; i++ {
+			switch src[i] {
+			case '{':
+				balance++
+			case '}':
+				balance--
+				if balance == 0 {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+
+	// checkElement applies the field rules to one BatchOp element's own span.
+	checkElement := func(start, end int) {
+		body := src[start : end+1]
+		if idx := loomStateDeleteField.FindStringIndex(body); idx != nil {
+			report(start+idx[0], "loom-state-delete: BatchOp{Delete: true} — a DEL marker is a permanent subject on loom-state (max_msgs_per_subject=1)"+loomStateFixSentence)
+		}
+		if idx := loomStatePurgeField.FindStringIndex(body); idx != nil && !loomStateTTLField.MatchString(body) {
+			report(start+idx[0], "loom-state-delete: BatchOp{Purge: true} without TTL: tombstoneTTL — a purge marker that does not expire is invisible to the start-time conversion pass, which lists DEL ops only, so it is a permanent subject on loom-state exactly like a DEL"+loomStateFixSentence)
+		}
+	}
+
+	// spans already walked as a slice literal, so a qualified element type
+	// inside one is not walked a second time as a literal of its own.
+	type span struct{ start, end int }
+	var walked []span
+	inWalked := func(pos int) bool {
+		for _, s := range walked {
+			if pos > s.start && pos <= s.end {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, m := range loomStateBatchOpLiteral.FindAllStringIndex(src, -1) {
+		// The match ends on the literal's own opening brace, so the span
+		// walks forward from there via balanced-brace counting — the same
+		// technique checkLensProtectedByDefault uses for a LensSpec entry,
+		// just without the backward half, since the anchor here already IS
+		// the open brace rather than an inner field.
+		open := m[1] - 1
+		if inWalked(open) {
+			continue
+		}
+		end := closingBrace(open)
+		if end == -1 {
+			report(m[0], "loom-state-delete: BatchOp literal has no closing brace within "+
+				strconv.Itoa(loomStateScanWindow)+" bytes, so its removal fields cannot be checked — split the literal"+loomStateFixSentence)
+			continue
+		}
+		if !loomStateSliceHead.MatchString(src[:m[0]]) {
+			checkElement(open, end)
+			continue
+		}
+		// A slice literal: each brace-delimited element inside it is its own
+		// BatchOp, checked on its own span.
+		walked = append(walked, span{open, end})
+		for i := open + 1; i < end; i++ {
+			if src[i] != '{' {
+				continue
+			}
+			elemEnd := closingBrace(i)
+			if elemEnd == -1 || elemEnd > end {
+				report(i, "loom-state-delete: BatchOp slice element has no closing brace within "+
+					strconv.Itoa(loomStateScanWindow)+" bytes, so its removal fields cannot be checked — split the literal"+loomStateFixSentence)
+				break
+			}
+			checkElement(i, elemEnd)
+			i = elemEnd
+		}
+	}
+
+	for _, m := range loomStateRemovalAssign.FindAllStringSubmatchIndex(src, -1) {
+		report(m[0], "loom-state-delete: "+src[m[2]:m[3]]+" set by field assignment — a removal assembled across statements carries no literal the gate can check for a TTL, so it is refused outright"+loomStateFixSentence)
+	}
+
+	for _, spec := range []struct {
+		re   *regexp.Regexp
+		call string
+	}{
+		{loomStateKVDeleteCall, ".KVDelete("},
+		{loomStateKVDeleteRevisionCall, ".KVDeleteRevision("},
+		{loomStateKVPurgeCall, ".KVPurge("},
+	} {
+		for _, m := range spec.re.FindAllStringIndex(src, -1) {
+			report(m[0], "loom-state-delete: "+spec.call+" call — a DEL marker is a permanent subject on loom-state (max_msgs_per_subject=1)"+loomStateFixSentence)
+		}
 	}
 	return out
 }
@@ -4266,6 +4466,106 @@ func selfTest() []string {
 		{"each name on a multi-name line names its own declaring package", "internal/loom/engine.go",
 			"\tops := []string{\"OpenTab\", \"ClaimIdentity\", \"DetachObject\"}\n",
 			"\"ClaimIdentity\" (declared by packages/identity-domain/ddls.go)"},
+		// loom-state-delete: every removal idiom the design bans, plus the
+		// two shapes it sanctions, plus the scoping the gate must hold to.
+		{"loom-state: bare Delete: true in a BatchOp literal is denied", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tBucket: s.bucket,\n" +
+				"\t\tKey:    k,\n" +
+				"\t\tDelete: true,\n" +
+				"\t})\n",
+			"loom-state-delete: BatchOp{Delete: true}"},
+		{"loom-state: Purge with TTL passes", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tBucket: s.bucket,\n" +
+				"\t\tKey:    k,\n" +
+				"\t\tPurge:  true,\n" +
+				"\t\tTTL:    tombstoneTTL,\n" +
+				"\t})\n",
+			""},
+		{"loom-state: Purge alone with no TTL is denied", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tBucket: s.bucket,\n" +
+				"\t\tKey:    k,\n" +
+				"\t\tPurge:  true,\n" +
+				"\t})\n",
+			"loom-state-delete: BatchOp{Purge: true} without TTL: tombstoneTTL"},
+		{"loom-state: Purge with TTL: 0 is denied", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tKey:   k,\n" +
+				"\t\tPurge: true,\n" +
+				"\t\tTTL:   0,\n" +
+				"\t})\n",
+			"loom-state-delete: BatchOp{Purge: true} without TTL: tombstoneTTL"},
+		{"loom-state: Purge with a TTL the gate cannot evaluate is denied", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tKey:   k,\n" +
+				"\t\tPurge: true,\n" +
+				"\t\tTTL:   someVar,\n" +
+				"\t})\n",
+			"loom-state-delete: BatchOp{Purge: true} without TTL: tombstoneTTL"},
+		// A TTL in a SIBLING element must not cover a purge in another one:
+		// the walk is per element, not per slice literal.
+		{"loom-state: a sibling element's TTL does not satisfy a purge", "internal/loom/self-test.go",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\t{Key: a, Purge: true},\n" +
+				"\t\t{Key: b, Purge: true, TTL: tombstoneTTL},\n" +
+				"\t}\n",
+			"loom-state-delete: BatchOp{Purge: true} without TTL: tombstoneTTL"},
+		{"loom-state: an elided-type slice element with a TTL passes", "internal/loom/self-test.go",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\t{Key: a, Purge: true, TTL: tombstoneTTL},\n" +
+				"\t\t{Key: b, Value: body},\n" +
+				"\t}\n",
+			""},
+		{"loom-state: .Delete = true by assignment is denied", "internal/loom/self-test.go",
+			"\top := substrate.BatchOp{Key: k}\n\top.Delete = true\n",
+			"loom-state-delete: Delete set by field assignment"},
+		{"loom-state: .Purge = true by assignment is denied", "internal/loom/self-test.go",
+			"\top := substrate.BatchOp{Key: k}\n\top.Purge = true\n\top.TTL = tombstoneTTL\n",
+			"loom-state-delete: Purge set by field assignment"},
+		{"loom-state: an unterminated literal is a finding, not a skip", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n\t\tKey: k,\n\t\tPurge: true,\n",
+			"loom-state-delete: BatchOp literal has no closing brace"},
+		{"loom-state: a call token inside a trailing comment passes", "internal/loom/self-test.go",
+			"\trev := marker.Revision // the revision conn.KVDelete( left behind\n",
+			""},
+		// The literal here carries an intervening field with its own brace pair
+		// ([]byte{}) before Delete: true, so a naive "find the next }" scan
+		// would close early and miss the field this case exists to catch —
+		// proving the balanced-brace walk, not just a multi-line literal.
+		{"loom-state: Delete: true past a nested brace pair in a multi-line literal is denied", "internal/loom/self-test.go",
+			"\tops = append(ops, substrate.BatchOp{\n" +
+				"\t\tBucket: s.bucket,\n" +
+				"\t\tKey:    fmt.Sprintf(\"token.%s\", token),\n" +
+				"\t\tValue:  []byte{},\n" +
+				"\t\tDelete: true,\n" +
+				"\t})\n",
+			"loom-state-delete: BatchOp{Delete: true}"},
+		{"loom-state: bare unqualified BatchOp{ is also matched", "internal/loom/self-test.go",
+			"\tops = append(ops, BatchOp{\n\t\tDelete: true,\n\t})\n",
+			"loom-state-delete: BatchOp{Delete: true}"},
+		{"loom-state: .KVDelete( call is denied", "internal/loom/self-test.go",
+			"\tif err := conn.KVDelete(ctx, bucket, key); err != nil {\n\t\treturn err\n\t}\n",
+			"loom-state-delete: .KVDelete("},
+		{"loom-state: .KVDeleteRevision( call is denied", "internal/loom/self-test.go",
+			"\tif err := conn.KVDeleteRevision(ctx, bucket, key, rev); err != nil {\n\t\treturn err\n\t}\n",
+			"loom-state-delete: .KVDeleteRevision("},
+		{"loom-state: .KVPurge( call is denied", "internal/loom/self-test.go",
+			"\tif err := conn.KVPurge(ctx, bucket, key); err != nil {\n\t\treturn err\n\t}\n",
+			"loom-state-delete: .KVPurge("},
+		{"loom-state: .KVPurgeWithTTL( call passes", "internal/loom/self-test.go",
+			"\tif err := conn.KVPurgeWithTTL(ctx, bucket, key, tombstoneTTL, 0); err != nil {\n\t\treturn err\n\t}\n",
+			""},
+		{"loom-state: a commented-out KVDelete call passes", "internal/loom/self-test.go",
+			"\t// conn.KVDelete(ctx, bucket, key)\n",
+			""},
+		{"loom-state: scoped OUT of _test.go files", "internal/loom/self-test_test.go",
+			"\tif err := conn.KVDelete(ctx, bucket, key); err != nil {\n\t\treturn err\n\t}\n",
+			""},
+		{"loom-state: scoped to internal/loom/ only", "internal/substrate/batch.go",
+			"\tops = append(ops, BatchOp{\n\t\tDelete: true,\n\t})\n",
+			""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -4286,6 +4586,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "refusal-sentinel:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") &&
 				!strings.HasPrefix(fd.msg, "op-name:") &&
+				!strings.HasPrefix(fd.msg, "loom-state-delete:") &&
 				!strings.HasPrefix(fd.msg, "history/changelog") {
 				continue
 			}
@@ -4323,6 +4624,51 @@ func selfTest() []string {
 	failures = append(failures, historyLineSelfTest()...)
 	failures = append(failures, opNameCountSelfTest()...)
 	failures = append(failures, opNameUniverseSelfTest()...)
+	failures = append(failures, loomStateDeleteCountSelfTest()...)
+	return failures
+}
+
+// loomStateDeleteCountSelfTest pins HOW MANY loom-state-delete findings a
+// source produces, which the message-substring table above cannot: a walk that
+// stopped at the first bad element in a literal would satisfy every case there
+// while leaving the second removal unreported.
+func loomStateDeleteCountSelfTest() []string {
+	var failures []string
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"both bad elements of one slice literal are reported",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\t{Key: a, Delete: true},\n" +
+				"\t\t{Key: b, Purge: true},\n" +
+				"\t}\n", 2},
+		{"a clean element beside a bad one is not reported",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\t{Key: a, Purge: true, TTL: tombstoneTTL},\n" +
+				"\t\t{Key: b, Delete: true},\n" +
+				"\t}\n", 1},
+		{"a slice literal's element type is not walked twice",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\tsubstrate.BatchOp{Key: a, Delete: true},\n" +
+				"\t}\n", 1},
+		{"an element carrying a nested brace pair is still one finding",
+			"\tops := []substrate.BatchOp{\n" +
+				"\t\t{Key: a, Value: []byte{}, Delete: true},\n" +
+				"\t}\n", 1},
+	}
+	for _, tc := range cases {
+		var got int
+		for _, fd := range scanSource("internal/loom/self-test.go", []byte(tc.src)) {
+			if strings.HasPrefix(fd.msg, "loom-state-delete:") {
+				got++
+			}
+		}
+		if got != tc.want {
+			failures = append(failures, fmt.Sprintf("%s: got %d loom-state-delete finding(s), want %d", tc.name, got, tc.want))
+		}
+	}
 	return failures
 }
 

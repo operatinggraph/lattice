@@ -15,11 +15,14 @@ import (
 )
 
 // newLoomStateStoreForTransition provisions loom-state the way a transition
-// batch needs it and newLoomStateStoreTTL's plain bucket does not: the
-// AtomicBatch write requires AllowAtomicPublish on the underlying KV_<bucket>
-// stream, exactly as bootstrap's primordial seeder sets it for the real bucket
-// (internal/bootstrap/primordial.go's enableAtomicPublish). LimitMarkerTTL
-// covers the deadline arm in the same batch.
+// batch needs it and newLoomStateStore does not: the AtomicBatch write requires
+// AllowAtomicPublish on the underlying KV_<bucket> stream, exactly as
+// bootstrap's primordial seeder sets it for the real bucket
+// (internal/bootstrap/primordial.go's enableAtomicPublish). LimitMarkerTTL is
+// the other half of what the batch needs: it is what allows per-message TTLs
+// on the bucket, and every removal a transition writes carries one, so on a
+// plain bucket the batch is rejected outright rather than merely leaving a
+// permanent marker behind.
 func newLoomStateStoreForTransition(ctx context.Context, t *testing.T) *stateStore {
 	t.Helper()
 	conn := newLoomConn(t)
@@ -391,7 +394,7 @@ func TestSubmitSystemOp_OutboxCarriesResolvedReads(t *testing.T) {
 				SubjectKey: subjectKey,
 				Status:     StatusRunning,
 			}
-			require.NoError(t, e.submitSystemOp(ctx, inst, pattern, tc.step, ""))
+			require.NoError(t, e.submitSystemOp(ctx, inst, pattern, tc.step, "", tokenCreateOnly))
 
 			entry, err := state.conn.KVGet(ctx, state.bucket, outboxKey(inst.PendingToken))
 			require.NoError(t, err, "the transition batch must have written the outbox record")

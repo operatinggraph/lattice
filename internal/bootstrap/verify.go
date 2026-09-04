@@ -253,14 +253,33 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 	// AllowAtomicPublish must be set on the buckets whose writers use atomic
 	// batches: Core KV (Processor commit) and loom-state (Loom step transition,
 	// Contract #10 §10.3). Without it, Conn.AtomicBatch on the bucket is rejected.
+	//
+	// loom-state carries three more posture flags of the same class: every Loom
+	// removal is a TTL'd purge — a subject rollup carrying a per-message TTL —
+	// so a bucket that forbids rollups, forbids purges, or ignores message TTLs
+	// fails every step transition. Asserting the posture here makes such a
+	// bucket fail verification rather than fail Loom at runtime.
 	for _, bucket := range []string{CoreKVBucket, LoomStateBucket} {
 		stream, err := js.Stream(ctx, "KV_"+bucket)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("CANNOT read stream KV_%s for AllowAtomicPublish check: %v", bucket, err))
+			failures = append(failures, fmt.Sprintf("CANNOT read stream KV_%s for write-posture checks: %v", bucket, err))
 			continue
 		}
-		if !stream.CachedInfo().Config.AllowAtomicPublish {
+		cfg := stream.CachedInfo().Config
+		if !cfg.AllowAtomicPublish {
 			failures = append(failures, fmt.Sprintf("AllowAtomicPublish NOT set on KV_%s (Conn.AtomicBatch would be rejected)", bucket))
+		}
+		if bucket != LoomStateBucket {
+			continue
+		}
+		if !cfg.AllowRollup {
+			failures = append(failures, fmt.Sprintf("AllowRollup NOT set on KV_%s (every Loom removal is a subject rollup)", bucket))
+		}
+		if cfg.DenyPurge {
+			failures = append(failures, fmt.Sprintf("DenyPurge IS set on KV_%s (every Loom removal is a purge)", bucket))
+		}
+		if !cfg.AllowMsgTTL {
+			failures = append(failures, fmt.Sprintf("AllowMsgTTL NOT set on KV_%s (a Loom removal's marker carries a TTL)", bucket))
 		}
 	}
 

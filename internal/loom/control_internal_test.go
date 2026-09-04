@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,12 +397,80 @@ func registerPattern(e *Engine, pat Pattern) {
 	e.source.mu.Unlock()
 }
 
+// driveToFailedAtStepZero runs an instance through the production sequence up
+// to a step-0 failure: create, submit step 0, then fail the pending step the
+// way every deadline arm does — fail(inst, pendingToken, …). The returned token
+// is the step-0 token the failure removed, which a redrive at the same cursor
+// re-derives identically.
+func driveToFailedAtStepZero(t *testing.T, ctx context.Context, e *Engine, pat *Pattern, instanceID string) string {
+	t.Helper()
+	inst := &Instance{
+		InstanceID: instanceID, PatternRef: "vtx.meta." + pat.PatternID, SubjectKey: "vtx.widget.w1",
+		Cursor: 0, Status: StatusRunning,
+	}
+	require.NoError(t, e.state.createInstance(ctx, inst, pat))
+	require.NoError(t, e.submitStep(ctx, inst, pat, "", tokenCreateOnly))
+	token := deriveRequestID(instanceID, 0)
+	require.Equal(t, token, inst.PendingToken, "precondition: step 0 parked on its derived token")
+	require.NoError(t, e.fail(ctx, inst, token, "step 0 deadline exceeded; op rejected or lost"))
+	return token
+}
+
+// TestRedriveInstance_ResumesOverTheFailedStepsRemovedToken pins the recovery
+// verb against the state a real failure leaves. A step's token is derived from
+// (instanceId, cursor) alone, so resuming at the failed cursor re-derives the
+// SAME token — onto a subject the failing transition removed, which therefore
+// carries a standing removal marker. A create-only write of that pointer is
+// refused by exactly that marker, and the refusal lands after the redrive's own
+// batch has already flipped the record to running: the instance would be left
+// running with no pending token, no deadline and no second redrive (status is
+// no longer failed). The resumed step's pointer is written as a put, so the
+// redrive completes against the marker.
+func TestRedriveInstance_ResumesOverTheFailedStepsRemovedToken(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+	}}
+	registerPattern(e, pat)
+	token := driveToFailedAtStepZero(t, ctx, e, &pat, "inst1")
+
+	// Precondition — the state a redrive actually starts from: the pointer reads
+	// absent AND the subject is occupied by the failure's removal marker, which
+	// is what a create-only write is refused by.
+	_, ok, err := e.state.resolveToken(ctx, token)
+	require.NoError(t, err)
+	require.False(t, ok, "precondition: the failing transition removed the step token")
+	requireExpiringPurgeMarker(ctx, t, e.state, tokenKey(token))
+
+	require.NoError(t, e.RedriveInstance(ctx, "inst1"))
+
+	got, err := e.state.getInstance(ctx, "inst1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, StatusRunning, got.Status)
+	assert.Equal(t, 0, got.Cursor, "resumes AT the recorded cursor")
+	assert.Equal(t, token, got.PendingToken, "the resumed step re-derives the removed token")
+
+	pointedAt, ok, err := e.state.resolveToken(ctx, token)
+	require.NoError(t, err)
+	require.True(t, ok, "the re-submitted step's pointer must exist — correlation dies with it")
+	assert.Equal(t, "inst1", pointedAt)
+}
+
 // TestRedriveInstance_HappyPath_ResumesAtCursor proves the core mechanism:
 // resume-at-cursor, not restart. The instance is driven to FAILED at cursor 1
-// through the REAL terminal batch — which deletes the pattern pin and leaves a
-// delete marker on that subject, the state production redrives from — and is
-// then redriven: the pin is re-written from the CURRENT live pattern, status
-// flips back to running, and the step AT CURSOR 1 (never step 0) is re-submitted.
+// through the production sequence — submit step 0, advance onto step 1, then
+// fail that step with its live pending token — so the terminal batch removes
+// both the pattern pin and the step-1 token, the state production redrives
+// from. It is then redriven: the pin is re-written from the CURRENT live
+// pattern, status flips back to running, and the step AT CURSOR 1 (never step
+// 0) is re-submitted.
 func TestRedriveInstance_HappyPath_ResumesAtCursor(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -419,11 +489,14 @@ func TestRedriveInstance_HappyPath_ResumesAtCursor(t *testing.T) {
 		Cursor: 0, Status: StatusRunning,
 	}
 	require.NoError(t, e.state.createInstance(ctx, inst, &pat))
-	inst.Cursor = 1
-	inst.Status = StatusFailed
-	inst.RetryCount = 1
-	require.NoError(t, e.state.transition(ctx, inst, "", "", nil, 0))
-	_, err := e.state.getPinnedPattern(ctx, "inst1")
+	require.NoError(t, e.submitStep(ctx, inst, &pat, "", tokenCreateOnly))
+	require.NoError(t, e.advance(ctx, "inst1", deriveRequestID("inst1", 0)))
+
+	onStepOne, err := e.state.getInstance(ctx, "inst1")
+	require.NoError(t, err)
+	require.Equal(t, 1, onStepOne.Cursor)
+	require.NoError(t, e.fail(ctx, onStepOne, deriveRequestID("inst1", 1), "step 1 deadline exceeded; op rejected or lost"))
+	_, err = e.state.getPinnedPattern(ctx, "inst1")
 	require.ErrorIs(t, err, errPatternPinMissing, "precondition: the terminal batch deleted the pin")
 
 	err = e.RedriveInstance(ctx, "inst1")
@@ -571,7 +644,7 @@ func TestStateStore_Redrive_ConcurrentCASRejectsLoser(t *testing.T) {
 	seed := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 	require.NoError(t, store.createInstance(ctx, seed, pat))
 	seed.Status = StatusFailed
-	require.NoError(t, store.transition(ctx, seed, "", "", nil, 0))
+	require.NoError(t, store.transition(ctx, seed, "", "", tokenCreateOnly, nil, 0))
 	_, err := store.getPinnedPattern(ctx, "inst1")
 	require.ErrorIs(t, err, errPatternPinMissing, "precondition: the terminal batch deleted the pin")
 
@@ -594,6 +667,217 @@ func TestStateStore_Redrive_ConcurrentCASRejectsLoser(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "winner", pinned.PatternID,
 		"the loser's pin must not survive its rejected batch")
+}
+
+// streamWrites returns the loom-state stream's last sequence — the count of
+// messages ever published to the bucket. A rejected atomic batch stages nothing,
+// so this counts committed writes only.
+func streamWrites(ctx context.Context, t *testing.T, conn *substrate.Conn) uint64 {
+	t.Helper()
+	stream, err := conn.JetStream().Stream(ctx, "KV_loom-state")
+	require.NoError(t, err)
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	return info.State.LastSeq
+}
+
+// TestRedriveInstance_ConcurrentRedrives_LoserWritesNothing proves the losing
+// racer of two concurrent redrives never reaches the resumed step's submission.
+// The resumed step's writes are content-identical between the two racers, so
+// their VALUES cannot tell one submission from two — the count of committed
+// writes on the bucket can. Two instances are seeded identically; one is
+// redriven once, the other by two concurrent calls, and both must cost the
+// bucket the same number of writes. A loser that reached submitStep would write
+// its instance record, token pointer, outbox record and deadline again.
+func TestRedriveInstance_ConcurrentRedrives_LoserWritesNothing(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+	}}
+	registerPattern(e, pat)
+	driveToFailedAtStepZero(t, ctx, e, &pat, "solo1")
+	driveToFailedAtStepZero(t, ctx, e, &pat, "raced1")
+
+	before := streamWrites(ctx, t, conn)
+	require.NoError(t, e.RedriveInstance(ctx, "solo1"))
+	soloWrites := streamWrites(ctx, t, conn) - before
+
+	errs := make(chan error, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			errs <- e.RedriveInstance(ctx, "raced1")
+		}()
+	}
+	before = streamWrites(ctx, t, conn)
+	close(start)
+	first, second := <-errs, <-errs
+	racedWrites := streamWrites(ctx, t, conn) - before
+
+	require.False(t, first == nil && second == nil, "only one of two concurrent redrives may take effect")
+	require.True(t, first == nil || second == nil, "one of the two must take effect: %v / %v", first, second)
+	// Whichever way the two interleave the loser writes nothing: it either reads
+	// the record after the winner's batch (refused on status, before any write)
+	// or reads the same revision and loses the compare-and-set (its batch
+	// rejected whole, and RedriveInstance returns on that error without
+	// submitting).
+	require.Equal(t, soloWrites, racedWrites,
+		"a concurrent redrive pair must cost the bucket exactly what one redrive costs")
+
+	got, err := e.state.getInstance(ctx, "raced1")
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status)
+	require.Equal(t, deriveRequestID("raced1", 0), got.PendingToken)
+}
+
+// triggerMessage renders the patternStarted message Weaver dispatches for an
+// instance, the redelivery of which is what can re-enter a redrive's window.
+func triggerMessage(t *testing.T, instanceID, patternRef, subjectKey string) substrate.Message {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"payload": map[string]any{
+			"instanceId": instanceID,
+			"patternRef": patternRef,
+			"subjectKey": subjectKey,
+		},
+	})
+	require.NoError(t, err)
+	return substrate.Message{Subject: "events.loom.patternStarted", Body: body}
+}
+
+// openRedriveWindow drives an instance to a step-0 failure and then applies the
+// FIRST half of a redrive — the compare-and-set batch that re-pins the pattern
+// and flips the record back to running. It returns the instance at that point
+// (running, no pending token) and the step-0 token, which is the exact window
+// RedriveInstance occupies between its own two halves and the state
+// handleTrigger's resume gate reads.
+func openRedriveWindow(t *testing.T, ctx context.Context, e *Engine, pat *Pattern, instanceID string) (*Instance, string) {
+	t.Helper()
+	token := driveToFailedAtStepZero(t, ctx, e, pat, instanceID)
+	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
+	require.NoError(t, err)
+	inst.Status = StatusRunning
+	require.NoError(t, e.state.redrive(ctx, inst, pat, revision))
+
+	inWindow, err := e.state.getInstance(ctx, instanceID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, inWindow.Status)
+	require.Empty(t, inWindow.PendingToken, "the window is running-with-no-pending-token")
+	return inst, token
+}
+
+// TestRedriveWindow_RedeliveredTriggerConvergesInBothOrders pins the one other
+// writer that can reach a redrive's window: a redelivered patternStarted, whose
+// resume gate (running, empty pending token) is exactly the state the redrive
+// batch leaves before the resumed step is submitted. The window lives INSIDE
+// RedriveInstance, so each order is driven through its two halves — the
+// compare-and-set batch (openRedriveWindow) and the resumed step's submission —
+// with the redelivered trigger interleaved between them, rather than racing
+// goroutines for an interleaving.
+func TestRedriveWindow_RedeliveredTriggerConvergesInBothOrders(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+	}}
+
+	t.Run("marker standing: the trigger is refused and the redrive completes", func(t *testing.T) {
+		t.Parallel()
+		conn, ctx := newControlTestConn(t)
+		e := newControlEngine(conn)
+		registerPattern(e, pat)
+		const instanceID = "RedriveWindowinst123"
+
+		inst, token := openRedriveWindow(t, ctx, e, &pat, instanceID)
+		requireExpiringPurgeMarker(ctx, t, e.state, tokenKey(token))
+
+		decision := e.handleTrigger(ctx, triggerMessage(t, instanceID, "vtx.meta.p1", "vtx.widget.w1"))
+		require.Equal(t, substrate.Nak, decision,
+			"the resume path's create-only token write is refused while the marker stands; Nak redelivers it")
+		stillOpen, err := e.state.getInstance(ctx, instanceID)
+		require.NoError(t, err)
+		require.Empty(t, stillOpen.PendingToken, "the refused resume must have committed nothing")
+
+		// The redrive's own second half then commits over the same marker.
+		require.NoError(t, e.submitStep(ctx, inst, &pat, "", tokenPutUnderRedriveCAS))
+		resumed, err := e.state.getInstance(ctx, instanceID)
+		require.NoError(t, err)
+		require.Equal(t, token, resumed.PendingToken)
+		pointedAt, ok, err := e.state.resolveToken(ctx, token)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, instanceID, pointedAt)
+
+		// On its redelivery the trigger reads a pending token and plain-Acks.
+		require.Equal(t, substrate.Ack, e.handleTrigger(ctx, triggerMessage(t, instanceID, "vtx.meta.p1", "vtx.widget.w1")))
+	})
+
+	t.Run("marker expired: the trigger resumes first and the redrive converges", func(t *testing.T) {
+		t.Parallel()
+		conn, ctx := newControlTestConn(t)
+		e := newControlEngine(conn)
+		registerPattern(e, pat)
+		const instanceID = "RedriveWindowinst456"
+
+		inst, token := openRedriveWindow(t, ctx, e, &pat, instanceID)
+
+		// Re-remove the token subject with the shortest TTL the server accepts and
+		// wait for the subject to leave the stream, so the resume path's create-only
+		// write lands on a genuinely empty subject.
+		require.NoError(t, conn.KVPurgeWithTTL(ctx, "loom-state", tokenKey(token), time.Second, 0))
+		require.Eventually(t, func() bool {
+			stream, err := conn.JetStream().Stream(ctx, "KV_loom-state")
+			if err != nil {
+				return false
+			}
+			_, err = stream.GetLastMsgForSubject(ctx, "$KV.loom-state."+tokenKey(token))
+			return err != nil
+		}, 20*time.Second, 250*time.Millisecond, "the marker must expire off the subject")
+
+		require.Equal(t, substrate.Ack, e.handleTrigger(ctx, triggerMessage(t, instanceID, "vtx.meta.p1", "vtx.widget.w1")),
+			"with the subject empty the resume path's create-only write commits")
+		resumed, err := e.state.getInstance(ctx, instanceID)
+		require.NoError(t, err)
+		require.Equal(t, token, resumed.PendingToken)
+
+		// The redrive's second half then rewrites the same pointer, cursor and
+		// outbox record with identical content.
+		require.NoError(t, e.submitStep(ctx, inst, &pat, "", tokenPutUnderRedriveCAS))
+		converged, err := e.state.getInstance(ctx, instanceID)
+		require.NoError(t, err)
+		require.Equal(t, *resumed, *converged, "both orders converge to one identical instance record")
+		pointedAt, ok, err := e.state.resolveToken(ctx, token)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, instanceID, pointedAt)
+
+		// One op, not two: both writes carry the same requestId, so they collapse
+		// onto the one outbox record the relay will publish (the doubled publish
+		// itself collapsing on the Contract #4 tracker). The other record is the
+		// FailPattern lifecycle op the failure wrote, which no relay ran to clear.
+		keys, err := conn.KVListKeys(ctx, "loom-state")
+		require.NoError(t, err)
+		var outboxKeys []string
+		for _, k := range keys {
+			if strings.HasPrefix(k, outboxPrefix) {
+				outboxKeys = append(outboxKeys, k)
+			}
+		}
+		sort.Strings(outboxKeys)
+		want := []string{outboxKey(deriveRequestID(instanceID, lifecycleCursor)), outboxKey(token)}
+		sort.Strings(want)
+		require.Equal(t, want, outboxKeys, "the resumed step must hold exactly one outbox record")
+	})
 }
 
 // waitForCond polls cond until true or the deadline.

@@ -421,6 +421,158 @@ func (c *Conn) KVPurge(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
+// KVPurgeWithTTL removes key with a purge marker that itself expires after
+// ttl, leaving the subject empty rather than permanently occupied. It is the
+// removal shape for a bucket provisioned max_msgs_per_subject=1: a DEL marker
+// (KVDelete) replaces the value and then IS the subject forever, while a purge
+// marker counts as a subject-delete marker in its own right (nats-server
+// v2.14.0 server/sdm.go:42-44), so its expiry drops the subject instead of
+// writing a fresh marker over it (server/filestore.go:6827).
+//
+// A ttl under one second is refused rather than published or silently
+// downgraded to KVPurge. One second is the server's floor: parseMessageTTL
+// rejects a sub-second duration and carries everything above it at whole-second
+// granularity (nats-server v2.14.0 server/stream.go parseMessageTTL), so the
+// only outcomes below the floor are a rejected publish and — at zero — the
+// permanent marker this method exists to avoid. The bucket must be provisioned
+// with LimitMarkerTTL (=> AllowMsgTTL) and allow rollups; nats.go accepts a TTL
+// only on the purge form of a delete (jetstream/kv.go:1160-1163 — a TTL'd plain
+// delete is ErrTTLOnDeleteNotSupported).
+//
+// expectedRevision == 0 means unconditioned. Non-zero conditions the purge on
+// the subject's current last sequence (jetstream/kv.go:1166-1168 →
+// Nats-Expected-Last-Subject-Sequence) and a mismatch surfaces as
+// ErrRevisionConflict, mirroring KVDeleteRevision. Note what that class covers:
+// the server answers the same 10071 when the subject's last sequence is
+// something else AND when the subject is already gone (an absent key's last
+// sequence can never match a non-zero expectation), so a conflict here means
+// "not the state you conditioned on", not specifically "another writer won".
+// An UNCONDITIONED purge of a never-written key is not an error: it is a rollup
+// over an empty subject, which the server accepts, leaving only the TTL'd
+// marker.
+func (c *Conn) KVPurgeWithTTL(ctx context.Context, bucket, key string, ttl time.Duration, expectedRevision uint64) error {
+	if ttl < time.Second {
+		return fmt.Errorf(
+			"substrate: KV purge-with-ttl %s/%s: ttl %s is below the server's 1s floor "+
+				"(a shorter TTL is rejected, and a TTL-less purge marker never expires)",
+			bucket, key, ttl)
+	}
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	opts := []jetstream.KVDeleteOpt{jetstream.PurgeTTL(ttl)}
+	if expectedRevision != 0 {
+		opts = append(opts, jetstream.LastRevision(expectedRevision))
+	}
+	if err := kv.Purge(ctx, key, opts...); err != nil {
+		if IsRevisionConflict(err) {
+			return fmt.Errorf("%w: bucket=%s key=%s expected=%d: %v",
+				ErrRevisionConflict, bucket, key, expectedRevision, err)
+		}
+		return fmt.Errorf("substrate: KV purge-with-ttl %s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// KVTombstone identifies one delete marker found by KVListTombstones: the key
+// it stands on, and the revision (stream sequence) of the marker message
+// itself — which a caller passes back as KVPurgeWithTTL's expectedRevision to
+// act on exactly the marker it saw and nothing that replaced it.
+type KVTombstone struct {
+	Key      string
+	Revision uint64
+}
+
+// KVListTombstones returns every key under filter whose latest message is a
+// DELETE marker — the permanent residue a KVDelete leaves on a history-1
+// bucket. filter is a key pattern over the bucket's keyspace (the substrate
+// prepends the $KV.<bucket>. subject prefix), so `*` matches exactly one key
+// token and `>` matches one-or-more trailing tokens.
+//
+// PURGE-op entries are deliberately NOT returned. The server's own end-of-life
+// markers (Nats-Marker-Reason: MaxAge) decode as purges, and so do the TTL'd
+// markers KVPurgeWithTTL and BatchOp.Purge write — both are already expiring,
+// so returning them would make a sweep that purges what it lists re-purge its
+// own output on every pass. What makes "a purge marker on this bucket is
+// already expiring" true is per-bucket, not universal: on loom-state it is the
+// lint gate (scripts/lint-conventions.go's checkLoomStateDelete) that refuses
+// every TTL-less removal idiom in internal/loom. Conn.KVPurge is a live,
+// TTL-less purge elsewhere — Refractor's rebuild truncate uses it — and the
+// permanent marker it leaves is invisible to this listing.
+//
+// Single round by construction. The substrate's retraction lesson — that a
+// filtered read must re-run because an entry can be retracted underneath it —
+// does not apply here: the subject read IS a marker, and the only transitions
+// out of that state are the key being re-created (a live value, which a caller
+// must not act on) or the marker expiring (already gone). A revision-conditioned
+// write refuses on both, so a second round inside one call buys nothing that
+// re-running the listing does not.
+//
+// The result is a HINT, not a proof of completeness: a KV listing is
+// count-bounded, not drain-bounded (docs/vendors.md, the NATS row). nats.go
+// ends the initial set when `received >= initPending || delta == 0`, and it
+// captures initPending once, at consumer creation (jetstream/kv.go's watcher
+// update callback and the InitialConsumerPending call that follows it). Two
+// shapes come back short: a rewrite during the enumeration can move delta to 0
+// with keys still undelivered, and if InitialConsumerPending errors the
+// watcher leaves initPending at 0 — under which `received >= 0` holds on the
+// FIRST entry, so a single delivered key ends the listing. Convergence is by
+// re-running, never by trusting one call's count.
+//
+// A ctx expiry is returned as an error, never a short list — the same posture
+// as KVListKeys, and for the same reason: a truncated tombstone set read as
+// complete reports a bucket clean that is not.
+func (c *Conn) KVListTombstones(ctx context.Context, bucket, filter string) ([]KVTombstone, error) {
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	watcher, err := kv.WatchFiltered(ctx, []string{filter}, jetstream.MetaOnly())
+	if err != nil {
+		return nil, fmt.Errorf("substrate: KV list tombstones %s filter %q: %w", bucket, filter, err)
+	}
+	// Stopping the watcher is not enough to release it: nats.go's update
+	// callback holds the watcher's mutex while sending each entry on a
+	// 256-slot channel, and the closed handler that closes that channel takes
+	// the same mutex (jetstream/kv.go:1278-1290, :1335-1338). Returning
+	// mid-listing with the buffer full would leave the dispatcher parked in
+	// that send forever, holding the lock the close needs. So every exit
+	// drains what is already queued, in the background, until nats.go closes
+	// the channel.
+	defer func() {
+		_ = watcher.Stop()
+		go func() {
+			for range watcher.Updates() {
+			}
+		}()
+	}()
+
+	out := make([]KVTombstone, 0)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf(
+				"substrate: KV list tombstones %s filter %q: interrupted (partial result discarded): %w",
+				bucket, filter, ctx.Err())
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				return nil, fmt.Errorf(
+					"substrate: KV list tombstones %s filter %q: watcher stopped before the initial set completed",
+					bucket, filter)
+			}
+			if entry == nil {
+				// The end-of-initial-values marker: everything the bucket held
+				// when the watcher's consumer was created has been delivered.
+				return out, nil
+			}
+			if entry.Operation() == jetstream.KeyValueDelete {
+				out = append(out, KVTombstone{Key: entry.Key(), Revision: entry.Revision()})
+			}
+		}
+	}
+}
+
 // KVStatus probes whether bucket is reachable, returning nil when it is. A
 // missing bucket (or backing stream) is mapped to ErrBucketNotFound so callers
 // can classify it as a structural fault; any other error is wrapped verbatim

@@ -53,6 +53,34 @@ const ValueHeadroomBytes = 4 * 1024
 //     and Revision 0. (Note: at most one batch member can be unconditioned
 //     against a given key; in practice the Processor always uses Create
 //     or Update.)
+//
+//   - Removal: set Delete (a DEL marker) or Purge (a rollup marker that also
+//     discards the subject's prior revisions). Either way the op carries no
+//     body and is exempt from the value-size ceiling; HasRevision/Revision
+//     still apply, CreateOnly does not. The two are mutually exclusive —
+//     AtomicBatch refuses an op with both set.
+//
+//     Which one a caller wants is decided by what the marker costs after the
+//     removal. On a bucket provisioned max_msgs_per_subject=1 a DEL marker
+//     replaces the value and then IS the subject, permanently: no limit ages
+//     it out, so every removal leaves a message behind for the life of the
+//     bucket. A Purge carrying a TTL does not: it is itself a subject-delete
+//     marker (nats-server v2.14.0 server/sdm.go:42-44 counts KV-Operation:
+//     PURGE as one), so when it expires the server drops the subject rather
+//     than writing a fresh marker over it (server/filestore.go:6827). A TTL'd
+//     purge is therefore the removal shape for a history-1 operational bucket,
+//     and a purge WITHOUT a TTL is the worst of both — a permanent marker that
+//     also discarded the history. The bucket must allow rollups and per-message
+//     TTLs (AllowRollup, AllowMsgTTL, and not DenyPurge) for the server to
+//     accept it.
+//
+//     A purge op's TTL must be at least one second, and AtomicBatch refuses
+//     anything shorter pre-flight. One second is the server's own floor:
+//     parseMessageTTL rejects a sub-second duration outright, and a valid TTL
+//     is carried at whole-second granularity (nats-server v2.14.0
+//     server/stream.go parseMessageTTL). So a sub-second value is never a
+//     shorter-lived marker — it is a rejected publish, and zero is the
+//     permanent marker the TTL exists to avoid.
 type BatchOp struct {
 	Bucket      string
 	Key         string
@@ -67,6 +95,18 @@ type BatchOp struct {
 	// ErrKeyNotFound. HasRevision/Revision still apply (a revision-conditioned
 	// delete); CreateOnly is meaningless for a delete and is ignored.
 	Delete bool
+	// Purge writes a NATS KV purge marker (KV-Operation: PURGE plus
+	// Nats-Rollup: sub, the shape nats.go's kvs.Delete renders for a purge —
+	// jetstream/kv.go:1153-1155) instead of a value put, removing the key and
+	// its prior revisions within the same atomic batch as other puts. Value is
+	// ignored; a subsequent read returns ErrKeyNotFound. TTL applies, is what
+	// makes the marker itself temporary, and must be at least one second (the
+	// server's floor); HasRevision/Revision apply (a revision-conditioned
+	// purge); CreateOnly is meaningless for a purge and is ignored, as it is
+	// for a delete. Delete and Purge together, and a purge whose TTL is under
+	// a second, are caller errors refused by AtomicBatch before anything is
+	// published.
+	Purge bool
 }
 
 // BatchAck describes the server's atomic-commit acknowledgement for a
@@ -127,6 +167,17 @@ func (c *Conn) AtomicBatch(ctx context.Context, ops []BatchOp) (*BatchAck, error
 		if op.Key == "" {
 			return nil, fmt.Errorf("substrate: AtomicBatch: op[%d] missing key", i)
 		}
+		if op.Delete && op.Purge {
+			return nil, fmt.Errorf(
+				"substrate: AtomicBatch: op[%d] key=%q sets both Delete and Purge (a removal is one or the other)",
+				i, op.Key)
+		}
+		if op.Purge && op.TTL < time.Second {
+			return nil, fmt.Errorf(
+				"substrate: AtomicBatch: op[%d] key=%q purges with TTL %s: a purge marker must carry a TTL of at least 1s "+
+					"(the server's floor; a shorter one is rejected and zero leaves a permanent marker)",
+				i, op.Key, op.TTL)
+		}
 	}
 
 	batchID, err := NewNanoID()
@@ -139,14 +190,26 @@ func (c *Conn) AtomicBatch(ctx context.Context, ops []BatchOp) (*BatchAck, error
 		m := nats.NewMsg(kvBucketSubject(op.Bucket, op.Key))
 		m.Data = op.Value
 		m.Header = nats.Header{}
-		if op.Delete {
+		switch {
+		case op.Delete:
 			// NATS KV delete marker: an empty body carrying the KV-Operation
 			// header. The server removes the visible value; subsequent reads
 			// return ErrKeyNotFound.
 			m.Data = nil
 			m.Header.Set("KV-Operation", "DEL")
+		case op.Purge:
+			// NATS KV purge marker: an empty body whose subject rollup discards
+			// the subject's prior messages (the value, or an older marker) as it
+			// lands. Subsequent reads return ErrKeyNotFound, the same as for a
+			// delete. The server permits the rollup on the FIRST occurrence of a
+			// subject within a batch (nats-server v2.14.0
+			// server/jetstream_batching.go:887-907), which every Loom transition
+			// batch satisfies — each key is named at most once.
+			m.Data = nil
+			m.Header.Set("KV-Operation", "PURGE")
+			m.Header.Set("Nats-Rollup", "sub")
 		}
-		if op.CreateOnly && !op.Delete {
+		if op.CreateOnly && !op.Delete && !op.Purge {
 			m.Header.Set("Nats-Expected-Last-Subject-Sequence", "0")
 		} else if op.HasRevision {
 			m.Header.Set("Nats-Expected-Last-Subject-Sequence",
@@ -197,16 +260,16 @@ func deriveRevisions(ops []BatchOp, lastSeq, batchSize uint64) map[string]uint64
 // checkBatchSize enforces the two NATS 2.14 atomic-batch bounds (Contract #3
 // §3.9.1) before any message is built or published: the message-count
 // ceiling and, per op, the per-value payload ceiling derived from the live
-// negotiated max_payload. Delete ops carry no body and are exempt from the
-// value check. Returns ErrBatchTooLarge / ErrValueTooLarge un-wrapped — this
-// is a pre-flight guard, never a NATS-reported rejection.
+// negotiated max_payload. Removal ops (Delete, Purge) carry no body and are
+// exempt from the value check. Returns ErrBatchTooLarge / ErrValueTooLarge
+// un-wrapped — this is a pre-flight guard, never a NATS-reported rejection.
 func (c *Conn) checkBatchSize(ops []BatchOp) error {
 	if len(ops) > MaxBatchMessages {
 		return fmt.Errorf("%w: %d messages > %d", ErrBatchTooLarge, len(ops), MaxBatchMessages)
 	}
 	limit := c.valueSizeLimit()
 	for i, op := range ops {
-		if op.Delete {
+		if op.Delete || op.Purge {
 			continue
 		}
 		if len(op.Value) > limit {

@@ -30,7 +30,7 @@
 //     are submitted to core-operations via the command outbox: the op is written
 //     as a loom-state outbox.<token> record in the SAME AtomicBatch as the cursor
 //     transition (no dual write), and a durable relay fire-and-forget publishes it
-//     and deletes the record on publish-ack (re-publish idempotent via the chosen
+//     and purges the record on publish-ack (re-publish idempotent via the chosen
 //     requestId + the Contract #4 tracker). The Processor stays the sole Core KV
 //     writer / event producer — Loom never writes Core KV or publishes events
 //     directly, P2;
@@ -40,9 +40,12 @@
 //     index (Contract #10 §10.6);
 //   - a rejected/lost op is invisible on core-events (no tracker, no event), so
 //     the failed terminal is learned off-stream via a per-step deadline.<instanceId>
-//     TTL: its expiry (a KeyValuePurge/MaxAge marker) trips a read-before-act
-//     probe (GET vtx.op.<token>: committed → advance + alert; not yet relayed →
-//     re-arm; rejected → fail) — never a synchronous submit-reply (§10.6);
+//     TTL: the server's marker for that expiry (Nats-Marker-Reason: MaxAge,
+//     decoding as a KeyValuePurge) trips a read-before-act probe (GET
+//     vtx.op.<token>: committed → advance + alert; not yet relayed → re-arm;
+//     rejected → fail) — never a synchronous submit-reply. The probe's predicate
+//     is the empty body every marker on the key carries, so it is re-entrant
+//     against an explicit removal's marker too (§10.6);
 //   - the per-instance cursor, the co-located token reverse index, the outbox
 //     record, and the deadline mark all live in the operational loom-state bucket;
 //     each step transition is one AtomicBatch.

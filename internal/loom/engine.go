@@ -35,6 +35,25 @@ const (
 // whose commit auto-completes the task and advances the cursor.
 const userTaskGrantTTL = 30 * 24 * time.Hour
 
+// tombstoneTTL is the lifetime of the marker every Loom removal leaves on
+// loom-state. The bucket is history-1, so a plain delete marker replaces the
+// value and then occupies the subject permanently; a purge marker carrying a
+// TTL expires instead, and because it is itself a subject-delete marker the
+// server drops the subject rather than re-marking it — so a removed ephemeral
+// key (the pattern pin, a step token, an outbox record, a deadline mark)
+// leaves nothing behind.
+//
+// Any value at or above the server's one-second TTL floor is correct: nothing
+// reads a marker for its own sake — every consumer's predicate is "value
+// absent" or "empty body", which a marker of either shape, and its absence,
+// already satisfy. One minute is chosen so that `nats kv history` on a key an
+// operator is looking at right now still shows the removal that just happened,
+// at a cost of single-digit transient subjects at the observed instance rates.
+//
+// Deliberately not a Config field: there is no operational reason to tune it,
+// and a knob would invite the belief that some consumer depends on the value.
+const tombstoneTTL = time.Minute
+
 // triggerDurable is the fixed always-on trigger consumer's durable name
 // (Contract #10 §10.9). It is independent of completionDomains.
 const triggerDurable = "loom-trigger"
@@ -275,9 +294,26 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	// restart). When patterns did load, this is a cheap no-op diff.
 	e.reconcileConsumers()
 
+	// Convert whatever permanent delete markers loom-state still carries into
+	// the expiring purge markers this package's removals leave. Off the startup
+	// path by construction: Start never waits on it here, and the engine's
+	// context cancels it.
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		e.sweepLegacyTombstones(ctx)
+	}()
+
 	e.logger.Info("loom engine started",
 		"coreKV", e.cfg.CoreKVBucket, "loomState", e.cfg.LoomStateBucket, "lane", e.cfg.Lane)
 	<-ctx.Done()
+	// Join the pass before returning, so nothing it owns — a publish, a log
+	// line, the summary — lands after Start's caller believes the engine is
+	// down. The wait needs no timeout of its own: the pass checks the same ctx
+	// at every marker and between families, and each of its publishes carries a
+	// bounded context, so a cancelled pass returns without waiting on anything
+	// unbounded.
+	<-sweepDone
 	e.supervisor.Stop()
 	return nil
 }
@@ -529,7 +565,7 @@ func (e *Engine) runStepZero(ctx context.Context, inst *Instance, pattern *Patte
 		return substrate.Ack
 	}
 	inst.Cursor = runCursor
-	if err := e.submitStep(ctx, inst, pattern, ""); err != nil {
+	if err := e.submitStep(ctx, inst, pattern, "", tokenCreateOnly); err != nil {
 		e.logger.Error("loom: submit step 0 failed; nak", "instanceId", inst.InstanceID, "err", err)
 		return substrate.Nak
 	}
@@ -804,7 +840,7 @@ func (e *Engine) advance(ctx context.Context, instanceID, token string) error {
 		return e.complete(ctx, inst, pattern, token)
 	}
 	inst.Cursor = runCursor
-	return e.submitStep(ctx, inst, pattern, token)
+	return e.submitStep(ctx, inst, pattern, token, tokenCreateOnly)
 }
 
 // advanceToRunnableStep evaluates step guards forward from inst.Cursor against
@@ -861,22 +897,28 @@ func (e *Engine) advanceToRunnableStep(ctx context.Context, inst *Instance, patt
 // directly with a bounded deadline; a userTask submits CreateTask and parks for
 // a human (the human wait is unbounded; the bounded deadline backstops only the
 // task creation, §10.6).
-func (e *Engine) submitStep(ctx context.Context, inst *Instance, pattern *Pattern, oldToken string) error {
+//
+// tokenMode carries the caller's write condition for the step's token pointer
+// down to the transition batch, whichever arm the step dispatches to: every
+// advancing path passes tokenCreateOnly, and the operator's redrive is the one
+// caller that passes tokenPutUnderRedriveCAS (transition's doc comment carries
+// the argument for why that path is exempt from the create-only guard).
+func (e *Engine) submitStep(ctx context.Context, inst *Instance, pattern *Pattern, oldToken string, tokenMode tokenWriteMode) error {
 	step := pattern.Steps[inst.Cursor]
 	switch step.Kind {
 	case StepKindUserTask:
-		return e.submitUserTask(ctx, inst, pattern, step, oldToken)
+		return e.submitUserTask(ctx, inst, pattern, step, oldToken, tokenMode)
 	case StepKindExternalTask:
-		return e.submitExternalTask(ctx, inst, pattern, step, oldToken)
+		return e.submitExternalTask(ctx, inst, pattern, step, oldToken, tokenMode)
 	default:
-		return e.submitSystemOp(ctx, inst, pattern, step, oldToken)
+		return e.submitSystemOp(ctx, inst, pattern, step, oldToken, tokenMode)
 	}
 }
 
 // submitSystemOp submits a step's bound op directly. The write-ahead token is
 // the op's own requestId; the step arms the bounded deadline (the off-stream
 // rejected/lost backstop, §10.6).
-func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string) error {
+func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string, tokenMode tokenWriteMode) error {
 	token := deriveRequestID(inst.InstanceID, inst.Cursor)
 	inst.PendingToken = token
 
@@ -898,7 +940,7 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, token, oldToken, ob, e.cfg.StepTimeout); err != nil {
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.StepTimeout); err != nil {
 		return err
 	}
 	e.logger.Info("loom step write-ahead",
@@ -998,7 +1040,7 @@ func userTaskOptionalReads(taskKey, subjectKey string) []string {
 // creation; once onDeadline's probe confirms the task vertex exists, it disarms
 // the deadline and the wait for the human becomes unbounded (§10.6) — a
 // human may take days, and false-failing that wait would be a correctness bug.
-func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string) error {
+func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string, tokenMode tokenWriteMode) error {
 	// opMetaKey resolves LIVE (not pinned): it maps the step's operationType to
 	// the op's CURRENT meta-vertex key, which becomes the task's forOperation
 	// grant endpoint. The user executes the op as it exists when the task is
@@ -1040,7 +1082,7 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, token, oldToken, ob, e.cfg.CreateTaskTimeout); err != nil {
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout); err != nil {
 		return err
 	}
 	e.logger.Info("loom userTask write-ahead",
@@ -1076,7 +1118,7 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 // StepTimeout external round-trip. Loom stays substrate-only: the
 // external.<adapter> event is emitted by the instanceOp DDL's transactional
 // outbox, never by Loom — the relay just submits the instanceOp like any op.
-func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string) error {
+func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string, tokenMode tokenWriteMode) error {
 	handle := deriveInstanceID(inst.InstanceID, inst.Cursor)
 	token := handle
 	inst.PendingToken = token
@@ -1119,7 +1161,7 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 	// The deadline bounds the instanceOp submission (a machine action), like a
 	// userTask's CreateTask creation-deadline — not the external round-trip; it
 	// disarms once the instanceOp commits (onExternalTaskDeadline).
-	if err := e.state.transition(ctx, inst, token, oldToken, ob, e.cfg.CreateTaskTimeout); err != nil {
+	if err := e.state.transition(ctx, inst, token, oldToken, tokenMode, ob, e.cfg.CreateTaskTimeout); err != nil {
 		return err
 	}
 	e.logger.Info("loom externalTask write-ahead",
@@ -1147,7 +1189,7 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, "", oldToken, ob, 0); err != nil {
+	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0); err != nil {
 		return err
 	}
 	e.logger.Info("loom pattern complete", "instanceId", inst.InstanceID, "patternId", pattern.PatternID)
@@ -1177,7 +1219,7 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 	if err != nil {
 		return err
 	}
-	if err := e.state.transition(ctx, inst, "", oldToken, ob, 0); err != nil {
+	if err := e.state.transition(ctx, inst, "", oldToken, tokenCreateOnly, ob, 0); err != nil {
 		return err
 	}
 	e.logger.Warn("loom instance failed",

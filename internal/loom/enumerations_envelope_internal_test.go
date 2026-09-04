@@ -112,7 +112,7 @@ func TestSystemOpEnumerations_ReachEnvelope(t *testing.T) {
 				SubjectKey: subjectKey,
 				Status:     StatusRunning,
 			}
-			require.NoError(t, e.submitSystemOp(ctx, inst, pattern, tc.step, ""))
+			require.NoError(t, e.submitSystemOp(ctx, inst, pattern, tc.step, "", tokenCreateOnly))
 
 			key := outboxKey(inst.PendingToken)
 			entry, err := state.conn.KVGet(ctx, state.bucket, key)

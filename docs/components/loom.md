@@ -307,16 +307,25 @@ story latitude):
 
 **Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
 on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,
-`Conn.AtomicBatch` on the bucket is rejected. The "no secondary KV index" rule forbids a **separate
+`Conn.AtomicBatch` on the bucket is rejected. A removal on `loom-state` is a TTL'd purge — `KV-Operation:
+PURGE` + `Nats-Rollup: sub` + a one-minute `Nats-TTL` — so each of the four ephemeral families
+(`instance.<id>.pattern`, `token.*`, `outbox.*`, `deadline.*`) leaves no subject behind once its marker
+expires, and the cursor is the one permanent subject per instance. A bucket still carrying permanent DEL
+markers on those four families converts them at the engine's next start — one pass, off the startup path,
+one revision-conditioned purge per marker, the cursor family never enumerated, convergence by restart
+rather than by looping. The bucket must therefore also allow
+rollups, per-message TTLs and purges (`AllowRollup`, `AllowMsgTTL`, `!DenyPurge`), asserted by
+`verify-kernel` beside `AllowAtomicPublish`. The "no secondary KV index" rule forbids a **separate
 index bucket** (dual-write atomicity / drift); the co-located disjoint-prefix `token.` index in the
 *same* bucket, written in the same atomic batch, is sanctioned and stronger. `deadline.` is keyed on
 **`instanceId`** (not the token) because the interpreter is linear — exactly one step pending per
 instance, so one key always denotes the current step's clock — and because a TTL expiry marker is a
 delete-marker carrying no old value: the subject itself must carry the instanceId, where a
 `token.`-keyed TTL would lose the reverse mapping. The expiry arrives via the loom-state CDC as
-`KeyValuePurge` / `Nats-Marker-Reason: MaxAge` (distinct from a normal DEL) and drives the
-step-deadline-exceeded handler; the value is thin (`setAt`, observability only) — the handler
-reconstructs from `instance.<instanceId>`.
+`KeyValuePurge` / `Nats-Marker-Reason: MaxAge` and drives the step-deadline-exceeded handler, which keys
+on the empty body every marker on the key carries — so a removal's own TTL'd purge marker re-fires the
+same probe harmlessly, no-opping on a terminal instance or an absent key; the value is thin (`setAt`,
+observability only) — the handler reconstructs from `instance.<instanceId>`.
 
 **The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
 recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
@@ -329,7 +338,9 @@ not an oversight: the record's presence is the dedup guard that collapses a re-e
 cursors out. The terminal record is therefore retained indefinitely, deliberately; what a bounding design
 would first have to bound is that horizon, not the record. See
 `_bmad-output/implementation-artifacts/loom-instance-enumeration-bounding-design.md` (§1, §9), and
-`loom-terminal-instance-retention-design.md` §0 for the falsified TTL direction.
+`loom-terminal-instance-retention-design.md` §0 for the falsified TTL direction. The four ephemeral
+sub-keys are the opposite case, swept by construction rather than kept: see
+`loom-state-tombstone-sweep-design.md`.
 
 Correlation on a completion is a **direct `token.<token>` GET** — durable, domain-independent, and
 **multi-instance-safe**: any engine replica resolves any token via the bucket (no in-memory index, no
@@ -476,7 +487,10 @@ placement (Contract #10 §10.3/§10.8).
 `redrive` resumes a FAILED instance at its recorded cursor — never restarts it under a fresh id, which
 would re-execute every step the failed run already committed (§10.3's terminal-batch pin deletion means
 `redrive` re-pins from the CURRENT live pattern, refusing rather than misindexing if the pattern's step
-count changed since the failure). The Starlark guard
+count changed since the failure). The resumed step's `token.<token>` is written as a **put**, guarded by
+the same batch's CAS on the instance record that guards the pin's re-pin, rather than the `CreateOnly`
+every other advancer uses: the failed step's token subject carries the fail arm's marker for the marker's
+lifetime, and a `CreateOnly` write against it is refused. The Starlark guard
 escape hatch (`{reads, starlark}`, loom-starlark-guards-design.md Fire 2) — parse-time compile-check
 + eval against the shared verified-pure sandbox (`internal/starlarksandbox`, Fire 1), for a predicate
 the declarative grammar can't express.
@@ -494,13 +508,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 (`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
-- **A `CreateOnly` write against a key that was ever DELETED can never commit again.** A KV delete leaves a
-  marker on the subject, and `CreateOnly` is `Nats-Expected-Last-Subject-Sequence: 0` ("subject must be
-  empty"), so the whole atomic batch is refused with `err_code=10071`. `redrive` re-created the
-  `instance.<id>.pattern` pin this way and was therefore broken in production for every instance that
-  genuinely reached terminal. Minted: the 2026-08-29 retention fire. Check:
-  `TestRedriveInstance_HappyPath_ResumesAtCursor` + `TestStateStore_Redrive_ConcurrentCASRejectsLoser`, both
-  now seeding through a real terminal batch.
+- **A `CreateOnly` write against a subject that still carries a marker is refused, and once the marker
+  expires the subject accepts writes again — so a guard on this write must never depend on the marker's
+  presence OR absence.** `CreateOnly` is `Nats-Expected-Last-Subject-Sequence: 0` ("subject must be
+  empty"), refused with `err_code=10071` for as long as a removal marker sits on the subject. `redrive`
+  re-created the `instance.<id>.pattern` pin this way — a guard resting on the marker instead of the
+  instance CAS — and was therefore broken in production for every instance that genuinely reached
+  terminal. Minted: the 2026-08-29 retention fire. Check: `TestRedriveInstance_HappyPath_ResumesAtCursor` +
+  `TestStateStore_Redrive_ConcurrentCASRejectsLoser`, both now seeding through a real terminal batch.
 - **A fixture that hand-seeds `loom-state` cannot reach the states a real transition leaves behind.**
   `putInstance` produces a pin subject that was *never written*; production leaves one carrying a delete
   marker. The redrive happy-path test asserted it reproduced "pin already deleted, as production leaves it at
@@ -523,3 +538,17 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `t.Cleanup` has by then cancelled the fixture context — so the read fails with `context canceled` and the
   verdict is reported as a blank assertion failure. Predicates must return a bool and treat a read error as
   "cannot conclude". Minted: the same fire. Check: `instanceRecordGone`'s shape in the loom tests.
+- **The deterministic step token is dossier entry one, one key over.** `redrive` re-derives the failed
+  step's token and writes it against a subject that carries the fail arm's marker — the identical shape,
+  the next key. Minted: the 2026-09-03 tombstone-sweep fire. Check: the redrive-after-real-fail test in
+  `control_internal_test.go` (`TestRedriveInstance_ResumesOverTheFailedStepsRemovedToken`).
+- **A removal in `loom-state` is a TTL'd purge, never a DEL.** A DEL is a permanent subject on a
+  `max_msgs_per_subject=1` bucket — exactly the growth this design exists to stop. Minted: the same fire.
+  Check: `lint-conventions`' `checkLoomStateDelete` (mechanized at ship; this entry records the why, the
+  gate does the catching).
+- **A message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it backstops.** Any
+  empty-body message on a `deadline.<id>` subject re-runs the step-deadline probe, and for a running instance
+  parked in an unbounded wait the probe's evidence (the 24 h tracker) is gone long before the wait ends — so
+  a replayed or re-published marker fails the instance. Never republish on that family for a running
+  instance; the conversion pass reads the record first. Minted: the same fire's close pass. Check:
+  `TestConvertFamily_SkipsARunningInstancesDeadlineMarker`.

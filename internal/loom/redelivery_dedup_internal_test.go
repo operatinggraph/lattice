@@ -29,12 +29,15 @@ func newLoomConn(t *testing.T) *substrate.Conn {
 }
 
 // newLoomStateStore returns a stateStore bound to a provisioned loom-state KV
-// bucket. Used by the redelivery-dedup path tests below.
+// bucket. LimitMarkerTTL mirrors bootstrap/primordial.go's real provisioning
+// and is a prerequisite, not a convenience: every stateStore removal is a
+// purge carrying tombstoneTTL, and a bucket without AllowMsgTTL rejects a
+// message TTL header outright ("message TTL disabled").
 func newLoomStateStore(ctx context.Context, t *testing.T) *stateStore {
 	t.Helper()
 	conn := newLoomConn(t)
 	const bucket = "loom-state"
-	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket, LimitMarkerTTL: time.Second})
 	require.NoError(t, err)
 	return newStateStore(conn, bucket)
 }
@@ -79,10 +82,13 @@ func TestDeleteToken_ClearsAdvancedPointerIdempotently(t *testing.T) {
 	require.NoError(t, s.deleteToken(ctx, token), "double-delete must not error (missing pointer is not an error)")
 }
 
-// TestDeleteToken_MissingPointerIsNoError pins that clearing a token that was
-// never written returns nil — the guard runs unconditionally on the redelivery
-// path and must not fail when the pointer is already absent.
-func TestDeleteToken_MissingPointerIsNoError(t *testing.T) {
+// TestDeleteToken_MissingPointerPublishesNothing pins both halves of the
+// probe-before-purge guard: clearing a token that was never written returns
+// nil, and it publishes NOTHING. An unconditioned purge is a rollup the server
+// accepts over an empty subject, so without the probe this call would mint a
+// marker where no subject existed at all — and advance runs it on every
+// redelivered completion whose token no longer matches the cursor.
+func TestDeleteToken_MissingPointerPublishesNothing(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -91,7 +97,14 @@ func TestDeleteToken_MissingPointerIsNoError(t *testing.T) {
 	defer cancel()
 
 	s := newLoomStateStore(ctx, t)
+	before := streamLastSeq(ctx, t, s)
 	require.NoError(t, s.deleteToken(ctx, "never-written-token"))
+	require.Equal(t, before, streamLastSeq(ctx, t, s),
+		"clearing a token that was never written must create no subject")
+
+	// A redelivery of the same clear stays equally silent.
+	require.NoError(t, s.deleteToken(ctx, "never-written-token"))
+	require.Equal(t, before, streamLastSeq(ctx, t, s))
 }
 
 // TestDeleteToken_PropagatesGenuineFailure pins that a real substrate failure

@@ -3,7 +3,6 @@ package loom
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -74,14 +73,14 @@ func newRelay(conn *substrate.Conn, bucket string, logger *slog.Logger) *relay {
 	}
 }
 
-// handle publishes one outbox record to ops.<lane> and deletes it on success.
-// An empty body is a delete marker (the relay's own delete-on-publish, or a
+// handle publishes one outbox record to ops.<lane> and removes it on success.
+// An empty body is a removal marker (the relay's own purge-on-publish, or a
 // tombstone) — nothing to relay. An unparseable record is poison (Term). Both
-// failure-return paths (publish and the subsequent KVDelete) return
+// failure-return paths (publish and the subsequent removal) return
 // NakWithDelay: one consistent backoff posture so the relay never hot-loops
 // against a failing dependency (with the ops stream healthy but loom-state KV
 // failing, an immediate Nak would re-publish — idempotent but not free — and
-// re-fail the delete at full speed for the outage's duration). Bounded cadence,
+// re-fail the removal at full speed for the outage's duration). Bounded cadence,
 // unbounded count (at-least-once preserved; the supervisor sets no MaxDeliver).
 func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
 	if len(msg.Body) == 0 {
@@ -121,8 +120,8 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 		return substrate.NakWithDelay, nil
 	}
 	key := strings.TrimPrefix(msg.Subject, r.subjPrefix)
-	if err := r.conn.KVDelete(ctx, r.bucket, key); err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
-		r.logger.Error("loom relay: delete outbox record failed; nak with delay", "key", key, "err", err)
+	if err := r.conn.KVPurgeWithTTL(ctx, r.bucket, key, tombstoneTTL, 0); err != nil {
+		r.logger.Error("loom relay: remove outbox record failed; nak with delay", "key", key, "err", err)
 		return substrate.NakWithDelay, nil
 	}
 	r.logger.Info("loom op relayed", "requestId", rec.RequestID, "operation", rec.Operation, "lane", rec.Lane)

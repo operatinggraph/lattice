@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
@@ -426,4 +427,93 @@ func TestInspectKernel_ReportsMissingKey(t *testing.T) {
 		}
 	}
 	require.True(t, found, "InspectKernel must still report the missing key, marked Missing")
+}
+
+// TestVerifyKernel_DetectsLoomStateRemovalPostureLoss pins the loom-state
+// write-posture assertions. Every Loom removal is a TTL'd purge — a subject
+// rollup carrying a per-message TTL — so a bucket that forbids rollups,
+// forbids purges, or ignores message TTLs fails every step transition, and the
+// check exists so that surfaces here rather than as a runtime failure inside
+// Loom.
+//
+// What a bucket in the bad posture actually looks like is worth stating,
+// because it constrains how the defect is injected. On a stream carrying a
+// subject-delete-marker TTL — which loom-state's LimitMarkerTTL provisioning
+// sets — the server FORCES all three flags on and refuses to let an update
+// relax them (nats-server v2.14.0 server/stream.go:1767-1781: it turns on
+// AllowMsgTTL, turns on AllowRollup and clears DenyPurge, non-pedantic). So
+// the regression these assertions guard is the marker TTL being dropped from
+// provisioning, taking the three implied flags with it — which is how each
+// case below is built: the stream is REPLACED with the marker TTL cleared.
+func TestVerifyKernel_DetectsLoomStateRemovalPostureLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		posture func(cfg *jetstream.StreamConfig)
+		want    []string
+		absent  []string
+	}{
+		{
+			name: "message TTLs ignored",
+			posture: func(cfg *jetstream.StreamConfig) {
+				cfg.AllowMsgTTL = false
+			},
+			want:   []string{"AllowMsgTTL NOT set on KV_" + bootstrap.LoomStateBucket},
+			absent: []string{"AllowRollup NOT set", "DenyPurge IS set"},
+		},
+		{
+			name: "rollups forbidden",
+			posture: func(cfg *jetstream.StreamConfig) {
+				cfg.AllowRollup = false
+			},
+			want:   []string{"AllowRollup NOT set on KV_" + bootstrap.LoomStateBucket},
+			absent: []string{"DenyPurge IS set", "AllowMsgTTL NOT set"},
+		},
+		{
+			// DenyPurge and AllowRollup are coupled at creation too — the
+			// server refuses the pair outright ("roll-ups require the purge
+			// permission", stream.go:1741-1743) — so purge-denied necessarily
+			// carries rollup-forbidden.
+			name: "purges denied",
+			posture: func(cfg *jetstream.StreamConfig) {
+				cfg.AllowRollup = false
+				cfg.DenyPurge = true
+			},
+			want: []string{
+				"DenyPurge IS set on KV_" + bootstrap.LoomStateBucket,
+				"AllowRollup NOT set on KV_" + bootstrap.LoomStateBucket,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			conn := seededKernelConn(ctx, t)
+
+			js := conn.JetStream()
+			streamName := "KV_" + bootstrap.LoomStateBucket
+			stream, err := js.Stream(ctx, streamName)
+			require.NoError(t, err)
+			cfg := stream.CachedInfo().Config
+			require.NoError(t, js.DeleteStream(ctx, streamName))
+			cfg.SubjectDeleteMarkerTTL = 0
+			tc.posture(&cfg)
+			created, err := js.CreateStream(ctx, cfg)
+			require.NoError(t, err, "the bad-posture stream must be creatable — otherwise the check guards nothing")
+			info, err := created.Info(ctx)
+			require.NoError(t, err)
+			require.Equal(t, cfg.AllowRollup, info.Config.AllowRollup, "the server must have stored the injected posture")
+			require.Equal(t, cfg.DenyPurge, info.Config.DenyPurge)
+			require.Equal(t, cfg.AllowMsgTTL, info.Config.AllowMsgTTL)
+
+			failures, _ := bootstrap.VerifyKernel(ctx, conn)
+			for _, want := range tc.want {
+				require.Condition(t, containsSubstring(failures, want),
+					"expected a failure naming %q, got %v", want, failures)
+			}
+			for _, absent := range tc.absent {
+				require.Condition(t, func() bool { return !containsSubstring(failures, absent)() },
+					"must not report %q, got %v", absent, failures)
+			}
+		})
+	}
 }

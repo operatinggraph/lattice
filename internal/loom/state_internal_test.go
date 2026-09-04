@@ -5,25 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-// newLoomStateStoreTTL is newLoomStateStore's TTL-capable counterpart —
-// rearmDeadline (KVPutWithTTL) requires the backing bucket provisioned with
-// LimitMarkerTTL (Contract #4 §4.3, mirroring bootstrap/primordial.go's real
-// loom-state provisioning), which the redelivery-dedup tests' plain bucket
-// does not need.
-func newLoomStateStoreTTL(ctx context.Context, t *testing.T) *stateStore {
-	t.Helper()
-	conn := newLoomConn(t)
-	const bucket = "loom-state"
-	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket, LimitMarkerTTL: time.Second})
-	require.NoError(t, err)
-	return newStateStore(conn, bucket)
-}
 
 // TestDisarmDeadline_MissingKeyIsNoOp pins the already-disarmed no-op: probing
 // a deadline key that was never armed (or was already disarmed) finds
@@ -55,7 +40,7 @@ func TestDisarmDeadline_ReentryAfterDisarmIsIdempotent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	s := newLoomStateStoreTTL(ctx, t)
+	s := newLoomStateStore(ctx, t)
 	const instanceID = "inst-reentry"
 
 	require.NoError(t, s.rearmDeadline(ctx, instanceID, time.Minute))

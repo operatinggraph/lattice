@@ -64,9 +64,9 @@ func TestRunningInstanceCounter_LifecycleAcrossRealTransitions(t *testing.T) {
 	// delete this depends on rides the same AtomicBatch a production terminal
 	// takes.
 	insts[0].Status = StatusComplete
-	require.NoError(t, s.transition(ctx, insts[0], "", "", nil, 0))
+	require.NoError(t, s.transition(ctx, insts[0], "", "", tokenCreateOnly, nil, 0))
 	insts[1].Status = StatusFailed
-	require.NoError(t, s.transition(ctx, insts[1], "", "", nil, 0))
+	require.NoError(t, s.transition(ctx, insts[1], "", "", tokenCreateOnly, nil, 0))
 
 	got, err = r.count(ctx)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestRunningInstanceCounter_TerminalRecordRetainedButNotCounted(t *testing.T
 	require.NoError(t, s.createInstance(ctx, inst, counterTestPattern()))
 
 	inst.Status = StatusComplete
-	require.NoError(t, s.transition(ctx, inst, "", "", nil, 0))
+	require.NoError(t, s.transition(ctx, inst, "", "", tokenCreateOnly, nil, 0))
 
 	got, err := r.count(ctx)
 	require.NoError(t, err)

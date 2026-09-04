@@ -133,10 +133,13 @@ type outboxRecord struct {
 }
 
 // deadlineMark is the thin value stored under deadline.<instanceId> (Contract
-// #10 §10.3). It carries a per-key TTL = the current step's deadline; its expiry
-// (a KeyValuePurge/MaxAge marker) is the off-stream failed/rejected backstop
-// (§10.6). The value is observability-only — the step-deadline-exceeded handler
-// reconstructs everything from instance.<instanceId>.
+// #10 §10.3). It carries a per-key TTL = the current step's deadline; the
+// server's marker for that expiry (Nats-Marker-Reason: MaxAge, which decodes as
+// a KeyValuePurge) is the off-stream failed/rejected backstop (§10.6). What the
+// handler keys on is the empty body, which every marker on this key shares —
+// an explicit removal decodes the same way. The value is observability-only:
+// the step-deadline-exceeded handler reconstructs everything from
+// instance.<instanceId>.
 type deadlineMark struct {
 	SetAt string `json:"setAt"`
 }
@@ -261,12 +264,13 @@ func (s *stateStore) resolveToken(ctx context.Context, token string) (instanceID
 // step 0's submission write-aheads its token via transition.
 //
 // The pin keeps its CreateOnly write even though redrive's cannot. The two are
-// not the same situation: a terminal batch deletes the pin and that DEL marker
-// is permanent, so the subject never accepts a CreateOnly write again. Redrive
-// must succeed against exactly that state, so its guard moved to a CAS on the
-// cursor. createInstance runs only when no cursor exists at all, which for a
-// live instanceId means it never ran — so the pin subject is genuinely empty
-// and CreateOnly is both correct and the tighter guard.
+// not the same situation: a CreateOnly write is refused by any subject that
+// still carries a marker, and a terminal batch's removal leaves one on the pin
+// for the marker's lifetime. Redrive must succeed against exactly that state
+// and must not depend on when the marker expires, so its guard sits on a CAS
+// of the cursor instead. createInstance runs only when no cursor exists at all,
+// which for a live instanceId means it never ran — so the pin subject is
+// genuinely empty and CreateOnly is both correct and the tighter guard.
 func (s *stateStore) createInstance(ctx context.Context, inst *Instance, pattern *Pattern) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
@@ -361,6 +365,26 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 	return domains, nil
 }
 
+// tokenWriteMode selects the write condition transition puts on the new
+// token.<newToken> reverse pointer. It exists because one caller — the
+// operator's redrive — legitimately targets a token subject a prior removal
+// left a marker on, and a marker makes a create-only write impossible for the
+// marker's lifetime. See transition's doc comment for why each mode is the
+// right guard on its path.
+type tokenWriteMode int
+
+const (
+	// tokenCreateOnly writes the pointer create-if-absent: the subject must be
+	// empty. Every advancing path uses it — it is the guard that lets only one
+	// of two racing advancers of the same step commit. The zero value, so a
+	// path that names no mode gets the tighter guard.
+	tokenCreateOnly tokenWriteMode = iota
+	// tokenPutUnderRedriveCAS writes the pointer unconditionally, for the
+	// resumed step of a redrive whose guard is the compare-and-set on the
+	// instance record in redrive's own batch.
+	tokenPutUnderRedriveCAS
+)
+
 // transition applies one transition as a single AtomicBatch on loom-state
 // (Contract #10 §10.3): update instance.<id>; optionally write the new
 // token.<newToken> reverse pointer; optionally delete the prior token.<oldToken>;
@@ -369,7 +393,8 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 // record) is part of the same atomic fact as the cursor advance and is NOT a
 // dual write (the command-outbox pattern, §10.3).
 //
-//   - newToken == "" writes no forward pointer (a terminal has no next step).
+//   - newToken == "" writes no forward pointer (a terminal has no next step),
+//     and tokenMode is then unread.
 //   - oldToken == "" deletes no prior pointer (the initial step had none).
 //   - outbox != nil writes the op-to-submit record (the relay publishes it).
 //   - deadlineTTL > 0 arms (PUT, fresh TTL) deadline.<instanceId> (re-arm on
@@ -385,7 +410,37 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 // The write-ahead invariant (loom.md crash-safety invariant 1) holds by construction: the op
 // record is persisted in this batch and the relay's publish is the only side
 // effect, decoupled and idempotent.
-func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, outbox *outboxRecord, deadlineTTL time.Duration) error {
+//
+// tokenMode is the write condition on token.<newToken>; the two modes guard
+// different things.
+//
+// tokenCreateOnly is the race guard for an ADVANCING instance: two advancers of
+// the same step (a live completion and a deadline-probe recovery) derive the
+// same deterministic newToken, so the loser's batch is rejected here and only
+// one advance commits a given step. A genuine crash-retry never reaches it —
+// the prior attempt's batch is all-or-nothing, so a re-GET sees PendingToken
+// already == newToken and routes to the drop branch, not a re-submit.
+//
+// tokenPutUnderRedriveCAS is the step a redrive resumes, and it is exempt from
+// that guard on both counts. It cannot use create-only: the token is derived
+// from (instanceId, cursor), so resuming at the failed cursor re-derives the
+// token the failing transition removed, and a removal's marker refuses a
+// create-only write for the marker's lifetime. It does not need create-only
+// either: after redrive's CAS on the instance record this instance has no live
+// advancer — it was terminal, so no deadline is armed; the old token is gone,
+// so a late completion resolves nothing and drops on advance's cursor check;
+// and a concurrent redrive lost that CAS and returned before submitting.
+//
+// One other writer reaches that window and is benign in both orders: a
+// redelivered patternStarted, whose resume gate is exactly running-with-an-
+// empty-pending-token — the state redrive leaves between its CAS and the
+// resumed step's submission. While the marker stands, the resume's create-only
+// write is refused → Nak → redelivered, by which time the redrive's put has
+// landed and the gate reads a pending token → Ack. With the marker expired the
+// resume commits first and the redrive's put rewrites the same pointer, cursor
+// and outbox record with identical content, the doubled op collapsing on the
+// Contract #4 tracker.
+func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, tokenMode tokenWriteMode, outbox *outboxRecord, deadlineTTL time.Duration) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -394,17 +449,18 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
 	}
 	if inst.Status != StatusRunning {
-		// Terminal (complete/failed): delete the pattern pin in the SAME batch
+		// Terminal (complete/failed): remove the pattern pin in the SAME batch
 		// that flips the status. The pin's removal is what lets the reconcile
 		// union drain — a domain kept alive only by this instance's pinned
 		// pattern is torn down on the next reconcile. The cursor record itself
 		// is kept, expiring on the retention TTL stamped above (if any) rather
-		// than being deleted here, so it can still answer a redelivered trigger
+		// than being removed here, so it can still answer a redelivered trigger
 		// and an operator's inspect/redrive.
 		ops = append(ops, substrate.BatchOp{
 			Bucket: s.bucket,
 			Key:    patternPinKey(inst.InstanceID),
-			Delete: true,
+			Purge:  true,
+			TTL:    tombstoneTTL,
 		})
 	}
 	if newToken != "" {
@@ -412,25 +468,19 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 		if err != nil {
 			return fmt.Errorf("loom: marshal token pointer: %w", err)
 		}
-		// CreateOnly is also the concurrency guard: two advancers racing the same
-		// step (e.g. a live completion and a deadline-probe recovery) derive the
-		// same deterministic newToken, so the loser's batch is rejected here —
-		// only one advance can commit a given step. A genuine crash-retry never
-		// hits this: the prior attempt's batch is all-or-nothing, so a re-GET sees
-		// PendingToken already == newToken and routes to the drop branch, not a
-		// re-submit.
 		ops = append(ops, substrate.BatchOp{
 			Bucket:     s.bucket,
 			Key:        tokenKey(newToken),
 			Value:      ptrBody,
-			CreateOnly: true,
+			CreateOnly: tokenMode == tokenCreateOnly,
 		})
 	}
 	if oldToken != "" && oldToken != newToken {
 		ops = append(ops, substrate.BatchOp{
 			Bucket: s.bucket,
 			Key:    tokenKey(oldToken),
-			Delete: true,
+			Purge:  true,
+			TTL:    tombstoneTTL,
 		})
 	}
 	if outbox != nil {
@@ -464,7 +514,8 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 		ops = append(ops, substrate.BatchOp{
 			Bucket: s.bucket,
 			Key:    deadlineKey(inst.InstanceID),
-			Delete: true,
+			Purge:  true,
+			TTL:    tombstoneTTL,
 		})
 	}
 	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
@@ -482,11 +533,12 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 // instance record: both readers see revision R, the winner's batch bumps it, and
 // the loser's expected-R batch is rejected whole — so only one redrive can
 // re-pin and re-submit. It rides the instance key rather than the pin because
-// the instance record is never deleted, while the pin is: the terminal batch's
-// pin DELETE leaves a delete marker on that subject, and a marker makes the
-// subject non-empty, so a CreateOnly re-pin (expected-last-subject-sequence 0)
-// could never commit for an instance that genuinely reached terminal. The pin is
-// therefore written as an ordinary put, guarded by the same batch's CAS.
+// the instance record is never removed, while the pin is: the terminal batch's
+// pin removal leaves a marker on that subject, a marker makes the subject
+// non-empty, and a CreateOnly re-pin (expected-last-subject-sequence 0) is
+// refused by exactly that. The marker is present for the marker's lifetime and
+// the guard must not depend on it, so the pin is written as an ordinary put,
+// guarded by the same batch's CAS.
 func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
@@ -535,17 +587,19 @@ func (s *stateStore) rearmDeadline(ctx context.Context, instanceID string, ttl t
 	return nil
 }
 
-// disarmDeadline deletes deadline.<instanceId> without touching the cursor or
+// disarmDeadline removes deadline.<instanceId> without touching the cursor or
 // token — used by the userTask creation-deadline probe once the task vertex
 // exists: the bounded creation wait is over, so the deadline is removed and the
 // wait for the human becomes unbounded (§10.6).
 //
-// The delete is guarded on the key already being present. This matters because
+// The removal is guarded on the key already being present. This matters because
 // disarming a still-running instance does NOT change instance state, so the
-// onDeadline handler does not self-guard against re-entry: the disarm's own DEL
+// onDeadline handler does not self-guard against re-entry: the disarm's own
 // marker re-fires the deadline watcher, which probes and disarms again. Skipping
-// the delete when the key is already gone makes the second pass a true no-op
-// (no fresh marker) and breaks that loop. A missing key is not an error.
+// the removal when the key is already gone makes the second pass a true no-op
+// (no fresh marker) and breaks that loop. A missing key is not an error — and
+// the probe is what supplies that, since an unconditioned purge of an absent
+// key is accepted by the server rather than reported as not-found.
 func (s *stateStore) disarmDeadline(ctx context.Context, instanceID string) error {
 	if _, err := s.conn.KVGet(ctx, s.bucket, deadlineKey(instanceID)); err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
@@ -553,7 +607,7 @@ func (s *stateStore) disarmDeadline(ctx context.Context, instanceID string) erro
 		}
 		return fmt.Errorf("loom: probe deadline %q: %w", instanceID, err)
 	}
-	if err := s.conn.KVDelete(ctx, s.bucket, deadlineKey(instanceID)); err != nil {
+	if err := s.conn.KVPurgeWithTTL(ctx, s.bucket, deadlineKey(instanceID), tombstoneTTL, 0); err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
 			return nil
 		}
@@ -565,8 +619,22 @@ func (s *stateStore) disarmDeadline(ctx context.Context, instanceID string) erro
 // deleteToken removes a token.<token> reverse pointer (used when a redelivered
 // completion resolves to an already-advanced instance and the stale pointer must
 // be cleared). A missing pointer is not an error.
+//
+// The removal is guarded on the key being present, the same probe
+// disarmDeadline runs and for the same reason: an unconditioned purge of an
+// absent key is accepted by the server rather than reported as not-found, so
+// it CREATES a marker on a subject that held nothing. advance calls this on
+// every redelivered completion that no longer matches the cursor, so an
+// unguarded purge would mint a fresh subject per redelivery on a token that
+// may never have been written at all.
 func (s *stateStore) deleteToken(ctx context.Context, token string) error {
-	if err := s.conn.KVDelete(ctx, s.bucket, tokenKey(token)); err != nil {
+	if _, err := s.conn.KVGet(ctx, s.bucket, tokenKey(token)); err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return nil
+		}
+		return fmt.Errorf("loom: probe token %q: %w", token, err)
+	}
+	if err := s.conn.KVPurgeWithTTL(ctx, s.bucket, tokenKey(token), tombstoneTTL, 0); err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
 			return nil
 		}
