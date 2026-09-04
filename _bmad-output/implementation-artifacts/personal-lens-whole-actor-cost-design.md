@@ -129,8 +129,20 @@ profile of the live handler: 13 in `ReadableAnchors`, 10 in `neighborsFromCoreKV
 0 in the publishes). **Inc 4 (found at build):** `KVGetMultiNoSnapshot`'s past-the-cap path becomes
 list-then-get — wildcards expanded to exact keys through the listing, then fetched in ≤ 1,024-key atomic
 requests — so every `NoSnapshot` caller past the cap (the grant set, the marked hub, any executor prefetch
-that overflows) pays ~0.05–0.15 ms per key instead of ~1 ms. The snapshot-verified `KVGetMulti` keeps its
+that overflows) pays ~0.1–0.2 ms per key instead of ~1 ms. The snapshot-verified `KVGetMulti` keeps its
 double drain: its guarantee is the comparison, which list-then-get cannot offer.
+
+*(Amended at build, 2026-09-03 — found by a real test failure, `TestNeighbors_MarkedNodeIsNeverQuietlyShort`.)*
+**A single listing is not a sound resolution.** nats.go's `ListKeysFiltered` is a `WatchFiltered(…,
+IgnoreDeletes(), MetaOnly())` whose "initial values received" marker fires on `received >= initPending ||
+delta == 0` with `initPending` captured at consumer creation (nats.go v1.52.0 `jetstream/kv.go`) — the same
+count-bounded stop condition `drainDirectGetFallback`'s own doc identifies as unsound on a history-1 stream:
+a rewrite during the enumeration erases the message the count counted and appends a new one later, the
+counts balance, and the enumeration ends with keys undelivered. On the capability plane a short listing is a
+silently disappearing grant. So the resolution enumerates each filter **twice and requires the key sets to
+agree** (bounded retries, else a loud error), which is cheap because a rewrite never changes the key set:
+the widest actor's listing cost is ~0.36 s, against the 3.0–3.4 s drain. The stop condition is now a
+load-bearing vendor behaviour and has its row in `docs/vendors.md`.
 
 ## 4. The shape
 
