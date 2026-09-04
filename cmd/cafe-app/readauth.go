@@ -282,11 +282,14 @@ func (s *server) visibleLeases(ctx context.Context, hats subjectHats) (leaseVisi
 		return leaseVisibility{}, fmt.Errorf("resolve resident's own leases: %w", err)
 	}
 	if hats.isFrontDesk() {
-		covered, err := s.staffCoveredLeases(ctx, hats)
+		covered, unattributable, err := s.staffCoveredLeases(ctx, hats)
 		if err != nil {
 			return leaseVisibility{}, err
 		}
 		for key := range covered {
+			leases[key] = true
+		}
+		for key := range unattributable {
 			leases[key] = true
 		}
 	}
@@ -308,34 +311,49 @@ func notYourLease(hats subjectHats) string {
 }
 
 // leaseWorkplaceProjection is one row of the cafe-domain `cafeLeaseWorkplaces`
-// lens — the locations that cover a lease.
+// lens — the locations that cover a lease. MissingLocation distinguishes an
+// empty CoveringLocations caused by a data gap (the appliesToUnit target is
+// gone or never wired) from the ordinary "no workplace reaches this lease"
+// answer — see leaseWorkplacesSpec (cafe-domain/lenses.go).
 type leaseWorkplaceProjection struct {
 	LeaseAppKey       string   `json:"leaseAppKey"`
+	MissingLocation   bool     `json:"missingLocation"`
 	CoveringLocations []string `json:"coveringLocations"`
 }
 
-// staffCoveredLeases returns the set of lease keys this staffer's workplace
-// reaches — the staff analog of residentOwnLeases (residents.go), and used the
-// same way: resolved once per request, then intersected with whatever rows the
-// handler was going to return. Every café staff read keys on leaseAppKey, so
-// one covered-lease set confines all of them.
+// staffCoveredLeases returns two sets from one pass over cafeLeaseWorkplaces:
+// covered — the leases this staffer's SPECIFIC workplace reaches, the staff
+// analog of residentOwnLeases (residents.go), resolved once per request and
+// then intersected with whatever rows the handler was going to return; and
+// unattributable — every lease flagged MissingLocation, visible to EVERY
+// front-desk staffer regardless of workplace because no specific one can be
+// blamed for the gap (11 café leases hit this when the 2026-08-23 duplicate-
+// listing reap tombstoned their units out from under a live lease, before the
+// reap script's live-tenancy guard existed, `9a3a7807`). This is a READ-only
+// accommodation: require_workplace's write-side walk independently refuses a
+// Charge/Settle against the same dead unit no matter what `unattributable`
+// admits, so it never grants a collection capability, only the visibility to
+// notice the debt and escalate it (an operator, already unrestricted, is who
+// actually fixes the underlying data). Every café staff read keys on
+// leaseAppKey, so these two sets, resolved once here, confine all of them.
 //
-// Fails CLOSED throughout. A caller with no workplace gets an empty set, not a
-// pass. A lease whose row is missing entirely — a projection written before
-// this lens existed, or one that has not converged yet — is simply absent from
-// the set and therefore denied, rather than defaulting to visible. Only the
-// bucket-missing case is distinguished, and it is reported as an error rather
-// than as an empty answer, so a stack where cafe-domain 0.8.0 has not been
-// installed fails loudly instead of silently blanking every staff view.
-func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (map[string]bool, error) {
-	covered := map[string]bool{}
+// Fails CLOSED throughout. A caller with no workplace gets an empty covered
+// set, not a pass. A lease whose row is missing entirely — a projection
+// written before this lens existed, or one that has not converged yet — is
+// simply absent from both sets and therefore denied, rather than defaulting
+// to visible. Only the bucket-missing case is distinguished, and it is
+// reported as an error rather than as an empty answer, so a stack where
+// cafe-domain 0.11.30 has not been installed fails loudly instead of
+// silently blanking every staff view.
+func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (covered, unattributable map[string]bool, err error) {
+	covered, unattributable = map[string]bool{}, map[string]bool{}
 	if !hats.isFrontDesk() {
-		return covered, nil
+		return covered, unattributable, nil
 	}
 	bucket := cafedomain.LeaseWorkplacesBucket
 	keys, err := s.conn.KVListKeys(ctx, bucket)
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w (is cafe-domain 0.8.0 installed and the Refractor projecting?)", bucket, err)
+		return nil, nil, fmt.Errorf("list %s: %w (is cafe-domain 0.11.30 installed and the Refractor projecting?)", bucket, err)
 	}
 	get := s.kvGetter(ctx, bucket)
 	for _, k := range keys {
@@ -347,9 +365,13 @@ func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (map[
 		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
 			continue
 		}
+		if p.MissingLocation {
+			unattributable[p.LeaseAppKey] = true
+			continue
+		}
 		if hats.covers(p.CoveringLocations) {
 			covered[p.LeaseAppKey] = true
 		}
 	}
-	return covered, nil
+	return covered, unattributable, nil
 }

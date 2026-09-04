@@ -921,11 +921,16 @@ func TestStaff_ContainingLocationCovers(t *testing.T) {
 	}
 }
 
-// TestStaff_UnwiredLeaseDenied: a lease whose covering set is empty — its unit
-// has no containment and the lease may have no unit at all — is covered by
-// nobody. This is the vector that would otherwise wave a whole class of rows
-// through, since an empty set is the shape the lens projects for anything the
-// topology has not reached yet.
+// TestStaff_UnwiredLeaseDenied is the DEFENSIVE-FALLBACK vector: a
+// cafeLeaseWorkplaces row with an empty covering set but no missingLocation
+// flag set either — a shape the real lens should never produce today (an
+// empty coveringLocations always means `u` never bound, which the real
+// Cypher also flags missingLocation, cafe-domain's
+// TestCafeLeaseWorkplaces_NoUnitEmptyCovering proves it live), but a stale
+// row from a pre-`missingLocation` lens version, or a future lens bug that
+// forgets to set the flag, must still deny rather than silently fall through
+// to visible. TestStaff_UnattributableLease_VisibleToAnyFrontDesk below is
+// the actually-reachable production shape (missingLocation explicitly true).
 func TestStaff_UnwiredLeaseDenied(t *testing.T) {
 	const staff, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
 	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
@@ -935,6 +940,59 @@ func TestStaff_UnwiredLeaseDenied(t *testing.T) {
 	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.nowhere", cookieFor(staff))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (an unwired lease is covered by nobody); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestStaff_UnattributableLease_VisibleToAnyFrontDesk: a lease flagged
+// missingLocation (its appliesToUnit target was tombstoned out from under a
+// still-live lease, 2026-08-23's duplicate-listing reap before `9a3a7807`'s
+// guard) is covered by no SPECIFIC workplace, but unlike the plain-unwired
+// case (TestStaff_UnwiredLeaseDenied) it must not be invisible to every
+// front-desk staffer either — that is what silently hid $14.50 of café debt
+// from the front-desk arrears list and 403'd `/api/ledger` for it. A staffer
+// wired to a workplace that has nothing to do with this lease still reads it.
+func TestStaff_UnattributableLease_VisibleToAnyFrontDesk(t *testing.T) {
+	const staff, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace}}, nil))
+	putJSON(t, s.conn, weaverTargetsBucket, leaseApplicationKeyPrefix+"vtx.leaseapp.orphaned", map[string]any{
+		"entityKey": "vtx.leaseapp.orphaned", "applicant": "vtx.identity." + res, "landlordApproved": true,
+	})
+	putJSON(t, s.conn, cafeledger.LeaseAccountsBucket, "vtx.leaseapp.orphaned", map[string]any{
+		"leaseAppKey": "vtx.leaseapp.orphaned", "accountKey": "",
+	})
+	putJSON(t, s.conn, cafedomain.LeaseWorkplacesBucket, "vtx.leaseapp.orphaned", map[string]any{
+		"leaseAppKey":       "vtx.leaseapp.orphaned",
+		"missingLocation":   true,
+		"coveringLocations": []string{},
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.orphaned", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a missingLocation lease is unattributable, not denied); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestResident_UnattributableLease_StillNotVisibleToStrangers: the
+// unattributable broadening is front-desk-only (unattributableLeases is only
+// unioned in inside the isFrontDesk() branch of visibleLeases) — a resident
+// who is not party to the lease and carries no staff hat gets no benefit
+// from another lease's missingLocation flag.
+func TestResident_UnattributableLease_StillNotVisibleToStrangers(t *testing.T) {
+	const stranger, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, nil))
+	putJSON(t, s.conn, weaverTargetsBucket, leaseApplicationKeyPrefix+"vtx.leaseapp.orphaned", map[string]any{
+		"entityKey": "vtx.leaseapp.orphaned", "applicant": "vtx.identity." + res, "landlordApproved": true,
+	})
+	putJSON(t, s.conn, cafedomain.LeaseWorkplacesBucket, "vtx.leaseapp.orphaned", map[string]any{
+		"leaseAppKey":       "vtx.leaseapp.orphaned",
+		"missingLocation":   true,
+		"coveringLocations": []string{},
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.orphaned", cookieFor(stranger))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a non-staff stranger gets no unattributable broadening); body=%s", rec.Code, rec.Body.String())
 	}
 }
 

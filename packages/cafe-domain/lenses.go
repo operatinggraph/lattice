@@ -158,9 +158,15 @@ func Lenses() []pkgmgr.LensSpec {
 // writes require_workplace refuses.
 //
 // The list-comprehension form (lease-signing's authz_anchors idiom, mirrored
-// by wellness-domain's own coveringLocations) keeps the row one-per-lease — an
-// OPTIONAL MATCH on a multi-parent unit would fan the lease into several rows
-// instead. The location nodes carry no label because the chain must admit a
+// by wellness-domain's own coveringLocations) keeps the row one-per-lease — a
+// plain (non-comprehension) MATCH/OPTIONAL MATCH on a multi-parent unit's
+// containedIn chain would fan the lease into several rows instead, one per
+// ancestor. The single-hop `OPTIONAL MATCH (l)-[:appliesToUnit]->(u)` added
+// below is exempt from that: appliesToUnit is 0..1 (lease-signing/lenses.go),
+// so it binds at most one `u` per lease and adds no row of its own — only the
+// `missingLocation` column.
+//
+// The location nodes carry no label because the chain must admit a
 // location at ANY level — a building, a floor, a unit — and a bare node is the
 // simplest way to say so, the same reason edge-manifest's workplace chains
 // leave them bare. (`:location*`, the abstract label with the taxonomy sigil,
@@ -175,11 +181,36 @@ func Lenses() []pkgmgr.LensSpec {
 // location_keys list, and it is why the column must be projected for every
 // lease rather than only for the wired ones: an absent row and an empty set
 // have to deny alike.
+//
+// `missingLocation` (mirrors menuCatalogSpec's own flag below) distinguishes
+// WHY the set is empty: `u.key = null` means the appliesToUnit target is gone
+// (tombstoned out from under a still-live lease — the 2026-08-23 duplicate-
+// listing reap did this to 11 café leases before the reap script's own
+// live-tenancy guard existed, `9a3a7807`) or was never wired at all, either
+// way a data gap rather than a genuine "no workplace" answer. The `(l:leaseapp)`
+// head is lease-signing's shared type, not café-scoped — a tombstoned-unit gap
+// on a LoftSpace/clinic/wellness lease projects missingLocation too, and reads
+// visible to café front desk the identical way; that is intentional, not a
+// leak, since a café tenant IS a loftspace tenant in the same building and
+// staffCoveredLeases already crosses that boundary for the wired case (a
+// staffer's workplace covers a lease's containedIn ancestors regardless of
+// which vertical minted it). staffCoveredLeases still denies a missingLocation
+// row on the per-workplace path — a data gap proves no MORE workplace access
+// than an empty set did — but readauth.go's staffCoveredLeases additionally
+// returns it in a SEPARATE unattributable set that every front-desk staffer
+// sees regardless of workplace: no specific one can be blamed for the gap, so
+// every workplace gets to see and escalate it, same as an operator would.
+// This is a READ-side accommodation only; require_workplace's own write-side
+// walk is untouched and independently refuses a Charge/Settle against the
+// same dead unit, so broadening this set never grants a collection
+// capability, only visibility.
 const leaseWorkplacesSpec = `MATCH (l:leaseapp)
+OPTIONAL MATCH (l)-[:appliesToUnit]->(u)
 RETURN
   l.key AS key,
   l.key AS leaseAppKey,
-  [(l)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
+  (u.key = null) AS missingLocation,
+  [(l)-[:appliesToUnit]->(wu)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // menuCatalogSpec projects one row per live menuItem — a tombstoned item
 // simply drops out of the MATCH, so RetireMenuItem needs no explicit filter

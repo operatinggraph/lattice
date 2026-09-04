@@ -66,6 +66,21 @@ func (f *cdFixture) aspect(t *testing.T, ownerName, local, class string, data ma
 	require.NoError(t, err)
 }
 
+// tombstoneVtx marks a previously-seeded vertex isDeleted — the exact
+// footprint the 2026-08-23 duplicate-listing reap left on a unit a live
+// lease still applies to (mirrors wellness-domain's own tombstoneVtx), so a
+// test can put appliesToUnit's target into the state that gave 11 café
+// leases an empty coveringLocations with a live link.
+func (f *cdFixture) tombstoneVtx(t *testing.T, name string) {
+	t.Helper()
+	id := f.ids[name]
+	key := "vtx." + f.types[id] + "." + id
+	body := map[string]any{"key": key, "class": f.types[id], "isDeleted": true, "data": map[string]any{}}
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
 func (f *cdFixture) edge(t *testing.T, name, fromName, toName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -451,6 +466,8 @@ func TestCafeLeaseWorkplaces_CoveringLocations(t *testing.T) {
 	require.Len(t, rows, 1, "the comprehension must not fan the lease into one row per ancestor")
 	require.ElementsMatch(t, []any{unitKey, buildingKey}, rows[0].Values["coveringLocations"],
 		"depth-0 (the lease's own unit) and its containedIn ancestor both cover the lease")
+	require.Equal(t, false, rows[0].Values["missingLocation"],
+		"a live, wired unit is not a data gap — the OPTIONAL MATCH head (bound to `u`) must not be confused with the comprehension's own re-walk (bound to `wu`)")
 }
 
 // TestCafeLeaseWorkplaces_DeepChainWalksEveryLevel proves the chain is walked
@@ -478,11 +495,16 @@ func TestCafeLeaseWorkplaces_DeepChainWalksEveryLevel(t *testing.T) {
 
 // TestCafeLeaseWorkplaces_NoUnitEmptyCovering proves a lease with no
 // appliesToUnit still projects one row, with an EMPTY covering set rather than
-// a null or a missing column: the staff boundary reads that as "no workplace
-// covers this row" and denies, matching require_workplace's
-// empty-location_keys denial. The comprehension's head is the matched lease,
-// so this is also the vector that would catch it seeding the whole keyspace
-// instead of binding empty.
+// a null or a missing column: staffCoveredLeases reads that as "no SPECIFIC
+// workplace covers this row" and denies via the per-workplace path, matching
+// require_workplace's empty-location_keys denial. The comprehension's head is
+// the matched lease, so this is also the vector that would catch it seeding
+// the whole keyspace instead of binding empty. missingLocation is true here
+// too (`u` never binds) — readauth.go's unattributableLeases is what actually
+// keeps this row from being invisible to every front-desk staffer everywhere;
+// this lens-level test only proves the flag, not the read-boundary behavior
+// (cmd/cafe-app/authz_test.go's TestStaff_UnattributableLease_VisibleToAnyFrontDesk
+// proves that).
 func TestCafeLeaseWorkplaces_NoUnitEmptyCovering(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -493,7 +515,35 @@ func TestCafeLeaseWorkplaces_NoUnitEmptyCovering(t *testing.T) {
 	rows := f.project(t, leaseWorkplacesSpec)
 	require.Len(t, rows, 1, "an unwired lease must still project a row, so its denial is explicit")
 	require.Empty(t, rows[0].Values["coveringLocations"],
-		"an unwired lease is covered by nobody; the boundary must not read that as unrestricted")
+		"an unwired lease is covered by nobody SPECIFIC; the per-workplace boundary must not read that as unrestricted")
+	require.Equal(t, true, rows[0].Values["missingLocation"],
+		"no appliesToUnit at all is the same data-gap shape as a tombstoned target — both leave `u` unbound")
+}
+
+// TestCafeLeaseWorkplaces_TombstonedUnit_MissingLocationTrue proves the shape
+// that actually hit production: appliesToUnit's LINK survives, but its target
+// unit is tombstoned (the 2026-08-23 duplicate-listing reap, before the
+// reap script's live-tenancy guard existed, `9a3a7807`) — 11 café leases hit
+// exactly this. `u` binds to nothing (Cypher does not match through a
+// tombstoned vertex), so missingLocation is true and coveringLocations is
+// empty, identical to the never-wired case above; the read boundary treats
+// both as one data-gap category (readauth.go's unattributableLeases).
+func TestCafeLeaseWorkplaces_TombstonedUnit_MissingLocationTrue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "unit4b", "unit")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.tombstoneVtx(t, "unit4b")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1, "a lease whose unit was tombstoned out from under it still projects a row")
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"Cypher does not match through a tombstoned vertex, so the comprehension binds empty")
+	require.Equal(t, true, rows[0].Values["missingLocation"],
+		"the appliesToUnit LINK is alive but its target is gone — this must read as a data gap, not a genuine no-workplace answer")
 }
 
 // TestCafeLeaseWorkplaces_UnwiredUnitCoversItself proves the depth-0 entry
