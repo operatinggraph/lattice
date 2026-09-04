@@ -1,6 +1,6 @@
 # Lint gates (`scripts/lint-*.go`)
 
-The repo's static gates. Each is a standalone `//go:build ignore` Go program run by CI's `lint-build` job
+The repo's static gates. Each is a standalone `//go:build ignore` Go program run by CI's `lint-static` job
 as `STRICT=1 go run ./scripts/lint-<name>.go` (`.github/workflows/ci.yml` is the authority for the list),
 and by a `make lint-<name>` target for local use. Unset `STRICT` warns; `STRICT=1` exits non-zero on any
 non-advisory finding.

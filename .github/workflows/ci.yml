@@ -15,10 +15,21 @@ on:
     paths-ignore: *doc-paths
   workflow_dispatch: {}
 
-# Six independent jobs run concurrently; wall-clock is the slowest job, not
+# Independent jobs run concurrently; wall-clock is the slowest job, not
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
-#   lint-build         — build, vet, golangci, conventions-lint     (no Docker)
+#   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
+#   lint-static        — golangci + the 16 STRICT scripts/lint-*.go gates,
+#                         split off lint-build so the compile/vet half and the
+#                         static-analysis half run in parallel instead of
+#                         serially — lint-build's own wall-clock (Build+Vet+
+#                         Lint+16 scripts, ~170-210s measured) had become a
+#                         tied pole with the unit shards (backlog: "unit-4/
+#                         lint-build now the poles"). Split by INDEPENDENCE,
+#                         not by runtime alone: nothing here reads `bin/` or
+#                         any output `make build`/`make vet` produce, so the
+#                         two jobs share no state past the checked-out tree
+#                         and a fresh module cache restore.               (no Docker)
 #   stack-gates        — make up → verify-kernel → 12× verify-package →
 #                         hello-lattice → health-completeness        (Docker)
 #   convergence        — lease-convergence, object-gc, augur-convergence,
@@ -104,24 +115,12 @@ jobs:
       - name: Vet
         run: make vet
 
-      - name: Lint
-        # skip-cache: a restored analysis cache makes the verdict depend on
-        # which packages the run happened to re-analyze. staticcheck's
-        # interprocedural facts (e.g. that t.Fatalf does not return) are lost
-        # for packages served from cache, so SA5011 fires on correct code in
-        # some runs and not others — the same commit linting clean or dirty by
-        # cache state alone. A full analysis every run is the only verdict
-        # that means anything.
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.11.4
-          skip-cache: true
-
       - name: Gofmt (whole tree, including build-ignored files)
         # golangci-lint's gofmt linter only analyses files that belong to a
         # package go/packages can load, and every scripts/*.go opens with
-        # `//go:build ignore` — so that whole tree is invisible to the Lint
-        # step above. This walks the working tree directly.
+        # `//go:build ignore` — so that whole tree is invisible to golangci
+        # (which runs in the lint-static job). This walks the working tree
+        # directly.
         run: |
           # gofmt -l exits non-zero with EMPTY stdout and a stderr diagnostic
           # when a file will not parse, so the listing alone cannot be the
@@ -138,6 +137,30 @@ jobs:
             exit 1
           fi
           echo "gofmt: clean"
+
+  lint-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Lint
+        # skip-cache: a restored analysis cache makes the verdict depend on
+        # which packages the run happened to re-analyze. staticcheck's
+        # interprocedural facts (e.g. that t.Fatalf does not return) are lost
+        # for packages served from cache, so SA5011 fires on correct code in
+        # some runs and not others — the same commit linting clean or dirty by
+        # cache state alone. A full analysis every run is the only verdict
+        # that means anything.
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.4
+          skip-cache: true
 
       - name: Conventions lint (CLAUDE.md key-shapes + no history comments)
         # Static check: rejects `asp.` key prefixes (Contract #1) and
