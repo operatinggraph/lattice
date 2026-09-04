@@ -890,3 +890,113 @@ table and §4.2's `distances()` bound as the things to attack.
 
 Review depth beyond those two calls is the Steward's sizing (`agents/steward/SKILL.md` §4); there is
 no blanket every-increment-full-depth clause here.
+
+---
+
+### Untyped-hop fire brief (build note, 2026-09-04)
+
+Compiled at `b9a49338` by the Lattice Steward (Phase 0, `agents/fire-brief-template.md`). One brief for the
+item; both increments are one fire, driven in §13's order. Worktree `lattice-wt-untyped-hop`, branch
+`fire/untyped-hop-anchor`. Landing shape: **each increment lands on `main` when independently green** (§13
+names Inc 1 independently shippable, and Inc 2's census edits assume Inc 1 is already in).
+
+**1. Scope sentence (verbatim, banner).** *"✅ ANDREW-RATIFIED 2026-09-01 — build-ready; the Lattice Steward
+builds it in the increment order of §13."* Green bar per increment is §10's; acceptance is §11.2's table.
+
+**2. Verified touch-list (live at `b9a49338`; two `haiku` scouts + lead re-check).**
+- Inc 1: `packages/objects-base/lenses.go:103-119` `objectLivenessSpec`; doc comments `:14-22`, `:74-84`;
+  bucket `:29`. `ddls.go:554` `optionalReads: [obj_key]`; vertex co-writes `:650` mint, `:658` revive, `:677`
+  live OCC-touch, `:699` replace leg (prior object), `:733-734` detach — the last two `present(state, …)`-gated;
+  link writes `:637` (`link_ensure_alive`), `:697` (old link tombstone), `:729` (detach tombstone).
+  `lens_cypher_test.go:516` (retire); sibling `objectLiveness` cases `:193,212,233,261,279,299`.
+  `package.go:56` `Version: "0.3.8"` + `manifest.yaml:2` (bump both). Pins that move on Inc 1, all under
+  `internal/refractor/`: `label_derivation_corpus_census_test.go:290`; `grouping_reduction_corpus_census_test.go:161`;
+  `branch_decomposition_corpus_census_pins_test.go:96,259`; `rel_projection_corpus_census_test.go:52` + the
+  closed population `:122-124`; `actor_onekey_corpus_census_test.go:136-137` (`objectLiveness` → one-key);
+  `actor_walk_scope_corpus_census_test.go:147-148` (digest → `""`, deliberately) + `:176-177` (`objectLiveness`
+  leaves the refusal table); `anchor_hopindex_corpus_census_test.go:142-143` (`objectLiveness` → complete).
+  Gate: `internal/objectgc/objectgc_test.go` (`//go:build objectgc`), `Makefile:1919`, `ci.yml:469`.
+- Inc 2: `ruleengine/full/hopindex.go:720-724` (the refusal; reason string inlined — the `hopUntypedHop`
+  constant lives only in `anchor_hopindex_corpus_census_test.go:49`), `:995` `AnchorSideSeeds`, `:532-549`
+  `distances`, `:982-987` `consider`, `:1031` `StepsFrom` (no edit). `pipeline/anchor_derivation.go:465-466`
+  `edgeTakesStep`; `:187` `derivationIndex`. `pipeline/walkscope.go:251` `addIndex` (`:269`, `:278` the
+  `Rel == ""` arms; its doc comment is the one line that changes), `:208/:230` `deriveWalkScope`.
+  `anchor_derivation_mode.go:239`, `anchor_derivation_plain.go:873` (log reasons), `:118-126`
+  (`plainDerivationIndex`, `p.diffRetraction` at `:125`). Census: `anchor_hopindex_…:49,142-143,245-247,277`;
+  `plain_scanroot_…:56,63,154,255-256`; `actor_walk_scope_…:147-148,176-177,205+`; `actor_onekey_…:136`
+  (`objectAttachments` → multi-position); `ruleengine/full/hopindex_test.go:954`. `relations.go:38,61-62`.
+  Tally: `anchor_derivation_shadow.go:316/326/343`. Docs: `auth-plane-projection-latency-design.md:1207-1208`
+  (conjunct 2; amendment form at `:1218-1225`); `docs/components/refractor.md:1122` (walk-scope paragraph).
+
+**Scout drift, none substantive:** `derivationIndex` `:141→:187`; `edgeTakesStep` `:409→:465`;
+`noteStaticDerivationRefusal` `:208→:239`; `noteStaticPlainDerivationRefusal` `:880→:873`; `ddls.go` `:676→:677`,
+`:731→:734`; `ci.yml` `:389→:469`; `refractor.md` `:762→:1122`; census rows moved 1–11 lines.
+
+**Premises, re-derived live at fire start:**
+1. **C1 = 3 lenses, C4 = 4 sites, C5 = 1 writer** — unchanged. **C3 = 6 readers + ONE NEW:**
+   `pipeline/anchor_derivation_branches.go:136` `branchAnchorHopsRefusal` (multi-walk fire `9725f42e`, after the
+   censuses were run). Evaluated here as **§6.2 reader 7**: it is reader 1's predicate over a per-branch index
+   set, reached only by multi-branch lenses; none of the three is multi-branch; its corpus door is
+   `BranchDerivationRefusal`, pinned by the `branch_decomposition` table already in §10's list. No code edit.
+2. **§11.1 re-measured 2026-09-04 ~14:20 PT** — `refractor-geopzKfa2CsKXAaogeop` (`objectLiveness`),
+   `refractor-rFCmgJvTMHE1kDfXrFCm` (`objectAttachments`), `refractor-mUY8zLVr5piGbrLzmUY8`
+   (`objectIdentityAttachmentsRead`): **Unprocessed 0 on all three.** The 40 k has drained, as §11.1 allowed.
+   The mechanism claims stand and are observable: the first two sit on the broad `$KV.core-kv.>` filter
+   (`filterBroadReason: "non-exhaustive"`) and `reason: "pattern carries an untyped relationship"` was emitted for
+   all three at 06:43:57 today. Acceptance = those lines gone; `objectLiveness` `narrowed-relation`,
+   `LabelCount: 1`; acted ≫ fellBack on `objectAttachments`.
+3. **Adjacent fires:** hub-read-scope **landed** (`8a2cee97`); varlength Inc 2 (`withScopeReject` whitelist)
+   **not landed** — if it lands first, re-run C1/C2 before merging (shared census tables).
+4. **Rollback pair** `REFRACTOR_ANCHOR_DERIVATION` / `REFRACTOR_WALK_SCOPE` both exist in the refractor
+   recipe (`Makefile:268,292`).
+
+**3. Precedents to mirror.** Filter-decision assertion on a real spec: `narrowingPipeline` +
+`TestAuthPlaneLenses_ConsumerFilterVerdict` (`auth_plane_narrowing_census_test.go:53-68,160-175`); package
+DDL-driving harness: `object_lifecycle_test.go` `submitObj` / `liveLinksOf` / `liveExists` (`:110-142,178-216`);
+census shape: `forEachCorpusCypher` (`label_derivation_corpus_census_test.go:573`); both-vectors absence gate:
+`TestAnchorHopIndex_EmptyExpansionIsUnresolved`; the wildcard rule in the label dimension: `stepAdmitsFarEnd`
+(`anchor_derivation.go`, *"cannot confirm ⇒ widen"*); tally unit: `TestFlip_TallyCountsActedAndFellBack`
+(`anchor_derivation_act_test.go:276`); amendment-note form: `auth-plane-projection-latency-design.md:1218`.
+
+**4. Increment order + green checks.**
+- **Inc 1 — de-hop `objectLiveness`** (`opus` builder — narrows a consumer filter, three posture axes §6.1;
+  full review naming §6.1's table). Green: `go test ./packages/objects-base/ -count=1` · `go test
+  ./internal/refractor/ -run 'Corpus|Census' -count=1` (exactly the §10 Inc-1 pins move, no other row) ·
+  `DIFF_BASE=b9a49338 go run ./scripts/lint-package-version.go` · `make test-object-gc` · revert-proof: restore
+  the `OPTIONAL MATCH` in a `/tmp` copy and `TestObjectLiveness_ConsumerFilterIsRelationNarrowed` goes red.
+  Land: merge to `main`, `make reinstall-package PKG=packages/objects-base`, read `objectLiveness`'s filter
+  health entry live (`narrowed-relation`, `LabelCount: 1`) and the projected `weaver-targets` rows unchanged.
+- **Inc 2 — the wildcard hop** (`opus` builder — lifts a fail-closed conjunct on the auth plane's predicate;
+  full review naming §6.2's table + §4.2's `distances()` bound). Green: `go test ./internal/refractor/... -count=1`
+  · mutation: `edgeTakesStep` back to bare equality ⇒ `TestWalkToAnchors_WildcardStepFollowsEveryRelation` red ·
+  `CompleteIndexHoldsEveryReferencedRelation`'s skip **deleted**, loop unconditional (M3) ·
+  `TestObjectAttachments_DerivationActsOnANeighbourEvent` asserts the **tally**, not only convergence.
+  Land: merge to `main`, `make cycle-refractor`, read the refusal lines gone for all three ids and the act
+  summary for `rFCmgJvTMHE1kDfXrFCm`.
+- **Both:** `go build ./...` · `make vet` · `golangci-lint run ./...` · `make verify-kernel` · every
+  `scripts/lint-*.go` · build-tagged harnesses reaching `internal/refractor` / `packages/objects-base`.
+- **Close pass:** one cumulative cold adversarial review over the item's whole diff; classify findings; §11.1
+  amended with the re-measure; board row → Done-log.
+
+**5. In-scope gotchas.** Package edit ⇒ `package.go` + `manifest.yaml` in lockstep. The census skip is
+DELETED, never replaced by a wildcard-presence rule (M3). `actor_walk_scope` pins `""` for `objectLiveness`
+with the sentence beside it. The wildcard invariant is a **bound** (one hop between the anchor and an incident
+position), stated in the `addPattern` comment. Dossier entries carried in (`docs/components/refractor.md`):
+*refuting a refusal's REASON does not establish the whole refusal was wrong — re-derive the boundary from the
+consumers* (this fire's §4.2 bound is that boundary); *a lifted refusal reveals the conjunct behind it, and a
+GRANTED licence logs nothing — prove by the positive verdict, live*; *a present-but-EMPTY set and a missing one
+are the same answer — `len(x) == 0`, never `nil`* (the empty walk scope is the live instance); *turning on a
+behaviour an existing predicate gated hands it the complement* (mechanized by the very test whose skip Inc 2
+deletes). From `_packages.md`: *a column's ABSENCE and its declared FALSE value are different inputs* —
+`liveOwners` leaves the `WITH`, never the `RETURN`, so no projected column moves. Standing checklist walked:
+(1) no new state (§5); (2) every census re-run above; (3) both new mechanisms revert-proven, in a scratch copy;
+(4) the dropped link delivery's healer is the sweep (`objectLiveness` is sweep-enrolled — assert it in the
+filter test); (5) no new key writer; (6) `narrowingPipeline` precedent verified against `pipeline.New`.
+
+**6. Adjacent finds.** (a) reader 7 above — absorbed as a §6.2 amendment, no code. (b) the stale
+`plain_scanroot` comment — in scope (§9). (c) the expired 40 k — in scope (§11.1 amendment at close). Nothing
+filed.
+
+**7. Non-goals.** `anchorwalk.go`'s parse refusal (§8 alt 5); the walk scope's untyped arm (refuses by
+design); `objectIdentityAttachmentsRead`'s `DiffRetraction`; `withScopeReject` (varlength Inc 2); anything in
+the `fire/personal-lens-delta` worktree.
