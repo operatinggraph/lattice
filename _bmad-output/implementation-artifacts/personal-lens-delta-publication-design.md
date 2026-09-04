@@ -579,3 +579,119 @@ Eleven findings, every citation re-verified by the author before folding; none d
   design are the next reader's premise).
 - Inc 3 files: *[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row (~2 KB × 97 rows per
   actor)* on the verticals lane, and the cap re-derivation on this lane if §9's residual binds.
+
+---
+
+## 14. Build notes
+
+### Inc 1 fire brief (build note, 2026-09-04 — Lattice Steward fire, worktree `../lattice-wt-pl-delta`, branch `fire/personal-lens-delta`)
+
+**Fire plan (Steward sizing).** The §11 increments are the item's fires: **Fire 1 = Inc 1**, Fire 2 = Inc 2, Fire 3 =
+Inc 3. **Landing shape: each increment lands on `main`** — the invariant that keeps `main` correct across the
+boundaries is §4's zero-value rule (`PublishScope{}` is `ScopeAll`, so every caller Inc 1 does not touch reproduces
+today's publication byte-for-byte) plus §7 (no wire change; old and new clients indifferent).
+
+**1. Scope sentence (§11 row 1, verbatim).** *`publishScope` type (pipeline); `ReprojectPersonalActor(ctx, id, scope)`
++ `recordProjected` on its frame and Hydrate's; `GrantChangeSink.GrantChanged(actorKey, entryID)` through the widened
+injected inverse (`SetGrantChangeSink` / `driver.go:690`) and its three producers (§4.3); dirty-set scope merge;
+sweeper `ScopeNone` per pass + the 24 h content cycle latched at `ensurePopulation`; `docs/components/refractor.md`
+§ transport + sweeper. No engine change.* Green bar: T5, T6 (grant + sweep vectors), T3's `ScopeAll`/`ScopeAnchors`
+arms. Posture-changing (healer semantics) — full-depth review.
+
+**2. Verified touch-list (checked live at `e869ec57`).**
+- `internal/refractor/pipeline/reproject_personal.go:143` — `ReprojectPersonalActor(ctx, identityID)`; row loop
+  `:193-209` upserts every non-delete result and appends `frameKeys`; revision captured after evaluation `:177`;
+  frame `:239`. Gains `scope PublishScope`; a non-delete result is **written iff `scope.Admits(result)`**, every
+  non-delete result still lands in `frameKeys`; the Delete arm and the revision/lock/flush order are untouched;
+  `p.recordProjected()` after a successful `PublishKeySet`.
+- `internal/refractor/pipeline/hydrate.go:45-134` — no signature change (`ScopeAll` by construction); add
+  `p.recordProjected()` after the successful `PublishKeySet` at `:122`.
+- `internal/refractor/pipeline/grantchange.go:30-32` (`GrantChangeSink`), `:51` (`SetGrantChangeSink`'s inverse
+  `func(string) (string, bool)`), `:216` (`notifyGrantChangeSignalled` → passes the inverse's entry token), `:246`
+  (`notifyActorGrantChange` → passes `""`), `:264-279` (`truncateTarget` routes through `notifyGrantChange`, so it
+  needs no separate edit). The legacy parent-document Delete `evaluate.go:953-957` never reaches the sink — unchanged.
+- `internal/refractor/projection/driver.go:690` — binds `desc.AnchorFromKey`; bind the widened closure instead.
+  `projection/output.go:392-422` (`AnchorFromKey`) and `:442-458` (`anchorFromKeyPerEntry`, the `LastIndexByte('.')`
+  split — the entry token is `rest[idx+1:]`, NanoID-validated). Add an exported per-descriptor inverse that returns
+  `(actorKey, entryID, ok)` with `entryID == ""` for a non-per-entry lens. `pipeline` must not import `projection`
+  (verified: it does not).
+- `internal/refractor/grantchange/reprojector.go:66-69` (`PersonalPipeline.ReprojectPersonalActor` — gains scope),
+  `:450-471` (`GrantChanged(actorKey)` → `(actorKey, entryID)`; `entryID == ""` ⇒ `ScopeAll`), `:492-497`
+  (`InterestChanged` ⇒ `ScopeAll`), `:505-517` (`enqueue` — the dirty set becomes `map[string]PublishScope`; an
+  existing entry MERGES per §4.3, the `maxDirty` bound and `dropped` accounting count entries exactly as today),
+  `:594-602` (`take` returns the scope), `:621-647` (`reprojectActor(ctx, actorID, scope)` applies it on every
+  registered lens), `:661-663` (`ReprojectNow(ctx, actorID, scope)`).
+- `internal/refractor/grantchange/sweeper.go:32-34` (add `PersonalContentHealInterval = 24 * time.Hour`),
+  `:270-371` (`Sweep` — the pass's scope is decided once, before the batch loop `:357-360`, from the latched cycle
+  kind), `:491-530` (`ensurePopulation` — the re-list at `:524-529` is where a cycle starts: latch
+  `lastContentCycleStart` there when the previous latch is older than the interval; zero ⇒ the first cycle after
+  boot is a content cycle; log the content-cycle start with the cycle length, R4), `:534-560` (`claim` unchanged).
+- Scope match for anchors: `substrate.ParseVertexKey(result.Row["anchor"])`'s NanoID ∈ A — the same read the D1
+  envelope makes (`projection/personal.go:271-277`) and the adapter promotes (`adapter/natssubject.go:36`).
+- Every caller/test that the signatures reach (all must compile + stay green): `pipeline/reproject_personal_test.go`
+  (`:168,189,235,268,349,358`), `pipeline/reproject_personal_revision_test.go:70`, `pipeline/publish_pipeline_test.go`
+  (`:340,366`), `pipeline/shred_announcement_test.go` (`:87,273,301`), `pipeline/truncate_reactivation_internal_test.go:113`,
+  `pipeline/truncate_grant_change_test.go` (`:107,122,135`), `grantchange/reprojector_test.go` (the fake at `:293` +
+  ~30 `GrantChanged` calls), `grantchange/sweeper_test.go:170-171`, `projection/grant_change_install_test.go`,
+  `cmd/refractor/personal_healer_test.go:363`, `cmd/refractor/main.go:1667`. No build-tagged test under
+  `internal/refractor` or `cmd/refractor` reaches these seams (verified by grep).
+- Docs: `docs/components/refractor.md:72` (Personal Lens transport — add the publication-scope rule) and `:293-310`
+  (the sweeper prose inside the D1 bullet — the two cadences: frame per pass, content once per
+  `PersonalContentHealInterval`); `personal-lens-grant-change-trigger-design.md:379` (§4.3 — a dated pointer to §4.4
+  here). `personal-lens-whole-actor-cost-design.md:70-75` already carries the §13 correction (verified).
+
+**3. Precedents to mirror.** `enqueue`'s coalesce-then-bound shape (`reprojector.go:505-517`); `anchorFromKeyPerEntry`'s
+split (`output.go:442-458`); the anchor parse in `personal.go:271-277`; `recordProjected` at `results.go:242`; the
+reprojector unit fakes (`reprojector_test.go:280-300`) for T5; the sweeper unit tests for the cycle latch; the e2e
+harness of `personal_lens_grant_change_e2e_test.go` (grant vector) for T6.
+
+**4. Increment order (inside the fire), each with its green check.**
+1. `pipeline`: `PublishScope` (kinds All/None/Anchors; the zero value is All; `ScopeAnchors` of an EMPTY set is
+   `ScopeAll` — an empty set must never read as "admit nothing" by accident, dossier rule) + `Admits` + `Merge`
+   (the §4.3 law, bound `MaxScopedAnchors = 64`) — a table test. `go test ./internal/refractor/pipeline/ -run Scope`
+2. `pipeline`: `ReprojectPersonalActor` scope + frame `recordProjected` (both sites); callers/tests updated.
+   `go test ./internal/refractor/pipeline/`
+3. `pipeline` + `projection`: sink widening, the exported inverse, the three producers, the driver binding.
+   `go test ./internal/refractor/pipeline/ ./internal/refractor/projection/`
+4. `grantchange` + `cmd/refractor`: dirty-set scope, `take`, `reprojectActor`, `ReprojectNow`, sweeper `ScopeNone` +
+   content cycle. `go test ./internal/refractor/grantchange/ ./cmd/refractor/`
+5. e2e T6 vectors in `internal/refractor` (grant → one anchor's row + frame; sweep pass → frames only; hydrate →
+   everything). `go test ./internal/refractor/ -run 'PersonalLens'`
+6. Docs (§2 last bullet). Gates: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+   `STRICT=1 go run ./scripts/lint-conventions.go` · every `scripts/lint-*.go` · `go test ./internal/refractor/... ./cmd/refractor/`.
+
+**5. In-scope gotchas.** (a) The after-capture revision and the `(lens, actor)` lock in `ReprojectPersonalActor` are
+the retraction design's spine — do not move them; a `ScopeNone` pass still flushes the (empty) pipeline and
+publishes the frame from ALL non-delete results. (b) `recordProjected` on a frame is a stated CHANGE to the freshness
+clock (§4.2) — say so in the doc comment; nothing alarms on it. (c) The sweep's scope is per PASS, latched at the
+cycle start — not per identity, not re-read mid-batch. (d) The merge never creates a second entry: a merge into an
+existing dirty entry is not counted against `maxDirty` and never increments `dropped`. (e) T5 pins that the verdict's
+`Attempted`/`Failed` are identical across scopes (the licence's conjunct 3 is liveness, §4.4). (f) Every test is
+revert-proven (standing checklist #3): a scope that admits everything, a latch that never flips, a producer that
+passes `""` — each must fail its test. (g) No history comments (CLAUDE.md). **Dossier entries copied in
+(`docs/components/refractor.md`):** *a widened operation silently drops the bound its narrow predecessor carried*
+(the dirty set's bound + drop accounting must survive the value change); *a fixture that establishes the favourable
+ORDER or ARM is an argument, not a test* — the sweeper test that registered the lens before `Run` was green over a
+pass that never ran: write the sweep-scope test in `cmd/refractor`'s startup order, and barrier on the EFFECT (the
+adapter's call list), never on pending; *a zero or empty reading that cannot be distinguished from "not measured"
+must read UNREADABLE* (an empty anchor set vs. no scope — hence increment 1's empty-set rule); *a soundness claim's
+stated REASON is load-bearing* — the healer's frames-only pass is justified by "nothing reads what a pass
+published"; T5 pins it rather than argues it. **Standing checklist (fire-brief template, six lines):** new state
+needs a LIFETIME (§5 has the table — `lastContentCycleStart` and the dirty-set scope; build to it); every census is a
+premise (the caller/test list above was re-grepped live); a negative test needs its positive vector, and plumbing is
+revert-proven hardest (the `entryID` thread: assert at the producer that the token equals the key's trailing NanoID,
+not merely non-empty); removal needs a transport AND an observer (the rows a `ScopeNone` pass withholds are held
+by the device and named by the frame — §4.7's argument, pinned by T6); one deterministic key, one writer (n/a); precedent
+may carry debt (the grant-change e2e is the mirror; verify its barrier before copying it).
+
+**6. Adjacent finds.** None outside the design's own list. The `edgeCatalog` row-size package row and the cap
+re-derivation are Inc 3's (§13). Any find the build surfaces resolves per the Steward's §4 accounting before this fire
+closes.
+
+**7. Non-goals (Fire 1).** The CDC write loop (`results.go`, `dispatch.go`, `evaluate.go`'s scope producers), row
+provenance and `ScopeVertices`, the hydrate guards of §4.6, the personal+`Retry` install refusal, the client, the wire,
+`edgeCatalog`'s row size, the Inc 3 probes.
+
+**Scope-diff gate.** Every touch in part 2 traces to the scope sentence; nothing widens it; no adjacent mechanism is
+substituted (the write loop and provenance stay Inc 2). Dependencies both ways: Inc 1 depends on nothing unbuilt;
+Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
