@@ -305,41 +305,43 @@ func Lenses() []pkgmgr.LensSpec {
 			// the pre-Vault/no-backfill posture both fall through the same
 			// null path).
 			//
-			// DiffRetraction: true — clinicPatientsReadSpec's WITH (the
-			// authz_anchors dedup) takes this rule out of the anchor-delete
-			// fast path: anchorProjectionShape rejects any WITH-bearing query
-			// wholesale (internal/refractor/ruleengine/full/anchor_delete.go),
-			// so a TombstonePatient event can no longer resolve a Delete key
-			// read-free and would otherwise leave the tombstoned patient's
-			// row — carrying decrypted name/email/phone PHI — stale in
-			// read_clinic_patients forever. Fire 3's target-diff retraction is
-			// the alternative for exactly this shape (mirrors
-			// loftspace-domain's landlordUnitsRead, packages/loftspace-domain/
-			// lenses.go, same Protected+postgres+WITH-blocks-anchor-delete
-			// shape); this query is genuinely unanchored (no $actorKey — a
-			// whole-roster scan), which is what
-			// ValidateUnanchoredForDiffRetraction requires, and both the
-			// Postgres and Protected adapters implement adapter.KeyLister, so
-			// the mechanism activates rather than installing dark.
+			// clinicPatientsReadSpec's WITH (the authz_anchors dedup) carries
+			// the patient pattern variable p through under its own name rather
+			// than an alias, so the closure predicate
+			// (internal/refractor/ruleengine/full/anchor_delete.go) resolves
+			// patient_id's RETURN expression, nanoIdFromKey(p.key), straight
+			// back across the WITH boundary to p — the anchor's own key
+			// column. A TombstonePatient root tombstone therefore resolves a
+			// read-free anchor Delete on that key, and a patient dropping out
+			// of the matched set (the registeredAt <> null guard) retracts
+			// through the filter-retraction presence check, the same as any
+			// WITH-free plain lens. Anchor seeding and the plain-derivation
+			// narrowing licence are both available to this lens for the same
+			// reason.
 			//
-			// Cost: DiffRetraction disables both anchor seeding (rulestate.go)
-			// and the plain-derivation narrowing licence (anchor_derivation_
-			// plain.go) for this lens, so every reacting event — appointment,
-			// building, identity, patient, or provider — now re-evaluates the
-			// whole patient corpus plus a full ListKeys() of
-			// read_clinic_patients, versus the single-patient seed the old
-			// comprehension-only spec got. Priced against the roster sizes
-			// this vertical carries (reference-vertical scale, not a claim
-			// about how far it scales), not a defect.
-			CanonicalName:  "clinicPatientsRead",
-			Class:          "meta.lens",
-			Adapter:        "postgres",
-			Table:          "read_clinic_patients",
-			Engine:         "full",
-			Spec:           clinicPatientsReadSpec,
-			Protected:      true,
-			DiffRetraction: true,
-			IntoKey:        []string{"patient_id"},
+			// The narrowing licence still refuses it, on the SecureColumns
+			// declaration below (a per-anchor re-entry would decrypt twice
+			// over) — not on the WITH. DiffRetraction is not declared: this
+			// lens's gain from the closure predicate is retraction and audit
+			// coverage (AuditClassRetained reaches it), not narrowing — every
+			// reacting event still re-evaluates the whole patient corpus; only
+			// DiffRetraction's own additional full ListKeys() of
+			// read_clinic_patients on top of that scan is absent.
+			//
+			// loftspace-domain's landlordUnitsRead (packages/loftspace-domain/
+			// lenses.go) is a different shape and not a precedent here: it
+			// carries no WITH at all, and its refusal sits on its composite
+			// (unit_id, landlord_id) key, which walks the `manages` link
+			// structurally rather than resolving to one anchor's own key
+			// column — which is why it declares DiffRetraction.
+			CanonicalName: "clinicPatientsRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_clinic_patients",
+			Engine:        "full",
+			Spec:          clinicPatientsReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"patient_id"},
 			Columns: []pkgmgr.PostgresColumn{
 				{Name: "entity_key", Type: "text"},
 				{Name: "patient_key", Type: "text"},

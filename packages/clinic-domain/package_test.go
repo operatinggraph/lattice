@@ -359,18 +359,21 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("unexpected providerAppointmentsRead shape: %+v", lensByName["providerAppointmentsRead"])
 	}
 	if l, ok := lensByName["clinicPatientsRead"]; !ok ||
-		l.Adapter != "postgres" || l.Table != "read_clinic_patients" || !l.Protected || !l.DiffRetraction {
+		l.Adapter != "postgres" || l.Table != "read_clinic_patients" || !l.Protected || l.DiffRetraction {
 		t.Fatalf("unexpected clinicPatientsRead shape: %+v", lensByName["clinicPatientsRead"])
 	}
-	// clinicPatientsReadSpec's WITH takes anchorProjectionShape's read-free
-	// Delete fast path off the table (any WITH is rejected wholesale —
-	// internal/refractor/ruleengine/full/anchor_delete.go), so DiffRetraction
-	// is this lens's ONLY tombstone-retraction mechanism (asserted above) —
-	// and DiffRetraction requires a genuinely unanchored query
-	// (ValidateUnanchoredForDiffRetraction refuses one that references
-	// $actorKey). Pin both: neither can regress silently.
+	// clinicPatientsReadSpec's WITH carries the patient pattern variable p
+	// through under its own name rather than an alias, so the closure
+	// predicate (internal/refractor/ruleengine/full/anchor_delete.go)
+	// resolves patient_id's RETURN expression, nanoIdFromKey(p.key), straight
+	// back to p across the WITH boundary — the read-free anchor Delete this
+	// lens's TombstonePatient retraction relies on with no DiffRetraction
+	// declared (proof: TestClinicPatientsRead_TombstonedPatientRetractsItsRow).
+	// This lens is also genuinely unanchored (a WildcardAnchor whole-roster
+	// scan) independent of that; pin the shape so an anchor added here does
+	// not silently narrow the roster it projects.
 	if strings.Contains(clinicPatientsReadSpec, "$actorKey") {
-		t.Error("clinicPatientsReadSpec must stay unanchored (no $actorKey) — DiffRetraction fails activation otherwise")
+		t.Error("clinicPatientsReadSpec must stay unanchored (no $actorKey) — it is a WildcardAnchor whole-roster scan")
 	}
 	// clinicEncountersRead is the only read path to the clinical record, so its
 	// posture is asserted field by field rather than by shape alone: PROTECTED
