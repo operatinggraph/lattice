@@ -110,10 +110,13 @@ form with no app rebuild. Rows carry no person data by construction (an op meta 
 descriptor), so the bucket is open and the lens declares no read-path posture.
 
 Three properties of its cypher are load-bearing and each is mutation-tested in
-`packages/edge-manifest/lens_cypher_test.go`. It carries **no `WITH` clause** — `anchorProjectionShape`
-(`internal/refractor/ruleengine/full/anchor_delete.go`) refuses any query with one, which would silently
-disable the anchor-tombstone Delete and leave a retired op's row describing an operation the Processor no
-longer accepts (`edgeCatalogTail`, the natural copy-paste source, opens with `WITH op, role`). Its key
+`packages/edge-manifest/lens_cypher_test.go`. Its key column must **resolve to the anchor's own binding**
+— `anchorProjectionShape` (`internal/refractor/ruleengine/full/anchor_delete.go`) reads a key column back
+through any `WITH` boundaries to the pattern variables underneath it, and refuses a boundary that carries
+the anchor under a *different* name (`WITH op AS o`), which would silently disable the anchor-tombstone
+Delete and leave a retired op's row describing an operation the Processor no longer accepts. A binding
+carried under its own name survives, so `edgeCatalogTail`'s `WITH op, role` opener — the natural
+copy-paste source — is safe to inherit. Its key
 column is `op.data.operationType`, a **ROOT vertex field**, so it resolves read-free from the tombstoned
 body — an aspect-sourced key would project fine and never retract. And the role join is an **`OPTIONAL
 MATCH`**: required, an op no permission grants yields zero rows and vanishes from the catalog instead of

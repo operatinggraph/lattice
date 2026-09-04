@@ -807,13 +807,21 @@ func TestOpCatalog_NonOpMetasAreFilteredOut(t *testing.T) {
 }
 
 // TestOpCatalog_TombstonedOpMetaRetractsItsRow is the retraction pin, and the
-// one the design's adversarial pass (B3) was filed against: the tempting
-// copy-paste source, edgeCatalogTail, OPENS with `WITH op, role`, and
-// anchorProjectionShape (internal/refractor/ruleengine/full/anchor_delete.go)
-// refuses any query carrying a WITH — wholesale, silently, before it ever
-// looks at the anchor. The lens would still parse, still project, still pass
-// every other test in this file, and simply never retract a retired op's row,
-// leaving the catalog describing an operation the Processor no longer accepts.
+// one the design's adversarial pass (B3) was filed against: this lens's key
+// column has to resolve to the anchor's own binding before a retired op's row
+// can be deleted at all, and every way that resolution dies is SILENT. The
+// lens would still parse, still project, still pass every other test in this
+// file, and simply never retract a retired op's row, leaving the catalog
+// describing an operation the Processor no longer accepts.
+//
+// The tempting copy-paste source, edgeCatalogTail, OPENS with `WITH op, role`.
+// A binding carried under its own name survives the boundary, so the mutations
+// below are aimed at the two shapes that do not: a boundary that carries the
+// anchor under a DIFFERENT name — anchorProjectionShape
+// (internal/refractor/ruleengine/full/anchor_delete.go) refuses it, because
+// downstream `o` is a name no pattern position holds and the RETURN's `op` is a
+// fresh whole-bucket binding rather than the matched anchor — and a key column
+// read off an ASPECT rather than the anchor's own root document.
 //
 // Two halves, because the mechanism has two:
 //
@@ -841,22 +849,50 @@ func TestOpCatalog_TombstonedOpMetaRetractsItsRow(t *testing.T) {
 
 	keys, ok := eng.AnchorDeleteResult(cr, f.key("fullOp"), "meta", body)
 	require.True(t, ok,
-		"the retired op's row key must resolve read-free from the tombstoned body — no WITH, a labeled :meta anchor, and a key column off the anchor's own ROOT data")
+		"the retired op's row key must resolve read-free from the tombstoned body — a labeled :meta anchor, and a key column off the anchor's own ROOT data")
 	require.Equal(t, map[string]any{"operationType": "ResolveWorkOrder"}, keys,
 		"the Delete must name the row the upsert path wrote, or it retracts nothing (or worse, something else)")
 
-	// MUTATION 1 — the `WITH op, role` opener edgeCatalogTail carries. The
-	// query still parses and still projects; the retraction silently dies.
-	withOpener := strings.Replace(opCatalogSpec, "\nRETURN\n", "\nWITH op, role\nRETURN\n", 1)
-	require.NotEqual(t, opCatalogSpec, withOpener, "the mutation must actually change the spec")
-	withCompiled, err := eng.Parse(withOpener)
-	require.NoError(t, err, "the mutant must still PARSE — that is precisely what makes this trap silent")
-	withCR, isFull := withCompiled.(*full.CompiledRule)
+	// The positive vector for both mutations below: edgeCatalogTail's own
+	// `WITH op, role` opener, which carries each binding under its own name and
+	// keeps the retraction. Without it a mutation that refuses proves only that
+	// SOMETHING about the mutant is refused, not the thing it was aimed at.
+	bareOpener := strings.Replace(opCatalogSpec, "\nRETURN\n", "\nWITH op, role\nRETURN\n", 1)
+	require.NotEqual(t, opCatalogSpec, bareOpener, "the control must actually change the spec")
+	bareCompiled, err := eng.Parse(bareOpener)
+	require.NoError(t, err)
+	bareCR, isFull := bareCompiled.(*full.CompiledRule)
 	require.True(t, isFull)
-	withCR.KeyColumns = []string{"operationType"}
-	_, withOK := eng.AnchorDeleteResult(withCR, f.key("fullOp"), "meta", body)
-	require.False(t, withOK,
-		"the mutant must LOSE the retraction — if a WITH-carrying spec still retracts, this test is not proving the no-WITH rule")
+	bareCR.KeyColumns = []string{"operationType"}
+	bareKeys, bareOK := eng.AnchorDeleteResult(bareCR, f.key("fullOp"), "meta", body)
+	require.True(t, bareOK,
+		"a boundary that carries every binding under its own name must KEEP the retraction — the mutations "+
+			"below are aimed at the rebinding, not at the presence of a boundary")
+	require.Equal(t, keys, bareKeys, "and it must resolve the same row key the un-mutated spec does")
+
+	// MUTATION 1 — carry the anchor across a boundary under a new name, and
+	// carry the RETURN's own references to it along, so the RETURN reads the
+	// new name `o` rather than re-reading the dropped `op`. That isolates the
+	// rename guard as the only thing this mutant can be refused by: leaving the
+	// RETURN reading `op` would also trip the boundary's separate re-reference
+	// check (a later clause reading a name the boundary dropped), so a spec that
+	// deleted the rename guard would still refuse here for an unrelated reason
+	// and this test would not have caught it.
+	renamedWithMarker := "\nWITH op AS o, role\nRETURN\n"
+	renamedOpener := strings.Replace(opCatalogSpec, "\nRETURN\n", renamedWithMarker, 1)
+	require.NotEqual(t, opCatalogSpec, renamedOpener, "the mutation must actually change the spec")
+	renamedReturnStart := strings.Index(renamedOpener, renamedWithMarker) + len(renamedWithMarker)
+	renamedOpener = renamedOpener[:renamedReturnStart] +
+		strings.ReplaceAll(renamedOpener[renamedReturnStart:], "op.", "o.")
+	renamedCompiled, err := eng.Parse(renamedOpener)
+	require.NoError(t, err, "the mutant must still PARSE — that is precisely what makes this trap silent")
+	renamedCR, isFull := renamedCompiled.(*full.CompiledRule)
+	require.True(t, isFull)
+	renamedCR.KeyColumns = []string{"operationType"}
+	_, renamedOK := eng.AnchorDeleteResult(renamedCR, f.key("fullOp"), "meta", body)
+	require.False(t, renamedOK,
+		"a spec that renames its anchor across a boundary must LOSE the retraction — if it still retracts, "+
+			"this test is not proving that the key column's variable name has to still mean the anchor")
 
 	// MUTATION 2 — key the lens off an ASPECT field instead of the anchor's
 	// root data. It projects identically on a live vertex and resolves to

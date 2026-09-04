@@ -60,9 +60,11 @@ func (e *Engine) AnchorDeleteResult(
 // delete — a key it cannot prove is the anchor's single row.
 //
 // The contract has two halves, and only the second needs the event: the
-// structural half (no WITH, a labeled anchor, every key column anchor-only) is
-// answered by anchorProjectionShape, which a caller holding a compiled rule
-// alone can ask directly (HasAnchorOnlyKeyColumns).
+// structural half (a labeled anchor, and every key column an expression that
+// resolves — through any WITH boundaries between it and the pattern — to the
+// anchor's binding and nothing else) is answered by anchorProjectionShape,
+// which a caller holding a compiled rule alone can ask directly
+// (HasAnchorOnlyKeyColumns).
 func (*Engine) AnchorProjectionKey(
 	cr ruleengine.CompiledRule, eventKey, eventType string, eventProps map[string]any,
 ) (keys map[string]any, ok bool) {
@@ -135,12 +137,13 @@ func (*Engine) AnchorProjectionKey(
 }
 
 // anchorProjectionShape is the half of AnchorProjectionKey's ok contract that
-// is decidable from the compiled rule alone: no WITH clause, a labeled anchor
-// pattern (carrying a resolved expansion set when it bears the `*` sigil), and
-// every key column a RETURN alias whose expression references no variable but
-// the anchor's. It carries the anchor descriptors and the resolved key-column
-// expressions on, so the per-event half evaluates exactly what the structural
-// half admitted.
+// is decidable from the compiled rule alone: a labeled anchor pattern
+// (carrying a resolved expansion set when it bears the `*` sigil), and every
+// key column a RETURN alias whose expression — resolved back through any WITH
+// boundaries to the pattern variables underneath it — references no variable
+// but the anchor's. It carries the anchor descriptors and the RESOLVED
+// key-column expressions on, so the per-event half evaluates exactly what the
+// structural half admitted, against the single-anchor binding.
 type anchorProjectionShape struct {
 	// anchorVar and anchorLabel are the anchor pattern's variable and label —
 	// the binding a key column may reference, and the type an event must carry
@@ -157,8 +160,10 @@ type anchorProjectionShape struct {
 	anchorExpand bool
 	expandedSet  map[string]struct{}
 	// cols are this rule's key columns — the threaded Into.Key composite, else
-	// the legacy first-RETURN-item alias — and keyExprs the RETURN expression
-	// producing each one.
+	// the legacy first-RETURN-item alias — and keyExprs the expression
+	// producing each one, resolved through the query's WITH boundaries so it
+	// names pattern variables rather than projected aliases. That is the form
+	// the per-event half can evaluate against a binding of the anchor alone.
 	cols     []string
 	keyExprs map[string]Expr
 }
@@ -171,17 +176,23 @@ func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
 	}
 	q := cr.Query
 
-	// A WITH clause can re-project or re-bind variables (`WITH y AS u`), so a
-	// RETURN expression's variable NAME no longer proves it binds the anchor —
-	// the name-based scope check below would be defeated. A live plain lens
-	// CAN carry WITH now (clinicPatientsRead, packages/clinic-domain/
-	// lenses.go, folds a workplace-anchor fan-out via WITH+collect(DISTINCT)):
-	// reject wholesale rather than model re-binding, and its lens spec
-	// declares DiffRetraction instead of relying on this fast path.
-	for _, c := range q.Clauses {
-		if _, isWith := c.(*With); isWith {
-			return anchorProjectionShape{}, false
-		}
+	// A WITH boundary rebuilds every row from its projection items alone, so a
+	// RETURN expression's variable NAME does not, by itself, say which pattern
+	// variable produced the value. Two composed steps answer that instead.
+	//
+	// First the general scope walk (withscope.go), memoized by Parse: it proves
+	// every clause and expression in the query is a shape it models — an AST
+	// node with no case there refuses rather than shortening a referenced set —
+	// and that no boundary dropped a name a later clause re-reads, whose rebind
+	// would be a fresh binding rather than the one it appears to name. It also
+	// refuses `WITH *` and a pattern-variable rename in either direction. The
+	// residue is exactly the case the substitution below is defined for.
+	//
+	// A rule that never went through Parse carries no resolution, so a
+	// WITH-bearing query is refused outright rather than judged against an
+	// environment nobody built.
+	if carriesWith(q.Clauses) && (!cr.withAliasResolved || cr.withScopeVerdict != "") {
+		return anchorProjectionShape{}, false
 	}
 
 	// Anchor = the first MATCH pattern's first node.
@@ -225,16 +236,35 @@ func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
 			// activation; defensively fall through rather than emit a partial key.
 			return anchorProjectionShape{}, false
 		}
-		if !exprReferencesOnlyVariable(expr, anchorVar) {
+		// Second step: rewrite the column through the WITH environments until it
+		// names pattern variables only. An alias no environment binds is a
+		// pattern variable or a binding carried under its own name and stands
+		// as it is; an alias whose provenance the resolver does not model
+		// refuses, because which variable produced that value is then unknown.
+		// A query with no WITH substitutes nothing and is judged exactly as it
+		// is written.
+		resolved, resolvable := resolveThroughWithAliases(expr, cr.withAliasEnv)
+		if !resolvable {
+			return anchorProjectionShape{}, false
+		}
+		if !exprReferencesOnlyVariable(resolved, anchorVar) {
 			// A key column bound to a NON-anchor variable (a neighbor-keyed /
 			// multi-row lens, e.g. landlord_id off a manages walk) is not
 			// derivable from the anchor alone. The evaluator would silently
 			// resolve the unbound variable to nil (the OPTIONAL-MATCH
 			// contract) and yield a WRONG partial key, so reject
 			// structurally before evaluating.
+			//
+			// An aggregate anywhere in the resolved expression is refused here
+			// too, by name, which is what confines the grouping argument
+			// through a boundary: an admitted column resolves through
+			// NON-aggregating projection items only, and a non-aggregating item
+			// is part of its own boundary's grouping key (projectItems). So
+			// every boundary the chain crosses is grouped by a value that
+			// identifies the anchor.
 			return anchorProjectionShape{}, false
 		}
-		keyExprs[col] = expr
+		keyExprs[col] = resolved
 	}
 
 	return anchorProjectionShape{
@@ -248,12 +278,12 @@ func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
 }
 
 // HasAnchorOnlyKeyColumns reports whether this rule keys its output on its
-// anchor alone: no WITH clause, a labeled anchor pattern, and every key column
-// an expression over that anchor's binding and nothing else
-// (exprReferencesOnlyVariable, which refuses aggregates and every traversal
-// form). That is per-anchor closure — the lens projects at most one row per
-// anchor, keyed by the anchor — asked of the compiled rule alone, with no
-// event to bind.
+// anchor alone: a labeled anchor pattern, and every key column an expression
+// which — once resolved back through the query's WITH boundaries — is over
+// that anchor's binding and nothing else (exprReferencesOnlyVariable, which
+// refuses aggregates and every traversal form). That is per-anchor closure —
+// the lens projects at most one row per anchor, keyed by the anchor — asked of
+// the compiled rule alone, with no event to bind.
 //
 // It is AnchorProjectionKey's own structural half, shared rather than
 // restated, so the two can never answer the closure question differently. It

@@ -237,6 +237,9 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 		groupingRedundant: analyseGroupingRedundancy(v.query),
 		branchStages:      branchStages,
 		branchDeferred:    branchDeferred,
+		withAliasEnv:      analyseWithAliases(v.query),
+		withScopeVerdict:  withScopeReject(v.query.Clauses),
+		withAliasResolved: true,
 	}, nil
 }
 

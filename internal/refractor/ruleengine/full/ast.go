@@ -297,6 +297,35 @@ type CompiledRule struct {
 	// each stage's expansion is capped against) lives on the executor.
 	branchStages   map[Clause]*stagePlan
 	branchDeferred map[*Match]struct{}
+
+	// withAliasEnv resolves a projected alias back to the expression that
+	// produces it — one map per WITH clause, in clause order, each already
+	// resolved against the boundary before it (withalias.go). It is what lets
+	// a key-column predicate read a RETURN expression as an expression over
+	// PATTERN VARIABLES when a WITH stands between the two. Empty for a query
+	// with no WITH, which needs no substitution.
+	//
+	// withScopeVerdict is withScopeReject's answer over the same Query: "" when
+	// no boundary strands a name a later clause re-reads and every clause and
+	// expression in the query is a shape that walk models, else the reason to
+	// refuse. It is memoized because anchorProjectionShape asks it on every
+	// neighbour event of every plain lens, where a per-event walk of the whole
+	// AST would be the expensive part of the path the verdict licenses.
+	//
+	// withAliasResolved records that Parse computed both of the above. It is
+	// deliberately NOT the same signal as an empty env: a query with no WITH
+	// also yields an empty env and must be ADMITTED, while a rule that never
+	// went through Parse must be REFUSED — collapsing the two would let an
+	// unparsed rule read as a clean WITH-free lens, which is the fail-open
+	// shape. A directly constructed *CompiledRule gets false here, and
+	// anchorProjectionShape refuses any WITH-bearing query on it.
+	//
+	// Same immutability contract as groupingRedundant above: written once by
+	// Parse, over the Query, and never mutated afterwards — a compiled rule is
+	// shared across concurrent evaluations.
+	withAliasEnv      []map[string]aliasBinding
+	withScopeVerdict  string
+	withAliasResolved bool
 }
 
 // EngineName implements ruleengine.CompiledRule.

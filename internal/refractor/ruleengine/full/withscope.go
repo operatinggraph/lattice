@@ -31,14 +31,7 @@ import "fmt"
 // in clauses is harmless. Clause order is load-bearing and matches the
 // executor's.
 func withScopeReject(clauses []Clause) string {
-	carriesWith := false
-	for _, c := range clauses {
-		if _, isWith := c.(*With); isWith {
-			carriesWith = true
-			break
-		}
-	}
-	if !carriesWith {
+	if !carriesWith(clauses) {
 		return ""
 	}
 
