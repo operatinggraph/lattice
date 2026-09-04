@@ -204,3 +204,36 @@ func TestComputeServiceAttachRate_NoOccupiedLeases_ZeroNoDivideByZero(t *testing
 func cafedomainPrefixKey(suffix string) string {
 	return cafedomain.TabSettlementTarget + "." + suffix
 }
+
+// TestComputeLandlordLeaseBalances_WorstFirstOwedOnly locks in the three
+// things portfolio-pulse's arrears column depends on: unsigned leases are
+// excluded (occupiedLeaseAppKeys' own rule, applied here too), a credit
+// (negative) balance is not arrears so it's dropped rather than shown as
+// "owed", and the remaining rows sort highest-balance-first.
+func TestComputeLandlordLeaseBalances_WorstFirstOwedOnly(t *testing.T) {
+	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.small", SignedAt: strp("2026-07-01T00:00:00Z"), UnitAddress: strp("12 Small St"), ApplicantName: strp("A. Small")},
+		{EntityKey: "vtx.leaseapp.big", SignedAt: strp("2026-07-01T00:00:00Z"), UnitAddress: strp("99 Big Ave")},
+		{EntityKey: "vtx.leaseapp.credit", SignedAt: strp("2026-07-01T00:00:00Z")},
+		{EntityKey: "vtx.leaseapp.unsigned", SignedAt: nil},
+	}
+	entries := map[string]string{
+		"t1": `{"transactionKey":"t1","leaseAppKey":"vtx.leaseapp.small","type":"debit","amountCents":5000,"postedAt":"2026-08-01T00:00:00Z"}`,
+		"t2": `{"transactionKey":"t2","leaseAppKey":"vtx.leaseapp.big","type":"debit","amountCents":480000,"postedAt":"2026-08-01T00:00:00Z"}`,
+		"t3": `{"transactionKey":"t3","leaseAppKey":"vtx.leaseapp.credit","type":"credit","amountCents":10000,"postedAt":"2026-08-01T00:00:00Z"}`,
+		// unsigned lease has an outstanding debit too — must still be excluded.
+		"t4": `{"transactionKey":"t4","leaseAppKey":"vtx.leaseapp.unsigned","type":"debit","amountCents":999999,"postedAt":"2026-08-01T00:00:00Z"}`,
+	}
+	get := fakeKV(entries)
+
+	got := computeLandlordLeaseBalances(rows, keysOf(entries), get)
+	if len(got) != 2 {
+		t.Fatalf("want 2 arrears rows (unsigned + credit excluded), got %d: %+v", len(got), got)
+	}
+	if got[0].LeaseAppKey != "vtx.leaseapp.big" || got[0].BalanceCents != 480000 || got[0].UnitAddress != "99 Big Ave" {
+		t.Errorf("row 0 = %+v, want the bigger balance first", got[0])
+	}
+	if got[1].LeaseAppKey != "vtx.leaseapp.small" || got[1].BalanceCents != 5000 || got[1].ApplicantName != "A. Small" {
+		t.Errorf("row 1 = %+v, want the smaller balance second", got[1])
+	}
+}

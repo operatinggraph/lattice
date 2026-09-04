@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 )
 
 // serviceAttachLookbackDays is the "this period" window for the
@@ -54,6 +56,15 @@ const serviceAttachLookbackDays = 30
 // currently-booked) and cafeTabSettlement gated on a startsAt/settledAt
 // window, not raw existence — a lease whose class already happened or whose
 // tab already settled still used the service; see computeServiceAttachRate.
+//
+// Lease balances (worst-first arrears) reuses handleLedger's own
+// ledgerHistory-lens read + computeLedgerHistory (ledger.go) across every
+// occupied lease instead of one at a time, so the landlord sees who owes
+// money without pulling each lease's ledger individually. Independent of the
+// service-attach sources above (needs only the loftspace-ledger bucket, not
+// front-desk's or café's) and, unlike attach-rate, fails loud into
+// BalancesAvailable=false rather than a silent zero — a hidden read failure
+// here would misreport arrears as "none owed."
 
 // portfolioPulseUnit is one row of the occupancy breakdown: a unit the
 // landlord manages, plus its coarse listing status. UnitStatus is empty when
@@ -89,6 +100,53 @@ type portfolioPulseResult struct {
 	OccupiedLeases    int     `json:"occupiedLeases"`
 	ServiceAttached   int     `json:"serviceAttached"`
 	ServiceAttachRate float64 `json:"serviceAttachRate"`
+	// LeaseBalances (worst-first) surfaces rent arrears the landlord could
+	// previously only see one lease-ledger key at a time: every occupied
+	// lease carrying a positive (owed) balance, computed the same way
+	// handleLedger derives a single lease's balance. BalancesAvailable
+	// distinguishes "confirmed zero arrears" (empty slice, true) from
+	// "couldn't read the ledger" (empty slice, false) — the same
+	// zero-vs-unavailable posture OccupiedLeases already establishes for
+	// service-attach-rate above.
+	LeaseBalances     []landlordLeaseBalance `json:"leaseBalances"`
+	BalancesAvailable bool                   `json:"balancesAvailable"`
+}
+
+// landlordLeaseBalance is one arrears row: an occupied lease with a positive
+// (owed-to-landlord) running balance, worst-first.
+type landlordLeaseBalance struct {
+	LeaseAppKey   string `json:"leaseAppKey"`
+	UnitAddress   string `json:"unitAddress"`
+	ApplicantName string `json:"applicantName"`
+	BalanceCents  int64  `json:"balanceCents"`
+}
+
+// computeLandlordLeaseBalances derives each occupied (signed) lease's running
+// balance from the same ledgerHistory rows handleLedger reads one lease at a
+// time (computeLedgerHistory, ledger.go), keeping only leases that owe the
+// landlord money (balance > 0 — a credit balance isn't arrears), sorted
+// worst-first so the FE needs no client-side sort.
+func computeLandlordLeaseBalances(rows []protectedLandlordRow, ledgerKeys []string, get kvGetter) []landlordLeaseBalance {
+	out := make([]landlordLeaseBalance, 0)
+	for _, r := range rows {
+		if r.SignedAt == nil || *r.SignedAt == "" {
+			continue
+		}
+		_, balance := computeLedgerHistory(ledgerKeys, get, r.EntityKey)
+		if balance <= 0 {
+			continue
+		}
+		row := landlordLeaseBalance{LeaseAppKey: r.EntityKey, BalanceCents: balance}
+		if r.UnitAddress != nil {
+			row.UnitAddress = *r.UnitAddress
+		}
+		if r.ApplicantName != nil {
+			row.ApplicantName = *r.ApplicantName
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].BalanceCents > out[j].BalanceCents })
+	return out
 }
 
 // weaverTargetsBucket is the shared cross-package Weaver convergence bucket
@@ -336,6 +394,27 @@ func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 	if appRows, err := queryLandlordApplications(ctx, s.pgPool, actor.Subject); err == nil && s.conn != nil {
 		occupied := occupiedLeaseAppKeys(appRows)
 		conn := s.conn
+
+		// Lease balances (worst-first arrears) — independent of the
+		// booking/tab sources below: a landlord with no service-attach
+		// data at all still needs to see who owes rent.
+		ledgerBucket := loftspaceledger.LedgerHistoryBucket
+		if ledgerKeys, lErr := conn.KVListKeys(ctx, ledgerBucket); lErr != nil {
+			s.logger.Warn("portfolio-pulse: ledger history unavailable, leaving lease balances unavailable", "error", lErr)
+		} else if ledgerValues, rErr := readAllOrFail(ledgerKeys, func(key string) ([]byte, error) {
+			entry, err := conn.KVGet(ctx, ledgerBucket, key)
+			if err != nil {
+				return nil, err
+			}
+			return entry.Value, nil
+		}); rErr != nil {
+			s.logger.Warn("portfolio-pulse: ledger history read incomplete, leaving lease balances unavailable", "error", rErr)
+		} else {
+			ledgerGet := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
+			result.LeaseBalances = computeLandlordLeaseBalances(appRows, ledgerKeys, ledgerGet)
+			result.BalancesAvailable = true
+		}
+
 		bookingKeys, bErr := conn.KVListKeys(ctx, frontdesk.BookingHistoryBucket)
 		if bErr != nil {
 			s.logger.Warn("portfolio-pulse: front-desk-booking-history unavailable, degrading service-attach-rate to café-tabs only", "error", bErr)

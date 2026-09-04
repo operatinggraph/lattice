@@ -3373,10 +3373,52 @@ async function loadPortfolioPulse() {
     }
     el.hidden = false;
     el.textContent = text;
+    renderPortfolioArrears(data.leaseBalances, data.balancesAvailable);
   } catch (e) {
     console.warn("portfolio-pulse unavailable:", e);
     el.hidden = true;
+    renderPortfolioArrears(null, false);
   }
+}
+
+// renderPortfolioArrears — the worst-first rent-owed column beside the pulse
+// card: one row per occupied lease with a positive balance, highest first
+// (server-sorted, portfolio.go's computeLandlordLeaseBalances). Hidden
+// entirely when the read was unavailable (balancesAvailable false) rather
+// than shown as a misleading "no one owes anything" — the same
+// zero-vs-unavailable distinction the pulse text already applies to
+// service-attach-rate. Built with createElement/textContent, never
+// innerHTML, since unit address and applicant name are landlord/tenant-
+// entered strings.
+function renderPortfolioArrears(rows, available) {
+  const el = $("#portfolio-arrears");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!available || !rows || !rows.length) {
+    el.hidden = true;
+    return;
+  }
+  const title = document.createElement("div");
+  title.className = "portfolio-arrears-title";
+  title.textContent = "💸 Rent owed (worst first)";
+  el.appendChild(title);
+  const list = document.createElement("ul");
+  list.className = "portfolio-arrears-list";
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "portfolio-arrears-row";
+    const who = document.createElement("span");
+    who.className = "portfolio-arrears-who";
+    who.textContent = row.unitAddress || row.applicantName || row.leaseAppKey;
+    const amount = document.createElement("span");
+    amount.className = "portfolio-arrears-amount";
+    amount.textContent = moneyAmount(row.balanceCents / 100);
+    li.appendChild(who);
+    li.appendChild(amount);
+    list.appendChild(li);
+  }
+  el.appendChild(list);
+  el.hidden = false;
 }
 
 // loadLandlordRLS reads /api/landlord/applications as an AUTHENTICATED actor;

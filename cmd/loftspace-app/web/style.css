@@ -564,6 +564,28 @@ button.ghost.danger:hover { background: var(--red); color: #fff; }
   font-size: 0.85rem;
 }
 
+/* Portfolio-pulse's worst-first rent-owed column (portfolio.go's
+   computeLandlordLeaseBalances). */
+.portfolio-arrears-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.portfolio-arrears-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.portfolio-arrears-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+.portfolio-arrears-amount {
+  font-weight: 600;
+  color: var(--red);
+}
+
 /* Front-of-house unified search grouped results. */
 .search-group-title {
   margin: 0 0 10px;
