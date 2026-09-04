@@ -140,7 +140,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"leaseRentSettlement":               hopIndexed,
 	"myTasks":                           hopIndexed,
 	"objectAttachments":                 hopUntypedHop,
-	"objectLiveness":                    hopUntypedHop,
+	"objectLiveness":                    hopIndexed, // One anchored node, no hops to index.
 	"orphanedTaskGrants":                hopIndexed,
 	"pastDueAppointments":               hopIndexed,
 	"pastDueBookings":                   hopIndexed,

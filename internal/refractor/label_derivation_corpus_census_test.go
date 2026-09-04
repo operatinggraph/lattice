@@ -287,11 +287,13 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"myTasks":                       {broad, "identity role task", modeBroad},
 	"objectAttachments":             {broad, "object", modeBroad},
 	"objectIdentityAttachmentsRead": {narrow, "identity object", modeLabel},
-	"objectLiveness":                {broad, "object", modeBroad},
-	"orphanedTaskGrants":            {broad, "task", modeBroad},
-	"wellnessIdentitiesRead":        {broad, "booking identity leaseapp session", modeBroad},
-	"wellnessMembers":               {broad, "identity leaseapp", modeBroad},
-	"wellnessSessions":              {broad, "instructor session studio", modeBroad},
+	// One anchored node and no relationship: the relation set is exhaustive and
+	// empty, so the narrowed branch emits the `object` vertex form alone.
+	"objectLiveness":         {narrow, "object", modeRelation},
+	"orphanedTaskGrants":     {broad, "task", modeBroad},
+	"wellnessIdentitiesRead": {broad, "booking identity leaseapp session", modeBroad},
+	"wellnessMembers":        {broad, "identity leaseapp", modeBroad},
+	"wellnessSessions":       {broad, "instructor session studio", modeBroad},
 }
 
 // consumerFilterMode runs a compiled cypher through the SAME

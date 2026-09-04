@@ -308,7 +308,7 @@ RETURN identity.key AS actorKey, report.data.name AS reportName
 
 // untypedRolesSpec is rolesSpec with its one hop left untyped — a shape
 // AnchorHopIndex refuses outright ("pattern carries an untyped relationship",
-// live on `objectLiveness` and `objectAttachments`), so nothing about the
+// live on `objectAttachments`), so nothing about the
 // pattern's positions is knowable and the one-key answer cannot be proven.
 //
 // A WITH used to serve this vector; Increment 4a-1 narrowed that refusal to the

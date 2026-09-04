@@ -49,7 +49,6 @@ import (
 var corpusRelBindings = map[string]string{
 	"objectAttachments":             "r:*[data type]",
 	"objectIdentityAttachmentsRead": "r:*[data type]",
-	"objectLiveness":                "r:*[]",
 }
 
 // corpusRelBindingVerdicts derives the verdict for every executable cypher the
@@ -121,7 +120,6 @@ func TestCorpusRelBindings_BindingLensesAreTheKnownPopulation(t *testing.T) {
 	require.Equal(t, []string{
 		"objectAttachments",
 		"objectIdentityAttachmentsRead",
-		"objectLiveness",
 	}, binders,
 		"the population of lenses that bind a relationship variable has changed. A lens joining this list "+
 			"projects off a relationship — price what it reads (a `data` read is a point-read per "+

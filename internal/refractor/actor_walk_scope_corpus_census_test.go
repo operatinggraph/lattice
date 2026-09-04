@@ -89,6 +89,14 @@ const corpusWalkScopeMinimum = 55
 // shipped cypher reaches: AnchorHopIndex refuses an untyped relationship
 // outright, so such a lens lands on `nil` instead.
 //
+// `none` AND `nil` ARE OPPOSITE ANSWERS, and objectLiveness is the row that
+// makes the difference load-bearing. `nil` is a REFUSED scope — the walk stays
+// relation-blind and crosses everything. `none` is a DERIVED and empty one: a
+// scope that follows no relation from any type, because no pattern path exists
+// at all, so following nothing still reaches every anchor the pattern can
+// reach. A row reading `none` is the scope's own soundness argument at k = 0,
+// not a refusal by another name.
+//
 // THE `service:…instanceOf…` ENTRIES ARE THE KNOWN RESIDUAL. Four rows below —
 // capabilityServiceAccess, edgeInstances, edgeManifestProviderReadGrants and
 // edgeProviderQueue — name `instanceOf` at the `service` type, because their own
@@ -145,7 +153,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"leaseRentSettlement":               "clause:governs|leaseapp:governs",
 	"myTasks":                           "identity:assignedTo,holdsRole|role:holdsRole,queuedFor|task:assignedTo,forOperation,queuedFor,scopedTo|any:forOperation,scopedTo",
 	"objectAttachments":                 scopeNil,
-	"objectLiveness":                    scopeNil,
+	"objectLiveness":                    "none", // Derived-and-empty, not refused; see above.
 	"orphanedTaskGrants":                "task:forOperation|any:forOperation",
 	"pastDueAppointments":               "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"pastDueBookings":                   "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
@@ -174,7 +182,6 @@ var corpusActorWalkScopeRefusals = map[string]string{
 	"edgeManifestReadGrants":      "a branch's pattern graph is incomplete",
 	"edgeManifestStaffReadGrants": "a branch's pattern graph is incomplete",
 	"objectAttachments":           "a branch's pattern graph is incomplete",
-	"objectLiveness":              "a branch's pattern graph is incomplete",
 }
 
 // corpusWalkScopeDerivation installs every actor-aware cypher the corpus ships

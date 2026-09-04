@@ -13,13 +13,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Liveness is read from `o.data.liveLinks` — the authoritative, lag-free
 // live-link count maintained atomically by every attach/detach — NOT from the
 // lagging refractor-adjacency projection (the §21 attach-lag reclaim-race fix;
-// see objectLivenessSpec). The `OPTIONAL MATCH (o)-[r]->(owner)` + `count(owner)`
-// is retained only to collapse the link fan to exactly one row per anchor (the
-// §0.C guard) and to drive the actorAggregate reprojection on any link
-// create/tombstone (AnchorType `object`); every attach/detach also rewrites the
-// object vertex, so the anchor reprojects from the vertex CDC regardless. The
-// dead-target dangling-link case is a deferred owner-cascade concern, not this
-// lens's job (a bounded leak, never data loss — see objectLivenessSpec).
+// see objectLivenessSpec). The cypher binds no relationship at all: it reads
+// two root fields and one `.content` aspect field off the anchor vertex, so the
+// anchor reprojects on the object vertex's own CDC (the `vtx.object.>` subject
+// covers the aspect), which every attach/detach writes in the same batch as the
+// link mutation. The dead-target dangling-link case is a deferred owner-cascade
+// concern, not this lens's job (a bounded leak, never data loss — see
+// objectLivenessSpec).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -66,23 +66,20 @@ func Lenses() []pkgmgr.LensSpec {
 //     root data, so it does NOT lag the commit. This is the §21 fix for the
 //     attach-adjacency-lag reclaim race: a freshly-attached object commits its
 //     link AND `liveLinks=1` atomically, so the lens never mis-sees it as
-//     orphaned during the refractor-adjacency catch-up window (the old
-//     adjacency-`count(owner.key)` decision DID — the link was in Core KV but not
-//     yet in adjacency → liveOwners 0 → a premature, irreversible TombstoneObject
-//     that the epoch-CAS could not catch because no re-link had bumped the
-//     epoch).
-//   - The single `OPTIONAL MATCH (o)-[r]->(owner)` + `count(owner.key)` is kept
-//     ONLY to collapse the link fan-out to exactly one row per object anchor (the
-//     §0.C guard) and to drive the actorAggregate reprojection; `liveOwners` is
-//     NOT used in the orphan decision. The carry-no-filtering-WHERE / null-restore
-//     grouping behaviour is the documented full-engine idiom.
-//     The hop NAMES its relationship, which makes each link its own intermediate
-//     row: two links to one owner count as two, where an anonymous hop would
-//     count one. `liveOwners` absorbs that — it is neither returned nor a
-//     bodyColumn, and the grouping key carries neither it nor the relationship,
-//     so the projected row is identical either way (pinned by
-//     TestObjectLiveness_NamedRelationshipDoesNotMoveTheProjectedRow). Anything
-//     added here that DOES read the fan-out counts links, not owners.
+//     orphaned during the refractor-adjacency catch-up window. An
+//     adjacency-derived owner count cannot give that guarantee: a link present
+//     in Core KV but not yet in adjacency reads as zero owners → a premature,
+//     irreversible TombstoneObject that the epoch-CAS cannot catch because no
+//     re-link has bumped the epoch.
+//   - The pattern is a single anchored node and nothing else. `MATCH (o:object
+//     {key: $actorKey})` binds exactly one row, so the §0.C one-row-per-anchor
+//     guard holds by construction rather than through an aggregate, and the
+//     carry-no-filtering-WHERE / null-restore grouping behaviour is the
+//     documented full-engine idiom. Binding no relationship is what lets the
+//     consumer filter narrow to the `object` vertex form alone: adding a hop
+//     here would put the lens back on the broad Core-KV filter AND make each
+//     link its own intermediate row, so anything added that reads a fan-out
+//     counts links, not owners.
 //   - DEAD-TARGET tradeoff (§21): because `liveLinks` is only decremented by the
 //     object's OWN attach/detach, an owner-tombstone (which never touches the
 //     object) leaves a stale `liveLinks >= 1` → a dangling link to a dead owner no
@@ -102,13 +99,11 @@ func Lenses() []pkgmgr.LensSpec {
 //     would be `= null`, never the unsupported `IS NULL`.
 const objectLivenessSpec = `
 MATCH (o:object {key: $actorKey})
-OPTIONAL MATCH (o)-[r]->(owner)
 WITH
   o.key AS entityKey,
   o.data.linkEpoch AS linkEpoch,
   o.data.liveLinks AS liveLinks,
-  o.content.data.storeName AS storeName,
-  count(owner.key) AS liveOwners
+  o.content.data.storeName AS storeName
 RETURN
   entityKey AS actorKey,
   entityKey,

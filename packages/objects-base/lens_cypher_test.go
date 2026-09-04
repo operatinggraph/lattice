@@ -23,7 +23,6 @@ package objectsbase
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -228,8 +227,10 @@ func TestObjectLiveness_ZeroLinks_Orphaned(t *testing.T) {
 // guards against): a freshly-attached object commits its link AND liveLinks=1
 // atomically, but refractor-adjacency lags — so here liveLinks=1 with NO
 // adjacency edge built at all. The object must NOT be flagged orphaned. The
-// OLD adjacency-count cypher saw count(owner)=0 and reaped it → irreversible
-// byte loss. This is the #1 regression guard for this invariant.
+// cypher reads no adjacency, so this stays green by construction; the guard
+// goes red the moment anyone reintroduces an adjacency-derived liveness
+// decision, which would read zero owners here and reap the object →
+// irreversible byte loss. This is the #1 regression guard for this invariant.
 func TestObjectLiveness_AttachLag_NotOrphaned(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -255,9 +256,10 @@ func TestObjectLiveness_AttachLag_NotOrphaned(t *testing.T) {
 // core-kv tombstone and submits DetachObject, which decrements liveLinks and lets
 // the SAME Loop A+B reap the orphan — proven end-to-end by
 // TestObjectGC_OwnerTombstoneCascadeReclaims. So this asserts the lens-only
-// behaviour (unchanged); the cascade closes the loop around it. (Pre-§21 this
-// asserted orphaned=true off the adjacency signal, which cannot be trusted
-// without reaping fresh attaches — Test 3.)
+// behaviour; the cascade closes the loop around it. The seeded dead owner and
+// its link are inert to the cypher — the vector reduces to liveLinks=1 ⇒ not
+// orphaned — and that inertness is the point: an adjacency signal cannot be
+// trusted without reaping fresh attaches (Test 3).
 func TestObjectLiveness_DeadTargetOwner_LeakedNotReaped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -276,6 +278,9 @@ func TestObjectLiveness_DeadTargetOwner_LeakedNotReaped(t *testing.T) {
 }
 
 // Test 4 — several live links ⇒ exactly one row (the one-row-per-anchor guard).
+// The cypher binds no relationship, so the links seeded here never become
+// intermediate rows; one row per anchor holds by construction and this guard
+// catches a future hop that would turn each link into its own row.
 func TestObjectLiveness_MultipleLiveLinks_OneRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -295,7 +300,7 @@ func TestObjectLiveness_MultipleLiveLinks_OneRow(t *testing.T) {
 }
 
 // Test 5 — liveLinks>0 ⇒ not orphaned regardless of how many owners later die;
-// the count is the authoritative signal.
+// the count is the authoritative signal and the owners seeded here are inert.
 func TestObjectLiveness_MultiOwnerLiveLinks_NotOrphaned(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -504,31 +509,4 @@ func TestObjectAttachments_ZeroLinks_DegenerateEntryHasNullSlotAndFilename(t *te
 	require.Nil(t, entry["filename"])
 	require.Empty(t, ownerKeys(t, rows[0].Values["owners"]))
 	require.Empty(t, attachmentEntries(t, rows[0].Values["owners"]))
-}
-
-// Test H — objectLiveness binds `r` as walk plumbing and reads nothing off it,
-// but naming a relationship still changes what a row IS: two links to one owner
-// are two intermediate rows where an anonymous hop gives one. The lens folds
-// them through `count(owner.key)` into a grouping key that carries neither the
-// relationship nor the count, so the projected row is unchanged — and that is a
-// property of THIS cypher, not of the engine, so it is pinned rather than
-// argued. A lens that projected the fan-out would double it.
-func TestObjectLiveness_NamedRelationshipDoesNotMoveTheProjectedRow(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	f := newObjLensFixture(t)
-	f.object(t, "scan", 4, 2)
-	f.content(t, "scan", "store-abc", "application/pdf", 2048)
-	f.owner(t, "applicant", false)
-	f.link(t, "idDocument", "scan", "applicant")
-	f.link(t, "proofOfIncome", "scan", "applicant")
-
-	named := f.project(t, "scan")
-	require.Len(t, named, 1, "the anchor still projects exactly one row")
-
-	anonymous := f.projectSpec(t, strings.Replace(objectLivenessSpec, "-[r]->", "-[]->", 1), "scan")
-	require.Len(t, anonymous, 1)
-	require.Equal(t, anonymous[0].Values, named[0].Values,
-		"binding the relationship must not move a single projected value on this lens")
 }

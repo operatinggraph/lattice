@@ -92,7 +92,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"myTasks":                        {"g2/o6[op,task,tgt;qop,qtask,qtgt,role]", 2, 2},
 	"objectAttachments":              {"g1/o1[owner,r] g0/o0!no-aggregating-item", 1, 1},
 	"objectIdentityAttachmentsRead":  {"g0/o0!no-aggregating-item", 0, 0},
-	"objectLiveness":                 {"g1/o1!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 1},
+	"objectLiveness":                 {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0}, // No aggregating item in either stage.
 	"oneBillCafeEntries":             {"g0/o0!no-aggregating-item", 0, 0},
 	"oneBillClinicEntries":           {"g0/o0!no-aggregating-item", 0, 0},
 	"oneBillRentEntries":             {"g0/o0!no-aggregating-item", 0, 0},

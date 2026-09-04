@@ -133,7 +133,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"leaseRentSettlement":            oneKey,
 	"myTasks":                        walkMultiPosition,
 	"objectAttachments":              walkIncompleteIndex,
-	"objectLiveness":                 walkIncompleteIndex,
+	"objectLiveness":                 oneKey, // PositionsBinding("object") is exactly {Anchor}.
 	"orphanedTaskGrants":             walkMultiPosition,
 	"pastDueAppointments":            oneKey,
 	"pastDueBookings":                oneKey,

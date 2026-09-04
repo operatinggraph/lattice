@@ -849,3 +849,207 @@ func TestObject_SensitiveAttach_DedupKeepsFirstEnvelope(t *testing.T) {
 		t.Fatalf(".content.encryption must stay the FIRST upload's envelope on dedup, got %v", enc)
 	}
 }
+
+// revisionOf reports a key's current KV revision and whether it exists at all.
+// The vertex co-write is observed as a revision ADVANCE rather than as a value
+// change, because an OCC-touch that lands the same liveLinks count is still a
+// write the objectLiveness lens reprojects on.
+func revisionOf(ctx context.Context, conn *substrate.Conn, key string) (uint64, bool) {
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		return 0, false
+	}
+	return entry.Revision, true
+}
+
+// TestObjectLiveness_LinkMutationCoWritesTheHydratedObjectVertex is the
+// objectLiveness lens's delivery premise, proven against the real DDL rather
+// than argued from its comments: the lens binds no relationship, so a link
+// mutation reaches it only through the object vertex's own CDC.
+//
+// The invariant is CONDITIONAL — every batch that mutates a `lnk.object.*` key
+// AND carries that object's vertex in its read set also writes
+// `vtx.object.<oid>`. It is not unconditional: `detach_object`'s vertex write is
+// gated on `present(state, obj_key)` and the replace leg's on
+// `present(state, old_obj_key)`, the object vertex reaches DetachObject through
+// `derive_reads`' absence-tolerant `optionalReads`, and the replace leg's
+// `old_obj_key` is not derived at all — it arrives only if the submitter names
+// it. The last vector below is that un-hydrated case, asserted as a NON-write:
+// the vertex is not written, and its `liveLinks` stays exactly as (in)accurate
+// as the lens's sole input already is.
+func TestObjectLiveness_LinkMutationCoWritesTheHydratedObjectVertex(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objcowrite", Instance: "objcowrite-1"})
+
+	id1 := "vtx.identity.AAuserHJKMNPQRSTUVC1"
+	id2 := "vtx.identity.AAuserHJKMNPQRSTUVC2"
+	seedIdentity(t, ctx, conn, id1, false)
+	seedIdentity(t, ctx, conn, id2, false)
+
+	digestA := "SHA-256=coWriteObjectAAAAAAAAAA"
+	digestB := "SHA-256=coWriteObjectBBBBBBBBBB"
+	oidA := substrate.SHA256NanoID("object:" + digestA)
+	oidB := substrate.SHA256NanoID("object:" + digestB)
+	objA := "vtx.object." + oidA
+	objB := "vtx.object." + oidB
+	contentA := objA + ".content"
+	linkA1 := "lnk.object." + oidA + ".photoOf.identity.AAuserHJKMNPQRSTUVC1"
+	linkA2 := "lnk.object." + oidA + ".photoOf.identity.AAuserHJKMNPQRSTUVC2"
+	linkB1 := "lnk.object." + oidB + ".photoOf.identity.AAuserHJKMNPQRSTUVC1"
+
+	attach := func(label string, payload map[string]any, reads []string) {
+		t.Helper()
+		submitObj(t, ctx, conn, cp, cons, testutil.GenReqID(label), "AttachObject",
+			payload, reads, processor.OutcomeAccepted)
+	}
+	attachA := func(label, target string, reads []string) {
+		t.Helper()
+		attach(label, map[string]any{"digest": digestA, "size": 11, "contentType": "image/png",
+			"storeName": "s-cowrite-a", "targetKey": target, "linkName": "photoOf"}, reads)
+	}
+
+	// MINT arm — the object vertex is absent, the link is created, and the same
+	// batch mints `vtx.object.<oidA>` with liveLinks = 1.
+	attachA("cowriteMint", id1, []string{id1})
+	if !liveExists(ctx, conn, linkA1) {
+		t.Fatalf("mint attach did not create %s", linkA1)
+	}
+	mintRev, ok := revisionOf(ctx, conn, objA)
+	if !ok {
+		t.Fatalf("the mint arm must write %s in the same batch as %s", objA, linkA1)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objA); ll != 1 {
+		t.Fatalf("liveLinks after mint = %d want 1", ll)
+	}
+
+	// LIVE (OCC-touch) arm — a second link to the same object, with the vertex
+	// and its .content hydrated. The link is created and the vertex revision
+	// advances in the same batch.
+	attachA("cowriteLive", id2, []string{id2, objA, contentA})
+	if !liveExists(ctx, conn, linkA2) {
+		t.Fatalf("live-arm attach did not create %s", linkA2)
+	}
+	liveRev, ok := revisionOf(ctx, conn, objA)
+	if !ok {
+		t.Fatalf("%s must still exist after the live-arm attach", objA)
+	}
+	if liveRev <= mintRev {
+		t.Fatalf("the live arm must OCC-touch %s (revision %d -> %d)", objA, mintRev, liveRev)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objA); ll != 2 {
+		t.Fatalf("liveLinks after the second attach = %d want 2", ll)
+	}
+
+	// DETACH — the submitter declares NO reads at all; derive_reads supplies the
+	// link (fail-closed) and the object vertex (absence-tolerant), so the vertex
+	// IS in the read set, `present` holds, and the tombstone batch writes it.
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("cowriteDetach"), "DetachObject",
+		map[string]any{"oid": oidA, "targetKey": id2, "linkName": "photoOf"},
+		nil, processor.OutcomeAccepted)
+	if !isDeleted(t, ctx, conn, linkA2) {
+		t.Fatalf("detach must tombstone %s", linkA2)
+	}
+	detachRev, ok := revisionOf(ctx, conn, objA)
+	if !ok {
+		t.Fatalf("%s must still exist after detach", objA)
+	}
+	if detachRev <= liveRev {
+		t.Fatalf("detach must co-write %s (revision %d -> %d)", objA, liveRev, detachRev)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objA); ll != 1 {
+		t.Fatalf("liveLinks after detach = %d want 1", ll)
+	}
+
+	// REVIVE arm — orphan the object, reap it, then re-attach. The revived
+	// vertex is written in the same batch as the revived link.
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("cowriteOrphan"), "DetachObject",
+		map[string]any{"oid": oidA, "targetKey": id1, "linkName": "photoOf"},
+		nil, processor.OutcomeAccepted)
+	if ll := liveLinksOf(t, ctx, conn, objA); ll != 0 {
+		t.Fatalf("liveLinks after orphaning = %d want 0", ll)
+	}
+	epochDoc, _ := readDoc(t, ctx, conn, objA)
+	epochData, _ := epochDoc["data"].(map[string]any)
+	orphanEpoch, _ := epochData["linkEpoch"].(float64)
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("cowriteReap"), "TombstoneObject",
+		map[string]any{"oid": oidA, "expectedEpoch": int(orphanEpoch)},
+		[]string{objA, contentA}, processor.OutcomeAccepted)
+	if !isDeleted(t, ctx, conn, objA) {
+		t.Fatalf("the orphan reap must soft-delete %s", objA)
+	}
+	reapRev, _ := revisionOf(ctx, conn, objA)
+
+	attachA("cowriteRevive", id1, []string{id1, objA, contentA, linkA1})
+	if !liveExists(ctx, conn, linkA1) {
+		t.Fatalf("the revive attach must bring %s back alive", linkA1)
+	}
+	reviveRev, ok := revisionOf(ctx, conn, objA)
+	if !ok {
+		t.Fatalf("%s must exist after the revive arm", objA)
+	}
+	if reviveRev <= reapRev {
+		t.Fatalf("the revive arm must co-write %s (revision %d -> %d)", objA, reapRev, reviveRev)
+	}
+	if isDeleted(t, ctx, conn, objA) {
+		t.Fatalf("the revive arm must un-delete %s", objA)
+	}
+
+	// REPLACE leg, PRIOR object hydrated — the submitter names the old object
+	// vertex, so the leg's `present(state, old_obj_key)` holds: the old link is
+	// tombstoned AND the old vertex is written, dropping it to liveLinks 0.
+	attach("cowriteReplaceHydrated", map[string]any{
+		"digest": digestB, "size": 12, "contentType": "image/png",
+		"storeName": "s-cowrite-b", "targetKey": id1, "linkName": "photoOf",
+		"replaceObjectId": oidA},
+		[]string{id1, objA, linkA1})
+	if !isDeleted(t, ctx, conn, linkA1) {
+		t.Fatalf("the replace leg must tombstone the prior link %s", linkA1)
+	}
+	replacedRev, ok := revisionOf(ctx, conn, objA)
+	if !ok {
+		t.Fatalf("%s must still exist after being replaced", objA)
+	}
+	if replacedRev <= reviveRev {
+		t.Fatalf("a hydrated prior object must be co-written by the replace leg (revision %d -> %d)",
+			reviveRev, replacedRev)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objA); ll != 0 {
+		t.Fatalf("prior object liveLinks after a hydrated replace = %d want 0", ll)
+	}
+	objBRev, ok := revisionOf(ctx, conn, objB)
+	if !ok {
+		t.Fatalf("the replacing attach must mint %s", objB)
+	}
+
+	// REPLACE leg, PRIOR object NOT hydrated — the submitter names the old LINK
+	// (the leg's `alive` test needs it) but not the old vertex, which
+	// derive_reads never supplies for AttachObject. `present` is False, so the
+	// batch tombstones the link and writes NO vertex. That is the correct
+	// answer, not a gap: an un-hydrated object vertex keeps its liveLinks
+	// unchanged, which is exactly the accuracy the lens's sole input already
+	// has — the unconditional form of this invariant is red right here.
+	digestC := "SHA-256=coWriteObjectCCCCCCCCCC"
+	oidC := substrate.SHA256NanoID("object:" + digestC)
+	attach("cowriteReplaceUnhydrated", map[string]any{
+		"digest": digestC, "size": 13, "contentType": "image/png",
+		"storeName": "s-cowrite-c", "targetKey": id1, "linkName": "photoOf",
+		"replaceObjectId": oidB},
+		[]string{id1, linkB1})
+	if !isDeleted(t, ctx, conn, linkB1) {
+		t.Fatalf("the replace leg must tombstone the prior link %s even un-hydrated", linkB1)
+	}
+	afterRev, ok := revisionOf(ctx, conn, objB)
+	if !ok {
+		t.Fatalf("%s must still exist", objB)
+	}
+	if afterRev != objBRev {
+		t.Fatalf("an un-hydrated prior object must NOT be written (revision %d -> %d)", objBRev, afterRev)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objB); ll != 1 {
+		t.Fatalf("an un-hydrated prior object keeps its stale liveLinks = %d want 1", ll)
+	}
+	oidCKey := "vtx.object." + oidC
+	if !liveExists(ctx, conn, oidCKey) {
+		t.Fatalf("the replacing attach must mint %s", oidCKey)
+	}
+}

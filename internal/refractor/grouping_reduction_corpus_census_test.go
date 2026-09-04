@@ -158,7 +158,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"myTasks":                           {"key(actorKey)", 0},
 	"objectAttachments":                 {"key(contentType digest encryption entityKey governingIdentity sensitive size storeName) p", 0},
 	"objectIdentityAttachmentsRead":     {"p", 0},
-	"objectLiveness":                    {"key(entityKey linkEpoch liveLinks storeName) p!liveLinks", 0},
+	"objectLiveness":                    {"p p!liveLinks", 0}, // One anchored row: nothing to reduce, so no grouping key.
 	"oneBillCafeEntries":                {"p", 0},
 	"oneBillClinicEntries":              {"p", 0},
 	"oneBillRentEntries":                {"p", 0},

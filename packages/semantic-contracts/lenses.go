@@ -142,7 +142,7 @@ RETURN
 //   - `missing_charge` — true while the clause charges an account, is either
 //     unconditioned or its conditionedOn target is still live, and no
 //     transaction `authorizedBy` it exists yet. count(t.key) collapses the
-//     fan to a single existence check (the objectLiveness liveOwners idiom).
+//     fan to a single existence check.
 //     "Conditioned" is a `terms.conditioned` data flag set at CreateClause
 //     time (not inferred from link/target liveness — a tombstoned
 //     conditionedOn TARGET makes condKey resolve null exactly like "never
