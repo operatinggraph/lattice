@@ -20,6 +20,7 @@ non-advisory finding.
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
 | `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map |
 | `lint-board` | The backlog is an index, not a journal |
+| `lint-slog-values` | An slog attribute value's in-module struct type implements `slog.LogValuer`/`json.Marshaler`/`encoding.TextMarshaler` — a JSON handler never consults `fmt.Stringer` |
 
 ## The author-declares shape
 

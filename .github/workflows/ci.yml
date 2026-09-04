@@ -312,6 +312,20 @@ jobs:
         # Survey-log/PO-notes fire-journal, or a multi-line Done-log entry.
         run: STRICT=1 go run ./scripts/lint-board.go
 
+      - name: slog attribute-value lint (JSON-handler renders a Stringer-only struct as {})
+        # Production installs slog.NewJSONHandler, whose Any arm goes through
+        # encoding/json — which honours json.Marshaler / encoding.TextMarshaler
+        # but never fmt.Stringer. An slog attribute value whose static type is
+        # an in-module named struct (directly, behind one pointer, or as a
+        # slice/array/map element) implementing none of slog.LogValuer /
+        # json.Marshaler / encoding.TextMarshaler ships as "{}" while a
+        # TextHandler-backed unit test reads it fine. Walks package-level
+        # slog.* calls, *slog.Logger methods, slog.Any, and the
+        # `f(msg, attrs...)` spread shape built from a local []any via
+        # append(). `// slog-value: <reason>` on the call's or the value's own
+        # line declares a deliberate exception. Self-tests on every invocation.
+        run: STRICT=1 go run ./scripts/lint-slog-values.go
+
   stack-gates:
     runs-on: ubuntu-latest
     timeout-minutes: 20
