@@ -237,9 +237,10 @@ has, and the edge re-drives it.
   exists to hold and so needs its own design.
 - *(Amended at build, 2026-09-03 — Inc 2 cold review.)* A batch is bounded by **count and by size**: a chunk
   whose aggregate value size trips the connection's 64 MiB response ceiling is split in half and retried down
-  to a floor — and ONLY on that signature (`substrate.ErrDirectGetAttemptsExhausted`, the deterministic
-  over-size case); any other error propagates unchanged on the first request, so a transport stall is not
-  amplified by the descent — so a wide frontier of large documents degrades to more requests, never to a
+  to a floor — and ONLY on that signature (`substrate.ErrDirectGetAttemptsExhausted`, wrapped only when every
+  exhausted attempt delivered at least 8 MiB — the over-size case; a short read that exhausts small, such as a
+  `404` racing a delete on a hot hub, is a plain failure); any other error propagates unchanged on the first
+  request, so neither a transport stall nor a racing delete is amplified by the descent — so a wide frontier of large documents degrades to more requests, never to a
   wedged evaluation;
   a body or adjacency document that fails to decode is **not staged** (Warn), so the point read fires iff the
   evaluation dereferences it and fails exactly where it did before batching (R6's rule, mirrored); the
