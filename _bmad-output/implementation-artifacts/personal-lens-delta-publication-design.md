@@ -469,6 +469,11 @@ hydrate carries the changed shape.
   published at live revisions — every device dropped the rewound pass, ≈ 9 MB per rebuild for nothing.
   `ReprojectPersonalActor` on a pipeline whose window is open therefore scopes to Silent whatever the caller asked,
   counted as attempted-and-succeeded; the window's close asks for the cycle that lands.
+- *A window a restart resumes is open before the consumer delivers (measured 2026-09-05 11:52 PT).* `Run` added the
+  consumer and only then read the health status that reopens an interrupted window, so the first replayed event after a
+  restart was scoped `vertices`, fanned out through the enumerator over 135 actors and published 742 messages at one
+  rewound revision; every later event was silent. The resumed window opens before the consumer exists; the completion
+  watcher starts after it.
 - *A personal target's rebuild has no stored effect at all.* `NatsSubjectAdapter` is neither a `Truncater` nor
   `Guarded`, so the truncate warns-and-skips; with the replay silent, what a personal rebuild still buys is the
   adjacency re-apply and the recomputed consumer filter — the SYNC stream is repaired by the content cycle, never
@@ -928,7 +933,7 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
   trigger a rebuild live (a spec-touching package refresh) and re-run `make sync-census -subject` on the widest actor: zero
   messages during the replay, one content pass after. Then the cumulative close pass over Inc 1–4 and the row closes.
 
-### Checkpoint (2026-09-05, Inc 4 SHIPPED `8a43aa9d` + 4b `1a1c6cd9` — T7 live on the rebuild path; item CLOSED)
+### Checkpoint (2026-09-05, Inc 4 SHIPPED `8a43aa9d` + 4b `1a1c6cd9` + 4c `34ce301c` — T7 live on the rebuild path; item CLOSED)
 
 - **Landed on `main` (CI green, run 33981427129):** `ScopeSilent` from the CDC write loop while a rebuild window is open; the
   window as a count of live rebuilds, each invocation ending its window once, the 1 → 0 transition asking the injected
@@ -948,6 +953,9 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
   the drain), the reader declared in the flag ledger; unit vectors + a real-sweeper e2e holding the window open. A requested
   cycle that runs inside a later window is spent silent, and that window's own close requests again; the latch reads the
   request at cycle start, so every close is honoured by the next cycle to start.
+- **Inc 4c `34ce301c`:** the resumed window opens before `Run` adds the consumer (live after the 12:14 PT cycle: the resume
+  at 12:14:47, the first replayed event at 12:15:00 already `silent`) (the 11:52 restart's first replayed event was scoped
+  before the window existed — 742 messages at revision 122,624 across 135 actors; every later event silent).
 - **Not observed in this fire:** the window's close and the requested content cycle on the live stack (the replay was still
   running at close; both are pinned by T8's completion vectors and the seam e2e). The next reader checks `refractor.log`
   for `rebuild complete on a personal lens` on `ZvZ3…` followed by a `CONTENT cycle … (requested)` line.
