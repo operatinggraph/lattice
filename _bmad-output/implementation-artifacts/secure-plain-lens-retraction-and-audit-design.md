@@ -744,3 +744,30 @@ lenses only once the licence does).
 An audit that writes (§7 row 3); an erasure attestation for identity-custodied secure columns (§12); the
 licence's restart window; the derived-anchor cap's size; the presence probe's RLS role assumption; any
 change to the sweep; auth-plane plain-lens retraction.
+
+---
+
+## 16. Build note — fire brief delta + checkpoint (Steward, 2026-09-05)
+
+**Phase 0 at `86bead09`.** §15 is the brief; a read-only scout re-anchored every §15.2 site live and every
+§15.1 premise holds at this commit (line numbers unchanged since `07c837b2`; the refractor drift since then
+is the untyped-hop and walk-scope fires, none of it on this design's touch list). The scan-root pin holds
+**65** lenses (floor `> 40`); the census test of Inc 3 takes its population from that pin. Live state at
+fire start: `health.refractor.rfx-469256e559a4` — `leaseApplicationsRead` still `auditEnrolled`,
+`alert=diverged`, `divergentRows={stale:10}` of 10 audited, `auditCycleDivergentTotal=57` of 64; the ten
+Secure lenses still refuse on the plaintext string; `read_lease_applications` = 59 rows / 2 deleted, and
+its columns include `authz_anchors text[]` and six `double precision` numerics — the two representation
+candidates §2.4 names, to be settled by the Inc 1 premise before the mask is built.
+
+**Scope-diff gate:** the three increments of §14 trace item-by-item to §0's scope sentence; no widening, no
+substituted mechanism. Dependencies re-verified both ways: Inc 2 rests on Inc 1 (the licence's first
+conjunct is audit freshness — `audit.go:329-331` neighbourhood), Inc 3 on Inc 2 (T1's population).
+
+**Landing shape: each increment lands on `main` when green.** The invariant that keeps `main` correct at
+every boundary: the audit never writes (Inc 1 changes only its comparison), the licence's other conjuncts
+stay in force (Inc 2 admits a Secure lens exactly where a non-Secure one is already licensed), and the
+gate is added last, only once the census pins zero business-plane debt (Inc 3).
+
+**Checkpoint.** Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-secure-plain`, branch
+`fire/secure-plain-lens`. Done: — . Next: Inc 1 (masked audit), starting from the `leaseApplicationsRead`
+premise.
