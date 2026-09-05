@@ -1838,13 +1838,29 @@ func (e *Engine) alert(key, severity, code, message string) {
 // occurrence at one key would have those occurrences damped to Debug and lose
 // them, so those keep using alert. A change of severity or code at the same key
 // is a different fact and arrives loudly again.
+//
+// A raise the per-row budget REFUSES is the case the arrival test cannot serve,
+// and it inverts the seam if left to it: nothing tracks the key, so standingAs
+// says "not standing" on every pass and the raise is Error once a sweep pass for
+// as long as the target sits at its cap — the flood this seam exists to prevent,
+// arriving exactly when the target is worst off. A refused raise is paced on the
+// cache's refusal clock instead: loud once per (target, family) per
+// logPaceInterval, Debug in between. The arrival is still heard; the flood ends.
 func (e *Engine) alertStanding(key, severity, code, message string) {
-	if e.issues.standingAs(key, severity, code) {
+	standing := e.issues.standingAs(key, severity, code)
+	refused := e.issues.set(key, severity, code, message)
+	switch {
+	case refused:
+		if e.issues.refusedLoud(key, e.now()) {
+			e.logger.Error("weaver: " + message)
+		} else {
+			e.logger.Debug("weaver: " + message)
+		}
+	case standing:
 		e.logger.Debug("weaver: " + message)
-	} else {
+	default:
 		e.logger.Error("weaver: " + message)
 	}
-	e.issues.set(key, severity, code, message)
 }
 
 // alertPaced records a Health KV issue exactly as alert does, but rations its
@@ -1883,7 +1899,7 @@ func (e *Engine) alertStanding(key, severity, code, message string) {
 // repairs, so a latch-borne stamp resets about once a pass. pacedRaise's doc
 // states what the pace-borne one can and cannot distinguish.
 func (e *Engine) alertPaced(key, severity, code, message string) {
-	loud, arrivedAt := e.issues.pacedRaise(key, severity, code, time.Now())
+	loud, arrivedAt := e.issues.pacedRaise(key, severity, code, e.now())
 	switch {
 	case !loud:
 		e.logger.Debug("weaver: " + message)
@@ -2124,9 +2140,27 @@ func issueKeyRowIssuesCapped(targetID string) string {
 	return issuePrefixData + targetID + "." + rowIssuesCappedSegment
 }
 
-// rowIssueTarget reports whether key is a member of a PER-ROW issue family — a
+// rowIssueTarget reports whether key is a member of a PER-ROW issue family and
+// if so which target's budget it counts against. It is rowIssueFamily with the
+// family discarded, for the callers that need only the budget's owner; the two
+// share one switch so a family's membership cannot be answered two ways.
+func rowIssueTarget(key string) (string, bool) {
+	target, _, ok := rowIssueFamily(key)
+	return target, ok
+}
+
+// rowIssueFamily reports whether key is a member of a PER-ROW issue family — a
 // `gap:`, `data:` or `template:` entry keyed per (target, entity, column) — and
-// if so which target's budget it counts against.
+// if so which target's budget it counts against and which family it belongs to,
+// named by that family's own prefix constant.
+//
+// The family is the second key the issue cache's refusal accounting uses. A
+// raise the cap turns away is counted and log-paced per (target, family), so a
+// `data:` flood that exhausts a target cannot silence the arrival of the first
+// refused `template:` fault behind it, and the overflow entry can say which
+// families the refusals came from — the two populations have different
+// re-derivation cadences, and an operator reading one number cannot tell them
+// apart.
 //
 // The test is the key SHAPE, not a list of raise sites: every member carries an
 // entity segment and a column segment below the target, so a key whose family
@@ -2165,23 +2199,23 @@ func issueKeyRowIssuesCapped(targetID string) string {
 // falls out as not-a-per-row-key and is left uncounted, which costs only the
 // bound on that one entry. There is no input that attributes an entry to a
 // target other than the one whose prefix it carries.
-func rowIssueTarget(key string) (string, bool) {
+func rowIssueFamily(key string) (target, family string, ok bool) {
 	tail := ""
 	switch {
 	case strings.HasPrefix(key, issuePrefixGapEntity):
-		tail = key[len(issuePrefixGapEntity):]
+		tail, family = key[len(issuePrefixGapEntity):], issuePrefixGapEntity
 	case strings.HasPrefix(key, issuePrefixData):
-		tail = key[len(issuePrefixData):]
+		tail, family = key[len(issuePrefixData):], issuePrefixData
 	case strings.HasPrefix(key, issuePrefixTemplate):
-		tail = key[len(issuePrefixTemplate):]
+		tail, family = key[len(issuePrefixTemplate):], issuePrefixTemplate
 	case strings.HasPrefix(key, issuePrefixSweep):
-		tail = key[len(issuePrefixSweep):]
+		tail, family = key[len(issuePrefixSweep):], issuePrefixSweep
 	default:
-		return "", false
+		return "", "", false
 	}
-	targetID, rest, ok := strings.Cut(tail, ".")
-	if !ok || targetID == "" || !strings.Contains(rest, ".") {
-		return "", false
+	targetID, rest, cut := strings.Cut(tail, ".")
+	if !cut || targetID == "" || !strings.Contains(rest, ".") {
+		return "", "", false
 	}
-	return targetID, true
+	return targetID, family, true
 }

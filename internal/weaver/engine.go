@@ -290,6 +290,10 @@ type Engine struct {
 	oscillation      *oscillationStats
 	admission        *admissionScheduler
 	republish        *republishSet
+	// clock is the wall clock the log-pacing seams read, injectable so a test
+	// can walk a pace window without waiting one out. Nil means time.Now — see
+	// Engine.now, which is what every caller goes through.
+	clock func() time.Time
 
 	mu sync.Mutex
 	// targets is the last-applied desired lane-1 consumer set (targetId →
@@ -298,6 +302,16 @@ type Engine struct {
 	targets map[string]specFingerprint
 
 	ctx context.Context
+}
+
+// now reads the engine's clock. It tolerates a zero-value clock so an Engine
+// assembled field-by-field — which several of this package's tests do — reads
+// the wall clock without having to know this seam exists.
+func (e *Engine) now() time.Time {
+	if e.clock != nil {
+		return e.clock()
+	}
+	return time.Now()
 }
 
 // disabledTargetSet is the engine's in-memory cache of currently-disabled

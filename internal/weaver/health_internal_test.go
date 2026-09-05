@@ -463,6 +463,86 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	}
 }
 
+// TestEmit_ClosesTheRefusalWindow pins the boundary the overflow entry's count
+// is measured against. That count is "refusals since the last heartbeat", and
+// the heartbeat is the only walk of the cache on the right cadence — snapshot is
+// a pure read with no reset leg, so wiring the reset to it would leave the
+// number a monotone total that never falls even after every refusal stops.
+//
+// The vector is a target refused only BEFORE the first heartbeat: the second
+// heartbeat must report zero, because nothing was refused in its window.
+func TestEmit_ClosesTheRefusalWindow(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const healthBucket = "health-kv"
+	if _, err := m.conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: healthBucket}); err != nil {
+		t.Fatalf("create %s: %v", healthBucket, err)
+	}
+	cache := newIssueCache()
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	h := &heartbeater{
+		conn:                  m.conn,
+		bucket:                healthBucket,
+		instance:              "unit-" + testNanoID(t),
+		startedAt:             time.Now(),
+		interval:              time.Second,
+		states:                healthkv.NewConsumerStateCache(),
+		issues:                cache,
+		source:                newTargetSource(nil, "core-kv", "test", cache, logger),
+		marks:                 m,
+		effectMismatchAlerted: make(map[string]struct{}),
+		consumerPausedSince:   make(map[string]string),
+		logger:                logger,
+	}
+
+	const targetID = "targetHeartbeatWindow"
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		cache.set(issueKeyDataEntity(targetID, fmt.Sprintf("%020d", i), "violating"),
+			"warning", "RowDataError", "row column violating is not a bool")
+	}
+	for i := 0; i < 3; i++ {
+		cache.set(issueKeyGapEntity(targetID, "eParked", "missing_a"), "warning", "GapBudgetExhausted",
+			"budget spent")
+	}
+
+	overflowMessage := func() string {
+		t.Helper()
+		entry, err := h.conn.KVGet(ctx, healthBucket, h.key())
+		if err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		var doc struct {
+			Issues []healthIssue `json:"issues"`
+		}
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			t.Fatalf("unmarshal heartbeat: %v", err)
+		}
+		for _, is := range doc.Issues {
+			if is.Code == rowIssuesCappedCode {
+				return is.Message
+			}
+		}
+		t.Fatalf("the heartbeat listed no %s entry; codes = %v", rowIssuesCappedCode, listedCodes(doc.Issues))
+		return ""
+	}
+
+	h.emit(ctx, "healthy")
+	if got := overflowMessage(); !strings.Contains(got, "3 raises for untracked rows were refused") {
+		t.Fatalf("the first heartbeat must report the refusals in its own window, got %q", got)
+	}
+
+	// Nothing is refused between the two heartbeats.
+	h.emit(ctx, "healthy")
+	if got := overflowMessage(); !strings.Contains(got, "0 raises for untracked rows were refused") {
+		t.Fatalf("a heartbeat whose window saw no refusal must report zero — a count that only ever "+
+			"climbs is a total, not a window; got %q", got)
+	}
+}
+
 // listedCodes renders the distinct codes a heartbeat document listed, for a
 // failure message that has to explain what the cap kept instead.
 func listedCodes(issues []healthIssue) []string {

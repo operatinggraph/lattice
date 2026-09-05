@@ -174,16 +174,15 @@ type pacedLog struct {
 // per-heartbeat sort without limit. rowIssues counts a target's currently-tracked
 // per-row latch entries; rowPaced counts its tracked per-row PACE entries, which
 // need their own budget because prunePaced can never reach them once a stuck row
-// re-raises inside every staleness window; refused counts the latch raises turned
-// away, and refusedWorst remembers the worst severity among them so the one
-// surfaced overflow entry (issueKeyRowIssuesCapped) can carry it. Their lifetimes:
+// re-raises inside every staleness window; refusedWorst remembers the worst
+// severity among the raises turned away, so the one surfaced overflow entry
+// (issueKeyRowIssuesCapped) can carry it. Their lifetimes:
 //
 //	created                | lazily, at the target's first per-row raise
-//	incremented            | rowIssues / rowPaced on each newly-tracked per-row key; refused on each
-//	                       | latch raise past the cap, which also folds its severity into refusedWorst
+//	incremented            | rowIssues / rowPaced on each newly-tracked per-row key
 //	decremented            | rowIssues on each per-row key's clear / clearPrefix removal; rowPaced on
 //	                       | prunePaced and clearPrefix (clear deliberately leaves the pace entry)
-//	retired (drained)      | refused, refusedWorst and the overflow entry when rowIssues reaches ZERO —
+//	retired (drained)      | refusedWorst and the overflow entry when rowIssues reaches ZERO —
 //	                       | NOT merely when it falls back under the cap. A refused `data:` fact is not
 //	                       | re-derivable on demand: those exits Ack, and lane 1 is DeliverLastPerSubject
 //	                       | on a stable durable, so the row is never delivered again until it
@@ -195,33 +194,64 @@ type pacedLog struct {
 //	                       | re-fills in delivery order and the overflow entry re-arrives when it is re-reached
 //	ordering               | none is promised — the cap admits whichever keys are raised first, so the tracked
 //	                       | set is a SAMPLE, never a ranking; the overflow entry is what states that
+//
+// The last two maps are the refusal accounting, and both are nested target →
+// FAMILY (rowIssueFamily names the family). The nesting is what lets the
+// per-target teardown above drain them with one delete, and what keeps one
+// exhausted family from speaking for another: the four families re-derive on
+// different cadences, so both the count an operator reads and the pacing of the
+// refusal's log record are per family.
+//
+// refusedWindow counts the raises refused since the last heartbeat — the number
+// the overflow entry's message carries. It is a WINDOW rather than a total
+// because the raise sites re-derive: an exhausted gap is re-evaluated once a
+// sweep pass for as long as its budget stands, so a total would climb by one a
+// minute and read as a growing backlog when the backlog is not moving.
+// refusedLoudAt is the log-pacing clock for those refusals, so a refused raise
+// is heard on arrival and once per logPaceInterval after, instead of on every
+// pass (alertStanding) or never (alertPaced).
+//
+//	created     | lazily, at that (target, family)'s first refused raise
+//	incremented | refusedWindow on every refused latch raise, which also folds its severity into refusedWorst
+//	stamped     | refusedLoudAt whenever refusedLoud lets a refused raise log loudly
+//	reset       | refusedWindow at the heartbeat boundary — rollRefusalWindow rewrites the overflow
+//	            | entry's message from the counts and zeroes them, which is what makes the number a
+//	            | window. refusedLoudAt is NOT reset there: it paces across windows
+//	retired     | both, with refusedWorst and the overflow entry, when the target's per-row set drains
+//	            | (retireRowIssueOverflowLocked) or the target itself goes away
+//	restart     | empty ⇒ the next refused raise is an arrival and is loud, which is the correct
+//	            | posture for a fresh process, and the window under-reports only its first heartbeat
 type issueCache struct {
-	mu           sync.Mutex
-	issues       map[string]healthIssue
-	since        map[string]string
-	paced        map[string]pacedLog
-	rowIssues    map[string]int
-	rowPaced     map[string]int
-	refused      map[string]int
-	refusedWorst map[string]string
+	mu            sync.Mutex
+	issues        map[string]healthIssue
+	since         map[string]string
+	paced         map[string]pacedLog
+	rowIssues     map[string]int
+	rowPaced      map[string]int
+	refusedWorst  map[string]string
+	refusedWindow map[string]map[string]int
+	refusedLoudAt map[string]map[string]time.Time
 }
 
 func newIssueCache() *issueCache {
 	return &issueCache{
-		issues:       make(map[string]healthIssue),
-		since:        make(map[string]string),
-		paced:        make(map[string]pacedLog),
-		rowIssues:    make(map[string]int),
-		rowPaced:     make(map[string]int),
-		refused:      make(map[string]int),
-		refusedWorst: make(map[string]string),
+		issues:        make(map[string]healthIssue),
+		since:         make(map[string]string),
+		paced:         make(map[string]pacedLog),
+		rowIssues:     make(map[string]int),
+		rowPaced:      make(map[string]int),
+		refusedWorst:  make(map[string]string),
+		refusedWindow: make(map[string]map[string]int),
+		refusedLoudAt: make(map[string]map[string]time.Time),
 	}
 }
 
 // set raises or refreshes the issue at key, stamping a key that carries no
-// since yet with the current instant.
-func (c *issueCache) set(key, severity, code, message string) {
-	c.setSince(key, severity, code, message, time.Now())
+// since yet with the current instant. It reports whether the per-target per-row
+// budget REFUSED the key, for a caller whose log level depends on cache state
+// the refusal makes unreachable (Engine.alertStanding).
+func (c *issueCache) set(key, severity, code, message string) (refused bool) {
+	return c.setSince(key, severity, code, message, time.Now())
 }
 
 // setSince is set with the caller supplying the first-arose instant to stamp a
@@ -243,27 +273,128 @@ func (c *issueCache) set(key, severity, code, message string) {
 // timer-payload marshal failure already raises `error` at a per-ENTITY
 // issueKeyDataEntity key, so "errors here are O(1)" is not an invariant this
 // cache may rest on.
-func (c *issueCache) setSince(key, severity, code, message string, arrivedAt time.Time) {
+//
+// The returned bool is the refusal itself, for a caller that decides its LOG
+// level from cache state — a refused key is tracked by nothing, so standingAs
+// answers "not standing" for it forever and a seam that reads only that would
+// call every re-derivation an arrival.
+func (c *issueCache) setSince(key, severity, code, message string, arrivedAt time.Time) (refused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, tracked := c.issues[key]; !tracked {
-		if target, perRow := rowIssueTarget(key); perRow {
+		if target, family, perRow := rowIssueFamily(key); perRow {
 			if c.rowIssues[target] >= rowIssueCapPerTarget {
-				c.refused[target]++
+				window := c.refusedWindow[target]
+				if window == nil {
+					window = make(map[string]int)
+					c.refusedWindow[target] = window
+				}
+				window[family]++
 				if severityRank(severity) < severityRank(c.refusedWorst[target]) || c.refusedWorst[target] == "" {
 					c.refusedWorst[target] = severity
 				}
 				c.setLocked(issueKeyRowIssuesCapped(target), c.refusedWorst[target], rowIssuesCappedCode,
-					"target "+target+": per-row issue tracking reached its cap of "+
-						strconv.Itoa(rowIssueCapPerTarget)+" entries; "+strconv.Itoa(c.refused[target])+
-						" further raises for rows outside the tracked set were not recorded, and are not "+
-						"re-derivable until those rows project again", arrivedAt)
-				return
+					rowIssuesCappedMessage(target, window), arrivedAt)
+				return true
 			}
 			c.rowIssues[target]++
 		}
 	}
 	c.setLocked(key, severity, code, message, arrivedAt)
+	return false
+}
+
+// rowIssuesCappedMessage composes the overflow entry's message from one
+// target's refusal window — the per-family counts refused since the last
+// heartbeat. Both writers go through it (the refusing raise and the heartbeat
+// boundary that zeroes the window), so the two can never state the same
+// accounting in two different ways.
+//
+// The families are named in a fixed order, and the sentence says what is true
+// PER family rather than for all of them at once. `template:` faults and the
+// two `gap:` exhaustion codes are re-derived by their own cadences — the long
+// redelivery floor and the sweep pass — so a refused one lands as soon as a slot
+// frees. A `data:` or `sweep:` fault is not: those exits Ack, and lane 1 is
+// DeliverLastPerSubject on a stable durable, so the row is never delivered again
+// until it re-projects. One "not re-derivable" clause covering all four would be
+// affirmatively false for half of them.
+func rowIssuesCappedMessage(target string, window map[string]int) string {
+	families := [...]string{issuePrefixData, issuePrefixGapEntity, issuePrefixTemplate, issuePrefixSweep}
+	total := 0
+	var breakdown strings.Builder
+	for i, family := range families {
+		if i > 0 {
+			breakdown.WriteString(" · ")
+		}
+		n := window[family]
+		total += n
+		breakdown.WriteString(family)
+		breakdown.WriteString(" ")
+		breakdown.WriteString(strconv.Itoa(n))
+	}
+	return "target " + target + ": per-row issue tracking reached its cap of " +
+		strconv.Itoa(rowIssueCapPerTarget) + " entries; " + strconv.Itoa(total) +
+		" raises for untracked rows were refused since the last heartbeat (" + breakdown.String() +
+		"). Refused " + issuePrefixTemplate + " and exhaustion facts re-derive on their own cadence " +
+		"and land when a slot frees; refused " + issuePrefixData + " and " + issuePrefixSweep +
+		" facts are not re-derivable until those rows project again."
+}
+
+// refusedLoud reports whether a refused raise at key may log LOUDLY now, and
+// stamps the clock when it says yes. The clock is per (target, family), not per
+// key: the whole point of a refusal is that the key is tracked by nothing, so
+// there is no per-key memory to pace against, and a per-target clock would let
+// one family's flood swallow another family's first refusal.
+//
+// A key that is not per-row returns true. Such a key is never refused — the
+// budget only ever turns away a per-row family — so the branch is unreachable
+// from the raise seams; it fails loud rather than inventing a silence for a
+// caller that reached here by some route this reasoning does not cover.
+func (c *issueCache) refusedLoud(key string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	target, family, perRow := rowIssueFamily(key)
+	if !perRow {
+		return true
+	}
+	return c.refusedLoudLocked(target, family, now)
+}
+
+// refusedLoudLocked is refusedLoud's decision with c.mu held and the key already
+// split, for pacedRaise, which holds the lock and has both halves in hand.
+func (c *issueCache) refusedLoudLocked(target, family string, now time.Time) bool {
+	if stamp, stamped := c.refusedLoudAt[target][family]; stamped && now.Sub(stamp) < logPaceInterval {
+		return false
+	}
+	byFamily := c.refusedLoudAt[target]
+	if byFamily == nil {
+		byFamily = make(map[string]time.Time)
+		c.refusedLoudAt[target] = byFamily
+	}
+	byFamily[family] = now
+	return true
+}
+
+// rollRefusalWindow closes the refusal window on every target carrying an
+// overflow entry: it rewrites the entry's message from the counts accumulated
+// since the last call, then zeroes them. This call IS the window boundary —
+// snapshot is a pure read with no reset leg, so the number would otherwise be a
+// monotone total that a re-derived refusal inflates by one per sweep pass.
+//
+// The loud clock is deliberately left alone. It paces a LOG record across
+// windows; resetting it here would make every heartbeat hand back the arrival
+// the pacing exists to ration.
+func (c *issueCache) rollRefusalWindow(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for target, worst := range c.refusedWorst {
+		overflow := issueKeyRowIssuesCapped(target)
+		if _, standing := c.issues[overflow]; !standing {
+			continue
+		}
+		c.setLocked(overflow, worst, rowIssuesCappedCode, rowIssuesCappedMessage(target, c.refusedWindow[target]), now)
+		delete(c.refusedWindow, target)
+	}
 }
 
 // setLocked is setSince's write, past the cap decision and with c.mu held.
@@ -304,8 +435,9 @@ func (c *issueCache) releaseRowIssueLocked(target string) {
 // accounting. Called when the target's per-row set drains to nothing — by
 // repair, by an entity tombstone, or by the target's own teardown.
 func (c *issueCache) retireRowIssueOverflowLocked(target string) {
-	delete(c.refused, target)
 	delete(c.refusedWorst, target)
+	delete(c.refusedWindow, target)
+	delete(c.refusedLoudAt, target)
 	overflow := issueKeyRowIssuesCapped(target)
 	delete(c.issues, overflow)
 	delete(c.since, overflow)
@@ -383,18 +515,23 @@ func (c *issueCache) clear(key string) {
 // its own once a per-row fault is re-derived on a redelivery floor shorter than
 // its staleness window — every stuck row then refreshes its entry forever — so
 // without the budget the map would be sized by the consumer's MaxAckPending
-// rather than by the cap the design advertises. A refused key is reported
-// NOT-loud and dated `now`: an untracked key has no clock to tell arrival from
-// continuation, and for a map deliberately not grown the safe side is the quiet
-// one. Nothing is dropped, only lowered to Debug — alertPaced's own rule.
+// rather than by the cap the design advertises.
+//
+// A refused key is dated `now` — an untracked key has no per-key clock to tell
+// arrival from continuation — and paced on the (target, family) refusal clock
+// instead, so the fault is heard on its arrival and once per logPaceInterval
+// after. Reporting it not-loud unconditionally would be permanent silence: the
+// key never enters c.paced, so nothing else in this function could ever raise
+// its level again, and a `template:` fault behind a full budget would log at
+// Debug for the life of the process.
 func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud bool, arrivedAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	last, ok := c.paced[key]
 	if !ok {
-		if target, perRow := rowIssueTarget(key); perRow {
+		if target, family, perRow := rowIssueFamily(key); perRow {
 			if c.rowPaced[target] >= rowIssueCapPerTarget {
-				return false, now
+				return c.refusedLoudLocked(target, family, now), now
 			}
 			c.rowPaced[target]++
 		}
@@ -711,6 +848,12 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 			metrics["admissionDeferred"] = deferred
 		}
 	}
+
+	// The heartbeat is the refusal window's boundary: it restates each overflow
+	// entry's count over the refusals since the last heartbeat and zeroes them,
+	// so the number an operator reads is a rate rather than a total climbing by
+	// one per re-derivation.
+	h.issues.rollRefusalWindow(now)
 
 	// The log-pacing clock is bounded on the same walk that reads the cache: an
 	// entry past twice its interval would log loudly on its next raise anyway,

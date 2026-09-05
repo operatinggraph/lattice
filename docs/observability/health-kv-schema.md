@@ -1049,9 +1049,17 @@ consumes no slot at any backlog size.
 ```json
 {"severity": "<the worst severity among the raises it refused — warning or error>",
  "code": "RowIssuesCapped",
- "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> further raises for rows outside the tracked set were not recorded, and are not re-derivable until those rows project again",
+ "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> raises for untracked rows were refused since the last heartbeat (data: <a> · gap: <b> · template: <c> · sweep: <d>). Refused template: and exhaustion facts re-derive on their own cadence and land when a slot frees; refused data: and sweep: facts are not re-derivable until those rows project again.",
  "since": "<RFC3339 — when the cap was first reached>"}
 ```
+
+`<n>` is the refusals in the **last heartbeat window**, broken down by the family each came from — not
+a total since the cap was reached. The distinction is what the number is readable as: several of the
+raise sites re-derive the same fact on a cadence (an exhausted gap is re-evaluated once a sweep pass
+for as long as its retry budget stands), so a running total climbs by one a minute for one parked row
+and reads as a backlog that is growing when nothing has changed. A window is a rate, and a rate of
+zero is what a target reports once the refusals stop, while its `since` still says when the cap was
+first reached.
 
 `severity` is **not** fixed at `warning`, and that is the entry's whole point: it carries the worst
 severity of the raises it turned away, so a refused `error` still escalates the document's `status`
@@ -1062,12 +1070,14 @@ freed as their entries retire (a repaired row, an entity tombstone, a target tea
 resumes as soon as the target is back under the cap.
 
 The `RowIssuesCapped` entry itself retires only once the target holds **no** per-row entries at all,
-not merely when it drops back under the cap. A refused raise is not re-derivable on demand: the
-`data:` exits all Ack, and lane 1 delivers the last revision per subject from a stable durable, so a
-row that was refused is never delivered again until something writes its key. (A refused `gap:` raise
-IS re-derived — its row keeps being delivered — but it is re-derived only into the same full budget,
-so the entry stays honest for it too.) Retiring the entry at the boundary would delete the only
-surviving record that those rows are broken.
+not merely when it drops back under the cap, and **re-derivability differs by family** — which is why
+the message says so per family rather than in one clause. A refused `data:` or `sweep:` fact is not
+re-derivable on demand: the `data:` exits all Ack, and lane 1 delivers the last revision per subject
+from a stable durable, so a row that was refused is never delivered again until something writes its
+key; the entry is the only surviving record that those rows are broken, and retiring it at the cap
+boundary would delete it. A refused `template:` fault or `gap:` exhaustion fact **is** re-derived on
+its own cadence — the long redelivery floor and the sweep pass respectively — so it lands as soon as
+a slot frees, and until then it is counted in each window it is refused in.
 
 Two properties the cap must not cost, and does not. Its `severity` is the **worst severity among the
 raises it refused**, so a refused `error` still escalates the document (`status` is aggregated over

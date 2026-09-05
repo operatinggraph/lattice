@@ -788,8 +788,11 @@ func TestIssueCache_PerRowFamiliesAreBoundedPerTarget(t *testing.T) {
 	if overflow.Code != rowIssuesCappedCode {
 		t.Fatalf("overflow code = %q, want %q", overflow.Code, rowIssuesCappedCode)
 	}
-	if !strings.Contains(overflow.Message, "25 further raises") {
+	if !strings.Contains(overflow.Message, "25 raises for untracked rows were refused") {
 		t.Fatalf("the overflow entry must count the refusals it stands for, got %q", overflow.Message)
+	}
+	if !strings.Contains(overflow.Message, "data: 25") {
+		t.Fatalf("the overflow entry must attribute the refusals to their family, got %q", overflow.Message)
 	}
 
 	// The cap is per TARGET: a second target is unaffected by the first's flood.
@@ -832,9 +835,9 @@ func TestIssueCache_PerRowFamiliesAreBoundedPerTarget(t *testing.T) {
 	if _, tracked := c.rowIssues[targetA]; tracked {
 		t.Fatalf("a drained target must leave no slot accounting behind, rowIssues=%v", c.rowIssues)
 	}
-	if len(c.refused) != 0 || len(c.refusedWorst) != 0 {
-		t.Fatalf("a drained target must leave no refusal accounting behind, refused=%v worst=%v",
-			c.refused, c.refusedWorst)
+	if len(c.refusedWorst) != 0 || len(c.refusedWindow) != 0 || len(c.refusedLoudAt) != 0 {
+		t.Fatalf("a drained target must leave no refusal accounting behind, worst=%v window=%v loudAt=%v",
+			c.refusedWorst, c.refusedWindow, c.refusedLoudAt)
 	}
 }
 
@@ -900,13 +903,15 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	if got := len(c.paced); got != rowIssueCapPerTarget {
 		t.Fatalf("pace map holds %d entries, want the cap %d", got, rowIssueCapPerTarget)
 	}
-	// A refused key is reported not-loud: an untracked key has no clock to tell
-	// arrival from continuation, and the safe side for a map deliberately not
-	// grown is the quiet one (the record is lowered to Debug, never dropped).
+	// A refused key has no per-key clock, so it is paced on the (target, family)
+	// refusal clock instead. The loop above already spent this family's window on
+	// its first refusal, so a further refusal inside the same window is damped —
+	// the record is lowered to Debug, never dropped.
 	loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
 		"warning", "TemplateDataError", now)
 	if loud {
-		t.Fatalf("a refused pace key must not report loud — every raise would then log at Warn forever")
+		t.Fatalf("a refused pace key inside its family's window must not report loud — every raise " +
+			"would then log at Warn forever")
 	}
 	// A target-scoped key is never counted against the per-row budget, so the
 	// config latch keeps pacing even under a per-row flood.
@@ -921,6 +926,194 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	if loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
 		"warning", "TemplateDataError", now.Add(3*logPaceInterval)); !loud {
 		t.Fatalf("a freed pace slot must be readmitted")
+	}
+}
+
+// --- A refusal must not invert the raising seam's loudness --------------------
+
+// fillRowIssueBudget takes the whole of one target's per-row latch budget with
+// `data:` faults, so any FURTHER per-row key the test raises is refused. The
+// filler is a different family from the key under test in each case below,
+// which is what makes the refusal — not some interaction inside one family —
+// the input being exercised.
+func fillRowIssueBudget(c *issueCache, targetID string) {
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		c.set(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
+	}
+}
+
+// assertRefusalWindow reads the target's overflow entry and pins both halves of
+// its count: the total refused in the window, and the per-family breakdown that
+// says which populations they came from.
+func assertRefusalWindow(t *testing.T, c *issueCache, targetID string, total int, breakdown string) {
+	t.Helper()
+	is, ok := issueAt(c, issueKeyRowIssuesCapped(targetID))
+	if !ok {
+		t.Fatalf("no overflow entry standing for %s", targetID)
+	}
+	want := strconv.Itoa(total) + " raises for untracked rows were refused since the last heartbeat"
+	if !strings.Contains(is.Message, want) {
+		t.Fatalf("overflow message must report %d refusals in the window, got %q", total, is.Message)
+	}
+	if !strings.Contains(is.Message, breakdown) {
+		t.Fatalf("overflow message must attribute the window per family (%q), got %q", breakdown, is.Message)
+	}
+}
+
+// TestAlertStanding_RefusedRaiseIsPacedNotFlooded pins the seam's loudness under
+// a REFUSED raise. alertStanding tells a fact's arrival from its continuation by
+// asking the latch whether the fact is already standing — and a refused key is
+// tracked by nothing, so that question answers
+// "not standing" on every pass. Left to it, the exhausted-gap raise the sweep
+// re-derives once a minute logs at Error once a minute for as long as the target
+// sits at its cap: the flood the seam exists to prevent, arriving exactly when
+// the target is worst off.
+func TestAlertStanding_RefusedRaiseIsPacedNotFlooded(t *testing.T) {
+	t.Parallel()
+	const targetID = "targetRefusedStanding"
+	const parked = "PARKEDentityNANOIDxx"
+	logs := &logCapture{}
+	clock := time.Now()
+	e := &Engine{
+		logger: slog.New(logs),
+		issues: newIssueCache(),
+		clock:  func() time.Time { return clock },
+	}
+	fillRowIssueBudget(e.issues, targetID)
+
+	raise := func() {
+		e.alertStanding(issueKeyGapEntity(targetID, parked, "missing_a"), "warning", "GapBudgetExhausted",
+			"target "+targetID+" entity "+parked+": row column missing_a exhausted its retry budget")
+	}
+	// Five sweep passes inside one pace window.
+	for i := 0; i < 5; i++ {
+		raise()
+		clock = clock.Add(defaultSweepInterval)
+	}
+	levels := logs.levelsContaining(parked)
+	if len(levels) != 5 {
+		t.Fatalf("every re-derivation must still be RECORDED — a record is lowered, never dropped; got %d", len(levels))
+	}
+	if levels[0] != slog.LevelError {
+		t.Fatalf("the refused fact's ARRIVAL must be loud, got %v", levels[0])
+	}
+	for i, level := range levels[1:] {
+		if level != slog.LevelDebug {
+			t.Fatalf("re-derivation %d inside the window must be damped to Debug, got %v", i+1, level)
+		}
+	}
+
+	// Past the interval it is audible again: an operator reading the log still
+	// learns the target is still at its cap, once an interval rather than never
+	// and rather than every minute.
+	clock = clock.Add(logPaceInterval)
+	raise()
+	levels = logs.levelsContaining(parked)
+	if got := levels[len(levels)-1]; got != slog.LevelError {
+		t.Fatalf("past logPaceInterval a refused raise must be loud again, got %v", got)
+	}
+}
+
+// TestPacedRaise_RefusedKeyIsLoudOncePerInterval closes the other inversion.
+// alertPaced reads its level from the pace map, and a refused key never enters
+// it — so reporting the refusal not-loud unconditionally is not damping but
+// permanent silence: nothing else in pacedRaise could ever raise that key's
+// level again for the life of the process.
+func TestPacedRaise_RefusedKeyIsLoudOncePerInterval(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetRefusedPaced"
+	now := time.Now()
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		c.pacedRaise(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"),
+			"warning", "RowDataError", now)
+	}
+	key := issueKeyTemplateEntity(targetID, "eParked", "missing_a")
+	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now); !loud {
+		t.Fatalf("a refused key's arrival must be loud — not-loud unconditionally is silence forever")
+	}
+	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now.Add(time.Minute)); loud {
+		t.Fatalf("a refused key must be damped for the rest of its family's window")
+	}
+	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now.Add(logPaceInterval)); !loud {
+		t.Fatalf("past logPaceInterval a refused key must be audible again")
+	}
+}
+
+// TestIssueCache_RefusalCountIsAWindowNotATotal pins what the overflow entry's
+// number MEANS. Counted monotonically it is a cadence counter wearing a backlog
+// number: the exhausted-gap raise is re-derived once a sweep pass, so one parked
+// row inflates the total by one a minute and an operator reads a growing
+// backlog off a backlog that is not moving.
+func TestIssueCache_RefusalCountIsAWindowNotATotal(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetRefusalWindow"
+	now := time.Now()
+	fillRowIssueBudget(c, targetID)
+
+	// One parked row, re-derived three times inside one window.
+	for i := 0; i < 3; i++ {
+		c.set(issueKeyGapEntity(targetID, "eParked", "missing_a"), "warning", "GapBudgetExhausted", "budget spent")
+	}
+	assertRefusalWindow(t, c, targetID, 3, issuePrefixGapEntity+" 3")
+
+	// The message states what is true PER family: half of these facts re-derive
+	// on their own cadence and half do not, and one clause covering all four
+	// would be affirmatively false for the half that does.
+	is, _ := issueAt(c, issueKeyRowIssuesCapped(targetID))
+	if !strings.Contains(is.Message, "re-derive on their own cadence") ||
+		!strings.Contains(is.Message, "not re-derivable until those rows project again") {
+		t.Fatalf("the overflow message must state re-derivability per family, got %q", is.Message)
+	}
+
+	// The boundary restates the closing window, then opens an empty one.
+	c.rollRefusalWindow(now)
+	assertRefusalWindow(t, c, targetID, 3, issuePrefixGapEntity+" 3")
+
+	// The next window sees two refusals of the same re-derived fact — two, not
+	// the five a running total would report.
+	for i := 0; i < 2; i++ {
+		c.set(issueKeyGapEntity(targetID, "eParked", "missing_a"), "warning", "GapBudgetExhausted", "budget spent")
+	}
+	c.rollRefusalWindow(now.Add(time.Minute))
+	assertRefusalWindow(t, c, targetID, 2, issuePrefixGapEntity+" 2")
+}
+
+// TestIssueCache_RefusalAccountingDrainsWithItsTarget is the nested keying's
+// whole justification. Both the window and the loud clock are keyed per
+// (target, family) so the existing per-target teardown drains them with one
+// delete and no new teardown leg is invented — which is only true if the
+// teardown actually reaches both.
+func TestIssueCache_RefusalAccountingDrainsWithItsTarget(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetRefusalDrain"
+	fillRowIssueBudget(c, targetID)
+
+	gapKey := issueKeyGapEntity(targetID, "eParked", "missing_a")
+	templateKey := issueKeyTemplateEntity(targetID, "eParked", "missing_a")
+	c.set(gapKey, "warning", "GapBudgetExhausted", "budget spent")
+	c.set(templateKey, "warning", "TemplateDataError", "template resolves null")
+	c.refusedLoud(gapKey, time.Now())
+	c.refusedLoud(templateKey, time.Now())
+	if len(c.refusedWindow[targetID]) != 2 || len(c.refusedLoudAt[targetID]) != 2 {
+		t.Fatalf("two refused families must be accounted separately, window=%v loudAt=%v",
+			c.refusedWindow[targetID], c.refusedLoudAt[targetID])
+	}
+
+	// The target's per-row set empties — every tracked key repairs.
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		c.clear(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"))
+	}
+	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetID)); ok {
+		t.Fatalf("a drained target must retire its overflow entry")
+	}
+	if window, ok := c.refusedWindow[targetID]; ok {
+		t.Fatalf("a drained target must leave no refusal window behind, got %v", window)
+	}
+	if clock, ok := c.refusedLoudAt[targetID]; ok {
+		t.Fatalf("a drained target must leave no refusal clock behind, got %v", clock)
 	}
 }
 
@@ -1269,9 +1462,10 @@ func TestIssueCache_PrefixClearFreesPerRowSlots(t *testing.T) {
 	if len(c.issues) != 0 {
 		t.Fatalf("a target teardown must leave nothing standing, got %d entries", len(c.issues))
 	}
-	if len(c.rowIssues) != 0 || len(c.refused) != 0 || len(c.refusedWorst) != 0 {
-		t.Fatalf("a target teardown must leave no slot accounting behind, rowIssues=%v refused=%v worst=%v",
-			c.rowIssues, c.refused, c.refusedWorst)
+	if len(c.rowIssues) != 0 || len(c.refusedWorst) != 0 ||
+		len(c.refusedWindow) != 0 || len(c.refusedLoudAt) != 0 {
+		t.Fatalf("a target teardown must leave no slot accounting behind, rowIssues=%v worst=%v "+
+			"window=%v loudAt=%v", c.rowIssues, c.refusedWorst, c.refusedWindow, c.refusedLoudAt)
 	}
 	for i := 0; i < rowIssueCapPerTarget; i++ {
 		c.set(issueKeyDataEntity(targetID, "f"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
