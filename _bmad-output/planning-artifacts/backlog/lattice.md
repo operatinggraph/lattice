@@ -145,7 +145,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is one counted entry per (target, gap column) — the workload population leaves the per-row issue budget; refused raises loud once per (target, family), overflow entry windowed per family; `lint-weaver-witnessed-retire` gate ([design](../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
+- 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is ONE counted entry per (target, gap column); refused raises paced, overflow windowed ([design](../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
 - 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
 - 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))
 - 2026-09-04 · `c38af84` · [CI] lint-build split into lint-build + lint-static, parallel not serial — 131s/163s vs old combined 171–206s, full CI green (run 33893636046)
