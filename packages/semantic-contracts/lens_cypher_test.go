@@ -514,3 +514,110 @@ func TestClauseSatisfaction_OneTime_FreshUntilAlwaysNull(t *testing.T) {
 	require.Equal(t, false, v["missing_charge"])
 	require.Nil(t, v["freshUntil"], "oneTime clauses never arm the temporal lane")
 }
+
+// projectLeaseAt runs the anchored leaseRentSettlement spec for one leaseapp.
+func (f *bcFixture) projectLeaseAt(t *testing.T, leaseAppName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(leaseRentSettlementSpec)
+	require.NoError(t, err, "leaseRentSettlement cypher must parse on the full engine")
+	leaseAppKey := "vtx.leaseapp." + f.ids[leaseAppName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey": leaseAppKey,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkApprovedLeaseNoTerms seeds an approved leaseapp with no .terms aspect at
+// all — the missing_terms shape (an application that skipped moveInDate, or
+// one minted before requestedRent was captured).
+func (f *bcFixture) mkApprovedLeaseNoTerms(t *testing.T, name string) {
+	t.Helper()
+	f.vtx(t, name, "leaseapp")
+	f.aspect(t, name, "decision", "decision", map[string]any{"value": "approved"})
+}
+
+// mkApprovedLeaseWithTerms seeds an approved leaseapp carrying an agreed
+// requestedRent, in dollars.
+func (f *bcFixture) mkApprovedLeaseWithTerms(t *testing.T, name string, requestedRent float64) {
+	t.Helper()
+	f.mkApprovedLeaseNoTerms(t, name)
+	f.aspect(t, name, "terms", "terms", map[string]any{"requestedRent": requestedRent})
+}
+
+// TestLeaseRentSettlement_ApprovedNoTerms_MissingTermsRow is the central
+// vector: an approved lease with no requestedRent projects exactly one row,
+// opens only missing_terms, and leaves missing_account/missing_clause closed
+// — the account/clause gaps must never dispatch against a null rent.
+func TestLeaseRentSettlement_ApprovedNoTerms_MissingTermsRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkApprovedLeaseNoTerms(t, "notermslease")
+
+	rows := f.projectLeaseAt(t, "notermslease")
+	require.Len(t, rows, 1, "an approved lease with no requestedRent projects — the missing_terms shape")
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_terms"], "no requestedRent — the rent itself is missing")
+	require.Equal(t, false, v["missing_account"], "missing_account never opens while requestedRent is still null")
+	require.Equal(t, false, v["missing_clause"], "missing_clause never opens while requestedRent is still null")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["requestedRentCents"], "no requestedRent to convert — the CASE WHEN keeps this column null rather than erroring the row")
+}
+
+// TestLeaseRentSettlement_ApprovedTermsWithoutRent_MissingTermsRow pins the
+// other producible shape of a missing rent: a .terms aspect that exists
+// (moveInDate recorded) but carries no requestedRent field. It must read
+// exactly like an absent aspect.
+func TestLeaseRentSettlement_ApprovedTermsWithoutRent_MissingTermsRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkApprovedLeaseNoTerms(t, "termsnorent")
+	f.aspect(t, "termsnorent", "terms", "terms", map[string]any{"moveInDate": "2026-10-01"})
+
+	rows := f.projectLeaseAt(t, "termsnorent")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_terms"], "a .terms aspect with no requestedRent is still a missing rent")
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, false, v["missing_clause"])
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["requestedRentCents"])
+}
+
+// TestLeaseRentSettlement_ApprovedWithTermsNoAccount_MissingAccountUnchanged
+// pins the shape once requestedRent is present: missing_account gates purely
+// on the ledgerAccount guard aspect, and missing_clause stays closed until
+// the account exists.
+func TestLeaseRentSettlement_ApprovedWithTermsNoAccount_MissingAccountUnchanged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkApprovedLeaseWithTerms(t, "termsnoacct", 1500)
+
+	v := f.projectLeaseAt(t, "termsnoacct")[0].Values
+	require.Equal(t, false, v["missing_terms"], "requestedRent is present")
+	require.Equal(t, true, v["missing_account"], "requestedRent present + no ledgerAccount")
+	require.Equal(t, false, v["missing_clause"], "missing_clause never opens before the account exists")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, 150000.0, v["requestedRentCents"])
+}
+
+// TestLeaseRentSettlement_NotApproved_NoTerms_NoRow — an undecided lease
+// (no .decision aspect at all) never projects a row, terms or no terms: the
+// population is gated on decision='approved' alone.
+func TestLeaseRentSettlement_NotApproved_NoTerms_NoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.vtx(t, "undecidedlease", "leaseapp")
+
+	rows := f.projectLeaseAt(t, "undecidedlease")
+	require.Empty(t, rows, "an undecided lease never projects, terms or no terms")
+}
