@@ -382,8 +382,10 @@ otherwise introduce.
 
 - **The genuine N-rows-per-anchor family stays refused**, correctly: `landlordLeaseApplicationsRead` and
   `wellnessMemberAccounts` (bucket G) key on a non-anchor variable, and a per-anchor evaluation would
-  compute a truncated row. That is the widening §5.1 called *"a real partitionability derivation"*, and it
-  is still a separate design. This fire does not file a row for it — no consumer is waiting.
+  compute a truncated row. That is the widening §5.1 called *"a real partitionability derivation"*.
+  *(Superseded 2026-09-05: [anchor-partitioned-plain-lens-retraction-design.md](anchor-partitioned-plain-lens-retraction-design.md)
+  is that design — the partition conjunct admits 8 lenses, `landlordLeaseApplicationsRead` among them, and
+  scopes their target diff to the anchors an evaluation covered; verticals.md row 29 was the consumer.)*
 - **The Secure Lens conjunct is untouched here.** `renewalsRead` and `clinicPatientsRead` gain retraction and
   audit, never narrowing. *(Superseded 2026-09-05: [secure-plain-lens-retraction-and-audit-design.md](secure-plain-lens-retraction-and-audit-design.md)
   drops that conjunct — the double-decrypt seam is closed at the shared re-entry, which never decrypts —

@@ -433,7 +433,9 @@ It is deliberately **sufficient rather than necessary**: a neighbour-keyed lens 
 partitionable by anchor is refused too, and keeps today's behaviour. Widening it needs a real partitionability
 derivation, which is a separate design and not this one. (The `WITH` half of the old refusal was never about
 partitionability and was lifted 2026-09-03 — [with-alias-anchor-closure-design.md](with-alias-anchor-closure-design.md)
-resolves a key column through its aliases; the partitionability half stands.) The three `auditEnrolment` conjuncts that *do*
+resolves a key column through its aliases; the partitionability half was lifted 2026-09-05 —
+[anchor-partitioned-plain-lens-retraction-design.md](anchor-partitioned-plain-lens-retraction-design.md) admits a lens whose
+key identifies the anchor beside neighbour-bound columns and scopes its diff to the partition.) The three `auditEnrolment` conjuncts that *do*
 transfer — no `$now`/`$projectedAt` (`CompiledRule.ReferencesParam`, that design's §4.5 primitive), no secure
 decryptor, not actor-aware — are carried alongside it, so the two predicates overlap without one standing in
 for the other.
