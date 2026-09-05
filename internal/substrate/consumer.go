@@ -458,19 +458,18 @@ func (c *Conn) ConsumerCaughtUp(ctx context.Context, stream, durable string) (bo
 // against the stream's head reads the two together — caught up, and caught up
 // TO WHAT. Reading it alone says nothing about any consumer.
 //
-// BOUND: one stream-info request. With no deadline on ctx the client bounds it
+// BOUND: exactly ONE round trip. js.Stream is itself a stream-info request, so
+// the state it already fetched is read back with CachedInfo rather than asked
+// for a second time — an Info call here would double the cost for a value the
+// handle is holding. With no deadline on ctx the client bounds that one request
 // by its own default API timeout; there is no retry and no paging, so the cost
-// is one round trip whatever the stream holds.
+// does not grow with what the stream holds.
 func (c *Conn) StreamLastSequence(ctx context.Context, stream string) (uint64, error) {
 	str, err := c.js.Stream(ctx, stream)
 	if err != nil {
 		return 0, fmt.Errorf("substrate: StreamLastSequence: stream %q: %w", stream, err)
 	}
-	info, err := str.Info(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("substrate: StreamLastSequence: info %q: %w", stream, err)
-	}
-	return info.State.LastSeq, nil
+	return str.CachedInfo().State.LastSeq, nil
 }
 
 // newMessage builds the caller-facing Message view from a raw JetStream

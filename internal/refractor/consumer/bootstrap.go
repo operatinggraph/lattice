@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
@@ -37,23 +36,20 @@ type Bootstrapper struct {
 	adjKV        *substrate.KV
 	ready        chan struct{}
 	once         sync.Once
-	// appliedSeq is the highest Core KV stream sequence this process has
-	// applied to the adjacency index — the index's own progress cursor, which
-	// JetStream does not expose for a durable (an ack floor moves on a Term as
-	// well as an Ack, and neither says which sequence the index actually
-	// reflects).
-	//
-	// It is a monotone MAXIMUM, never an assignment: a Nak'd message is
-	// redelivered out of order, so assigning would let an old redelivery move
-	// the cursor backwards and report progress the index has already passed.
-	//
-	// Lifetime: created 0 at process start and never reset. Zero means "this
-	// process has applied nothing and polled nothing yet" — a reader comparing
-	// its own token against it therefore refuses until the first apply or the
-	// first caught-up poll, which is the fail-closed direction. Per process,
-	// never durable: a second Refractor instance under-states the cluster's
-	// true progress, which refuses more, never less.
-	appliedSeq atomic.Uint64
+	// seqMu guards the two fields below, which are read and written together:
+	// the cursor they answer is a function of both, and a lock-free pair would
+	// let a reader see a retirement without the owed entry that caps it.
+	seqMu sync.Mutex
+	// maxRetired is the highest Core KV stream sequence this process has seen
+	// RETIRED — applied to the adjacency index, or discarded as unappliable.
+	maxRetired uint64
+	// owed holds the sequences this process has Nak'd and not since retired:
+	// messages the index still has to apply. They are what turns a maximum
+	// into a FLOOR. A Nak'd message is redelivered out of order, so the
+	// sequences above it keep retiring while it is outstanding, and a cursor
+	// reported as their maximum would claim the index reflects an edge it is
+	// still missing — blind to precisely the lag AppliedSeq exists to expose.
+	owed map[uint64]struct{}
 }
 
 // NewBootstrapper creates a Bootstrapper that reads from coreKVBucket via the
@@ -67,6 +63,7 @@ func NewBootstrapper(conn *substrate.Conn, coreKVBucket string, adjKV *substrate
 		subjectPrefx: "$KV." + coreKVBucket + ".",
 		adjKV:        adjKV,
 		ready:        make(chan struct{}),
+		owed:         map[uint64]struct{}{},
 	}
 }
 
@@ -115,6 +112,22 @@ func (b *Bootstrapper) pollReady(ctx context.Context) {
 		case <-b.ready:
 			return
 		case <-ticker.C:
+			// The HEAD IS READ FIRST, and the drained check second. A message
+			// committed between the two reads is above the head this pass will
+			// raise to, so the worst it costs is a cursor one message stale —
+			// refusing more, never less. Reading the head after the check would
+			// invert that: the head would then include a commit the consumer
+			// had not been asked about, and the cursor would claim the index
+			// reflects an edge it has never seen. That inversion is worst at
+			// startup, which is the one moment this poll is load-bearing.
+			last, serr := b.conn.StreamLastSequence(ctx, b.streamName)
+			if serr != nil && ctx.Err() == nil {
+				// The cursor stays where it is, which is the refusing answer
+				// for its readers — never a reason to hold Ready and with it
+				// every lens on this process.
+				slog.Warn("adjacency bootstrap: could not read the stream head — the applied-sequence cursor stays where it is",
+					"stream", b.streamName, "err", serr)
+			}
 			caughtUp, err := b.conn.ConsumerCaughtUp(ctx, b.streamName, adjConsumerName)
 			if err != nil {
 				// The durable may not be created yet (RunDurableConsumer creates
@@ -122,21 +135,15 @@ func (b *Bootstrapper) pollReady(ctx context.Context) {
 				continue
 			}
 			if caughtUp {
-				// A drained consumer has applied everything the stream holds,
-				// which is the only moment the index's progress can be read
-				// off the stream rather than off a delivery. It is what gives
-				// AppliedSeq a value on the path where the handler never runs:
-				// an empty stream, and a restart against a durable that was
-				// already caught up. Raised before Ready is signalled so a
-				// reader released by Ready sees the cursor.
-				if last, serr := b.conn.StreamLastSequence(ctx, b.streamName); serr == nil {
-					b.raiseAppliedSeq(last)
-				} else if ctx.Err() == nil {
-					// The cursor stays where it is, which is the refusing
-					// answer for its readers — never a reason to hold Ready
-					// and with it every lens on this process.
-					slog.Warn("adjacency bootstrap: caught up but could not read the stream head — the applied-sequence cursor stays where it is",
-						"stream", b.streamName, "err", serr)
+				// A drained consumer has retired everything the stream held at
+				// the read above, which is the only moment the index's progress
+				// can be read off the stream rather than off a delivery. It is
+				// what gives AppliedSeq a value on the path where the handler
+				// never runs: an empty stream, and a restart against a durable
+				// another process had already drained. Raised before Ready is
+				// signalled so a reader released by Ready sees the cursor.
+				if serr == nil {
+					b.retire(last)
 				}
 				b.signalReady()
 				return
@@ -151,12 +158,17 @@ func (b *Bootstrapper) pollReady(ctx context.Context) {
 // message pending at startup has been delivered.
 func (b *Bootstrapper) handle(ctx context.Context, msg substrate.Message) substrate.Decision {
 	decision := b.processMsg(ctx, msg)
-	// Ack and Term are the two dispositions that retire a message: the index
-	// reflects everything up to this sequence once either is returned (a Term
-	// discards a message the index can never apply, which is as final as an
-	// apply). A Nak leaves the message owed, so the cursor must not move.
-	if decision == substrate.Ack || decision == substrate.Term {
-		b.raiseAppliedSeq(msg.Sequence)
+	// Ack and Term both RETIRE a message: the index will never do more with it
+	// than it has now. An Ack applied it; a Term discarded it, and every Term
+	// shape here is a message no consumer of this index could ever apply (an
+	// undecodable body, a key the KV client refuses), so waiting for it would
+	// be waiting forever. A Nak leaves the message OWED — redelivered later,
+	// its edge still missing — so it caps the cursor until it retires.
+	switch decision {
+	case substrate.Ack, substrate.Term:
+		b.retire(msg.Sequence)
+	default:
+		b.markOwed(msg.Sequence)
 	}
 	if msg.NumPending == 0 {
 		b.signalReady()
@@ -164,31 +176,67 @@ func (b *Bootstrapper) handle(ctx context.Context, msg substrate.Message) substr
 	return decision
 }
 
-// AppliedSeq reports the highest Core KV stream sequence this process has
-// applied to the adjacency index, or 0 when it has applied and polled nothing.
+// AppliedSeq reports the CONTIGUOUS Core KV stream sequence the adjacency
+// index has been brought up to: every message at or below it has been retired,
+// and nothing is promised above it. 0 means nothing has been retired, or the
+// oldest owed message is the first one.
 //
-// A reader uses it to ask whether an edge view it just read can be trusted
-// against an ordering token: the index reflects every link commit at or below
-// this sequence, and nothing is promised above it. Because 0 is the
-// never-measured value as well as the empty-stream one before the first poll,
-// a reader that cannot act on an unknown cursor must treat 0 as a refusal.
+// It is a FLOOR, not a maximum, and the difference is the whole point. A Nak'd
+// message is redelivered later while the sequences above it keep retiring, so
+// the maximum would sit at the head while the index is missing the edge that
+// message carries — reporting caught-up during exactly the lag a reader
+// consults this to detect. The floor stops at the oldest thing still owed.
+//
+// WHOSE work it describes: the DURABLE's. The consumer is shared and its
+// progress is durable, so a process that starts against an already-drained
+// consumer legitimately reports work a previous process did — that is the
+// index's state, which is what a reader is asking about, not this process's
+// biography. It under-states on a second concurrent instance (this process
+// sees only its own deliveries), and under-stating refuses more, never less.
+//
+// Lifetime: per process, never persisted, 0 at start until the first retirement
+// or the first caught-up poll. A reader that cannot act on an unknown cursor
+// must treat 0 as a refusal, since it is also the never-measured reading.
 func (b *Bootstrapper) AppliedSeq() uint64 {
-	return b.appliedSeq.Load()
-}
-
-// raiseAppliedSeq moves the cursor to seq when seq is higher, and leaves it
-// alone otherwise. The CAS loop is what makes the maximum hold under the
-// concurrent writer the poll is alongside the handler.
-func (b *Bootstrapper) raiseAppliedSeq(seq uint64) {
-	for {
-		cur := b.appliedSeq.Load()
-		if seq <= cur {
-			return
+	b.seqMu.Lock()
+	defer b.seqMu.Unlock()
+	floor := b.maxRetired
+	for seq := range b.owed {
+		if seq == 0 {
+			continue
 		}
-		if b.appliedSeq.CompareAndSwap(cur, seq) {
-			return
+		if seq-1 < floor {
+			floor = seq - 1
 		}
 	}
+	return floor
+}
+
+// retire records that seq will never be delivered again — applied, or
+// discarded as unappliable — raising the maximum and clearing seq from the
+// owed set if a redelivery is what retired it.
+func (b *Bootstrapper) retire(seq uint64) {
+	b.seqMu.Lock()
+	if seq > b.maxRetired {
+		b.maxRetired = seq
+	}
+	delete(b.owed, seq)
+	b.seqMu.Unlock()
+}
+
+// markOwed records that seq was Nak'd and is still to be applied, so the floor
+// stops below it until a redelivery retires it. Idempotent: a message Nak'd
+// again on redelivery is the same debt, not a second one.
+func (b *Bootstrapper) markOwed(seq uint64) {
+	b.seqMu.Lock()
+	if b.owed == nil {
+		// The zero-value Bootstrapper is usable: nothing else here needs the
+		// constructor, so the map is built on first debt rather than made a
+		// precondition of calling handle.
+		b.owed = map[uint64]struct{}{}
+	}
+	b.owed[seq] = struct{}{}
+	b.seqMu.Unlock()
 }
 
 // processMsg classifies one Core KV message and returns its disposition. Link

@@ -582,6 +582,11 @@ func (p *Pipeline) TruncateForReactivation(ctx context.Context, requested bool) 
 	if err := p.truncateTarget(ctx, adpt); err != nil {
 		return false, err
 	}
+	// A purge with no rebuild window of its own, so the generation is what
+	// records it: a reconciliation pass holding a token captured before this
+	// point is now reasoning about keys that are gone, and RebuildInFlight
+	// never went true for it to notice.
+	p.rebuildGen.Add(1)
 	return true, nil
 }
 

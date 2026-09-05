@@ -47,11 +47,12 @@ const (
 // the design's §4.3 — a truncating rebuild leaves every key absent, so the
 // replay creates each entry and there is nothing to withhold.
 //
-// The scan matches a plain Upsert/Delete on ANY identifier receiver, not only
-// on the `adpt` name the package usually gives a captured adapter, so
+// The scan matches a plain Upsert/Delete by NAME AND ARITY on any receiver
+// expression, not by a list of receiver names the package happens to use, so
 // replayWrite contributes four sites rather than the two its outcome-returning
-// forms alone would: a writer that names its adapter something else must not
-// slip past a gate whose whole job is to notice a new writer.
+// forms alone would. A writer that calls its adapter `target`, or writes
+// `p.adpt.Upsert(...)`, is caught the same way — a gate whose whole job is to
+// notice a new writer must not be defeated by naming.
 var perEntryWriterCensus = map[string]struct {
 	discipline writerTokenDiscipline
 	calls      int
@@ -66,10 +67,10 @@ var perEntryWriterCensus = map[string]struct {
 }
 
 // perEntryWriterCensusFloor is the population this census must never silently
-// shrink below. An enumeration that finds nothing agrees with a census of
-// nothing, and would read as a table of unchanged rows rather than as a broken
-// scan.
-const perEntryWriterCensusFloor = 18
+// shrink below: the count the scan finds today. An enumeration that finds
+// nothing agrees with a census of nothing, and would read as a table of
+// unchanged rows rather than as a broken scan.
+const perEntryWriterCensusFloor = 20
 
 // TestPerEntryWriterCensus_EveryTargetWriteSiteIsClassified is T4: the
 // executable form of the design's §2 row 11 census.
@@ -175,11 +176,7 @@ func targetWriteSites(t *testing.T) []targetWriteSite {
 				if !isCall {
 					return true
 				}
-				sel, isSel := call.Fun.(*ast.SelectorExpr)
-				if !isSel {
-					return true
-				}
-				if !writesTheTarget(sel) {
+				if !writesTheTarget(call) {
 					return true
 				}
 				sites = append(sites, targetWriteSite{
@@ -193,17 +190,35 @@ func targetWriteSites(t *testing.T) []targetWriteSite {
 	return sites
 }
 
-// writesTheTarget reports whether one selector call reaches the adapter's write
-// surface. The two outcome forms are named uniquely enough to match on the
-// method alone; the plain Upsert/Delete are not (a KV handle has both), so they
-// match only on a receiver this package names for an adapter.
-func writesTheTarget(sel *ast.SelectorExpr) bool {
+// writesTheTarget reports whether one call reaches the adapter's write surface,
+// by METHOD NAME AND ARITY, on ANY receiver expression.
+//
+// The receiver is deliberately not part of the test. Matching a list of names
+// the package happens to use today (`adpt`, `a`) would let the next writer
+// escape the census by calling the variable `target`, or by writing
+// `p.adpt.Upsert(...)` — a selector, not an identifier — and a gate whose whole
+// job is to notice a new writer must not be defeated by naming.
+//
+// Arity is what keeps that width honest. adapter.Adapter's Upsert takes four
+// arguments (ctx, keys, row, seq) and its Delete three (ctx, keys, seq), while
+// the same-named methods this package calls on other things do not: a KV
+// handle's Delete is (ctx, key) and its Put/Get are different names entirely.
+// So the pair (name, arity) selects the adapter surface without naming a single
+// receiver, and a false positive would appear here as an unclassified function
+// — loudly — rather than as silence.
+func writesTheTarget(call *ast.CallExpr) bool {
+	sel, isSel := call.Fun.(*ast.SelectorExpr)
+	if !isSel {
+		return false
+	}
 	switch sel.Sel.Name {
 	case "UpsertWithOutcome", "DeleteWithOutcome":
+		// Named uniquely enough that the method alone selects them.
 		return true
-	case "Upsert", "Delete":
-		recv, isIdent := sel.X.(*ast.Ident)
-		return isIdent && (recv.Name == "adpt" || recv.Name == "a")
+	case "Upsert":
+		return len(call.Args) == 4
+	case "Delete":
+		return len(call.Args) == 3
 	}
 	return false
 }

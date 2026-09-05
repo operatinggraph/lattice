@@ -534,6 +534,20 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 	// together so the caller still sees (and can retry) the failure.
 	var errs []error
 	for _, result := range results {
+		// ONE abandon check, at the top of every result, covering both arms:
+		// "abandon every remaining write" is literally a per-iteration
+		// condition, and a rebuild invalidates a converged verdict exactly as
+		// it invalidates a write — the rescan truncated the keys this pass is
+		// reasoning about, so reporting them correct would tell the sweep the
+		// actor is fine while its rows are gone until the replay reaches them.
+		// Blocked is the honest answer for a pass whose target was purged
+		// under it. The residual is one result wide: a rebuild opening between
+		// this check and this result's own write is caught on the next
+		// iteration.
+		if p.rebuildAbandons(rebuildGen) {
+			fold.addBlocked(VerdictBlocked, BlockedUnknown, rebuildMovedReason)
+			continue
+		}
 		if result.Delete {
 			// A delete is skippable only when the row is already gone;
 			// GetRow reports a soft-deleted row as absent too, so an
@@ -563,26 +577,37 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				errs = append(errs, ErrNoOrderingToken)
 				continue
 			}
-			if p.rebuildAbandons(rebuildGen) {
-				fold.addBlocked(VerdictBlocked, BlockedUnknown, rebuildMovedReason)
-				continue
-			}
 			// The retraction's own precondition, and the one the ordering
-			// token cannot supply. This result says "the actor no longer
-			// holds this anchor", which the evaluation concluded from an EDGE
-			// view served by the refractor-adjacency index — a separately
-			// cursored consumer that can be arbitrarily far behind the lens.
-			// An index that has not yet applied everything up to seq can
-			// report an edge absent that Core KV already holds, and the
-			// tombstone this produces would carry a token above the stored
-			// watermark and land. Refusing puts this arm where the CDC link
-			// path already stands: it never retracts from a view older than
-			// the token it is writing under. A cursor of 0 — no source wired,
-			// or a process that has applied and polled nothing yet — is the
-			// unknown answer and refuses with the rest.
+			// token cannot supply — for the ONE result shape whose absence
+			// verdict came from the index.
 			//
-			// The sweep's next pass retries; nothing is lost but a cycle.
-			if applied := p.adjacencyAppliedSeq(); applied == 0 || applied < seq {
+			// AbsenceFromEdgeIndex marks a dropped-anchor tombstone the
+			// perEntry prefix diff derived by subtracting the executor's walk
+			// from the stored key set, and the walk reads its edges from the
+			// refractor-adjacency index: a separately cursored consumer that
+			// can be arbitrarily far behind the lens and can report an edge
+			// absent that Core KV already holds. Such a tombstone would carry
+			// a token above the stored watermark and land, retracting a live
+			// grant. Refusing puts this arm where the CDC link path already
+			// stands: it never retracts from a view older than the token it
+			// writes under. A cursor of 0 — no source wired, or a process that
+			// has retired and polled nothing yet — is the unknown answer and
+			// refuses with the rest.
+			//
+			// Everything else falls through unrefused, because for everything
+			// else the index is not the evidence: a legacy-parent tombstone is
+			// a presence fact read live from the target, a missing-actor
+			// retraction comes from fetchVertexProps' live Core KV read, and a
+			// doc-mode actor-aggregate lens has no edge-derived diff at all.
+			//
+			// PRICE, and it is the design's (§4.4 refusal 1, §8 row 5c): a
+			// refusal folds VerdictBlocked, which is the sweep's error tier, so
+			// a sustained adjacency backlog surfaces as a standing blocked
+			// verdict on the lens. That is the trade taken deliberately over
+			// clamping the token or dropping the arm — the sweep retries every
+			// pass, and a loud refusal is preferred to a quiet retraction of a
+			// grant that is still live.
+			if applied := p.adjacencyAppliedSeq(); result.AbsenceFromEdgeIndex && (applied == 0 || applied < seq) {
 				fold.addBlocked(VerdictBlocked, BlockedUnknown, adjacencyBehindReason)
 				continue
 			}
@@ -626,12 +651,19 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			continue
 		}
 
-		if result.Unchanged {
+		if p.honoursUnchanged(result) {
 			// The evaluation already read this entry's stored body back and
 			// found it equal — the same predicate, on the same stored row,
 			// that the comparison below would re-derive one round trip later.
-			// Concluding it here is what keeps a converged perEntry actor at
-			// zero reads per entry as well as zero writes.
+			// Concluding it here, ABOVE that comparison, is what keeps a
+			// converged perEntry actor at zero reads per entry as well as zero
+			// writes; below it the read would happen anyway and the fold would
+			// save nothing.
+			//
+			// It sits BELOW the abandon check at the top of the loop, which is
+			// what makes a rebuild invalidate this verdict along with every
+			// write the pass still holds.
+			p.entriesWithheld.Add(1)
 			out.Converged = true
 			fold.add(VerdictConverged, "")
 			continue
@@ -673,11 +705,6 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				errs = append(errs, ErrNoOrderingToken)
 				continue
 			}
-		}
-
-		if p.rebuildAbandons(rebuildGen) {
-			fold.addBlocked(VerdictBlocked, BlockedUnknown, rebuildMovedReason)
-			continue
 		}
 
 		if reportsUpsert {

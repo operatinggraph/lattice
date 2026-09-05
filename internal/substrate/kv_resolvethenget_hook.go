@@ -57,3 +57,31 @@ func kvResolvedKeysHook(ctx context.Context) func(keys []string) {
 	fn, _ := ctx.Value(kvResolvedKeysHookKey{}).(func(keys []string))
 	return fn
 }
+
+// kvFastPathRequestHookKey is the unexported context key
+// WithKVFastPathRequestHook stores its callback under.
+type kvFastPathRequestHookKey struct{}
+
+// WithKVFastPathRequestHook returns a context that makes every FAST-PATH
+// multi-get request issued under it report the number of subjects it carried,
+// once per request — retries included, since each is its own round trip.
+//
+// It exists for the same reason WithKVResolveThenGetHook does, one layer down:
+// a complete map comes back whether it was assembled from one request or from
+// twenty, so only a per-request count can pin a caller's stated bound. A caller
+// that chunks its own request set to stay on the fast path (see
+// KVDirectGetSubjectCap) has no other way to show its ceil(N/cap) claim is
+// true, and a bound nothing measures is prose.
+//
+// Production code never calls this; it is a test-only seam, mirroring
+// WithKVDrainRoundHook.
+func WithKVFastPathRequestHook(ctx context.Context, fn func(subjects int)) context.Context {
+	return context.WithValue(ctx, kvFastPathRequestHookKey{}, fn)
+}
+
+// kvFastPathRequestHook reads back the callback WithKVFastPathRequestHook
+// installed, returning nil when none was — the production case.
+func kvFastPathRequestHook(ctx context.Context) func(subjects int) {
+	fn, _ := ctx.Value(kvFastPathRequestHookKey{}).(func(subjects int))
+	return fn
+}

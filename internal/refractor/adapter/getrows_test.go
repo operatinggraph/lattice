@@ -3,11 +3,13 @@ package adapter_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestNatsKVAdapter_GetRows_ChunksStripsAndSurvivesACorruptMember is
@@ -17,9 +19,14 @@ import (
 //
 // Four properties, all in one fixture because they are one read:
 //
-//   - CHUNKING. 1,100 live keys are requested in one call and every one comes
-//     back. Below the cap this proves nothing; above it, a resolve-then-chunk
-//     that dropped a chunk would show up as a short map.
+//   - CHUNKING, pinned as a REQUEST PROFILE and not merely as a complete map.
+//     1,100 live keys — deliberately just past the substrate's fast-path
+//     subject cap — come back whole, AND the read is served by exactly
+//     ceil(N/cap) fast-path requests, each carrying at most the cap. That is
+//     the bound GetRows' doc states, and a complete map is no evidence for it:
+//     the same map comes back from one refused request plus a resolution plus
+//     the same chunks, which is what the primitive does when a caller hands it
+//     the whole set. Only the per-request count tells the two apart.
 //   - TOMBSTONES ARE ABSENT. A soft-deleted entry is missing from the result,
 //     the same answer GetRow gives for one, so the caller reads it as "no
 //     stored body" and writes the entry.
@@ -55,8 +62,37 @@ func TestNatsKVAdapter_GetRows_ChunksStripsAndSurvivesACorruptMember(t *testing.
 	// One key that was never written: absent, like the tombstoned one.
 	absent := "cap.rows.identity.A.9999"
 
-	rows, err := a.GetRows(ctx, append(append([]string{}, keys...), absent))
+	requested := append(append([]string{}, keys...), absent)
+
+	// Every fast-path request this read issues, in order, by subject count.
+	var perRequest []int
+	var mu sync.Mutex
+	hooked := substrate.WithKVFastPathRequestHook(ctx, func(subjects int) {
+		mu.Lock()
+		perRequest = append(perRequest, subjects)
+		mu.Unlock()
+	})
+
+	rows, err := a.GetRows(hooked, requested)
 	require.NoError(t, err, "a per-member problem must never fail the batch")
+
+	subjectCap := substrate.KVDirectGetSubjectCap
+	require.Equal(t, 1024, subjectCap,
+		"the fast path's subject cap is the server's number and GetRows' bound is stated in terms of it; "+
+			"a change here changes that bound and must be read, not absorbed")
+	wantRequests := (len(requested) + subjectCap - 1) / subjectCap
+	require.Equal(t, 2, wantRequests, "1,101 keys past a 1,024 cap is two requests — the vector is on the right side of the boundary")
+	require.Len(t, perRequest, wantRequests,
+		"GetRows must issue exactly ceil(N/%d) requests; got %v — more than that means it fell off the fast path "+
+			"and paid a refused request plus a resolution", subjectCap, perRequest)
+	for i, subjects := range perRequest {
+		require.LessOrEqual(t, subjects, subjectCap, "request %d carried %d subjects, past the fast path's cap", i, subjects)
+	}
+	asked := 0
+	for _, subjects := range perRequest {
+		asked += subjects
+	}
+	require.Equal(t, len(requested), asked, "every requested key is asked for exactly once across the chunks")
 
 	require.Len(t, rows, total-2,
 		"every live, parseable key comes back; the tombstoned and the corrupt one do not")

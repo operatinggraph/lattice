@@ -1997,11 +1997,11 @@ func main() {
 		lp.SetAckStatsFunc(p.AckStats)
 		lp.SetPeakRowsFunc(p.PeakBindingRows)
 		// The per-entry writes this lens avoided, and the read-backs that
-		// failed and so avoided none. Wired for every lens: a lens that cannot
-		// withhold reports two honest zeroes.
-		lp.SetWithholdCountsFunc(func() (uint64, uint64) {
-			return p.EntriesWithheld(), p.WithholdReadFailures()
-		})
+		// failed and so avoided none. Wired for every lens, but the pipeline
+		// answers ok == false for one that cannot withhold at all — the poller
+		// then leaves both fields absent rather than publishing a zero that
+		// would read as a mechanism installed and saving nothing.
+		lp.SetWithholdCountsFunc(p.WithholdCounts)
 		// The one writer that can report the personal healer's SILENCE. The
 		// sweeper publishes its verdict at the end of every pass, so a sweeper
 		// that stops passing leaves `clean` standing on every personal lens's

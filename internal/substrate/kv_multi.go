@@ -356,6 +356,18 @@ func (c *Conn) kvGetMulti(ctx context.Context, bucket string, keys []string, ver
 // every one of those requests stays on that path.
 const directGetSubjectCap = 1024
 
+// KVDirectGetSubjectCap exports directGetSubjectCap for a caller that chunks
+// its OWN exact-key request set to stay on the fast path — which is the only
+// way to hold a ceil(N/1024) request bound over exact keys. Handing the whole
+// set to KVGetMultiNoSnapshot instead costs one refused request plus a
+// resolution before the same chunks, because the primitive cannot know the
+// request carries no wildcard until the server has refused it.
+//
+// A caller that chunks reads this rather than writing 1024 down: the value is
+// the server's, and a caller carrying its own copy would silently fall off the
+// fast path the day the server's changed.
+const KVDirectGetSubjectCap = directGetSubjectCap
+
 // directGetChunkFloor bounds the split-on-failure descent ChunkedMultiGet takes
 // when a chunk of exact keys is refused for its aggregate SIZE rather than its
 // count. Sixteen entries is far under any response ceiling, so a failure there
@@ -583,6 +595,9 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 	// received accumulates the payload bytes this attempt actually got before
 	// it ended, which is what tells an over-size failure from a racing one.
 	received := 0
+	if hook := kvFastPathRequestHook(ctx); hook != nil {
+		hook(len(subjects))
+	}
 	streamName := "KV_" + bucket
 	reqSubj := fmt.Sprintf(directGetMultiAPIT, streamName)
 	body, err := json.Marshal(directGetMultiRequest{MultiLastFor: subjects})

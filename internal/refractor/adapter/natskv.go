@@ -792,24 +792,45 @@ func (a *NatsKVAdapter) GetRow(ctx context.Context, keys map[string]any) (map[st
 // the row is written. An error return means the request set did not happen at
 // all.
 //
-// BOUND. The read is substrate.KVGetMultiNoSnapshot over exact keys: ceil(N/1024)
-// fast-path requests, each bounded by the client's directGetMultiDefaultTimeout,
-// with no drain and so no round-starved ceiling. It runs on the caller's ctx —
-// the pipeline's consumer context, which carries no deadline — so that
-// per-request timeout is the whole bound, and N (the caller's own key set) is
-// what sizes the request count.
+// BOUND: exactly ceil(N/substrate.KVDirectGetSubjectCap) requests, each one a
+// FAST-PATH multi-get computed under the stream's read lock, and each bounded
+// by the client's directGetMultiDefaultTimeout. There is no drain, so no
+// round-starved ceiling, and no resolution round trip.
+//
+// The chunking is done HERE rather than left to the primitive, and that is the
+// difference between the stated bound and the real one. KVGetMultiNoSnapshot
+// cannot know a request carries no wildcard until the server has refused it for
+// its subject count, so handing it more than the cap costs one refused request
+// plus a stream-info resolution before it reaches the same chunks. Chunking to
+// the cap keeps every request on the path the bound describes. The cap is read
+// from the substrate rather than written down here, so a caller cannot drift off
+// the fast path by holding a stale copy of the server's number.
+//
+// SHARED BUDGET: the caller's ctx. The pipeline's consumer context carries no
+// deadline, so each request falls back to the client's own default API timeout
+// and that per-request timeout is the whole bound — N sizes the request COUNT,
+// never any single request's deadline, and a wide actor therefore costs more
+// round trips rather than one longer one.
 //
 // No snapshot is needed and none is taken: each key is compared independently
 // against its own freshly computed body, so a result that blends instants
 // answers every comparison correctly (KVGetMultiNoSnapshot's own
-// independent-facts test).
+// independent-facts contract), and chunking is for that reason free of
+// correctness cost as well.
 func (a *NatsKVAdapter) GetRows(ctx context.Context, keys []string) (map[string]map[string]any, error) {
 	if len(keys) == 0 {
 		return map[string]map[string]any{}, nil
 	}
-	entries, err := a.kv.GetMultiNoSnapshot(ctx, keys)
-	if err != nil {
-		return nil, fmt.Errorf("natskv get rows: %d keys: %w", len(keys), err)
+	entries := make(map[string]*substrate.KVEntry, len(keys))
+	for start := 0; start < len(keys); start += substrate.KVDirectGetSubjectCap {
+		end := min(start+substrate.KVDirectGetSubjectCap, len(keys))
+		chunk, err := a.kv.GetMultiNoSnapshot(ctx, keys[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("natskv get rows: %d keys, chunk [%d:%d]: %w", len(keys), start, end, err)
+		}
+		for key, entry := range chunk {
+			entries[key] = entry
+		}
 	}
 	out := make(map[string]map[string]any, len(entries))
 	for key, entry := range entries {

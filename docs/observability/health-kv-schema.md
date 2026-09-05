@@ -1419,6 +1419,8 @@ above).
   "lastProjectedAt": "<RFC3339>",
   "projectionLag": <uint64>,
   "peakBindingRows": <uint64>,
+  "entriesWithheld": <uint64>,
+  "withholdReadFailures": <uint64>,
   "lagProgressAt": "<RFC3339>",
   "ackPending": <uint64>,
   "ackFloorProgressAt": "<RFC3339>",
@@ -1595,6 +1597,24 @@ the lens ever sees and those are the samples worth having. ABSENT means no evalu
 one — a lens that has not evaluated, or an entry written by a Refractor that predates the field.
 Like every other field here it is observation, not control: nothing in the engine or the pipeline
 reads it back.
+
+`entriesWithheld` / `withholdReadFailures` are a **perEntry** read-grant lens's write-avoidance
+counters (perentry-unchanged-entry-withholding-design.md §4.6). Such a lens — the kernel
+`capabilityRead` base and each generated `cap-read.<domain>` producer — re-evaluates every actor an
+event reaches and, before writing, reads back the stored bodies of the entries it is about to
+rewrite in one batched request; an entry whose stored body already equals the fresh one is
+**withheld**: not written, not audited, its `projectionSeq` left where the write that last changed
+it stood. `entriesWithheld` is the cumulative count of those decisions for the life of the process
+(a redelivered event that decides again counts again, the same way a rewritten row would); read it
+against the audit subject's rate — a converged lens under a busy neighbour has a high withheld
+count and a near-silent audit trail, which is the healthy shape. `withholdReadFailures` counts the
+batched read-backs that failed, each of which cost exactly one actor's entries one unconditional
+rewrite and nothing afterwards: it is a **rate** to read against `entriesWithheld`, never a latch,
+and a lens with a rising rate is paying writes it could have avoided, not projecting wrongly. Both
+are published only for a perEntry lens — the one shape that has the mechanism — so ABSENT means
+the lens has no such mechanism, not that it has withheld nothing; a lens that predates the field
+is absent for the same reason. A perEntry lens whose target cannot arm it (unguarded, or unable
+to read rows back) publishes real zeroes: the mechanism exists and has decided nothing.
 
 `sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
 position and cumulative heal count; both are omitted for a lens that does not sweep. They

@@ -224,8 +224,12 @@ Then, per fresh result whose key the read resolved: `if rowsEquivalent(stored, f
 ### 4.3 The write loop (pipeline — Inc 1)
 
 `writeResults` (`results.go:158`): immediately after the personal `admits` check, `if result.Unchanged { withheld++;
-continue }` — not written, not audited, not counted by `recordProjectionWrite`, not marked on the freshness clock,
-never entering `retryResults` / `terminalErrs`. The `pipeline: processed` line gains `entriesWithheld=N`. Tombstones
+continue }` — not written, not audited, not counted by `recordProjectionWrite`, never entering `retryResults` /
+`terminalErrs`. **The freshness clock DOES advance (amended at build, 2026-09-05, review finding):** a pass that
+withheld ≥ 1 entry stamps `lastProjectedAt` once after the flush, as a landed row would — the pass processed the
+event and confirmed the entry current, and `lastProjectedAt` is the "is this lens still projecting" clock, so a
+converged lens must not read as a stalled one to `LensProjectionStalled` should a business perEntry lens ever arm
+(§2 row 16's exclusion is a fact about today's corpus, not a guarantee). Audit and the write count stay silent. The `pipeline: processed` line gains `entriesWithheld=N`. Tombstones
 (`Delete`) and `FailClosed` results are never `Unchanged` (§4.1), so §6.14's tombstones-first ordering and the
 FailClosed abort are untouched.
 
@@ -272,14 +276,24 @@ sequence today exactly as it would after this design.
 **The replacement — two refusals in `Reproject`'s delete arm, and one filed bug.** The accident is replaced by
 intent, on the one writer the fence protected:
 
-1. **Index-behind refusal (S-lag).** The adjacency bootstrapper (`consumer/bootstrap.go`) records the stream
-   sequence of the last message it applied and, on its pending-zero poll, the stream's last sequence — one atomic,
-   exposed as `AppliedSeq()`; `cmd/refractor` hands every pipeline a `func() uint64` (the `PersonalHealerVerdictFn`
-   bare-func precedent). `Reproject`'s delete arm writes a tombstone only when `adjacencyApplied ≥ seq` (the token it
-   captured); otherwise the result folds as `VerdictBlocked` with class `BlockedUnknown` and reason *"adjacency index
-   behind the reconciliation token"*, and the sweep's next pass retries. A per-process cursor under-states on a second
-   instance and reads 0 after a restart until the first poll — both refuse more, never less. This puts `Reproject`
-   where the CDC link arm already is: it never tombstones from a view older than what the lens has applied.
+1. **Index-behind refusal (S-lag).** The adjacency bootstrapper (`consumer/bootstrap.go`) exposes `AppliedSeq()`
+   — **the contiguous floor of what the shared adjacency durable has retired (amended at build, 2026-09-05, two
+   reviewers):** a monotone maximum over Ack'd/Term'd sequences, capped one below the lowest Nak'd-and-still-owed
+   sequence (a max over retirements alone would claim edge 100 applied once 101–120 had retired around its Nak),
+   and raised to the stream head on the caught-up poll only when the head was read *before* the caught-up check
+   (a message landing between the two reads must not be claimed). `cmd/refractor` hands every pipeline a
+   `func() uint64` (the `PersonalHealerVerdictFn` bare-func precedent). **The refusal is scoped to the tombstones
+   whose absence the index served (amended at build, 2026-09-05, three reviewers):** only a dropped-entry tombstone
+   `multiEntryRetractions` manufactured from the prefix diff against a real evaluation — the executor's edge walk —
+   carries the mark `Reproject`'s delete arm reads; the legacy-parent tombstone, the missing-actor tombstones (a
+   live `fetchVertexProps` read) and every doc-mode lens's document delete are unmarked and land as today. A marked
+   tombstone lands only when `adjacencyApplied ≥ seq` (the token it captured); otherwise the result folds as
+   `VerdictBlocked` with class `BlockedUnknown` and reason *"adjacency index behind the reconciliation token"*, and
+   the sweep's next pass retries — under a sustained index backlog that streak reaches the auth plane's error tier,
+   which is the priced trade (§8 row 5c's over-grant for the backlog's duration, made visible rather than silent). A
+   per-process cursor under-states on a second instance and reads 0 after a restart until the first apply or poll —
+   both refuse more, never less. This puts `Reproject` where the CDC link arm already is: it never tombstones from
+   a view older than what the lens has applied.
 2. **Rebuild-moved refusal.** `Pipeline.Rebuild` increments a rebuild generation (one atomic, beside
    `rebuildInFlight`); `Reproject` captures it with its token and abandons every write — not only tombstones — with
    `VerdictBlocked` if it differs at write time or `RebuildInFlight()` is true. The sweep already refuses a tick during
@@ -349,7 +363,7 @@ new tool (the stream's subject counts are already the per-lens census).
 |---|---|---|---|---|
 | `EvalResult.Unchanged` | per evaluation, in `multiEntryRetractions` | never (per-batch value) | never across batches | n/a |
 | `EntriesWithheld` / `WithholdReadFailures` | first withhold / first failure | never (monotone) | carried forward on the health entry (§2 row 16) | n/a |
-| adjacency `AppliedSeq` (one atomic in the bootstrapper) | first applied message or first pending-zero poll | 0 at process start (refuses until set) | per process, never durable | monotone max |
+| adjacency `AppliedSeq` (a retired-max atomic + the owed set, in the bootstrapper) | first retired message or first caught-up poll | 0 at process start (refuses until set) | per process, never durable; reports the shared durable's floor, so a restart against a drained durable reports prior work | contiguous floor: max(retired) capped below min(owed) |
 | rebuild generation (one atomic beside `rebuildInFlight`) | first `Rebuild` | never | per process | monotone |
 
 ---
@@ -576,6 +590,7 @@ Green bar: T1–T8, T11, T12 (Inc 1) and T9 (Inc 2) green; X1–X5 re-pinned; T1
 | `internal/refractor/health/healthwire/healthwire.go:102-145`, `health/reporter.go:232,346,436` (carry-forward), `:738-761` (`SetPeakBindingRows`), `health/lag_poller.go:374` | health | `+ EntriesWithheld`, `+ WithholdReadFailures` (monotone), carried forward in all three wholesale writers; `entry_carry_forward_completeness_test.go:38-101` discovers them |
 | `scripts/lint-flag-consumer-census.go:76-90` | flag ledger | declare `internal/refractor/pipeline/reproject.go#Reproject` as a `RebuildInFlight` reader (re-read the `rebuildWindows` bound: the reader refuses writes, the safe direction) |
 | `docs/components/refractor.md` audit row + *Convergence sweep* section; dossier | Inc 2 | per §11 |
+| `docs/observability/health-kv-schema.md` `<lensId>` block + prose | Inc 1 (same change as the emission — Contract #5 §5.4; omitted from the first cut of this table, caught by the acceptance audit) | the two counters, absent for a lens that cannot withhold |
 | `internal/refractor/edge_manifest_fire2_producer_flip_e2e_test.go:51` | T9 precedent | extend with the `providedTo`-create-against-populated-domain vector |
 
 Citations that moved (claims all hold): §2 row 4 `evaluate.go:919-1010` → `:975-1040`; row 1 `reprojectActors :1218` → `:1261`;
@@ -606,7 +621,7 @@ Inc 2: T9 e2e; `docs/components/refractor.md`; dossier classification; §15.7 ch
 go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go
 STRICT=1 go run ./scripts/lint-flag-consumer-census.go && STRICT=1 go run ./scripts/lint-slog-values.go
 POSTGRES_TEST_DSN=… go test ./internal/refractor/... ./internal/substrate/... ./cmd/refractor/... -count=1
-go test ./internal/refractor/health/ -run CarryForward -count=1
+go test ./internal/refractor/health/ -run TestReporter_WholesaleWriters_CarryEveryEntryFieldForward -count=1
 grep -rl "^//go:build " --include=*_test.go internal/ | xargs grep -l "refractor" # build-tagged harnesses the interfaces reach
 ```
 

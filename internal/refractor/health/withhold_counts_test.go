@@ -89,10 +89,10 @@ func TestLagPoller_PublishesWithholdCounts(t *testing.T) {
 		var mu sync.Mutex
 		withheld, failures := uint64(1200), uint64(1)
 		lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
-		lp.SetWithholdCountsFunc(func() (uint64, uint64) {
+		lp.SetWithholdCountsFunc(func() (uint64, uint64, bool) {
 			mu.Lock()
 			defer mu.Unlock()
-			return withheld, failures
+			return withheld, failures, true
 		})
 		_ = startPoller(lp, ctx)
 
@@ -110,6 +110,39 @@ func TestLagPoller_PublishesWithholdCounts(t *testing.T) {
 			entry, err := reporter.GetStatus(context.Background())
 			return err == nil && entry.EntriesWithheld == 1300 && entry.WithholdReadFailures == 2
 		}, 2*time.Second, 10*time.Millisecond, "a changed pair must still reach the entry")
+	})
+
+	t.Run("a source that cannot withhold publishes nothing", func(t *testing.T) {
+		// Contract #5 §5.4: an unmeasured quantity is ABSENT, never 0. A lens
+		// that cannot withhold at all has measured nothing, and a stored 0
+		// would read as "the mechanism is installed and has saved nothing" —
+		// a different and more alarming claim.
+		const ruleID = "rule-withhold-incapable"
+		reporter := health.New(env.healthKV, ruleID)
+		ctx := context.Background()
+		require.NoError(t, reporter.SetActive(ctx))
+
+		pollCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		lp := health.NewLagPoller(env.conn, zeroLag, reporter, ruleID)
+		// The values are deliberately NON-ZERO beside the false. A source that
+		// returned zeroes would make the fix and its absence indistinguishable
+		// — the poller would write 0 and the entry would read 0 either way —
+		// so the flag is the only thing under test here, and it has to be the
+		// only thing that decides the outcome.
+		lp.SetWithholdCountsFunc(func() (uint64, uint64, bool) { return 5, 1, false })
+		_ = startPoller(lp, pollCtx)
+
+		require.Eventually(t, func() bool {
+			entry, err := reporter.GetStatus(ctx)
+			return err == nil && entry.LagProgressAt != ""
+		}, 2*time.Second, 10*time.Millisecond, "the poller must have completed a cycle")
+
+		entry, err := reporter.GetStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), entry.EntriesWithheld,
+			"an incapable lens's fields stay absent; a poller ignoring ok would have written 5")
+		require.Equal(t, uint64(0), entry.WithholdReadFailures)
 	})
 
 	t.Run("no wired source leaves a stored value alone", func(t *testing.T) {

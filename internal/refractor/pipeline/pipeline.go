@@ -146,10 +146,29 @@ type Pipeline struct {
 	// by a rebuild reports a quiet lens and a broken one alike.
 	entriesWithheld      atomic.Uint64
 	withholdReadFailures atomic.Uint64
+	// adapterSwaps counts the adapters installed on this pipeline AFTER the
+	// first: New installs one and leaves this at 0, and every HotReloadInto
+	// raises it. It is what lets a verdict computed against one target refuse
+	// to be honoured against another — an unchanged-entry comparison is a
+	// statement about a specific store, and a hot reload between the
+	// evaluation and the write would otherwise skip on the NEW target every
+	// entry that matched on the old one.
+	//
+	// Read through adapterGeneration, never directly: the generation is this
+	// count PLUS ONE, so that zero is never a live generation and a carried
+	// verdict's zero value means "no verdict" rather than "the verdict of a
+	// pipeline that has never reloaded".
+	adapterSwaps atomic.Uint64
 	// secureWithholdRefusalOnce keeps withholdingArmed's Secure-lens refusal
 	// to one log line: the condition is a property of the lens's declaration,
 	// so it answers identically for every event this pipeline ever handles.
 	secureWithholdRefusalOnce sync.Once
+	// withholdReadWarned latches a logged read-back failure until a later read
+	// succeeds. A fan-out event calls the read once per reached actor —
+	// thousands on a wide one — so an unreadable target would otherwise write
+	// the same line thousands of times per event. The counter carries the rate;
+	// this only decides whether the line is emitted.
+	withholdReadWarned atomic.Bool
 
 	// plainReprojectLabels is the exhaustive set of vertex types this lens's
 	// patterns can bind (full.CompiledRule.ReferencedLabels), used by the
@@ -1412,6 +1431,14 @@ func (p *Pipeline) rebuildGeneration() uint64 {
 	return p.rebuildGen.Load()
 }
 
+// adapterGeneration identifies the adapter instance currently installed. It
+// starts at 1 and rises with every HotReloadInto, so a zero is never a live
+// generation — which is what lets EvalResult.UnchangedAt carry "no verdict" in
+// its zero value while a pipeline that has never reloaded still has one.
+func (p *Pipeline) adapterGeneration() uint64 {
+	return p.adapterSwaps.Load() + 1
+}
+
 // RequireGuardedAdapter declares that every adapter this pipeline writes
 // through must enforce the §6.2 monotonic projection-write guard. Called by the
 // installer once it has enabled the guard on the activation adapter; from then
@@ -1460,6 +1487,10 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 	}
 	p.adpt = newAdpt
 	p.bindAdapterReporters(newAdpt)
+	// Raised with the swap, under the same adapterMu the write path takes to
+	// read the adapter, so no caller can observe the new adapter under the old
+	// generation.
+	p.adapterSwaps.Add(1)
 	return nil
 }
 

@@ -204,7 +204,7 @@ func TestOrdering_AStaleReprojectTombstoneIsDeclinedByTheGuard(t *testing.T) {
 	p.recordAppliedSeq(5)
 	results := runCDCEvent(t, p, 5)
 	require.Len(t, results, 1)
-	require.False(t, results[0].Unchanged, "a tombstoned stored entry is a presence change and is always written")
+	require.False(t, p.honoursUnchanged(results[0]), "a tombstoned stored entry is a presence change and is always written")
 	require.True(t, entryIsLive(t, adpt), "the CDC create landed")
 
 	close(release)
@@ -243,11 +243,18 @@ func TestOrdering_AStaleEntryLosesToAFreshReprojectTombstone(t *testing.T) {
 
 	p.recordAppliedSeq(4)
 	reached, release := parkTheFirstPrefixListing(adpt)
-	done := make(chan Reprojection, 1)
+	// The error travels back over the channel rather than being asserted on the
+	// goroutine: a failed require there calls runtime.Goexit on a non-test
+	// goroutine, which aborts nothing the test framework is watching and leaves
+	// this test blocked on the channel until the whole package times out.
+	type reprojection struct {
+		res Reprojection
+		err error
+	}
+	done := make(chan reprojection, 1)
 	go func() {
 		res, err := p.Reproject(ctx, orderingActor)
-		require.NoError(t, err)
-		done <- res
+		done <- reprojection{res, err}
 	}()
 
 	select {
@@ -259,11 +266,13 @@ func TestOrdering_AStaleEntryLosesToAFreshReprojectTombstone(t *testing.T) {
 	grantTheRole(t, p)
 	results := runCDCEvent(t, p, 5)
 	require.Len(t, results, 1)
-	require.True(t, results[0].Unchanged, "the stored body already equals the fresh one, so the write is withheld")
+	require.True(t, p.honoursUnchanged(results[0]), "the stored body already equals the fresh one, so the write is withheld")
 	require.True(t, entryIsLive(t, adpt))
 
 	close(release)
-	res := <-done
+	got := <-done
+	require.NoError(t, got.err)
+	res := got.res
 	require.True(t, res.Deleted, "the reconciliation's token outranks the stale stored watermark")
 	require.False(t, entryIsLive(t, adpt),
 		"§5 row 7r: a stale entry is retracted by a fresher reconciliation — the design's stated residual")
@@ -312,6 +321,6 @@ func TestOrdering_AWronglyRemovedEdgeRetractsAndTheNextEventHeals(t *testing.T) 
 	grantTheRole(t, p)
 	results := runCDCEvent(t, p, 7)
 	require.Len(t, results, 1)
-	require.False(t, results[0].Unchanged, "a tombstoned stored entry is written, not withheld")
+	require.False(t, p.honoursUnchanged(results[0]), "a tombstoned stored entry is written, not withheld")
 	require.True(t, entryIsLive(t, adpt), "the next CDC event on the actor heals it")
 }

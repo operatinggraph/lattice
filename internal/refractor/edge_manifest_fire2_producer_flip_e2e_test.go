@@ -5,8 +5,19 @@
 // `entryKeyColumn` — the per-anchor keyed shape Fire 1 built the mechanism
 // for — rather than the legacy one-document-per-actor shape. This proves the
 // flip through the live pipeline, not a unit-level driver call: admit on
-// grant, drop on revoke, and drain of a pre-existing legacy parent document on
-// the actor's first post-flip evaluation (§6 dual-read migration).
+// grant, WITHHOLD on a re-evaluation that changes nothing, drop on revoke, and
+// drain of a pre-existing legacy parent document on the actor's first
+// post-flip evaluation (§6 dual-read migration).
+//
+// The withhold phase is the BODY-AXIS seam pin for
+// perentry-unchanged-entry-withholding-design.md. Every other test of that
+// mechanism supplies its own envelope, so all of them would stay green if the
+// REAL per-entry body — projection.OutputDescriptor.EntryEnvelopeFn's, with
+// its collected entry fields, `key`, `actor`, `version` and `projectedAt` —
+// failed to round-trip through the guarded adapter and back. This one runs the
+// real descriptor's bodies through the real store, so a field that does not
+// survive the trip shows up as a mechanism that silently never withholds,
+// rather than as nothing at all.
 //
 // Installs the real edgemanifest.Package via InstallPackage (mirroring
 // edge_manifest_fire1_e2e_test.go), then activates ONLY the generated
@@ -48,7 +59,7 @@ import (
 	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 )
 
-func TestEdgeManifest_Fire2_E2E_ProducerFlip_AdmitRevokeLegacyDrain(t *testing.T) {
+func TestEdgeManifest_Fire2_E2E_ProducerFlip_AdmitWithholdRevokeLegacyDrain(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping edge-manifest Fire 2 producer-flip e2e in -short mode")
 	}
@@ -228,6 +239,43 @@ func TestEdgeManifest_Fire2_E2E_ProducerFlip_AdmitRevokeLegacyDrain(t *testing.T
 		return present && del
 	}, 10*time.Second, 100*time.Millisecond,
 		"the legacy parent doc must be tombstoned on the actor's first post-flip evaluation (§6 dual-read drain)")
+
+	// --- WITHHOLD (body axis): a second event on the actor that changes no
+	// entry must write nothing. Touching the identity vertex re-evaluates the
+	// whole actor through the same producer, and every entry it re-derives is
+	// byte-identical to what the store already holds — modulo projectedAt,
+	// which this touch DOES move (it is the actor vertex's lastModifiedAt) and
+	// which the predicate ignores. So the mechanism must recognise the real
+	// body as unchanged and skip the write.
+	//
+	// The store-side proof is the guard's own watermark: a write that landed
+	// would stamp the new event's stream sequence into projectionSeq. It must
+	// still read the sequence of the write that created the entry.
+	readProjectionSeq := func(key string) (uint64, bool) {
+		entry, gErr := capKV.Get(ctx, key)
+		if gErr != nil || entry == nil || len(entry.Value) == 0 {
+			return 0, false
+		}
+		var env map[string]any
+		require.NoError(t, json.Unmarshal(entry.Value, &env))
+		seq, isNum := env["projectionSeq"].(float64)
+		return uint64(seq), isNum
+	}
+	seqBefore, ok := readProjectionSeq(perAnchorKey)
+	require.True(t, ok, "the admitted entry must carry the guard's watermark")
+	require.NotZero(t, seqBefore)
+
+	emWriteVertex(t, ctx, coreKV, identityKey, "identity", map[string]any{"name": "Fire2 Tenant (touched)"})
+
+	require.Eventually(t, func() bool { return p.EntriesWithheld() > 0 }, 30*time.Second, 100*time.Millisecond,
+		"a re-evaluation that derives the identical entry body must withhold the write — "+
+			"if this never fires, the REAL per-entry body does not compare equal to what the real adapter stored, "+
+			"and the mechanism is installed but inert on every production lens")
+
+	seqAfter, ok := readProjectionSeq(perAnchorKey)
+	require.True(t, ok, "the entry must still be there — withholding writes nothing, it does not retract")
+	require.Equal(t, seqBefore, seqAfter,
+		"a withheld write leaves the guard's watermark where the last real change left it")
 
 	// --- REVOKE: tombstone the providedTo link; the per-anchor key must drop. ---
 	linkKey := substrate.LinkKey("service", instID, "providedTo", "identity", tenantID)

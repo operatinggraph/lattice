@@ -151,9 +151,18 @@ type Entry struct {
 	// says the lens is working rather than stalled.
 	//
 	// Cumulative for the life of the process and never reset, so a rate is
-	// what a reader takes from two samples. Zero (absent on the wire) means a
-	// lens that has withheld nothing: a plain, doc-mode or personal lens,
-	// which never can, or a perEntry lens whose entries really are changing.
+	// what a reader takes from two samples. ABSENT means the lens cannot
+	// withhold at all — a plain, doc-mode or personal lens, which has no
+	// per-entry set to compare — and the poller writes nothing for one rather
+	// than a zero that would read as a mechanism installed and saving nothing.
+	// A published 0 is a real reading: a perEntry lens whose entries really
+	// are changing.
+	//
+	// It counts DECIDED withholds, at the point recordProjectionWrite counts a
+	// write, which means a redelivered batch counts its withholds again — the
+	// same over-reporting a rewritten row's ProjectionWrites carries, and the
+	// same parity is what makes the two comparable. Read it as a rate against
+	// that counter, never as a distinct-entry population.
 	EntriesWithheld uint64 `json:"entriesWithheld,omitempty"`
 	// WithholdReadFailures is the cumulative number of batched read-backs that
 	// failed, each costing one actor's entries an unconditional rewrite for

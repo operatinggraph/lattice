@@ -57,10 +57,16 @@ type PeakRowsFunc func() (uint64, bool)
 // WithholdCountsFunc optionally returns the lens's two cumulative withholding
 // tallies: the per-entry rows it did not write because the target already held
 // them, and the batched read-backs that failed. Both are monotone for the life
-// of the process, so there is no "nothing to say" case the way PeakRowsFunc has
-// one — a lens that has withheld nothing has genuinely withheld nothing, and
-// zero is the true reading rather than a fabricated one.
-type WithholdCountsFunc func() (withheld, readFailures uint64)
+// of the process.
+//
+// ok == false means this lens CANNOT withhold at all — a plain, doc-mode or
+// personal lens, which has no per-entry set to compare — and the poller then
+// writes nothing rather than a zero. An unmeasured quantity is absent, never 0
+// (Contract #5 §5.4): a stored 0 on such a lens would read as "the mechanism is
+// installed and has saved nothing", which is a different and more alarming
+// claim than "the mechanism does not apply here". Only a lens genuinely capable
+// of withholding publishes a real 0.
+type WithholdCountsFunc func() (withheld, readFailures uint64, ok bool)
 
 // LagPoller publishes per-lens consumer lag metrics to lattice.refractor.metrics.<lensId>
 // at the interval captured from MetricsInterval at construction time.
@@ -87,8 +93,9 @@ type LagPoller struct {
 
 	// withholdCounts optionally supplies the lens's withholding tallies. nil
 	// (the default, unless SetWithholdCountsFunc is called) leaves the Entry's
-	// two counters untouched — a lens whose host never wired the source has
-	// not measured zero, and writing one would say it had.
+	// two counters untouched, and so does a source reporting ok == false — a
+	// lens whose host never wired the source, or one that cannot withhold at
+	// all, has not measured zero, and writing one would say it had.
 	withholdCounts WithholdCountsFunc
 
 	// healerPass optionally supplies the personal healer's last-pass clock, so
@@ -416,15 +423,22 @@ func (lp *LagPoller) pollPeakRows(ctx context.Context) {
 // pollWithholdCounts publishes the lens's two withholding tallies onto its
 // health entry. A separate read-modify-write from the progress and gauge writes
 // for the same reason those are separate from each other: its own source, its
-// own "nothing to say" case (no source wired at all — a lens that has not
-// measured, which is not a lens that measured zero), and the same
-// unchanged-value skip, so a lens whose counters have stopped moving costs a
-// read rather than a Health-KV round trip.
+// own "nothing to say" case, and the same unchanged-value skip, so a lens whose
+// counters have stopped moving costs a read rather than a Health-KV round trip.
+//
+// "Nothing to say" is two states and both are silence, mirroring
+// SetPeakBindingRows' refusal to write without a sample: no source wired (the
+// host never called the setter), and a source reporting ok == false (a lens
+// that cannot withhold). Writing a zero for either would put a measurement on
+// the entry that no reading produced.
 func (lp *LagPoller) pollWithholdCounts(ctx context.Context) {
 	if lp.withholdCounts == nil {
 		return
 	}
-	withheld, failures := lp.withholdCounts()
+	withheld, failures, ok := lp.withholdCounts()
+	if !ok {
+		return
+	}
 	if lp.lastWithholdSet && withheld == lp.lastWithheld && failures == lp.lastWithholdFailures {
 		return
 	}

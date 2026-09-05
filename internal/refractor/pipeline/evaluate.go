@@ -243,9 +243,11 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			return peerResults, append([]string{entry.CoreKVKey}, peers...), scope, nil
 		}
 		if p.multiEnvelopeFn != nil {
-			// An empty fresh set: every live child is retracted and there is
-			// nothing to compare, so the read-back is not asked for.
-			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil, false)
+			// The actor vertex itself is gone — read live from Core KV, not
+			// inferred from an edge — so every live child is retracted,
+			// nothing is compared, and no read-back is asked for. The zero
+			// retractionCall says both.
+			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil, retractionCall{})
 			if rerr != nil {
 				return nil, nil, ScopeAll(), rerr
 			}
@@ -934,13 +936,35 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 	// security plane, cap-read-per-anchor-grant-keys-design.md §4.2). The
 	// prefix diff below is the retraction transport that closes it.
 	if p.multiEnvelopeFn != nil {
-		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results, recordCost)
+		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results,
+			retractionCall{costed: recordCost, fromEdgeWalk: true})
 		if rerr != nil {
 			return nil, ruleengine.EvalFootprint{}, rerr
 		}
 		results = withRetractions
 	}
 	return results, footprint, nil
+}
+
+// retractionCall tells multiEntryRetractions which of its callers is asking.
+// The two flags answer different questions and are deliberately separate: they
+// happen to agree at every call site today, and folding them into one would
+// make a future caller that needs one without the other silently take both.
+type retractionCall struct {
+	// costed marks a call that leads to a WRITE, and gates the one extra read
+	// multiEntryRetractions makes: the batched read-back that marks an
+	// unchanged entry for the write loop to skip. The background divergence
+	// audit is uncosted — it writes nothing, so a read deciding what to write
+	// would be pure cost — and so is a caller with no fresh set to compare.
+	costed bool
+	// fromEdgeWalk marks a call whose fresh set came from the executor's
+	// pattern walk, whose EDGE reads are served by the refractor-adjacency
+	// index. Only then is a dropped-anchor tombstone evidence drawn from that
+	// index, and only then does Reproject's index-behind refusal apply. The
+	// actor-disappearance callers pass the zero value: their absence verdict
+	// is fetchVertexProps' LIVE Core KV read of the actor vertex, which no
+	// index lag can distort.
+	fromEdgeWalk bool
 }
 
 // multiEntryRetractions computes cap-read-per-anchor-grant-keys-design.md
@@ -975,15 +999,9 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 // exact fail-OPEN shape this design exists to close, reopened one batch at a
 // time.
 //
-// recordCost marks the evaluations that lead to a WRITE, and it gates the one
-// extra read this function makes: on a costed call, and only while withholding
-// is armed (withholdingArmed), the entries the fresh set and the stored set
-// have in common are read back in one batch and the ones whose stored body
-// already equals the fresh one are marked Unchanged for the write loop to
-// skip. The background divergence audit passes false — it writes nothing, so a
-// read that decides what to write would be pure cost — and so does a caller
-// with an empty fresh set, which has nothing to compare.
-func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult, recordCost bool) ([]ruleengine.EvalResult, error) {
+// call says which of this function's two callers is asking; see
+// retractionCall for what each flag decides.
+func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult, call retractionCall) ([]ruleengine.EvalResult, error) {
 	adpt := p.currentAdapter()
 	lister, ok := adpt.(adapter.PrefixKeyLister)
 	if !ok {
@@ -1054,9 +1072,16 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		if !live {
 			continue
 		}
-		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: keys, FailClosed: true})
+		// The one tombstone in this function whose absence verdict came from
+		// the executor's edge walk: the key is stored, the walk's fresh set
+		// does not carry it, and the walk read its edges from the adjacency
+		// index. Reproject's index-behind refusal gates on exactly this mark.
+		tombstones = append(tombstones, ruleengine.EvalResult{
+			Delete: true, Keys: keys, FailClosed: true,
+			AbsenceFromEdgeIndex: call.fromEdgeWalk,
+		})
 	}
-	if recordCost && len(retained) > 0 {
+	if call.costed && len(retained) > 0 {
 		p.markUnchangedEntries(ctx, adpt, actorKey, retained, fresh)
 	}
 	if len(tombstones) == 0 {
@@ -1321,8 +1346,11 @@ func (p *Pipeline) reprojectActors(ctx context.Context, rs ruleState, actorKeys 
 			// `SetMultiEnvelopeFn` at registration — the bootstrap
 			// `capabilityRead` base lens is the first live one.
 			if p.multiEnvelopeFn != nil {
-				// An empty fresh set: nothing to withhold, so no read-back.
-				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil, false)
+				// fetchVertexProps read the actor vertex absent or deleted
+				// from Core KV — a live read, never the adjacency index — so
+				// these tombstones carry no index-derived absence and nothing
+				// is compared. The zero retractionCall says both.
+				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil, retractionCall{})
 				if rerr != nil {
 					return nil, rerr
 				}

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -202,7 +203,7 @@ func TestWithholding_UnchangedEntryIsNotWritten(t *testing.T) {
 	first := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
 	require.Len(t, first, 3)
 	for _, r := range first {
-		require.False(t, r.Unchanged, "an entry the target does not hold yet is never withheld")
+		require.False(t, p.honoursUnchanged(r), "an entry the target does not hold yet is never withheld")
 	}
 	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 10}, withholdActor, first, nil, ScopeAll())
 	require.NoError(t, err)
@@ -219,7 +220,7 @@ func TestWithholding_UnchangedEntryIsNotWritten(t *testing.T) {
 	second := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
 	require.Len(t, second, 3)
 	for _, r := range second {
-		require.True(t, r.Unchanged, "an entry whose stored body equals the fresh one is withheld")
+		require.True(t, p.honoursUnchanged(r), "an entry whose stored body equals the fresh one is withheld")
 	}
 	decision, err = p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 11}, withholdActor, second, nil, ScopeAll())
 	require.NoError(t, err)
@@ -229,12 +230,18 @@ func TestWithholding_UnchangedEntryIsNotWritten(t *testing.T) {
 	require.Empty(t, upserts, "a withheld entry reaches no adapter write")
 	require.Empty(t, deletes)
 	require.Equal(t, writesBefore, p.ProjectionWrites(), "a withheld entry is not counted as a projection write")
-	// The freshness clock and the audit entry are emitted from ONE loop over
-	// the committed results, so an unmoved clock is also the proof that no
-	// audit entry was appended for a row that never landed.
-	require.Equal(t, projectedBefore, p.Progress().LastProjectedAt,
-		"a withheld entry marks no freshness clock, and so appends no audit entry")
 	require.Equal(t, withheldBefore+3, p.EntriesWithheld())
+	// The audit trail is written ONLY from the committed results, and the
+	// assertions above prove that list empty — no adapter write was made and
+	// recordProjectionWrite did not move — so no audit entry describes a row
+	// that never landed.
+	//
+	// The freshness clock is the one thing the pass DOES move, once: it
+	// answers "is this lens still projecting", and a pass that evaluated the
+	// event and confirmed every entry current is projecting. A frozen clock
+	// here would make a converged perEntry lens read as a stalled one.
+	require.True(t, p.Progress().LastProjectedAt.After(projectedBefore),
+		"a pass that withheld everything still marks the lens as projecting")
 
 	require.Len(t, rowsAsked, 1, "one batched read-back per costed evaluation, not one per entry")
 	for _, k := range rowsAsked[0] {
@@ -252,10 +259,10 @@ func TestWithholding_UnchangedEntryIsNotWritten(t *testing.T) {
 	require.Len(t, third, 3)
 	for _, r := range third {
 		if r.Keys["key"].(string) == "child.a2" {
-			require.False(t, r.Unchanged, "an entry whose stored body differs is written")
+			require.False(t, p.honoursUnchanged(r), "an entry whose stored body differs is written")
 			continue
 		}
-		require.True(t, r.Unchanged)
+		require.True(t, p.honoursUnchanged(r))
 	}
 	decision, err = p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 13}, withholdActor, third, nil, ScopeAll())
 	require.NoError(t, err)
@@ -312,7 +319,7 @@ func TestWithholding_ARetractionIsNeverWithheld(t *testing.T) {
 		}
 		tombstones++
 		require.True(t, r.FailClosed)
-		require.False(t, r.Unchanged, "a retraction is always written")
+		require.False(t, p.honoursUnchanged(r), "a retraction is always written")
 	}
 	require.Equal(t, 2, tombstones)
 
@@ -392,7 +399,7 @@ func TestWithholding_PredicateIsRowsEquivalent(t *testing.T) {
 			results := evaluateWithhold(t, p, tc.modAt)
 			require.Len(t, results, 1, tc.explains)
 			require.Equal(t, fresh["key"], results[0].Keys["key"])
-			require.Equal(t, tc.withheld, results[0].Unchanged, tc.explains)
+			require.Equal(t, tc.withheld, p.honoursUnchanged(results[0]), tc.explains)
 		})
 	}
 }
@@ -418,10 +425,10 @@ func TestWithholding_ACorruptStoredMemberIsRewrittenAndItsSiblingsWithheld(t *te
 	require.Len(t, second, 3)
 	for _, r := range second {
 		if r.Keys["key"].(string) == "child.a2" {
-			require.False(t, r.Unchanged, "an unparseable stored body is 'different', so its entry is rewritten")
+			require.False(t, p.honoursUnchanged(r), "an unparseable stored body is 'different', so its entry is rewritten")
 			continue
 		}
-		require.True(t, r.Unchanged, "a corrupt member must not cost its siblings their withholding")
+		require.True(t, p.honoursUnchanged(r), "a corrupt member must not cost its siblings their withholding")
 	}
 }
 
@@ -441,13 +448,22 @@ func TestWithholding_ABatchReadFailureWritesEverythingAndCounts(t *testing.T) {
 	adpt.rowsErr = errors.New("injected: batched read-back unavailable")
 	adpt.mu.Unlock()
 
+	logs := captureLogs(t, slogTextHandler)
 	failuresBefore := p.WithholdReadFailures()
-	second := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
-	require.Len(t, second, 2)
-	for _, r := range second {
-		require.False(t, r.Unchanged, "a failed read marks nothing — every entry is written")
+
+	// Three failing evaluations, standing in for the thousands of actors one
+	// fan-out event reaches.
+	for range 3 {
+		failed := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+		require.Len(t, failed, 2)
+		for _, r := range failed {
+			require.False(t, p.honoursUnchanged(r), "a failed read marks nothing — every entry is written")
+		}
 	}
-	require.Equal(t, failuresBefore+1, p.WithholdReadFailures(), "the failure is counted once for the actor")
+	require.Equal(t, failuresBefore+3, p.WithholdReadFailures(), "every failure is counted")
+	require.Equal(t, 1, strings.Count(logs(), "unchanged-entry read-back failed"),
+		"the line is logged once and the counter carries the rate: one fan-out event calls this read "+
+			"once per reached actor, and an unreadable target must not write thousands of identical lines per event")
 
 	// Nothing is remembered: the very next evaluation withholds again.
 	adpt.mu.Lock()
@@ -455,8 +471,45 @@ func TestWithholding_ABatchReadFailureWritesEverythingAndCounts(t *testing.T) {
 	adpt.mu.Unlock()
 	third := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
 	for _, r := range third {
-		require.True(t, r.Unchanged, "a read failure is a rate, never a latch that disables the mechanism")
+		require.True(t, p.honoursUnchanged(r), "a read failure is a rate, never a latch that disables the mechanism")
 	}
+
+	// And the latch is re-armed by that success, so the NEXT outage is
+	// reported rather than swallowed by the last one.
+	adpt.mu.Lock()
+	adpt.rowsErr = errors.New("injected: the target is unreadable again")
+	adpt.mu.Unlock()
+	evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	require.Equal(t, 2, strings.Count(logs(), "unchanged-entry read-back failed"),
+		"a successful read clears the latch, so a later outage is its own report")
+}
+
+// TestHonoursUnchanged_RefusesShapesThatMayNeverBeSkipped pins the belt on the
+// write loop's side of the verdict. The marking loop already refuses to set a
+// verdict on a Delete or a FailClosed result, and the intersection it iterates
+// cannot contain one anyway — so this check is unreachable today, and that is
+// the point of pinning it directly: the two places that could get it wrong both
+// refuse, rather than one trusting the other to have.
+//
+// It also pins the generation half from the same seat: a verdict with no
+// generation (the zero value, "no verdict") and one from another adapter both
+// read as write.
+func TestHonoursUnchanged_RefusesShapesThatMayNeverBeSkipped(t *testing.T) {
+	p := &Pipeline{ruleID: "belt"}
+	gen := p.adapterGeneration()
+	require.NotZero(t, gen, "a live generation is never zero, so the zero value can mean 'no verdict'")
+
+	require.True(t, p.honoursUnchanged(ruleengine.EvalResult{UnchangedAt: gen}),
+		"the control: an ordinary marked result at the current generation is honoured")
+
+	require.False(t, p.honoursUnchanged(ruleengine.EvalResult{UnchangedAt: gen, Delete: true}),
+		"a retraction is always written, whatever verdict it is carrying")
+	require.False(t, p.honoursUnchanged(ruleengine.EvalResult{UnchangedAt: gen, FailClosed: true}),
+		"a FailClosed result's write may never be silently passed over")
+	require.False(t, p.honoursUnchanged(ruleengine.EvalResult{}),
+		"the zero value writes")
+	require.False(t, p.honoursUnchanged(ruleengine.EvalResult{UnchangedAt: gen + 1}),
+		"a verdict from another adapter generation is not this target's")
 }
 
 // TestWithholding_ArmingConjuncts is T6: each conjunct's negation disarms, and
@@ -470,19 +523,33 @@ func TestWithholding_ArmingConjuncts(t *testing.T) {
 	require.NoError(t, err)
 
 	armed := &Pipeline{ruleID: "armed", multiEnvelopeFn: fanOutEntryFn}
-	require.True(t, armed.withholdingArmed(guarded), "the positive vector: a perEntry lens on a guarded, readable target")
+	reader, ok := armed.withholdingArmed(guarded)
+	require.True(t, ok, "the positive vector: a perEntry lens on a guarded, readable target")
+	require.NotNil(t, reader, "an armed verdict hands back the reader it armed on, so no caller re-derives it")
 
 	docMode := &Pipeline{ruleID: "doc-mode"}
-	require.False(t, docMode.withholdingArmed(guarded), "conjunct 1: no multiEnvelopeFn, so not the perEntry family")
+	_, ok = docMode.withholdingArmed(guarded)
+	require.False(t, ok, "conjunct 1: no multiEnvelopeFn, so not the perEntry family")
 
-	require.False(t, armed.withholdingArmed(&noRowsReaderAdapter{inner: guarded}),
-		"conjunct 2: a target that cannot be read back in batch has no stored body to compare")
-	require.False(t, armed.withholdingArmed(unguarded),
-		"conjunct 2: an unguarded target's ordering is not the guard's, and it already skips identical rows itself")
+	_, ok = armed.withholdingArmed(&noRowsReaderAdapter{inner: guarded})
+	require.False(t, ok, "conjunct 2: a target that cannot be read back in batch has no stored body to compare")
+	_, ok = armed.withholdingArmed(unguarded)
+	require.False(t, ok, "conjunct 2: an unguarded target's ordering is not the guard's, and it already skips identical rows itself")
 
+	// Conjunct 3, with its log line. The refusal is reported LAZILY — at the
+	// first armed check, not at install — because it is only knowable once
+	// both the lens shape and the target are in hand, and it is latched to one
+	// line per pipeline because the condition is a property of the lens's
+	// declaration and answers identically for every event it ever handles.
+	logs := captureLogs(t, slogTextHandler)
 	secure := &Pipeline{ruleID: "secure", multiEnvelopeFn: fanOutEntryFn, secureDecryptor: &SecureDecryptor{}}
-	require.False(t, secure.withholdingArmed(guarded),
-		"conjunct 3: a Secure lens compares before decryption, so it would compare ciphertext against plaintext")
+	for range 3 {
+		_, ok = secure.withholdingArmed(guarded)
+		require.False(t, ok,
+			"conjunct 3: a Secure lens compares before decryption, so it would compare ciphertext against plaintext")
+	}
+	require.Equal(t, 1, strings.Count(logs(), "unchanged-entry withholding refused"),
+		"the Secure refusal is logged once per pipeline, however many events ask")
 }
 
 // TestWithholding_TheAuditPathIssuesNoReadBack is T8's cost half: the
@@ -497,14 +564,109 @@ func TestWithholding_TheAuditPathIssuesNoReadBack(t *testing.T) {
 	_, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 50}, withholdActor, first, nil, ScopeAll())
 	require.NoError(t, err)
 
+	// POSITIVE CONTROL first, and it is what makes the silence below evidence.
+	// The creating pass has no stored entries to compare, so it would issue no
+	// read-back either — a negative asserted against it alone stays green with
+	// the whole mechanism deleted. This costed pass, against a store that now
+	// holds the entries, is the vector that DOES read.
+	adpt.reset()
+	costed := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	require.Len(t, costed, 2)
+	rowsAsked, _, _ := adpt.snapshot()
+	require.Len(t, rowsAsked, 1, "the control: a costed evaluation over stored entries issues exactly one read-back")
+	for _, r := range costed {
+		require.True(t, p.honoursUnchanged(r), "the control: the costed pass reaches a verdict")
+	}
+
 	adpt.reset()
 	results, err := p.executeFullForAudit(ctx, p.ruleState(), withholdActor,
 		map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}, "")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
-	rowsAsked, _, _ := adpt.snapshot()
+	rowsAsked, _, _ = adpt.snapshot()
 	require.Empty(t, rowsAsked, "an uncosted evaluation issues no batched read-back")
 	for _, r := range results {
-		require.False(t, r.Unchanged, "an uncosted evaluation marks nothing")
+		require.False(t, p.honoursUnchanged(r), "an uncosted evaluation marks nothing")
 	}
+}
+
+// TestWithholding_TheReadRequestsExactlyTheIntersection is T1's scope half,
+// on a fixture where the three sets differ. The batched read asks for the
+// entries this evaluation is about to REWRITE — the stored set intersected with
+// the fresh one — and for nothing else: not a stored key the fresh set dropped
+// (that one is being tombstoned, and its liveness is decided by its own read),
+// and not a fresh key the store has never held (there is nothing to compare it
+// against). On a fixture where those three sets coincide the assertion cannot
+// tell an intersection from either input, which is why this vector exists.
+func TestWithholding_TheReadRequestsExactlyTheIntersection(t *testing.T) {
+	ctx := context.Background()
+	p, adpt, _ := newWithholdFixture(t, "withhold-intersection-rule", "kept", "brandNew")
+
+	// Stored: one key the fresh set still carries, one it has dropped.
+	require.NoError(t, adpt.NatsKVAdapter.Upsert(ctx, map[string]any{"key": "child.kept"},
+		map[string]any{"key": "child.kept", "id": "kept"}, 1))
+	require.NoError(t, adpt.NatsKVAdapter.Upsert(ctx, map[string]any{"key": "child.dropped"},
+		map[string]any{"key": "child.dropped", "id": "dropped"}, 2))
+	adpt.reset()
+
+	results := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+
+	rowsAsked, _, _ := adpt.snapshot()
+	require.Len(t, rowsAsked, 1)
+	require.ElementsMatch(t, []string{"child.kept"}, rowsAsked[0],
+		"the read is the stored set INTERSECTED with the fresh one: "+
+			"child.dropped is stored but not fresh (it is being tombstoned), and "+
+			"child.brandNew is fresh but not stored (there is nothing to compare it against)")
+
+	// And the verdicts that follow from it, so the key set is not asserted in
+	// isolation from what it is for.
+	verdicts := map[string]bool{}
+	for _, r := range results {
+		if r.Delete {
+			continue
+		}
+		verdicts[r.Keys["key"].(string)] = p.honoursUnchanged(r)
+	}
+	require.Equal(t, map[string]bool{"child.kept": true, "child.brandNew": false}, verdicts)
+}
+
+// TestWithholding_AHotReloadInvalidatesEveryVerdictInFlight pins the seam
+// between the adapter the comparison ran against and the adapter the write goes
+// to. They are read separately — evaluation captures one, the write loop asks
+// for the current one — so a HotReloadInto in between swaps the store
+// underneath the verdict. Honouring it there would skip, on a target holding
+// nothing, every entry that matched on the old one: an under-grant standing
+// until the next rebuild replay.
+func TestWithholding_AHotReloadInvalidatesEveryVerdictInFlight(t *testing.T) {
+	ctx := context.Background()
+	p, _, _ := newWithholdFixture(t, "withhold-hotreload-rule", "a1", "a2")
+
+	first := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	_, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 70}, withholdActor, first, nil, ScopeAll())
+	require.NoError(t, err)
+
+	second := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	require.Len(t, second, 2)
+	for _, r := range second {
+		require.True(t, p.honoursUnchanged(r), "the control: against the adapter it was computed on, the verdict stands")
+	}
+
+	// A different target instance, holding nothing.
+	replacementKVs := newTestKVs(t, "REPLACEMENT")
+	replacementInner, err := adapter.New(replacementKVs[0], []string{"key"}, adapter.DeleteModeSoft)
+	require.NoError(t, err)
+	replacementInner.SetGuarded(true)
+	replacement := &recordingEntryAdapter{NatsKVAdapter: replacementInner}
+	require.NoError(t, p.HotReloadInto(replacement))
+
+	for _, r := range second {
+		require.False(t, p.honoursUnchanged(r),
+			"a verdict about the previous target must not be honoured against a new one")
+	}
+
+	_, err = p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 71}, withholdActor, second, nil, ScopeAll())
+	require.NoError(t, err)
+	_, upserts, _ := replacement.snapshot()
+	require.ElementsMatch(t, []string{"child.a1", "child.a2"}, upserts,
+		"every entry lands on the new target, which held none of them")
 }

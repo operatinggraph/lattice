@@ -195,20 +195,29 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 			// client pruning the copy it holds.
 			continue
 		}
-		if result.Unchanged {
+		if p.honoursUnchanged(result) {
 			// The target already holds this exact body, so there is no write
 			// to make and nothing to say about one: not written, not audited,
-			// not counted by recordProjectionWrite, no freshness mark, and
-			// never entered into the retry or terminal lists — the same three
-			// silences the personal scope's decline takes, for the same
-			// reason. The stored row's projectionSeq stays where the write
-			// that last CHANGED this entry left it, which is what makes a
-			// withheld write safe to skip: that watermark already carries the
-			// entry's last presence change.
+			// not counted by recordProjectionWrite, and never entered into the
+			// retry or terminal lists. The stored row's projectionSeq stays
+			// where the write that last CHANGED this entry left it, which is
+			// what makes a withheld write safe to skip: that watermark already
+			// carries the entry's last presence change.
 			//
-			// Only a non-delete, non-FailClosed result can be marked, so
+			// The freshness clock is the one thing a withheld entry DOES move,
+			// and it moves once for the pass rather than once per entry (see
+			// the mark after the flush below). lastProjectedAt answers "is this
+			// lens still projecting", and a lens that evaluated the event and
+			// confirmed every entry current is projecting — leaving the clock
+			// frozen through a converged steady state would make a healthy
+			// perEntry lens indistinguishable from a stalled one.
+			//
+			// Only a non-delete, non-FailClosed result can be marked, and
+			// honoursUnchanged refuses both shapes again on the way in, so
 			// §6.14's tombstones-first ordering and the FailClosed abort are
-			// untouched by this branch.
+			// untouched by this branch. The verdict is also refused outright
+			// if a hot reload has swapped the adapter since the comparison —
+			// it was a statement about the target that is no longer there.
 			// Counted at exactly the point recordProjectionWrite counts a
 			// write, and for the same reason: the tally is of work this pass
 			// decided on, so a redelivery that decides again counts again,
@@ -362,6 +371,19 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	for i := range committedResults {
 		p.recordProjected()
 		p.writeAudit(ctx, auditPipeline, key, committedResults[i])
+	}
+	if withheld > 0 && len(committedResults) == 0 {
+		// A pass that wrote nothing because everything was already current is
+		// still a pass that projected: it evaluated the event and confirmed the
+		// target correct, which is exactly what lastProjectedAt is asked about.
+		// ONCE for the pass, not once per entry — the clock is a timestamp, not
+		// a tally — and skipped when a committed row already marked it, so the
+		// two paths cannot double-stamp the same instant.
+		//
+		// The audit trail and recordProjectionWrite stay silent: both describe
+		// a row landing in the target, and no row landed. Only the liveness
+		// clock has a true thing to say about a withheld pass.
+		p.recordProjected()
 	}
 
 	for _, terr := range terminalErrs {

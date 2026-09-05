@@ -83,11 +83,6 @@ func newReprojectPipeline(t *testing.T, adpt *recordingAdapter) *Pipeline {
 	p.SetEnvelopeFn(func(row, keys, params map[string]any) (map[string]any, map[string]any, error) {
 		return row, keys, nil
 	})
-	// The adjacency index is current with this lens, which is the state a
-	// healthy stack sits in: Reproject's retraction arm refuses to tombstone
-	// from an edge view the index has not brought up to the token it writes
-	// under, and a fixture that installs no cursor would refuse every delete.
-	p.SetAdjacencyAppliedFn(func() uint64 { return p.Progress().LastAppliedSeq })
 	return p
 }
 
