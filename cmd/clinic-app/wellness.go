@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
@@ -67,11 +68,15 @@ func computeWellnessBookedCounts(keys []string, get kvGetter) map[string]int {
 	return counts
 }
 
-// computeWellnessSessions decodes every wellnessSessions row, joins each to
-// its live booking count, and sorts by startsAt for a chronological picker. A
-// row that fails to decode or carries no sessionKey (a tombstoned projection
-// entry) is skipped.
-func computeWellnessSessions(keys []string, get kvGetter, bookedCounts map[string]int) []wellnessSessionRow {
+// computeWellnessSessions decodes every wellnessSessions row, keeps only the
+// ones still bookable at nowUTC, joins each to its live booking count, and
+// sorts by startsAt so the picker reads soonest-first. A session that has
+// already started is dropped: wellness-domain's CreateBooking refuses it as
+// SessionInPast (`submitted < startsAt` — canonical-UTC RFC3339 compares
+// lexically == chronologically, the same test applied here), so offering it
+// would be a dead end. A row that fails to decode or carries no sessionKey (a
+// tombstoned projection entry) is skipped.
+func computeWellnessSessions(keys []string, get kvGetter, bookedCounts map[string]int, nowUTC string) []wellnessSessionRow {
 	rows := make([]wellnessSessionRow, 0, len(keys))
 	for _, k := range keys {
 		raw, ok := get(k)
@@ -80,6 +85,9 @@ func computeWellnessSessions(keys []string, get kvGetter, bookedCounts map[strin
 		}
 		var p wellnessSessionProjection
 		if json.Unmarshal(raw, &p) != nil || p.SessionKey == "" {
+			continue
+		}
+		if !(nowUTC < p.StartsAt) {
 			continue
 		}
 		var capacity int64
@@ -152,6 +160,6 @@ func (s *server) handleWellnessSessions(w http.ResponseWriter, r *http.Request) 
 		return entry.Value, true
 	}
 	bookedCounts := computeWellnessBookedCounts(bookingKeys, getBookings)
-	rows := computeWellnessSessions(sessionKeys, getSessions, bookedCounts)
+	rows := computeWellnessSessions(sessionKeys, getSessions, bookedCounts, time.Now().UTC().Format(time.RFC3339))
 	s.writeJSON(w, http.StatusOK, map[string]any{"sessions": rows})
 }
