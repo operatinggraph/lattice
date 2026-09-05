@@ -542,3 +542,101 @@ draft and is priced against the code that refuted it.
 - **Candidate line from this fire** (for the Steward's close pass, second sighting pending): *a serialization added
   to protect a skipped write should first be re-derived against the ordering token the write was carrying — the
   token may already encode the fact the lock would enforce.*
+
+---
+
+## 15. Fire brief (build note, 2026-09-05 — Steward fire `claude/bold-tesla-ras9ml`)
+
+**Fire:** Inc 1 + Inc 2 of §11, one S–M fire, landing shape **hold the branch and merge once when green** (main never
+carries withholding without §4.4's refusals — §11's order puts the refusals first inside the branch too).
+
+### 15.1 Scope sentence (verbatim, §4)
+
+> A perEntry fresh entry is written iff its stored body differs from the fresh one; a tombstone is always written.
+> "Differs" is `Reproject`'s own verdict: `!rowsEquivalent(stored, fresh)` … An entry that is absent, tombstoned,
+> unreadable or unparseable in the store is "different". Withholding applies only while **armed** (§4.5); disarmed,
+> every entry is written — byte-identical to today.
+
+Green bar: T1–T8, T11, T12 (Inc 1) and T9 (Inc 2) green; X1–X5 re-pinned; T10 is a live dev-stack measurement
+(Mac-only — `agents/steward/REMOTE.md` §3) and is recorded as **pending Andrew's stack** in §15.7, not faked.
+
+### 15.2 Verified touch-list (checked live 2026-09-05 by two read-only scouts; design citations that moved are restated)
+
+| Site | Current anchor | What changes |
+|---|---|---|
+| `internal/refractor/ruleengine/eval_result.go:16-45` | `EvalResult` | `+ Unchanged bool` (§4.1; zero value = write) |
+| `internal/refractor/adapter/adapter.go:81-92, 128-130` | `SeqGuarded`, `RowReader` | `+ RowsReader { GetRows(ctx, keys []string) (map[string]map[string]any, error) }` beside `RowReader` |
+| `internal/refractor/adapter/natskv.go:73-83` (`kvStore`), `:754-778` (`GetRow`) | | `kvStore + GetMultiNoSnapshot`; `GetRows` = `a.kv.GetMultiNoSnapshot` (`substrate/kvhandle.go:87` → `kv_multi.go:323`) + `GetRow`'s per-member shaping (tombstone ⇒ absent, unparseable ⇒ absent, strip `projectionSeq`); the four `kvStore` doubles in `natskv_internal_test.go` / `grant_transition_internal_test.go` gain the method |
+| `internal/refractor/pipeline/evaluate.go:975-1040` (`multiEntryRetractions`), call site `:933-939`, `executeFullForActorOnce :773` (`recordCost` at `:791-794`) | the seam | gains `recordCost`; when `recordCost && p.withholdingArmed(adpt)` reads `existing ∩ freshKeys` via `GetRows`, marks `Unchanged` on `rowsEquivalent`; a batch error marks nothing, warns once per actor, bumps `WithholdReadFailures`. Callers at `:246` / `:1303` pass `nil` fresh (nothing to withhold) |
+| `internal/refractor/pipeline/results.go:103-109` (`admits`), write loop `:158-216`, `:271-286` (perEntry retry), `:410` (`pipeline: processed`) | write loop | `if result.Unchanged { withheld++; continue }` immediately after `admits`; `entriesWithheld` on the processed line (thread the count from `writeResults` to `handle`) |
+| `internal/refractor/pipeline/reproject.go:447` (token), `:503-575` (delete arm; `DeleteWithOutcome :532`), `:578-660` (upsert arm; `GetRow` compare `:580-595`), `Verdict :55-79`, `BlockedClass :113` | `Reproject` | delete arm: **index-behind refusal** (`adjacencyApplied() < seq` ⇒ `fold.addBlocked(VerdictBlocked, BlockedUnknown, "adjacency index behind the reconciliation token")`, no write) and **rebuild-moved refusal** (generation captured beside `seq`; at write time `gen != p.rebuildGeneration() \|\| p.RebuildInFlight()` ⇒ every remaining write abandons as `VerdictBlocked`); upsert arm: `result.Unchanged` ⇒ `VerdictConverged` without `GetRow` |
+| `internal/refractor/pipeline/pipeline.go:530-542` (`rebuildWindows`), `:1357-1360` (`RebuildInFlight`), `:121-126` (`multiEnvelopeFn`), `:386-389` (`secureDecryptor`), `:1238-1261` (`PeakBindingRows` accessor precedent) | | `+ rebuildGeneration atomic.Uint64` raised in `rebuild.go:258-263` `openRebuildWindowLocked`; `+ adjacencyAppliedFn func() uint64` + setter; `+ withhold counters` + accessor |
+| `internal/refractor/consumer/bootstrap.go:117-123` (`handle`), `:90-115` (`pollReady`), `:165-185` (`processMsg` → Ack) | adjacency bootstrapper | `+ appliedSeq atomic.Uint64` (monotone max): stamped with `msg.Sequence` after an Ack/Term disposition; on the caught-up poll with the stream's last sequence (new `substrate.Conn` helper beside `ConsumerCaughtUp`, `substrate/consumer.go:440`, reading `Stream.Info().State.LastSeq`); `AppliedSeq()` accessor |
+| `cmd/refractor/main.go:600` (bootstrapper), `:1902` (`SetSecureDecryptor`), `:1991` (`SetPeakRowsFunc`), `cmd/refractor/personal_healer.go:76` | wiring | hand every pipeline `bootstrapper.AppliedSeq` (the `PersonalHealerVerdictFn` bare-func shape); wire the withhold counters into the lag poller the way `PeakBindingRows` is |
+| `internal/refractor/health/healthwire/healthwire.go:102-145`, `health/reporter.go:232,346,436` (carry-forward), `:738-761` (`SetPeakBindingRows`), `health/lag_poller.go:374` | health | `+ EntriesWithheld`, `+ WithholdReadFailures` (monotone), carried forward in all three wholesale writers; `entry_carry_forward_completeness_test.go:38-101` discovers them |
+| `scripts/lint-flag-consumer-census.go:76-90` | flag ledger | declare `internal/refractor/pipeline/reproject.go#Reproject` as a `RebuildInFlight` reader (re-read the `rebuildWindows` bound: the reader refuses writes, the safe direction) |
+| `docs/components/refractor.md` audit row + *Convergence sweep* section; dossier | Inc 2 | per §11 |
+| `internal/refractor/edge_manifest_fire2_producer_flip_e2e_test.go:51` | T9 precedent | extend with the `providedTo`-create-against-populated-domain vector |
+
+Citations that moved (claims all hold): §2 row 4 `evaluate.go:919-1010` → `:975-1040`; row 1 `reprojectActors :1218` → `:1261`;
+row 12 `main.go:2404-2418` → `:70` (`lensAckWait`) + `:2447`; row 13 `main.go:1860-1870` → `:1892-1902`, `evaluate.go:88` → `:105`,
+`dispatch.go:210,353` → `:34`; row 17 `audit.go:951-957` → `:1043-1044`; row 22 `main.go:2413` → `:2445`. X1 = 3 sites ✓, X2 ✓
+(`:271` precedes `:287`), X3 = 18 ✓ (the 18 enumerated by enclosing function in the scout report; T4 pins them), X4 = 1 ✓, X5 ✓.
+
+### 15.3 Precedents to mirror
+
+- `Unchanged` fail-direction and placement → the personal `admits` skip (`results.go:103-109`, zero value admits).
+- `GetRows` shaping → `GetRow` (`natskv.go:754-778`); bound and per-member semantics → `substrate.KVGetMultiNoSnapshot`'s doc
+  (`kv_multi.go:323`) and `TestPrefetch_CorruptBodyFailsOnlyWhereItIsUsed` (`ruleengine/full/prefetch_test.go:852`).
+- Bare-func wiring → `PersonalHealerVerdictFn` (`pipeline/anchor_derivation_personal.go:193,286`; `cmd/refractor/personal_healer.go:76`).
+- Blocked fold → `fold.addBlocked(VerdictBlocked, BlockedRetraction, …)` at `reproject.go:540-545`.
+- Rebuild generation → `rebuildWindows` (`pipeline.go:530-542`), raised inside `openRebuildWindowLocked` under `rebuildWatchMu`.
+- Health counter → `PeakBindingRows` end to end (`pipeline.go:1238-1261` → `main.go:1991` → `lag_poller.go:374` → `reporter.go:738-761`).
+- Flag reader declaration → the seven `RebuildInFlight` readers in `lint-flag-consumer-census.go:81-89`.
+- Source-classifying test (T4) → `label_derivation_corpus_census_test.go`'s population-with-floor shape (assert the hit set is exactly the classified 18; a new unclassified hit fails).
+
+### 15.4 Increment order + green checks
+
+Inc 1 (§11 order, each step green before the next): (1) `rebuildGeneration` + bootstrapper `AppliedSeq` + substrate helper +
+`Reproject`'s two refusals — T11, T12 · (2) `RowsReader` / `GetRows` — T7 · (3) `Unchanged` + `multiEntryRetractions` read +
+arming — T1, T2, T5, T6 · (4) ordering pins — T3, T4 · (5) write loop + `Reproject` fold · (6) counters + health — T8.
+Inc 2: T9 e2e; `docs/components/refractor.md`; dossier classification; §15.7 checkpoint.
+
+```sh
+go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go
+STRICT=1 go run ./scripts/lint-flag-consumer-census.go && STRICT=1 go run ./scripts/lint-slog-values.go
+POSTGRES_TEST_DSN=… go test ./internal/refractor/... ./internal/substrate/... ./cmd/refractor/... -count=1
+go test ./internal/refractor/health/ -run CarryForward -count=1
+grep -rl "^//go:build " --include=*_test.go internal/ | xargs grep -l "refractor" # build-tagged harnesses the interfaces reach
+```
+
+### 15.5 In-scope gotchas (+ the dossier entries this fire builds against — read `docs/components/refractor.md` § *Review keeps catching* in full)
+
+- The `natskv_test.go:375` no-content-skip pin STAYS; the skip lives in the pipeline (§8 row 3).
+- `LastAppliedSeq` stays *assigned* on Ack (§2 row 21) — do not "fix" it to a max.
+- A tombstone / `FailClosed` result is never `Unchanged`; §6.14's tombstones-first order is untouched.
+- The refusals land BEFORE the write loop skips anything (branch commit order).
+- `Reproject` gains a `RebuildInFlight` read → declare it in the flag census or CI's lint-static job reds.
+- New health fields → carry-forward in all three wholesale writers or `entry_carry_forward_completeness_test` fails by name.
+- A new slog attr of a module struct type needs `LogValuer` (`lint-slog-values`).
+- Dossier: *a widened operation drops its predecessor's bound* → `GetRows` doc names `ceil(N/1024)` × `directGetMultiDefaultTimeout`
+  and the ctx it runs under; *a corrupt member of a set read fails only where it is used* → T5 mandated shape; *a two-layer seam is
+  broken across it* → T3 on a real guarded adapter + real adjacency bucket, ordered by channels; *a negative test needs its positive
+  vector and every fix is proven by revert* → T3's mutation, T1's "no write" beside a "writes when different" vector; *a zero
+  reading indistinguishable from not-measured* → `AppliedSeq()==0` refuses (fail-closed), counters are monotone and carried;
+  *making a fault standing* → read failures are a gauge, never a latch; *a fixture that arranges the favourable order is an
+  argument* → T3 drives `Reproject` against a CDC withhold in production order (token captured before evaluation).
+- Standing checklist (`agents/fire-brief-template.md`): lifetimes for the three new atomics are §5's table; every census re-run
+  (§15.2); revert-prove T1/T3/T11/T12; the replaced mechanism's obligations are §4.4's two axes — both accounted; one writer per key
+  unchanged; the mirrored `PeakBindingRows` path carries no debt this fire inherits.
+
+### 15.6 Adjacent finds / non-goals
+
+Scouts surfaced no new find; the S-wrong adjacency bug is already the board's *[Refractor] `adjacency.upsertEdge` … no ordering
+guard* row (§13). Non-goals = §4.7 (doc-mode actorAggregate, plain, personal, the actor set per event).
+Scope-diff gate: every §15.2 touch traces to §4.1–§4.6; nothing widens §4; dependencies re-verified — the `WITH`-scope Inc 2 and
+the delta design's close are independent both ways (§11).
+
+### 15.7 Checkpoint
+
+*(amended at close)*
