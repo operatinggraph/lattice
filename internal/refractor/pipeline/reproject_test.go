@@ -255,3 +255,34 @@ func TestRowsComparable_SeparatesUnrenderableFromDifferent(t *testing.T) {
 	require.False(t, rowsEquivalent(same, unrenderable),
 		"the repair path's collapse is unchanged: an unrenderable row is one it should rewrite")
 }
+
+// TestRowsComparableMasked_ExcludesGivenColumns pins the Inc 1 premise
+// (secure-plain-lens-retraction-and-audit-design.md §15.1, §2.4): a freshly
+// computed row (ruleengine.EvalResult.Row) carries every RETURN alias, its own
+// key columns included, because the engine has no notion of "this alias is
+// also the key" — while adapter.RowReader.GetRow's contract excludes them (a
+// Postgres GetRow scopes its SELECT by key and never returns them as content).
+// Comparing them unmasked reports a mismatch no recomputation could ever
+// resolve — the exact signature that read every anchor of leaseApplicationsRead
+// `stale` on the shared stack, reproduced live against the real full engine and
+// a real Postgres GetRow (see the Increment-1 build note). rowsComparable
+// itself must keep disagreeing: it is the sweep's own comparator, and a mask is
+// never threaded there.
+func TestRowsComparableMasked_ExcludesGivenColumns(t *testing.T) {
+	stored := map[string]any{"name": "Loft"}
+	computed := map[string]any{"app_id": "abc", "name": "Loft"}
+
+	equalUnmasked, comparable := rowsComparable(stored, computed)
+	require.True(t, comparable)
+	require.False(t, equalUnmasked, "rowsComparable is untouched and must still disagree")
+
+	equalMasked, comparable := rowsComparableMasked(stored, computed, []string{"app_id"})
+	require.True(t, comparable)
+	require.True(t, equalMasked, "excluding the row's own key column must make the comparison agree")
+
+	// A genuine content divergence on a non-excluded column must still be
+	// caught — the mask excludes exactly the columns it is given, nothing more.
+	equalMasked, comparable = rowsComparableMasked(stored, map[string]any{"app_id": "abc", "name": "Loft renamed"}, []string{"app_id"})
+	require.True(t, comparable)
+	require.False(t, equalMasked)
+}

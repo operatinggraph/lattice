@@ -132,6 +132,11 @@ type AuditPlan struct {
 	// subtypes, which one key-type listing cannot enumerate, and a multi-walk
 	// lens has no single anchor at all.
 	AnchorLabel string
+	// MaskedColumns are the columns the comparison excludes for a Secure Lens
+	// — its declared secure columns' RETURN aliases (SecureDecryptor.Columns),
+	// §4.1. Empty for a lens with no secure decryptor installed: comparison is
+	// over every projected column.
+	MaskedColumns []string
 	// Interval and Batch override the audit defaults; zero selects them.
 	Interval time.Duration
 	Batch    int
@@ -153,6 +158,13 @@ type AuditStatus struct {
 	// "audited, clean" at every layer.
 	Enrolled bool
 	Refusal  string
+	// MaskedColumns are the columns this lens's comparison excludes — a
+	// Secure Lens's declared secure columns, unverified because the audit's
+	// recompute never decrypts them (§4.1). Empty, never nil, for an enrolled
+	// lens with no secure decryptor: the container travels for every enrolled
+	// lens, following DivergentRows' rule that absence means "not enrolled",
+	// never "nothing masked".
+	MaskedColumns []string
 	// Audited counts ANCHORS the last pass reached a conclusion about; the
 	// Divergent map and DivergentTotal count ROWS. An anchor that reached no
 	// conclusion is counted in Unverified and in neither of the other two.
@@ -221,9 +233,12 @@ type AuditStatus struct {
 // it is not detection. The remediation path is the operator's existing
 // control-plane reproject RPC and Rebuild.
 //
-// The comparison is pipeline.rowsEquivalent — the same definition of "same row"
-// the sweep and Reproject use, canonical JSON with the volatile envelope fields
-// stripped — never a second one.
+// The comparison is rowsComparableMasked — canonical JSON with the volatile
+// envelope fields stripped, the SAME definition of "same row" the sweep and
+// Reproject's rowsEquivalent/rowsComparable use, with two classes of column
+// additionally excluded per anchor (comparisonIgnore): the row's own key
+// columns, always, and a Secure Lens's declared secure columns (§4.1).
+// rowsComparable itself is untouched and stays the sweep's own comparator.
 type Auditor struct {
 	p    *Pipeline
 	plan AuditPlan
@@ -240,7 +255,17 @@ type Auditor struct {
 	// changed one (resetting the cursor, which addressed the old keyspace)
 	// rather than suppressing itself against a frozen copy forever.
 	anchorLabel string
-	status      AuditStatus
+	// maskedColumns is the current comparison mask — a Secure Lens's declared
+	// secure columns, plus (always, regardless of Secure status) each anchor's
+	// own key columns, threaded into the comparison at auditAnchor. It lives
+	// here rather than only in plan for the same hot-reload reason as
+	// anchorLabel: a lens whose secure decryptor changes (or is installed for
+	// the first time) after activation must compare under the new mask on its
+	// very next pass, not carry the install-time one forever. Unlike
+	// anchorLabel, adopting a new mask resets no cursor: the mask changes what
+	// a comparison excludes, not which anchors are walked.
+	maskedColumns []string
+	status        AuditStatus
 	// The in-progress cycle's running totals. They are separate from the
 	// status counters, which describe the last PASS: a cycle spans
 	// ceil(anchors/batch) passes, and it is the cycle — not the pass — whose
@@ -261,14 +286,30 @@ func newAuditor(p *Pipeline, plan AuditPlan, authPlane bool) *Auditor {
 		batch = DefaultAuditBatch
 	}
 	return &Auditor{
-		p:           p,
-		plan:        plan,
-		interval:    iv,
-		batch:       batch,
-		authPlane:   authPlane,
-		anchorLabel: plan.AnchorLabel,
-		status:      AuditStatus{Enrolled: true, CoverageBasis: AuditCoverageBasisKeyType},
+		p:             p,
+		plan:          plan,
+		interval:      iv,
+		batch:         batch,
+		authPlane:     authPlane,
+		anchorLabel:   plan.AnchorLabel,
+		maskedColumns: plan.MaskedColumns,
+		status: AuditStatus{
+			Enrolled:      true,
+			CoverageBasis: AuditCoverageBasisKeyType,
+			MaskedColumns: emptyIfNil(plan.MaskedColumns),
+		},
 	}
+}
+
+// emptyIfNil turns a nil slice into an empty, non-nil one — the "container
+// travels even when empty" rule DivergentRows already follows (record's own
+// comment): a nil MaskedColumns would marshal as `null`, which in this
+// document means "could not be read", never "nothing is masked".
+func emptyIfNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // newRefusedAuditor builds the auditor a refused lens carries: it runs no pass
@@ -339,6 +380,17 @@ func (a *Auditor) AnchorLabel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.anchorLabel
+}
+
+// MaskedColumns is the set of columns the current pass excludes from its
+// comparison — a Secure Lens's declared secure columns, and "" (an empty
+// slice) for a refused lens or one with none. Read under the lock because a
+// pass may adopt a changed set after a hot reload installs or replaces the
+// lens's secure decryptor.
+func (a *Auditor) MaskedColumns() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maskedColumns
 }
 
 // SetAuditPlan installs the divergence-audit plan for this pipeline. Only
@@ -476,6 +528,7 @@ func (a *Auditor) suppressed(ctx context.Context, rs ruleState, adpt adapter.Ada
 		return "enrolment no longer holds: " + refusal
 	}
 	a.adoptAnchorLabel(plan.AnchorLabel)
+	a.adoptMaskedColumns(plan.MaskedColumns)
 	if a.p.RebuildInFlight() {
 		return "rebuild in flight"
 	}
@@ -512,6 +565,21 @@ func (a *Auditor) adoptAnchorLabel(label string) {
 	a.anchorLabel = label
 	a.status.Cursor = ""
 	a.cycleAudited, a.cycleDivergent, a.cycleUnverified = 0, 0, 0
+}
+
+// adoptMaskedColumns updates the columns this pass's comparison excludes for a
+// Secure Lens. Unlike adoptAnchorLabel, no cursor or cycle state depends on
+// this value — only the comparison basis for anchors compared FROM HERE ON —
+// so a hot reload that adds, removes or changes a secure decryptor's declared
+// columns takes effect on the very next anchor this pass compares, with
+// nothing to reset: an anchor already compared earlier this cycle is not
+// retroactively re-verified, the same as every other counter a cycle never
+// rewinds mid-walk.
+func (a *Auditor) adoptMaskedColumns(mask []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.maskedColumns = mask
+	a.status.MaskedColumns = emptyIfNil(mask)
 }
 
 // pass runs one bounded audit tick: page the anchor listing from the persisted
@@ -669,6 +737,19 @@ func (t *auditTally) noteDivergent(class string) {
 	t.divergent[class]++
 }
 
+// comparisonIgnore is the full set of columns one anchor's should-exist
+// comparison excludes: keys' own column names, always — a freshly computed
+// row carries every RETURN alias, key columns included, while GetRow's
+// contract excludes them (rowsComparableMasked's doc says why) — plus, for a
+// Secure Lens, MaskedColumns (§4.1). Computed fresh per row rather than
+// cached: keys names the SAME columns on every row of one lens, but building
+// the slice here keeps the mask's own hot-reload adoption (adoptMaskedColumns)
+// the only place that mutates shared state, and the per-row cost is a handful
+// of map-key reads.
+func (a *Auditor) comparisonIgnore(keys map[string]any) []string {
+	return append(keyColumnNames(keys), a.MaskedColumns()...)
+}
+
 // auditAnchor reaches one anchor's verdict. Every path either books the anchor
 // as audited (with zero or more divergent rows) or books it as unverified, and
 // an anchor whose check faults partway discards the classes it had already found
@@ -734,7 +815,7 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 			classes = append(classes, AuditClassMissing)
 			continue
 		}
-		equal, comparable := rowsComparable(stored, res.Row)
+		equal, comparable := rowsComparableMasked(stored, res.Row, a.comparisonIgnore(res.Keys))
 		switch {
 		case !comparable:
 			// One side could not be rendered at all (a value JSON cannot
@@ -955,25 +1036,37 @@ func auditEnrolment(p *Pipeline, rs ruleState, adpt adapter.Adapter, authPlane b
 	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
 		return AuditPlan{}, "it is actor-aggregate or personal, so its rows are the convergence sweep's to verify, not the audit's"
 	}
-	// Diff retraction diffs the target's FULL live key set against an
-	// evaluation's FULL row set, so a single-anchor row set reads as "every
-	// other anchor's rows are gone". The audit never writes — but it must not
-	// COMPUTE under a shape whose semantics it would misread.
-	if p.diffRetraction {
-		return AuditPlan{}, "it uses target-diff retraction, whose semantics a single-anchor evaluation would misread"
-	}
+	// DiffRetraction declares a target-diff retraction transport, not an
+	// evaluation shape: executeFullForAudit (auditAnchor's own call) never
+	// calls applyDiffRetraction — that function's only caller is
+	// evaluateForEntryRaw's plain arm, which the audit does not run — so a
+	// DiffRetraction lens's seeded evaluation is read exactly like any other
+	// plain lens's. What DOES follow from DiffRetraction is a narrower
+	// should-not-exist direction: AnchorProjectionKey (the read-free
+	// presence-check derivation auditAnchor's own `retained` class depends on,
+	// below) declines for most of this corpus's DiffRetraction lenses, so
+	// those enrol with `missing`/`stale` only and never `retained` — an absent
+	// `retained` on one of them reads as "not detected in this direction",
+	// never as "clean", the same as the CDC filter-retraction path it mirrors.
+	//
 	// Without read-back there is nothing to compare against, and an audit that
 	// cannot compare would report clean.
 	if _, ok := adpt.(adapter.RowReader); !ok {
 		return AuditPlan{}, "its target adapter cannot read a row back, so there is nothing to compare a recomputation against"
 	}
-	// A Secure Lens's declared columns are decrypted before the results reach
-	// any write path (Contract #3 §3.10). A background job with no request
-	// context must not re-derive plaintext merely to compare it. The check is
-	// against the installed COMPONENT rather than the spec, because the
-	// component is what actually decrypts.
+	// A Secure Lens's declared secure columns are decrypted only inside
+	// evaluateForEntry (Pipeline.handle's own CDC path) and the two actor
+	// fan-out handlers — never inside executeFullForAudit, so the audit's
+	// recomputed row always carries the raw ciphertext envelope while the
+	// stored row carries the decrypted plaintext (or null). That is not a
+	// reason to refuse the lens; it is a reason to exclude those columns from
+	// the comparison (§4.1): the mask below, threaded through
+	// rowsComparableMasked at auditAnchor's one comparison site. A masked
+	// `stale` verdict is exact over every OTHER column; a secure column is
+	// simply unverified, never assumed equal or assumed diverged.
+	var maskedColumns []string
 	if p.secureDecryptor != nil {
-		return AuditPlan{}, "it is a Secure Lens, and a background comparison must not re-derive plaintext outside a request context"
+		maskedColumns = p.secureDecryptor.Columns()
 	}
 
 	// The two evaluation parameters that make a recompute legitimately differ
@@ -996,5 +1089,5 @@ func auditEnrolment(p *Pipeline, rs ruleState, adpt adapter.Adapter, authPlane b
 		}
 	}
 
-	return AuditPlan{AnchorLabel: label}, ""
+	return AuditPlan{AnchorLabel: label, MaskedColumns: maskedColumns}, ""
 }

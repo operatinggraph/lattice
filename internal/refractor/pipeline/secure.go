@@ -128,6 +128,22 @@ func (d *SecureDecryptor) HolderTypes() []string {
 	return out
 }
 
+// Columns returns this decryptor's declared secure columns' RETURN aliases —
+// the exact set the divergence audit's comparison must exclude (§4.1 of the
+// secure-plain-lens-retraction-and-audit-design): the audit's recompute never
+// calls this decryptor, so a secure column's computed value is always the raw
+// ciphertext envelope while the stored value is the decrypted plaintext (or
+// null), and comparing them would read as `stale` forever. Order follows
+// declaration order; SecureColumn.Column names a distinct RETURN alias per
+// column, so no de-duplication is needed.
+func (d *SecureDecryptor) Columns() []string {
+	out := make([]string, len(d.columns))
+	for i, col := range d.columns {
+		out[i] = col.Column
+	}
+	return out
+}
+
 // SecureRedaction records one column this decryptor could not resolve and
 // therefore projected as null. It is the payload of the privacy-critical alarm
 // the caller raises: Column names the projected alias, Reason carries the

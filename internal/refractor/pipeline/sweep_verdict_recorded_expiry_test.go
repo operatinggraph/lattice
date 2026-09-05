@@ -123,7 +123,7 @@ func TestSweepVerdict_StraddlingADeadlineIsNotADivergence(t *testing.T) {
 	stored := projectAtInstant(t, spec, anchorKey, sweepBefore, adjKV, coreKV)
 	recomputed := projectAtInstant(t, spec, anchorKey, sweepAfter, adjKV, coreKV)
 
-	require.Equal(t, divergenceNone, classifyDivergence(stored, recomputed),
+	require.Equal(t, divergenceNone, classifyDivergence(stored, recomputed, nil),
 		"two deep-verify passes straddling a deadline, over an UNCHANGED graph, must agree — "+
 			"a lens that reads a clock reports a divergence here and the sweep 'heals' a projection nothing broke")
 
@@ -160,7 +160,7 @@ RETURN
 	stored := projectAtInstant(t, clockReadingSpec, anchorKey, sweepBefore, adjKV, coreKV)
 	recomputed := projectAtInstant(t, clockReadingSpec, anchorKey, sweepAfter, adjKV, coreKV)
 
-	require.Equal(t, divergenceContent, classifyDivergence(stored, recomputed),
+	require.Equal(t, divergenceContent, classifyDivergence(stored, recomputed, nil),
 		"a clock-reading form must diverge over an unchanged graph — otherwise the assertion "+
 			"in the sibling test is satisfied by a fixture with nothing time-dependent in it")
 	require.Equal(t, false, stored["missing_noshow_transition"])

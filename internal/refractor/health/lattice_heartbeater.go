@@ -553,6 +553,14 @@ type LensLivenessStatus struct {
 	// from "audited, clean".
 	AuditEnrolled bool
 	AuditRefusal  string
+	// AuditMaskedColumns are the columns this lens's audit comparison
+	// excludes — a Secure Lens's declared secure columns (secure-plain-lens-
+	// retraction-and-audit-design.md §4.1), unverified because the audit's
+	// recompute never decrypts them. Published only for an ENROLLED lens,
+	// following DivergentRows' own rule below: the container travels even
+	// when empty (a non-Secure enrolled lens carries `[]`, never null), so
+	// its absence means "not enrolled", never "nothing masked".
+	AuditMaskedColumns []string
 	// Audited counts ANCHORS the last pass concluded about; DivergentRows and
 	// DivergentTotal count ROWS. DivergentRows carries only the classes that
 	// actually fired (missing / stale / retained), so a direction that has
@@ -2209,6 +2217,7 @@ func (h *LatticeHeartbeater) evalLensSweep(
 type auditSnapshot struct {
 	enrolled            bool
 	refusal             string
+	maskedColumns       []string
 	audited             int
 	divergent           map[string]int
 	divergentTotal      int
@@ -2228,7 +2237,7 @@ type auditSnapshot struct {
 
 func (s LensLivenessStatus) audit() auditSnapshot {
 	return auditSnapshot{
-		enrolled: s.AuditEnrolled, refusal: s.AuditRefusal,
+		enrolled: s.AuditEnrolled, refusal: s.AuditRefusal, maskedColumns: s.AuditMaskedColumns,
 		audited: s.Audited, divergent: s.DivergentRows, divergentTotal: s.DivergentTotal,
 		unverified: s.AuditUnverified, lastUnverified: s.AuditLastUnverified,
 		lastPassAt: s.AuditLastPassAt, cycleCompletedAt: s.AuditCycleCompletedAt,
@@ -2284,6 +2293,16 @@ func addAuditMetrics(m map[string]any, a auditSnapshot) {
 		cycleCompletedAt = substrate.FormatTimestamp(a.cycleCompletedAt)
 	}
 	m["audited"] = a.audited
+	// auditMaskedColumns follows the exact same "container travels even when
+	// empty" rule as divergentRows below: a nil mask (a non-Secure lens, or a
+	// CapabilityLensStatus, which never sets it) renders as `[]`, never as
+	// `null` — a null here would mean "could not be read", and an enrolled
+	// lens that masks nothing has read cleanly.
+	maskedColumns := a.maskedColumns
+	if maskedColumns == nil {
+		maskedColumns = []string{}
+	}
+	m["auditMaskedColumns"] = maskedColumns
 	// The map is published even when empty, and carries only the classes that
 	// FIRED. An always-present zero per class would make a direction that has
 	// silently stopped detecting indistinguishable from one with nothing to

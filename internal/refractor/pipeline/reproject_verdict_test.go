@@ -207,7 +207,7 @@ func TestClassifyDivergence_ProvenanceIsDistinctFromContent(t *testing.T) {
 			"grant":                  "read",
 			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
 		}
-		require.Equal(t, divergenceNone, classifyDivergence(base, same))
+		require.Equal(t, divergenceNone, classifyDivergence(base, same, nil))
 	})
 
 	t.Run("only the freshness record moved", func(t *testing.T) {
@@ -215,7 +215,7 @@ func TestClassifyDivergence_ProvenanceIsDistinctFromContent(t *testing.T) {
 			"grant":                  "read",
 			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(9)},
 		}
-		require.Equal(t, divergenceProvenance, classifyDivergence(base, drifted))
+		require.Equal(t, divergenceProvenance, classifyDivergence(base, drifted, nil))
 	})
 
 	t.Run("the row's meaning moved", func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestClassifyDivergence_ProvenanceIsDistinctFromContent(t *testing.T) {
 			"grant":                  "write",
 			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
 		}
-		require.Equal(t, divergenceContent, classifyDivergence(base, changed))
+		require.Equal(t, divergenceContent, classifyDivergence(base, changed, nil))
 	})
 
 	t.Run("both moved — content wins, the louder classification", func(t *testing.T) {
@@ -231,7 +231,22 @@ func TestClassifyDivergence_ProvenanceIsDistinctFromContent(t *testing.T) {
 			"grant":                  "write",
 			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(9)},
 		}
-		require.Equal(t, divergenceContent, classifyDivergence(base, both))
+		require.Equal(t, divergenceContent, classifyDivergence(base, both, nil))
+	})
+
+	t.Run("the row's own key column is never a divergence", func(t *testing.T) {
+		// A Postgres GetRow returns content columns only, so the stored side
+		// lacks the key the computed side carries; fetched BY that key, the
+		// two cannot differ in it.
+		computed := map[string]any{
+			"actor_key":              "vtx.identity.x",
+			"grant":                  "read",
+			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
+		}
+		keys := map[string]any{"actor_key": "vtx.identity.x"}
+		require.Equal(t, divergenceContent, classifyDivergence(base, computed, nil),
+			"without the key named, the extra column reads as content divergence — the positive vector")
+		require.Equal(t, divergenceNone, classifyDivergence(base, computed, keys))
 	})
 
 	t.Run("volatile projectedAt is still not a divergence", func(t *testing.T) {
@@ -240,7 +255,7 @@ func TestClassifyDivergence_ProvenanceIsDistinctFromContent(t *testing.T) {
 			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
 			"projectedAt":            "2026-08-07T00:00:00Z",
 		}
-		require.Equal(t, divergenceNone, classifyDivergence(base, stamped))
+		require.Equal(t, divergenceNone, classifyDivergence(base, stamped, nil))
 	})
 }
 

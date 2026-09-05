@@ -847,24 +847,7 @@ func main() {
 			// refusal is a published verdict, and this is the field that
 			// publishes it.
 			if au := entry.pipeline.Auditor(); au != nil {
-				status := au.Status()
-				snap.AuditEnrolled = status.Enrolled
-				snap.AuditRefusal = status.Refusal
-				snap.Audited = status.Audited
-				snap.DivergentRows = status.Divergent
-				snap.DivergentTotal = status.DivergentTotal
-				snap.AuditUnverified = status.Unverified
-				snap.AuditLastUnverified = status.LastUnverified
-				snap.AuditLastPassAt = status.LastPassAt
-				snap.AuditCycleCompletedAt = status.CycleCompletedAt
-				snap.AuditCycleAudited = status.CycleAudited
-				snap.AuditCycleDivergentTotal = status.CycleDivergentTotal
-				snap.AuditCycleUnverified = status.CycleUnverified
-				snap.AuditCoverageBasis = status.CoverageBasis
-				snap.AuditListingSize = status.ListingSize
-				snap.AuditSuppression = status.Suppression
-				snap.AuditSuppressionAt = status.SuppressionAt
-				snap.AuditInterval = au.Interval()
+				copyCapabilityAuditStatus(&snap, au.Status(), au.Interval())
 			}
 			// A rebuild suppresses the sweep, so the stall detector cannot judge
 			// the sweep's silence while one runs. These let it judge the REBUILD
@@ -965,24 +948,7 @@ func main() {
 			// A REFUSED lens carries a non-nil auditor too, because its refusal
 			// is a published verdict rather than an absence.
 			if au := entry.pipeline.Auditor(); au != nil {
-				status := au.Status()
-				snap.AuditEnrolled = status.Enrolled
-				snap.AuditRefusal = status.Refusal
-				snap.Audited = status.Audited
-				snap.DivergentRows = status.Divergent
-				snap.DivergentTotal = status.DivergentTotal
-				snap.AuditUnverified = status.Unverified
-				snap.AuditLastUnverified = status.LastUnverified
-				snap.AuditLastPassAt = status.LastPassAt
-				snap.AuditCycleCompletedAt = status.CycleCompletedAt
-				snap.AuditCycleAudited = status.CycleAudited
-				snap.AuditCycleDivergentTotal = status.CycleDivergentTotal
-				snap.AuditCycleUnverified = status.CycleUnverified
-				snap.AuditCoverageBasis = status.CoverageBasis
-				snap.AuditListingSize = status.ListingSize
-				snap.AuditSuppression = status.Suppression
-				snap.AuditSuppressionAt = status.SuppressionAt
-				snap.AuditInterval = au.Interval()
+				copyLensAuditStatus(&snap, au.Status(), au.Interval())
 			}
 			// A lens whose liveness inputs cannot be read is reported as
 			// unknown, never omitted: dropping it removes the lens from

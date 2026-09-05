@@ -1367,8 +1367,16 @@ lens-projection-divergence-audit-design.md §4.3). Every 15 minutes
 (`DefaultAuditInterval`) it lists a bounded batch of its anchors from the persisted cursor
 (`DefaultAuditBatch`, 10), re-runs the lens's own **seeded** evaluation for each — the D2
 Phase 1 primitive that makes a per-anchor recompute cost one anchor's walk instead of a
-corpus-wide scan — and compares each result against the stored row with `rowsEquivalent`,
-the same definition of "same row" the sweep and `Reproject` use. **It never writes to the
+corpus-wide scan — and compares each result against the stored row with
+`rowsComparableMasked`, canonical JSON with the volatile envelope fields stripped, the same
+definition of "same row" the sweep's `rowsEquivalent` / `Reproject`'s `classifyDivergence`
+use, with two further exclusions per anchor: the row's own key columns, always (a freshly
+computed row carries every RETURN alias, key columns included, while
+`adapter.RowReader.GetRow`'s contract excludes them — comparing them would report a mismatch
+no recomputation could ever resolve), and, for a Secure Lens, its declared secure columns
+(secure-plain-lens-retraction-and-audit-design.md §4.1) — see below. `rowsEquivalent` itself
+is untouched and stays the sweep's own comparator; a mask is never threaded there.
+**It never writes to the
 target.** Repair on a shared, unguarded plain target was rejected (§8.1): there is no
 ordering token to keep a repair subordinate to a racing CDC event, a seeded evaluation
 cannot prove it owns the keyspace it would write into, and coupling this detector to a
@@ -1389,11 +1397,9 @@ derivable anchor pattern
 cannot speak for all of them, and a `*` taxonomy anchor resolves to a subtype *set* one
 key-type listing cannot enumerate); no actor enumerator and no envelope (an actor-aware
 evaluation's anchor is the actor, so seeding it evaluates the wrong entity, and those
-lenses are the sweep's); no diff retraction (whose full-key-set semantics a single-anchor
-row set would misread); an `adapter.RowReader` target (without read-back there is nothing
-to compare against, and an audit that cannot compare would report clean); no secure
-decryptor (a background job with no request context must not re-derive plaintext to
-compare it); and no `$now` / `$projectedAt` reference — `$now` is wall-clock and
+lenses are the sweep's); an `adapter.RowReader` target (without read-back there is nothing
+to compare against, and an audit that cannot compare would report clean); and no `$now` /
+`$projectedAt` reference — `$now` is wall-clock and
 `$projectedAt` derives from the *event* vertex's provenance, a neighbour of the anchor on
 the plain CDC path, so a seeded recompute supplying the anchor's own props can never
 reproduce either and the lens would read divergent forever. That last conjunct reads
@@ -1401,6 +1407,24 @@ reproduce either and the lens would read divergent forever. That last conjunct r
 pass**: `(referenced=false, exhaustive=false)` means the walk could not rule the parameter
 out, and treating that as an absence is the read-the-declaration-not-the-matcher mistake
 the flag exists to prevent.
+
+A **Secure Lens** enrols like any other plain lens: its recompute never calls the decryptor
+(`evaluateForEntry` and the two actor fan-out handlers are the only callers), so its
+computed row always carries the raw ciphertext envelope for a declared secure column while
+the stored row carries the decrypted plaintext (or null). Rather than refuse the lens, the
+comparison excludes those columns — `auditMaskedColumns` on the lens's liveness entry names
+them, published as `[]` (never `null`) for an enrolled lens with none, and absent for a
+refused one, the same rule `divergentRows` follows. Under the mask `missing` and `retained`
+are exact — they are presence and key questions, not content ones — and `stale` is exact
+over every **other** column; a masked column is simply unverified, never assumed equal or
+diverged. A **`DiffRetraction`** lens also enrols: `executeFullForAudit` never calls
+`applyDiffRetraction` (that function's only caller is the plain CDC path the audit does not
+run), so its seeded evaluation is read exactly like any other plain lens's. Its
+should-not-exist direction (`retained`) is narrower, though — it depends on
+`AnchorProjectionKey`'s own read-free derivation, which most of this corpus's
+`DiffRetraction` lenses decline (a non-partitioning key, most often), so those enrol with
+`missing`/`stale` only; an absent `retained` on one of them reads as "not detected in this
+direction," never as "clean."
 
 A refused lens publishes `auditEnrolled: false` plus `auditRefusal`, runs no pass, and can
 never read as audit-stalled — *not audited* must stay distinguishable from *audited,

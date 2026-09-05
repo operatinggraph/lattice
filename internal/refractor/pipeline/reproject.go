@@ -358,12 +358,20 @@ func (d divergence) String() string {
 // row still carries the engine's in-memory Go types. A structural comparison
 // would read those as divergent for byte-identical documents and turn every
 // reconciliation into a write.
-func classifyDivergence(stored, computed map[string]any) divergence {
-	if rowsEquivalent(stored, computed) {
+//
+// keys names the row's own key columns, which are excluded on both sides: the
+// computed row carries every RETURN alias, key columns included, while a
+// RowReader's GetRow may omit them (a Postgres GetRow scopes its SELECT by key
+// and returns content columns only), and a row fetched BY those keys cannot
+// differ in them.
+func classifyDivergence(stored, computed, keys map[string]any) divergence {
+	ignore := keyColumnNames(keys)
+	if equal, _ := rowsComparableMasked(stored, computed, ignore); equal {
 		return divergenceNone
 	}
-	a, aerr := canonicalJSON(stored, provenanceEnvelopeFields...)
-	b, berr := canonicalJSON(computed, provenanceEnvelopeFields...)
+	ignore = append(ignore, provenanceEnvelopeFields...)
+	a, aerr := canonicalJSON(stored, ignore...)
+	b, berr := canonicalJSON(computed, ignore...)
 	if aerr != nil || berr != nil {
 		// A row that cannot be rendered cannot be proven provenance-only, so
 		// it takes the louder classification rather than the quieter one.
@@ -569,7 +577,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				continue
 			}
 			if present {
-				divergedAs = classifyDivergence(stored, result.Row)
+				divergedAs = classifyDivergence(stored, result.Row, result.Keys)
 			} else {
 				divergedAs = divergenceContent
 			}
@@ -742,6 +750,47 @@ func rowsComparable(stored, computed map[string]any) (equal, comparable bool) {
 		return false, false
 	}
 	return bytes.Equal(a, b), true
+}
+
+// rowsComparableMasked is rowsComparable with additional columns excluded from
+// the comparison before it runs — the divergence audit's one comparison site
+// (Auditor.auditAnchor) calls this instead of rowsComparable for every plain
+// lens it audits, Secure or not. rowsComparable itself is untouched and stays
+// the sweep's own comparator (rowsEquivalent / classifyDivergence): a mask is
+// never threaded there, because the sweep's reconciliation writer must never
+// learn to treat a masked column as agreeing when it may not.
+//
+// ignore always carries the row's own KEY columns: a freshly computed row
+// (ruleengine.EvalResult.Row / ruleengine.ProjectionResult.Values) carries
+// every RETURN alias, key columns included, because the engine has no notion
+// of "this alias is also the key" — while adapter.RowReader.GetRow's contract
+// excludes them (a Postgres GetRow scopes its SELECT by key and never returns
+// the key columns as content; postgres.go's buildGetRowSQL / getRowPlatformColumns
+// doc says so). Comparing them would report a mismatch no recomputation could
+// ever resolve, which is why every audited Postgres-adapter anchor must have
+// its own key columns excluded here regardless of whether the lens is Secure.
+//
+// For a Secure Lens, ignore additionally carries its declared secure columns
+// (SecureDecryptor.Columns): the audit's recompute never decrypts them, so
+// their content is unverified — never assumed equal, never assumed diverged.
+func rowsComparableMasked(stored, computed map[string]any, ignore []string) (equal, comparable bool) {
+	a, aerr := canonicalJSON(stored, ignore...)
+	b, berr := canonicalJSON(computed, ignore...)
+	if aerr != nil || berr != nil {
+		return false, false
+	}
+	return bytes.Equal(a, b), true
+}
+
+// keyColumnNames lists a row's key column names — the columns a comparison
+// between a stored row and a freshly computed one always excludes, because the
+// stored row was fetched BY them and a RowReader may omit them from its result.
+func keyColumnNames(keys map[string]any) []string {
+	names := make([]string, 0, len(keys))
+	for k := range keys {
+		names = append(names, k)
+	}
+	return names
 }
 
 // canonicalJSON renders a row without its volatile fields, plus any extra

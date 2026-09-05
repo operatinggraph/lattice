@@ -174,12 +174,13 @@ func TestPlainDerivationLicence_Conjuncts(t *testing.T) {
 
 	t.Run("a REFUSED audit refuses — a published non-verdict is not a watcher", func(t *testing.T) {
 		f := newAuditFixture(t, seedUnitsSpec, nil)
-		// Target-diff retraction refuses enrolment, and is deliberately NOT a
-		// licence conjunct of its own (plainDerivationIndex carries it), so the
-		// refusal below can only be the auditor's.
-		require.NoError(t, f.p.SetDiffRetraction(true))
-		enrolled, _ := f.p.InstallAudit(AuditOptions{})
+		// The audit's OWN auth-plane refusal, passed only to InstallAudit and
+		// deliberately never to SetAuthPlane — the licence's direct authPlane
+		// conjunct (p.authPlane) therefore stays false, so the refusal below
+		// can only be the auditor's.
+		enrolled, _ := f.p.InstallAudit(AuditOptions{AuthPlane: true})
 		require.False(t, enrolled)
+		require.False(t, f.p.AuthPlane(), "the licence's own authPlane conjunct must stay unset")
 		require.NotNil(t, f.p.Auditor(), "a refusal is a published verdict, not an absence")
 
 		licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())

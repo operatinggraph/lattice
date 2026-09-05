@@ -580,7 +580,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "auditMaskedColumns": ["<string>", ...], "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
     }
   },
   "issues": [
@@ -739,7 +739,11 @@ managed to **write**; the **divergence audit** writes nothing at all
 correctness signal: on a slow clock (`DefaultAuditInterval`, 15 minutes) it re-runs an
 enrolled plain lens's own seeded evaluation over a bounded batch of its anchors
 (`DefaultAuditBatch`, 10) and compares each result against the stored row, using the same
-`rowsEquivalent` definition of "same row" the sweep and `Reproject` use.
+canonical-JSON "same row" definition the sweep's `rowsEquivalent` and `Reproject`'s
+`classifyDivergence` use, with the row's own key columns always excluded (a freshly computed
+row carries every RETURN alias, key columns included, while `GetRow`'s contract excludes
+them) and, for a Secure Lens, its declared secure columns excluded too (see
+`auditMaskedColumns` below).
 
 `LensProjectionDiverged` is raised when it finds a disagreement, and it says so with the
 per-class breakdown in `divergentRows` — `missing` (the recomputation produces a row the
@@ -773,14 +777,22 @@ result is under-coverage, never a wrong verdict, and publishing the basis is wha
 "audited clean" readable as the bounded claim it is.
 
 `auditEnrolled` is published for **every** lens, and `auditRefusal` beside a false one. The
-enrolment gate is fail-closed on six conjuncts (§4.4) and every one is re-checked at the top
-of every pass, not only at install — they are all mutable pipeline state, so a hot reload
+enrolment gate is fail-closed on several conjuncts (§4.4) and every one is re-checked at the
+top of every pass, not only at install — they are all mutable pipeline state, so a hot reload
 could otherwise leave a lens auditing under a shape it no longer has; a failed re-check
 self-suppresses with the reason instead. Most of the corpus refuses by design: an
-actor-aggregate lens is the sweep's, a Postgres or subject target cannot read a row back, a
-Secure Lens must not have plaintext re-derived by a background job outside a request context,
-and a query returning `$now` or `$projectedAt` would read divergent forever because a
-recomputation cannot reproduce either. A lens on the **auth plane** is refused outright
+actor-aggregate lens is the sweep's, a subject target cannot read a row back, and
+a query returning `$now` or `$projectedAt` would read divergent forever because a
+recomputation cannot reproduce either. A Secure Lens and a `DiffRetraction` lens both **enrol**
+(secure-plain-lens-retraction-and-audit-design.md §4.1) rather than refuse: the audit's
+recompute never calls the decryptor, so a Secure Lens's declared secure columns are excluded
+from the comparison instead, named on `auditMaskedColumns` — `[]` (never `null`) for an
+enrolled lens with none, absent for a refused one, the same rule `divergentRows` follows;
+under the mask, `missing` and `retained` are exact and `stale` is exact over every other
+column. A `DiffRetraction` lens's should-not-exist direction (`retained`) is narrower where
+its own key derivation declines — most of this corpus's `DiffRetraction` lenses do — so those
+enrol with `missing`/`stale` only, and an absent `retained` reads as "not detected in this
+direction," never as "clean." A lens on the **auth plane** is refused outright
 (`projection.IsAuthPlane` — `nats_kv` into `capability-kv`, or a Postgres grant table): its
 per-row verdicts belong to the convergence sweep and to the `Capability*` codes, which carry
 an escalation this detector deliberately does not. `CapabilityProjectionDiverged` /

@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,56 @@ func requireEverySweepFieldSet(t *testing.T, structName string, v reflect.Value)
 				"Add the line to copyCapabilitySweepStatus AND copyLensSweepStatus (cmd/refractor/sweepstatus.go); "+
 				"both surfaces publish the same sweep, and a field carried on one of them only is the same defect "+
 				"with half the blast radius.", structName, name)
+		}
+	}
+}
+
+// lensLivenessDesignAddedFields names every health.LensLivenessStatus field a
+// design has added outside the Sweep* family TestSeam_EverySweepFieldIsCopied
+// already covers — the audit's own fields, copied by copyLensAuditStatus
+// (cmd/refractor/auditstatus.go) rather than by a Sweep* copier. A field lands
+// here in the SAME fire that adds it to the struct: the alternative is a field
+// with no line of its own publishing a zero that reads as a verdict, exactly
+// the failure mode TestSeam_EverySweepFieldIsCopied exists to catch for Sweep*.
+var lensLivenessDesignAddedFields = []string{
+	// secure-plain-lens-retraction-and-audit-design.md Increment 1, §4.1: the
+	// columns a Secure Lens's audit comparison excludes.
+	"AuditMaskedColumns",
+}
+
+// TestLensLivenessStatus_NewFieldsAreCarried is the reflection gate
+// TestSeam_EverySweepFieldIsCopied's own comment calls for widening: every
+// field named in lensLivenessDesignAddedFields must survive a non-trivial
+// pipeline.AuditStatus crossing copyLensAuditStatus. It fails by NAME, so a
+// field added to the struct and forgotten in the copier is caught here rather
+// than publishing a silent zero at the only surface anyone would notice.
+func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
+	full := pipeline.AuditStatus{
+		Enrolled:       true,
+		MaskedColumns:  []string{"name", "email"},
+		Audited:        10,
+		Divergent:      map[string]int{"stale": 1},
+		DivergentTotal: 1,
+		CoverageBasis:  pipeline.AuditCoverageBasisKeyType,
+		ListingSize:    64,
+		LastPassAt:     time.Now(),
+	}
+
+	lensSnap := health.LensLivenessStatus{}
+	copyLensAuditStatus(&lensSnap, full, time.Minute)
+
+	v := reflect.ValueOf(lensSnap)
+	typ := v.Type()
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if !slices.Contains(lensLivenessDesignAddedFields, name) {
+			continue
+		}
+		if v.Field(i).IsZero() {
+			t.Errorf("health.LensLivenessStatus.%s is left at its zero value by copyLensAuditStatus.\n\n"+
+				"This field is named in lensLivenessDesignAddedFields (cmd/refractor/sweepstatus_test.go) as "+
+				"one a design added outside the Sweep* family; add its line to copyLensAuditStatus "+
+				"(cmd/refractor/auditstatus.go).", name)
 		}
 	}
 }

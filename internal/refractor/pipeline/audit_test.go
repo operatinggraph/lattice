@@ -422,14 +422,15 @@ func TestAudit_EnrolmentIsRecheckedEveryPass(t *testing.T) {
 	require.Equal(t, 1, a.Status().Audited)
 	require.Empty(t, a.Status().Suppression)
 
-	// Diff retraction arrives on the live pipeline. Its semantics — the target's
-	// full live key set against a full re-execute — are exactly what a
-	// single-anchor evaluation would misread, so the next pass must hold.
-	require.NoError(t, f.p.SetDiffRetraction(true))
+	// An actor enumerator arrives on the live pipeline. The lens is now
+	// actor-aware — its "anchor" is the actor, not the event vertex — so a
+	// single-anchor seeded evaluation would evaluate the wrong entity, and the
+	// next pass must hold.
+	f.p.SetActorEnumerator(NewActorEnumerator(f.p.adjKV, f.coreKV, "identity"))
 
 	a.pass(ctx)
 	st := a.Status()
-	require.Contains(t, st.Suppression, "target-diff retraction")
+	require.Contains(t, st.Suppression, "actor-aggregate or personal")
 	require.Contains(t, st.Suppression, "enrolment no longer holds")
 	require.False(t, st.SuppressionAt.IsZero(), "the reason needs a clock or a wedged audit reads as a suppressed one")
 	require.Equal(t, 1, st.Audited, "a suppressed tick must not republish a verdict as if it re-derived one")

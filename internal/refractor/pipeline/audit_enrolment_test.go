@@ -1,10 +1,15 @@
 package pipeline
 
-// Audit enrolment (lens-projection-divergence-audit-design.md §4.4): six
-// fail-closed conjuncts, each a correctness requirement rather than a heuristic.
-// Every one gets a negative case here, and the positive case sits at the top —
-// without it a green refusal could equally come from a gate that refuses
-// everything, which is the failure mode nobody would notice.
+// Audit enrolment (lens-projection-divergence-audit-design.md §4.4;
+// secure-plain-lens-retraction-and-audit-design.md §4.1): a series of
+// fail-closed conjuncts, each a correctness requirement rather than a
+// heuristic. Every one gets a negative case here, and the positive case sits
+// at the top — without it a green refusal could equally come from a gate that
+// refuses everything, which is the failure mode nobody would notice. A Secure
+// Lens and a DiffRetraction lens both enrol (audit_secure_test.go's own
+// positive cases) rather than refuse: neither conjunct this file once pinned
+// survives the comparison actually going through executeFullForAudit's read
+// path.
 
 import (
 	"context"
@@ -140,26 +145,12 @@ RETURN u.key AS key
 		require.Contains(t, refusal, "actor-aggregate or personal")
 	})
 
-	t.Run("target-diff retraction", func(t *testing.T) {
-		f := newAuditFixture(t, seedUnitsSpec, nil)
-		require.NoError(t, f.p.SetDiffRetraction(true))
-		_, refusal := enrolAudit(f.p, false)
-		require.Contains(t, refusal, "target-diff retraction")
-	})
-
 	t.Run("a target that cannot read a row back", func(t *testing.T) {
 		f := newAuditFixture(t, seedUnitsSpec, func(a adapter.Adapter) adapter.Adapter {
 			return notARowReader{inner: a}
 		})
 		_, refusal := enrolAudit(f.p, false)
 		require.Contains(t, refusal, "cannot read a row back")
-	})
-
-	t.Run("a Secure Lens", func(t *testing.T) {
-		f := newAuditFixture(t, seedUnitsSpec, nil)
-		f.p.SetSecureDecryptor(&SecureDecryptor{})
-		_, refusal := enrolAudit(f.p, false)
-		require.Contains(t, refusal, "Secure Lens")
 	})
 
 	t.Run("a query referencing $now", func(t *testing.T) {
@@ -203,7 +194,7 @@ RETURN u.key AS key, $projectedAt AS at
 // audit-stalled.
 func TestAuditEnrolment_RefusalInstallsAPublishedVerdict(t *testing.T) {
 	f := newAuditFixture(t, seedUnitsSpec, nil)
-	require.NoError(t, f.p.SetDiffRetraction(true))
+	f.p.SetActorEnumerator(NewActorEnumerator(f.p.adjKV, f.coreKV, "identity"))
 
 	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
 	require.False(t, enrolled)
