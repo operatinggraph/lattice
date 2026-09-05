@@ -5,6 +5,7 @@
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Component maintenance → *[Refractor] Personal Lens rows never retract* (★★, M).
 **Demand:** the [staff-worlds F5 Inc-2 residual](facet-staff-worlds-design.md) (§6) — live-proven on the showcase stack: a completed work-order task stayed on the tech's mirror un-retracted, and the verticals board's ★★★ staff-worlds row is **blocked today** on exactly this ("claim beat blocked-on mirror-delivery"; the delivery half shipped `5c5cb236`, this is the retraction half).
 **Extends:** [personal-secure-lens-design.md](personal-secure-lens-design.md) (✅ ratified; PL.1–PL.5 shipped) — this closes the retraction gap that design never covered.
+**Superseded in part (2026-09-04):** the per-pass row republish this design's healer performed is replaced by [personal-lens-delta-publication-design.md](personal-lens-delta-publication-design.md) §4.4 — a pass publishes the authoritative frame alone and rows once a day (or on request); the frame semantics here are unchanged.
 **Frozen-contract change: NONE** (the delta envelope + frames are component-level surfaces per that design's ratified §4; `docs/components/refractor.md` + edge docs updated at build).
 
 ---

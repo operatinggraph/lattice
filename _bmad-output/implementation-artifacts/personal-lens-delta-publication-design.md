@@ -436,6 +436,41 @@ the rebuilt shape once, at a live revision, within one sweep cadence instead of 
 (spec update without rebuild) republishes nothing by itself either; the next scoped event, the content pass or a
 hydrate carries the changed shape.
 
+**Bounds and exclusions the Inc 4 review pinned (2026-09-05):**
+
+- *Every close of a silent span asks.* The flag is raised before the health write, the consumer reset and the
+  truncate, so an abandoned rebuild (a reset that fails) also silences a span of CDC events; the ask is issued
+  wherever the *owned* end of the span is decided — completion and abandon alike — exactly once per span, and a
+  superseded finisher asks nothing.
+- *A personal lens with secure columns is refused by the class-key erasure ceremony, loudly.* That ceremony
+  rebuilds a target with `truncate=false` so the replay upserts null over retained rows — on a personal target the
+  replay upserts nothing, and an attestation over it would be recorded over plaintext still on the SYNC stream and
+  the device. No corpus personal lens declares a secure column today; the refusal is a named error at the erasure
+  manager, so the first Secure Personal Lens design owns the attestation shape (its erasure must await the content
+  cycle at a live revision, not the replay) rather than inheriting a false clean.
+- *The request is spent by the cycle it buys, failures included.* A content cycle that fails a reprojection reports
+  it through R7's fault path; it does not re-arm the request — a permanently failing actor would otherwise buy a
+  content cycle every cycle, and the daily clock is the backstop.
+- *"At a live revision" is bounded by the ordering token.* The content cycle publishes at `LastAppliedSeq`, which the
+  replay rewinds and which a rebuild that also *narrows* the consumer filter can leave below the device's
+  `frameHW` (the last matching entry older than the head the device saw) — the device drops that frame and the
+  rows die on the resurrection guard until the next event or hydrate. Pre-existing (a hydrate has the same bound);
+  named here because §4.5's convergence rests on it.
+- *Concurrent windows are counted, not named.* A second rebuild that begins and abandons while an earlier rescan is
+  live must not close the window (the flood would return and its ask would be spent at a rewound revision); the
+  flag is a count of live windows, the ask fires on the 1 → 0 transition, and the health `active` write keeps its
+  ownership rule.
+- *The rule's second exception is pre-existing and now named.* The actor-own no-peer arm returns an empty actor
+  enumeration and publishes nothing for that event (§4.2) — a row's provenance carries the actor key there, so the
+  next scoped event admits it; Silent is the only exception that withholds a frame a pass would otherwise emit.
+- *The standing healer's passes during a window are wasted, not harmful.* They publish at the rewound revision and
+  every device drops them; the window's end asks for the cycle that lands. Not suppressed — the sweeper is a
+  healer, and a pass that is dropped costs frames only.
+- *A personal target's rebuild has no stored effect at all.* `NatsSubjectAdapter` is neither a `Truncater` nor
+  `Guarded`, so the truncate warns-and-skips; with the replay silent, what a personal rebuild still buys is the
+  adjacency re-apply and the recomputed consumer filter — the SYNC stream is repaired by the content cycle, never
+  by the rebuild.
+
 ### 4.6 Hydrate — the race scoping unmasks, and the two guards that close it (Inc 2)
 
 `Hydrate` captures `highWater` **before** evaluating and publishes rows and frame at it (`hydrate.go:55, :98, :122`);
@@ -568,6 +603,8 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 | R6 | A hydrate row the client's resurrection guard drops is no longer repaired by the next event's whole-actor republish. | A cold device short of rows until the content pass. | §4.6's two guards (pinned T3/T6); the exposure that remains is a hydrate whose RPC ctx expires while waiting on an in-flight event — it fails loud and the device re-attaches. |
 | R5 | A device relying on the sweep's row republish to repair a store it corrupted itself. | Repaired within a day instead of ~80 min. | The store is a disposable cache; `Rehydrate` is the operator/client remedy the vault names. |
 | R7 (build) | A lost or failed grant-ADD signal's row reaches a connected device only on the content cycle (§4.4). | Under-display ≤ `PersonalContentHealInterval`; never over-grant. | The drain's health fault names the failed reprojection; the frame retracts on every pass; a re-attach hydrates. |
+| R9 (build) | **The silent window has no bound of its own.** `rebuildInFlight` silences every personal publication; a completion watcher whose `OutstandingForConsumer` errors forever would hold it open with the wedge detector reading "unknown". | Total publication silence on every device of that lens, unbounded. | Inc 4: the rebuild's progress is stamped at window open, so a started rebuild is never "unknown" and `evalRebuildWedged` fires on staleness; `lint-flag-consumer-census` refuses an undeclared reader of the flag. |
+| R10 (build) | **A hydrate during a rebuild window publishes at a rewound revision.** `Hydrate` captures `LastAppliedSeq`, which the replay rewinds; a device re-attaching mid-rebuild has its rows and frame dropped by its own guards and `PublishHydrationComplete` still fires. | The device keeps its pre-rebuild truth (retained, never over-granting) for the rebuild's duration plus one sweep cycle — the bound every connected device has during a rebuild. A fresh device (no high-water) lands the hydrate. | Named, not built: refusing hydrates for a 75-minute replay was rejected as the worse outcome; the post-rebuild content cycle is the convergence for both. |
 | **Residual** | **The per-event frame is the count floor.** After scoping, a dense actor publishes 1–2 messages per event; the widest subject's ~6 events/min is 8,640/day against a 10,000 cap sized as a backstop to the 24 h `MaxAge`. Not a byte problem (a 2-key frame is ~150 B). | A device on such an actor offline > ~28 h re-hydrates anyway (`MaxAge`); the cap binds only past ~7 events/min. | Revive trigger for row 1/row 2: a subject at the count cap whose messages are ≥ 50 % frames, measured by the Inc 3 probe. Re-deriving `syncStreamMaxMsgsPerSubject` as an *event* count is a one-constant follow-on once the count is a count of events. |
 
 ---
@@ -664,8 +701,9 @@ Eleven findings, every citation re-verified by the author before folding; none d
   return-path threading enumerated, Inc 2 re-sized to L (§4.2, §11); the comprehension cursor's precedence over the
   head-chain rule stated (§4.1 site 4).
 - **Refuted by the reviewer, kept as pins:** no engine read goes around `fetchNode`/`fetchEdges` (staging promotes
-  through it; `resolveProperty` routes through it); nothing in the licence, the verdict or any health surface reads
-  what a sweep published; every generated cap-read producer is per-entry, so the anchor token the grant scope needs
+  through it; `resolveProperty` routes through it); ~~nothing in the licence, the verdict or any health surface reads
+  what a sweep published~~ (struck 2026-09-05: `LensProjectionStalled` reads `lastProjectedAt`, which the Inc 1 review caught
+  and the frame deliberately never stamps — §4.2); every generated cap-read producer is per-entry, so the anchor token the grant scope needs
   is always present.
 
 ---
@@ -676,8 +714,11 @@ Eleven findings, every citation re-verified by the author before folding; none d
 - `personal-lens-whole-actor-cost-design.md` §1.3: the sentence *"i.e. under three events of history"* is
   corrected in place with a pointer to §1.1 here (ratification-banner-rewrites-body; the numbers in a shipped
   design are the next reader's premise).
-- Inc 3 files: *[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row (~2 KB × 97 rows per
-  actor)* on the verticals lane, and the cap re-derivation on this lane if §9's residual binds.
+- The `edgeCatalog` row-size row — *[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row (~2 KB
+  × 26–97 rows per actor)* — is filed on the Lattice lane (2026-09-05; `edge-manifest` is the platform's edge package, not a
+  vertical's). The cap re-derivation is not owed: the post-rebuild fill is ≈ 66 MB/day against 512 MiB (Checkpoint 2026-09-05).
+- `personal-lens-retraction-design.md` carries a pointer to §4.4 (its per-pass row republish is superseded by frames per pass
+  and a daily content cycle).
 
 ---
 
