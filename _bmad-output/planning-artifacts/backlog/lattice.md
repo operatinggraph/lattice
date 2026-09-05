@@ -151,7 +151,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-05 · `94275eb` · [Refractor] perEntry unchanged-entry withholding SHIPPED — the CDC loop withholds an entry the target already holds (T9: 1 write + 6 withheld, then 0 + 7); `Reproject` refuses an edge-derived retraction from an index behind its token ([design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md))
+- 2026-09-05 · `94275eb` · [Refractor] perEntry unchanged-entry withholding SHIPPED — the CDC loop withholds an entry the target already holds ([design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md))
 - 2026-09-05 · `8a43aa9d` · [Refractor] personal-lens delta publication SHIPPED — rows by provenance, frames per pass, silent rebuild (`edgeCatalog` −94.6 %) ([design](../../implementation-artifacts/personal-lens-delta-publication-design.md))
 - 2026-09-05 · `1225c84c` · [CI] split `internal/refractor` off unit-1 into its own job (unit-refractor) — CI wall-clock 235s avg → 188s, full green
 - 2026-09-05 · `424e2740` · [Refractor] Secure plain lenses audit under a mask + retract by derivation; the neighbour-retraction transport gate ([design](../../implementation-artifacts/secure-plain-lens-retraction-and-audit-design.md))
