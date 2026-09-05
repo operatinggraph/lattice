@@ -129,6 +129,11 @@ census against it as you would against a stranger's.
   the row never named.** ~19 hops × 15–20 ms could not reach 250 ms; the cost was `kv.Read`'s lazy `instanceOf`
   fall-through. Run the read-only spike before the shape hardens and ship its numbers as a §measurement table.
   (2026-08-11 · class-(e) budget)
+- **A row a design filed OUT of itself carries that design's PRE-BUILD premise — re-derive it against the
+  design's shipped increments (`git show <build sha>`), never its filing text.** The tell: the row's
+  `no-pattern:` names a fact "no increment answers" while the parent's own later increment is the writer of
+  that fact; the parent's Inc 3 recorded the task marker its §2.6 said did not exist, and the mechanism
+  row dissolved into a predicate edit (live census 52/52). (2026-09-05 · capabilityEphemeral recorded expiry)
 - **"No live consumer / no live victim" is a census nobody ran — run it, keyed on the mechanism, before the
   dead-scaffolding test** (whose input it is). A row grounded on the one lens the harness saw hid fourteen
   hand-authored lenses paying the same cross product, `capabilityEphemeral` and `myTasks` among them. When the
