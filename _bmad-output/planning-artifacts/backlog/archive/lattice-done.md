@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-31 · `0da6c431` · [Contracts] #10-substrate redrive clause adjudicated — branch rejected as mechanism-for-mechanism; clause rewritten to the observable promise; full-file posture sweep queued
+- 2026-08-30 · `9ab532a` · [packages] actor-role walk declared on 31 of 32 ops — baseline walks 130→99, holdsRole 32→1; fixtures resolve the hint from the spec; cold review, 1 MAJOR + 4 MINOR closed
 - 2026-08-30 · `9d0bec7` · [CI] main un-reddened — cafe-app's Relocate action recorded in the op-literal ceiling
 - 2026-08-29 · `5699325` · [Processor/testutil] read-drift ratchet SHIPPED — scripts record what they actually read; guard armed on every CapabilityPipeline blocks new undeclared reads/walks; cold review: 1 BLOCKING + 4 MAJOR closed
 - 2026-08-29 · `3c2e21c` · [Weaver] GapWithoutPlaybook orphan columns CLOSED — the two deliberate orphans declared `surface` + a projected-`missing_*` ⊆ gaps CI gate; 2 cold reviews, 1 BLOCKING + 3 MAJOR closed

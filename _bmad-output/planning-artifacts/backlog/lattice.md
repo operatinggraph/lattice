@@ -114,7 +114,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor] A personal lens republishes its whole actor per event** | Every evaluation republishes the actor's whole row set: `edgeCatalog` alone is 91 % of SYNC's 512 MiB, healer/drain passes are 39 % of messages, the byte cap binds at ~12 h for every actor and the audit stream holds one hour. Fix: publish rows by provenance, frame as today; healer frames per pass. | ★★ | L | 🏗️ building · owner: fire/personal-lens-delta · [design](../../implementation-artifacts/personal-lens-delta-publication-design.md) · next: T7 re-run ≥ 2026-09-05 06:45 PT, then close pass |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
@@ -152,6 +151,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-05 · `8a43aa9d` · [Refractor] personal-lens delta publication SHIPPED — rows by provenance, frames per pass, silent rebuild (`edgeCatalog` −94.6 %) ([design](../../implementation-artifacts/personal-lens-delta-publication-design.md))
 - 2026-09-05 · `1225c84c` · [CI] split `internal/refractor` off unit-1 into its own job (unit-refractor) — CI wall-clock 235s avg → 188s, full green
 - 2026-09-05 · `424e2740` · [Refractor] Secure plain lenses audit under a mask + retract by derivation; the neighbour-retraction transport gate ([design](../../implementation-artifacts/secure-plain-lens-retraction-and-audit-design.md))
 - 2026-09-05 · `89b61556` · [Weaver] an exhausted goal gap re-plans at its leg boundary; the budget books attempts, the escalation books nothing and is paced ([design](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md))
@@ -176,10 +176,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
 - 2026-08-31 · `571e45e6` · [Contracts] #10 §10.8 {actor} hub token ratified ahead of build — transitional note in text; build fire filed 📋 ready
 - 2026-08-31 · `935492df` · [Contracts] #10 §10.8 ratified with posture trims — three-arm param grammar + directOp optionalReads land; gate narration and internal names stay out
-- 2026-08-31 · `0da6c431` · [Contracts] #10-substrate redrive clause adjudicated — branch rejected as mechanism-for-mechanism; clause rewritten to the observable promise; full-file posture sweep queued
-- 2026-08-30 · `9ab532a` · [packages] actor-role walk declared on 31 of 32 ops — baseline walks 130→99, holdsRole 32→1; fixtures resolve the hint from the spec; cold review, 1 MAJOR + 4 MINOR closed
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `9d0bec7`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `0da6c431`)*

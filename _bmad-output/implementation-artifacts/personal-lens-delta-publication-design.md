@@ -463,9 +463,12 @@ hydrate carries the changed shape.
 - *The rule's second exception is pre-existing and now named.* The actor-own no-peer arm returns an empty actor
   enumeration and publishes nothing for that event (§4.2) — a row's provenance carries the actor key there, so the
   next scoped event admits it; Silent is the only exception that withholds a frame a pass would otherwise emit.
-- *The standing healer's passes during a window are wasted, not harmful.* They publish at the rewound revision and
-  every device drops them; the window's end asks for the cycle that lands. Not suppressed — the sweeper is a
-  healer, and a pass that is dropped costs frames only.
+- *The standing healer's passes and the drain on a rebuilding lens are silent too (measured 2026-09-05 10:52 PT).*
+  A content cycle that reached the widest actor during a live rebuild published 26 rows + a frame on the rebuilding
+  lens at its rewound cursor (revision 3,381 against a live head of 497,393) while the other fourteen lenses
+  published at live revisions — every device dropped the rewound pass, ≈ 9 MB per rebuild for nothing.
+  `ReprojectPersonalActor` on a pipeline whose window is open therefore scopes to Silent whatever the caller asked,
+  counted as attempted-and-succeeded; the window's close asks for the cycle that lands.
 - *A personal target's rebuild has no stored effect at all.* `NatsSubjectAdapter` is neither a `Truncater` nor
   `Guarded`, so the truncate warns-and-skips; with the replay silent, what a personal rebuild still buys is the
   adjacency re-apply and the recomputed consumer filter — the SYNC stream is repaired by the content cycle, never
@@ -924,3 +927,29 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
 - **Next:** build Inc 4 in `../lattice-wt-pl-delta` (fast-forwarded to `30d29549`), cold review, merge, cycle `bin/refractor`,
   trigger a rebuild live (a spec-touching package refresh) and re-run `make sync-census -subject` on the widest actor: zero
   messages during the replay, one content pass after. Then the cumulative close pass over Inc 1–4 and the row closes.
+
+### Checkpoint (2026-09-05, Inc 4 SHIPPED `8a43aa9d` + 4b `1a1c6cd9` — T7 live on the rebuild path; item CLOSED)
+
+- **Landed on `main` (CI green, run 33981427129):** `ScopeSilent` from the CDC write loop while a rebuild window is open; the
+  window as a count of live rebuilds, each invocation ending its window once, the 1 → 0 transition asking the injected
+  `RebuildCompleteSink` (the sweeper's `RequestContentCycle`, one request = one cycle); rebuild progress stamped at window
+  open (R9); the class-key erasure refusing a `Personal` target before `RebuildRule`, the label falling back to the declared
+  `IsPersonalLens`; the `$now` refusal derived over the branch set; `scripts/lint-flag-consumer-census.go` (Makefile + CI);
+  T8 unit vectors, a pl2 e2e with a delivered-count positive control, a real-sweeper seam e2e. Two cold reviews (Inc 4 +
+  the cumulative close pass) — 8 MAJOR, all folded; M‑5 (hydrate mid-window) named as R10, m‑1 (re-arm on failure) rejected.
+- **Live (Refractor cycled 10:35 PT, operator `lattice lens rebuild` of `edgeCatalog` at 10:37:14):** every event the lens
+  processed through 11:32 (13,486) carried `publishScope=silent`; the widest subject received zero write-loop messages
+  during the replay against 1,406 in the 2026-09-04 rebuild. The one rewound publication observed was the sweeper's boot
+  content cycle on the rebuilding lens (10:52:50, 27 msgs at revision 3,381) — the §4.5 bullet above; Inc 4b gates it.
+- **Post-rebuild steady state (17 h, four restarts):** live 1,751 msgs / 2.5 MB; `edgeCatalog` 25.5 MB/12 h (−94.6 % vs C4);
+  every live revision on the widest subject outside whole-actor passes ≤ 2 messages; the byte cap stops binding when the
+  09-04 burst ages out (≈ 66 MB/day post-burst against 512 MiB). T7 holds on the shipped mechanism.
+- **Inc 4b `1a1c6cd9`:** `ReprojectPersonalActor` on a pipeline whose window is open scopes to Silent (the healer's passes and
+  the drain), the reader declared in the flag ledger; unit vectors + a real-sweeper e2e holding the window open. A requested
+  cycle that runs inside a later window is spent silent, and that window's own close requests again; the latch reads the
+  request at cycle start, so every close is honoured by the next cycle to start.
+- **Not observed in this fire:** the window's close and the requested content cycle on the live stack (the replay was still
+  running at close; both are pinned by T8's completion vectors and the seam e2e). The next reader checks `refractor.log`
+  for `rebuild complete on a personal lens` on `ZvZ3…` followed by a `CONTENT cycle … (requested)` line.
+- **Binaries:** `bin/refractor` cycled from `main` (`make cycle-refractor`); `bin/lattice` and `bin/loupe` rebuilt (Loupe links
+  `pipeline.Hydrate` only and runs no pipeline — not cycled; the Loupe lane owns its process).
