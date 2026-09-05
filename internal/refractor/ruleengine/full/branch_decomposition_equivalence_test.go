@@ -631,6 +631,19 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	putEdge(t, reg, adjKV, "withProvider", retiredVisit, retired)
 	putEdge(t, reg, adjKV, "atSite", retiredVisit, retiredSite)
 
+	// The building the roster patient was REGISTERED at, reachable by no other
+	// walk in the corpus. This is the roster's second deferred subtree
+	// (patient -> registeredAtSite building, the site CreatePatient records from
+	// the submitting staffer's worksAt links), and it needs its own seeding for
+	// the same reason the retired visit above does: with no registeredAtSite edge
+	// anywhere the arm binds null on every row and folds empty in BOTH execution
+	// orders, leaving a vacuous differential. deskSite being unreachable any other
+	// way is what makes its entry observable — drop the arm and authz_anchors
+	// loses one rather than staying identical.
+	deskSite := name("desksite")
+	putVertex(t, reg, coreKV, deskSite, "building", nil)
+	putEdge(t, reg, adjKV, "registeredAtSite", patient, deskSite)
+
 	// objectAttachments anchors on ONE object, so the corpus always carries one
 	// with an owner link whatever the random shape drew.
 	obj := name("attachment")

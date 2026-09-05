@@ -302,6 +302,20 @@ func Lenses() []pkgmgr.LensSpec {
 			// reads this model for document rendering, so there is nothing pulling
 			// those columns in yet — add them here too if one starts.
 			//
+			// doc_store_name / doc_filename / doc_content_type mirror
+			// leaseApplicationsRead's own doc-pointer columns exactly (same source
+			// walk: (app)<-[:providedTo]-(docInst:service) for the completed docGen
+			// outcome, (app)<-[:signedLease]-(leaseDocObj:object) for the attachment,
+			// the same max(CASE …) gate requiring both). cmd/loftspace-app's GET
+			// /api/lease-document reads the applicant-scoped model first and falls
+			// back to THIS lens under the same actor when that read finds no row —
+			// so whoever this lens already anchors (the managing landlord, and every
+			// building-anchored actor the authz_anchors fan-out below admits) reads
+			// the same pointers off the row they can already read, still under RLS.
+			// The document renders nothing that is not already a column of that
+			// row (tenant name, unit, rent, term, dates), so the pointer widens no
+			// information class.
+			//
 			// The 7 applicant qualification-profile signal columns (D1.5 Rec C,
 			// loftspace-d1.5-landlord-rls-decision-surface-design.md §4/§5) are
 			// pure `app.applicationSignals.data.*` scalar hops off the already-anchored
@@ -368,6 +382,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "terms_move_in_date", Type: "text"},
 				{Name: "terms_lease_term_months", Type: "double precision"},
 				{Name: "terms_requested_rent", Type: "double precision"},
+				{Name: "doc_store_name", Type: "text"},
+				{Name: "doc_filename", Type: "text"},
+				{Name: "doc_content_type", Type: "text"},
 				{Name: "profile_submitted", Type: "boolean"},
 				{Name: "income_to_rent_met", Type: "boolean"},
 				{Name: "employment_verified", Type: "boolean"},
@@ -1300,6 +1317,12 @@ RETURN
 //     ciphertext presence: an application from an identity missing an aspect
 //     (or shredded) must still project a row — the contact columns are
 //     display enrichment, never a row gate.
+//   - doc_store_name / doc_filename / doc_content_type project the SAME
+//     anchored executed-lease artifact leaseApplicationsRead carries, via the
+//     identical walk + max(CASE …) gate (both the completed docGen outcome
+//     off (app)<-[:providedTo]-(docInst:service) AND the signedLease
+//     attachment off (app)<-[:signedLease]-(leaseDocObj:object) — see that
+//     spec's own doc comment). Null until the document has anchored.
 //
 // '= null' / list literals + nanoIdFromKey in RETURN mirror leaseApplicationsRead.
 var landlordLeaseApplicationsReadSpec = fmt.Sprintf(`
@@ -1307,6 +1330,8 @@ MATCH (app:leaseapp)
 MATCH (app)-[:applicationFor]->(id:identity)
 MATCH (app)-[:appliesToUnit]->(u:unit)
 MATCH (u)<-[:manages]-(landlord:identity)
+OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
+OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
 %s
 WITH
   u,
@@ -1333,6 +1358,9 @@ WITH
   app.applicationSignals.data.hasCoApplicant             AS hasCoApplicant,
   app.applicationSignals.data.hasGuarantor               AS hasGuarantor,
   app.applicationSignals.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.storeName ELSE null END) AS docStoreName,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.filename ELSE null END) AS docFilename,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType,
   id.name.data                   AS applicantNameEnv,
   id.email.data                  AS applicantEmailEnv,
   id.phone.data                  AS applicantPhoneEnv,
@@ -1363,6 +1391,9 @@ RETURN
   hasCoApplicant                  AS has_co_applicant,
   hasGuarantor                    AS has_guarantor,
   guarantorIncomeToRentMet        AS guarantor_income_to_rent_met,
+  docStoreName                    AS doc_store_name,
+  docFilename                     AS doc_filename,
+  docContentType                  AS doc_content_type,
   applicantNameEnv                AS applicant_name,
   applicantEmailEnv               AS applicant_email,
   applicantPhoneEnv               AS applicant_phone,

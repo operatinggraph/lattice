@@ -18,6 +18,9 @@ package clinicreminders
 //   - PAST activeUntil (nextDueAt > activeUntil): never violating (clean
 //     termination); freshUntil null.
 //   - NO activeUntil: active is governed by paused alone.
+//   - NO PATIENT (link absent, or the patient tombstoned): no row at all —
+//     forPatient is the REQUIRED anchor walk, the same population bound
+//     visitSeriesRead projects.
 
 import (
 	"context"
@@ -43,6 +46,15 @@ func (f *remFixture) mkVisitSeries(t *testing.T, name string, intervalDays int, 
 	if paused != nil {
 		f.aspect(t, name, "paused", "visitSeriesPaused", map[string]any{"value": *paused})
 	}
+}
+
+// linkPatient seeds a patient vertex and the series' forPatient link. That walk
+// is the due lens' REQUIRED match, so every vector that is not itself about a
+// missing or tombstoned patient carries it.
+func (f *remFixture) linkPatient(t *testing.T, seriesName, patientName string) {
+	t.Helper()
+	f.vtx(t, patientName, "patient")
+	f.edge(t, "forPatient", seriesName, patientName)
 }
 
 // projectSeries runs the anchored visitSeriesDue spec for one series. NO clock
@@ -97,6 +109,7 @@ func TestVisitSeriesDue_Due(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	f.mkVisitSeries(t, "series", 30, "", "2026-06-29T09:00:00Z", 2, nil)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -115,6 +128,7 @@ func TestVisitSeriesDue_Paused(t *testing.T) {
 	f := newRemFixture(t)
 	yes := true
 	f.mkVisitSeries(t, "series", 30, "", "2026-06-29T09:00:00Z", 2, &yes)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -133,6 +147,7 @@ func TestVisitSeriesDue_ExplicitlyResumed(t *testing.T) {
 	f := newRemFixture(t)
 	no := false
 	f.mkVisitSeries(t, "series", 30, "", "2026-06-29T09:00:00Z", 2, &no)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -150,6 +165,7 @@ func TestVisitSeriesDue_PastActiveUntil(t *testing.T) {
 	f := newRemFixture(t)
 	// activeUntil is BEFORE nextDueAt → terminated.
 	f.mkVisitSeries(t, "series", 30, "2026-06-20T09:00:00Z", "2026-06-29T09:00:00Z", 5, nil)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -169,6 +185,7 @@ func TestVisitSeriesDue_WithinActiveUntil(t *testing.T) {
 	f := newRemFixture(t)
 	// activeUntil is AFTER nextDueAt → still active.
 	f.mkVisitSeries(t, "series", 30, "2028-01-01T00:00:00Z", "2026-07-15T09:00:00Z", 1, nil)
+	f.linkPatient(t, "series", "alice")
 
 	v := f.projectSeries(t, "series")[0].Values
 	require.Equal(t, false, v["missing_series_advance"])
@@ -176,9 +193,12 @@ func TestVisitSeriesDue_WithinActiveUntil(t *testing.T) {
 	require.Equal(t, "2026-07-15T09:00:00Z", v["freshUntil"])
 }
 
-// TestVisitSeriesDue_NoLinks — a series with no patient/provider linked still
-// produces exactly one row (informational columns null).
-func TestVisitSeriesDue_NoLinks(t *testing.T) {
+// TestVisitSeriesDue_NoPatientLinkProducesNoRow — forPatient is the REQUIRED
+// anchor walk, so a series carrying no patient link projects NO row: no
+// freshUntil to arm an @at, no violating row to dispatch AdvanceVisitSeries.
+// Same population as visitSeriesReadSpec (visitseries_read_test.go's
+// TestVisitSeriesRead_NoPatientLinkProducesNoRow) — one population, not two.
+func TestVisitSeriesDue_NoPatientLinkProducesNoRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -186,10 +206,46 @@ func TestVisitSeriesDue_NoLinks(t *testing.T) {
 	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
 
 	rows := f.projectSeries(t, "series")
-	require.Len(t, rows, 1, "one row per series anchor even with no links")
+	require.Empty(t, rows, "no forPatient link → no row at all")
+}
+
+// TestVisitSeriesDue_TombstonedPatientProducesNoRow is the headline vector: a
+// deleted patient's standing cadence leaves the due population. TombstonePatient
+// cascades to no link, but Contract #1 filters the dead vertex out of every
+// graph walk, so the REQUIRED forPatient match drops the row — the series stops
+// arming timers and stops dispatching AdvanceVisitSeries, exactly as it already
+// stopped being readable by any hat.
+func TestVisitSeriesDue_TombstonedPatientProducesNoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2026-06-29T09:00:00Z", 2, nil)
+	f.linkPatient(t, "series", "alice")
+	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
+	require.Len(t, f.projectSeries(t, "series"), 1, "the live patient's series is due — the positive vector this negative rests on")
+
+	f.tombstoneVertex(t, "alice")
+	require.Empty(t, f.projectSeries(t, "series"), "the patient is gone → the series leaves the due population")
+}
+
+// TestVisitSeriesDue_PatientWithoutProviderStillProjects — withProvider stays
+// OPTIONAL: a series whose provider link is absent still projects its row,
+// providerKey null, so the cadence keeps rolling for its patient.
+func TestVisitSeriesDue_PatientWithoutProviderStillProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
+	f.linkPatient(t, "series", "alice")
+
+	rows := f.projectSeries(t, "series")
+	require.Len(t, rows, 1, "forPatient present is all the row needs")
 	v := rows[0].Values
-	require.Nil(t, v["patientKey"])
-	require.Nil(t, v["providerKey"])
+	require.Equal(t, "vtx.patient."+f.ids["alice"], v["patientKey"])
+	require.Nil(t, v["providerKey"], "no withProvider link → null providerKey, row intact")
+	require.Equal(t, "2026-07-15T09:00:00Z", v["freshUntil"])
 }
 
 // projectSeriesSite runs the anchored visitSeriesSiteBackfill spec for one
@@ -308,6 +364,7 @@ func TestVisitSeriesDue_AdvancedPastTheRecordedLapse(t *testing.T) {
 	f := newRemFixture(t)
 	const nextDueAt = "2026-07-29T09:00:00Z"
 	f.mkVisitSeries(t, "series", 30, "", nextDueAt, 3, nil)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: "2026-06-29T09:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -329,6 +386,7 @@ func TestVisitSeriesDue_PastNextDueAtProjectedVerbatim(t *testing.T) {
 	f := newRemFixture(t)
 	const longPast = "2020-06-01T09:00:00Z"
 	f.mkVisitSeries(t, "series", 30, "", longPast, 1, nil)
+	f.linkPatient(t, "series", "alice")
 
 	v := f.projectSeries(t, "series")[0].Values
 	require.Equal(t, longPast, v["freshUntil"],
@@ -352,6 +410,7 @@ func TestVisitSeriesDue_BoundaryMarkerEqualsNextDueAt(t *testing.T) {
 	f := newRemFixture(t)
 	const nextDueAt = "2026-07-15T09:00:00Z"
 	f.mkVisitSeries(t, "series", 30, "", nextDueAt, 0, nil)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesDueTarget: nextDueAt})
 
 	v := f.projectSeries(t, "series")[0].Values
@@ -370,6 +429,7 @@ func TestVisitSeriesDue_SiblingTargetLapseDoesNotOpenThisGap(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
+	f.linkPatient(t, "series", "alice")
 	f.recordLapse(t, "series", map[string]string{VisitSeriesSiteBackfillTarget: "2099-01-01T00:00:00Z"})
 
 	v := f.projectSeries(t, "series")[0].Values

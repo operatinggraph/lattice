@@ -497,3 +497,49 @@ func TestLandlordLeaseApplicationsRead_ShredMakesContactUndecryptable(t *testing
 	require.Len(t, rowsAfterShred, 1)
 	require.Equal(t, nameEnvelope, rowsAfterShred[0].Values["applicant_name"], "the row survives with its envelope intact; only decrypt is destroyed")
 }
+
+// TestLandlordLeaseApplicationsRead_ProjectsDocPointers — the landlord row
+// carries the SAME anchored executed-lease pointers leaseApplicationsRead
+// projects (D1.3/D1.5's landlord-fallback follow-up): null until a completed
+// docGen outcome exists, still null with a completed outcome but no
+// signedLease attachment, and populated once both exist. cmd/loftspace-app's
+// GET /api/lease-document reads these off this lens when the applicant-scoped
+// read finds no row (the managing landlord is a party to the lease too).
+func TestLandlordLeaseApplicationsRead_ProjectsDocPointers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
+
+	// No docGen claim at all: null pointers.
+	rows := f.projectLandlordRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["doc_store_name"])
+	require.Nil(t, rows[0].Values["doc_filename"])
+	require.Nil(t, rows[0].Values["doc_content_type"])
+
+	// Completed docGen outcome, NOT yet anchored: still null.
+	f.vtxWithClass(t, "dg1", "service", "service.docGen.instance")
+	f.edge(t, "providedTo", "dg1", "app")
+	f.aspect(t, "dg1", "outcome", "leaseDocOutcome", map[string]any{
+		"status": "completed", "completedAt": "2026-07-15T00:00:05Z",
+		"digest": "SHA-256=abc123", "size": 1264, "contentType": "text/plain; charset=utf-8",
+		"storeName": "dgStoreNanoXyz", "filename": "signed-lease-leaseapp.test.txt",
+	})
+	rows = f.projectLandlordRead(t)
+	require.Len(t, rows, 1, "the docGen fan must not multiply the row")
+	require.Nil(t, rows[0].Values["doc_store_name"], "an un-anchored document projects no pointers")
+
+	// The signedLease attachment lands: the pointers project.
+	f.vtx(t, "leaseDocObj", "object")
+	f.edge(t, "signedLease", "leaseDocObj", "app")
+	rows = f.projectLandlordRead(t)
+	require.Len(t, rows, 1, "the attachment fan must not multiply the row")
+	v := rows[0].Values
+	require.Equal(t, "dgStoreNanoXyz", v["doc_store_name"])
+	require.Equal(t, "signed-lease-leaseapp.test.txt", v["doc_filename"])
+	require.Equal(t, "text/plain; charset=utf-8", v["doc_content_type"])
+	require.Equal(t, []string{f.ids["larry"]}, anchorStrings(t, v["authz_anchors"]),
+		"the managing-landlord anchor is untouched by the doc fans")
+}

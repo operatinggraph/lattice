@@ -79,6 +79,23 @@ func (f *lensFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
+// unedge removes a previously seeded edge from both endpoints' adjacency, the
+// shape an UnwireWorksAt-style tombstone leaves behind once Refractor has
+// indexed it (adjacency.CoreKVEvent IsDeleted). It is what lets a test move a
+// standing relationship rather than only add one.
+func (f *lensFixture) unedge(t *testing.T, name, fromName, toName string) {
+	t.Helper()
+	ctx := context.Background()
+	fromID, toID := f.ids[fromName], f.ids[toName]
+	fromType, toType := f.types[fromID], f.types[toID]
+	linkKey := "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID
+	edgeID := name + "_" + fromID + "_" + toID
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType, IsDeleted: true}))
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType, IsDeleted: true}))
+}
+
 // project runs a spec (no actor anchor — these are unanchored projections that
 // seed-scan the graph, like loftspace's availableListings) and returns the rows.
 func (f *lensFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {

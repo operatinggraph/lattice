@@ -2,6 +2,15 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-02 · `785b446b` · A no-show no longer silently clears the clinic follow-up worklist, and a requested follow-up now always carries a date — `RecordEncounter` requires `followUpDate` whenever `followUpRequested` is true.
+- 2026-09-01 · `e1c1a6a0`+`9d49a3b1` · Front desk can finally correct a wrong terminal appointment status (e.g. a no-show who actually showed) — new `CorrectAppointmentStatus` op.
+- 2026-09-01 · `a0b6264b` · An applicant with N applications now gets one onboarding task, not N — `missing_onboarding` re-anchored onto a new identity-scoped target (lease-signing 0.31.16).
+- 2026-09-01 · `df4517bf` · Account settings can finally tell your own sign-in method apart — session now carries which credential authenticated it (JWT `cred_id` claim, `internal/appsession`), separate from the identity it resolved to.
+- 2026-09-01 · (live-stack op run) · Riley Chen's standing auto-no-show charges waived, $125 credited reason:waiver — census corrected from the filed 6 (live count was 5; the 6th debit carries no automated-sweep memo, left untouched).
+- 2026-09-01 · `9a3a7807` · Lease-terms backfill run to convergence (2/3 fixed); seed's duplicate-unit reap now guards live tenancies — 3rd lease's unit was already gone, filed above.
+- 2026-09-01 · (live-stack op run) · wellness-reminders refreshed to 0.3.3 live + 19 auto-charged no-show fees refunded, $475 credited reason:waiver — census corrected from the filed 23 (live count was 19, all Weaver-charged).
+- 2026-09-01 · `0e779e16` · Landlord service-attach KPI degrades per-source now — one absent lens bucket (e.g. no wellness booking ever written) no longer zeroes the other, readable half too.
+- 2026-09-01 · `ed25f080` · Café front-desk bookings/lease-details/visits now fail loud (502) on a real KVGet error instead of silently dropping the row, closing the gap `aa29c41e`'s balances fix left.
 - 2026-09-01 · `b3436086` · A member no longer eats the cost of a class the studio cancels — ReleaseOrphanedBooking now mints the same wellnessrefund marker CancelBooking does, unconditionally (no late-cancel window, since the studio caused it).
 - 2026-09-01 · `77e196a5` · Wellness can no longer cancel free at the door — CancelBooking forfeits the class price inside a 2h window instead of refunding it.
 - 2026-09-01 · `99233d11` · Wellness front desk can finally see who owes the studio money — new `/api/frontdesk-arrears`, worst-first, mirrors the café pattern.

@@ -135,11 +135,18 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 			"an optional identityKey wires lnk.patient.<id>.identifiedBy.identity.<identityId> to a pre-minted " +
 			"vtx.identity (validated alive + class=identity) carrying the patient's sensitive contact, and claims " +
 			"a CreateOnly vtx.identity.<identityId>.patientClaim guard aspect — a second, DIFFERENT patient passing " +
-			"the same identityKey is rejected (IdentityAlreadyClaimed). TombstonePatient soft-deletes one. The " +
+			"the same identityKey is rejected (IdentityAlreadyClaimed). CreatePatient also RECORDS WHERE the " +
+			"registration happened: it enumerates the caller's live worksAt links once and writes one " +
+			"lnk.patient.<id>.registeredAtSite.<type>.<id> per workplace (patient registeredAtSite building), so a " +
+			"just-registered patient sits in the front-desk world of the building it was registered at before any " +
+			"appointment exists. The site is a FACT of the registration recorded on the patient, never a live walk of " +
+			"where the registrar works today — a staffer who later transfers buildings moves no patient. A caller " +
+			"that works nowhere (an operator, a console, a provider who only practicesAt) records no site and " +
+			"registers normally. TombstonePatient soft-deletes one. The " +
 			".demographics aspect is NON-sensitive (it attaches to a patient, not an identity); real contact PII " +
 			"lives on the linked identity, the Vault plane's unit. BackfillPatientRegistration is an operator-only, " +
-			"manual, one-time repair for a patient minted before registeredAt became an always-present field " +
-			"(2026-08-08, 7eb4c72f): it upserts registeredAt onto an existing .demographics aspect that lacks it, " +
+			"manual repair for a patient whose .demographics aspect carries no registeredAt (the roster lenses' " +
+			"presence filter hides such a patient from every actor): it upserts registeredAt onto that aspect, " +
 			"preserving fullName, and no-ops cleanly if registeredAt is already set.",
 		Script: patientDDLScript,
 		InputSchema: `{"type":"object","properties":` +
@@ -163,7 +170,9 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "CreatePatient — register a patient",
 				Payload: map[string]any{"fullName": "Alice Rivera"},
 				ExpectedOutcome: "Mints vtx.patient.<NanoID> (class=patient, root {}) + the .demographics aspect " +
-					"{fullName}. Accepts an optional bare-NanoID patientId. Returns primaryKey (the patient key).",
+					"{fullName}, plus one lnk.patient.<id>.registeredAtSite.<type>.<id> per building the caller " +
+					"worksAt at that instant (none when the caller works nowhere). Accepts an optional " +
+					"bare-NanoID patientId. Returns primaryKey (the patient key).",
 			},
 			{
 				Name:    "CreatePatient — register a patient with linked contact identity",
@@ -171,7 +180,7 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Mints the patient as above, plus lnk.patient.<id>.identifiedBy.identity.<identityId> " +
 					"to the supplied identity (rejected if that identity is absent, tombstoned, or the wrong class) " +
 					"and a CreateOnly patientClaim guard aspect on the identity (rejected if a DIFFERENT patient " +
-					"already claimed it).",
+					"already claimed it). The registeredAtSite links are recorded either way.",
 			},
 			{
 				Name:            "TombstonePatient — remove a patient",
@@ -1217,6 +1226,20 @@ def parts_of(key, name, want_type):
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
+def vertex_parts_or_none(key):
+    # parts_of's non-failing twin, for a key whose SHAPE is not the caller's
+    # promise. op.actor is a platform-owned value, not payload, and it is not
+    # always a person: a service or console actor can carry a key of another
+    # type entirely, and kv.Links REJECTS a hub that is not vtx.<type>.<id>.
+    # Refusing a registration over the shape of who submitted it would break
+    # every such dispatch path, so an unparseable key simply enumerates nothing.
+    # It also screens each ENUMERATED target before that target becomes a
+    # segment of a link key this op writes.
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] == "" or parts[2] == "":
+        return None, None
+    return parts[1], parts[2]
+
 def vertex_alive(state, key):
     if key not in state:
         return False
@@ -1262,6 +1285,55 @@ def claim_identity(identity_key):
     if existing != None:
         fail("IdentityAlreadyClaimed: " + identity_key + " is already linked to another patient")
     return make_aspect(identity_key, "patientClaim", "identityPatientClaim", {})
+
+REGISTRATION_SITE_PAGE_LIMIT = 20
+
+def registration_site_mutations(pid, pkey, actor_key):
+    # The buildings the registering staffer worksAt AT THIS INSTANT, recorded on
+    # the patient as its own links -- a time fact of the registration, not a
+    # pointer to be re-walked. clinicPatientsRead reads these links directly, so
+    # a staffer who later transfers buildings carries no patient with them: the
+    # old desk keeps every patient it registered and the new desk inherits none.
+    # A lens that walked the registrar's CURRENT worksAt instead would re-anchor
+    # the whole history on every transfer, in both directions.
+    #
+    # The patient (later-arriving) is the source, the pre-existing location the
+    # target (Contract #1 §1.1). Sentence: "patient registeredAtSite building".
+    # The target's TYPE segment comes from the enumerated link, not a literal:
+    # worksAt is location-domain's edge and its target is whatever location type
+    # that domain wired, while the roster's arm filters on :building.
+    #
+    # ONE bounded enumeration and no follow-up read per target: the lens revalidates
+    # every recorded site at READ time (Contract #1 filters a tombstoned vertex out
+    # of every walk), so proving the building alive here would only duplicate a
+    # check that must happen at read time anyway. A worksAt link tombstoned by
+    # UnwireWorksAt is skipped -- kv.Links returns it with isDeleted set rather
+    # than omitting it.
+    #
+    # Truncation at page 1 records FEWER sites, never more, and fewer anchors is
+    # a narrower read: no cursor loop, on a relation whose degree is the handful
+    # of buildings one person works at.
+    _, actor_id = vertex_parts_or_none(actor_key)
+    if actor_id == None:
+        return []
+    # read-posture: (e) relation=worksAt epoch=none -- a single bounded enumeration
+    # off the platform-supplied actor key, never a keyspace scan. A workplace wired
+    # concurrently with this op is simply not part of the registration this op is
+    # recording; the fact is whatever held when the patient was typed in.
+    wpage, _ = kv.Links(actor_key, "worksAt", "out", None, REGISTRATION_SITE_PAGE_LIMIT)
+    site_mutations = []
+    for lk in wpage:
+        if lk.isDeleted:
+            continue
+        site_type, site_id = vertex_parts_or_none(lk.targetVertex)
+        if site_id == None:
+            continue
+        # worksAt's own key is (identity, location)-deterministic, so this
+        # enumeration names each target at most once and the derived link key is
+        # unique within the batch.
+        site_lnk = "lnk.patient." + pid + ".registeredAtSite." + site_type + "." + site_id
+        site_mutations.append(make_link(site_lnk, pkey, lk.targetVertex, "registeredAtSite", "registeredAtSite", {}))
+    return site_mutations
 
 def execute(state, op):
     ot = op.operationType
@@ -1312,6 +1384,13 @@ def execute(state, op):
             # details for.
             demo["fullName"] = full_name
         mutations.append(make_aspect(pkey, "demographics", "patientDemographics", demo))
+        # WHERE this registration happened, recorded on the patient at write
+        # time. clinicPatientsRead anchors the roster row on these buildings, so
+        # the desk that typed the patient in reads them immediately instead of
+        # waiting for someone to book a first appointment (a patient with no
+        # appointment otherwise carries its own self-anchor alone, which no staff
+        # grant matches).
+        mutations = mutations + registration_site_mutations(pid, pkey, op.actor)
         events = [{"class": "clinic.patientCreated", "data": {"patientKey": pkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": pkey}}

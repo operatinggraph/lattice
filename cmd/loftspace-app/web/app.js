@@ -1630,11 +1630,15 @@ function renderApplicationCard(row, highlight) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  // Signed-lease download: once the lease is signed, the platform's docGen
+  // Signed-lease download: gated on the landlord's APPROVAL, not signature
+  // alone — sign precedes decide by design, so a declined or still-undecided
+  // application must never expose the download link even though it may
+  // already carry an anchored artifact. Once approved, the platform's docGen
   // vendor generates the executed-lease artifact and Weaver anchors it to the
   // application; the GET streams the anchored bytes (a 404 "being generated"
-  // inside the brief convergence window).
-  if (!row.missing_signature) {
+  // inside the brief convergence window, or "not approved" if this render is
+  // stale and the decision has since changed).
+  if (row.landlordApproved && !row.missing_signature) {
     const lease = document.createElement("a");
     lease.className = "ghost btn-link";
     lease.textContent = "📄 Signed lease";
@@ -2402,9 +2406,12 @@ async function loadRenewals() {
   if (summary) summary.textContent = "loading…";
   // The landlord legs (SetRenewalTerms / CancelRenewal) render from their
   // descriptors, so the catalog is loaded before the cards offer their buttons.
+  // The tenant's Sign button is enabled by the SignRenewal task assigned to
+  // them (assignedTaskKey), so their task list is loaded alongside the rows;
+  // a task-list failure only leaves the button in its not-yet-assigned state.
   await loadOpCatalogQuiet();
   try {
-    await loadRenewalsQuiet();
+    await Promise.all([loadRenewalsQuiet(), landlord ? null : loadTasksQuiet().catch(() => null)]);
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
@@ -2444,8 +2451,22 @@ function renderRenewals() {
 // renewalReady reports whether row has everything SignRenewal's own write
 // guard requires (terms set; guarantor verified if one is on file) — mirrors
 // the planner's signRenewal `pre`, the terminal-leg rule (design §4.3/§5).
+// Readiness is what makes the Sign button APPEAR; what makes it CLICKABLE is
+// the grant, which for a task-voice op is the tenant's own assigned task
+// (assignedTaskKey) — the Processor authorizes SignRenewal on {task, target},
+// never on the write guard alone, so a ready-but-unassigned cycle is shown
+// as waiting rather than as a button whose submit can only be denied.
 function renewalReady(row) {
   return !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt);
+}
+
+// assignedTaskKey answers the caller's own open task for operationName on
+// scopedTo from the tasks already loaded (state.tasks), or null. Synchronous
+// on purpose — it decides how a card renders; openTaskKeyFor is the
+// refetching form the click path uses.
+function assignedTaskKey(operationName, scopedTo) {
+  const t = (state.tasks || []).find((x) => x.operationName === operationName && x.scopedTo === scopedTo);
+  return (t && t.taskKey) || null;
 }
 
 function renewalStatusLabel(row) {
@@ -2505,8 +2526,19 @@ function renderRenewalCard(row, landlord) {
   } else if (unsigned && renewalReady(row)) {
     const signBtn = document.createElement("button");
     signBtn.textContent = "Sign renewal";
-    signBtn.addEventListener("click", () => openRenewalAction(row, "SignRenewal"));
-    actions.append(signBtn);
+    if (assignedTaskKey("SignRenewal", row.entityKey)) {
+      signBtn.addEventListener("click", () => openRenewalAction(row, "SignRenewal"));
+      actions.append(signBtn);
+    } else {
+      signBtn.disabled = true;
+      signBtn.title = "Signing opens once the task is assigned to you.";
+      actions.append(signBtn);
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "Terms are set — signing opens once your signing task is assigned (usually within a minute; refresh to check).";
+      card.append(title, sub, actions, hint);
+      return card;
+    }
   }
 
   card.append(title, sub, actions);
@@ -3582,6 +3614,23 @@ function renderRLSApplicantRow(a, unit) {
     reason.textContent = "Reason: " + a.declineReason;
     row.append(reason);
   }
+
+  // Signed-lease download — the landlord-fallback counterpart of the
+  // applicant's own "📄 Signed lease" link (renderApplicationCard): gated on
+  // APPROVAL + signature, same as the applicant side, never on signature
+  // alone. GET /api/lease-document falls back to this landlord-scoped row
+  // when the caller reads it under the landlord lens's own anchors (the
+  // managing landlord, or a building-anchored staffer) rather than as the
+  // applicant.
+  if (a.landlordApproved && a.signedAt) {
+    const lease = document.createElement("a");
+    lease.className = "ghost btn-link";
+    lease.textContent = "📄 Signed lease";
+    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(a.entityKey);
+    lease.target = "_blank";
+    lease.rel = "noopener";
+    row.append(lease);
+  }
   return row;
 }
 
@@ -3726,6 +3775,19 @@ function renderSearchApplicationRow(a) {
     contact.className = "applicant-contact";
     contact.textContent = [a.applicantEmail, a.applicantPhone].filter(Boolean).join(" · ");
     row.append(contact);
+  }
+
+  // Same signed-lease download as renderRLSApplicantRow, same gate: approval
+  // + signature. The search card reads the same landlord-scoped row, so the
+  // document is reachable from either surface.
+  if (a.landlordApproved && a.signedAt) {
+    const lease = document.createElement("a");
+    lease.className = "ghost btn-link";
+    lease.textContent = "📄 Signed lease";
+    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(a.entityKey);
+    lease.target = "_blank";
+    lease.rel = "noopener";
+    row.append(lease);
   }
   return row;
 }

@@ -184,6 +184,11 @@ func submitCreatePatientAs(t *testing.T, ctx context.Context, conn *substrate.Co
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "patient",
 		Payload:       json.RawMessage(`{"fullName":"Walk-in Patient"}`),
+		// The registration-site walk: CreatePatient enumerates the caller's own
+		// worksAt links to record where the registration happened.
+		ContextHint: &processor.ContextHint{
+			Enumerations: testutil.DeclaredEnumerations("CreatePatient", actorKey, clinicdomain.OpMetas()),
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")

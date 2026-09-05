@@ -128,7 +128,12 @@ census against it as you would against a stranger's.
 - **Multiply the row's own numbers by a measured unit cost; an order-of-magnitude shortfall is a term on a path
   the row never named.** ~19 hops × 15–20 ms could not reach 250 ms; the cost was `kv.Read`'s lazy `instanceOf`
   fall-through. Run the read-only spike before the shape hardens and ship its numbers as a §measurement table.
-  (2026-08-11 · class-(e) budget)
+  (2026-08-11 · class-(e) budget) **Second sighting — a unit cost on a shared substrate is a per-DAY
+  quantity: profile it from the platform's own timestamps first** (`step 4: hydrated`→`step 5: executed`
+  in `processor.log`, per op, day and ACTOR — never pooled — with a one-round-trip op as the probe). The
+  same walk ran 139 ms → timeout → 95 → 30 ms across four days; a "still blows the wall" row was refuted
+  8/8 at head on the day it was filed, and a load sample taken while the walks pass proves nothing about
+  the day they failed. (2026-09-05 · authority-walk wall)
 - **A row a design filed OUT of itself carries that design's PRE-BUILD premise — re-derive it against the
   design's shipped increments (`git show <build sha>`), never its filing text.** The tell: the row's
   `no-pattern:` names a fact "no increment answers" while the parent's own later increment is the writer of

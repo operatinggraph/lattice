@@ -1202,17 +1202,15 @@ def execute(state, op):
                 "response": {"primaryKey": app_key}}
 
     if ot == "BackfillLeaseTerms":
-        # A one-time historical-data repair, operator-only and manual —
-        # mirrors BackfillPatientRegistration's shape exactly (clinic-domain):
-        # an application approved before CreateLeaseApplication's
-        # unit-listing-rent fallback existed (0.31.14) can carry no .terms
-        # aspect at all, so leaseRentSettlementSpec (semantic-contracts) —
-        # gated on requestedRent present — never projects a row and the
-        # lease never gets a ledger account or rent clause. This gap cannot
-        # recur (every CreateLeaseApplication since 0.31.14 already falls
-        # back to the unit's listed rent), so a standing auto-remediation
-        # loop would be the wrong shape, same reasoning as the clinic
-        # precedent's own comment.
+        # Operator-granted, mirroring BackfillPatientRegistration's shape
+        # (clinic-domain): an approved leaseapp with no requestedRent — a
+        # .terms aspect never written, or written before
+        # CreateLeaseApplication's unit-listing-rent fallback existed
+        # (0.31.14) — bills nothing, since every downstream ledger step
+        # (leaseRentSettlementSpec's account/clause gaps, semantic-contracts)
+        # requires an agreed rent before it opens. leaseRentSettlementSpec's
+        # own missing_terms gap dispatches this op automatically over every
+        # such lease; an operator may also run it by hand.
         app_key = required_string(p, "leaseAppKey")
         parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):

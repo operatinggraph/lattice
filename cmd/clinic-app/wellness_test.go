@@ -12,7 +12,7 @@ func TestComputeWellnessSessions_JoinsBookedCountAndSorts(t *testing.T) {
 		"vtx.session.X": map[string]any{"name": "Ghost"},
 	})
 	bookedCounts := map[string]int{"vtx.session.A": 2}
-	rows := computeWellnessSessions(keys, get, bookedCounts)
+	rows := computeWellnessSessions(keys, get, bookedCounts, "2026-07-01T00:00:00Z")
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 sessions (the keyless row skipped), got %d", len(rows))
 	}
@@ -41,5 +41,24 @@ func TestComputeWellnessBookedCounts_TalliesLiveRowsOnlySkipsGhosts(t *testing.T
 	}
 	if counts["vtx.session.B"] != 1 {
 		t.Fatalf("expected session B count 1, got %d", counts["vtx.session.B"])
+	}
+}
+
+func TestComputeWellnessSessions_DropsSessionsAlreadyStarted(t *testing.T) {
+	cap10 := 10.0
+	keys, get := fakeKV(map[string]any{
+		"vtx.session.Past":   map[string]any{"sessionKey": "vtx.session.Past", "name": "Yoga", "startsAt": "2026-07-20T09:00:00Z", "endsAt": "2026-07-20T10:00:00Z", "capacity": cap10},
+		"vtx.session.Now":    map[string]any{"sessionKey": "vtx.session.Now", "name": "Spin", "startsAt": "2026-09-05T12:00:00Z", "endsAt": "2026-09-05T13:00:00Z", "capacity": cap10},
+		"vtx.session.Later":  map[string]any{"sessionKey": "vtx.session.Later", "name": "Barre", "startsAt": "2026-09-12T09:00:00Z", "endsAt": "2026-09-12T10:00:00Z", "capacity": cap10},
+		"vtx.session.Sooner": map[string]any{"sessionKey": "vtx.session.Sooner", "name": "Pilates", "startsAt": "2026-09-06T09:00:00Z", "endsAt": "2026-09-06T10:00:00Z", "capacity": cap10},
+	})
+	// A session that starts exactly at now is already in the past for
+	// CreateBooking (it requires submitted < startsAt), so it is dropped too.
+	rows := computeWellnessSessions(keys, get, nil, "2026-09-05T12:00:00Z")
+	if len(rows) != 2 {
+		t.Fatalf("expected only the two future sessions, got %+v", rows)
+	}
+	if rows[0].SessionKey != "vtx.session.Sooner" || rows[1].SessionKey != "vtx.session.Later" {
+		t.Fatalf("expected soonest-first, got %+v", rows)
 	}
 }

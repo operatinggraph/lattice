@@ -159,16 +159,16 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"(no guarantor ⇒ no guarantor fields at all; no references supplied ⇒ no references field). UNCONDITIONED upsert " +
 			"(re-submittable — a re-submit overwrites all three aspects). It verifies unit is the application's appliesToUnit " +
 			"target (the Withdraw precedent) and feeds no gap — capture + surface, not a convergence gate. " +
-			"BackfillLeaseTerms{leaseAppKey} is an operator-only, manual, one-time repair for an application " +
-			"approved before CreateLeaseApplication's unit-listing-rent fallback existed (0.31.14, this package): " +
-			"with no .terms aspect at all, leaseRentSettlementSpec (semantic-contracts, gated on requestedRent " +
-			"present) never projects a row, so a signed and approved lease never gets a ledger account or rent " +
-			"clause. It resolves the application's OWN appliesToUnit link (never a payload field, the leaseapp_unit " +
-			"resolver's forgery-resistance rationale) and writes {requestedRent: unit.listing.rentAmount} onto " +
-			".terms, preserving any moveInDate/leaseTermMonths already present; no-ops cleanly if requestedRent is " +
-			"already set (mirrors BackfillPatientRegistration's own already-present no-op, clinic-domain). This gap " +
-			"cannot recur — every CreateLeaseApplication since 0.31.14 already falls back to the unit's listed rent " +
-			"— so this is a one-time repair, never a standing auto-remediation loop.",
+			"BackfillLeaseTerms{leaseAppKey} is operator-granted (never person-facing) and repairs an approved " +
+			"application carrying no requestedRent — a .terms aspect never written, or written before " +
+			"CreateLeaseApplication's unit-listing-rent fallback existed (0.31.14, this package) — so " +
+			"leaseRentSettlementSpec (semantic-contracts) has an agreed rent to bill and can open its account/clause " +
+			"gaps. leaseRentSettlementSpec's own missing_terms gap dispatches it automatically over every such " +
+			"lease; an operator may also run it by hand. It resolves the application's OWN appliesToUnit link " +
+			"(never a payload field, the leaseapp_unit resolver's forgery-resistance rationale) and writes " +
+			"{requestedRent: unit.listing.rentAmount} onto .terms, preserving any moveInDate/leaseTermMonths " +
+			"already present; no-ops cleanly if requestedRent is already set (mirrors BackfillPatientRegistration's " +
+			"own already-present no-op, clinic-domain).",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -306,7 +306,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"employmentStatus.",
 			},
 			{
-				Name:    "BackfillLeaseTerms — repair a pre-0.31.14 approved lease missing requestedRent",
+				Name:    "BackfillLeaseTerms — repair an approved lease missing requestedRent",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
 				ExpectedOutcome: "Resolves the application's own appliesToUnit link and upserts .terms with requestedRent set to " +
 					"the unit's own listed rent (unit.listing.rentAmount), preserving any moveInDate/leaseTermMonths already " +

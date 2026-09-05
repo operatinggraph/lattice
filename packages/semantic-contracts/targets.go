@@ -38,9 +38,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // TestSemanticContracts_PlaybookColumnsMatchLens.
 //
 // leaseRentSettlement's own playbook (lenses.go) is the bootstrap ahead of
-// this one — two independent gaps, mirroring cafe-domain's tabSettlement
+// this one — three independent gaps, mirroring cafe-domain's tabSettlement
 // missing_account → directOp(CreateAccount) shape:
 //
+//   - missing_terms → directOp(BackfillLeaseTerms) (lease-signing) — the
+//     lens's only gate opens the account/clause gaps once requestedRent is
+//     non-null, so this gap converges before either of them ever fires.
+//     Grants operator unconfined (lease-signing permissions.go), the same
+//     no-authContext.target idiom every directOp in this file uses.
+//     Reads the application; OptionalReads its own .terms aspect
+//     (row.leaseAppKey.terms) — the script branches on the aspect's absence
+//     rather than requiring it (Contract #2 §2.5).
 //   - missing_account → directOp(LoftspaceCreateAccount) (loftspace-ledger).
 //     Grants operator unconfined (loftspace-ledger permissions.go), the same
 //     no-authContext.target idiom every directOp in this file uses.
@@ -83,10 +91,22 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: LeaseRentSettlementTarget,
-			Description: "An approved lease with an agreed rent has a ledger account and a recurring monthly rent " +
-				"clause. Whichever is missing is created, so a signed lease actually bills its rent.",
+			Description: "An approved lease has an agreed rent, a ledger account, and a recurring monthly rent " +
+				"clause. A missing agreed rent is backfilled from the unit's listed rent; whichever of the " +
+				"account/clause is then still missing is created — so a signed lease actually bills its rent.",
 			LensRef: LeaseRentSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_terms": {
+					Action:    "directOp",
+					Operation: "BackfillLeaseTerms",
+					// BackfillLeaseTerms is claimed by lease-signing's own leaseapp
+					// vertexType DDL (the same pin-regardless-of-ambiguity idiom every
+					// directOp in this file uses).
+					Class:         "leaseapp",
+					Params:        map[string]string{"leaseAppKey": "row.leaseAppKey"},
+					Reads:         []string{"row.leaseAppKey"},
+					OptionalReads: []string{"row.leaseAppKey.terms"},
+				},
 				"missing_account": {
 					Action:    "directOp",
 					Operation: "LoftspaceCreateAccount",

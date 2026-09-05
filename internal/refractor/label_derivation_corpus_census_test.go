@@ -187,7 +187,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"identityIndexHint":              {narrow, "identityindex", modeRelation},
 	// The landlord* pair converted alongside applicantRosterRead (same fire,
 	// same `containedIn*1..` -> single-hop rewrite, both verified live).
-	"landlordLeaseApplicationsRead": {narrow, "building identity leaseapp service unit", modeLabel},
+	"landlordLeaseApplicationsRead": {narrow, "building identity leaseapp object service unit", modeLabel},
 	"landlordUnitsRead":             {narrow, "building identity unit", modeRelation},
 	"leaseAccounts":                 {narrow, "account leaseapp", modeRelation},
 	"leaseApplicationsRead":         {narrow, "augurproposal identity leaseapp object service unit", modeLabel},

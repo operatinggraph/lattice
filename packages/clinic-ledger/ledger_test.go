@@ -136,6 +136,8 @@ func createPatient(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "patient",
 		Payload:       json.RawMessage(`{"fullName":"` + fullName + `"}`),
+		ContextHint: &processor.ContextHint{
+			Enumerations: testutil.DeclaredEnumerations("CreatePatient", ledgerActorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

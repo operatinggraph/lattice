@@ -85,7 +85,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "TombstoneSupersededLeaseServiceInstance",
 			Scope:         "any",
-			Note:          "Grants the operator alone the right to retire a lease service instance superseded by a newer completed one on the same subject + family — a one-time/maintenance repair (the runaway-bgcheck-instance purge, bgcheck-runaway-and-broad-filter-design.md §6), never a person-facing action (BackfillPatientRegistration/BackfillLeaseTerms precedent).",
+			Note:          "Grants the operator alone the right to retire a lease service instance superseded by a newer completed one on the same subject + family — a one-time/maintenance repair (the runaway-bgcheck-instance purge, bgcheck-runaway-and-broad-filter-design.md §6), never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
 			GrantsTo:      []string{"operator"},
 		},
 		{
@@ -157,7 +157,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "BackfillLeaseTerms",
 			Scope:         "any",
-			Note:          "Grants the operator alone the right to backfill requestedRent onto a lease application approved before CreateLeaseApplication's unit-listing-rent fallback existed (0.31.14) — a one-time manual repair, never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
+			Note:          "Grants the operator alone the right to backfill requestedRent onto an approved lease application that carries none — dispatched automatically by leaseRentSettlement's missing_terms gap (semantic-contracts), and runnable by hand; never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
 			GrantsTo:      []string{"operator"},
 		},
 		{
