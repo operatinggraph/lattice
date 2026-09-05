@@ -1,5 +1,7 @@
 # Weaver — separate the WORKLOAD population from the FAULT population in the issue cache
 
+**Status: ✅ SHIPPED 2026-09-04 — `3c54ddb3` on `main` (one fire, Inc 1 + Inc 2 + two review fix rounds; close note at the end).** Ratified text follows.
+
 **Status: ✅ RATIFIED by Andrew 2026-09-02 — "agreed - take the trade": a `surface` gap raises one counted entry per (target, gap column); per-row identity stays in the target's projected row set. One fire, size M, Increment 1 first. Contract #10 §10.8's `surface` clause of record is in §6 and lands WITH the fire's commit (a cardinality promise the runtime does not yet keep is not committed ahead of its build — Andrew, 2026-09-01); nothing is staged. Winston's adjudications: the `gapOpen:` key family; nested per-(target, family) refusal counters with a heartbeat-boundary reset; the tombstone leg clears every column set; `since` on the per-column entry means when the column last went from no open rows to some.** · Designer fire 2026-09-01 · Lattice lane
 Board row: *[Weaver] One per-target issue budget is shared by the WORKLOAD and FAULT populations*
 (★★ · M).
@@ -253,11 +255,11 @@ issue at a new target-scoped key:
 
 Four properties fall out of the key shape and need no new code:
 
-1. **It is not counted against the budget.** `rowIssueTarget` (`evaluator.go:2075-2093`) requires two
-   separators below the target; `gapOpen:<t>.<col>` has one. The workload population leaves the budget by
-   construction, not by a new exemption — the same test that already excludes the `__capped` overflow entry.
-   Because the *shape* is what carries the property, §9 asserts the one input that would break it: a gap
-   column carrying a `.` gives the key two separators and would re-enter the budget.
+1. **It is not counted against the budget.** `rowIssueTarget` decides membership by a closed prefix switch
+   over the four per-row families (`gap:`, `data:`, `template:`, `sweep:`), and `"gap:"` does not
+   prefix-match `"gapOpen:"`, so a `gapOpen:` key falls out of the switch before any separator is counted.
+   The workload population leaves the budget by construction, not by a new exemption. §9 still asserts a
+   dotted gap column stays out, as the pin that the family list is what carries the property.
 2. **The shared-latch collision disappears.** Surface, `GapBudgetExhausted` and `GapEscalatedToAugur`
    currently occupy one latch, which is why `escalateExhaustedGap` needs the `surfaceOnlyGap` bail
    (`evaluator.go:1526-1560`). After Inc 1 they are three separate keys. **The guard stays** — its
@@ -606,9 +608,9 @@ Every test below is **owned by a named increment**; none is left unowned.
   leaves the entry standing with a message reading **N−1** — and its `since` unchanged. This is the vector
   that separates the design from the obvious wrong implementation, in which a remove that merely shrinks
   the set leaves a stale-high count on the board until the whole backlog drains.
-- **A gap column carrying a `.` stays out of the budget.** The key-shape guard is what keeps the workload
-  population out (§4.1 property 1), and a dotted column is the one input that would give
-  `gapOpen:<t>.<col>` a second separator below the target. Assert `rowIssues[target]` is **0** for it.
+- **A gap column carrying a `.` stays out of the budget.** The family switch is what keeps the workload
+  population out (§4.1 property 1); a dotted column is the input that would re-enter it if the switch ever
+  prefix-matched the new family. Assert `rowIssues[target]` is **0** for it.
   Two adjacent properties are free and need no assertion: `target.Gaps` is a map keyed by column, so one
   column yields exactly one `issueCode`; and `"gapOpen:"` is not prefix-matched by `"gap:"`.
 - Budget non-interference — the point of the increment: with 600 entities holding a surface column open,
@@ -859,3 +861,30 @@ budget membership — each accounted in part 4), #5 (one writer per `gapOpen:` k
 
 **7. Non-goals.** No change to `rowIssueCapPerTarget`'s value, no Loupe code, no `packages/` edit, no new
 Contract #5 field (the count rides in `message`), no admission ranking or eviction (§8).
+
+### Close note (2026-09-04) — shipped `3c54ddb3`
+
+**Reviews.** Inc 1 cold (opus): 4 MAJOR + 4 MINOR, all fixed (`f81f6e24`): the contract's trailing
+retirement clause, the sweep reaching the surface remove + reflect outside the set's lock, the unreadable
+column retiring a target-scoped fact, the re-authored `issueCode` never reaching the wire, plus the
+transition test, two history comments, "1 rows", and the over-strong `ReplayTarget` claim. Cumulative close
+pass (opus, whole diff): Inc 2 sound under mutation; 2 MAJOR + 6 MINOR on Inc 1's retirement legs, fixed
+(`5d054620` → rebased `3c54ddb3`): every membership retire now stands behind `boolColumnRead`'s `readable`
+verdict (lane 1, the non-violating leg, both sweep legs), the retire left `deleteMark` for the two call sites
+that read the column, a pace-only refusal spends no refusal loud token (which keeps `refusedLoudAt` on the
+overflow drain path), the overflow message states its standing severity, the contract clause says no
+*violating* row names the column. Recorded non-defect: `emit` stays on the wall clock (the clock seam was
+scoped to the two log seams); `TestEmit_ClosesTheRefusalWindow` asserts the zero case and runs in CI.
+
+**Classification → routing.** implementation-bug ×6 (all the retirement-leg sightings share one class);
+design-gap ×5 (§6 clause vs the legs, identity refresh, pace-vs-latch clocks, `refusedLoudAt` lifetime,
+replay over-strong — each amended in the body above); convention ×3. The one recurring class — *a
+level-reconciled retirement must state which READ witnessed it* — had four sightings in this item and is
+mechanized: `scripts/lint-weaver-witnessed-retire.go` (CI step) fails a function that retires a membership at
+a column it reads through `boolColumn`; the Weaver dossier gains the entry and retires the
+per-entity-issue-is-unbounded one (pinned by `TestEmit_BoundsTheListingWithoutHidingTheCause`).
+
+**Accounting.** No open residual: every finding resolved in-fire; §11's inherited residuals stand as priced.
+Live: `bin/weaver` cycled via `make orchestration` (binary postdates the merge), `verify-kernel` passed; the
+running heartbeat shows no `gapOpen:` entry because no surface column is open for a violating row on the dev
+stack right now (2 pre-existing `LensEffectMismatch` warnings, `degraded`).
