@@ -2406,9 +2406,12 @@ async function loadRenewals() {
   if (summary) summary.textContent = "loading…";
   // The landlord legs (SetRenewalTerms / CancelRenewal) render from their
   // descriptors, so the catalog is loaded before the cards offer their buttons.
+  // The tenant's Sign button is enabled by the SignRenewal task assigned to
+  // them (assignedTaskKey), so their task list is loaded alongside the rows;
+  // a task-list failure only leaves the button in its not-yet-assigned state.
   await loadOpCatalogQuiet();
   try {
-    await loadRenewalsQuiet();
+    await Promise.all([loadRenewalsQuiet(), landlord ? null : loadTasksQuiet().catch(() => null)]);
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
@@ -2448,8 +2451,22 @@ function renderRenewals() {
 // renewalReady reports whether row has everything SignRenewal's own write
 // guard requires (terms set; guarantor verified if one is on file) — mirrors
 // the planner's signRenewal `pre`, the terminal-leg rule (design §4.3/§5).
+// Readiness is what makes the Sign button APPEAR; what makes it CLICKABLE is
+// the grant, which for a task-voice op is the tenant's own assigned task
+// (assignedTaskKey) — the Processor authorizes SignRenewal on {task, target},
+// never on the write guard alone, so a ready-but-unassigned cycle is shown
+// as waiting rather than as a button whose submit can only be denied.
 function renewalReady(row) {
   return !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt);
+}
+
+// assignedTaskKey answers the caller's own open task for operationName on
+// scopedTo from the tasks already loaded (state.tasks), or null. Synchronous
+// on purpose — it decides how a card renders; openTaskKeyFor is the
+// refetching form the click path uses.
+function assignedTaskKey(operationName, scopedTo) {
+  const t = (state.tasks || []).find((x) => x.operationName === operationName && x.scopedTo === scopedTo);
+  return (t && t.taskKey) || null;
 }
 
 function renewalStatusLabel(row) {
@@ -2509,8 +2526,19 @@ function renderRenewalCard(row, landlord) {
   } else if (unsigned && renewalReady(row)) {
     const signBtn = document.createElement("button");
     signBtn.textContent = "Sign renewal";
-    signBtn.addEventListener("click", () => openRenewalAction(row, "SignRenewal"));
-    actions.append(signBtn);
+    if (assignedTaskKey("SignRenewal", row.entityKey)) {
+      signBtn.addEventListener("click", () => openRenewalAction(row, "SignRenewal"));
+      actions.append(signBtn);
+    } else {
+      signBtn.disabled = true;
+      signBtn.title = "Signing opens once the task is assigned to you.";
+      actions.append(signBtn);
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "Terms are set — signing opens once your signing task is assigned (usually within a minute; refresh to check).";
+      card.append(title, sub, actions, hint);
+      return card;
+    }
   }
 
   card.append(title, sub, actions);
