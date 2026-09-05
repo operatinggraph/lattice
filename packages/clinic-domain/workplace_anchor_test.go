@@ -59,10 +59,19 @@ func TestWorkplaceAnchor_ProviderLensUnchanged(t *testing.T) {
 // patient_id IntoKey) or an un-deduped pattern comprehension (which grows
 // authz_anchors by one entry per appointment forever — see
 // clinicPatientsReadSpec's doc comment). ONE collect over the coalesced value,
-// not one per arm concatenated, is what makes the dedup hold across the two
-// arms rather than only within each. collect(DISTINCT ...) drops nulls, so a
-// patient with no appointments still yields buildingAnchors = [] rather than a
-// null element.
+// not one per APPOINTMENT arm concatenated, is what makes the dedup hold across
+// those two arms rather than only within each.
+//
+// The REGISTRATION arm (patient -> registeredAtSite building) is a THIRD,
+// independent fan-out, so it gets its own collect concatenated onto that one:
+// coalesce picks a single value per row, and on the cross-product row of an
+// appointment building and a registration building it would keep one and drop
+// the other. It reads a fact RECORDED on the patient at registration, walking no
+// identity — the arm must never re-derive the site from where the registering
+// staffer works now, or a transfer would re-anchor that staffer's whole
+// registration history. collect(DISTINCT ...) drops nulls, so a patient with no
+// appointments and no recorded registration site still yields buildingAnchors =
+// [] rather than a null element.
 func TestWorkplaceAnchor_PatientsRosterDedupesViaWith(t *testing.T) {
 	spec := clinicPatientsReadSpec
 
@@ -73,10 +82,17 @@ func TestWorkplaceAnchor_PatientsRosterDedupesViaWith(t *testing.T) {
 	if !strings.Contains(spec, "OPTIONAL MATCH (a)-[:atSite]->(b2:building)") {
 		t.Fatal("the roster must also walk each appointment's own atSite building — the only surviving path once its provider is tombstoned")
 	}
-	if !strings.Contains(spec, "WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) AS buildingAnchors") {
-		t.Fatal("the WITH must re-project p and id explicitly and fold BOTH arms through a single " +
-			"collect(DISTINCT coalesce(...)) — two collects concatenated dedupe only within each arm, " +
-			"and a patient-level fallback would let a live appointment suppress a tombstoned one's site")
+	if !strings.Contains(spec, "OPTIONAL MATCH (p)-[:registeredAtSite]->(b3:building)") {
+		t.Fatal("the roster must also read the patient's RECORDED registration site — the only building token a " +
+			"patient carries before their first appointment exists. One hop, off the patient: a walk through the " +
+			"registering identity's current worksAt would re-anchor every patient that staffer ever registered " +
+			"the moment they transfer buildings")
+	}
+	if !strings.Contains(spec, "WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) + collect(DISTINCT nanoIdFromKey(b3.key)) AS buildingAnchors") {
+		t.Fatal("the WITH must re-project p and id explicitly, fold both APPOINTMENT arms through a single " +
+			"collect(DISTINCT coalesce(...)) — coalescing them per appointment is what stops a live one " +
+			"suppressing a tombstoned one's site — and concatenate the registration arm's own collect, " +
+			"which cannot join that coalesce: it fans out independently, so coalesce would drop one of the two")
 	}
 	if !strings.Contains(spec, "[nanoIdFromKey(p.key)] + buildingAnchors") {
 		t.Error("the patient self-anchor must remain the first, unconditional element")

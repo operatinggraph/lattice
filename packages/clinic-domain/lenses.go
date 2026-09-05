@@ -271,10 +271,17 @@ func Lenses() []pkgmgr.LensSpec {
 			// JWT-authenticated actor.
 			//
 			// Each row anchors on its own patient's NanoID plus every WORKPLACE
-			// building a provider practises at, for a provider the patient has
-			// an appointment with (mirrors clinicAppointmentsRead's own
-			// practicesAt anchor exactly, one hop further out from patient to
-			// appointment to provider) — service-location's staffReadGrants
+			// building the patient reaches: the building of an appointment they
+			// hold (its provider's practicesAt site, or the appointment's own
+			// atSite — mirrors clinicAppointmentsRead's own practicesAt anchor
+			// exactly, one hop further out from patient to appointment to
+			// provider), and the building they were REGISTERED at, which is the
+			// only workplace token a patient carries before their first
+			// appointment exists. That registration site is RECORDED on the
+			// patient (CreatePatient's registeredAtSite links, naming the
+			// buildings the submitting staffer worksAt at that instant), never
+			// re-derived from where that staffer works today: a transfer moves
+			// no patient, in either direction. service-location's staffReadGrants
 			// (cap-read.staff) grants a front-desk actor a token per building
 			// they worksAt, so a worksAt-anchored front-desk identity now
 			// matches every patient whose care touches its building, not only
@@ -804,20 +811,26 @@ RETURN
 // added the identifiedBy contact columns). Same WHERE guard as
 // clinicPatientsSpec (only NAMED patients project). authz_anchors carries the
 // row's own patient NanoID plus the WORKPLACE token of every DISTINCT building
-// one of this patient's appointments is held at — the same self-plus-workplace
-// anchor concept clinicAppointmentsReadSpec establishes per appointment, one hop
-// further out (patient -> appointment -> {provider -> building | building}),
-// though this query folds that fan-out through WITH + collect(DISTINCT) rather
-// than projecting a comprehension directly (see below) — so a front-desk actor's
-// cap-read.staff grant (service-location's staffReadGrants, anchored on the
-// building it worksAt) now matches every patient whose care touches that
-// building, not only the reserved WildcardAnchor holder. Three kinds of actor
+// this patient reaches, by either of two routes: a building one of their
+// appointments is held at — the same self-plus-workplace anchor concept
+// clinicAppointmentsReadSpec establishes per appointment, one hop further out
+// (patient -> appointment -> {provider -> building | building}) — and a building
+// the patient was REGISTERED at (patient -> registeredAtSite building), which is
+// the only workplace token a patient carries before their first appointment
+// exists. This query
+// folds both fan-outs through WITH + collect(DISTINCT) rather than projecting a
+// comprehension directly (see below) — so a front-desk actor's cap-read.staff
+// grant (service-location's staffReadGrants, anchored on the building it
+// worksAt) matches every patient whose care touches that building AND every
+// patient registered at that building, not only the reserved WildcardAnchor
+// holder.
+// Three kinds of actor
 // match: the WildcardAnchor grant (the whole roster), a worksAt-anchored
 // front-desk actor for a shared building, and, via patientIdentityReadGrants
 // below, the signed-in identity that patient is identifiedBy (its own row
 // only — see clinicPatientsRead's doc comment).
 //
-// The workplace fan-out is an OPTIONAL MATCH folded back to one row per
+// Each workplace fan-out is an OPTIONAL MATCH folded back to one row per
 // (patient, identity) pair by WITH p, id, collect(DISTINCT ...) — one row per
 // patient in the common single-identifiedBy case, pre-existing multiplicity
 // this WITH neither introduces nor fixes if a patient ever carries more than
@@ -861,7 +874,54 @@ RETURN
 // the provider at write time, so it names a real site independent of the
 // provider's current status. One collect(DISTINCT) over the coalesced value —
 // not one per arm concatenated — is what makes the dedup hold ACROSS the two
-// ways of naming a building, not just within each.
+// ways an APPOINTMENT names a building, not just within each.
+//
+// The REGISTRATION arm is the third way a patient reaches a building, and the
+// only one that exists before any appointment does: the site the patient was
+// registered at, RECORDED on the patient itself. CreatePatient enumerates the
+// submitting staffer's live worksAt links once and writes a registeredAtSite
+// link per building (ddls.go); this arm reads those links and nothing else. A
+// patient the front desk registered a minute ago has no appointment and would
+// otherwise carry its self-anchor alone — invisible to the very staffer who
+// typed it in, and to every colleague at that desk, until someone books the
+// first visit. The token it contributes is the same nanoIdFromKey(building) that
+// service-location's staffReadGrants issues to a frontOfHouse actor for the
+// building it worksAt, so the arm reaches exactly the desk population that will
+// see the patient anyway the moment an appointment lands there.
+//
+// The bound is a RECORDED FACT, which is what makes it stable: the arm walks no
+// identity at all, so the registering staffer's CURRENT workplace is not an
+// input. A staffer who transfers to another building keeps every patient they
+// registered on the old building's desk and carries none of them to the new one
+// — where a live walk (patient -> registeredBy identity -> worksAt building)
+// would silently re-anchor that staffer's entire registration history on every
+// transfer, handing the new desk PHI on patients it has no care relationship
+// with and re-opening the empty-roster bug at the old one. The site is fixed at
+// registration for the same reason clinic-domain records every other time fact
+// on the entity rather than reading a clock or a mutable edge at projection.
+//
+// A patient registered by a staffer who works nowhere (an operator, a console,
+// a provider who only practicesAt) carries no registeredAtSite link and so no
+// token — the arm's floor is the self-anchor, never a bare "whoever submitted
+// it". A building since tombstoned drops out on its own: Contract #1 filters a
+// dead vertex out of every walk, so the recorded link binds nothing and the
+// desk of a decommissioned building confers no read.
+//
+// The arm's ONLY filter is the :building label. A registrar wired to a
+// non-clinic location records that location too, and it projects a token
+// whenever its type is building — the same bound service-location's own
+// staffReadGrants carries, which issues a frontOfHouse actor a token per
+// building it worksAt without asking whether that building is a clinic.
+//
+// It is a SEPARATE collect(DISTINCT) concatenated onto the appointment one, not
+// a third coalesce arm, because the two fan-outs are independent: coalesce picks
+// per row, so on the cross-product row of an appointment building and a
+// registration building it would keep one and silently drop the other. Each
+// collect is a deduped set of its own; a building named by BOTH an appointment
+// and the registration therefore appears twice. That overlap is bounded by the
+// patient's recorded registeredAtSite count (one entry, typically) and never
+// grows with the patient's appointments, and the RLS predicate is an EXISTS over
+// unnest(authz_anchors) — a repeated token changes no verdict.
 //
 // identifiedBy is OPTIONAL — a patient created before its contact was minted,
 // or one with no contact at all, has no linked identity, so identityKey /
@@ -877,7 +937,8 @@ OPTIONAL MATCH (p)-[:identifiedBy]->(id:identity)
 OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)
 OPTIONAL MATCH (a)-[:atSite]->(b2:building)
-WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) AS buildingAnchors
+OPTIONAL MATCH (p)-[:registeredAtSite]->(b3:building)
+WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) + collect(DISTINCT nanoIdFromKey(b3.key)) AS buildingAnchors
 RETURN
   nanoIdFromKey(p.key)         AS patient_id,
   p.key                        AS entity_key,

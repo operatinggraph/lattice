@@ -485,6 +485,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// (cmd/clinic-app/web/app.js), which the vocabulary has no
 				// form for.
 				OptionalReads: []string{"{payload.identityKey}"},
+				// Where the registration happened: the script enumerates the
+				// caller's own worksAt links once and records a
+				// registeredAtSite link per building on the new patient
+				// (ddls.go — "patient registeredAtSite building", the roster
+				// row's pre-appointment workplace anchor in clinicPatientsRead).
+				// A class-(e) bounded enumeration, so it declares its walk here
+				// as metadata rather than any key: the targets are unknowable
+				// client-side, and the hub is {actor}, which the Processor
+				// resolves server-side.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "worksAt", Direction: "out"},
+				},
 			},
 		},
 		{

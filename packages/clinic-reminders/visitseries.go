@@ -1096,10 +1096,23 @@ func visitSeriesDueLens() pkgmgr.LensSpec {
 // not-paused without a separate absence check. '= null' (not the unsupported IS
 // NULL) is the activeUntil absence test.
 //
+// forPatient is a REQUIRED match, and it is what bounds the population: a
+// series carrying no patient link — or one whose patient is tombstoned, which
+// Contract #1 filters out of every graph walk — projects NO row, so it arms no
+// @at and dispatches no AdvanceVisitSeries. That is exactly the population
+// visitSeriesReadSpec projects, so a cadence no hat can see is also a cadence no
+// target keeps rolling: the DUE lens and the READ lens are one population, not
+// two. That pairing is the claim, not a package-wide rule — visitSeriesSiteBackfillSpec
+// deliberately walks no forPatient, so every live series vertex stays a candidate
+// for the missing-site gap whatever its lifecycle or patient state (its own doc
+// comment: staff need to reach a finished cadence, and a tombstoned series is
+// already filtered by the anchor MATCH). withProvider stays OPTIONAL — a
+// display-only neighbour, not the anchor.
+//
 // One-row-per-anchor: forPatient / withProvider are 0..1 (StartVisitSeries writes
-// exactly one of each, deterministic keys), so the OPTIONAL walks do not fan out.
+// exactly one of each, deterministic keys), so neither walk fans the row out.
 const visitSeriesDueSpec = `MATCH (s:visitseries {key: $actorKey})
-OPTIONAL MATCH (s)-[:forPatient]->(p:patient)
+MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
 RETURN
   s.key AS actorKey,

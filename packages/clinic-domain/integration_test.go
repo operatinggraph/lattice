@@ -38,6 +38,8 @@ import (
 
 const (
 	clStaffActorID   = "CLstaffActHJKMNPQRST"
+	clRegSiteID      = "CLregSiteHJKMNPQRSTU"
+	clRegSiteKey     = "vtx.building." + clRegSiteID
 	clStaffActorKey  = "vtx.identity." + clStaffActorID
 	clStaffCapKey    = "cap.identity." + clStaffActorID
 	clConsumerID     = "CLconsumerHJKMNPQRST"
@@ -1778,6 +1780,11 @@ func TestClinic_CreatePatientWithIdentity(t *testing.T) {
 
 	identityKey := "vtx.identity.CLidentwithHJKMNPQRS"
 	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
+	// The submitting staffer's workplace — what CreatePatient enumerates to
+	// record WHERE this registration happened.
+	clSeedVertex(t, ctx, conn, clRegSiteKey, "building", false)
+	clSeedLink(t, ctx, conn, "lnk.identity."+clStaffActorID+".worksAt.building."+clRegSiteID,
+		clStaffActorKey, clRegSiteKey, "worksAt", "worksAt")
 
 	id := clSubmitOpt(t, ctx, conn, cp, cons, "mkpatid0001", "CreatePatient", "patient",
 		`{"fullName":"Bea Nakamura","identityKey":"`+identityKey+`"}`,
@@ -1824,6 +1831,21 @@ func TestClinic_CreatePatientWithIdentity(t *testing.T) {
 	if ldoc["sourceVertex"] != patientKey || ldoc["targetVertex"] != identityKey {
 		t.Fatalf("identifiedBy link source/target = %v/%v, want %v/%v",
 			ldoc["sourceVertex"], ldoc["targetVertex"], patientKey, identityKey)
+	}
+
+	// The submitter's workplace, recorded on the patient, commits through the
+	// real pipeline — end-to-end proof that the kv.Links enumeration resolves
+	// against live Core KV rather than only against the script test's fake
+	// lister. The link names two endpoints the operation declared no read of:
+	// op.actor is platform-owned, and the building is discovered mid-walk.
+	regKey := "lnk.patient." + id + ".registeredAtSite.building." + clRegSiteID
+	rdoc := clReadDoc(t, ctx, conn, regKey)
+	if rdoc["class"] != "registeredAtSite" {
+		t.Fatalf("registeredAtSite link class = %v, want registeredAtSite", rdoc["class"])
+	}
+	if rdoc["sourceVertex"] != patientKey || rdoc["targetVertex"] != clRegSiteKey {
+		t.Fatalf("registeredAtSite link source/target = %v/%v, want %v/%v (patient registeredAtSite building)",
+			rdoc["sourceVertex"], rdoc["targetVertex"], patientKey, clRegSiteKey)
 	}
 }
 

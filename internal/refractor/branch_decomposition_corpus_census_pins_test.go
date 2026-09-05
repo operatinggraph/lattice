@@ -39,7 +39,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"clinicPatientAccounts":          {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicPatientReadGrants":        {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicPatients":                 {"g0/o0!no-aggregating-item", 0, 0},
-	"clinicPatientsRead":             {"g2/o4[a,b,b2,pr] g0/o0!no-aggregating-item", 1, 2},
+	"clinicPatientsRead":             {"g3/o5[a,b,b2,pr;b3] g0/o0!no-aggregating-item", 2, 3},
 	"clinicProviderReadGrants":       {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicProviders":                {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicSiteBackfill":             {"g1/o1!no-aggregating-item", 0, 1},
@@ -80,7 +80,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"identityCredentialsRead":        {"g0/o0!no-aggregating-item", 0, 0},
 	"identityErasureResidue":         {"g1/o1[c] g1/o1[o] g1/o1[x] g1/o1[dout] g1/o1[din] g0/o0!no-aggregating-item", 5, 1},
 	"identityIndexHint":              {"g0/o0!no-aggregating-item", 0, 0},
-	"landlordLeaseApplicationsRead":  {"g1/o1[inst] g0/o0!no-aggregating-item", 1, 1},
+	"landlordLeaseApplicationsRead":  {"g3/o3[inst] g0/o0!no-aggregating-item", 1, 3},
 	"landlordUnitsRead":              {"g0/o0!no-aggregating-item", 0, 0},
 	"leaseAccounts":                  {"g1/o1!no-aggregating-item", 0, 1},
 	"leaseApplicationComplete":       {"g5/o10[docInst;inst;leaseDocObj;mgr;onbOp,onbTask;sigOp,sigTask] g0/o0!no-aggregating-item", 6, 5},
@@ -119,7 +119,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// forOperation branch.
 	"staleUserTasks":                    {"g4/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
-	"visitSeriesDue":                    {"g2/o2!no-aggregating-item", 0, 2},
+	"visitSeriesDue":                    {"g1/o1!no-aggregating-item", 0, 1},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
 	"visitSeriesSiteBackfill":           {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessBookingReminders":          {"g2/o2!no-aggregating-item", 0, 2},
@@ -175,7 +175,7 @@ var decomposingCorpusLenses = []string{
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
 // holding two or more SIBLING branch groups in one stage. The design said
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
-// thirty-two clause-counted literals; the analysis derives TWENTY-SIX.
+// thirty-two clause-counted literals; the analysis derives TWENTY-NINE.
 var siblingBranchGroupLenses = []string{
 	"applicantOnboarding",
 	"appointmentReminders",
@@ -189,6 +189,7 @@ var siblingBranchGroupLenses = []string{
 	"edgeIdentity",
 	"followUpReminders",
 	"identityAnchors",
+	"landlordLeaseApplicationsRead",
 	"leaseApplicationComplete",
 	"leaseApplicationsRead",
 	"leaseExpiry",
@@ -197,7 +198,6 @@ var siblingBranchGroupLenses = []string{
 	"pastDueBookings",
 	"providerAppointmentsRead",
 	"staleUserTasks",
-	"visitSeriesDue",
 	"visitSeriesRead",
 	"visitSeriesSiteBackfill",
 	"wellnessBookingReminders",
@@ -219,6 +219,7 @@ var multiGroupDecomposingLenses = []string{
 	"clinicPatientsRead",
 	"edgeIdentity",
 	"identityAnchors",
+	"landlordLeaseApplicationsRead",
 	"leaseApplicationComplete",
 	"leaseApplicationsRead",
 	"leaseExpiry",

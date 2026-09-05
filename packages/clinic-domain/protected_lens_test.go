@@ -611,6 +611,175 @@ func TestClinicPatientsRead_WorkplaceAnchorDedupesAcrossAppointments(t *testing.
 	require.Len(t, anchors, 3, "authz_anchors must not grow by one entry per appointment, and must not collapse a genuinely distinct building")
 }
 
+// seedRegisteredPatient seeds a named patient plus the building it was
+// REGISTERED at — the registeredAtSite link CreatePatient records on the
+// patient from the submitting staffer's live worksAt links. The registrar
+// itself is deliberately NOT part of the seed: the roster's registration arm
+// walks the recorded fact and never the identity that produced it.
+func (f *lensFixture) seedRegisteredPatient(t *testing.T, patientName, siteName string) {
+	t.Helper()
+	f.vtx(t, patientName, "patient")
+	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+	f.vtx(t, siteName, "building")
+	f.edge(t, "registeredAtSite", patientName, siteName)
+}
+
+// TestClinicPatientsRead_RegistrationSiteWorkplaceAnchor — the fix for the
+// invisible-fresh-registration bug: a patient the front desk registered a
+// moment ago has NO appointment, so the appointment fan-out yields nothing and
+// the row would carry its self-anchor alone — matched by no staff grant, so
+// invisible to the very staffer who typed it in. The recorded registration site
+// is the only workplace token such a patient has, and it is the same token
+// service-location's staffReadGrants issues that desk.
+func TestClinicPatientsRead_RegistrationSiteWorkplaceAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedRegisteredPatient(t, "alice", "riverside")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"a patient with no appointment must still anchor on the building they were registered at")
+}
+
+// TestClinicPatientsRead_RegistrarTransferMovesNoPatient is the headline vector
+// for recording the site instead of walking the registrar: the staffer who
+// registered Alice at riverside transfers to downtown, and Alice moves nowhere.
+// The arm reads the patient's own recorded link, so the registrar's CURRENT
+// worksAt is not an input at all — riverside keeps her (the desk that admitted
+// her still reads her record) and downtown never gains her (a desk with no care
+// relationship never sees her Secure-Lens PHI). A live walk
+// (patient -> registeredBy identity -> worksAt building) would fail BOTH halves
+// on this seed, re-anchoring the staffer's whole registration history on every
+// transfer.
+func TestClinicPatientsRead_RegistrarTransferMovesNoPatient(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedRegisteredPatient(t, "alice", "riverside")
+	f.vtx(t, "downtown", "building")
+	f.vtx(t, "desk", "identity")
+	f.edge(t, "worksAt", "desk", "riverside")
+
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]},
+		anchorStrings(t, f.project(t, clinicPatientsReadSpec)[0].Values["authz_anchors"]),
+		"the pre-transfer vector this rests on")
+
+	// The transfer itself: the registrar's worksAt link leaves riverside and
+	// lands on downtown.
+	f.unedge(t, "worksAt", "desk", "riverside")
+	f.edge(t, "worksAt", "desk", "downtown")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"a registrar's transfer must move no patient: riverside keeps Alice and downtown never gains her")
+}
+
+// TestClinicPatientsRead_UnrecordedRegistrationSiteAnchorsSelfOnly — the
+// negative half. The token is the recorded BUILDING, so a patient registered by
+// a staffer who works nowhere (a console, an operator, a provider who only
+// practicesAt) carries no registeredAtSite link at all and the row stays exactly
+// where it was, self-anchored. The arm grants a desk its own registrations,
+// never a bare "whoever submitted it".
+func TestClinicPatientsRead_UnrecordedRegistrationSiteAnchorsSelfOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"no recorded registration site contributes no anchor")
+}
+
+// TestClinicPatientsRead_TombstonedRegistrationSiteAnchorsSelfOnly — the
+// building Alice was registered at has since been decommissioned. Contract #1
+// filters a tombstoned vertex out of every graph walk, so the recorded link
+// binds nothing and the token goes with it: a dead building's desk confers no
+// read, exactly as the appointment arm's tombstoned-provider case does. The
+// recorded LINK is left live, which is what makes the vertex test load-bearing
+// rather than incidental.
+func TestClinicPatientsRead_TombstonedRegistrationSiteAnchorsSelfOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedRegisteredPatient(t, "alice", "riverside")
+
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]},
+		anchorStrings(t, f.project(t, clinicPatientsReadSpec)[0].Values["authz_anchors"]),
+		"the live-building vector this negative rests on")
+
+	f.tombstoneVertex(t, "riverside")
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "the patient row itself survives — only the anchor is lost")
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"a tombstoned registration site confers no workplace token")
+}
+
+// TestClinicPatientsRead_RegistrationAndAppointmentAnchorsUnion — the two
+// fan-outs are INDEPENDENT, and the row carries both. Alice was registered at
+// riverside and is seen at downtown; each desk reads her. This is what a third
+// coalesce arm could not express — coalesce picks one value per row, so on the
+// cross-product row of an appointment building and a registration building it
+// would keep the appointment's and silently drop the desk that registered her.
+func TestClinicPatientsRead_RegistrationAndAppointmentAnchorsUnion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedRegisteredPatient(t, "alice", "riverside")
+	f.vtx(t, "downtown", "building")
+
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.edge(t, "practicesAt", "drsam", "downtown")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "one roster row per patient, whichever arms matched")
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["downtown"], f.ids["riverside"]},
+		anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"the appointment building and the registration building both anchor the row")
+}
+
+// TestClinicPatientsRead_RegistrationAnchorOverlapBounded pins the one cost of
+// keeping the registration arm in its own collect: a building named by BOTH an
+// appointment and the registration appears TWICE, because the two sets are
+// deduped separately and then concatenated. What must hold is that the overlap
+// stays bounded by the patient's recorded registeredAtSite count — one extra
+// entry here, no matter how many appointments the patient accumulates at that
+// building. The RLS predicate is an EXISTS over unnest(authz_anchors), so a
+// repeated token changes no verdict; unbounded growth is the thing that would.
+func TestClinicPatientsRead_RegistrationAnchorOverlapBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedRegisteredPatient(t, "alice", "riverside")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+	for _, appt := range []string{"appt1", "appt2", "appt3"} {
+		f.vtx(t, appt, "appointment")
+		f.edge(t, "forPatient", appt, "alice")
+		f.edge(t, "withProvider", appt, "drsam")
+	}
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"], f.ids["riverside"]},
+		anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"three appointments at riverside still collapse to ONE appointment-arm entry; the registration arm adds exactly one more")
+}
+
 // TestClinicPatientsRead_TombstonedProviderFallsBackToAtSiteAnchor — the roster
 // half of the atSite fallback, and the proof that it resolves PER APPOINTMENT
 // rather than per patient. Alice has two appointments: one through a live
