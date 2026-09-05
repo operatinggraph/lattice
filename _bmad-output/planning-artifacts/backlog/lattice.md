@@ -67,6 +67,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row** | Every catalog row repeats the descriptor vocabulary (~2 KB × 26–97 rows per actor), so one actor's content pass is 50–200 KB of near-identical text; a vocabulary reference per row, or a per-actor vocabulary row, would cut it by an order of magnitude. Measured at the personal-lens delta T7. | ★ | S | 📋 ready · [why](../../implementation-artifacts/personal-lens-delta-publication-design.md) §13 |
 | **[Refractor] `adjacency.upsertEdge` removes an edge by `EdgeID` with no ordering guard** | Deterministic `EdgeID`s: a revoke→re-grant reuses one, the removal has no sequence compare, a Nak'd message redelivers — an older tombstone after the newer create deletes a live edge, absent to every walk, the enumerator, the cap-read diff and the derived-anchor retraction walk (19 lenses, 5 PII tables). Fix: seq-guard removal + upsert per edge. | ★★★ | S–M | 📋 ready · [why](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md) §4.4 |
 
+| **[Weaver] A goal-mode gap's dispatch shape never reaches `externalDispatchGap`** | Switches on `ga.Action` ([evaluator.go:616](../../../internal/weaver/evaluator.go:616)) — `""` for every goal gap — so `staleMark` never returns true for one, and three legs read that: `renewalComplete`'s external `refreshBgcheck` leg always reclaims collapse-only, and `reset-budget` refuses it forever. `resolvedLegAction` resolves it a line above two of the three sites. | ★★ | S–M | 📐 needs designer pass · no-pattern: dispatch-shape resolution for a goal gap at lane-1's pre-plan stale gate |
+
 ### Survey log (round-robin rotation)
 
 Rotation memory only — findings are the filed rows; fire narratives live in commits, never here.
@@ -78,7 +80,8 @@ backlog). Survey the stalest (`git log -1 --format=%ct -- <path>`), note ONE dat
 - 2026-07-19 Bootstrap (69.3% cov; filed stale-bootstrap-json-no-freshness-probe ★★ + seed-idempotency-branch-cov).
 - 2026-07-19 Core (processor 81.8/substrate 76.2% cov; filed 3: supervisor-accessors, outbox-consumer cov, processor.md drift).
 - 2026-07-25 Refractor (out of rotation) — filed shared-bucket rebuild-truncate hazard; next unchanged.
-- **Next:** Weaver.
+- 2026-09-05 Weaver (91.0% cov, zero TODOs; filed goal-mode dispatch-shape classifier + the planner mandate's Fire 9).
+- **Next:** Loom.
 
 ## Lattice feature backlog — the Phase-3 build queue
 
@@ -119,6 +122,8 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **AI-authored capabilities — Fire 5 (auto-apply)** | Fires 1–4 ship the propose→validate→human-review→apply loop; Fire 5 would apply a high-confidence proposal with no human verdict. Design-only by Andrew. | ★★ | M | 🚧 Andrew-gated (design-only) · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) |
 | **The Augur — Fire 3 (autoApply)** | Fires 1+2a+2b close the escalate→review→dispatch loop with a human verdict in it; Fire 3 removes it for high-confidence remediations. | ★★ | M | 🚧 Andrew-gated · [design](../../implementation-artifacts/augur-design.md) + [dispatch](../../implementation-artifacts/augur-dispatch-pickup-design.md) |
 | **[capability-author] One authoring request cannot co-propose a NEW lens + the target that binds it** | `RecordCapabilityProposal` records one `{kind,content}` per request and single-artifact apply resolves `lensRef` only by NanoID or same-Definition name — so a new-lens-plus-target intent can't produce both atomically. NL v1 binds an existing lens instead. | ★★ | L | 🗄️ shelved (revive: a real new-lens+target atomic intent, or a reported torn bundle) · two-step workaround shipped · [why](../../implementation-artifacts/capability-proposal-bundles-design.md) |
+
+| **[Weaver] The planner mandate's Fire 9 — the Augur floor — is its last unbuilt fire, on no board** | Fires 1–8 shipped; §8's Fire 9 (`unplannable`/`exhausted` → Augur, plan-shaped proposals via the Fire-6 per-leg path, promotion) is tracked nowhere. The Augur materialises one `proposedAction`/`proposedParams` today, so §7(b)'s named case — a novel gap with no pre-authored decomposition — has no remediation path. | ★★ | M | ✅ ratified · seq: after the three-doors escalation row · [design §8](../../implementation-artifacts/weaver-planner-mandate-design.md) |
 
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
