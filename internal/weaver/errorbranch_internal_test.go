@@ -414,6 +414,7 @@ func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
 		issueKeyDataEntity(targetID, entityB, "entityKey"),
 		issueKeyGapEntity(targetID, entityA, "missing_x"),
 		issueKeyGapConfig(targetID, "missing_x"),
+		issueKeyGapOpen(targetID, "missing_s"),
 	}
 	// A target whose id shares the removed one's leading characters: the trailing
 	// separator in each family prefix is what keeps it out of the clear.
@@ -421,6 +422,12 @@ func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
 	for _, key := range append(append([]string{}, stranded...), survivor) {
 		h.engine.issues.set(key, "warning", "Fixture", key)
 	}
+
+	// The in-memory membership behind a surface column's entry is torn down on
+	// the same leg: no consumer means no delivery, so nothing could ever consult
+	// or retire it.
+	h.engine.surface.add(targetID, "missing_s", entityA, "UnroutedTasks", "warning")
+	h.engine.surface.add(targetID+"Sibling", "missing_s", entityA, "UnroutedTasks", "warning")
 
 	// Leave the registry the non-Revoke way — the state removeVertex /
 	// removeSpec / a renamed targetId all land in before firing the reconcile
@@ -441,6 +448,12 @@ func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
 	}
 	if _, ok := issueAt(h.engine.issues, survivor); !ok {
 		t.Fatalf("removing %q retired %q, which belongs to another target", targetID, survivor)
+	}
+	if n := h.engine.surface.count(targetID, "missing_s"); n != 0 {
+		t.Fatalf("registry removal left %d open-row memberships for an unregistered target", n)
+	}
+	if n := h.engine.surface.count(targetID+"Sibling", "missing_s"); n != 1 {
+		t.Fatalf("removing %q dropped another target's memberships, sibling count = %d", targetID, n)
 	}
 }
 

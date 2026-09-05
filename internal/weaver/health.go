@@ -22,13 +22,13 @@ const defaultHeartbeatEvery = 10 * time.Second
 
 // maxHeartbeatIssues caps how many issue entries one heartbeat document lists.
 //
-// The whole document is a single Health-KV value, and two of the issue classes
-// Weaver raises are per-ENTITY: a `surface` gap standing open (one per
-// violating subject — every unrouted task past its expiresAt, every erasure
-// stuck mid-flight) and the spent-budget pair (GapBudgetExhausted, or
-// GapEscalatedToAugur where a policy escalates). Both are unbounded in entity count,
-// so an unbounded issues[] would grow the value without limit. The listing is
-// bounded instead; the aggregate status is computed over EVERY open issue
+// The whole document is a single Health-KV value, and several of the issue
+// classes Weaver raises are per-ENTITY: a malformed projected value
+// (RowDataError), an unbuildable plan (TemplateDataError), and the spent-budget
+// pair (GapBudgetExhausted, or GapEscalatedToAugur where a policy escalates).
+// Each is unbounded in entity count, so an unbounded issues[] would grow the
+// value without limit. The listing is bounded instead; the aggregate status is
+// computed over EVERY open issue
 // before the cut, so truncation never makes the heartbeat read healthier than
 // it is, and the truncation entry names the total so a bounded list is never
 // readable as the whole set (internal/pkgmgr's sampleWithOverflow rule, applied
@@ -43,9 +43,18 @@ const issuesTruncatedCode = "IssuesTruncated"
 // names before it summarises the remainder.
 const omittedCodeSampleCap = 8
 
-// rowIssueCapPerTarget bounds how many PER-ROW issue entries — the `data:` and
-// `template:` families together, one entry per (entity, column) — the issue
-// cache tracks for one target.
+// rowIssueCapPerTarget bounds how many PER-ROW issue entries — the `gap:`,
+// `data:`, `template:` and `sweep:` families together, one entry per
+// (entity, column) — the issue cache tracks for one target. Which four is
+// decided by rowIssueTarget's key-shape test, whose own comment carries the
+// reasoning for each; a narrower list here would tell a builder the bound
+// covers less than it does.
+//
+// The population it bounds is FAULTS — one entry per broken row. The one family
+// whose population is open business work rather than breakage, a `surface`
+// gap's open rows, is deliberately outside it: that raises one counted
+// target-scoped entry at issueKeyGapOpen, so a healthy backlog cannot fill the
+// budget and start refusing the target's genuine faults.
 //
 // maxHeartbeatIssues bounds the DOCUMENT and is unaffected by this: the
 // heartbeat still computes its aggregate status over every entry the cache holds
@@ -157,9 +166,10 @@ type pacedLog struct {
 //	                       | "keys raised in the last two intervals"
 //	restart                | empty, like the latch itself; the first raise after a restart is an arrival, which is correct
 //
-// The remaining maps are the per-target bound on the two PER-ROW families
-// (`data:` and `template:`), whose entry count is one per (entity, column) and
-// therefore grows with the LENS, not with the deployment: a systemically-broken
+// The remaining maps are the per-target bound on the four PER-ROW families
+// (`gap:`, `data:`, `template:` and `sweep:` — rowIssueTarget's key-shape test
+// is what decides), whose entry count is one per (entity, column) and therefore
+// grows with the LENS, not with the deployment: a systemically-broken
 // 100k-row target would otherwise grow both this map and snapshot's
 // per-heartbeat sort without limit. rowIssues counts a target's currently-tracked
 // per-row latch entries; rowPaced counts its tracked per-row PACE entries, which
@@ -179,7 +189,7 @@ type pacedLog struct {
 //	                       | on a stable durable, so the row is never delivered again until it
 //	                       | re-projects. Retiring the count at the boundary would delete the only
 //	                       | record that those rows are broken
-//	retired (subject gone) | with the target's `data:`/`template:` prefix clears — an entity tombstone frees
+//	retired (subject gone) | with the per-row families' prefix clears — an entity tombstone frees
 //	                       | that entity's slots, a Revoke or registry removal frees the target's whole set
 //	restart                | empty, like the latch itself: the cache is rebuilt from redeliveries, so the cap
 //	                       | re-fills in delivery order and the overflow entry re-arrives when it is re-reached

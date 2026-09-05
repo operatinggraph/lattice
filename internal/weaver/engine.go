@@ -286,6 +286,7 @@ type Engine struct {
 	disabled         *disabledTargetSet
 	shadow           *shadowStats
 	contraction      *contractionStats
+	surface          *surfaceStats
 	oscillation      *oscillationStats
 	admission        *admissionScheduler
 	republish        *republishSet
@@ -379,6 +380,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		disabled:         newDisabledTargetSet(),
 		shadow:           newShadowStats(),
 		contraction:      newContractionStats(),
+		surface:          newSurfaceStats(),
 		oscillation:      newOscillationStats(),
 		admission:        newAdmissionScheduler(),
 		republish:        newRepublishSet(),
@@ -569,19 +571,23 @@ func (e *Engine) reconcileConsumers() {
 		e.issues.clear(issueKeyConsumer(id))
 		delete(e.targets, id)
 		// A target leaving the registry retires its whole standing issue set, not
-		// just its consumer's entry. The gap, gap-config, data and template
-		// families are keyed per (entity, column) below the target, so there is
-		// no single key to name, and an unregistered target's rows return at
-		// handleRow's registry miss — no live path can reach a clear once the
-		// registration is gone. This is the same prefix set Revoke retires, so a
-		// target torn down by either route leaves nothing standing; the two
-		// overlap idempotently.
+		// just its consumer's entry. The gap, gap-config, gap-open, data,
+		// template and sweep families all carry a segment below the target, so
+		// there is no single key to name, and an unregistered target's rows
+		// return at handleRow's registry miss — no live path can reach a clear
+		// once the registration is gone. This is the same prefix set Revoke
+		// retires, so a target torn down by either route leaves nothing
+		// standing; the two overlap idempotently.
 		for _, prefix := range issueKeyTargetPrefixes(id) {
 			e.issues.clearPrefix(prefix)
 		}
-		// Same reasoning for the in-memory republish obligations: no consumer
-		// means no delivery, so nothing could ever consult or retire them.
+		// Same reasoning for the in-memory republish obligations and the
+		// surface gaps' open-row memberships: no consumer means no delivery, so
+		// nothing could ever consult or retire them, and a membership left
+		// standing would re-raise the count the prefix clear above just retired
+		// if the same targetId were registered again.
 		e.republish.clearTarget(id)
+		e.surface.removeTarget(id)
 		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states)
 		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("weaver target consumer health-state cleanup failed", "targetId", id, "durable", name, "err", err)

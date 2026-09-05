@@ -942,8 +942,9 @@ decides whose close retires the issue. The key never appears on the wire — it 
 
 | Key shape | Scope | Codes |
 |---|---|---|
-| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted`; `GapEscalatedToAugur` |
+| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW's gap | `GapBudgetExhausted`; `GapEscalatedToAugur` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` — all three `warning` |
+| `gapOpen:<targetId>.<gapColumn>` | the target's open WORKLOAD for one `surface` gap column | the package's declared `issueCode` (`UnroutedTasks`, `StaleAssignedTask`, `LeaseDecisionAwaiting`, …) at its declared `issueSeverity` |
 | `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo, a row body that does not parse as JSON) |
 | `data:<targetId>.__capped` | the target's per-ROW issue budget | `RowIssuesCapped` |
 | *(not latched — rebuilt from live consumer state each heartbeat)* | one lane-1 consumer | `ConsumerPaused`, `ConsumerSaturated` |
@@ -966,12 +967,30 @@ dead and IS re-fired, because a reasoning claim that never converges has no othe
 re-fire mints a fresh live mark, which paces the re-fires to one per lease. A suppression keyed on
 this latch instead would be permanent and would retire that recovery.
 
-A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
-`(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
-a document, and each entry's `message` names its `entity <entityId>`. Each retires on its own
-subject's close, so one subject's remediation landing never clears the issue raised for a subject
-still stuck. A config fact is identical for every row of the target and only a package re-author
-can fix it, so it is raised once per `(target, gap)` however many rows are violating.
+A `surface` gap standing open is a fact about the target's open WORKLOAD, not about any one row: N
+subjects holding the same `(target, gap)` column open are N units of business work of one kind, and
+on a healthy system that number is large and is supposed to be. It raises **one** entry per
+`(target, gapColumn)`, whose `message` carries the count —
+`target unroutedTasks: 137 rows have column missing_claim true`. Row identity is not lost, it is
+read where it is authoritative and complete: the target's projected row set, which is what the gap
+is computed from and what Loupe's entity page already renders the column's `open` state from.
+
+Two honest bounds on that count, and neither is a defect to report. It is a **lower bound** while
+rows re-project after a restart — a lane-1 durable that survives resumes from its persisted ack
+floor, so a row already acked and not since re-projected is not re-counted; `replayTarget`
+re-presents a target's whole current row set and re-derives it exactly. And it is **per instance**:
+lane-1 durables are one per target, so with more than one Weaver a target's rows shard across
+instances and each instance's heartbeat carries the count it observes — which is why Loupe reports
+Weaver heartbeats per instance and never merges them. The contract states both on the wire.
+
+The entry is rewritten on **every** membership change, add and remove alike, so the count is always
+the set behind it; only the close of the **last** open row retires it. Its `since` therefore means
+*when this column last went from no open rows to some*: a count that merely changes leaves the stamp
+alone, while a retirement deletes it, so a column that reopens after emptying arrives as a new issue
+dated from then.
+
+A config fact is identical for every row of the target and only a package re-author can fix it, so it
+too is raised once per `(target, gap)` however many rows are violating.
 
 The same split governs `data:`. A malformed column value is a fact about the one projected row
 carrying it, repaired for that row alone by the next projection, so it is keyed per
@@ -1016,10 +1035,16 @@ at most 500 per-row entries are tracked for one target, after which further rais
 that set are refused and counted into one entry at `data:<targetId>.__capped`:
 
 Membership in that budget is decided by key SHAPE — an entity segment AND a column segment below the
-target — because that shape is exactly what makes a family grow with the subject count. All three
-per-row families qualify: `gap:`, `data:` and `template:`. A target-scoped fact (`gapConfig:`, the
-overflow entry itself, `consumer:`, `effect:`) never consumes a slot, or a flood of row faults would
-start refusing the very entries that explain them.
+target — because that shape is exactly what makes a family grow with the subject count. All four
+per-row families qualify: `gap:`, `data:`, `template:` and `sweep:`. A target-scoped fact
+(`gapConfig:`, `gapOpen:`, the overflow entry itself, `consumer:`, `effect:`) never consumes a slot,
+or a flood of row faults would start refusing the very entries that explain them.
+
+`gapOpen:` is the one whose exclusion is load-bearing rather than incidental. The budget bounds the
+FAULT population — one entry per broken row — and a `surface` gap's population is open business
+work. Counted against it, a healthy backlog of 500 unclaimed tasks would fill the budget and every
+genuine fault raised for that target afterwards would be refused. Keyed per `(target, gapColumn)` it
+consumes no slot at any backlog size.
 
 ```json
 {"severity": "<the worst severity among the raises it refused — warning or error>",

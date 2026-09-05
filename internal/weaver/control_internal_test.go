@@ -378,6 +378,7 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyGapEntity("t1", entityA, "missing_x"),
 		issueKeyGapEntity("t1", entityB, "missing_x"),
 		issueKeyGapConfig("t1", "missing_x"),
+		issueKeyGapOpen("t1", "missing_s"),
 		issueKeyDataEntity("t1", entityA, "missing_x"),
 		issueKeyDataEntity("t1", entityB, freshUntilColumn),
 		issueKeyDataEntity("t1", entityB, "entityKey"),
@@ -392,15 +393,27 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 	survivors := []string{
 		issueKeyGapEntity("t10", entityA, "missing_x"),
 		issueKeyGapConfig("t10", "missing_x"),
+		issueKeyGapOpen("t10", "missing_s"),
 		issueKeyDataEntity("t10", entityA, "missing_x"),
 		issueKeyTemplateEntity("t10", entityA, "missing_x"),
 	}
 	for _, key := range survivors {
 		h.engine.issues.set(key, "warning", "Fixture", key)
 	}
+	// The in-memory membership behind a surface column's entry goes with the
+	// entry: left standing, the first row a re-added target delivered would
+	// re-raise the count the prefix clear just retired.
+	h.engine.surface.add("t1", "missing_s", entityA, "UnroutedTasks", "warning")
+	h.engine.surface.add("t10", "missing_s", entityA, "UnroutedTasks", "warning")
 
 	if err := h.engine.Revoke(ctx, "t1"); err != nil {
 		t.Fatalf("Revoke: %v", err)
+	}
+	if n := h.engine.surface.count("t1", "missing_s"); n != 0 {
+		t.Fatalf("Revoke left %d open-row memberships for a target that no longer exists", n)
+	}
+	if n := h.engine.surface.count("t10", "missing_s"); n != 1 {
+		t.Fatalf("Revoke(t1) dropped another target's memberships, t10 count = %d", n)
 	}
 
 	for _, key := range revoked {

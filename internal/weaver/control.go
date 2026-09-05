@@ -235,19 +235,23 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 
 	e.issues.clear(issueKeyConsumer(targetID))
 	e.issues.clear(issueKeyTimer(targetID))
-	// The gap, gap-config, data and template families are keyed per
-	// (entity, column) below the target, so a revoked target's standing entries
-	// have no single key to name: retire each family by prefix, exactly as the
+	// The gap, gap-config, gap-open, data, template and sweep families all carry
+	// a segment below the target, so a revoked target's standing entries have no
+	// single key to name: retire each family by prefix, exactly as the
 	// weaver-state teardown above retires the target's keys by prefix. Without
-	// this, one issue per (entity, column) stands for a target that no longer
-	// exists until the process restarts.
+	// this, one issue per (entity, column) — and one per open surface column —
+	// stands for a target that no longer exists until the process restarts.
 	for _, prefix := range issueKeyTargetPrefixes(targetID) {
 		e.issues.clearPrefix(prefix)
 	}
 	// The in-memory republish obligations go with them: the weaver-state
 	// teardown above deleted every mark they were owed against, so no delivery
-	// can consult them and no publish can retire them.
+	// can consult them and no publish can retire them. The surface gaps'
+	// open-row memberships go for the same reason, and for a second: a
+	// membership left standing would re-raise the count the prefix clear above
+	// just retired, the first time a re-added target delivered a row.
 	e.republish.clearTarget(targetID)
+	e.surface.removeTarget(targetID)
 	if ownerID, ok := e.source.ownerVertexID(targetID); ok {
 		e.issues.clear(issueKeyTarget(ownerID))
 	}

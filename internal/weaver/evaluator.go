@@ -315,11 +315,26 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 
 	if ga.Action == actionSurface {
 		// FR29: surface-only, never dispatch. No mark, no OCC, no episode —
-		// just a Health-KV issue for as long as THIS entity's gap stays open
-		// (cleared by clearClosedMarks below when this row stops naming the
-		// column). The issue states a fact about one row, so it is keyed per
-		// (target, entity, gap): N subjects violating the same column
-		// concurrently raise and retire N independent issues.
+		// just the entity's membership in this column's open-row set, and the
+		// ONE Health-KV issue that set is reflected into (issueKeyGapOpen),
+		// carrying the count. The fact is the target's open WORKLOAD for the
+		// column, identical in kind for every row holding it, so it is one
+		// target-scoped entry rather than N per-row ones: the per-row budget
+		// bounds FAULTS, and a backlog of open business work is not a fault.
+		// Row identity stays where it is authoritative and complete — the
+		// projected row set this gap is computed from.
+		//
+		// Only a membership TRANSITION writes: a CDC redelivery of an
+		// already-open row leaves the entry untouched, count and `since` alike.
+		// The retirements are surfaceStats' three removal legs (its doc
+		// comment); clearClosedMarks below reaches the first of them when this
+		// row stops naming the column.
+		//
+		// A message whose value changes is safe on this seam and only on this
+		// seam: bare issues.set touches neither standingAs (which ignores
+		// messages) nor pacedRaise (which would read a changing count as a
+		// fresh arrival). Routing this raise through either would mean moving
+		// the count to a metric.
 		sev := ga.IssueSeverity
 		if sev == "" {
 			sev = "warning"
@@ -328,8 +343,9 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		if code == "" {
 			code = "Surface"
 		}
-		e.issues.set(issueKeyGapEntity(targetID, entityID, col), sev, code,
-			"target "+targetID+" entity "+entityID+": row column "+col+" is true")
+		if reflection, changed := e.surface.add(targetID, col, entityID, code, sev); changed {
+			e.reflectSurface(targetID, reflection)
+		}
 		return substrate.Ack
 	}
 
@@ -565,16 +581,18 @@ func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external
 // own surface branch, therefore meets a `surface` gap it must not act on:
 // planning one falls to buildPlan's default and alerts `PlaybookConfigError`
 // against a playbook that is entirely contract-legal; escalating one raises
-// GapBudgetExhausted at the very latch lane-1 holds the surface issue on; and
-// merely reading the suppression verdict for one makes a stranded count look
-// like a spent budget, which SKIPS the column and switches its diagnostic off.
+// GapBudgetExhausted — "this row's remediation ran out" — for a gap that by
+// contract never remediates; and merely reading the suppression verdict for one
+// makes a stranded count look like a spent budget, which SKIPS the column and
+// switches its diagnostic off.
 //
 // The four sites are handleRow's suppression gate, escalateExhaustedGap, the
 // sweep's reclaim, and the count leg's re-arm. handleRow and reclaim each need a
 // guard of their own because each declines something the escalation never sees:
-// handleRow SKIPS the column outright on a spent budget, and the Surface issue
-// dispatchGap would have raised is what that skip costs; reclaim would
-// re-dispatch a stranded mark. With both guarded, the escalation's only
+// handleRow SKIPS the column outright on a spent budget, and the open-row
+// membership dispatchGap would have recorded — the count on the column's
+// gapOpen: entry — is what that skip costs; reclaim would re-dispatch a
+// stranded mark. With both guarded, the escalation's only
 // currently-reachable surface path is the count leg's arm (l) — but the guard
 // sits INSIDE escalateExhaustedGap rather than at that one caller, so a future
 // third caller inherits it instead of having to remember it.
@@ -1000,7 +1018,8 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// and the tombstone's empty body needs no parsing to get here.
 		//
 		// The `gap:` family is retired by the same prefix and for a stronger
-		// reason: its entries are raised at whatever openGapColumns enumerated,
+		// reason: its entries — a spent retry budget, an escalation to the
+		// reasoning tier — are raised at whatever openGapColumns enumerated,
 		// which is every true missing_* column WHETHER OR NOT the playbook names
 		// it, while the candidate walk below yields only the playbook's keys
 		// unioned with the (now empty) row's. A gap entry raised at an orphan
@@ -1009,6 +1028,16 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		e.issues.clearPrefix(issuePrefixGapEntity + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
+		// A `surface` gap's open-row membership has the identical orphan-column
+		// hazard and the same answer in memory: the entity is dropped from EVERY
+		// column set of the target, not just from the ones the walk below will
+		// name, because a column the playbook has since dropped never yields
+		// from an empty body and the membership would leak with the entity gone
+		// and no leg able to reach it. Each changed column's entry is rewritten
+		// with the smaller count, or retired if the deleted row was its last.
+		for _, reflection := range e.surface.removeEntity(targetID, entityID) {
+			e.reflectSurface(targetID, reflection)
+		}
 	}
 	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
@@ -1067,7 +1096,9 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
-			// e.marks.get) — nothing further to clear for this column.
+			// e.marks.get) — nothing further to clear for this column. Its one
+			// piece of state, the entity's membership in the column's open-row
+			// set, was retired by retireClosedGapIssues above.
 			continue
 		}
 		rec, markRev, found, gErr := e.marks.get(ctx, targetID, entityID, col)
@@ -1172,9 +1203,17 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 }
 
 // retireClosedGapIssues retires everything a gap ACTUALLY ENDING retires: the
-// plan-side facts above, plus the gap's own entity-scoped latch (a `surface`
-// gap standing open, a spent retry budget, a budget spent and escalated to the
-// reasoning tier).
+// plan-side facts above, the gap's own entity-scoped latch (a spent retry
+// budget, a budget spent and escalated to the reasoning tier), and this entity's
+// membership in the column's `surface` open-row set — which rewrites that
+// column's one gapOpen: entry with the smaller count, or retires it when this
+// was the last open row.
+//
+// The membership remove is a no-op for every non-surface gap, which is why it
+// rides here rather than behind an action test: the sweep legs that reach this
+// helper hold a mark or a dispatch-count and a `surface` gap has neither, so
+// they can never carry one, and the one leg that can — clearClosedMarks'
+// candidate walk — reaches it for the column that actually closed.
 //
 // The split from retireGapPlanIssues is the difference between "this gap ended"
 // and "this gap is no longer dispatchable", and it is load-bearing. A gap the
@@ -1190,7 +1229,32 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 // row cease to exist — may retire it.
 func (e *Engine) retireClosedGapIssues(targetID, entityID, gapColumn string) {
 	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	if reflection, changed := e.surface.remove(targetID, gapColumn, entityID); changed {
+		e.reflectSurface(targetID, reflection)
+	}
 	e.retireGapPlanIssues(targetID, entityID, gapColumn)
+}
+
+// reflectSurface writes a `surface` gap column's one Health entry from the
+// membership surfaceStats just changed: the count while rows are still open, and
+// the entry's retirement once the last one closes. It is the SINGLE writer of a
+// gapOpen: key, so the number on the board is always the size of the set behind
+// it — an entry written only on the raise would sit at its high-water mark while
+// the backlog drained.
+//
+// setLocked preserves an existing `since`, so a rewrite restates the count
+// without disturbing the entry's age; the retirement deletes it, so a column
+// that reopens after emptying arrives with a fresh stamp. That is what makes the
+// entry's `since` read as "when this column last went from no open rows to
+// some".
+func (e *Engine) reflectSurface(targetID string, reflection surfaceReflection) {
+	key := issueKeyGapOpen(targetID, reflection.column)
+	if reflection.count == 0 {
+		e.issues.clear(key)
+		return
+	}
+	e.issues.set(key, reflection.severity, reflection.code,
+		"target "+targetID+": "+strconv.Itoa(reflection.count)+" rows have column "+reflection.column+" true")
 }
 
 // releaseCompletedLeg reports whether gap col's currently-pinned goal-mode
@@ -1543,17 +1607,19 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		// A surface gap has no remediation chain, so it has no budget to have
 		// spent: the count that reached this call is stranded from the action
 		// the package replaced (surfaceOnlyGap). Both branches below would be
-		// wrong for it. Both write issueKeyGapEntity — GapBudgetExhausted on the
-		// un-escalated arm, GapEscalatedToAugur on the escalated one — and that
-		// is the SAME latch lane-1 holds this column's surface issue on, so
-		// either would overwrite it and re-stamp `since` on every round trip,
-		// the flap the orphan-column arm was amended to stop. The escalated one
-		// also dispatches a real Augur reasoning episode for a gap whose whole
-		// contract is that Weaver never dispatches for it.
+		// wrong for it, and the reason is the DISPATCH, not a key collision. The
+		// un-escalated arm would raise GapBudgetExhausted — "this row's
+		// remediation ran out" — for a gap that by contract has no remediation
+		// and never attempted one, which is a fabricated fault an operator would
+		// go looking for. The escalated arm would additionally fire a real Augur
+		// reasoning episode for a gap whose whole contract is that Weaver never
+		// dispatches for it.
 		// Ack: nothing to do, and nothing to redeliver for.
 		//
-		// The latch is left exactly as found. It is lane-1's here, and a clear
-		// would fight the raise it re-derives while the column stays true.
+		// The column's own standing fact — the count at its gapOpen: entry — is
+		// lane-1's and sits at a different key, so neither arm could reach it;
+		// this guard is not what protects it. What it protects is the honesty of
+		// the two exhaustion codes and the never-dispatch promise.
 		e.logger.Debug("weaver: exhausted-gap escalation skipped for a surface gap; its budget is stranded state, not a spent chain",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return substrate.Ack
@@ -1835,6 +1901,7 @@ func (e *Engine) alertPaced(key, severity, code, message string) {
 const (
 	issuePrefixGapEntity = "gap:"
 	issuePrefixGapConfig = "gapConfig:"
+	issuePrefixGapOpen   = "gapOpen:"
 	issuePrefixData      = "data:"
 	issuePrefixTemplate  = "template:"
 	issuePrefixSweep     = "sweep:"
@@ -1873,6 +1940,7 @@ var perEntityIssuePrefixes = []string{
 // this engine raises — TestListingRank_EveryIssueFamilyIsClassified pins that.
 var targetScopedIssuePrefixes = []string{
 	issuePrefixGapConfig,
+	issuePrefixGapOpen,
 	issuePrefixConsumer,
 	issuePrefixTarget,
 	issuePrefixTimer,
@@ -1882,12 +1950,12 @@ var targetScopedIssuePrefixes = []string{
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
 // teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,
-// row-data and template families. These are the families whose keys carry a
-// segment below the target — a per-entity or per-gap one — so a teardown has no
-// single key to name and must clear by prefix; the families keyed by targetID
-// alone (consumer, timer, owner) are cleared by key at the same site. Each
-// prefix ends in the "." separator, which is what keeps "t1." from matching a
-// key under "t10.".
+// gap-open, row-data, template and sweep families. These are the families whose
+// keys carry a segment below the target — a per-entity or per-gap one — so a
+// teardown has no single key to name and must clear by prefix; the families
+// keyed by targetID alone (consumer, timer, owner) are cleared by key at the
+// same site. Each prefix ends in the "." separator, which is what keeps "t1."
+// from matching a key under "t10."
 //
 // Every family whose entries a revoke would otherwise strand belongs here: a
 // revoked target delivers no rows and keeps no marks, so each of these has no
@@ -1912,18 +1980,23 @@ func issueKeyTargetPrefixes(targetID string) []string {
 	return []string{
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
+		issuePrefixGapOpen + targetID + ".",
 		issuePrefixData + targetID + ".",
 		issuePrefixTemplate + targetID + ".",
 		issuePrefixSweep + targetID + ".",
 	}
 }
 
-// issueKeyGapEntity keys a Health issue whose raised fact is about ONE ROW: a
-// `surface` gap standing open for this entity, or this entity's gap having
-// spent its retry budget. Two entities violating the same (target, gap)
-// concurrently are two independent facts, each raised and retired on its own
+// issueKeyGapEntity keys a Health issue whose raised fact is about ONE ROW's
+// gap: this entity's gap having spent its retry budget, or that spent budget
+// having been escalated to the reasoning tier. Two entities exhausting the same
+// (target, gap) are two independent facts, each raised and retired on its own
 // subject's timeline, so the key carries the entity segment — mirroring
 // issueKeyEffect's three-segment shape.
+//
+// A `surface` gap raises at issueKeyGapOpen instead: its population is the
+// target's open workload rather than a set of per-row faults, so it is one
+// counted entry per (target, column) and outside this family's budget.
 func issueKeyGapEntity(targetID, entityID, col string) string {
 	return issuePrefixGapEntity + targetID + "." + entityID + "." + col
 }
@@ -1936,6 +2009,26 @@ func issueKeyGapEntity(targetID, entityID, col string) string {
 // per violating row.
 func issueKeyGapConfig(targetID, col string) string {
 	return issuePrefixGapConfig + targetID + "." + col
+}
+
+// issueKeyGapOpen keys the one Health issue a `surface` gap raises: the count of
+// rows this instance observes holding one (target, gap column) open. The fact is
+// the target's open WORKLOAD for that column — a backlog of business work, whose
+// population is supposed to be large on a healthy system — not a fault in any
+// one row, so it is raised once per (target, gap) with the row identities held
+// in surfaceStats rather than fanned out one issue per row.
+//
+// The key is target-scoped on purpose, and that is what keeps the workload
+// population OUT of the per-row budget: rowIssueTarget's family test names the
+// four per-row prefixes and this is not one of them — `gap:` does not
+// prefix-match `gapOpen:` — so no gapOpen entry can consume one of the 500 slots
+// the budget sizes for FAULTS. Without that, a healthy backlog of open rows
+// fills the budget and every fault raised afterwards for the target is refused.
+// The family test, not the separator count, is what decides, so the property
+// holds even for a gap column carrying a `.` (which install-time validation
+// rejects anyway — a gaps key is a dot-free `missing_<gap>` token).
+func issueKeyGapOpen(targetID, col string) string {
+	return issuePrefixGapOpen + targetID + "." + col
 }
 
 // issueKeyDataEntity keys a per-ROW data error — a column whose value is not
@@ -2043,11 +2136,11 @@ func issueKeyRowIssuesCapped(targetID string) string {
 // consuming a per-row budget.
 //
 // `gap:` belongs here for the same reason the other two do, and its omission
-// would leave the bound describing less than it names. Every member of that
-// family — a `surface` gap standing open, a spent retry budget, a budget spent
-// and escalated — is one fact about one (entity, column) and multiplies with the
-// lens exactly like a row-data fault, so a systemically-broken target grows the
-// in-memory map and the per-heartbeat sort over it without limit. Capping it
+// would leave the bound describing less than it names. Both members of that
+// family — a spent retry budget, a budget spent and escalated — are one fact
+// about one (entity, column) and multiply with the lens exactly like a row-data
+// fault, so a systemically-broken target grows the in-memory map and the
+// per-heartbeat sort over it without limit. Capping it
 // costs an operator nothing they could otherwise see: the heartbeat DOCUMENT is
 // already truncated to maxHeartbeatIssues severity-first, far below this cap,
 // and a refused raise still carries its severity into the overflow entry, so

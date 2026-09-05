@@ -420,7 +420,8 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	// sorts behind every one of them — well past the cap.
 	const total = maxHeartbeatIssues + 10
 	for i := 0; i < total-1; i++ {
-		cache.set(fmt.Sprintf("gap:t.%020d.missing_claim", i), "warning", "UnroutedTasks", "row column missing_claim is true")
+		cache.set(issueKeyDataEntity("t", fmt.Sprintf("%020d", i), "missing_claim"), "warning", "RowDataError",
+			"row column missing_claim is not a bool")
 	}
 	cache.set(issueKeyGapConfig("t", "missing_claim"), "error", "PlaybookConfigError", "the playbook does not resolve")
 
@@ -454,7 +455,7 @@ func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	if !strings.Contains(last.Message, strconv.Itoa(total)+" open in total") {
 		t.Fatalf("truncation message must name the true total (%d), got %q", total, last.Message)
 	}
-	if !strings.Contains(last.Message, "UnroutedTasks ×") {
+	if !strings.Contains(last.Message, "RowDataError ×") {
 		t.Fatalf("truncation message must name the unlisted codes, got %q", last.Message)
 	}
 	if doc.Status != "unhealthy" {

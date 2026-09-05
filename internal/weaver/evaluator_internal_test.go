@@ -1283,10 +1283,11 @@ func TestClearClosedMarks_ConcurrentCloseCreditsEffectOnce(t *testing.T) {
 }
 
 // TestHandleRow_SurfaceGap proves FR29's "surface, never dispatch" gap
-// (actionSurface): a violating row raises the named Health issue at the
-// declared severity and dispatches NO op and creates NO mark; when the row
-// stops naming the gap, the issue clears via clearClosedMarks — with no mark
-// ever having existed to clean up.
+// (actionSurface): a violating row joins the column's open-row set and raises
+// the named Health issue — at the declared severity, at the target-scoped
+// gapOpen: key, naming the count — and dispatches NO op and creates NO mark;
+// when the row stops naming the gap, the last membership goes and the entry
+// retires via clearClosedMarks, with no mark ever having existed to clean up.
 func TestHandleRow_SurfaceGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1311,12 +1312,20 @@ func TestHandleRow_SurfaceGap(t *testing.T) {
 		t.Fatalf("surface gap dispatch must Ack, got %v", dec)
 	}
 	h.requireNoOp(t)
-	issues := h.engine.issues.snapshot()
-	if !hasIssueCode(issues, "UnroutedTasks") {
-		t.Fatalf("expected an UnroutedTasks issue, got %v", issues)
+	open1, ok := issueAt(h.engine.issues, issueKeyGapOpen(targetID, "missing_claim"))
+	if !ok {
+		t.Fatalf("expected an open-workload entry at %s, issues = %+v",
+			issueKeyGapOpen(targetID, "missing_claim"), h.engine.issues.snapshot())
 	}
-	if sev := issueSeverity(issues, "UnroutedTasks"); sev != "warning" {
-		t.Fatalf("UnroutedTasks severity = %q, want warning", sev)
+	if open1.Code != "UnroutedTasks" || open1.Severity != "warning" {
+		t.Fatalf("entry = %+v, want the package's declared code/severity (UnroutedTasks/warning)", open1)
+	}
+	if want := "target " + targetID + ": 1 rows have column missing_claim true"; open1.Message != want {
+		t.Fatalf("entry message = %q, want %q", open1.Message, want)
+	}
+	// The per-ROW key is gone, and with it the budget slot it used to hold.
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
+		t.Fatalf("a surface gap must not raise a per-row entry; issues = %+v", h.engine.issues.snapshot())
 	}
 	if _, _, inFlight, err := h.engine.marks.get(ctx, targetID, entityID, "missing_claim"); err != nil || inFlight {
 		t.Fatalf("surface gap must never create a mark (err=%v, inFlight=%v)", err, inFlight)
@@ -1329,7 +1338,10 @@ func TestHandleRow_SurfaceGap(t *testing.T) {
 		t.Fatalf("gap-close row must Ack, got %v", dec)
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "UnroutedTasks") {
-		t.Fatal("expected UnroutedTasks issue to clear once the gap closes")
+		t.Fatal("expected the open-workload entry to retire once the last open row closes")
+	}
+	if n := h.engine.surface.count(targetID, "missing_claim"); n != 0 {
+		t.Fatalf("membership after the close = %d, want 0", n)
 	}
 }
 
@@ -1447,14 +1459,22 @@ func TestHandleRow_RowDataIssueRetiresOnACleanRead(t *testing.T) {
 	}
 }
 
-// TestHandleRow_SurfaceGapIssueIsPerEntity proves a `surface` gap's Health
-// issue states a fact about ONE ROW: two subjects violating the same
-// (target, gap) concurrently raise two independent issues, and the one whose
-// gap closes first retires ONLY its own. A target-scoped key made the two
-// subjects share a single latch, so whichever half landed first cleared the
-// issue standing for the subject still stuck — the wrong per-subject answer,
-// and silently so.
-func TestHandleRow_SurfaceGapIssueIsPerEntity(t *testing.T) {
+// TestHandleRow_SurfaceGapIsOneCountedEntryPerColumn is the acceptance test for
+// the `surface` gap's cardinality, and for the count actually tracking the set
+// behind it.
+//
+// N subjects holding one column open are ONE fact — this target has N rows of
+// work standing — not N faults, so they raise ONE entry naming the count. Three
+// vectors, and the middle two are what separate this from the obvious wrong
+// implementation. A repeat delivery of an already-open row must not move the
+// count (only a membership TRANSITION writes). And one subject of N closing must
+// leave the entry standing at N-1 with its `since` UNCHANGED — an entry written
+// only on the raise would sit at its high-water mark until the whole backlog
+// drained, and one cleared-and-re-raised on every change would restamp the age
+// of a backlog that never emptied. The stamp is the observable that tells those
+// two apart from the correct behaviour, so it is asserted rather than the
+// presence alone.
+func TestHandleRow_SurfaceGapIsOneCountedEntryPerColumn(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -1471,31 +1491,164 @@ func TestHandleRow_SurfaceGapIssueIsPerEntity(t *testing.T) {
 			col: {Action: actionSurface, IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
 		},
 	})
-	stuck, cleared := testNanoID(t), testNanoID(t)
+	key := issueKeyGapOpen(targetID, col)
 	open := func(entityID string) map[string]any {
 		return map[string]any{"entityKey": "vtx.task." + entityID, "violating": true, col: true}
 	}
-	for i, entityID := range []string{stuck, cleared} {
+	entities := []string{testNanoID(t), testNanoID(t), testNanoID(t)}
+	for i, entityID := range entities {
 		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open(entityID), uint64(i+1), 1)); dec != substrate.Ack {
 			t.Fatalf("surface gap dispatch must Ack, got %v", dec)
 		}
 	}
 	h.requireNoOp(t)
-	if n := len(h.engine.issues.snapshot()); n != 2 {
-		t.Fatalf("two subjects violating the same gap must raise two issues, got %d: %+v", n, h.engine.issues.snapshot())
+
+	if n := len(h.engine.issues.snapshot()); n != 1 {
+		t.Fatalf("three subjects holding one column open must raise ONE entry, got %d: %+v",
+			n, h.engine.issues.snapshot())
+	}
+	entry, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("expected the entry at %s, issues = %+v", key, h.engine.issues.snapshot())
+	}
+	if want := "target " + targetID + ": 3 rows have column " + col + " true"; entry.Message != want {
+		t.Fatalf("entry message = %q, want %q", entry.Message, want)
+	}
+	arrival := entry.Since
+
+	// A CDC redelivery of a row that is already open changes nothing: the
+	// membership is unchanged, so the count and the stamp both hold.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entities[0], open(entities[0]), 4, 2)); dec != substrate.Ack {
+		t.Fatalf("redelivery must Ack, got %v", dec)
+	}
+	entry, _ = issueAt(h.engine.issues, key)
+	if want := "target " + targetID + ": 3 rows have column " + col + " true"; entry.Message != want {
+		t.Fatalf("a repeat delivery of an already-open row moved the count: %q, want %q", entry.Message, want)
 	}
 
-	// The second subject's halves land: its gap closes.
-	closed := map[string]any{"entityKey": "vtx.task." + cleared, "violating": false, col: false}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, cleared, closed, 3, 1)); dec != substrate.Ack {
+	// One of the three closes. The entry stands, at N-1, at the same age.
+	closed := map[string]any{"entityKey": "vtx.task." + entities[2], "violating": false, col: false}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entities[2], closed, 5, 1)); dec != substrate.Ack {
 		t.Fatalf("gap-close row must Ack, got %v", dec)
 	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, cleared, col)); ok {
-		t.Fatal("the closed subject's own issue must retire")
-	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, stuck, col)); !ok {
-		t.Fatalf("the STILL-STUCK subject's issue must survive another subject's close; issues = %+v",
+	entry, ok = issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("one row closing must not retire a column two rows still hold open; issues = %+v",
 			h.engine.issues.snapshot())
+	}
+	if want := "target " + targetID + ": 2 rows have column " + col + " true"; entry.Message != want {
+		t.Fatalf("entry message after one close = %q, want %q — the count must track every membership "+
+			"change, not only the last one", entry.Message, want)
+	}
+	if entry.Since != arrival {
+		t.Fatalf("the entry's since moved %q -> %q across a count change: the backlog never emptied, so "+
+			"the fact never re-arose and its age must be preserved", arrival, entry.Since)
+	}
+
+	// The last two close: the set empties and the entry retires.
+	for i, entityID := range entities[:2] {
+		row := map[string]any{"entityKey": "vtx.task." + entityID, "violating": false, col: false}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, uint64(6+i), 1)); dec != substrate.Ack {
+			t.Fatalf("gap-close row must Ack, got %v", dec)
+		}
+	}
+	if is, ok := issueAt(h.engine.issues, key); ok {
+		t.Fatalf("the entry must retire when the LAST open row closes, still standing as %+v", is)
+	}
+}
+
+// TestHandleRow_SurfaceGapLeavesThePerRowBudgetAlone is the regression the board
+// row describes, expressed as a test: a HEALTHY backlog must not be able to
+// starve the target's fault reporting.
+//
+// The per-row budget is sized for faults — one entry per broken row — and the
+// `surface` population is open business work, which on a healthy system is
+// large and is supposed to be. Fanned out one entry per open row it fills the
+// 500 slots and every fault raised afterwards for that target is REFUSED. Keyed
+// per (target, column) it consumes none, whatever the backlog.
+func TestHandleRow_SurfaceGapLeavesThePerRowBudgetAlone(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "unroutedTasks"
+	const col = "missing_claim"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			col: {Action: actionSurface, IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
+		},
+	})
+	const backlog = rowIssueCapPerTarget + 100
+	for i := 0; i < backlog; i++ {
+		entityID := surfaceBacklogEntityID(i)
+		row := map[string]any{"entityKey": "vtx.task." + entityID, "violating": true, col: true}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, uint64(i+1), 1)); dec != substrate.Ack {
+			t.Fatalf("surface gap dispatch must Ack, got %v", dec)
+		}
+	}
+	if n := h.engine.surface.count(targetID, col); n != backlog {
+		t.Fatalf("setup: %d rows must be recorded open, got %d", backlog, n)
+	}
+	h.engine.issues.mu.Lock()
+	tracked := h.engine.issues.rowIssues[targetID]
+	h.engine.issues.mu.Unlock()
+	if tracked != 0 {
+		t.Fatalf("a backlog of %d open rows consumed %d per-row budget slots, want 0: the workload "+
+			"population must not be counted against a budget sized for faults", backlog, tracked)
+	}
+
+	// The point of all of it: a genuine fault raised afterwards is ADMITTED.
+	faultKey := issueKeyDataEntity(targetID, "brokenEntity12345678", "violating")
+	h.engine.issues.set(faultKey, "warning", "RowDataError", "column violating is not a bool")
+	if _, ok := issueAt(h.engine.issues, faultKey); !ok {
+		t.Fatalf("the fault raised behind a %d-row healthy backlog was refused; issues = %+v",
+			backlog, h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyRowIssuesCapped(targetID)); ok {
+		t.Fatal("no raise was refused, so the target must carry no overflow entry")
+	}
+}
+
+// surfaceBacklogEntityID renders i as a distinct valid 20-char NanoID: a fixed
+// 13-char prefix plus a 7-digit base-9 counter, base NINE because the canonical
+// alphabet carries no `0` (nor `l`, `I` or `O`) and splitRowKey rejects anything
+// that is not a NanoID.
+func surfaceBacklogEntityID(i int) string {
+	digits := []byte("1111111")
+	for p := len(digits) - 1; p >= 0 && i > 0; p-- {
+		digits[p] = byte('1' + i%9)
+		i /= 9
+	}
+	return "openRowEntity" + string(digits)
+}
+
+// TestIssueKeyGapOpen_DottedColumnStaysOutOfTheBudget pins the property the new
+// family's whole payoff rests on, at the one input that could plausibly break
+// it. What keeps a gapOpen: entry out of the per-row budget is rowIssueTarget's
+// FAMILY test — the four per-row prefixes, of which `gap:` does not
+// prefix-match `gapOpen:` — and not the separator count, so the property must
+// hold even for a column carrying a `.` (which install-time validation rejects
+// anyway: a gaps key is a dot-free missing_<gap> token).
+func TestIssueKeyGapOpen_DottedColumnStaysOutOfTheBudget(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "dottedColumnTarget"
+	for _, col := range []string{"missing_a", "missing_a.b", "missing_a.b.c"} {
+		c.set(issueKeyGapOpen(targetID, col), "warning", "UnroutedTasks", "target "+targetID+": 1 rows have column "+col+" true")
+	}
+	c.mu.Lock()
+	tracked, present := c.rowIssues[targetID]
+	c.mu.Unlock()
+	if present || tracked != 0 {
+		t.Fatalf("gapOpen: entries consumed %d per-row budget slots (present=%v), want none", tracked, present)
+	}
+	if target, perRow := rowIssueTarget(issueKeyGapOpen(targetID, "missing_a.b")); perRow {
+		t.Fatalf("rowIssueTarget counts a dotted-column gapOpen: key against %q", target)
 	}
 }
 
@@ -1592,8 +1745,8 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); !ok {
 		t.Fatalf("expected a target-scoped GapWithoutPlaybook issue, issues = %+v", h.engine.issues.snapshot())
 	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); !ok {
-		t.Fatalf("expected an entity-scoped surface issue, issues = %+v", h.engine.issues.snapshot())
+	if _, ok := issueAt(h.engine.issues, issueKeyGapOpen(targetID, "missing_claim")); !ok {
+		t.Fatalf("expected the surface column's open-workload issue, issues = %+v", h.engine.issues.snapshot())
 	}
 
 	closed := map[string]any{
@@ -1606,8 +1759,8 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); ok {
 		t.Fatal("a column that stopped being reported must retire its target-scoped config issue too")
 	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
-		t.Fatal("the entity-scoped surface issue must retire on the close")
+	if _, ok := issueAt(h.engine.issues, issueKeyGapOpen(targetID, "missing_claim")); ok {
+		t.Fatal("the surface column's open-workload issue must retire on the close of its last open row")
 	}
 }
 
@@ -2057,13 +2210,19 @@ func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
 		t.Fatalf("handleRow = %v, want Ack", dec)
 	}
 
-	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_s"))
+	issue, ok := issueAt(h.engine.issues, issueKeyGapOpen(targetID, "missing_s"))
 	if !ok {
 		t.Fatalf("a surface gap's whole output is its issue; a stranded count must not switch it off (issues: %+v)",
 			h.engine.issues.snapshot())
 	}
 	if issue.Code != "Surface" {
-		t.Fatalf("issue code = %q, want Surface: the escalation must not overwrite the latch this column's own action owns", issue.Code)
+		t.Fatalf("issue code = %q, want Surface: the column's own action decides the code", issue.Code)
+	}
+	// And the escalation's own arms wrote nothing: a GapBudgetExhausted here
+	// would report a spent remediation chain for a gap that by contract never
+	// remediates.
+	if is, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_s")); ok {
+		t.Fatalf("a surface gap has no budget to have spent; the escalation must raise nothing, got %+v", is)
 	}
 	h.requireNoOp(t)
 }
@@ -2418,7 +2577,7 @@ func TestClearClosedMarks_RetiresPriorityDataErrorOnTheLastClose(t *testing.T) {
 			t.Fatalf("a surface gap dispatches nothing and never reads the priority column; it must not hold "+
 				"this entry open, still standing as %+v", is)
 		}
-		if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, other)); !ok {
+		if _, ok := issueAt(h.engine.issues, issueKeyGapOpen(targetID, other)); !ok {
 			t.Fatalf("the surface gap's own issue is untouched by this — it is still open; issues = %+v",
 				h.engine.issues.snapshot())
 		}

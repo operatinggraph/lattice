@@ -360,19 +360,26 @@ func TestEscalateExhaustedGap_PublishFailureRecordsNoRepublishObligation(t *test
 	}
 }
 
-// TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue pins the `gap:`
-// prefix clear on the entity-deletion branch, and the vector is the one the
-// per-key walk provably cannot reach.
+// TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapFacts pins the two
+// retirements the entity-deletion branch owns that the per-key walk provably
+// cannot reach, and the vector is the same for both: a column the PLAYBOOK has
+// since dropped.
 //
-// `gap:` entries are raised at whatever openGapColumns enumerated — every true
-// missing_* column, WHETHER OR NOT the playbook names it. The tombstone branch's
-// candidate walk is markCandidateColumns(target, nil), which for an empty body is
-// just the playbook's own keys. So an entry raised at a column the playbook has
-// since dropped is retired by no per-key clear once the entity is gone: the row
-// that would re-derive it no longer exists, and the walk no longer names it. The
-// prefix clear is its only retirement, and without it the entry stands for the
-// process's lifetime holding one of the target's per-row budget slots.
-func TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue(t *testing.T) {
+// The tombstone branch's candidate walk is markCandidateColumns(target, nil),
+// which for an empty body is just the playbook's own keys. Two facts are raised
+// at columns that walk no longer names:
+//
+//   - A `gap:` entry — a spent retry budget, or that budget's escalation —
+//     raised at whatever openGapColumns enumerated, which is every true
+//     missing_* column WHETHER OR NOT the playbook names it. The prefix clear is
+//     its only retirement, and without it the entry stands for the process's
+//     lifetime holding one of the target's per-row budget slots.
+//   - A `surface` gap's open-row MEMBERSHIP, recorded while the column was still
+//     declared. Its analogue is removeEntity across every column set of the
+//     target: without it the entity stays counted in a backlog it has left by
+//     dying, and the column's gapOpen: entry reports a row that no longer exists
+//     with no leg able to correct it.
+func TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapFacts(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -392,14 +399,19 @@ func TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue(t *testing.T) 
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
 		t.Fatalf("surface delivery: decision = %v, want Ack", dec)
 	}
-	issueKey := issueKeyGapEntity(targetID, entityID, "missing_a")
-	if !h.engine.issues.standingAs(issueKey, "warning", "UnroutedTasks") {
-		t.Fatalf("a surface gap standing open must raise at %s, issues = %+v", issueKey, h.engine.issues.snapshot())
+	openKey := issueKeyGapOpen(targetID, "missing_a")
+	if !h.engine.issues.standingAs(openKey, "warning", "UnroutedTasks") {
+		t.Fatalf("a surface gap standing open must raise at %s, issues = %+v", openKey, h.engine.issues.snapshot())
 	}
+	// The per-row fact at the same column, in the family whose prefix clear this
+	// branch also owns. Seeded rather than driven: its raise sites are the
+	// suppression legs, which this vector's row never reaches.
+	budgetKey := issueKeyGapEntity(targetID, entityID, "missing_a")
+	h.engine.issues.set(budgetKey, "warning", "GapBudgetExhausted", "this row's budget is spent")
 
-	// The package re-author drops the column. The entry stays raised — nothing
-	// about a playbook edit is evidence that THIS row's gap closed — but it is
-	// now at a column the candidate walk will not name for an empty body.
+	// The package re-author drops the column. Both facts stay raised — nothing
+	// about a playbook edit is evidence that THIS row's gap closed — but the
+	// column is now one the candidate walk will not name for an empty body.
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_b": {Action: actionDirectOp, Operation: "FixB"}},
@@ -413,8 +425,15 @@ func TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue(t *testing.T) 
 	if dec := h.engine.handleRow(ctx, tombstone); dec != substrate.Ack {
 		t.Fatalf("tombstone delivery: decision = %v, want Ack", dec)
 	}
-	if h.engine.issues.standingAs(issueKey, "warning", "UnroutedTasks") {
+	if h.engine.issues.standingAs(budgetKey, "warning", "GapBudgetExhausted") {
 		t.Fatalf("a deleted entity must retire its gap: entries; %s survives an entity that no longer exists "+
-			"and nothing can ever reach it again", issueKey)
+			"and nothing can ever reach it again", budgetKey)
+	}
+	if n := h.engine.surface.count(targetID, "missing_a"); n != 0 {
+		t.Fatalf("the deleted entity is still counted in the column's open-row set (%d): the candidate walk "+
+			"no longer names the column, so only the tombstone's own sweep over every column set reaches it", n)
+	}
+	if is, ok := issueAt(h.engine.issues, openKey); ok {
+		t.Fatalf("the set is empty, so its entry must retire, still standing as %+v", is)
 	}
 }

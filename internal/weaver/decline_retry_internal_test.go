@@ -951,6 +951,7 @@ var issueKeyProbes = map[string]func() string{
 	"issueKeyDataEntity":      func() string { return issueKeyDataEntity(censusTargetID, censusEntityID, censusGapColumn) },
 	"issueKeyTemplateEntity":  func() string { return issueKeyTemplateEntity(censusTargetID, censusEntityID, censusGapColumn) },
 	"issueKeyGapConfig":       func() string { return issueKeyGapConfig(censusTargetID, censusGapColumn) },
+	"issueKeyGapOpen":         func() string { return issueKeyGapOpen(censusTargetID, censusGapColumn) },
 	"issueKeyRowIssuesCapped": func() string { return issueKeyRowIssuesCapped(censusTargetID) },
 	"issueKeyEffect":          func() string { return issueKeyEffect(censusTargetID, censusGapColumn, actionDirectOp) },
 	"issueKeyConsumer":        func() string { return issueKeyConsumer(censusTargetID) },
@@ -1139,14 +1140,14 @@ func TestIssueCache_GapFamilyIsBoundedAndReleased(t *testing.T) {
 	const targetID = "targetGapBudget"
 
 	for i := 0; i < rowIssueCapPerTarget; i++ {
-		c.set(issueKeyGapEntity(targetID, "A"+strconv.Itoa(i), "missing_a"), "warning", "UnroutedTasks", "open")
+		c.set(issueKeyGapEntity(targetID, "A"+strconv.Itoa(i), "missing_a"), "warning", "GapBudgetExhausted", "budget spent")
 	}
 	if got := c.rowIssues[targetID]; got != rowIssueCapPerTarget {
 		t.Fatalf("tracked per-row entries = %d, want the full cap %d", got, rowIssueCapPerTarget)
 	}
 	// Past the cap the raise is refused and folded into the one overflow entry,
 	// exactly as a data/template raise is.
-	c.set(issueKeyGapEntity(targetID, "Aoverflow", "missing_a"), "warning", "UnroutedTasks", "open")
+	c.set(issueKeyGapEntity(targetID, "Aoverflow", "missing_a"), "warning", "GapBudgetExhausted", "budget spent")
 	if _, tracked := c.issues[issueKeyGapEntity(targetID, "Aoverflow", "missing_a")]; tracked {
 		t.Fatalf("a gap: raise past the cap must be refused, not tracked")
 	}
@@ -1160,7 +1161,7 @@ func TestIssueCache_GapFamilyIsBoundedAndReleased(t *testing.T) {
 	if got := c.rowIssues[targetID]; got != rowIssueCapPerTarget-1 {
 		t.Fatalf("a gap: clear must return its slot, tracked = %d", got)
 	}
-	c.set(issueKeyGapEntity(targetID, "Areadmit", "missing_a"), "warning", "UnroutedTasks", "open")
+	c.set(issueKeyGapEntity(targetID, "Areadmit", "missing_a"), "warning", "GapBudgetExhausted", "budget spent")
 	if _, tracked := c.issues[issueKeyGapEntity(targetID, "Areadmit", "missing_a")]; !tracked {
 		t.Fatalf("a freed slot must be readmitted")
 	}

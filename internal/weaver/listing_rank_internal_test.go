@@ -16,6 +16,7 @@ func TestListingRank_EveryIssueFamilyIsClassified(t *testing.T) {
 	all := []string{
 		issuePrefixGapEntity,
 		issuePrefixGapConfig,
+		issuePrefixGapOpen,
 		issuePrefixData,
 		issuePrefixTemplate,
 		issuePrefixSweep,
@@ -114,6 +115,55 @@ func TestBoundIssues_ConfigFaultSurvivesItsOwnPerRowFlood(t *testing.T) {
 	if !strings.Contains(last.Message, "RowDataError") {
 		t.Errorf("truncation entry should name the omitted per-row code, got %q", last.Message)
 	}
+}
+
+// TestBoundIssues_SurfaceBacklogEntrySurvivesAPerRowFlood is the same acceptance
+// for the `gapOpen:` family, and it is the reason that family is classified
+// target-scoped rather than left to default.
+//
+// One entry says "this target has N rows of work standing open on this column";
+// the per-row faults beside it each say "this one row is broken". Key order puts
+// `data:` ahead of `gapOpen:`, so ranked together the one entry that explains a
+// backlog loses the cut to sixty that merely count faults — and the entry an
+// operator opens the page for is the one truncated away.
+func TestBoundIssues_SurfaceBacklogEntrySurvivesAPerRowFlood(t *testing.T) {
+	t.Parallel()
+	const target = "unroutedTasks"
+	const col = "missing_claim"
+
+	if rank := listingRank(healthIssue{Severity: "warning", Code: "UnroutedTasks", key: issueKeyGapOpen(target, col)}); rank != 2 {
+		t.Fatalf("listingRank for a gapOpen: entry = %d, want 2 (target-scoped): its population is gap "+
+			"COLUMNS, not rows, and it explains the flood rather than counting it", rank)
+	}
+
+	var in []healthIssue
+	for i := 0; i < 60; i++ {
+		id := strconv.Itoa(i)
+		in = append(in, healthIssue{
+			Severity: "warning",
+			Code:     "RowDataError",
+			Message:  "row " + id + " column missing_x is not a bool",
+			Since:    "2026-09-04T00:00:00Z",
+			key:      issueKeyDataEntity(target, "entity"+id, "missing_x"),
+		})
+	}
+	// Placed where key order alone would bury it: `data:` < `gapOpen:`.
+	in = append(in, healthIssue{
+		Severity: "warning",
+		Code:     "UnroutedTasks",
+		Message:  "target " + target + ": 137 rows have column " + col + " true",
+		Since:    "2026-09-04T00:00:00Z",
+		key:      issueKeyGapOpen(target, col),
+	})
+
+	got := boundIssues(in, maxHeartbeatIssues)
+
+	for _, is := range got {
+		if is.Code == "UnroutedTasks" {
+			return
+		}
+	}
+	t.Fatalf("the target's open-workload entry was truncated out of the heartbeat; listed codes: %s", codesOf(got))
 }
 
 func codesOf(issues []healthIssue) string {

@@ -3869,11 +3869,11 @@ func TestSweep_ReclaimSkipsASurfaceGap(t *testing.T) {
 // the previous action, reads as EXHAUSTED and reaches escalateExhaustedGap.
 //
 // Both of that call's branches are wrong here, and the un-escalated one is the
-// sharper: it raises GapBudgetExhausted at issueKeyGapEntity, which is the very
-// latch lane-1 holds this column's surface issue on. The two would overwrite
-// each other and re-stamp `since` every round trip — the flap the orphan-column
-// arm was amended to stop. The seeded Surface issue must come through the pass
-// untouched, and the dispatching control in the same pass must still escalate.
+// sharper: it would raise GapBudgetExhausted — "this row's remediation ran out"
+// — for a gap that by contract never remediates and never attempted anything, a
+// fabricated fault an operator would go looking for. The column must come
+// through the pass with nothing raised against this row at all, while the
+// dispatching control in the same pass must still escalate.
 func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -3898,20 +3898,15 @@ func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
 		h.seedCount(t, ctx, targetID, entityID, gap, budget)
 		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
 	}
-	// The standing issue lane-1 raises for a surface column while it is true.
-	h.engine.issues.set(issueKeyGapEntity(targetID, migrated, "missing_s"), "warning", "Surface",
-		"target "+targetID+" entity "+migrated+": row column missing_s is true")
-
 	h.pass(ctx)
 
 	if issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, control, "missing_x")); !ok || issue.Code != "GapBudgetExhausted" {
 		t.Fatalf("setup: the identical vector on a DISPATCHING gap must escalate, or the negative proves nothing (issues: %+v)",
 			h.engine.issues.snapshot())
 	}
-	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, migrated, "missing_s"))
-	if !ok || issue.Code != "Surface" {
-		t.Fatalf("the latch at a surface column is lane-1's; a GapBudgetExhausted raise here flaps it (issues: %+v)",
-			h.engine.issues.snapshot())
+	if issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, migrated, "missing_s")); ok {
+		t.Fatalf("a surface gap has no remediation chain and no budget to have spent; the escalation must "+
+			"raise nothing for it, got %+v", issue)
 	}
 	if h.markExists(t, ctx, markKey(targetID, migrated, "missing_s")) {
 		t.Fatal("a surface gap must never be dispatched, escalation included")
