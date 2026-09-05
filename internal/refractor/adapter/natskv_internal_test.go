@@ -25,6 +25,9 @@ type scriptedKVStore struct {
 func (s *scriptedKVStore) Get(ctx context.Context, key string) (*substrate.KVEntry, error) {
 	return s.getEntry, s.getErr
 }
+func (s *scriptedKVStore) GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error) {
+	panic("unused by guardedWrite tests")
+}
 
 func (s *scriptedKVStore) Create(ctx context.Context, key string, value []byte) (uint64, error) {
 	s.calls++
@@ -75,6 +78,9 @@ type getErrStore struct {
 
 func (s *getErrStore) Get(ctx context.Context, key string) (*substrate.KVEntry, error) {
 	return nil, s.getErr
+}
+func (s *getErrStore) GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error) {
+	panic("unused by upsert Get-error tests")
 }
 func (s *getErrStore) Create(ctx context.Context, key string, value []byte) (uint64, error) {
 	panic("unused by upsert Get-error tests")
@@ -217,6 +223,9 @@ type watermarkStore struct {
 
 func (s *watermarkStore) Get(ctx context.Context, key string) (*substrate.KVEntry, error) {
 	return &substrate.KVEntry{Value: s.stored, Revision: 7}, nil
+}
+func (s *watermarkStore) GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error) {
+	panic("unused by watermark decline tests")
 }
 func (s *watermarkStore) Create(ctx context.Context, key string, value []byte) (uint64, error) {
 	s.writeAttempt++

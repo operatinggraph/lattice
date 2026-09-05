@@ -143,6 +143,26 @@ type Entry struct {
 	// pattern matched nothing) is also absent from the wire by omitempty; the
 	// distinction does not matter to a reader, since neither is a cost.
 	PeakBindingRows uint64 `json:"peakBindingRows,omitempty"`
+	// EntriesWithheld is the cumulative number of per-entry grant rows this
+	// lens did NOT write because the target already held the identical body —
+	// the writes an event's re-evaluation avoided. Read it beside the audit
+	// trail's growth: a perEntry lens whose grants are at rest writes almost
+	// nothing and withholds almost everything, and this is the number that
+	// says the lens is working rather than stalled.
+	//
+	// Cumulative for the life of the process and never reset, so a rate is
+	// what a reader takes from two samples. Zero (absent on the wire) means a
+	// lens that has withheld nothing: a plain, doc-mode or personal lens,
+	// which never can, or a perEntry lens whose entries really are changing.
+	EntriesWithheld uint64 `json:"entriesWithheld,omitempty"`
+	// WithholdReadFailures is the cumulative number of batched read-backs that
+	// failed, each costing one actor's entries an unconditional rewrite for
+	// one event. It is a RATE read against EntriesWithheld, never a fault
+	// latch: a failure degrades that one evaluation to writing everything —
+	// the behaviour with withholding disarmed — and nothing is remembered
+	// afterwards. A steadily climbing value against a flat EntriesWithheld is
+	// a target that cannot be read back, not a projection that is wrong.
+	WithholdReadFailures uint64 `json:"withholdReadFailures,omitempty"`
 	// LagProgressAt is when ConsumerLag was last observed to decrease (stamped
 	// at first observation too) — RFC3339 UTC; "" before the lens's first lag
 	// poll. A newly-activated consumer on a bucket-wide filter can carry a

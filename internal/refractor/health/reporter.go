@@ -230,6 +230,14 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		// reading the entry, and exactly the number they want: how expensive the
 		// evaluation that preceded the trouble was.
 		PeakBindingRows: existing.PeakBindingRows,
+		// The two withholding tallies, cumulative for the life of the
+		// process: a status transition avoids no writes and fails no reads,
+		// so it has nothing to say about either. Zeroing them here would
+		// erase the record on exactly the operation that produces the most
+		// of it — a rebuild, which passes through SetRebuilding on the way
+		// in and SetActive on the way out.
+		EntriesWithheld:      existing.EntriesWithheld,
+		WithholdReadFailures: existing.WithholdReadFailures,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -344,6 +352,14 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		// The cost gauge, for the reason SetActive states: nothing restores it
 		// after a transition, because samples come only from evaluations.
 		PeakBindingRows: existing.PeakBindingRows,
+		// The two withholding tallies, cumulative for the life of the
+		// process: a status transition avoids no writes and fails no reads,
+		// so it has nothing to say about either. Zeroing them here would
+		// erase the record on exactly the operation that produces the most
+		// of it — a rebuild, which passes through SetRebuilding on the way
+		// in and SetActive on the way out.
+		EntriesWithheld:      existing.EntriesWithheld,
+		WithholdReadFailures: existing.WithholdReadFailures,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -434,6 +450,14 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		// The cost gauge, for the reason SetActive states: nothing restores it
 		// after a transition, because samples come only from evaluations.
 		PeakBindingRows: existing.PeakBindingRows,
+		// The two withholding tallies, cumulative for the life of the
+		// process: a status transition avoids no writes and fails no reads,
+		// so it has nothing to say about either. Zeroing them here would
+		// erase the record on exactly the operation that produces the most
+		// of it — a rebuild, which passes through SetRebuilding on the way
+		// in and SetActive on the way out.
+		EntriesWithheld:      existing.EntriesWithheld,
+		WithholdReadFailures: existing.WithholdReadFailures,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -759,6 +783,35 @@ func (r *Reporter) SetPeakBindingRows(ctx context.Context, rows uint64) error {
 		return fmt.Errorf("health: SetPeakBindingRows read: %w", err)
 	}
 	existing.PeakBindingRows = rows
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// SetWithholdCounts persists the lens's two withholding tallies: the per-entry
+// rows it did not write because the target already held them, and the batched
+// read-backs that failed. Read-modify-write under the same writeMu as every
+// other setter.
+//
+// Both values OVERWRITE rather than accumulate: the pipeline's counters are
+// already cumulative for the life of the process, and adding here would double
+// -count every poll. That also means a restart legitimately lowers them — they
+// describe this process, and a reader takes a rate from two samples of one
+// process, never a lifetime total across restarts.
+//
+// Unlike SetPeakBindingRows there is no refusal for an absent sample: zero is a
+// real reading here (a lens that has withheld nothing), and the poller's own
+// nil-source check is what keeps an unwired lens from writing one.
+func (r *Reporter) SetWithholdCounts(ctx context.Context, withheld, readFailures uint64) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetWithholdCounts read: %w", err)
+	}
+	existing.EntriesWithheld = withheld
+	existing.WithholdReadFailures = readFailures
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)

@@ -72,6 +72,7 @@ const projectionSeqField = "projectionSeq"
 // which a real NATS-backed store can only reach via an actual race.
 type kvStore interface {
 	Get(ctx context.Context, key string) (*substrate.KVEntry, error)
+	GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error)
 	Create(ctx context.Context, key string, value []byte) (uint64, error)
 	Update(ctx context.Context, key string, value []byte, expectedRevision uint64) (uint64, error)
 	Put(ctx context.Context, key string, value []byte) (uint64, error)
@@ -775,6 +776,57 @@ func (a *NatsKVAdapter) GetRow(ctx context.Context, keys map[string]any) (map[st
 	}
 	delete(doc, projectionSeqField)
 	return doc, true, nil
+}
+
+// GetRows reads back many stored rows at once, keyed by the exact key each was
+// requested under, and shapes every member exactly as GetRow shapes its one:
+// a soft-delete tombstone (isDeleted) is reported as absent, so is an empty or
+// unparseable value, and the guard's internal projectionSeq bookkeeping field
+// is stripped from every body returned. A key with no live, parseable row is
+// therefore MISSING from the result rather than present-and-empty, which is
+// what lets a caller read the map as "the bodies the target holds".
+//
+// A per-member problem never fails the batch (adapter.RowsReader's contract):
+// an unparseable member is dropped like an absent one, because the caller's
+// answer for both is the same — there is no stored body to compare against, so
+// the row is written. An error return means the request set did not happen at
+// all.
+//
+// BOUND. The read is substrate.KVGetMultiNoSnapshot over exact keys: ceil(N/1024)
+// fast-path requests, each bounded by the client's directGetMultiDefaultTimeout,
+// with no drain and so no round-starved ceiling. It runs on the caller's ctx —
+// the pipeline's consumer context, which carries no deadline — so that
+// per-request timeout is the whole bound, and N (the caller's own key set) is
+// what sizes the request count.
+//
+// No snapshot is needed and none is taken: each key is compared independently
+// against its own freshly computed body, so a result that blends instants
+// answers every comparison correctly (KVGetMultiNoSnapshot's own
+// independent-facts test).
+func (a *NatsKVAdapter) GetRows(ctx context.Context, keys []string) (map[string]map[string]any, error) {
+	if len(keys) == 0 {
+		return map[string]map[string]any{}, nil
+	}
+	entries, err := a.kv.GetMultiNoSnapshot(ctx, keys)
+	if err != nil {
+		return nil, fmt.Errorf("natskv get rows: %d keys: %w", len(keys), err)
+	}
+	out := make(map[string]map[string]any, len(entries))
+	for key, entry := range entries {
+		if entry == nil || len(entry.Value) == 0 {
+			continue
+		}
+		var doc map[string]any
+		if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
+			continue
+		}
+		if isDeleted, _ := doc["isDeleted"].(bool); isDeleted {
+			continue
+		}
+		delete(doc, projectionSeqField)
+		out[key] = doc
+	}
+	return out, nil
 }
 
 // Truncate clears the lens's rows by purging them, so a rebuild's stream replay

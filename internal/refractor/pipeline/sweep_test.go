@@ -113,6 +113,11 @@ func newSweepPipeline(t *testing.T, adpt *listingAdapter, batch int) *Pipeline {
 		Interval:      time.Hour, // ticks are driven explicitly by the tests
 		Batch:         batch,
 	})
+	// The adjacency index is current with this lens, which is the state a
+	// healthy stack sits in: Reproject's retraction arm refuses to tombstone
+	// from an edge view the index has not brought up to the token it writes
+	// under, and a fixture that installs no cursor would refuse every delete.
+	p.SetAdjacencyAppliedFn(func() uint64 { return p.Progress().LastAppliedSeq })
 	return p
 }
 

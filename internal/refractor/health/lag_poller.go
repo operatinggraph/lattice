@@ -54,6 +54,14 @@ type PersonalHealerPassFunc func() (lastPassAt time.Time, interval time.Duration
 // earlier observation.
 type PeakRowsFunc func() (uint64, bool)
 
+// WithholdCountsFunc optionally returns the lens's two cumulative withholding
+// tallies: the per-entry rows it did not write because the target already held
+// them, and the batched read-backs that failed. Both are monotone for the life
+// of the process, so there is no "nothing to say" case the way PeakRowsFunc has
+// one — a lens that has withheld nothing has genuinely withheld nothing, and
+// zero is the true reading rather than a fabricated one.
+type WithholdCountsFunc func() (withheld, readFailures uint64)
+
 // LagPoller publishes per-lens consumer lag metrics to lattice.refractor.metrics.<lensId>
 // at the interval captured from MetricsInterval at construction time.
 // It also updates the health KV consumerLag/projectionLag/lastProjectedAt fields
@@ -76,6 +84,12 @@ type LagPoller struct {
 	// peakBindingRows untouched, so a caller that does not wire it is unchanged
 	// rather than reporting a fabricated zero.
 	peakRows PeakRowsFunc
+
+	// withholdCounts optionally supplies the lens's withholding tallies. nil
+	// (the default, unless SetWithholdCountsFunc is called) leaves the Entry's
+	// two counters untouched — a lens whose host never wired the source has
+	// not measured zero, and writing one would say it had.
+	withholdCounts WithholdCountsFunc
 
 	// healerPass optionally supplies the personal healer's last-pass clock, so
 	// this poller can escalate a stored personalSweepVerdict to `stale`. nil
@@ -124,6 +138,15 @@ type LagPoller struct {
 	// Single dedicated goroutine (Start), so no lock.
 	lastPeakRows    uint64
 	lastPeakRowsSet bool
+
+	// lastWithheld / lastWithholdFailures / lastWithholdSet are the same
+	// unchanged-value skip for the withholding tallies: two monotone counters
+	// that stop moving the moment a lens goes quiet, and re-writing an
+	// unchanged pair would cost a Health-KV round trip per cycle for a number
+	// nobody's reading changed. Single dedicated goroutine (Start), so no lock.
+	lastWithheld         uint64
+	lastWithholdFailures uint64
+	lastWithholdSet      bool
 
 	// staleWritten latches the escalation so a stalled healer costs one Health-KV
 	// write, not one per poll for as long as it stays stalled. Cleared the moment
@@ -182,6 +205,13 @@ func (lp *LagPoller) SetPersonalHealerPassFunc(fn PersonalHealerPassFunc) {
 // called before Start. Pass nil to clear (the default).
 func (lp *LagPoller) SetPeakRowsFunc(fn PeakRowsFunc) {
 	lp.peakRows = fn
+}
+
+// SetWithholdCountsFunc attaches the pipeline's withholding tallies. Must be
+// called before Start. Pass nil to clear (the default), which leaves both
+// fields on the entry entirely untouched.
+func (lp *LagPoller) SetWithholdCountsFunc(fn WithholdCountsFunc) {
+	lp.withholdCounts = fn
 }
 
 // NewLagPoller creates a LagPoller for the given rule. The lag source is read
@@ -286,6 +316,7 @@ func (lp *LagPoller) poll(ctx context.Context) {
 			}
 		}
 		lp.pollPeakRows(ctx)
+		lp.pollWithholdCounts(ctx)
 		lp.pollPersonalHealerStaleness(ctx)
 	}
 }
@@ -380,6 +411,32 @@ func (lp *LagPoller) pollPeakRows(ctx context.Context) {
 	}
 	lp.lastPeakRows = rows
 	lp.lastPeakRowsSet = true
+}
+
+// pollWithholdCounts publishes the lens's two withholding tallies onto its
+// health entry. A separate read-modify-write from the progress and gauge writes
+// for the same reason those are separate from each other: its own source, its
+// own "nothing to say" case (no source wired at all — a lens that has not
+// measured, which is not a lens that measured zero), and the same
+// unchanged-value skip, so a lens whose counters have stopped moving costs a
+// read rather than a Health-KV round trip.
+func (lp *LagPoller) pollWithholdCounts(ctx context.Context) {
+	if lp.withholdCounts == nil {
+		return
+	}
+	withheld, failures := lp.withholdCounts()
+	if lp.lastWithholdSet && withheld == lp.lastWithheld && failures == lp.lastWithholdFailures {
+		return
+	}
+	if err := lp.reporter.SetWithholdCounts(ctx, withheld, failures); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("lag poller: SetWithholdCounts failed",
+				"ruleId", lp.ruleID, "err", err)
+		}
+		return
+	}
+	lp.lastWithheld, lp.lastWithholdFailures = withheld, failures
+	lp.lastWithholdSet = true
 }
 
 // pollAckStats reads the consumer's un-acked count and ack floor and stamps the

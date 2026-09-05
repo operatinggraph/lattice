@@ -26,6 +26,11 @@ type recordingAdapter struct {
 	upserts   []recordedWrite
 	deletes   []recordedWrite
 	getCalled int
+	// onGetRow, when set, runs at the start of every read-back. It is the
+	// interleaving hook: a case that needs state to move BETWEEN a Reproject's
+	// token capture and its write phase drives it from here, in the one place
+	// the loop is guaranteed to pass through per result.
+	onGetRow func()
 }
 
 type recordedWrite struct {
@@ -49,6 +54,9 @@ func (a *recordingAdapter) Close() error                { return nil }
 func (a *recordingAdapter) Guarded() bool               { return !a.unguarded }
 
 func (a *recordingAdapter) GetRow(context.Context, map[string]any) (map[string]any, bool, error) {
+	if a.onGetRow != nil {
+		a.onGetRow()
+	}
 	a.getCalled++
 	if a.getErr != nil {
 		return nil, false, a.getErr
@@ -75,6 +83,11 @@ func newReprojectPipeline(t *testing.T, adpt *recordingAdapter) *Pipeline {
 	p.SetEnvelopeFn(func(row, keys, params map[string]any) (map[string]any, map[string]any, error) {
 		return row, keys, nil
 	})
+	// The adjacency index is current with this lens, which is the state a
+	// healthy stack sits in: Reproject's retraction arm refuses to tombstone
+	// from an edge view the index has not brought up to the token it writes
+	// under, and a fixture that installs no cursor would refuse every delete.
+	p.SetAdjacencyAppliedFn(func() uint64 { return p.Progress().LastAppliedSeq })
 	return p
 }
 

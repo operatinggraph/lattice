@@ -42,4 +42,21 @@ type EvalResult struct {
 	// a result an engine did not record provenance for, and on a
 	// pipeline-manufactured result (a tombstone, a zero-row retraction).
 	Provenance []string
+	// Unchanged marks a result the target already holds verbatim: the stored
+	// body equals this one, so the write loop skips it — nothing written,
+	// audited, counted or marked on the freshness clock. It is the pipeline's
+	// verdict, not an engine's: only the perEntry prefix diff
+	// (Pipeline.multiEntryRetractions) sets it, and only after reading the
+	// stored bodies back and comparing them.
+	//
+	// The ZERO VALUE WRITES, which is the direction every path that forgets
+	// this field must fail in: an unset Unchanged reproduces the
+	// write-everything behaviour exactly, while a wrongly set one withholds a
+	// row that needed to land.
+	//
+	// Never set on a Delete (a retraction is always written — a tombstone the
+	// target "already holds" is precisely the one the prefix diff skipped
+	// before it ever became a result) and never on a FailClosed result, whose
+	// whole purpose is that its write cannot be silently passed over.
+	Unchanged bool
 }

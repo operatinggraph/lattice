@@ -508,7 +508,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_ActorDisappearance_TombstonesLegacy
 		multiEnvelopeFn: fanOutEntryFn,
 	}
 
-	results, err := p.multiEntryRetractions(ctx, "vtx.identity.gone", nil)
+	results, err := p.multiEntryRetractions(ctx, "vtx.identity.gone", nil, false)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	keys := map[string]bool{}
@@ -587,14 +587,14 @@ func (fakePrefixOnlyAdapter) ListKeysPrefix(context.Context, string) ([]map[stri
 
 func TestMultiEntryRetractions_AdapterNotPrefixKeyLister_ErrorsClosed(t *testing.T) {
 	p := &Pipeline{adpt: fakeBareAdapter{}, actorDeleteKey: func(string) string { return "child" }}
-	_, err := p.multiEntryRetractions(context.Background(), "vtx.identity.x", nil)
+	_, err := p.multiEntryRetractions(context.Background(), "vtx.identity.x", nil, false)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cannot enumerate keys by prefix")
 }
 
 func TestMultiEntryRetractions_AdapterNotRowReader_ErrorsClosed(t *testing.T) {
 	p := &Pipeline{adpt: fakePrefixOnlyAdapter{}, actorDeleteKey: func(string) string { return "child" }}
-	_, err := p.multiEntryRetractions(context.Background(), "vtx.identity.x", nil)
+	_, err := p.multiEntryRetractions(context.Background(), "vtx.identity.x", nil, false)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cannot read back a row")
 }

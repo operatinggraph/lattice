@@ -129,6 +129,27 @@ type RowReader interface {
 	GetRow(ctx context.Context, keys map[string]any) (row map[string]any, ok bool, err error)
 }
 
+// RowsReader is RowReader's batched sibling: it reads back many rows in one
+// request set, keyed by the exact key each was asked for. Implemented by
+// NatsKVAdapter for the perEntry write loop, which compares an actor's whole
+// fresh entry set against what the target already holds and writes only the
+// entries that differ — a comparison that is worth making only if reading the
+// stored side costs far less than the writes it replaces.
+//
+// PER-MEMBER semantics, and they are the interface's contract rather than one
+// implementation's convenience: a key that is absent, tombstoned, unreadable
+// or unparseable is simply MISSING from the returned map, and never an error
+// for the batch. A caller reads a missing key as "no stored body to compare
+// against", which is the write direction — so one corrupt member costs its own
+// entry a write and nothing else. An error return means the request set as a
+// whole did not happen.
+//
+// An implementation states, in its own doc, what bounds the read when the ctx
+// carries no deadline: a batch is only as safe as its worst case.
+type RowsReader interface {
+	GetRows(ctx context.Context, keys []string) (map[string]map[string]any, error)
+}
+
 // HydrationMarkerPublisher is an optional interface for adapters that support
 // publishing a terminal "hydrationComplete" marker after a cold bulk
 // projection (personal-secure-lens-design.md §3.5, Fire PL.4). Implemented by

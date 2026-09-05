@@ -36,6 +36,10 @@ func (s *transitionStore) Get(ctx context.Context, key string) (*substrate.KVEnt
 	return &substrate.KVEntry{Value: s.stored, Revision: 7}, nil
 }
 
+func (s *transitionStore) GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error) {
+	panic("unused by grant-transition tests")
+}
+
 func (s *transitionStore) Create(ctx context.Context, key string, value []byte) (uint64, error) {
 	s.writes++
 	if s.createErr != nil {

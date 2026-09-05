@@ -259,6 +259,10 @@ func (p *Pipeline) openRebuildWindowLocked() *rebuildSignal {
 	sig := &rebuildSignal{done: make(chan struct{})}
 	p.rebuildWatch = sig
 	p.rebuildWindows.Add(1)
+	// Raised with the count, under the same lock, so a reader holding a
+	// generation captured before this call cannot observe the window open
+	// without also observing the generation move.
+	p.rebuildGen.Add(1)
 	return sig
 }
 

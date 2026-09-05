@@ -74,6 +74,11 @@ RETURN t.key AS actorKey, t.key AS taskKey
 	})
 	p.SetActorDeleteKey(zeroRowActorDeleteKey)
 	p.SetZeroRowRetraction(true)
+	// The adjacency index is current with this lens, which is the state a
+	// healthy stack sits in: Reproject's retraction arm refuses to tombstone
+	// from an edge view the index has not brought up to the token it writes
+	// under, and a fixture that installs no cursor would refuse every delete.
+	p.SetAdjacencyAppliedFn(func() uint64 { return p.Progress().LastAppliedSeq })
 	return p
 }
 

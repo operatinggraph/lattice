@@ -386,6 +386,32 @@ func classifyDivergence(stored, computed, keys map[string]any) divergence {
 	return divergenceContent
 }
 
+// The two reasons Reproject's write loop refuses on state that moved under it.
+// Both are BlockedUnknown: neither consulted a stored watermark, so neither has
+// established which kind of divergence stands between the row and its repair.
+const (
+	// adjacencyBehindReason names the retraction precondition the ordering
+	// token cannot supply — the adjacency index that served the evaluation's
+	// edge view has not applied everything the token covers, so "the actor no
+	// longer holds this anchor" may be an artifact of the index's lag.
+	adjacencyBehindReason = "adjacency index behind the reconciliation token; retraction refused"
+	// rebuildMovedReason names a reconciliation pass that a rebuild opened
+	// under: the rescan truncates the lens's keys and replays them, so every
+	// write still in hand describes a target that no longer exists.
+	rebuildMovedReason = "a rebuild opened under this reconciliation pass; remaining writes abandoned"
+)
+
+// rebuildAbandons reports whether a reconciliation pass that captured
+// generation gen at its start must abandon its remaining writes. Two
+// conditions, and both are needed: a DIFFERENT generation catches a rescan
+// that opened and already finished under this pass, and an in-flight one
+// catches the rescan that is still replaying — the first alone would miss a
+// pass that began after the rebuild started, and the second alone would miss a
+// short rebuild that came and went.
+func (p *Pipeline) rebuildAbandons(gen uint64) bool {
+	return p.rebuildGeneration() != gen || p.RebuildInFlight()
+}
+
 // Reproject re-executes one actor's projection and reconciles the stored row
 // with it (capability-projection-reconciliation-design.md §3.1). It is the
 // auth plane's targeted heal for the class where a CDC event lost to a
@@ -445,6 +471,15 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 	}
 
 	seq := p.Progress().LastAppliedSeq
+
+	// The rebuild this call runs inside, if any. Captured with the ordering
+	// token and compared at every write below: a rescan that opens under a
+	// running reconciliation truncates the lens's keys and replays them from
+	// the stream, so every write this call still has in hand describes a
+	// target that no longer exists and carries a token above the replay's
+	// first writes. The sweep already refuses to START a pass during a rebuild
+	// (sweep.go's suppressed); this is the pass that was already running.
+	rebuildGen := p.rebuildGeneration()
 
 	// Sweep, control-plane RPC and the retry queue all reach here off the
 	// consumer goroutine, so this entry point takes its own rule snapshot.
@@ -528,6 +563,29 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				errs = append(errs, ErrNoOrderingToken)
 				continue
 			}
+			if p.rebuildAbandons(rebuildGen) {
+				fold.addBlocked(VerdictBlocked, BlockedUnknown, rebuildMovedReason)
+				continue
+			}
+			// The retraction's own precondition, and the one the ordering
+			// token cannot supply. This result says "the actor no longer
+			// holds this anchor", which the evaluation concluded from an EDGE
+			// view served by the refractor-adjacency index — a separately
+			// cursored consumer that can be arbitrarily far behind the lens.
+			// An index that has not yet applied everything up to seq can
+			// report an edge absent that Core KV already holds, and the
+			// tombstone this produces would carry a token above the stored
+			// watermark and land. Refusing puts this arm where the CDC link
+			// path already stands: it never retracts from a view older than
+			// the token it is writing under. A cursor of 0 — no source wired,
+			// or a process that has applied and polled nothing yet — is the
+			// unknown answer and refuses with the rest.
+			//
+			// The sweep's next pass retries; nothing is lost but a cycle.
+			if applied := p.adjacencyAppliedSeq(); applied == 0 || applied < seq {
+				fold.addBlocked(VerdictBlocked, BlockedUnknown, adjacencyBehindReason)
+				continue
+			}
 			if reportsDelete {
 				outcome, derr := outcomeDeleter.DeleteWithOutcome(ctx, result.Keys, seq)
 				p.recordProjectionWrite()
@@ -568,6 +626,17 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			continue
 		}
 
+		if result.Unchanged {
+			// The evaluation already read this entry's stored body back and
+			// found it equal — the same predicate, on the same stored row,
+			// that the comparison below would re-derive one round trip later.
+			// Concluding it here is what keeps a converged perEntry actor at
+			// zero reads per entry as well as zero writes.
+			out.Converged = true
+			fold.add(VerdictConverged, "")
+			continue
+		}
+
 		// divergedAs carries the read-back evidence from the comparison below
 		// to the write outcome, so a declined write can name WHICH KIND of
 		// divergence it failed to repair. Without a reader there is no
@@ -604,6 +673,11 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				errs = append(errs, ErrNoOrderingToken)
 				continue
 			}
+		}
+
+		if p.rebuildAbandons(rebuildGen) {
+			fold.addBlocked(VerdictBlocked, BlockedUnknown, rebuildMovedReason)
+			continue
 		}
 
 		if reportsUpsert {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
@@ -36,6 +37,23 @@ type Bootstrapper struct {
 	adjKV        *substrate.KV
 	ready        chan struct{}
 	once         sync.Once
+	// appliedSeq is the highest Core KV stream sequence this process has
+	// applied to the adjacency index — the index's own progress cursor, which
+	// JetStream does not expose for a durable (an ack floor moves on a Term as
+	// well as an Ack, and neither says which sequence the index actually
+	// reflects).
+	//
+	// It is a monotone MAXIMUM, never an assignment: a Nak'd message is
+	// redelivered out of order, so assigning would let an old redelivery move
+	// the cursor backwards and report progress the index has already passed.
+	//
+	// Lifetime: created 0 at process start and never reset. Zero means "this
+	// process has applied nothing and polled nothing yet" — a reader comparing
+	// its own token against it therefore refuses until the first apply or the
+	// first caught-up poll, which is the fail-closed direction. Per process,
+	// never durable: a second Refractor instance under-states the cluster's
+	// true progress, which refuses more, never less.
+	appliedSeq atomic.Uint64
 }
 
 // NewBootstrapper creates a Bootstrapper that reads from coreKVBucket via the
@@ -104,6 +122,22 @@ func (b *Bootstrapper) pollReady(ctx context.Context) {
 				continue
 			}
 			if caughtUp {
+				// A drained consumer has applied everything the stream holds,
+				// which is the only moment the index's progress can be read
+				// off the stream rather than off a delivery. It is what gives
+				// AppliedSeq a value on the path where the handler never runs:
+				// an empty stream, and a restart against a durable that was
+				// already caught up. Raised before Ready is signalled so a
+				// reader released by Ready sees the cursor.
+				if last, serr := b.conn.StreamLastSequence(ctx, b.streamName); serr == nil {
+					b.raiseAppliedSeq(last)
+				} else if ctx.Err() == nil {
+					// The cursor stays where it is, which is the refusing
+					// answer for its readers — never a reason to hold Ready
+					// and with it every lens on this process.
+					slog.Warn("adjacency bootstrap: caught up but could not read the stream head — the applied-sequence cursor stays where it is",
+						"stream", b.streamName, "err", serr)
+				}
 				b.signalReady()
 				return
 			}
@@ -117,10 +151,44 @@ func (b *Bootstrapper) pollReady(ctx context.Context) {
 // message pending at startup has been delivered.
 func (b *Bootstrapper) handle(ctx context.Context, msg substrate.Message) substrate.Decision {
 	decision := b.processMsg(ctx, msg)
+	// Ack and Term are the two dispositions that retire a message: the index
+	// reflects everything up to this sequence once either is returned (a Term
+	// discards a message the index can never apply, which is as final as an
+	// apply). A Nak leaves the message owed, so the cursor must not move.
+	if decision == substrate.Ack || decision == substrate.Term {
+		b.raiseAppliedSeq(msg.Sequence)
+	}
 	if msg.NumPending == 0 {
 		b.signalReady()
 	}
 	return decision
+}
+
+// AppliedSeq reports the highest Core KV stream sequence this process has
+// applied to the adjacency index, or 0 when it has applied and polled nothing.
+//
+// A reader uses it to ask whether an edge view it just read can be trusted
+// against an ordering token: the index reflects every link commit at or below
+// this sequence, and nothing is promised above it. Because 0 is the
+// never-measured value as well as the empty-stream one before the first poll,
+// a reader that cannot act on an unknown cursor must treat 0 as a refusal.
+func (b *Bootstrapper) AppliedSeq() uint64 {
+	return b.appliedSeq.Load()
+}
+
+// raiseAppliedSeq moves the cursor to seq when seq is higher, and leaves it
+// alone otherwise. The CAS loop is what makes the maximum hold under the
+// concurrent writer the poll is alongside the handler.
+func (b *Bootstrapper) raiseAppliedSeq(seq uint64) {
+	for {
+		cur := b.appliedSeq.Load()
+		if seq <= cur {
+			return
+		}
+		if b.appliedSeq.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
 }
 
 // processMsg classifies one Core KV message and returns its disposition. Link

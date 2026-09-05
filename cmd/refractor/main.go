@@ -1504,6 +1504,13 @@ func main() {
 		// design.md §14 Fire A item 4).
 		p.SetTaxonomyResolver(taxResolver)
 
+		// The adjacency index's progress cursor, handed to every lens: the
+		// executor's edge reads are served from that index, and Reproject's
+		// retraction arm refuses to conclude "this anchor is gone" from a view
+		// the index has not brought up to the token it writes under. One
+		// process-wide bootstrapper, so every pipeline reads the same cursor.
+		p.SetAdjacencyAppliedFn(bootstrapper.AppliedSeq)
+
 		// Wire full engine when selected.
 		if r.ResolvedEngine == ruleengine.EngineFull {
 			if r.CompiledRule == nil {
@@ -1989,6 +1996,12 @@ func main() {
 		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
 		lp.SetAckStatsFunc(p.AckStats)
 		lp.SetPeakRowsFunc(p.PeakBindingRows)
+		// The per-entry writes this lens avoided, and the read-backs that
+		// failed and so avoided none. Wired for every lens: a lens that cannot
+		// withhold reports two honest zeroes.
+		lp.SetWithholdCountsFunc(func() (uint64, uint64) {
+			return p.EntriesWithheld(), p.WithholdReadFailures()
+		})
 		// The one writer that can report the personal healer's SILENCE. The
 		// sweeper publishes its verdict at the end of every pass, so a sweeper
 		// that stops passing leaves `clean` standing on every personal lens's

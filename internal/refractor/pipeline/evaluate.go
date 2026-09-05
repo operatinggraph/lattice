@@ -243,7 +243,9 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			return peerResults, append([]string{entry.CoreKVKey}, peers...), scope, nil
 		}
 		if p.multiEnvelopeFn != nil {
-			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil)
+			// An empty fresh set: every live child is retracted and there is
+			// nothing to compare, so the read-back is not asked for.
+			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil, false)
 			if rerr != nil {
 				return nil, nil, ScopeAll(), rerr
 			}
@@ -932,7 +934,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 	// security plane, cap-read-per-anchor-grant-keys-design.md §4.2). The
 	// prefix diff below is the retraction transport that closes it.
 	if p.multiEnvelopeFn != nil {
-		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results)
+		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results, recordCost)
 		if rerr != nil {
 			return nil, ruleengine.EvalFootprint{}, rerr
 		}
@@ -972,7 +974,16 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 // child key) live alongside the correctly-updated rest of the set — the
 // exact fail-OPEN shape this design exists to close, reopened one batch at a
 // time.
-func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult) ([]ruleengine.EvalResult, error) {
+//
+// recordCost marks the evaluations that lead to a WRITE, and it gates the one
+// extra read this function makes: on a costed call, and only while withholding
+// is armed (withholdingArmed), the entries the fresh set and the stored set
+// have in common are read back in one batch and the ones whose stored body
+// already equals the fresh one are marked Unchanged for the write loop to
+// skip. The background divergence audit passes false — it writes nothing, so a
+// read that decides what to write would be pure cost — and so does a caller
+// with an empty fresh set, which has nothing to compare.
+func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult, recordCost bool) ([]ruleengine.EvalResult, error) {
 	adpt := p.currentAdapter()
 	lister, ok := adpt.(adapter.PrefixKeyLister)
 	if !ok {
@@ -1021,12 +1032,19 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		freshKeys[k] = struct{}{}
 	}
 
+	// The keys this evaluation is about to rewrite that the target already
+	// holds — the intersection of the stored set with the fresh one. Both
+	// sides are already scoped to actorKey's own prefix (childPrefix, itself
+	// actorDeleteKeyFor's parent key), so a sibling lens sharing the target is
+	// never named in the read below.
+	var retained []string
 	for _, keys := range existing {
 		k, ok := keys["key"].(string)
 		if !ok {
 			continue
 		}
 		if _, stillFresh := freshKeys[k]; stillFresh {
+			retained = append(retained, k)
 			continue
 		}
 		_, live, err := reader.GetRow(ctx, keys)
@@ -1037,6 +1055,9 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 			continue
 		}
 		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: keys, FailClosed: true})
+	}
+	if recordCost && len(retained) > 0 {
+		p.markUnchangedEntries(ctx, adpt, actorKey, retained, fresh)
 	}
 	if len(tombstones) == 0 {
 		return fresh, nil
@@ -1300,7 +1321,8 @@ func (p *Pipeline) reprojectActors(ctx context.Context, rs ruleState, actorKeys 
 			// `SetMultiEnvelopeFn` at registration — the bootstrap
 			// `capabilityRead` base lens is the first live one.
 			if p.multiEnvelopeFn != nil {
-				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil)
+				// An empty fresh set: nothing to withhold, so no read-back.
+				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil, false)
 				if rerr != nil {
 					return nil, rerr
 				}

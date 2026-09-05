@@ -125,6 +125,32 @@ type Pipeline struct {
 	// set at once.
 	multiEnvelopeFn MultiEnvelopeFn
 
+	// adjacencyApplied reports the highest Core KV stream sequence the
+	// refractor-adjacency index has applied in this process
+	// (consumer.Bootstrapper.AppliedSeq). It is the one progress cursor the
+	// executor's EDGE reads depend on and JetStream does not expose, and
+	// Reproject's retraction arm refuses to tombstone from a view older than
+	// the ordering token it captured.
+	//
+	// A bare func rather than an interface, for the reason
+	// PersonalHealerVerdictFn takes one: the contract is one method and the
+	// producer lives in a package this one may not import. Nil — a host that
+	// never wired it — reads as a cursor of 0, which refuses.
+	adjacencyApplied func() uint64
+
+	// entriesWithheld counts the perEntry entries this lens did not write
+	// because the target already held the identical body, and
+	// withholdReadFailures the batched read-backs that failed and so withheld
+	// nothing. Both are cumulative for the life of the process and never
+	// reset: a rate is what an operator reads, and a gauge that can be cleared
+	// by a rebuild reports a quiet lens and a broken one alike.
+	entriesWithheld      atomic.Uint64
+	withholdReadFailures atomic.Uint64
+	// secureWithholdRefusalOnce keeps withholdingArmed's Secure-lens refusal
+	// to one log line: the condition is a property of the lens's declaration,
+	// so it answers identically for every event this pipeline ever handles.
+	secureWithholdRefusalOnce sync.Once
+
 	// plainReprojectLabels is the exhaustive set of vertex types this lens's
 	// patterns can bind (full.CompiledRule.ReferencedLabels), used by the
 	// plain aspect/link reprojection arms to skip events on types the lens
@@ -536,10 +562,28 @@ type Pipeline struct {
 	// lens live under a rescan still replaying. Three readers turn on that
 	// difference: the health sink (a supervisor-driven active-persist mid-rebuild
 	// re-persists "rebuilding" rather than a premature "active"), the convergence
-	// sweep's suppression, and a personal lens's publication scope, which
-	// publishes NOTHING for as long as any window is open.
+	// sweep's suppression, a personal lens's publication scope, which
+	// publishes NOTHING for as long as any window is open, and Reproject,
+	// which abandons the writes of a reconciliation pass that spans a rebuild.
+	// Reproject's read is in the refusing direction whichever way the flag is
+	// briefly wrong: a false positive costs one sweep pass, retried on the
+	// next, while a false negative is covered by rebuildGen below — the two
+	// are read together, never apart.
 	rebuildPollInterval time.Duration
 	rebuildWindows      atomic.Int64
+	// rebuildGen counts the rebuilds ever begun on this pipeline: raised once
+	// per opened window, inside openRebuildWindowLocked under rebuildWatchMu,
+	// so it moves in lockstep with rebuildWindows and never lags it.
+	//
+	// It answers the question the count cannot: a caller that captured a
+	// generation before a rebuild began and reads a DIFFERENT one now knows a
+	// rescan started under it, even when that rescan has already finished and
+	// left the count back at zero. RebuildInFlight alone would report that
+	// interleaving as quiet.
+	//
+	// Monotone, per process, never reset — a restart is not a boundary any
+	// captured generation survives.
+	rebuildGen atomic.Uint64
 	// rebuildSerial (capacity 1) serializes RebuildAndWait callers per pipeline.
 	// A channel rather than a sync.Mutex because acquisition must honour the
 	// caller's context: a rebuild drain is unbounded in principle, and a shutting
@@ -1358,6 +1402,14 @@ func (p *Pipeline) AckStats(ctx context.Context) (substrate.AckStats, error) {
 // scripts/lint-flag-consumer-census.go fails a reader the census does not name.
 func (p *Pipeline) RebuildInFlight() bool {
 	return p.rebuildWindows.Load() > 0
+}
+
+// rebuildGeneration reports how many rebuilds have ever begun on this
+// pipeline. A caller captures it alongside whatever state it is about to act
+// on and compares before acting: an unequal value means a rescan opened in
+// between, whether or not one is open now.
+func (p *Pipeline) rebuildGeneration() uint64 {
+	return p.rebuildGen.Load()
 }
 
 // RequireGuardedAdapter declares that every adapter this pipeline writes

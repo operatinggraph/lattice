@@ -168,6 +168,12 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
+	// Entries the evaluation proved the target already holds verbatim
+	// (EvalResult.Unchanged). Counted so the lens's processed line and its
+	// health entry report the writes this pass did NOT make — without it the
+	// mechanism is invisible, and a lens that has stopped writing because the
+	// grants stopped changing looks exactly like one that has stopped working.
+	withheld := 0
 	// committedResults are the rows the adapter reported as landed, held back
 	// until the flush below proves it. Emitting the freshness mark and the
 	// audit entry from inside the loop would record rows a failed flush is
@@ -187,6 +193,28 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 			// nothing is written, audited, counted or disposed for it — and it
 			// still reaches emitPersonalFrames below, which is what stops the
 			// client pruning the copy it holds.
+			continue
+		}
+		if result.Unchanged {
+			// The target already holds this exact body, so there is no write
+			// to make and nothing to say about one: not written, not audited,
+			// not counted by recordProjectionWrite, no freshness mark, and
+			// never entered into the retry or terminal lists — the same three
+			// silences the personal scope's decline takes, for the same
+			// reason. The stored row's projectionSeq stays where the write
+			// that last CHANGED this entry left it, which is what makes a
+			// withheld write safe to skip: that watermark already carries the
+			// entry's last presence change.
+			//
+			// Only a non-delete, non-FailClosed result can be marked, so
+			// §6.14's tombstones-first ordering and the FailClosed abort are
+			// untouched by this branch.
+			// Counted at exactly the point recordProjectionWrite counts a
+			// write, and for the same reason: the tally is of work this pass
+			// decided on, so a redelivery that decides again counts again,
+			// just as a rewritten row does.
+			p.entriesWithheld.Add(1)
+			withheld++
 			continue
 		}
 		var writeErr error
@@ -399,6 +427,11 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	}
 
 	attrs := []any{"ruleId", p.ruleID, "entityId", key, "stage", "pipeline", "adapter", p.adapterName}
+	if withheld > 0 {
+		// On the line that already reports the event, because this is where an
+		// operator asking "why did this event write so little" is looking.
+		attrs = append(attrs, "entriesWithheld", withheld)
+	}
 	if scoped {
 		// The scope this event published under, on the line that already
 		// reports the event — an operator asking why a device did not receive a

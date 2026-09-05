@@ -449,6 +449,30 @@ func (c *Conn) ConsumerCaughtUp(ctx context.Context, stream, durable string) (bo
 	return info.NumPending == 0 && info.NumAckPending == 0, nil
 }
 
+// StreamLastSequence reports the highest sequence the named stream currently
+// holds (State.LastSeq), or 0 for a stream that has never taken a message.
+//
+// It is the companion of ConsumerCaughtUp for a caller that needs a NUMBER
+// rather than a boolean: a consumer that has drained its backlog has applied
+// everything up to this sequence, so a reader comparing its own progress
+// against the stream's head reads the two together — caught up, and caught up
+// TO WHAT. Reading it alone says nothing about any consumer.
+//
+// BOUND: one stream-info request. With no deadline on ctx the client bounds it
+// by its own default API timeout; there is no retry and no paging, so the cost
+// is one round trip whatever the stream holds.
+func (c *Conn) StreamLastSequence(ctx context.Context, stream string) (uint64, error) {
+	str, err := c.js.Stream(ctx, stream)
+	if err != nil {
+		return 0, fmt.Errorf("substrate: StreamLastSequence: stream %q: %w", stream, err)
+	}
+	info, err := str.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("substrate: StreamLastSequence: info %q: %w", stream, err)
+	}
+	return info.State.LastSeq, nil
+}
+
 // newMessage builds the caller-facing Message view from a raw JetStream
 // message. Sequence is the backing-stream sequence when metadata is available.
 func newMessage(msg jetstream.Msg) Message {
