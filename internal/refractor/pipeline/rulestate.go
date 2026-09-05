@@ -539,19 +539,31 @@ func (p *Pipeline) actorAwareNarrowingLabels(rs ruleState) (map[string]struct{},
 	// A key holder is not implied by the pattern: the decryptor resolves custody
 	// from the ciphertext's own keyId, and a holder vertex may not be one the
 	// cypher binds at all. The in-band scrub is a CDC event on <holder>.piiKey,
-	// so a narrowed lens that cannot see a declared holder type would never be
-	// delivered that holder's destruction and would keep projecting decrypted
-	// plaintext. Judge against what the lens DECLARED — the declaration is the
-	// only place a holder type is knowable without parsing compiled cypher.
+	// so a narrowed ACTOR-AWARE lens that cannot see a declared holder type
+	// would never be delivered that holder's destruction and would keep
+	// projecting decrypted plaintext. Judge against what the lens DECLARED —
+	// the declaration is the only place a holder type is knowable without
+	// parsing compiled cypher.
 	//
-	// This conjunct guards a combination that cannot exist yet, and claims
-	// nothing about the lenses that ship today: reaching here at all requires an
-	// actorEnumerator (narrowedFilterEligible), and a secure lens is refused on
-	// any non-empty projectionKind at translate time, so every shipped secure
-	// lens takes the PLAIN branch, which carries no holder-type conjunct. What
-	// contains the exposure meanwhile is pkgmgr's custody-scope gate, which
-	// refuses a non-identity holder at install. Whoever lifts either ban owns
-	// carrying this requirement onto the arm they open.
+	// This conjunct guards a combination that cannot exist yet: reaching here at
+	// all requires an actorEnumerator, and a secure lens is refused on any
+	// non-empty projectionKind at translate time, so every shipped Secure Lens
+	// takes the PLAIN branch instead — which carries no analogous conjunct,
+	// because plainReactsTo's ordinary type-relevance gate already excludes a
+	// piiKey scrub for it: the scrub is a CDC event on the HOLDER vertex's own
+	// type ("retentionclass" for clinicEncountersRead's SecureColumns,
+	// clinic-domain/lenses.go — pkgmgr's custody-scope gate
+	// (internal/pkgmgr/custodyscope.go) accepts a retention-class holder same as
+	// an identity one), which no business lens's pattern binds, so
+	// plainReactsTo("retentionclass") is false and the plain reprojection arms
+	// never see that event to react to at all. A retention-class holder's
+	// erasure still has to reach clinicEncountersRead, and it does through a
+	// different mechanism entirely: cmd/refractor/main.go's
+	// holderTypeRebuildTargets enumerates every running lens whose declared
+	// SecureColumns name the destroyed holder type and rebuilds it whole
+	// (retention-class-key-custody-design.md §6.3). Whoever lifts the
+	// non-empty-projectionKind ban owns carrying this conjunct onto the arm they
+	// open.
 	if p.secureDecryptor != nil {
 		for _, holderType := range p.secureDecryptor.HolderTypes() {
 			if _, ok := rs.reprojectLabels[holderType]; !ok {

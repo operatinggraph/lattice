@@ -104,13 +104,14 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"applicantRosterRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"augurProposals":      {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"availableListings":   {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	// A complete ScanRootHopIndex that the plain arm never acts on: the plain
-	// licence refuses this lens on `secureDecryptor == nil`, because it declares
-	// SecureColumns (cafe-domain/lenses.go). Indexed is the index's verdict, not
-	// a statement about what the pipeline does with the lens.
+	// A complete ScanRootHopIndex the plain arm CAN act on: the licence admits a
+	// Secure lens on exactly the conjuncts a non-Secure one is admitted on (its
+	// decryptor is not a conjunct — the re-entry never decrypts on its own
+	// account), so this lens is derivation-acted on the same as any other
+	// licensed plain lens (SecureColumns declared in cafe-domain/lenses.go).
 	"cafeIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"cafeLeaseAccounts":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// One of the four plain lenses the derivation acts on: its neighbour events
+	// One of the plain lenses the derivation acts on: its neighbour events
 	// narrow to the derived anchors rather than rescanning the corpus. Its
 	// `containedIn` range is a ranged hop the walk steps.
 	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
@@ -180,7 +181,8 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"visitSeriesRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessBookings":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// SecureColumns, licence-held — see cafeIdentitiesRead.
+	// The licence admits a Secure lens; it is derivation-acted on — see
+	// cafeIdentitiesRead.
 	"wellnessIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessInstructors":    {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessLedgerHistory":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},

@@ -622,6 +622,44 @@ type LensLivenessStatus struct {
 	StructuralAutoRecoveredAt      time.Time
 	StructuralAutoRecoveredCause   string
 	StructuralAutoRecoveryAttempts int
+	// The plain arm's neighbour-anchor derivation, which is a WRITE transport on
+	// this plane: an armed lens retracts a row whose required neighbour dropped
+	// out, and an ineligible, unlicensed, or over-cap event falls back to the
+	// whole-corpus rescan that retracts nothing (secure-plain-lens-retraction-
+	// and-audit-design.md §4.2).
+	//
+	// DerivationEligible is the presence gate for everything else in this
+	// group, not a published key of its own: it is the STATIC half — act mode
+	// plus the derivation index's AST-derived conjuncts — independent of
+	// whether the licence's live auditor-health conjuncts currently admit the
+	// lens. A lens whose derivation never runs and a licensed lens that has
+	// never fallen back would otherwise both read `derivationFellBack: 0`, and
+	// only Eligible (not the mode alone) tells them apart: a static licence
+	// refusal never increments the tally at all.
+	//
+	// DerivationArmed is the WHOLE gate — Eligible AND the licence — and reads
+	// as the transport's OWN posture for an eligible lens: true while a derived
+	// set is deciding its neighbour events, false while an eligible lens's
+	// licence currently refuses it (an unenrolled, suppressed, or stale
+	// auditor, among other conjuncts) — "declared, currently off", not "no
+	// transport at all".
+	//
+	// DerivationFellBack counts events since activation that took the rescan
+	// instead of the derived set, and DerivationOverCapSize carries the size of
+	// the most recent derived set that was refused for exceeding the cap — the
+	// sizing number, so a lens whose neighbourhoods routinely outgrow the cap
+	// is a cap-sizing finding rather than a silent non-transport. Both are read
+	// for any ELIGIBLE lens, armed or not: a count that has already accrued
+	// stays on the wire regardless of whether the licence happens to be
+	// refusing the lens at this beat. Both live only in the pipeline's memory
+	// and are therefore PROCESS-lifetime, unlike SweepReconciled beside them,
+	// which the sweep restores from the health entry: a restart zeroes these
+	// two, so a low count on a recently restarted instance says nothing about
+	// the day.
+	DerivationEligible    bool
+	DerivationArmed       bool
+	DerivationFellBack    uint64
+	DerivationOverCapSize int
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -1667,6 +1705,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			}
 			addLensSweepMetrics(m, s)
 			addAuditMetrics(m, s.audit())
+			addPlainDerivationMetrics(m, s)
 			metric[name] = m
 			continue
 		}
@@ -1703,6 +1742,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		}
 		addLensSweepMetrics(m, s)
 		addAuditMetrics(m, s.audit())
+		addPlainDerivationMetrics(m, s)
 		metric[name] = m
 	}
 	h.pruneLensLagState(seen)
@@ -2328,6 +2368,41 @@ func addAuditMetrics(m map[string]any, a auditSnapshot) {
 	m["auditSuppression"] = a.suppression
 	if a.lastUnverified != "" {
 		m["auditUnverifiedReason"] = a.lastUnverified
+	}
+}
+
+// addPlainDerivationMetrics publishes the plain arm's neighbour-anchor
+// derivation posture for a lens whose derivation is ELIGIBLE, and NOTHING at
+// all for one whose is not.
+//
+// The gate is the whole point, and it is Eligible rather than Armed: an
+// ineligible lens's shape can never support the transport at all, while an
+// eligible-but-unlicensed lens's shape could, and an operator needs to tell
+// those apart from the same absence-vs-presence signal
+// auditMaskedColumns follows. So absence means "this lens's neighbour events
+// are never decided by a derived set" and presence means "they could be" —
+// derivationArmed is then the live answer to whether they currently ARE:
+// `false` reads as "declared, currently off" (an unenrolled, suppressed, or
+// stale auditor, among other conjuncts), never as "no transport", which is
+// what publishing nothing at all would wrongly suggest for a lens whose shape
+// fully supports one.
+//
+// derivationFellBack is published for any eligible lens regardless of
+// derivationArmed: a count that has already accrued must stay on the wire, not
+// disappear the moment the licence flips against an otherwise-eligible lens.
+// derivationOverCapSize is carried only once it has fired (> 0), mirroring
+// logActSummaryIfDue's own zero-suppression (anchor_derivation_shadow.go): a
+// permanent zero beside a non-zero fellBack whose causes include a failed walk
+// AND a declined walk would read as "every fall-back was an over-cap one of
+// size nothing", which is not always true.
+func addPlainDerivationMetrics(m map[string]any, s LensLivenessStatus) {
+	if !s.DerivationEligible {
+		return
+	}
+	m["derivationArmed"] = s.DerivationArmed
+	m["derivationFellBack"] = s.DerivationFellBack
+	if s.DerivationOverCapSize > 0 {
+		m["derivationOverCapSize"] = s.DerivationOverCapSize
 	}
 }
 

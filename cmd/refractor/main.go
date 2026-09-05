@@ -950,6 +950,14 @@ func main() {
 			if au := entry.pipeline.Auditor(); au != nil {
 				copyLensAuditStatus(&snap, au.Status(), au.Interval())
 			}
+			// The plain arm's neighbour-anchor derivation, read from the same
+			// live pipeline and ahead of the reporter, for the reason the two
+			// above are read there: the tally is per-run state no health entry
+			// carries, and a retraction transport that is falling back must not
+			// be lost to a fault observing something else. A lens whose
+			// derivation is not armed copies a zero status, which publishes
+			// nothing rather than a zero that would read as a verdict.
+			copyLensDerivationStatus(&snap, entry.pipeline.PlainDerivationStatus())
 			// A lens whose liveness inputs cannot be read is reported as
 			// unknown, never omitted: dropping it removes the lens from
 			// metrics.lensLiveness entirely, which is indistinguishable from a

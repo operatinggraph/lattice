@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
@@ -269,4 +270,64 @@ func TestRenewalsRead_CoManagedUnitWithTenantNamePresent(t *testing.T) {
 	rows := f.projectRenewalsRead(t)
 	require.Len(t, rows, 1, "co-management still collapses to one row even with a tenant_name envelope present")
 	require.Equal(t, nameEnv, rows[0].Values["tenant_name"], "the co-managers' aggregation does not disturb the tenant's own name envelope")
+}
+
+// tombstoneEdge removes a link from adjacency the way a link-tombstone CDC
+// event does — adjacency.Build with IsDeleted, both directions, under the same
+// EdgeID lensFixture.edge wrote. It is the only way this fixture can pose a
+// drop-out that happens AFTER a row exists rather than one that was never
+// there.
+func (f *lensFixture) tombstoneEdge(t *testing.T, name, fromName, toName string) {
+	t.Helper()
+	ctx := context.Background()
+	fromID, toID := f.ids[fromName], f.ids[toName]
+	fromType, toType := f.types[fromID], f.types[toID]
+	linkKey := "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID
+	edgeID := name + "_" + fromID + "_" + toID
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "outbound",
+		NodeID: fromID, OtherNodeID: toID, OtherType: toType, IsDeleted: true}))
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound",
+		NodeID: toID, OtherNodeID: fromID, OtherType: fromType, IsDeleted: true}))
+}
+
+// TestRenewalsRead_ManagesTombstoneStopsProjectingTheRow is the after-the-fact
+// twin of TestRenewalsRead_UnmanagedUnitProducesNoRow: that one poses a unit
+// that never had a manager, this one a well-formed renewal whose landlord is
+// unassigned once the row already exists. They are different claims — the first
+// says the REQUIRED `manages` MATCH fail-closes on a fresh projection, this one
+// that a tombstoned link genuinely leaves the matched set, which is the premise
+// every retraction transport rests on.
+//
+// What this fixture CANNOT prove is the retraction itself. It drives the cypher
+// straight through the rule engine (projectRenewalsRead → full.Engine.ExecuteWith)
+// against a Core/Adjacency KV pair and has no Pipeline, no target adapter and no
+// CDC dispatch, so there is no stored row for a Delete to reach and
+// internal/lenstest hands back no connection a target bucket could be opened on.
+// A drop-out becomes a Delete only through the plain arm's neighbour-anchor
+// derivation, which is pinned at the pipeline level by
+// TestPlainDerivation_SecureLensNeighbourDropOutRetracts
+// (internal/refractor/pipeline) on this same shape: a Secure Lens, a REQUIRED
+// hop, and a link tombstone incident on neither the anchor nor the row's value
+// source.
+func TestRenewalsRead_ManagesTombstoneStopsProjectingTheRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	f.seedOpenRenewal(t, "rn2", "app2", "tess", "unit2", "laura")
+
+	// The positive vector: both rows project while both units are managed.
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 2, "both well-formed renewals project before the unassign")
+
+	f.tombstoneEdge(t, "manages", "larry", "unit1")
+
+	rows = f.projectRenewalsRead(t)
+	require.Len(t, rows, 1,
+		"the unassigned renewal leaves the matched set; the row standing in a target is then an orphan")
+	require.Equal(t, f.ids["rn2"], rows[0].Values["renewal_id"],
+		"and it is the OTHER renewal that survives, not a collapsed row of the two")
 }

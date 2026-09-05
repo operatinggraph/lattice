@@ -205,6 +205,18 @@ func (ix HopIndex) UnresolvedExpansionPosition() int {
 	return -1
 }
 
+// AnchorIsExpanding reports whether the ANCHOR position itself carries the `*`
+// taxonomy-expansion sigil — true whether or not its expansion has been
+// resolved (contrast UnresolvedExpansionPosition, which only ever reports an
+// UNresolved one). A consumer that re-seeds a derivation by the anchor
+// position's own AST label (ix.Labels[ix.Anchor]) rather than by the concrete
+// type a live vertex actually has needs this, not that: an expanding anchor's
+// AST label is an abstract taxonomy name no concrete vertex is ever typed as,
+// so a re-seed keyed on it misses every time, resolved closure or not.
+func (ix HopIndex) AnchorIsExpanding() bool {
+	return ix.Anchor >= 0 && ix.Anchor < len(ix.LabelExpand) && ix.LabelExpand[ix.Anchor]
+}
+
 // admitsType reports whether position pos — labeled ix.Labels[pos], and
 // taxonomy-expanded when ix.LabelExpand[pos] is true — admits vertexType.
 // The single predicate PositionsBinding and AnchorSideSeeds' admits closure

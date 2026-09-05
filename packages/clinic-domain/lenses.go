@@ -316,31 +316,37 @@ func Lenses() []pkgmgr.LensSpec {
 			// of the matched set (the registeredAt <> null guard) retracts
 			// through the filter-retraction presence check, the same as any
 			// WITH-free plain lens — that transport is pinned by
-			// TestClinicPatientsRead_TombstonedPatientRetractsItsRow. Anchor
+			// TestClinicPatientsRead_TombstonedPatientRetractsItsRow. Every
+			// OTHER pattern position (id, a, pr, b, b2) is OPTIONAL, so no
+			// NEIGHBOUR event can ever drop this lens's row out of its matched
+			// set — only an event on the anchor `p` itself can. Ordinary anchor
 			// seeding and the plain-derivation narrowing licence are both
-			// available to this lens for the same reason (the narrowing
-			// licence still refuses it, on the SecureColumns declaration below
-			// — a per-anchor re-entry would decrypt twice over — not on the
-			// WITH).
+			// refused by the DERIVATION INDEX (plainDerivationIndex) on the
+			// DiffRetraction declaration below, not on the SecureColumns one
+			// and not on the WITH.
 			//
 			// DiffRetraction is declared anyway, as this lens's CONTINUOUS
-			// HEALER rather than its retraction transport: on every event it
-			// diffs read_clinic_patients' live key set against a fresh
-			// whole-corpus projection, so a row orphaned by a missed or failed
-			// retraction event is removed by the next event of any kind. This
-			// lens has no other standing observer to catch that miss — the
-			// divergence audit refuses enrolment for a lens with a secure
-			// decryptor (internal/refractor/pipeline/audit.go, ~:974: a
-			// background comparison must not re-derive plaintext outside a
-			// request context), and the convergence sweep enrols only
-			// auth-plane actor-aggregate lenses (internal/refractor/pipeline/
-			// sweep.go) — so on a table carrying decrypted name/email/phone,
-			// this whole-target diff is the only thing that heals an orphaned
-			// row. The cost is one extra ListKeys() of read_clinic_patients
-			// per event, on top of the scan the closure predicate already
-			// re-evaluates every event; the disabled anchor seeding and
-			// narrowing licence still apply — the licence refuses this lens on
-			// SecureColumns regardless of DiffRetraction.
+			// HEALER for an ANCHOR-event loss: because no neighbour drop-out is
+			// possible here, the only row a retraction is ever owed for is the
+			// anchor's own tombstone or WHERE-guard flip, and the only way that
+			// retraction goes missing is the write itself failing to land — a
+			// crash between evaluation and write, healed by redelivery's retry
+			// queue surviving a restart. On every event DiffRetraction diffs
+			// read_clinic_patients' live key set against a fresh whole-corpus
+			// projection, so a patient left standing by one of those losses is
+			// removed by the next event of any kind. The divergence audit also
+			// enrols this lens, masking name, email and phone from its
+			// comparison rather than refusing enrolment outright
+			// (internal/refractor/pipeline/audit.go's auditEnrolment), so it is
+			// a second, independent observer of every OTHER column; the
+			// convergence sweep enrols only auth-plane actor-aggregate lenses
+			// (internal/refractor/pipeline/sweep.go), which this lens is not.
+			// The cost is one extra ListKeys() of read_clinic_patients per
+			// event, on top of the scan the closure predicate already
+			// re-evaluates every event; the anchor seeding and narrowing
+			// licence the derivation index refuses on DiffRetraction stay
+			// refused regardless of what the licence itself would say about
+			// SecureColumns.
 			//
 			// loftspace-domain's landlordUnitsRead (packages/loftspace-domain/
 			// lenses.go) is not the precedent for the WITH question: it

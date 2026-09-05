@@ -580,7 +580,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "auditMaskedColumns": ["<string>", ...], "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "auditMaskedColumns": ["<string>", ...], "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>", "derivationArmed": <bool>, "derivationFellBack": <uint64>, "derivationOverCapSize": <int>}
     }
   },
   "issues": [
@@ -818,6 +818,42 @@ governing cause in `auditUnverifiedReason`, and it is counted as **neither clean
 divergent**. It raises the `unverified` alert but no issue of its own: `LensAuditUnverified`
 belongs to the sweep, and one code written by two independent detectors would be two `since`
 clocks disagreeing about when the condition began.
+
+`derivationArmed`, `derivationFellBack` and `derivationOverCapSize` report the plain arm's
+neighbour-anchor derivation, which on a plain lens is a **retraction transport**: an armed lens
+answers a neighbour event with one seeded evaluation per derived anchor, and that is what
+retracts a row whose required neighbour dropped out. When the derived set exceeds the
+derived-anchor cap, or the lens is not currently armed, the event falls back to the
+whole-corpus rescan — correct, cheaper, and upsert-only, so the retraction is simply not made
+and the row is left standing for the audit's `retained` class to find.
+
+`derivationFellBack` counts EVERY event that took that rescan instead of the derived set — a
+failed adjacency walk, a declined walk, and an over-cap derived set are all a fall-back and all
+increment it. `derivationOverCapSize` moves for only the LAST of those causes: it is the SIZE
+(not a count) of the most recent derived set the cap refused, which is the number a cap is
+re-sized from, and it says nothing about a walk failure or a declined walk — a lens whose
+fall-backs are a mix of causes can carry a `derivationFellBack` that outcounts the one size
+beside it. `derivationArmed` is the transport's own live posture: `true` while a derived set is
+deciding this lens's neighbour events, `false` while an eligible lens's licence currently
+refuses it (an unenrolled, suppressed, or stale auditor, among other conjuncts) — "declared,
+currently off", not "no transport". All three are **process-lifetime** — unlike `reconciled`,
+which the sweep restores from this same entry, they live only in the pipeline's memory, so a
+restart zeroes them and a low count on a recently restarted instance says nothing about the
+day.
+
+All three keys are published **only for a lens whose derivation is ELIGIBLE at all** — `act`
+mode plus the derivation index's AST-derived conjuncts (a derivable scan-root index, a single
+branch, no target-diff retraction) — and are absent otherwise; `derivationOverCapSize` is
+additionally absent whenever it is zero, mirroring the pipeline's own zero-suppression for a
+size beside a count whose other causes include a failed or declined walk. Eligibility is a
+FIXED property of the lens's shape, independent of the licence's live auditor-health conjuncts,
+so a lens whose audit goes stale keeps publishing all three but flips `derivationArmed` to
+`false` for as long as that lasts — the honest reading: the shape is still there, the transport
+is off, and the tally is neither hidden nor frozen. The distinction from absence is the point:
+a lens publishing nothing is one whose neighbour events can NEVER be decided by a derived set,
+while a published `derivationFellBack: 0` (with `derivationArmed: true`) means the transport is
+on and has never had to fall back. `derivationFellBack` counts EVENTS, not rows, and a lens
+falling back on every event carries the transport's cost with none of its retraction.
 
 **`alert` precedence**, worst first, is a single total order shared by both maps:
 

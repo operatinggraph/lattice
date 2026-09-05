@@ -1507,22 +1507,53 @@ func (p *Pipeline) Run(ctx context.Context) {
 // arms. A missing or tombstoned vertex yields (nil, nil): its row lifecycle
 // belongs to the vertex-root event path.
 func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, rs ruleState, vtxKey, vtxType string) ([]ruleengine.EvalResult, error) {
-	props, err := p.fetchVertexProps(ctx, vtxKey)
-	if err != nil {
+	entry, seeded, err := p.plainEntryForVertex(ctx, vtxKey, vtxType)
+	if err != nil || !seeded {
 		return nil, err
-	}
-	if props == nil {
-		return nil, nil
-	}
-	entry := ruleengine.NodeEntry{
-		CoreKVKey:  vtxKey,
-		NodeLabel:  vtxType,
-		Properties: props,
 	}
 	// The scope is discarded: a plain arm publishes every row it derives, and
 	// this helper's two callers pass ScopeAll to writeResults themselves.
 	results, _, _, err := p.evaluateForEntry(ctx, rs, entry)
 	return results, err
+}
+
+// evaluatePlainFromVertexRaw is evaluatePlainFromVertex through the PRE-decrypt
+// core (evaluateForEntryRaw) rather than through the decrypting wrapper. It is
+// the entry point for an evaluation that is already running INSIDE
+// evaluateForEntry, whose rows that outer wrapper decrypts once when this one
+// returns into it.
+//
+// Its one caller is evaluatePlainDerivedAnchors. On a Secure Lens the outer
+// wrapper is the single choke point that runs applySecureDecrypt, so a
+// re-entrant evaluation decrypting on its own account would hand that wrapper a
+// decrypted string where a ciphertext envelope map is declared — Terminal, and
+// the column is redacted to null (secure.go). Everything else about the two is
+// identical, the discarded scope included.
+func (p *Pipeline) evaluatePlainFromVertexRaw(ctx context.Context, rs ruleState, vtxKey, vtxType string) ([]ruleengine.EvalResult, error) {
+	entry, seeded, err := p.plainEntryForVertex(ctx, vtxKey, vtxType)
+	if err != nil || !seeded {
+		return nil, err
+	}
+	results, _, _, err := p.evaluateForEntryRaw(ctx, rs, entry)
+	return results, err
+}
+
+// plainEntryForVertex point-reads a vertex and renders it as the NodeEntry a
+// plain evaluation seeds from. seeded == false means the vertex is missing or
+// tombstoned, whose row lifecycle belongs to the vertex-root event path.
+func (p *Pipeline) plainEntryForVertex(ctx context.Context, vtxKey, vtxType string) (ruleengine.NodeEntry, bool, error) {
+	props, err := p.fetchVertexProps(ctx, vtxKey)
+	if err != nil {
+		return ruleengine.NodeEntry{}, false, err
+	}
+	if props == nil {
+		return ruleengine.NodeEntry{}, false, nil
+	}
+	return ruleengine.NodeEntry{
+		CoreKVKey:  vtxKey,
+		NodeLabel:  vtxType,
+		Properties: props,
+	}, true, nil
 }
 
 // dedupeKeyFor returns a canonical identity for an EvalResult's target key

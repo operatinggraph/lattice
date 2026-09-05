@@ -337,6 +337,38 @@ RETURN pr.key AS key, org.key AS orgKey
 		_, ready := p.plainDerivationIndex(rs)
 		require.False(t, ready)
 	})
+
+	t.Run("positive vector: a plain (non-expanding) anchor position is admitted", func(t *testing.T) {
+		p := plainDerivationPipeline(t, adjKV, providerSpec)
+		rs := p.ruleState()
+		require.False(t, rs.rootHops.AnchorIsExpanding())
+		_, ready := p.plainDerivationIndex(rs)
+		require.True(t, ready)
+	})
+
+	t.Run("an anchor position carrying the `*` sigil refuses, even once its expansion is resolved", func(t *testing.T) {
+		// Distinct from the unresolved-expansion vector above: here the
+		// expansion IS resolved (Expanded[Anchor] is a populated concrete
+		// set), so UnresolvedExpansionPosition alone would not catch this —
+		// evaluatePlainDerivedAnchors hands the re-entry the AST label
+		// (idx.Labels[idx.Anchor]), never a derived anchor's own resolved
+		// type, and seedAnchorFor's resolved-closure membership test
+		// (rs.seedAnchorLabels) would miss it regardless of resolution.
+		p := plainDerivationPipeline(t, adjKV, providerSpec)
+		rs := p.ruleState()
+		require.True(t, rs.rootHops.Complete)
+		expanding := rs.rootHops
+		expanding.LabelExpand = make([]bool, len(expanding.Labels))
+		expanding.LabelExpand[expanding.Anchor] = true
+		expanding.Expanded = make([]map[string]struct{}, len(expanding.Labels))
+		expanding.Expanded[expanding.Anchor] = map[string]struct{}{"provider": {}}
+		rs.rootHops = expanding
+		require.Equal(t, -1, rs.rootHops.UnresolvedExpansionPosition(),
+			"resolved, so the unresolved-expansion conjunct alone must not be what catches this")
+		require.True(t, rs.rootHops.AnchorIsExpanding())
+		_, ready := p.plainDerivationIndex(rs)
+		require.False(t, ready)
+	})
 }
 
 // TestPlainDerivationIndexForAct_RequiresBothTheIndexAndTheLicence pins the act

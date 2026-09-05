@@ -243,12 +243,24 @@ func TestPlainDerivationLicence_Conjuncts(t *testing.T) {
 		require.Empty(t, refusal)
 	})
 
-	t.Run("a Secure Lens refuses", func(t *testing.T) {
+	t.Run("a Secure Lens is licensed — the decryptor is not a conjunct", func(t *testing.T) {
+		// The licence admits a Secure Lens on exactly the conjuncts a non-Secure
+		// one is admitted on: the double-decrypt risk a Secure conjunct would
+		// guard against is closed in the wiring instead — the re-entry
+		// (evaluatePlainDerivedAnchors) goes through evaluatePlainFromVertexRaw,
+		// never the decrypting evaluatePlainFromVertex — so the decryptor is not
+		// a property this predicate reads at all. The pair is asserted — the
+		// same fixture licensed both without a decryptor and with one — because
+		// a green "licensed" from a lens that was already licensed proves
+		// nothing about which field the predicate does not read.
 		f := licenceFixture(t, seedUnitsSpec)
-		f.p.SetSecureDecryptor(&SecureDecryptor{})
 		licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
-		require.False(t, licensed)
-		require.Contains(t, refusal, "Secure Lens")
+		require.True(t, licensed, "refusal: %s", refusal)
+
+		f.p.SetSecureDecryptor(&SecureDecryptor{})
+		licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+		require.True(t, licensed, "installing a decryptor must not change the verdict; refusal: %s", refusal)
+		require.Empty(t, refusal)
 	})
 
 	t.Run("a query returning $now refuses", func(t *testing.T) {
@@ -430,21 +442,27 @@ func TestPlainDerivationLicence_NeverAuditedRefuses(t *testing.T) {
 // snapshotted at install. Activation installs components in stages, so a
 // snapshot would read a later stage's component as absent — and for a licence,
 // absent reads as satisfied.
+//
+// The moving component is the target adapter, swapped through the production
+// hot-reload path: one rs snapshot is held across all three answers, so a
+// verdict that changed with it would be reading the snapshot rather than the
+// live field.
 func TestPlainDerivationLicence_IsReadOffLiveFields(t *testing.T) {
 	f := licenceFixture(t, seedUnitsSpec)
 	rs := f.p.ruleState()
+	rowReader := f.p.currentAdapter()
 
 	licensed, _ := f.p.plainDerivationLicence(rs)
 	require.True(t, licensed)
 
-	f.p.SetSecureDecryptor(&SecureDecryptor{})
+	require.NoError(t, f.p.HotReloadInto(notARowReader{inner: rowReader}))
 	licensed, refusal := f.p.plainDerivationLicence(rs)
-	require.False(t, licensed, "a component installed after the first answer must change the next one")
-	require.Contains(t, refusal, "Secure Lens")
+	require.False(t, licensed, "a component swapped after the first answer must change the next one")
+	require.Contains(t, refusal, "cannot read a row back")
 
-	f.p.SetSecureDecryptor(nil)
+	require.NoError(t, f.p.HotReloadInto(rowReader))
 	licensed, _ = f.p.plainDerivationLicence(rs)
-	require.True(t, licensed, "and removing it must restore the licence, not leave a latched refusal")
+	require.True(t, licensed, "and restoring it must restore the licence, not leave a latched refusal")
 }
 
 // TestPlainDerivationLicence_StaleRefusalIsStableAcrossTheWindow pins the

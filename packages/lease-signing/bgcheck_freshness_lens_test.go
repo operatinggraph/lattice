@@ -373,10 +373,14 @@ func TestRenewalComplete_BgcheckValidUntil_TakesTheLatestUnlapsed(t *testing.T) 
 // which is the condition the refusal tests.
 //
 // landlordLeaseApplicationsRead splices the SAME fragment and so also loses its
-// clock reference — and stays refused anyway, one conjunct earlier: it is a
-// Secure Lens (three encrypted contact columns), whose columns a per-anchor
-// re-entry would decrypt twice over. Asserting both is what keeps an enrolment
-// that should not have happened from passing unnoticed.
+// clock reference — and stays refused anyway, one conjunct earlier and in the
+// INDEX rather than the licence: it declares DiffRetraction, and a per-anchor
+// seeded row set reads to applyDiffRetraction as "every OTHER anchor's rows are
+// gone". Its three encrypted contact columns are not what refuses it — a Secure
+// Lens is licensed on the same conjuncts as any other plain lens
+// (secure-plain-lens-retraction-and-audit-design.md §4.2), because the
+// re-entrant evaluation never decrypts. Asserting both lenses is what keeps a
+// narrowing that should not have happened from passing unnoticed.
 func TestPostgresReadModels_DerivationRefusalReasons(t *testing.T) {
 	eng := full.New()
 	compiled := func(spec string) *full.CompiledRule {
@@ -390,11 +394,11 @@ func TestPostgresReadModels_DerivationRefusalReasons(t *testing.T) {
 
 	for _, name := range []string{"leaseApplicationsRead", "landlordLeaseApplicationsRead"} {
 		var spec string
-		var secure int
+		var diffRetraction bool
 		for _, l := range Lenses() {
 			if l.CanonicalName == name {
 				spec = l.Spec
-				secure = len(l.SecureColumns)
+				diffRetraction = l.DiffRetraction
 			}
 		}
 		require.NotEmptyf(t, spec, "%s must be declared", name)
@@ -405,9 +409,9 @@ func TestPostgresReadModels_DerivationRefusalReasons(t *testing.T) {
 			require.Falsef(t, referenced, "%s must reference no $%s — freshness is a recorded fact, not a clock reading", name, param)
 		}
 		if name == "landlordLeaseApplicationsRead" {
-			require.NotZerof(t, secure, "%s stays refused on the Secure-Lens conjunct, which is checked before the clock one", name)
+			require.Truef(t, diffRetraction, "%s stays refused on the DiffRetraction conjunct, which the index asks before the licence is reached", name)
 		} else {
-			require.Zerof(t, secure, "%s declares no secure column, so the clock conjunct is the one that decided its verdict", name)
+			require.Falsef(t, diffRetraction, "%s declares no target diff, so the clock conjunct is the one that decided its verdict", name)
 		}
 	}
 }

@@ -145,22 +145,39 @@ func requireEverySweepFieldSet(t *testing.T, structName string, v reflect.Value)
 // lensLivenessDesignAddedFields names every health.LensLivenessStatus field a
 // design has added outside the Sweep* family TestSeam_EverySweepFieldIsCopied
 // already covers — the audit's own fields, copied by copyLensAuditStatus
-// (cmd/refractor/auditstatus.go) rather than by a Sweep* copier. A field lands
-// here in the SAME fire that adds it to the struct: the alternative is a field
-// with no line of its own publishing a zero that reads as a verdict, exactly
-// the failure mode TestSeam_EverySweepFieldIsCopied exists to catch for Sweep*.
+// (cmd/refractor/auditstatus.go), and the plain arm's derivation posture,
+// copied by copyLensDerivationStatus (cmd/refractor/derivationstatus.go),
+// rather than by a Sweep* copier. A field lands here in the SAME fire that adds
+// it to the struct: the alternative is a field with no line of its own
+// publishing a zero that reads as a verdict, exactly the failure mode
+// TestSeam_EverySweepFieldIsCopied exists to catch for Sweep*.
 var lensLivenessDesignAddedFields = []string{
 	// secure-plain-lens-retraction-and-audit-design.md Increment 1, §4.1: the
 	// columns a Secure Lens's audit comparison excludes.
 	"AuditMaskedColumns",
+	// The same design's Increment 2, §4.2 and §5: whether the plain arm's
+	// derivation — a retraction transport on this plane — is ELIGIBLE at all
+	// (a fixed property of the lens's shape), whether it is currently ARMED
+	// (Eligible AND the licence), how often it fell back to the rescan that
+	// retracts nothing, and how far the last refused derived set overshot the
+	// cap.
+	"DerivationEligible",
+	"DerivationArmed",
+	"DerivationFellBack",
+	"DerivationOverCapSize",
 }
 
 // TestLensLivenessStatus_NewFieldsAreCarried is the reflection gate
 // TestSeam_EverySweepFieldIsCopied's own comment calls for widening: every
 // field named in lensLivenessDesignAddedFields must survive a non-trivial
-// pipeline.AuditStatus crossing copyLensAuditStatus. It fails by NAME, so a
-// field added to the struct and forgotten in the copier is caught here rather
-// than publishing a silent zero at the only surface anyone would notice.
+// status crossing the copier that owns it. It fails by NAME, so a field added
+// to the struct and forgotten in a copier is caught here rather than publishing
+// a silent zero at the only surface anyone would notice.
+//
+// Both copiers run against ONE snapshot, because the field list is one list and
+// the defect is "no line copies this field", whichever copier the line belongs
+// in — a per-copier split would need the list split too, and a field added to
+// the wrong half would then pass.
 func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
 	full := pipeline.AuditStatus{
 		Enrolled:       true,
@@ -172,9 +189,11 @@ func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
 		ListingSize:    64,
 		LastPassAt:     time.Now(),
 	}
+	derivation := pipeline.PlainDerivationStatus{Eligible: true, Armed: true, FellBack: 3, OverCapSize: 91}
 
 	lensSnap := health.LensLivenessStatus{}
 	copyLensAuditStatus(&lensSnap, full, time.Minute)
+	copyLensDerivationStatus(&lensSnap, derivation)
 
 	v := reflect.ValueOf(lensSnap)
 	typ := v.Type()
@@ -184,10 +203,11 @@ func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
 			continue
 		}
 		if v.Field(i).IsZero() {
-			t.Errorf("health.LensLivenessStatus.%s is left at its zero value by copyLensAuditStatus.\n\n"+
+			t.Errorf("health.LensLivenessStatus.%s is left at its zero value by the copier that owns it.\n\n"+
 				"This field is named in lensLivenessDesignAddedFields (cmd/refractor/sweepstatus_test.go) as "+
 				"one a design added outside the Sweep* family; add its line to copyLensAuditStatus "+
-				"(cmd/refractor/auditstatus.go).", name)
+				"(cmd/refractor/auditstatus.go) or copyLensDerivationStatus "+
+				"(cmd/refractor/derivationstatus.go).", name)
 		}
 	}
 }

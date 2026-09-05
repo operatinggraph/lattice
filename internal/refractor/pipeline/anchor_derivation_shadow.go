@@ -94,6 +94,16 @@ type DerivationShadowStats struct {
 	ActedAnchors int64
 	FellBack     int64
 
+	// LastOverCapSize is the size of the most recent derived set an ACTING
+	// event declined for exceeding the derived-anchor cap, and zero until one
+	// does. It is a last value rather than a sum because the question it
+	// answers is a sizing one — how far past the cap this lens's
+	// neighbourhoods actually reach — which a running total over an unknown
+	// number of events cannot be read for. FellBack beside it says how often;
+	// PlainOverCapSize below is the SHADOW arm's own distribution and is not
+	// written here, so acting and measuring never share a number.
+	LastOverCapSize int64
+
 	// The plain arm's own shadow counters (plain-lens-neighbour-anchor-
 	// derivation-design.md §11's measurement), populated by
 	// shadowPlainDerivation (anchor_derivation_plain.go) instead of
@@ -329,6 +339,24 @@ func (p *Pipeline) recordDerivationFellBack(walkScoped bool) {
 	p.logActSummaryIfDue(snapshot, walkScoped)
 }
 
+// recordDerivationOverCap is recordDerivationFellBack for the one fall-back
+// cause whose SIZE is worth carrying: a derived set that was ready and correct
+// and simply too large. LastOverCapSize is the MOST RECENT over-cap event's
+// size, not a running total keyed to FellBack — a lens whose fall-backs mix
+// walk failures (recordDerivationFellBack, which never touches this field)
+// with over-cap events publishes a FellBack that outcounts the one size beside
+// it, and an operator reading the pair must read the size as "how big the last
+// refused derived set was", never as "the size behind every count in
+// FellBack".
+func (p *Pipeline) recordDerivationOverCap(derivedCount int, walkScoped bool) {
+	p.derivShadow.mu.Lock()
+	p.derivShadow.stats.FellBack++
+	p.derivShadow.stats.LastOverCapSize = int64(derivedCount)
+	snapshot := p.derivShadow.stats
+	p.derivShadow.mu.Unlock()
+	p.logActSummaryIfDue(snapshot, walkScoped)
+}
+
 // recordDerivationRangedReads adds one walk's ranged-closure adjacency reads to
 // the act-mode tally. It does not touch Acted/FellBack — the walk's outcome is
 // recorded by its own caller — so it does not move logActSummaryIfDue's
@@ -365,6 +393,12 @@ func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats, walkScoped bool)
 	// zero.
 	if st.RangedClosureReads > 0 {
 		attrs = append(attrs, "rangedClosureReads", st.RangedClosureReads)
+	}
+	// Same rule: a lens that has never exceeded the cap has no size to report,
+	// and a permanent zero beside a non-zero fellBack would read as "the
+	// fall-backs were over-cap ones of size nothing".
+	if st.LastOverCapSize > 0 {
+		attrs = append(attrs, "lastOverCapSize", st.LastOverCapSize)
 	}
 	slog.Info("pipeline: anchor-derivation tally", attrs...)
 }

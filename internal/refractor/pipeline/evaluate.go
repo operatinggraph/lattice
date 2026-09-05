@@ -65,8 +65,13 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // is rewritten before being handed to the adapter. When a SecureDecryptor is
 // installed (a Secure Lens), each row's declared secure columns are decrypted
 // before the results reach any write path — this wrapper is the single choke
-// point the stream consumer (handle) flows through, so no plain-lens
-// evaluation path can bypass it.
+// point the stream consumer (handle) flows through. The plain arm's
+// derived-anchor re-entry (evaluatePlainDerivedAnchors, anchor_derivation_
+// plain.go) runs evaluatePlainFromVertexRaw — evaluateForEntryRaw with no
+// decrypt of its own — from INSIDE this wrapper's one evaluateForEntryRaw
+// call below, once per derived anchor, so every one of those rows still
+// reaches this wrapper's single applySecureDecrypt call and no plain-lens row
+// bypasses it.
 // The second return value is the enumerated-actor list (full vertex keys) —
 // non-nil only for an actor-aware pipeline (personal-lens-retraction-
 // design.md §3.2, R1: the frame-emission caller needs the complete

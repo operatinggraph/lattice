@@ -7,13 +7,13 @@
 // mirroring anchor_derivation.go's actor-aware trio (deriveAnchorsFor
 // {Vertex,Aspect,Link}) but reading rs.rootHops (Increment 1's
 // ScanRootHopIndex) instead of rs.anchorHops, and re-entering
-// evaluatePlainFromVertex — the SAME entry point the anchor-typed arms
-// already use — once per derived anchor instead of running the unseeded
-// evaluation.
+// evaluatePlainFromVertexRaw — the anchor-typed arms' own entry point, minus
+// the decrypt wrapper the re-entry already runs inside — once per derived
+// anchor instead of running the unseeded evaluation.
 //
 // The narrowing LICENCE (§5: per-anchor closure, an Auditor that is enrolled,
-// unsuppressed and not stale, no $now/$projectedAt, no secure decryptor, the
-// auth-plane exclusion) lives here too, as plainDerivationLicence, and
+// unsuppressed and not stale, no $now/$projectedAt, the auth-plane exclusion)
+// lives here too, as plainDerivationLicence, and
 // plainDerivationIndexForAct is what consults it: in `act` mode a derived
 // anchor set decides a plain lens's neighbour event only on a lens the licence
 // admits, and every lens it refuses keeps today's whole-corpus rescan. Both
@@ -82,6 +82,80 @@ func (p *Pipeline) plainDerivedAnchorCap() int {
 	return DefaultPlainDerivedAnchorCap
 }
 
+// PlainDerivationStatus is one plain lens's act-mode derivation posture, as an
+// operator reads it off the heartbeat.
+//
+// Eligible and Armed answer two different questions, and an operator needs
+// both. Eligible is the STATIC half — act mode, plus plainDerivationIndex's
+// own AST-derived conjuncts (single branch, a complete resolved rootHops, no
+// diffRetraction) — and says nothing about whether a derived set may be ACTED
+// on: it is the property a fixed lens shape carries, independent of the
+// licence's live auditor-health conjuncts. Armed is Eligible AND
+// plainDerivationLicence: the WHOLE gate, so a lens the licence turns back —
+// an unenrolled, suppressed or stale auditor, among other conjuncts — is
+// Eligible but not Armed, and its heartbeat says exactly that ("declared,
+// currently off") rather than omitting the lens as if its shape could never
+// support the transport at all.
+//
+// FellBack and OverCapSize are read whenever Eligible, never gated on Armed:
+// plainDerivationDecide's tally increments on a per-event walk failure or an
+// over-cap derived set regardless of whether the licence is what is currently
+// refusing the lens — a count that has already accrued must stay on the wire,
+// not disappear the moment an unrelated licence conjunct (say, the auditor
+// going stale) flips. Reading only "act mode and plain" would still be wrong
+// for a different reason: a static licence refusal never increments the tally
+// at all (plainDerivationDecide's own noteStaticPlainDerivationRefusal path),
+// so a permanently-refused lens would publish a permanent zero indistinguishable
+// from an armed lens that has never fallen back — which is why Eligible, not
+// the mode alone, is the presence gate.
+//
+// It is answered per heartbeat, off one rule-state snapshot, so a lens whose
+// audit goes stale keeps publishing Eligible and the counters but flips Armed
+// to false for as long as that holds — the honest reading: the shape is still
+// there, the transport is off, and the tally is neither hidden nor frozen.
+type PlainDerivationStatus struct {
+	Eligible    bool
+	Armed       bool
+	FellBack    uint64
+	OverCapSize int
+}
+
+// PlainDerivationStatus reports whether this pipeline's neighbour events COULD
+// be decided by a derived anchor set (Eligible), whether they currently ARE
+// (Armed), and the act-mode fall-back tally.
+//
+// The licence is the dearer read — TWO independent auditor status snapshots
+// (Status() for enrolment/suppression, and a second inside Stale() for the
+// verdict clock) and THREE compiled-rule walks (ReferencesParam for "now" and
+// for "projectedAt", plus ProjectsOneRowPerAnchor) — so it is paid only once
+// Eligible has already held, and only once per lens per beat, the same order
+// as the health-entry read the caller already makes for every lens.
+//
+// copyLensAuditStatus (cmd/refractor) takes its OWN independent Status()
+// snapshot of the same auditor, on the same heartbeat pass but not under any
+// shared lock with this call's two reads — so a suppression that starts or
+// clears in the instant between them can show on one published field and not
+// the other for one beat. Accepted skew: both settle to the same answer on the
+// next pass, and neither ever narrows a write on the strength of the other's
+// snapshot.
+func (p *Pipeline) PlainDerivationStatus() PlainDerivationStatus {
+	if p.derivationMode() != DerivationModeAct {
+		return PlainDerivationStatus{}
+	}
+	rs := p.ruleState()
+	if _, ready := p.plainDerivationIndex(rs); !ready {
+		return PlainDerivationStatus{}
+	}
+	st := p.AnchorDerivationShadow()
+	licensed, _ := p.plainDerivationLicence(rs)
+	return PlainDerivationStatus{
+		Eligible:    true,
+		Armed:       licensed,
+		FellBack:    uint64(st.FellBack),
+		OverCapSize: int(st.LastOverCapSize),
+	}
+}
+
 // plainDerivationIndex returns rs.rootHops and whether this pipeline may
 // derive from it at all — the plain arm's mirror of derivationIndex
 // (anchor_derivation.go), with the plain pipeline's own conjuncts (§4.2 of
@@ -100,6 +174,16 @@ func (p *Pipeline) plainDerivedAnchorCap() int {
 //   - no unresolved `*` position — pruning a far end the taxonomy cannot yet
 //     confirm is the unsound direction for a derivation (HopIndex's own doc
 //     on UnresolvedExpansionPosition);
+//   - the ANCHOR position itself does not carry the `*` sigil
+//     (HopIndex.AnchorIsExpanding) — resolved or not. evaluatePlainDerivedAnchors
+//     hands the re-entry idx.Labels[idx.Anchor], the AST label, never a derived
+//     anchor's own concrete type; seedAnchorFor's re-entrant dispatch tests
+//     membership in the RESOLVED closure (rs.seedAnchorLabels), which an
+//     abstract AST label is not a member of, so the re-entry would miss its own
+//     seed and fall through to a whole-corpus rescan PER derived anchor — the
+//     opposite of what deriving was for. No corpus lens has a `*`-sigil anchor
+//     today (hopindex.go's Expanded/LabelExpand pair), so this refuses a shape
+//     nothing shipped yet relies on;
 //   - !p.diffRetraction — a per-anchor seeded row set would read to
 //     applyDiffRetraction as "every OTHER anchor's rows are gone" (§3's
 //     grounding ledger; the same conjunct seedAnchorFor already enforces at
@@ -119,6 +203,9 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 		return full.HopIndex{}, false
 	}
 	if rs.rootHops.UnresolvedExpansionPosition() >= 0 {
+		return full.HopIndex{}, false
+	}
+	if rs.rootHops.AnchorIsExpanding() {
 		return full.HopIndex{}, false
 	}
 	if p.diffRetraction {
@@ -236,11 +323,6 @@ func isPlainDerivedAnchorReentry(ctx context.Context) bool {
 //     over: the Auditor's own enrolment needs it, and so does the zero-row
 //     Delete probe the derived retraction class rests on (§6) — so it is a
 //     conjunct of the mechanism, not merely inherited from enrolment.
-//   - no secure decryptor. A Secure Lens's columns are decrypted before results
-//     reach any write path, and evaluatePlainDerivedAnchors re-enters an
-//     evaluation path that decrypts on its own results while itself running
-//     inside the outer wrapper that decrypts again — this conjunct is what
-//     keeps that double-decrypt unreachable (see that function's own note).
 //   - no $now / $projectedAt. $now is wall-clock and $projectedAt derives from
 //     the EVENT vertex's provenance, so a per-anchor re-evaluation produces a
 //     different value for them than the whole-corpus rescan it replaces. A
@@ -325,9 +407,6 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 	}
 	if _, ok := p.currentAdapter().(adapter.RowReader); !ok {
 		return false, "its target adapter cannot read a row back, which both the audit and the derived path's own presence probe require"
-	}
-	if p.secureDecryptor != nil {
-		return false, "it is a Secure Lens, whose columns a per-anchor re-entry would decrypt twice over"
 	}
 	for _, param := range []string{"now", "projectedAt"} {
 		referenced, exhaustive := fullCR.ReferencesParam(param)
@@ -503,22 +582,29 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 // plain evaluation through the pipeline's normal write path (upsert, or the
 // presence-check Delete, itself idempotent against an already-absent key).
 //
-// THE DOUBLE-DECRYPT SEAM: evaluatePlainFromVertex calls the OUTER
-// evaluateForEntry wrapper, which runs applySecureDecrypt on its own results.
-// Reached from evaluateForEntryRaw's neighbour-event path — itself inside
-// that same outer wrapper — a Secure Lens's columns would be decrypted once
-// per derived anchor here AND AGAIN by the outer wrapper on return. What
-// holds it shut is plainDerivationLicence's refusal of any pipeline carrying
-// a secureDecryptor, which is the ONLY thing applySecureDecrypt acts on (it
-// returns immediately when the field is nil, evaluate.go) — so on every
-// pipeline the act gate admits, both invocations are no-ops rather than a
-// decrypt and a re-decrypt. Any change that makes the licence's Secure
-// conjunct advisory re-opens this seam.
+// THE DECRYPT SEAM: this loop runs inside evaluateForEntryRaw's
+// neighbour-event path, itself inside the outer evaluateForEntry wrapper that
+// runs applySecureDecrypt on everything returned to it. So the invariant the
+// re-entry must hold is that it NEVER decrypts on its own account — which is
+// why it goes through evaluatePlainFromVertexRaw (pipeline.go) rather than
+// evaluatePlainFromVertex: the outer wrapper is the single choke point, and a
+// Secure Lens's declared columns are decrypted exactly once per derived
+// anchor's row, by it. A re-entry that decrypted here too would hand that
+// wrapper a decrypted string where a ciphertext envelope map is declared —
+// Terminal, redacted to null (secure.go) — so the failure is silent data loss
+// rather than an error, and TestSecureDecryptor_DecryptCallsPerEvaluation is
+// what holds the wiring. It detects that failure by the stored plaintext and
+// the zero-redaction assertion, never by the decrypt COUNT: swapping
+// evaluatePlainFromVertexRaw back for evaluatePlainFromVertex re-introduces the
+// double decrypt without moving the count at all — the inner call now decrypts
+// and succeeds, and the outer wrapper's own call then fails secure.go's
+// ciphertext-envelope type assertion before it would have incremented, so one
+// success and one no-op failure land on the same total.
 //
 // THE REENTRANCY SEAM (§4.4). Every anchor in anchors is, by walkToAnchors'
 // own construction, of the SAME anchorLabel type — so seedAnchorFor
 // (pipeline.go) always finds a seed for the re-entrant evaluateForEntryRaw
-// call evaluatePlainFromVertex/evaluateForEntry makes below. On a lens whose
+// call evaluatePlainFromVertexRaw makes below. On a lens whose
 // anchorLabel ALSO binds a second pattern position, that re-entry would
 // itself qualify for the seeded-multi-position derivation
 // (seedMultiPosition) — deriving the identical anchor set and recursing
@@ -531,7 +617,7 @@ func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState
 	var combined []ruleengine.EvalResult
 	seen := make(map[string]bool, len(anchors))
 	for _, anchorKey := range anchors {
-		results, err := p.evaluatePlainFromVertex(ctx, rs, anchorKey, anchorLabel)
+		results, err := p.evaluatePlainFromVertexRaw(ctx, rs, anchorKey, anchorLabel)
 		if err != nil {
 			return nil, err
 		}
@@ -718,7 +804,7 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		// than the declined answer they would replace.
 		slog.Warn("pipeline: plain anchor derivation exceeded the derived-anchor cap; using today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "derivedCount", len(anchors), "cap", cap)
-		p.recordDerivationFellBack(p.walkIsScoped(rs))
+		p.recordDerivationOverCap(len(anchors), p.walkIsScoped(rs))
 		return declined()
 	}
 	p.recordDerivationActed(len(anchors), p.walkIsScoped(rs))
@@ -882,6 +968,8 @@ func (p *Pipeline) noteStaticPlainDerivationRefusal(rs ruleState, licenceRefusal
 	case rs.rootHops.UnresolvedExpansionPosition() >= 0:
 		reason = fmt.Sprintf("pattern position %d carries the `*` taxonomy-expansion sigil with no resolved concrete set — the walk would prune far ends it cannot confirm, which under-approximates",
 			rs.rootHops.UnresolvedExpansionPosition())
+	case rs.rootHops.AnchorIsExpanding():
+		reason = "the anchor pattern position carries the `*` taxonomy-expansion sigil — a derived anchor's re-entry would be seeded by the AST label rather than its own resolved type, and would miss its seed and fall through to a whole-corpus rescan"
 	case p.diffRetraction:
 		reason = "it uses target-diff retraction, which would read a per-anchor row set as every OTHER anchor's rows being gone"
 	case licenceRefusal != "":

@@ -877,9 +877,44 @@ soundness rests entirely on that invariant. `read_landlord_lease_applications`
 reference `DiffRetraction` lens; eight more declare it today (`grep -rn "DiffRetraction: true"
 packages/*/lenses.go`); a lens whose key resolves to its anchor — through a `WITH` or
 not — needs none of it for the retraction and takes the anchor Delete; a Secure plain lens
-keeps the declaration as its only continuous orphan healer (the audit refuses it —
-`clinicPatientsRead`). A convergence
+keeps the declaration as a continuous per-event healer the detect-only audit does not offer
+(`clinicPatientsRead`). A convergence
 (`violating`-flag) lens never opts in, so its never-retract contract is untouched.
+
+**Neighbour-driven retraction (the plain arm's anchor derivation).** The other transport for a
+drop-out no event names — a neighbour vertex tombstoned, a link two hops out removed, a
+neighbour's aspect flipping a `WHERE` — is the plain arm's own affected-anchor derivation
+(`anchor_derivation_plain.go`). In `act` mode on a lens its **licence** admits, a neighbour
+event is answered by one seeded evaluation per derived anchor instead of the whole-corpus
+rescan, and each of those evaluations can emit the anchor Delete the rescan structurally
+cannot: an upsert-only rescan names no key that dropped out, and the filter-retraction
+presence check derives its key from the EVENT vertex, which on a neighbour event is not an
+anchor. The licence is fail-closed and read per event, never snapshotted: not the auth plane,
+an enrolled and unsuppressed divergence auditor whose last verdict is recent, a full-engine
+rule, a target that can read a row back, no `$now` / `$projectedAt`, and per-anchor closure
+(`ProjectsOneRowPerAnchor`).
+
+**A Secure Lens is licensed on exactly those conjuncts** — the decryptor is not one of them.
+What makes that sound is a wiring invariant rather than a predicate: the re-entrant evaluation
+goes through `evaluatePlainFromVertexRaw`, which **never decrypts**, so the outer
+`evaluateForEntry` wrapper the whole event already runs inside stays the single choke point and
+a derived anchor's secure columns are decrypted exactly once. A re-entry that decrypted on its
+own account would hand that wrapper a decrypted string where a ciphertext envelope map is
+declared — Terminal, and the column is redacted to `null`, a stored row silently missing its
+PII rather than an error (`TestSecureDecryptor_DecryptCallsPerEvaluation` is what holds it).
+
+A derived set larger than `DefaultPlainDerivedAnchorCap` (64) is a **fall-back, not a
+truncation**: the event takes the rescan, so the retraction is not made and the row is left for
+the audit's `retained` class. That is published, because a transport that is silently off reads
+exactly like one with nothing to do — `derivationArmed` (the transport's own live posture),
+`derivationFellBack` (fall-backs since the process started, every cause) and
+`derivationOverCapSize` (the last refused derived set's size, carried only once it has fired)
+ride the lens's liveness entry, and are absent entirely for a lens whose derivation is
+**ineligible** — a fixed property of its shape (`act` mode plus the derivation index's own
+conjuncts), independent of the licence. An ELIGIBLE lens the licence currently turns back still
+publishes all three, `derivationArmed: false` among them: a static licence refusal is never
+counted as a fall-back, so `derivationFellBack` keeps whatever it already accrued and
+`derivationArmed` — not absence — is what says the transport is declared but currently off.
 
 ### Property model (how lens cypher reads a node)
 
