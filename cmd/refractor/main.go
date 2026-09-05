@@ -958,6 +958,15 @@ func main() {
 			// derivation is not armed copies a zero status, which publishes
 			// nothing rather than a zero that would read as a verdict.
 			copyLensDerivationStatus(&snap, entry.pipeline.PlainDerivationStatus())
+			// What carries a retraction when a NEIGHBOUR event drops one of
+			// this lens's rows, re-derived per beat off the same rule snapshot
+			// the licence reads — so a MATCH hot-reload that changes the shape
+			// (and with it the closure verdict, the scan-root graph, or the
+			// neighbour dependency itself) cannot leave a stale posture
+			// published. entry.authPlane is this branch's own precondition,
+			// carried in rather than re-derived so the field and the activation
+			// gate answer about the same plane.
+			copyLensRetractionTransport(&snap, entry.pipeline.PlainRetractionTransport(entry.authPlane))
 			// A lens whose liveness inputs cannot be read is reported as
 			// unknown, never omitted: dropping it removes the lens from
 			// metrics.lensLiveness entirely, which is indistinguishable from a
@@ -1579,6 +1588,19 @@ func main() {
 				return
 			}
 			logger.Info("diff retraction installed", "lensId", r.ID)
+		}
+
+		// Both activation-time retraction guards
+		// (secure-plain-lens-retraction-and-audit-design.md §3.3, §4.4): the
+		// shared-target scoping a target diff on a shared NATS-KV bucket needs, and
+		// the business plane's rule that a lens a neighbour can orphan must carry a
+		// transport that retracts it. Both are decided from the registry, which is
+		// why the sibling set is read here and the rule is applied there. A refusal
+		// is already on the lens's health entry by the time this returns false, and
+		// the disposition is the DiffRetraction guard's above: the lens does not
+		// activate.
+		if !admitRetractionTransport(ctx, logger, reporter, r, p, registeredSiblingsOnTarget(&mu, registry, r.ID, r.Into.Target, r.Into.Bucket)) {
+			return
 		}
 
 		// Convergence-lens no-filtering-WHERE activation guard

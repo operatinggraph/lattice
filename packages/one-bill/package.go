@@ -26,7 +26,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "one-bill",
-	Version:     "0.3.0",
+	Version:     "0.4.0",
 	Description: "Combined-statement lens: loftspace-ledger + cafe-ledger + clinic-ledger + wellness-ledger transactions, tagged by source, into one leaseAppKey-keyed read model.",
 	Depends:     []string{"loftspace-ledger", "cafe-ledger", "clinic-ledger", "wellness-ledger"},
 	Lenses:      Lenses(),

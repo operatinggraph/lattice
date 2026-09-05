@@ -391,6 +391,16 @@ func corpusInstalledPipeline(t *testing.T, name string, eng *full.Engine, cr rul
 // same JSON the real transport uses, so a field pkgmgr declares and Refractor
 // does not read (or a tag that drifts between them) fails here instead of
 // silently dropping a descriptor field the installer would have acted on.
+//
+// The INTO block carries every declared field a census downstream reads, not
+// only the ones the install switch dispatches on. DiffRetraction IS a retraction
+// transport; GrantTable and GrantSource are half of projection.IsAuthPlane (a
+// Postgres grant table is auth-plane whatever bucket it names) and the scoping
+// that makes a grant lens's diff its own rows; Protected decides the §6.2 guard;
+// SecureColumns decide the audit's comparison mask. A rule built without them
+// answers about a lens no deployment installs — every grant table on the
+// business plane, every DiffRetraction lens carrying no transport — which is
+// exactly the shape that makes a gap assertion vacuous.
 func corpusLensRule(t *testing.T, name string, l pkgmgr.LensSpec) *lens.Rule {
 	t.Helper()
 	// The authored adapter name to the runtime target type, the mapping
@@ -415,13 +425,35 @@ func corpusLensRule(t *testing.T, name string, l pkgmgr.LensSpec) *lens.Rule {
 		ProjectionKind: l.ProjectionKind,
 		ResolvedEngine: ruleengine.EngineFull,
 		Into: lens.IntoConfig{
-			Target:   target,
-			Bucket:   l.Bucket,
-			Key:      lens.KeyField(keyFields),
-			Personal: l.Personal,
+			Target:         target,
+			Bucket:         l.Bucket,
+			Table:          l.Table,
+			Key:            lens.KeyField(keyFields),
+			Personal:       l.Personal,
+			DiffRetraction: l.DiffRetraction,
+			GrantTable:     l.GrantTable,
+			GrantSource:    l.GrantSource,
+			Protected:      l.Protected,
+			SecureColumns:  secureColumnsAcrossTheWire(l.SecureColumns),
 		},
 		Output: descriptorAcrossTheWire(t, name, l.Output),
 	}
+}
+
+// secureColumnsAcrossTheWire re-reads an authored Secure-Lens column set as
+// Refractor reads it. The two structs are field-identical by design and live in
+// packages that may not import each other, so the crossing is a copy rather than
+// a cast — and a field added on one side without the other shows up here as a
+// compile error rather than as a column silently dropped from the mask.
+func secureColumnsAcrossTheWire(cols []pkgmgr.SecureColumn) []lens.SecureColumn {
+	if len(cols) == 0 {
+		return nil
+	}
+	out := make([]lens.SecureColumn, 0, len(cols))
+	for _, c := range cols {
+		out = append(out, lens.SecureColumn{Column: c.Column, HolderTypes: c.HolderTypes, Field: c.Field})
+	}
+	return out
 }
 
 // descriptorAcrossTheWire re-reads an authored output descriptor as Refractor
@@ -618,11 +650,20 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string, rule *lens.
 		// projectionKind aspect a package lens declares, so activation switches
 		// on it identically. It reaches the same builder through the same
 		// LensSpec shape rather than a second one.
+		// The kernel declaration surface carries no target-diff retraction flag
+		// at all, so a kernel lens's transport can only be the derivation's or
+		// none. GrantTable and Protected it does carry, and they are not a
+		// formality: capabilityReadGrants and capabilityReadWildcardGrants are
+		// Postgres GRANT TABLES, so their plane comes from that flag and from
+		// nothing else — a rule built without it would put the read-path
+		// authorization source of truth on the business plane.
 		spec := pkgmgr.LensSpec{
 			CanonicalName:  l.CanonicalName,
 			Adapter:        l.Adapter,
 			Bucket:         provisionedBucket(l.TargetBucket),
 			ProjectionKind: l.ProjectionKind,
+			GrantTable:     l.GrantTable,
+			Protected:      l.Protected,
 			Output:         bootstrapDescriptorAsPkgmgr(t, l),
 		}
 		visit(l.CanonicalName, l.CypherRule, corpusLensRule(t, l.CanonicalName, spec),

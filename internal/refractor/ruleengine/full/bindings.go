@@ -1,5 +1,7 @@
 package full
 
+import "strings"
+
 // CollectVariableRefs returns every graph-bound variable name e's evaluation
 // depends on: a *VariableRef's own name, or the root *VariableRef of a
 // *PropertyAccess chain. *Literal and *ParameterRef leaves are evaluation-
@@ -21,6 +23,20 @@ func CollectVariableRefs(e Expr) (names map[string]bool, unknown bool) {
 }
 
 func collectVariableRefsInto(e Expr, out map[string]bool) bool {
+	return collectVariableRefsAndPatterns(e, out, nil)
+}
+
+// collectVariableRefsAndPatterns is the walk itself, with an optional second
+// output: every PathPattern the expression EVALUATES — a pattern predicate
+// (`NOT (a)-->(:role)`) or a pattern comprehension's own pattern.
+//
+// One traversal serves both because two would be two chances to disagree about
+// which nodes an expression reaches. The variable set alone cannot answer for
+// the ANONYMOUS elements of those patterns: `(a)-->(:role)` binds nothing but
+// `a`, so a caller asking "does this expression reach past the anchor" off the
+// names would read no. patterns is nil for every caller that only needs names,
+// and the append is then never made.
+func collectVariableRefsAndPatterns(e Expr, out map[string]bool, patterns *[]PathPattern) bool {
 	switch x := e.(type) {
 	case nil:
 		return false
@@ -38,25 +54,26 @@ func collectVariableRefsInto(e Expr, out map[string]bool) bool {
 		}
 		return unk
 	case *BinaryOp:
-		u1 := collectVariableRefsInto(x.Left, out)
-		u2 := collectVariableRefsInto(x.Right, out)
+		u1 := collectVariableRefsAndPatterns(x.Left, out, patterns)
+		u2 := collectVariableRefsAndPatterns(x.Right, out, patterns)
 		return u1 || u2
 	case *AndOr:
 		unknown := false
 		for _, op := range x.Operands {
-			if collectVariableRefsInto(op, out) {
+			if collectVariableRefsAndPatterns(op, out, patterns) {
 				unknown = true
 			}
 		}
 		return unknown
 	case *Not:
-		return collectVariableRefsInto(x.Operand, out)
+		return collectVariableRefsAndPatterns(x.Operand, out, patterns)
 	case *PatternExpr:
+		notePattern(patterns, x.Pattern)
 		return collectPatternVariableRefs(x.Pattern, out)
 	case *FunctionCall:
 		unknown := false
 		for _, a := range x.Args {
-			if collectVariableRefsInto(a, out) {
+			if collectVariableRefsAndPatterns(a, out, patterns) {
 				unknown = true
 			}
 		}
@@ -64,7 +81,7 @@ func collectVariableRefsInto(e Expr, out map[string]bool) bool {
 	case *MapLiteral:
 		unknown := false
 		for _, k := range x.Keys {
-			if collectVariableRefsInto(x.Values[k], out) {
+			if collectVariableRefsAndPatterns(x.Values[k], out, patterns) {
 				unknown = true
 			}
 		}
@@ -72,31 +89,32 @@ func collectVariableRefsInto(e Expr, out map[string]bool) bool {
 	case *ListLiteral:
 		unknown := false
 		for _, el := range x.Elements {
-			if collectVariableRefsInto(el, out) {
+			if collectVariableRefsAndPatterns(el, out, patterns) {
 				unknown = true
 			}
 		}
 		return unknown
 	case *PatternComprehension:
+		notePattern(patterns, x.Pattern)
 		unknown := collectPatternVariableRefs(x.Pattern, out)
-		if collectVariableRefsInto(x.Where, out) {
+		if collectVariableRefsAndPatterns(x.Where, out, patterns) {
 			unknown = true
 		}
-		if collectVariableRefsInto(x.Projection, out) {
+		if collectVariableRefsAndPatterns(x.Projection, out, patterns) {
 			unknown = true
 		}
 		return unknown
 	case *CaseExpr:
 		unknown := false
 		for _, alt := range x.Alternatives {
-			if collectVariableRefsInto(alt.When, out) {
+			if collectVariableRefsAndPatterns(alt.When, out, patterns) {
 				unknown = true
 			}
-			if collectVariableRefsInto(alt.Then, out) {
+			if collectVariableRefsAndPatterns(alt.Then, out, patterns) {
 				unknown = true
 			}
 		}
-		if collectVariableRefsInto(x.Else, out) {
+		if collectVariableRefsAndPatterns(x.Else, out, patterns) {
 			unknown = true
 		}
 		return unknown
@@ -164,4 +182,82 @@ func collectPatternVariableRefs(p PathPattern, out map[string]bool) bool {
 		}
 	}
 	return unknown
+}
+
+// notePattern records a pattern an expression evaluates, when the caller asked
+// for them.
+func notePattern(patterns *[]PathPattern, p PathPattern) {
+	if patterns != nil {
+		*patterns = append(*patterns, p)
+	}
+}
+
+// patternReachesAnonymousElement reports whether p touches a node or
+// relationship NO VARIABLE NAMES.
+//
+// It is collectPatternVariableRefs' complement, and exists because that
+// function's contract is the set of BINDINGS an evaluation depends on — a set
+// that is silent about the elements the pattern still traverses under no name.
+// `MATCH (a:x)-[:rel]->(:y)` binds only `a`, so a caller asking "does this
+// pattern reach past the anchor" off the names alone reads no, for a pattern
+// whose whole purpose is a hop to a `:y`.
+//
+// An unnamed element can never be the anchor — the anchor is a named binding —
+// so any one of them is a reach past it. A relationship counts whether or not
+// its endpoints are named: `(a)-[:x]->(a)` is a self-loop whose existence turns
+// on a link, and a link is a thing another event can remove.
+func patternReachesAnonymousElement(p PathPattern) bool {
+	for _, n := range p.Nodes {
+		if n.Variable == "" {
+			return true
+		}
+	}
+	for _, r := range p.Rels {
+		if r.Variable == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// renderPathPattern renders a pattern the way it was authored, so a refusal
+// naming one is a string an author can find in their own cypher: labels and
+// relationship types where the pattern declares them, variables where it binds
+// them, and `()` / `--` where it declares neither.
+func renderPathPattern(p PathPattern) string {
+	var b strings.Builder
+	for i, n := range p.Nodes {
+		if i > 0 && i-1 < len(p.Rels) {
+			b.WriteString(renderRelPattern(p.Rels[i-1]))
+		}
+		b.WriteString("(")
+		b.WriteString(n.Variable)
+		if n.Label != "" {
+			b.WriteString(":" + n.Label)
+			if n.LabelExpand {
+				b.WriteString("*")
+			}
+		}
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+func renderRelPattern(r RelPattern) string {
+	body := "-"
+	if r.Variable != "" || r.Type != "" {
+		body = "-[" + r.Variable
+		if r.Type != "" {
+			body += ":" + r.Type
+		}
+		body += "]-"
+	}
+	switch r.Direction {
+	case DirOut:
+		return body + ">"
+	case DirIn:
+		return "<" + body
+	default:
+		return body
+	}
 }

@@ -31,6 +31,7 @@ package onebill
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -300,4 +301,174 @@ func TestOneBill_KeysDoNotCollide(t *testing.T) {
 		keys[k] = true
 		require.Equal(t, "vtx.leaseapp."+f.ids["sharedlease"], rows[0].Values["leaseAppKey"])
 	}
+}
+
+// The tail-headed spelling of the two cross-package specs: the same edge, in
+// the same direction, written with the leaseapp at the head of its own MATCH so
+// nothing above it binds that variable.
+//
+// It is a TEST VECTOR, not a fossil. The engine reaches an unbound head by
+// scanning the head label's whole corpus rather than by stepping an adjacency
+// hop, which leaves ScanRootHopIndex ungrounded and the lens without a
+// neighbour-retraction transport — so the rows the two spellings project must
+// be identical, and the pattern graphs must not be. Both halves are asserted
+// below; the equivalence half is what makes the shipped spelling a free choice
+// and the index half is what makes it the right one.
+const (
+	tailHeadedClinicEntriesSpec = `MATCH (t:clinictransaction)
+MATCH (t)-[:postedTo]->(a:clinicaccount)
+MATCH (a)-[:heldFor]->(pt:patient)
+MATCH (pt)-[:identifiedBy]->(id:identity)
+MATCH (l:leaseapp)-[:applicationFor]->(id)
+RETURN
+  t.key AS key,
+  t.key AS transactionKey,
+  a.key AS accountKey,
+  l.key AS leaseAppKey,
+  t.entry.data.type AS type,
+  t.entry.data.amountCents AS amountCents,
+  t.entry.data.memo AS memo,
+  t.entry.data.postedAt AS postedAt,
+  'clinic' AS source`
+
+	tailHeadedWellnessEntriesSpec = `MATCH (t:wellnesstransaction)
+MATCH (t)-[:postedTo]->(a:wellnessaccount)
+MATCH (a)-[:heldFor]->(id:identity)
+MATCH (l:leaseapp)-[:applicationFor]->(id)
+RETURN
+  t.key AS key,
+  t.key AS transactionKey,
+  a.key AS accountKey,
+  l.key AS leaseAppKey,
+  t.entry.data.type AS type,
+  t.entry.data.amountCents AS amountCents,
+  t.entry.data.memo AS memo,
+  t.entry.data.postedAt AS postedAt,
+  'wellness' AS source`
+)
+
+// TestOneBill_ReversedPatternProjectsSameRows proves the shipped clinic and
+// wellness specs project exactly what their tail-headed spelling does, and that
+// only the shipped one has a grounded scan-root pattern graph.
+//
+// The row comparison is on the marshalled projection, key set included, so a
+// difference in a single column's value or in which columns exist at all fails
+// here rather than being lost in a field-by-field walk that forgets one. The
+// ROW SET is compared, not one row: the way these two spellings can differ is in
+// which rows they select, and a fixture with one of everything makes every
+// spelling of the join agree by construction (see confound).
+func TestOneBill_ReversedPatternProjectsSameRows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct {
+		name       string
+		shipped    string
+		tailHeaded string
+		seed       func(f *obFixture, t *testing.T)
+		// confound seeds the graph the two spellings could disagree on. A
+		// fixture holding one transaction, one identity and one leaseapp makes
+		// every spelling of the join look alike: the row is unique, so a
+		// pattern that bound `l` by scanning every leaseapp and a pattern that
+		// stepped to it from the identity return the same thing. These are the
+		// shapes where they need not.
+		confound func(f *obFixture, t *testing.T)
+	}{
+		{
+			name: "clinicEntries", shipped: clinicEntriesSpec, tailHeaded: tailHeadedClinicEntriesSpec,
+			seed: func(f *obFixture, t *testing.T) { f.mkClinicTx(t, "clinictx", 4500) },
+			confound: func(f *obFixture, t *testing.T) {
+				// A SECOND leaseapp for the same identity: the `l` binding is
+				// no longer a function of the transaction, so a spelling that
+				// bound it differently would project a different number of rows
+				// (or the wrong one of the two) rather than a differing column.
+				f.vtx(t, "clinictx_lease2", "leaseapp")
+				f.edge(t, "applicationFor", "clinictx_lease2", "clinictx_identity")
+				// An identity with a leaseapp and NO transaction: the
+				// head-bound spelling scans every leaseapp, so a spelling that
+				// leaked one would project a row with null transaction columns.
+				f.vtx(t, "spare_identity", "identity")
+				f.vtx(t, "spare_lease", "leaseapp")
+				f.edge(t, "applicationFor", "spare_lease", "spare_identity")
+				// A transaction whose patient has no identity at all: it must
+				// drop out of BOTH spellings, and a spelling that kept it would
+				// project a null leaseAppKey the target's key column rejects.
+				f.vtx(t, "orphan_tx", "clinictransaction")
+				f.aspect(t, "orphan_tx", "entry", "transactionEntry", map[string]any{
+					"type": "debit", "amountCents": 900.0, "memo": "Unlinked", "postedAt": "2026-06-05T00:00:00Z",
+				})
+				f.vtx(t, "orphan_acct", "clinicaccount")
+				f.vtx(t, "orphan_patient", "patient")
+				f.edge(t, "postedTo", "orphan_tx", "orphan_acct")
+				f.edge(t, "heldFor", "orphan_acct", "orphan_patient")
+			},
+		},
+		{
+			name: "wellnessEntries", shipped: wellnessEntriesSpec, tailHeaded: tailHeadedWellnessEntriesSpec,
+			seed: func(f *obFixture, t *testing.T) { f.mkWellnessTx(t, "wellnesstx", 3000) },
+			confound: func(f *obFixture, t *testing.T) {
+				f.vtx(t, "wellnesstx_lease2", "leaseapp")
+				f.edge(t, "applicationFor", "wellnesstx_lease2", "wellnesstx_identity")
+				f.vtx(t, "spare_identity", "identity")
+				f.vtx(t, "spare_lease", "leaseapp")
+				f.edge(t, "applicationFor", "spare_lease", "spare_identity")
+				// A transaction posted to an account held for nobody — the
+				// wellness chain's own "no identity" shape.
+				f.vtx(t, "orphan_tx", "wellnesstransaction")
+				f.aspect(t, "orphan_tx", "entry", "transactionEntry", map[string]any{
+					"type": "debit", "amountCents": 700.0, "memo": "Unlinked", "postedAt": "2026-06-06T00:00:00Z",
+				})
+				f.vtx(t, "orphan_acct", "wellnessaccount")
+				f.edge(t, "postedTo", "orphan_tx", "orphan_acct")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newObFixture(t)
+			tc.seed(f, t)
+			tc.confound(f, t)
+
+			shippedRows := f.project(t, tc.shipped)
+			tailRows := f.project(t, tc.tailHeaded)
+			require.Len(t, shippedRows, 2,
+				"the confounding graph must actually multiply the rows — one transaction against two leaseapps for its "+
+					"identity — or the comparison below is back to the single-row fixture that cannot tell the spellings apart")
+			require.Equal(t, len(shippedRows), len(tailRows),
+				"the two spellings must select the same rows — a difference in COUNT is the failure mode a "+
+					"single-row fixture cannot see, and it is the one a head-bound scan produces")
+
+			require.JSONEq(t, rowSetJSON(t, tailRows), rowSetJSON(t, shippedRows),
+				"the two spellings walk the same edge in the same direction and must project the same rows")
+
+			eng := full.New()
+			shippedCR, err := eng.Parse(tc.shipped)
+			require.NoError(t, err)
+			tailCR, err := eng.Parse(tc.tailHeaded)
+			require.NoError(t, err)
+			require.True(t, shippedCR.(*full.CompiledRule).ScanRootHopIndex().Complete,
+				"the shipped spec's scan-root pattern graph must be complete — without it no neighbour event can be narrowed "+
+					"to the anchors it affects, and the lens has no retraction transport")
+			require.False(t, tailCR.(*full.CompiledRule).ScanRootHopIndex().Complete,
+				"the tail-headed spelling must leave the graph ungrounded, or this test is comparing two spellings that "+
+					"were never different and proves nothing about the shipped one")
+		})
+	}
+}
+
+// rowSetJSON renders a projection result set as one order-independent document,
+// so two spellings are compared on the rows they SELECT rather than on the order
+// a scan happened to visit them in. The rows are sorted by their own marshalled
+// form, which is total and needs no key to be nominated.
+func rowSetJSON(t *testing.T, rows []ruleengine.ProjectionResult) string {
+	t.Helper()
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		raw, err := json.Marshal(r.Values)
+		require.NoError(t, err)
+		out = append(out, string(raw))
+	}
+	sort.Strings(out)
+	joined, err := json.Marshal(out)
+	require.NoError(t, err)
+	return string(joined)
 }

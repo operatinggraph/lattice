@@ -691,3 +691,97 @@ func TestAnchorProjectionKey_Contract(t *testing.T) {
 		require.False(t, ok, "a nil key value must be underivable")
 	})
 }
+
+// sharedBucketShapeSpec is a single-key plain lens whose row key IS the
+// anchor's Contract #1 vertex key — so every row this lens writes shares the
+// `vtx.leaseapp.` prefix and a sibling lens writing another type's rows into
+// the same bucket shares none of it.
+const sharedBucketShapeSpec = `
+MATCH (app:leaseapp)
+RETURN app.key AS key
+`
+
+// TestApplyDiffRetraction_SharedBucketListsOwnPrefixOnly proves the scoping
+// added for a target several lenses write
+// (secure-plain-lens-retraction-and-audit-design.md §3.3, §4.4).
+//
+// The unscoped vector runs FIRST and is the whole point: a single-column key is
+// kept verbatim by the adapter's key mapping — there is no segment filter to
+// skip a sibling's key — so an unscoped diff on a shared bucket appends a
+// Delete for every row the sibling owns. That is the live behaviour the
+// activation-time sharing check refuses, reproduced here so the scoped vector
+// below is proven against a real hazard rather than against an empty listing.
+//
+// The third vector is what keeps the scoping honest in the other direction: a
+// scoped diff must still retract this lens's OWN dropped row. A prefix that
+// silently disabled retraction would pass the second assertion and be worse
+// than the cross-delete it fixed.
+func TestApplyDiffRetraction_SharedBucketListsOwnPrefixOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	ctx := context.Background()
+	p, _, _, targetKV := newRetractionPipeline(t, sharedBucketShapeSpec, []string{"key"})
+	require.NoError(t, p.SetDiffRetraction(true))
+
+	const ownKey = "vtx.leaseapp.SharedBucketAppAAAAA"
+	const siblingKey = "vtx.unit.SharedBucketUnitAAAAA"
+	seedRow := func(key string) {
+		raw, err := json.Marshal(map[string]any{"key": key})
+		require.NoError(t, err)
+		_, err = targetKV.Put(ctx, key, raw)
+		require.NoError(t, err)
+	}
+	seedRow(ownKey)
+	seedRow(siblingKey)
+
+	// The fresh row set this lens computes: its own one row, unchanged.
+	fresh := []ruleengine.EvalResult{{Keys: map[string]any{"key": ownKey}}}
+
+	deletedKeys := func(results []ruleengine.EvalResult) []string {
+		var out []string
+		for _, r := range results {
+			if r.Delete {
+				out = append(out, r.Keys["key"].(string))
+			}
+		}
+		return out
+	}
+
+	unscoped, err := p.applyDiffRetraction(ctx, fresh)
+	require.NoError(t, err)
+	require.Equal(t, []string{siblingKey}, deletedKeys(unscoped),
+		"an unscoped diff on a shared bucket must retract the sibling's row — without that this hazard is not real "+
+			"and the scoping below proves nothing")
+
+	require.NoError(t, p.SetDiffRetractionPrefix("vtx.leaseapp."))
+	scoped, err := p.applyDiffRetraction(ctx, fresh)
+	require.NoError(t, err)
+	require.Empty(t, deletedKeys(scoped),
+		"a diff scoped to this lens's own key prefix must never reach a sibling's rows")
+
+	dropped, err := p.applyDiffRetraction(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{ownKey}, deletedKeys(dropped),
+		"the scoped diff must still retract this lens's OWN row when the fresh computation no longer produces it")
+}
+
+// TestSetDiffRetractionPrefix_Refusals pins the two ways the scoping must fail
+// closed. An empty prefix is the whole-bucket listing the caller asked to avoid;
+// an adapter that cannot enumerate a prefix is the same listing reached through
+// the mechanism meant to prevent it. Neither may leave the lens half-armed.
+func TestSetDiffRetractionPrefix_Refusals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	p, _, _, _ := newRetractionPipeline(t, sharedBucketShapeSpec, []string{"key"})
+	require.Error(t, p.SetDiffRetractionPrefix(""))
+	assert.Empty(t, p.diffRetractionPrefix)
+
+	nonPrefix, err := New("no-prefix-lister", "nats_kv", "CORE", nil, nil, &keyedAdapter{}, nil)
+	require.NoError(t, err)
+	err = nonPrefix.SetDiffRetractionPrefix("vtx.leaseapp.")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "adapter.PrefixKeyLister")
+	assert.Empty(t, nonPrefix.diffRetractionPrefix)
+}

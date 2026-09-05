@@ -854,3 +854,60 @@ func TestAuditorStale(t *testing.T) {
 		require.Negative(t, elapsed)
 	})
 }
+
+// addStoredOnlyColumn writes a column into the stored row that no RETURN alias
+// produces — the shape a `SELECT *` reader hands back on a table carrying a
+// column the lens does not project (a migration leftover, most often).
+func addStoredOnlyColumn(t *testing.T, targetKV *substrate.KV, key, column string, value any) {
+	t.Helper()
+	ctx := context.Background()
+	entry, err := targetKV.Get(ctx, key)
+	require.NoError(t, err)
+	var row map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &row))
+	row[column] = value
+	raw, err := json.Marshal(row)
+	require.NoError(t, err)
+	_, err = targetKV.Put(ctx, key, raw)
+	require.NoError(t, err)
+}
+
+// TestAuditAnchor_StoredOnlyColumnIsNotStale pins the second comparator
+// artifact: a column the TARGET holds and the projection does not produce is
+// excluded from the comparison rather than reported as content that no longer
+// matches.
+//
+// The exclusion is sound because the computed row's key set is exactly the
+// compiled rule's RETURN alias set — full's projectItems assigns every alias
+// unconditionally, so an alias that evaluated to null is present-with-null and
+// never missing (storedOnlyColumns' own doc). A stored-only key is therefore
+// never a projected column the recomputation dropped.
+//
+// Without it such a column reads `stale` on every pass forever, on a lens whose
+// projection is exactly right: a permanent divergence no recomputation resolves
+// and no operator action clears, which is the class of finding that teaches a
+// reader to stop reading the field.
+func TestAuditAnchor_StoredOnlyColumnIsNotStale(t *testing.T) {
+	ctx := context.Background()
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	a := f.installAudit(t, 10)
+	keyA := f.project(t, auditUnitA, "Loft A", 1)
+
+	a.pass(ctx)
+	require.Empty(t, a.Status().Divergent,
+		"the positive vector: without a clean pass first, an empty result below could be a comparison that reports nothing")
+
+	addStoredOnlyColumn(t, f.targetKV, keyA, "active", nil)
+	a.pass(ctx)
+	require.Empty(t, a.Status().Divergent,
+		"a column the target holds and no RETURN alias produces is not content the recomputation got wrong — "+
+			"compared, it is a divergence that can never be resolved or cleared")
+
+	// The same row, now differing on a column the projection DOES produce, must
+	// still read stale — the exclusion is one-directional, and a mask that
+	// swallowed a real divergence would pass the assertion above too.
+	corruptStoredRow(t, f.targetKV, keyA)
+	a.pass(ctx)
+	require.Equal(t, map[string]int{AuditClassStale: 1}, a.Status().Divergent,
+		"a projected column that differs is a real divergence, stored-only neighbours or not")
+}

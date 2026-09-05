@@ -165,6 +165,10 @@ var lensLivenessDesignAddedFields = []string{
 	"DerivationArmed",
 	"DerivationFellBack",
 	"DerivationOverCapSize",
+	// The same design's Increment 3, §4.4 and §5: what carries a retraction
+	// when a NEIGHBOUR event drops one of this lens's rows, copied by
+	// copyLensRetractionTransport (cmd/refractor/derivationstatus.go).
+	"RetractionTransport",
 }
 
 // TestLensLivenessStatus_NewFieldsAreCarried is the reflection gate
@@ -190,10 +194,15 @@ func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
 		LastPassAt:     time.Now(),
 	}
 	derivation := pipeline.PlainDerivationStatus{Eligible: true, Armed: true, FellBack: 3, OverCapSize: 91}
+	transport := pipeline.PlainRetractionVerdict{
+		Classified: true, DependsOnNeighbour: true, Exhaustive: true,
+		Transport: pipeline.RetractionTransportDerivation,
+	}
 
 	lensSnap := health.LensLivenessStatus{}
 	copyLensAuditStatus(&lensSnap, full, time.Minute)
 	copyLensDerivationStatus(&lensSnap, derivation)
+	copyLensRetractionTransport(&lensSnap, transport)
 
 	v := reflect.ValueOf(lensSnap)
 	typ := v.Type()
@@ -206,8 +215,8 @@ func TestLensLivenessStatus_NewFieldsAreCarried(t *testing.T) {
 			t.Errorf("health.LensLivenessStatus.%s is left at its zero value by the copier that owns it.\n\n"+
 				"This field is named in lensLivenessDesignAddedFields (cmd/refractor/sweepstatus_test.go) as "+
 				"one a design added outside the Sweep* family; add its line to copyLensAuditStatus "+
-				"(cmd/refractor/auditstatus.go) or copyLensDerivationStatus "+
-				"(cmd/refractor/derivationstatus.go).", name)
+				"(cmd/refractor/auditstatus.go), copyLensDerivationStatus or "+
+				"copyLensRetractionTransport (cmd/refractor/derivationstatus.go).", name)
 		}
 	}
 }

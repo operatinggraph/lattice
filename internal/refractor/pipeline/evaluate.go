@@ -1419,10 +1419,14 @@ func resultsContainKeys(results []ruleengine.EvalResult, keys map[string]any) bo
 // Fire 2's anchor-self presence check cannot reach by construction (a
 // composite output key with a column bound to a non-anchor variable, so
 // AnchorProjectionKey returns ok=false for every event on the lens, not just
-// some). It reads the target's full live key set via adapter.KeyLister,
-// diffs it against this re-execute's freshly-derived row set, and appends a
-// Delete for every key the target still carries but the fresh computation no
-// longer produces.
+// some). It reads the target's live key set via adapter.KeyLister, diffs it
+// against this re-execute's freshly-derived row set, and appends a Delete for
+// every key the target still carries but the fresh computation no longer
+// produces.
+//
+// The listing is the WHOLE target's for a target this lens owns alone, and the
+// lens's own key prefix when activation scoped it (SetDiffRetractionPrefix) —
+// see diffRetractionListing.
 //
 // Correctness rests on the lens itself being a genuinely unanchored
 // whole-scan (no `{key: $actorKey}` seed anywhere in its MATCH clauses, the
@@ -1445,13 +1449,9 @@ func resultsContainKeys(results []ruleengine.EvalResult, keys map[string]any) bo
 // lens up front (cmd/refractor's DiffRetraction guard), so reaching here means
 // the adapter was swapped underneath a running pipeline — loud is correct.
 func (p *Pipeline) applyDiffRetraction(ctx context.Context, results []ruleengine.EvalResult) ([]ruleengine.EvalResult, error) {
-	lister, ok := p.currentAdapter().(adapter.KeyLister)
-	if !ok {
-		return nil, fmt.Errorf("pipeline: diff retraction: adapter %T does not implement adapter.KeyLister — the lens cannot retract anything", p.currentAdapter())
-	}
-	existing, err := lister.ListKeys(ctx)
+	existing, err := p.diffRetractionListing(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: diff retraction: list keys: %w", err)
+		return nil, err
 	}
 	for _, exKeys := range existing {
 		if resultsContainKeys(results, exKeys) {
@@ -1460,6 +1460,52 @@ func (p *Pipeline) applyDiffRetraction(ctx context.Context, results []ruleengine
 		results = append(results, ruleengine.EvalResult{Delete: true, Keys: exKeys})
 	}
 	return results, nil
+}
+
+// diffRetractionListing enumerates the live keys the diff above compares
+// against: the lens's own key prefix when activation scoped it, the whole
+// target otherwise.
+//
+// The scoped arm exists because a listing is not an ownership set. On a NATS-KV
+// bucket several lenses share, ListKeys returns every key in the bucket and
+// mapKeys filters only by segment count — a single-column key is kept verbatim
+// — so every sibling's row would read to the diff as one this lens no longer
+// produces and be Deleted. Activation refuses a shared-target lens that cannot
+// derive a prefix (projection.SharedTargetDiffRefusal), so an empty prefix here
+// means a target this lens owns alone, where the whole listing IS its own rows.
+//
+// THE PREFIX IS THE ONLY PROTECTION A LISTED KEY GETS. Every key this listing
+// returns that the fresh row set does not contain is Deleted, and that row set
+// is this lens's own rows — a sibling's key is never in it. The comparison
+// therefore cannot spare a sibling's row; only the listing's scope can.
+//
+// What makes the scope sufficient is the ACTIVATION check rather than the prefix
+// alone: a prefix scopes but does not prove ownership by itself
+// (OutputDescriptor.KeyPrefix's own doc: `cap.` admits `cap.roles.`), and it is
+// projection.SharedTargetDiffRefusal — refusing a bucket whose lenses' prefixes
+// nest, or whose siblings declare no locatable key space at all — that turns
+// "these keys carry my prefix" into "these keys are mine".
+func (p *Pipeline) diffRetractionListing(ctx context.Context) ([]map[string]any, error) {
+	if prefix := p.diffRetractionPrefix; prefix != "" {
+		lister, ok := p.currentAdapter().(adapter.PrefixKeyLister)
+		if !ok {
+			return nil, fmt.Errorf("pipeline: diff retraction: adapter %T does not implement adapter.PrefixKeyLister, but this lens's target is shared and its diff was scoped to %q — listing the whole target would retract its siblings' rows", p.currentAdapter(), prefix)
+		}
+		existing, err := lister.ListKeysPrefix(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: diff retraction: list keys by prefix %q: %w", prefix, err)
+		}
+		return existing, nil
+	}
+	lister, ok := p.currentAdapter().(adapter.KeyLister)
+	if !ok {
+		return nil, fmt.Errorf("pipeline: diff retraction: adapter %T does not implement adapter.KeyLister — the lens cannot retract anything", p.currentAdapter())
+	}
+	existing, err := lister.ListKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: diff retraction: list keys: %w", err)
+	}
+	return existing, nil
 }
 
 // fetchVertexProps point-reads a vertex from Core KV and returns its

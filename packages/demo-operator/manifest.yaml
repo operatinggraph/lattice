@@ -1,5 +1,5 @@
 name: demo-operator
-version: 0.1.3
+version: 0.2.0
 description: |
   Declares a scoped demoOperator role holding INSPECT-ONLY grants: the
   non-mutating control-plane reads (ctrl.weaver.read, ctrl.loom.read,

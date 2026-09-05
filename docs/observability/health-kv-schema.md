@@ -580,7 +580,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "auditMaskedColumns": ["<string>", ...], "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>", "derivationArmed": <bool>, "derivationFellBack": <uint64>, "derivationOverCapSize": <int>}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | retraction-transport-missing | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "auditMaskedColumns": ["<string>", ...], "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>", "derivationArmed": <bool>, "derivationFellBack": <uint64>, "derivationOverCapSize": <int>, "retractionTransport": "derivation | derivation (audit disarmed) | diffRetraction | diffRetraction-prefix | none | unclassified"}
     }
   },
   "issues": [
@@ -602,6 +602,7 @@ currently reserved-but-unemitted.
     {"code": "LensRepairBlocked", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensSecureRedaction", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensStructuralPauseAutoRecovered", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensRetractionTransportDisarmed", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
@@ -742,12 +743,17 @@ enrolled plain lens's own seeded evaluation over a bounded batch of its anchors
 canonical-JSON "same row" definition the sweep's `rowsEquivalent` and `Reproject`'s
 `classifyDivergence` use, with the row's own key columns always excluded (a freshly computed
 row carries every RETURN alias, key columns included, while `GetRow`'s contract excludes
-them) and, for a Secure Lens, its declared secure columns excluded too (see
-`auditMaskedColumns` below).
+them), every column only the STORED row carries excluded too (`GetRow` reads `SELECT *`, and
+the computed row carries every alias, so a stored-only column can only be one the lens does not
+project — a migration leftover would otherwise read `stale` on every pass forever), and, for a
+Secure Lens, its declared secure columns excluded as well (see `auditMaskedColumns` below).
 
 `LensProjectionDiverged` is raised when it finds a disagreement, and it says so with the
 per-class breakdown in `divergentRows` — `missing` (the recomputation produces a row the
-target does not hold), `stale` (the target holds it and the content differs), `retained` (the
+target does not hold), `stale` (the target holds it and the content differs on a column the
+lens PROJECTS — a column only the stored row carries is excluded, since `GetRow` reads
+`SELECT *` and the computed row carries every RETURN alias, so such a column can only be one
+the lens does not project), `retained` (the
 target still holds a row for an anchor that no longer projects it, because its match stopped
 matching or the anchor was tombstoned and the retraction was lost). The map carries **only
 the classes that fired**, so a direction that has silently stopped detecting reads as absent
@@ -855,18 +861,66 @@ while a published `derivationFellBack: 0` (with `derivationArmed: true`) means t
 on and has never had to fall back. `derivationFellBack` counts EVENTS, not rows, and a lens
 falling back on every event carries the transport's cost with none of its retraction.
 
+`retractionTransport` names what carries a retraction when a **neighbour** event drops one of
+this lens's rows — a neighbour vertex tombstoned, a link two hops out removed, a neighbour's
+aspect flipping a WHERE. A plain lens retracts on its ANCHOR's own event through the presence
+check; a row dropped by a neighbour is named by no anchor event, so it reaches the target only
+through one of four values:
+
+| value | what carries the retraction |
+|---|---|
+| `derivation` | the licensed neighbour-anchor derivation — the neighbour event narrows to the anchors the scan-root walk derives and re-evaluates each |
+| `derivation (audit disarmed)` | the same shape, **voided by this deployment**: the derivation licence requires an enrolled divergence audit and the audit's kill switch is thrown, so nothing is carrying it |
+| `diffRetraction` | the whole-target key diff, on a target this lens owns alone |
+| `diffRetraction-prefix` | the same diff, scoped to this lens's own key prefix in a target it shares |
+| `none` | **nothing** — its rows depend on a neighbour and no transport retracts a drop-out |
+| `unclassified` | **unknown** — whether its rows depend on a neighbour could not be derived from its query shape, which every gate reads as a refusal rather than as "they do not" |
+
+It is published **only for a lens whose row existence depends on a required neighbour** — or
+whose dependence could not be derived at all — and is absent otherwise: the question is not
+asked of a lens that cannot be orphaned, and a value beside it would read as a verdict about a
+risk the lens does not carry. It is re-derived every heartbeat off the same compiled-rule
+snapshot the licence reads, so a MATCH hot-reload that changes the shape moves it on the next
+beat rather than leaving a stale posture published.
+
+The last two values should never appear. Activation refuses both shapes, and so does every
+hot-reload path that can install one — a lens carrying either is one that reached the registry
+past all of that, and it keeps rows its graph no longer supports with no detector that will ever
+name them. `LensRetractionTransportMissing` (`error`) lists them and each takes the per-lens
+`alert` `retraction-transport-missing`, which is the worst rank in the table below: every other
+token describes a lens that is legitimately live and degraded, this one a lens whose shape has
+to change before it may run at all.
+
+The field is **business-plane only**. The heartbeat's lens provider filters the auth plane out
+before reading it, because an auth-plane lens publishes `CapabilityLensStatus` — which has no
+member for this, and whose per-row verdicts belong to the convergence sweep and the
+`Capability*` codes. The auth-plane lenses carrying no transport are named debt in the
+retraction-transport corpus census, not an alert here.
+
+`LensRetractionTransportDisarmed` is the `warning` raised when the deployment has thrown the
+audit's kill switch and one or more lenses' only transport is the derivation. It is ONE issue
+listing what the switch voided, and no lens's own `alert` moves: the cause is a single operator
+decision, and N per-lens alerts would bury it under its own consequences. Each affected lens
+still publishes `retractionTransport: "derivation (audit disarmed)"` beside it, which is what
+separates this from a lens that never had a transport.
+
 **`alert` precedence**, worst first, is a single total order shared by both maps:
 
-`secure-redaction` > `paused` > `unreadable` > `repair-failing` > `repair-blocked` >
-`sweep-stalled` > `audit-stalled` > `unverified` > `diverged` > `lagging` >
-`structural-pause-auto-recovered` > `ok`.
+`retraction-transport-missing` > `secure-redaction` > `paused` > `unreadable` >
+`repair-failing` > `repair-blocked` > `sweep-stalled` > `audit-stalled` > `unverified` >
+`diverged` > `lagging` > `structural-pause-auto-recovered` > `ok`.
+
+(`retraction-transport-missing` is business-lens only; the capability map's `alert` starts at
+`secure-redaction`.)
 
 The field is single-valued and several conditions can hold at once, so the order ships as a
 table with a test (`alertRank`, `TestAlertRank_TotalOrder`) rather than as the call sequence
 of the branches that set it. Nothing displaced is lost: each condition raises its own issue
 and its underlying counters travel in the same metrics map.
 
-The order reads as one argument. `secure-redaction` tops it because that read model is not
+The order reads as one argument. `retraction-transport-missing` tops it because it is the only
+token that says the lens should not be RUNNING — the remedy is its cypher or its declaration,
+not an operator action on its read model. `secure-redaction` is next because that read model is not
 stale or frozen but **confidently wrong** and being served that way — a null the reader
 cannot distinguish from a lawful erasure — where a frozen lens misleads nobody. Below it,
 `paused` and `unreadable` say that everything quieter is a claim made on suppressed or

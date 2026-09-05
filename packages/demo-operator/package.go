@@ -73,7 +73,7 @@ RETURN
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "demo-operator",
-	Version:     "0.1.3",
+	Version:     "0.2.0",
 	Description: "Grants a scoped demoOperator role the non-mutating ctrl.*.read control-plane grants plus its read-side wildcard grant, and nothing that writes — the platform boundary for a public read-only Loupe demo.",
 	Depends:     []string{"rbac-domain", "identity-domain", "privacy-base", "objects-base"},
 	Permissions: Permissions(),
@@ -85,12 +85,29 @@ var Package = pkgmgr.Definition{
 	},
 	Lenses: []pkgmgr.LensSpec{
 		{
-			CanonicalName: "demoOperatorReadGrants",
-			Class:         "meta.lens",
-			Adapter:       "postgres",
-			GrantTable:    true,
-			Engine:        "full",
-			Spec:          demoOperatorReadGrantsSpec,
+			// The grant exists only while the holdsRole link does, and an
+			// unwire tombstones the LINK, not the identity or the role — so no
+			// vertex tombstone ever names this row and the anchor-self
+			// retraction path cannot reach it. Left there, a revoked demo
+			// operator keeps a WILDCARD read grant over every Protected table.
+			// The row-set simply shrinks, which is the shape DiffRetraction
+			// exists for, scoped by GrantSource to this producer's own rows in
+			// the shared actor_read_grants table — the staffReadGrants shape
+			// (service-location/lenses.go).
+			//
+			// GrantSource repeats the literal the cypher RETURNs as
+			// grant_source: the cypher's value is what lands in the row, and
+			// this one is what the retraction enumerates back, so the two must
+			// name the same producer or the diff would list rows this lens
+			// never wrote.
+			CanonicalName:  "demoOperatorReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			GrantTable:     true,
+			GrantSource:    "cap-read.demoOperator",
+			DiffRetraction: true,
+			Engine:         "full",
+			Spec:           demoOperatorReadGrantsSpec,
 		},
 	},
 }

@@ -109,11 +109,18 @@ RETURN
 // applicant — a patient with no linked identity, or one whose identity never
 // applied for the lease, simply projects no row here (no error, same as a
 // stack missing a package on the rent/café side).
+//
+// The applicationFor step is written HEAD-BOUND — `(id)<-[:applicationFor]-(l)`,
+// the direction lease-signing's applicantOnboardingSpec reads the same edge —
+// because a MATCH whose head variable nothing above it binds executes as a
+// corpus scan of the head label rather than as an adjacency hop, and leaves the
+// lens's scan-root pattern graph ungrounded, so no neighbour event can be
+// narrowed to the anchors it affects. Same edge, same direction, same rows.
 const clinicEntriesSpec = `MATCH (t:clinictransaction)
 MATCH (t)-[:postedTo]->(a:clinicaccount)
 MATCH (a)-[:heldFor]->(pt:patient)
 MATCH (pt)-[:identifiedBy]->(id:identity)
-MATCH (l:leaseapp)-[:applicationFor]->(id)
+MATCH (id)<-[:applicationFor]-(l:leaseapp)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -135,7 +142,7 @@ RETURN
 const wellnessEntriesSpec = `MATCH (t:wellnesstransaction)
 MATCH (t)-[:postedTo]->(a:wellnessaccount)
 MATCH (a)-[:heldFor]->(id:identity)
-MATCH (l:leaseapp)-[:applicationFor]->(id)
+MATCH (id)<-[:applicationFor]-(l:leaseapp)
 RETURN
   t.key AS key,
   t.key AS transactionKey,

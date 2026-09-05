@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
@@ -134,6 +135,17 @@ func hotReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
 	// reverse. Neither is a continuation of the running lens.
 	if entry.grantTable != newLens.Into.GrantTable {
 		return "lens update changes grantTable — not hot-reloadable (the rows the lens already wrote become unaddressable); " + reactivateRemedy
+	}
+	// Whether the lens diffs its target's whole key set is bound before Run
+	// (pipeline.SetDiffRetraction) and read by the handler goroutine with no
+	// lock, and neither swap re-runs that binding. So an edit either way is not
+	// applied: turning it ON leaves an operator reading an accepted spec while
+	// nothing retracts, and turning it OFF leaves a diff enumerating a target the
+	// spec says the lens no longer reconciles. The scoping the diff carries on a
+	// shared bucket is bound the same way, which is what lets the sharing check
+	// read a running pipeline's prefix as a settled fact.
+	if entry.pipeline != nil && entry.pipeline.DiffRetraction() != newLens.Into.DiffRetraction {
+		return "lens update changes diffRetraction — not hot-reloadable (the target diff and its shared-bucket scoping are bound before the lens runs); " + reactivateRemedy
 	}
 	// `protected` is the fourth thing that decides whether the built adapter
 	// carries the §6.2 guard: NewProtectedAdapter forces it on the inner
@@ -567,6 +579,19 @@ func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 			rl.refuse(entry, newLens.ID, "build new adapter", "err", err)
 			return
 		}
+		// The shared-target rule, re-asked for the bucket the lens is JOINING
+		// (secure-plain-lens-retraction-and-audit-design.md §3.3). Activation
+		// decided it against the bucket the lens is leaving, and an INTO edit is
+		// the one path that moves an unguarded NATS-KV lens onto a bucket other
+		// lenses already write — where an unscoped sibling diff would delete
+		// every row it lands.
+		//
+		// Decided before HotReloadInto so a refused update leaves the pipeline
+		// writing the target it was admitted against.
+		if reason := rl.sharedTargetReloadRefusal(entry, newLens, newLens.Into.Target, newLens.Into.Bucket); reason != "" {
+			rl.refuse(entry, newLens.ID, reason, "bucket", newLens.Into.Bucket)
+			return
+		}
 		// The pipeline's own guard requirement, checked against the adapter
 		// actually built. The refusals above cover every rule edit that can
 		// drop the guard, so reaching this is a backstop, not a live path.
@@ -574,6 +599,19 @@ func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 			rl.refuse(entry, newLens.ID, "hot-reload adapter", "err", err)
 			return
 		}
+		// The entry now describes the surface the pipeline WRITES, which is what
+		// every later question asks of it — the next update's refusal
+		// comparisons, and which lenses share a bucket. Leaving these at the
+		// activation values would make the entry describe a target the lens
+		// stopped writing the moment the swap landed. entry.rule is deliberately
+		// not among them: an INTO-only update carries no compiled rule, and that
+		// field IS the taxonomy re-derivation's baseline (its own doc).
+		entry.guarded = adapterIsGuarded(newAdpt)
+		entry.target = newLens.Into.Target
+		entry.bucket = newLens.Into.Bucket
+		entry.table = newLens.Into.Table
+		entry.dsn = newLens.Into.DSN
+		entry.grantSource = newLens.Into.GrantSource
 		entry.reporter.SetRuleSequence(newLens.Sequence)
 		entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
 		rl.logger.Info("lens INTO hot-reloaded", "lensId", newLens.ID)
@@ -622,6 +660,29 @@ func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 		// pipelineEntry.taxRebuildTruncate for which target shapes that
 		// actually retracts on, and which retract through DiffRetraction
 		// instead.
+		// Both activation-time retraction guards, re-asked of the rule the
+		// pipeline now evaluates (secure-plain-lens-retraction-and-audit-design.md
+		// §4.4). A MATCH edit can ADD a required neighbour to a lens whose rows
+		// nothing could orphan before — exactly the shape activation refuses —
+		// and a swap that skipped the gate would land it on a RUNNING lens, which
+		// no activation will ever re-examine.
+		//
+		// Asked AFTER the swap because the verdict is derived from the pipeline's
+		// own rule snapshot: the scan-root pattern graph, the closure verdict and
+		// the neighbour dependency all come off the compiled rule, and there is
+		// no candidate the pipeline can answer about without installing it. So a
+		// refusal puts the PREVIOUS rule back through the same call that
+		// installed this one, and the lens goes on running the shape it was
+		// admitted with — the disposition every other refusal on this path takes.
+		// Between the swap and that restore the handler goroutine can evaluate
+		// events against the refused shape (rule publication is copy-on-write,
+		// not gated on this verdict); the window is one AST walk long, and a row
+		// it projects is corrected by the restored rule's next event for that
+		// anchor, not by the restore itself.
+		if reason := rl.retractionReloadRefusal(entry, newLens); reason != "" {
+			rl.restoreRunningRule(entry, newLens.ID, reason)
+			return
+		}
 		nextLabels, nextNarrowed := entry.pipeline.ConsumerFilterLabels()
 		matchShrank := consumerFilterShrank(prevLabels, prevNarrowed, nextLabels, nextNarrowed) &&
 			rl.truncateIsSafe(entry, newLens.ID)
@@ -697,6 +758,112 @@ func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 		rl.startTaxonomyRebuild(entry, newLens.ID,
 			"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set")
 	}
+}
+
+// siblingsOnTarget is registeredSiblingsOnTarget for the reload path: the
+// already-activated lenses writing (target, bucket), excluding this entry.
+//
+// reloader has no direct handle on the registry map, so it reads the same
+// snapshot main.go supplies for every other cross-lens question (liveEntries).
+// A harness with no snapshot closure sees no siblings, which is the same answer
+// a single-lens deployment gives.
+func (rl *reloader) siblingsOnTarget(entry *pipelineEntry, target, bucket string) []projection.SiblingLens {
+	if target != natsKVTarget || rl.liveEntries == nil {
+		return nil
+	}
+	var out []projection.SiblingLens
+	for _, e := range rl.liveEntries() {
+		if e == entry || e.pipeline == nil {
+			continue
+		}
+		if e.target == target && e.bucket == bucket {
+			out = append(out, siblingLensOf(e))
+		}
+	}
+	return out
+}
+
+// sharedTargetReloadRefusal asks the shared-target rule of a lens whose target
+// (target, bucket) is the one it will be writing after this update, and reports
+// why the update cannot be carried, "" when it can.
+//
+// It refuses on two grounds. The rule's own refusal is the first. The second is
+// a scoping the swap cannot install: SetDiffRetractionPrefix binds before Run,
+// so a target whose sharing calls for a prefix the running pipeline does not
+// already carry would be written by a diff scoped for the target the lens is
+// leaving.
+func (rl *reloader) sharedTargetReloadRefusal(entry *pipelineEntry, r *lens.Rule, target, bucket string) string {
+	if entry.pipeline == nil {
+		return ""
+	}
+	scoped := *r
+	scoped.Into.Target, scoped.Into.Bucket = target, bucket
+	prefix, refusal := projection.SharedTargetDiffRefusal(&scoped, rl.siblingsOnTarget(entry, target, bucket))
+	if refusal != "" {
+		return "shared-target diff retraction: " + refusal
+	}
+	if prefix != entry.pipeline.DiffRetractionPrefix() {
+		return "shared-target diff retraction: the lens's target diff would have to be scoped to " + strconv.Quote(prefix) +
+			" there, and the running pipeline carries " + strconv.Quote(entry.pipeline.DiffRetractionPrefix()) +
+			" — the scoping is bound before the lens runs and no swap re-installs it; " + reactivateRemedy
+	}
+	return ""
+}
+
+// retractionTransportReloadRefusal asks the business plane's
+// neighbour-retraction gate of the rule the pipeline is evaluating RIGHT NOW
+// (secure-plain-lens-retraction-and-audit-design.md §4.4), and reports why that
+// shape may not run, "" when it may.
+//
+// The plane and the plain-projection question are asked of the rule as the
+// pipeline will actually write it — the running target and bucket, not the ones
+// an INTO edit named and no swap applied.
+func (rl *reloader) retractionTransportReloadRefusal(entry *pipelineEntry, r *lens.Rule, target, bucket string) string {
+	if entry.pipeline == nil {
+		return ""
+	}
+	scoped := *r
+	scoped.Into.Target, scoped.Into.Bucket = target, bucket
+	if !isPlainProjectionLens(&scoped) || projection.IsAuthPlane(&scoped) {
+		return ""
+	}
+	if refusal := retractionTransportRefusal(entry.pipeline, &scoped); refusal != "" {
+		return "neighbour-retraction transport: " + refusal
+	}
+	return ""
+}
+
+// retractionReloadRefusal asks both retraction guards of the entry as it stands
+// after a MATCH swap, and reports the first refusal, "" when the shape may run.
+//
+// The target the questions are asked about is the RUNNING one. ClassifyUpdate
+// keys on the Match string alone, so an update editing the cypher and the INTO
+// block together classifies as a MATCH change and its INTO half is never applied
+// — asking about the bucket the spec names would judge a target this lens does
+// not write.
+func (rl *reloader) retractionReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
+	if reason := rl.sharedTargetReloadRefusal(entry, newLens, entry.target, entry.bucket); reason != "" {
+		return reason
+	}
+	return rl.retractionTransportReloadRefusal(entry, newLens, entry.target, entry.bucket)
+}
+
+// restoreRunningRule puts the rule the lens was admitted with back on the
+// pipeline and records the refusal that sent it back.
+//
+// A restore that itself fails leaves the pipeline evaluating a shape the gate
+// refuses, which is the one outcome worse than either rule — so it is recorded
+// with that consequence named, rather than as a second-order log line.
+func (rl *reloader) restoreRunningRule(entry *pipelineEntry, lensID, reason string) {
+	if entry.rule == nil {
+		rl.refuse(entry, lensID, reason+" — and the lens carries no previous rule to restore")
+		return
+	}
+	if err := entry.pipeline.UseFullEngineBranches(rl.fullEngine, entry.rule.CompiledRule, entry.rule.CompiledBranches); err != nil {
+		rl.refuse(entry, lensID, reason+" — and the rule the lens was admitted with could not be restored, so the lens is evaluating a shape the gate refuses", "err", err)
+		return
+	}
+	rl.refuse(entry, lensID, reason)
 }
 
 // reactivate carries an Output-descriptor or projectionKind edit the one way a

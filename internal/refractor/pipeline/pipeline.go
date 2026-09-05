@@ -313,6 +313,19 @@ type Pipeline struct {
 	// lens that explicitly opts in (SetDiffRetraction) pays this cost.
 	diffRetraction bool
 
+	// diffRetractionPrefix scopes that diff's listing to the lens's own rows in
+	// a NATS-KV bucket it SHARES (secure-plain-lens-retraction-and-audit-
+	// design.md §3.3, §4.4). adapter.KeyLister.ListKeys enumerates the whole
+	// bucket, and NatsKVAdapter.mapKeys filters only by segment count — for a
+	// single-column key it keeps every key verbatim — so an unscoped diff on a
+	// shared bucket reads a sibling lens's keys as rows this lens no longer
+	// produces and Deletes them. Empty is the default and means the whole
+	// listing, which is exact for a target this lens owns alone.
+	//
+	// Decided at activation, from the lens registry — the only place that knows
+	// which OTHER lens targets this bucket — and never re-derived per event.
+	diffRetractionPrefix string
+
 	// actorEnumerator enables cross-vertex fan-out. When non-nil and
 	// engineKind == Full, evaluateForEntry expands every CDC event on a
 	// non-actor vertex into the set of affected actors and re-executes
@@ -1073,6 +1086,44 @@ func (p *Pipeline) SetDiffRetraction(enabled bool) error {
 	p.diffRetraction = enabled
 	return nil
 }
+
+// SetDiffRetractionPrefix scopes the target-diff listing to prefix — the lens's
+// own rows in a NATS-KV bucket it shares (see the diffRetractionPrefix field
+// doc). Must be called before Run, and only by the activation path that has the
+// registry to decide sharing from.
+//
+// An adapter that cannot enumerate a prefix is refused rather than silently
+// falling back to the whole-bucket listing: the caller asked for a scoped diff
+// because the unscoped one would cross-delete a sibling lens's rows, and
+// answering that request with the exact listing it was trying to avoid is the
+// failure worth being loud about. An empty prefix is refused for the same
+// reason NatsKVAdapter.ListKeysPrefix refuses one.
+func (p *Pipeline) SetDiffRetractionPrefix(prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("pipeline: diff retraction prefix must not be empty — an unscoped listing is what the caller asked to avoid")
+	}
+	if _, ok := p.currentAdapter().(adapter.PrefixKeyLister); !ok {
+		return fmt.Errorf("pipeline: diff retraction prefix requires an adapter implementing adapter.PrefixKeyLister; %T does not — the diff would list the whole shared target and retract its siblings' rows", p.currentAdapter())
+	}
+	p.diffRetractionPrefix = prefix
+	return nil
+}
+
+// DiffRetraction reports whether this pipeline diffs its target's live key set
+// against a fresh re-projection on every event.
+//
+// It is the INSTALLED posture, which is the one a lens joining the same bucket
+// has to decide against: the flag is bound before Run and no reload re-runs
+// SetDiffRetraction, so a spec that edits it is refused rather than applied.
+func (p *Pipeline) DiffRetraction() bool { return p.diffRetraction }
+
+// DiffRetractionPrefix reports the prefix this pipeline's target diff is scoped
+// to, "" when it lists the whole target.
+//
+// It is the INSTALLED value, which is what a lens joining the same bucket later
+// has to decide against: whether a prefix COULD be derived for this lens says
+// nothing about what its next event will actually list.
+func (p *Pipeline) DiffRetractionPrefix() string { return p.diffRetractionPrefix }
 
 // SetActorEnumerator installs the cross-vertex fan-out enumerator for the
 // full-engine path. When set, evaluateForEntry expands every non-actor CDC

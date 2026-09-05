@@ -72,7 +72,7 @@ RETURN
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "console-operator",
-	Version:     "0.8.0",
+	Version:     "0.9.0",
 	Description: "Grants a scoped consoleOperator role the default-lane console ops + ctrl.* control-plane ops + the allowlisted pkg-lifecycle trio at meta + the AI-authored-capabilities review-console ops, without root, plus its read-side wildcard grant.",
 	Depends:     []string{"rbac-domain", "identity-domain", "privacy-base", "objects-base"},
 	Permissions: Permissions(),
@@ -84,12 +84,29 @@ var Package = pkgmgr.Definition{
 	},
 	Lenses: []pkgmgr.LensSpec{
 		{
-			CanonicalName: "consoleOperatorReadGrants",
-			Class:         "meta.lens",
-			Adapter:       "postgres",
-			GrantTable:    true,
-			Engine:        "full",
-			Spec:          consoleOperatorReadGrantsSpec,
+			// The grant exists only while the holdsRole link does, and an
+			// unwire tombstones the LINK, not the identity or the role — so no
+			// vertex tombstone ever names this row and the anchor-self
+			// retraction path cannot reach it. Left there, a revoked console
+			// operator keeps a WILDCARD read grant over every Protected table.
+			// The row-set simply shrinks, which is the shape DiffRetraction
+			// exists for, scoped by GrantSource to this producer's own rows in
+			// the shared actor_read_grants table — the staffReadGrants shape
+			// (service-location/lenses.go).
+			//
+			// GrantSource repeats the literal the cypher RETURNs as
+			// grant_source: the cypher's value is what lands in the row, and
+			// this one is what the retraction enumerates back, so the two must
+			// name the same producer or the diff would list rows this lens
+			// never wrote.
+			CanonicalName:  "consoleOperatorReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			GrantTable:     true,
+			GrantSource:    "cap-read.consoleOperator",
+			DiffRetraction: true,
+			Engine:         "full",
+			Spec:           consoleOperatorReadGrantsSpec,
 		},
 	},
 }

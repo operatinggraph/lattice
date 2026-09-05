@@ -89,12 +89,18 @@ type plainScanRootVerdict struct {
 }
 
 // scanRootCorpusVerdicts pins today's verdict for every plain lens the
-// installed corpus ships — 61 of them, matching corpusAnchorIndexVerdicts'
-// own anchored/plain split (anchor_hopindex_corpus_census_test.go
-// §2's "confirmed" row). Measured live, not copied from the design doc's own
-// prose numbers: TestScanRootCorpusCensus_PinnedVerdicts is what keeps this
-// table honest against the shipped corpus, the same way
-// TestCorpusAnchorHopIndex_PinnedConjuncts keeps the anchored table honest.
+// installed corpus ships — the same population corpusAnchorIndexVerdicts'
+// anchored/plain split leaves over (anchor_hopindex_corpus_census_test.go).
+// The count is this table's own length and is deliberately not restated in
+// prose: a number in a comment is the one part of a census nothing re-derives,
+// and it drifts silently while every test stays green.
+//
+// Measured live, not copied from a design doc's prose: TestScanRootCorpusCensus_
+// PinnedVerdicts is what keeps this table honest against the shipped corpus, the
+// same way TestCorpusAnchorHopIndex_PinnedConjuncts keeps the anchored table
+// honest. It is also the population every sibling census over the plain corpus
+// takes its own from (plain_retraction_transport_corpus_census_test.go), so two
+// censuses can never quietly cover different corpora.
 var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	// applicantRosterRead/landlordUnitsRead/landlordLeaseApplicationsRead
 	// converted 2026-08-22 alongside their corpusLabelVerdicts row: the
@@ -162,9 +168,9 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	// on independently.
 	"objectIdentityAttachmentsRead": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"oneBillCafeEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"oneBillClinicEntries":          {hasNeighbour: true, reason: rootUngrounded},
+	"oneBillClinicEntries":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"oneBillRentEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"oneBillWellnessEntries":        {hasNeighbour: true, reason: rootUngrounded},
+	"oneBillWellnessEntries":        {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// closureRefused is the PROBE's answer, not the lens's: its key column is
 	// the anchor's own root `data.operationType`, which the empty synthetic
 	// body cannot carry — see structuralClosureDivergence, and the live

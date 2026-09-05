@@ -10,6 +10,7 @@ package full
 import (
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // Direction names the orientation of a RelPattern.
@@ -508,6 +509,194 @@ func (cr *CompiledRule) ValidateNoFilteringWhereForConvergence() error {
 		}
 	}
 	return nil
+}
+
+// ExistenceDependsOnNeighbour reports whether a row's EXISTENCE in this rule's
+// output turns on some vertex other than its own anchor — the question that
+// decides whether a plain lens needs a neighbour-retraction transport at all
+// (secure-plain-lens-retraction-and-audit-design.md §4.4). A lens whose rows
+// depend only on the anchor retracts through the anchor's own event; a lens
+// whose rows can be dropped by a NEIGHBOUR event needs a transport that no
+// anchor event names.
+//
+// Two shapes make existence depend on a neighbour:
+//
+//   - a non-OPTIONAL MATCH that reaches any element other than the anchor. The
+//     pattern must match for the row to exist at all, so that element's
+//     disappearance drops the row. An OPTIONAL MATCH cannot: a failed optional
+//     pattern restores nulls for its bindings rather than removing the row
+//     (the null-restore semantics ValidateNoFilteringWhereForConvergence
+//     above reads the same way).
+//   - a WHERE — on a required MATCH, or on any WITH — that reads a non-anchor
+//     variable, directly or through a WITH alias, or that evaluates a PATTERN
+//     reaching past the anchor. `OPTIONAL MATCH (a)-->(b) WITH a, count(b) AS n
+//     WHERE n > 0` gates existence on b while naming only an alias no pattern
+//     binds, so each reference is resolved through the WITH-alias environment
+//     analyseWithAliases already builds (withalias.go) to the expression over
+//     pattern variables that produces it, and judged there.
+//
+// "ELEMENT", NOT "VARIABLE", IN BOTH. A pattern reaches past the anchor through
+// its unnamed nodes and relationships as much as through its bindings:
+// `MATCH (a:x)-[:rel]->(:y)` names only `a` while its row lives or dies with a
+// link and a `:y`, and `WHERE NOT (a)-->(:role)` gates existence on a
+// neighbourhood no binding appears in. So each pattern is asked twice — for the
+// non-anchor variables it binds (collectPatternVariableRefs) and for the
+// elements it names nothing at all (patternReachesAnonymousElement) — and either
+// answer is a dependency. Reading only the bindings answers "no" for the two
+// shapes above, which is the fail-open direction this classifier's whole
+// disposition is against.
+//
+// exhaustive is false when the answer could not be derived: an unparsed rule
+// carrying a WITH (no alias environment was ever computed), a WITH scope the
+// general walk refuses, an anchor pattern that does not resolve, an alias whose
+// provenance the resolver does not model, or any AST node the variable walk has
+// no case for. A non-exhaustive answer is a REFUSAL at every consumer, never a
+// pass — reading "could not tell" as "does not depend" is the fail-open
+// direction, and the flag exists so no caller can take it by accident.
+//
+// reasons names each dependency found, in clause order and de-duplicated, so a
+// refusal an operator reads says which variable carries the dependency rather
+// than only that one does.
+func (cr *CompiledRule) ExistenceDependsOnNeighbour() (depends bool, reasons []string, exhaustive bool) {
+	if cr == nil || cr.Query == nil {
+		return false, nil, false
+	}
+	q := cr.Query
+	// A rule that never went through Parse carries no alias resolution, and a
+	// WITH boundary the general scope walk refuses leaves names whose
+	// provenance nothing here can trace — the same precondition
+	// anchorProjectionShape states, for the same reason.
+	if carriesWith(q.Clauses) && (!cr.withAliasResolved || cr.withScopeVerdict != "") {
+		return false, nil, false
+	}
+	anchorVar, _, _, found := anchorNode(q)
+	if !found || anchorVar == "" {
+		return false, nil, false
+	}
+
+	exhaustive = true
+	seen := map[string]struct{}{}
+	note := func(reason string) {
+		if _, dup := seen[reason]; dup {
+			return
+		}
+		seen[reason] = struct{}{}
+		reasons = append(reasons, reason)
+		depends = true
+	}
+	// withIdx is the index of the most recent WITH boundary, which is the
+	// environment a WHERE resolves against: a WITH's own WHERE reads that
+	// boundary's projected names, and a later MATCH's WHERE reads the same
+	// names until the next boundary replaces them.
+	withIdx := -1
+	for _, c := range q.Clauses {
+		switch cl := c.(type) {
+		case *Match:
+			if cl.Optional {
+				continue
+			}
+			bound := map[string]bool{}
+			for _, p := range cl.Patterns {
+				if collectPatternVariableRefs(p, bound) {
+					exhaustive = false
+				}
+				if patternReachesAnonymousElement(p) {
+					note(fmt.Sprintf("a required MATCH pattern %s reaches an element no variable names, which the anchor %q therefore cannot be",
+						renderPathPattern(p), anchorVar))
+				}
+			}
+			for _, v := range sortedVariableNames(bound) {
+				if v == anchorVar {
+					continue
+				}
+				note(fmt.Sprintf("a required MATCH reaches %q, which the anchor %q does not bind", v, anchorVar))
+			}
+			if cl.Where != nil && !cr.whereStaysOnAnchor(cl.Where, anchorVar, withIdx, note) {
+				exhaustive = false
+			}
+		case *With:
+			withIdx++
+			if cl.Where != nil && !cr.whereStaysOnAnchor(cl.Where, anchorVar, withIdx, note) {
+				exhaustive = false
+			}
+		case *Return:
+			// A RETURN projects the row that already exists; it cannot drop one.
+		default:
+			// A clause type added to the AST without a case here could carry a
+			// filter this walk never saw, so it refuses rather than passing.
+			exhaustive = false
+		}
+	}
+	return depends, reasons, exhaustive
+}
+
+// whereStaysOnAnchor resolves every variable a WHERE reads back to the pattern
+// variables underneath it, and every pattern it evaluates to the elements those
+// patterns reach, calling note for each one that is not the anchor.
+// It returns false when the resolution could not be completed — an unmodelled
+// AST node, or an alias whose provenance analyseWithAliases could not
+// reconstruct — which its caller turns into a non-exhaustive answer.
+//
+// envIdx names the WITH boundary in force at this clause, -1 before the first
+// one. An alias resolves through substituteAliases (the resolver
+// anchorProjectionShape's key columns already go through) rather than through a
+// second traversal written here: two resolutions of the same alias are two
+// chances to disagree about which variable produced a value.
+func (cr *CompiledRule) whereStaysOnAnchor(where Expr, anchorVar string, envIdx int, note func(string)) bool {
+	refs := map[string]bool{}
+	var patterns []PathPattern
+	if collectVariableRefsAndPatterns(where, refs, &patterns) {
+		return false
+	}
+	// The patterns the WHERE itself evaluates, asked for the elements no
+	// variable names — `NOT (a)-->(:role)` reads as anchor-only through the
+	// bindings, while the row it gates lives or dies with a link and a `:role`.
+	for _, p := range patterns {
+		if patternReachesAnonymousElement(p) {
+			note(fmt.Sprintf("a WHERE evaluates the pattern %s, which reaches an element no variable names and the anchor %q therefore cannot be",
+				renderPathPattern(p), anchorVar))
+		}
+	}
+	var env map[string]aliasBinding
+	if envIdx >= 0 && envIdx < len(cr.withAliasEnv) {
+		env = cr.withAliasEnv[envIdx]
+	}
+	for _, name := range sortedVariableNames(refs) {
+		if _, isAlias := env[name]; !isAlias {
+			// A name no boundary binds is a pattern variable (or one carried
+			// under its own name), and stands for itself.
+			if name != anchorVar {
+				note(fmt.Sprintf("a WHERE reads %q, which the anchor %q does not bind", name, anchorVar))
+			}
+			continue
+		}
+		resolved, resolvable := substituteAliases(&VariableRef{Name: name}, env)
+		if !resolvable {
+			return false
+		}
+		source := map[string]bool{}
+		if collectVariableRefsInto(resolved, source) {
+			return false
+		}
+		for _, v := range sortedVariableNames(source) {
+			if v == anchorVar {
+				continue
+			}
+			note(fmt.Sprintf("a WHERE reads %q, whose alias %q resolves through it, and the anchor %q does not bind it", v, name, anchorVar))
+		}
+	}
+	return true
+}
+
+// sortedVariableNames renders a variable set in a stable order, so the reasons
+// a refusal carries read the same on every run.
+func sortedVariableNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pathPatternReferencesActorKey reports whether any node/relationship

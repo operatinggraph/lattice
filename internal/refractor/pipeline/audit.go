@@ -738,16 +738,23 @@ func (t *auditTally) noteDivergent(class string) {
 }
 
 // comparisonIgnore is the full set of columns one anchor's should-exist
-// comparison excludes: keys' own column names, always — a freshly computed
-// row carries every RETURN alias, key columns included, while GetRow's
-// contract excludes them (rowsComparableMasked's doc says why) — plus, for a
-// Secure Lens, MaskedColumns (§4.1). Computed fresh per row rather than
-// cached: keys names the SAME columns on every row of one lens, but building
-// the slice here keeps the mask's own hot-reload adoption (adoptMaskedColumns)
-// the only place that mutates shared state, and the per-row cost is a handful
-// of map-key reads.
-func (a *Auditor) comparisonIgnore(keys map[string]any) []string {
-	return append(keyColumnNames(keys), a.MaskedColumns()...)
+// comparison excludes:
+//
+//   - keys' own column names, always — a freshly computed row carries every
+//     RETURN alias, key columns included, while GetRow's contract excludes them
+//     (rowsComparableMasked's doc says why);
+//   - the columns the STORED row carries and the computed one does not
+//     (storedOnlyColumns), which on a `SELECT *` reader is a column of the table
+//     the lens does not project — a migration leftover reads `stale` on every
+//     pass forever otherwise;
+//   - for a Secure Lens, MaskedColumns (§4.1).
+//
+// Computed fresh per row rather than cached: the first two are a property of the
+// row in hand, and building the slice here keeps the mask's own hot-reload
+// adoption (adoptMaskedColumns) the only place that mutates shared state.
+func (a *Auditor) comparisonIgnore(keys, stored, computed map[string]any) []string {
+	ignore := append(keyColumnNames(keys), a.MaskedColumns()...)
+	return append(ignore, storedOnlyColumns(stored, computed)...)
 }
 
 // auditAnchor reaches one anchor's verdict. Every path either books the anchor
@@ -815,7 +822,7 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 			classes = append(classes, AuditClassMissing)
 			continue
 		}
-		equal, comparable := rowsComparableMasked(stored, res.Row, a.comparisonIgnore(res.Keys))
+		equal, comparable := rowsComparableMasked(stored, res.Row, a.comparisonIgnore(res.Keys, stored, res.Row))
 		switch {
 		case !comparable:
 			// One side could not be rendered at all (a value JSON cannot

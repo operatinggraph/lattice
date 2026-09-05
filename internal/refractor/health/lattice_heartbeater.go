@@ -120,6 +120,15 @@ const (
 // every branch. It ships as a table with a test instead.
 //
 // The order, worst first, and why:
+//   - retraction-transport-missing: the only value that says the lens SHOULD NOT
+//     BE RUNNING. A neighbour can drop its rows and nothing retracts them (or
+//     the classifier could not tell, which is read the same way), which is the
+//     shape activation refuses — so a lens publishing it is one the gate did not
+//     reach, and its read model accumulates rows the graph no longer supports
+//     with no detector that names them. Above everything else because the
+//     remedy differs in KIND: every value below describes a lens that is
+//     legitimately live and in some degraded state, and this one describes a
+//     lens whose shape has to change before it may run at all.
 //   - secure-redaction: the read model is not stale or frozen but CONFIDENTLY
 //     WRONG, and being served that way — a row rendering a null the reader
 //     cannot distinguish from a lawfully erased record. Above paused because a
@@ -156,6 +165,7 @@ const (
 // Nothing displaced is lost: each condition raises its own issue, and the
 // underlying counters travel in the same metrics map.
 var alertRank = map[string]int{
+	"retraction-transport-missing":    12,
 	"secure-redaction":                11,
 	"paused":                          10,
 	"unreadable":                      9,
@@ -323,6 +333,34 @@ const (
 	// (structuralAutoRecoveredFreshnessCycles) — a recovery is an event, not a
 	// condition, and an issue that never clears stops being read.
 	issueLensStructuralPauseAutoRecovered = "LensStructuralPauseAutoRecovered"
+	// issueLensRetractionTransportDisarmed is raised when the deployment has
+	// thrown the divergence audit's kill switch and a lens's only
+	// neighbour-retraction transport is the derivation, whose licence requires
+	// an enrolled audit. It is a DEPLOYMENT condition reported once, listing
+	// what it voided, rather than a per-lens alert: every affected lens carries
+	// the identical cause, and N lens-level alerts for one operator decision is
+	// noise that hides the decision.
+	//
+	// `warning`, like every other business-lens code here: the read models stay
+	// readable and merely keep rows the graph no longer supports, which degrades
+	// the instance rather than failing it. The signal exists because the
+	// alternative is silence — `derivationArmed` reads false for a dozen
+	// unrelated reasons, and nothing else says the deployment did this on
+	// purpose.
+	issueLensRetractionTransportDisarmed = "LensRetractionTransportDisarmed"
+	// issueLensRetractionTransportMissing is raised when a business-plane lens
+	// is RUNNING with rows a neighbour can drop and nothing to retract them —
+	// or with a query shape the classifier could not answer for, which is read
+	// the same way, because "could not tell" taken as "cannot be orphaned" is
+	// the fail-open direction the whole mechanism is against.
+	//
+	// It is a per-lens ERROR rather than a warning, and it should be
+	// unreachable: activation refuses this shape, and so does every hot-reload
+	// path that can install one. Reaching it means a lens is live that no gate
+	// admitted — the read model keeps rows its graph no longer supports, and
+	// unlike a divergence there is no detector that will ever name them, so
+	// nothing downstream distinguishes it from a correct read model.
+	issueLensRetractionTransportMissing = "LensRetractionTransportMissing"
 )
 
 // structuralAutoRecoveredFreshnessCycles is how many heartbeat cycles a
@@ -660,6 +698,23 @@ type LensLivenessStatus struct {
 	DerivationArmed       bool
 	DerivationFellBack    uint64
 	DerivationOverCapSize int
+	// RetractionTransport names what carries a retraction when a NEIGHBOUR
+	// event drops one of this lens's rows — "derivation", "diffRetraction",
+	// "diffRetraction-prefix", or "derivation (audit disarmed)"
+	// (secure-plain-lens-retraction-and-audit-design.md §4.4, §5). It is empty,
+	// and unpublished, for a lens whose rows no neighbour can drop: the
+	// question is not asked of a lens that cannot be orphaned, and publishing
+	// "none" there would read as a MISSING transport rather than as one that is
+	// not owed.
+	//
+	// A business-plane lens that owes one and has none never reaches this
+	// field: activation refuses it (cmd/refractor's retraction-transport
+	// guard), so it has no snapshot at all and its recorded error is the
+	// account. The one value describing a lens whose transport is DECLARED but
+	// not carrying is "derivation (audit disarmed)" — the deployment threw the
+	// divergence audit's kill switch, which voids the derivation licence
+	// corpus-wide.
+	RetractionTransport string
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -1650,13 +1705,21 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	metric := make(map[string]map[string]any, len(snaps))
 	var paused, lagging, unreadable, blocked, unverified []string
 	var diverging, unrepaired, stalled, redacting, recovered []string
-	var diverged, auditStalled []string
+	var diverged, auditStalled, transportDisarmed, transportMissing []string
 	blockedSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
 		seen[name] = struct{}{}
-		alert := "ok"
+		evalRetractionTransport(name, s, &transportDisarmed)
+		// The retraction-transport gap is read here, ahead of everything the
+		// health entry supplies, and survives an unreadable entry for the reason
+		// the sweep and audit verdicts below it do: it comes from the in-process
+		// pipeline, so a fault observing the entry says nothing about it — and
+		// this is the one verdict that says the lens should not be running at
+		// all, which is not a thing to lose to a NATS blip.
+		transportAlert := evalRetractionTransportGap(name, s, &transportMissing)
+		alert := raiseAlert("ok", transportAlert)
 		// The sweep's verdicts are read before the reporter-derived ones and
 		// survive an unreadable entry, the same order the cap path takes: a
 		// repair that is failing right now is a fact about the projection, and
@@ -1677,7 +1740,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			// auth-plane path does: an unreadable cycle is not evidence either
 			// way, and carrying a partial streak across it would let a lag alert
 			// raise on cycles that never measured anything.
-			alert = "unreadable"
+			alert = raiseAlert("unreadable", transportAlert)
 			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", name, s.Unreadable))
 			h.resetLensLagState(name)
 			// The redaction count survives an unreadable cycle for the same
@@ -1706,6 +1769,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			addLensSweepMetrics(m, s)
 			addAuditMetrics(m, s.audit())
 			addPlainDerivationMetrics(m, s)
+			addRetractionTransportMetrics(m, s)
 			metric[name] = m
 			continue
 		}
@@ -1743,6 +1807,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		addLensSweepMetrics(m, s)
 		addAuditMetrics(m, s.audit())
 		addPlainDerivationMetrics(m, s)
+		addRetractionTransportMetrics(m, s)
 		metric[name] = m
 	}
 	h.pruneLensLagState(seen)
@@ -1785,6 +1850,23 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			severity: "warning",
 			message: "lens liveness inputs could not be read, so this lens's read model is unobserved rather than known-healthy: " +
 				strings.Join(unreadable, ", "),
+		}
+	}
+	if len(transportMissing) > 0 {
+		active[issueLensRetractionTransportMissing] = capIssue{
+			severity: "error",
+			message: "these business-plane lenses are RUNNING with a neighbour-retraction obligation nothing is meeting, which is the shape activation refuses — " +
+				"so each of them reached the registry past a gate that should have stopped it, and each keeps rows its graph no longer supports with no detector " +
+				"that will ever name them: " + strings.Join(transportMissing, ", "),
+		}
+	}
+	if len(transportDisarmed) > 0 {
+		active[issueLensRetractionTransportDisarmed] = capIssue{
+			severity: "warning",
+			message: "the divergence audit is DISARMED on this deployment, and the only neighbour-retraction transport these " +
+				"lenses have is the derivation, whose licence requires an enrolled audit — so each of them keeps a row its graph " +
+				"no longer supports whenever a neighbour drops out, with no detector to say so. Re-arm the audit, or accept that " +
+				"these read models converge only on a rebuild: " + strings.Join(transportDisarmed, ", "),
 		}
 	}
 	if len(diverging) > 0 {
@@ -2404,6 +2486,88 @@ func addPlainDerivationMetrics(m map[string]any, s LensLivenessStatus) {
 	if s.DerivationOverCapSize > 0 {
 		m["derivationOverCapSize"] = s.DerivationOverCapSize
 	}
+}
+
+// RetractionTransportAuditDisarmed is the transport value naming a lens whose
+// neighbour-retraction transport is the derivation and whose derivation is
+// voided by the deployment's audit kill switch.
+//
+// It is a string rather than an import of the pipeline's own constant because
+// this package does not depend on internal/refractor/pipeline — the health
+// entry's shape is its own contract (docs/observability/health-kv-schema.md)
+// regardless of who produces it, the same mirror-by-value convention
+// TaxonomyLivenessSnapshot keeps. The two spellings are held together by
+// cmd/refractor's TestRetractionTransport_VocabularyMatchesThePipeline, which
+// is the one package that imports both.
+const RetractionTransportAuditDisarmed = "derivation (audit disarmed)"
+
+// The two transport values that describe an OBLIGATION NOT MET rather than a
+// transport carrying one.
+//
+// They are the wire's own spellings, like RetractionTransportAuditDisarmed
+// above, and unlike the four carrying values they mirror no pipeline constant:
+// the pipeline answers a verdict, and turning "depends on a neighbour, carries
+// nothing" into a published token is this contract's decision. cmd/refractor's
+// TestRetractionTransport_VocabularyMatchesThePipeline holds the mapping.
+const (
+	// RetractionTransportNone is a lens whose rows a neighbour can drop and
+	// which carries nothing that retracts them.
+	RetractionTransportNone = "none"
+	// RetractionTransportUnclassified is a lens whose query shape the
+	// neighbour-dependency classifier could not answer exhaustively, so
+	// whether it is owed a transport is unknown — refused at every gate, and
+	// published here for the same reason.
+	RetractionTransportUnclassified = "unclassified"
+)
+
+// addRetractionTransportMetrics publishes what carries a retraction when a
+// neighbour event drops one of this lens's rows, and NOTHING for a lens whose
+// rows no neighbour can drop.
+//
+// The absence is the reading, not an omission: a lens that cannot be orphaned
+// by a neighbour is owed no transport, and a `none` beside it would read as the
+// gap this whole mechanism exists to close. A business-plane lens that IS owed
+// one and has none never reaches this map at all — activation refuses it, so it
+// has no snapshot to publish.
+func addRetractionTransportMetrics(m map[string]any, s LensLivenessStatus) {
+	if s.RetractionTransport == "" {
+		return
+	}
+	m["retractionTransport"] = s.RetractionTransport
+}
+
+// evalRetractionTransport collects the lenses whose derivation transport the
+// deployment's audit kill switch has voided.
+//
+// It raises no per-lens alert, and that is deliberate: the switch is a
+// PROCESS-wide setting, so every affected lens carries the identical condition
+// and flipping each one's alert would report one deployment decision as N
+// independent lens faults. The issue below names the switch once and lists what
+// it voided.
+func evalRetractionTransport(name string, s LensLivenessStatus, disarmed *[]string) {
+	if s.RetractionTransport != RetractionTransportAuditDisarmed {
+		return
+	}
+	*disarmed = append(*disarmed, name)
+}
+
+// evalRetractionTransportGap collects the lenses running with a retraction
+// obligation nothing is meeting, and returns the alert each one argues for.
+//
+// This one IS a per-lens alert, where the disarmed reading above is not, and
+// the difference is what produced the condition. The kill switch is one operator
+// decision affecting every T1 lens identically; this is one lens whose own shape
+// no gate admitted, and the remedy is that lens's cypher or its declaration.
+func evalRetractionTransportGap(name string, s LensLivenessStatus, missing *[]string) string {
+	switch s.RetractionTransport {
+	case RetractionTransportNone:
+		*missing = append(*missing, name+" (a neighbour can drop its rows and nothing retracts them)")
+	case RetractionTransportUnclassified:
+		*missing = append(*missing, name+" (whether a neighbour can drop its rows could not be derived from its query shape)")
+	default:
+		return ""
+	}
+	return "retraction-transport-missing"
 }
 
 // evalAudit collects one lens's divergence-audit verdicts into the caller's

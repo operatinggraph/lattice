@@ -20,6 +20,13 @@ func TestAlertRank_TotalOrder(t *testing.T) {
 	// to alertRank without a decision about where it belongs fails here by name
 	// instead of landing at whatever rank its author happened to type.
 	order := []string{
+		// The only token that says the lens SHOULD NOT BE RUNNING: a neighbour
+		// can drop its rows and nothing retracts them, which is the shape
+		// activation refuses. Above everything else because the remedy differs
+		// in kind — every token below describes a lens that is legitimately live
+		// and degraded, this one a lens whose shape must change before it may
+		// run at all.
+		"retraction-transport-missing",
 		// A read model that is CONFIDENTLY wrong outranks one that is merely
 		// frozen: a paused lens misleads nobody, a null indistinguishable from a
 		// lawful erasure misleads everybody.

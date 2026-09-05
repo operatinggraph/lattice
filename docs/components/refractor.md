@@ -916,6 +916,85 @@ publishes all three, `derivationArmed: false` among them: a static licence refus
 counted as a fall-back, so `derivationFellBack` keeps whatever it already accrued and
 `derivationArmed` — not absence — is what says the transport is declared but currently off.
 
+**A business-plane lens that needs one of those two transports must carry one, refused at
+activation otherwise.** `CompiledRule.ExistenceDependsOnNeighbour` classifies the shape: a
+non-`OPTIONAL` `MATCH` reaching a variable the anchor does not bind, or a `WHERE` reading one —
+directly, or through a `WITH` alias it resolves back to its source bindings — makes the row's
+EXISTENCE a neighbour's to decide, so a neighbour event can drop it and no anchor event names
+it. Such a lens must satisfy T1 (`Pipeline.PlainDerivationStaticallyEligible`, which is the
+derivation licence's own static prefix — one function, so the gate cannot admit a lens the
+licence will never license) or T2 (target-diff retraction on a target it owns). A classifier
+answer that is not exhaustive is a refusal, never a pass. The lens does not activate: dark is
+the safe end, because a lens silently keeping orphaned rows on a Protected table serves them
+under stale authorization anchors, and after an erasure serves plaintext no re-projection
+reaches. The reason lands on the lens's health entry (`lastError`), which is the only account a
+lens with no heartbeat status can leave.
+
+The gate is scoped to the **business plane** — the same boundary the divergence audit draws,
+and for the same reason: an auth-plane verdict belongs to the plane that has a code, a severity
+ladder and an escalation for it, and the derivation licence refuses that plane outright, so T1
+is not available there to satisfy the rule with. The auth-plane lenses that carry no transport
+are named debt rather than an absence, pinned by name in the retraction-transport corpus census
+(`internal/refractor/plain_retraction_transport_corpus_census_test.go`), which is also where an
+author meets the business-plane rule before a runtime refusal does.
+
+`retractionTransport` publishes the verdict per lens — `derivation`, `diffRetraction`,
+`diffRetraction-prefix`, or `derivation (audit disarmed)` — for a lens whose rows a neighbour
+can drop, and nothing for one whose rows cannot. Two further values describe an obligation NOT
+met: `none` (its rows depend on a neighbour and nothing retracts a drop-out) and `unclassified`
+(whether they depend on one could not be derived from its query shape, which every gate reads
+as a refusal rather than as "they do not"). Both raise `LensRetractionTransportMissing`
+(`error`) and the per-lens `alert` `retraction-transport-missing`, and neither should ever
+appear: activation refuses both shapes and so does every hot-reload path that could install
+one, so the alert is the backstop for a lens that reached the registry past all of it. The
+field is **business-plane only** — the heartbeat's lens provider filters the auth plane out
+before reading it, because an auth-plane lens publishes `CapabilityLensStatus`, which has no
+member for this and whose per-row verdicts belong to the convergence sweep and the
+`Capability*` codes. **The disarmed reading is the deployment's
+own**: `SetAuditEnabled(false)` makes the audit refuse every lens corpus-wide, so the
+derivation licence's first conjunct can never hold and a T1 lens's declared transport is
+carrying nothing. The heartbeat raises `LensRetractionTransportDisarmed` (`warning`) once,
+listing what the switch voided, and moves no lens's own `alert`: one operator decision reported
+as N lens faults would bury the decision.
+
+**T2 on a target the lens SHARES is scoped, or refused.** `NatsKVAdapter.ListKeys` enumerates
+the whole bucket and its key mapping filters only by segment count — a single-column key is
+kept verbatim — so an unscoped diff on a shared bucket reads every sibling's key as a row this
+lens no longer produces and Deletes it. **The scoping is the only protection a listed key gets**:
+the diff Deletes every key the fresh row set does not contain, and a sibling's key is never in
+that set, so nothing downstream of the listing can spare it. Activation decides sharing from
+the lens **registry**, the only place that knows it (`pkgmgr` validates one package at a time
+and cannot see a bucket another package shares), on three rules:
+
+- **Scoping is unconditional.** Any `DiffRetraction` lens with a derivable
+  `OutputDescriptor.KeyPrefix` is scoped to it at activation, siblings or not. Deriving it only
+  for a bucket that already holds one leaves a diff lens that loaded *first* listing the whole
+  bucket for the life of the process — nothing re-scopes a running pipeline when the sibling
+  arrives.
+- **A live unscoped diff refuses the newcomer.** What a sibling is asked is what its diff
+  *lists* — the prefix installed on its running pipeline — never what its declaration would
+  admit. The sibling is running, so refusing the arriving lens is the only disposition
+  available.
+- **Prefixes must be provably disjoint.** `KeyPrefix` admits `cap.` for a lens whose keys are
+  `cap.roles.*`, so two *nesting* prefixes are one diff listing the other's rows. On a bucket a
+  diff reads at all, every lens must declare a key space, and no two may nest; a lens that
+  declares none leaves the disjointness unprovable, which is refused the same way.
+
+Those three together are what make the verdict independent of load order — not the check being
+"asked of every lens", which on its own decides nothing about a diff that is already unscoped.
+The same rule is re-asked on the two hot-reload paths that can reach it: an `INTO` edit moving
+the lens onto another bucket, and a `MATCH` edit (whose swap cannot re-scope a running diff, so
+a target needing a different scoping is refused rather than applied under the old one).
+
+**A MATCH edit re-enters the transport gate.** A cypher edit can add a required neighbour to a
+lens whose rows nothing could orphan before — exactly what activation refuses — and the swap
+that carries it is the one path no activation follows. The gate is re-asked of the rule the
+pipeline now evaluates, and a refusal puts the previously admitted rule back: the lens goes on
+running the shape it was admitted with, and the reason lands on its health entry like every
+other hot-reload refusal. `diffRetraction` itself is **not** hot-reloadable in either direction
+— the flag and its scoping bind before the lens runs, so an edit to it is refused with the
+re-activation remedy rather than accepted and silently not applied.
+
 ### Property model (how lens cypher reads a node)
 
 A vertex's Core KV body carries the **envelope** (`key`, `class`, provenance,
@@ -1442,6 +1521,20 @@ reproduce either and the lens would read divergent forever. That last conjunct r
 pass**: `(referenced=false, exhaustive=false)` means the walk could not rule the parameter
 out, and treating that as an absence is the read-the-declaration-not-the-matcher mistake
 the flag exists to prevent.
+
+**The comparison excludes two classes of column before the mask is even reached.** The row's
+own key columns, always: a freshly computed row carries every RETURN alias, key columns
+included, while `GetRow`'s contract excludes them. And every column the STORED row carries that
+the computed one does not — `PostgresAdapter.GetRow` reads `SELECT *` deliberately (a reader
+with its own column list would go stale against the writer's), so a table column no RETURN
+alias produces, a migration leftover most often, comes back with the row. The exclusion is
+sound because the computed key set is exactly the alias set: the executor assigns every RETURN
+alias unconditionally, so an alias that evaluated to null is present-with-null and never
+missing, and a stored-only key can therefore only be a column the lens does not project.
+Compared instead, such a column reads `stale` on every pass forever on a lens whose projection
+is exactly right — a divergence no recomputation resolves and no operator action clears. The
+exclusion is one-directional: a column the COMPUTED row carries and the stored one does not is a
+real divergence and stays compared.
 
 A **Secure Lens** enrols like any other plain lens: its recompute never calls the decryptor
 (`evaluateForEntry` and the two actor fan-out handlers are the only callers), so its

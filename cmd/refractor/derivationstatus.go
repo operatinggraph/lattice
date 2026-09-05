@@ -29,3 +29,49 @@ func copyLensDerivationStatus(snap *health.LensLivenessStatus, status pipeline.P
 	snap.DerivationFellBack = status.FellBack
 	snap.DerivationOverCapSize = status.OverCapSize
 }
+
+// copyLensRetractionTransport transfers the lens's neighbour-retraction posture
+// onto its heartbeat snapshot, and NOTHING for a lens whose rows no neighbour
+// can drop.
+//
+// Absence is a reading, not an omission: a lens that cannot be orphaned by a
+// neighbour is owed no transport, so publishing one for it — or publishing
+// "none" — would put a field on the wire that reads as a verdict about a risk
+// the lens does not carry.
+//
+// The two values that are NOT a transport are published because they are the
+// two shapes activation refuses, and a lens carrying either is one that reached
+// the registry anyway:
+//
+//   - "none": its rows depend on a neighbour and nothing retracts a neighbour
+//     drop-out.
+//   - "unclassified": whether its rows depend on a neighbour could not be
+//     derived from its query shape. Read as "they do not" the lens activates
+//     with no obligation anyone can see, which is why every gate refuses it —
+//     and why the wire says so rather than falling silent, which is the reading
+//     "not owed" already has.
+//
+// Neither should ever be published: activation refuses both shapes, and so does
+// every hot-reload path that could install one. The heartbeat's own alert for
+// them is the backstop for a lens that got past all of that, whose only other
+// evidence would be a read model quietly keeping rows nothing will name.
+//
+// Business plane only. The caller's loop filters to !entry.authPlane, and that
+// is the field's whole scope: an auth-plane lens publishes CapabilityLensStatus,
+// which has no member for this and whose per-row verdicts belong to the
+// convergence sweep and the Capability* codes. The auth-plane members carrying
+// no transport are named debt in the corpus census, not an alert here.
+func copyLensRetractionTransport(snap *health.LensLivenessStatus, v pipeline.PlainRetractionVerdict) {
+	switch {
+	case !v.Classified:
+		// Not the shape the verdict speaks about — an actor-aware or personal
+		// evaluation, whose retraction is the envelope's and the sweep's.
+	case !v.Exhaustive:
+		snap.RetractionTransport = health.RetractionTransportUnclassified
+	case !v.DependsOnNeighbour:
+	case v.Transport == pipeline.RetractionTransportNone:
+		snap.RetractionTransport = health.RetractionTransportNone
+	default:
+		snap.RetractionTransport = v.Transport
+	}
+}

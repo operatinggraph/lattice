@@ -365,7 +365,10 @@ func (d divergence) String() string {
 // and returns content columns only), and a row fetched BY those keys cannot
 // differ in them.
 func classifyDivergence(stored, computed, keys map[string]any) divergence {
-	ignore := keyColumnNames(keys)
+	// The stored row comes back from the same SELECT * the audit's does, so it
+	// carries the same class of column no RETURN alias produces — see
+	// storedOnlyColumns for why excluding them cannot hide a real divergence.
+	ignore := append(keyColumnNames(keys), storedOnlyColumns(stored, computed)...)
 	if equal, _ := rowsComparableMasked(stored, computed, ignore); equal {
 		return divergenceNone
 	}
@@ -780,6 +783,39 @@ func rowsComparableMasked(stored, computed map[string]any, ignore []string) (equ
 		return false, false
 	}
 	return bytes.Equal(a, b), true
+}
+
+// storedOnlyColumns lists the columns the STORED row carries that the freshly
+// computed one does not — the second class of column a comparison between the
+// two always excludes.
+//
+// The exclusion is sound because the computed key set is exactly the compiled
+// rule's RETURN alias set: full's projectItems assigns every item's alias into
+// the projected binding unconditionally, for both the grouping and the
+// non-grouping arm, so an alias that evaluated to null is PRESENT with a null
+// value and never missing. A key the stored row carries and the computed one
+// does not is therefore never a projected column the recomputation dropped; it
+// can only be a column of the target the lens does not project.
+//
+// PostgresAdapter.GetRow reads `SELECT *`, deliberately — a reader with its own
+// column list would go stale against the writer's — so every column the table
+// happens to hold comes back, a migration leftover no RETURN alias produces
+// among them. Compared, such a column makes the row read `stale` on every pass
+// forever, on a lens whose projection is exactly right: a permanent divergence
+// no recomputation can resolve and no operator action can clear, which is the
+// class of finding that teaches a reader to stop reading the field.
+//
+// The exclusion is one-directional. A column the COMPUTED row carries and the
+// stored one does not is a real divergence — the projection produced a value
+// the target does not hold — and stays compared.
+func storedOnlyColumns(stored, computed map[string]any) []string {
+	var out []string
+	for k := range stored {
+		if _, projected := computed[k]; !projected {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // keyColumnNames lists a row's key column names — the columns a comparison

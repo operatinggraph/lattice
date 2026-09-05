@@ -193,25 +193,37 @@ func (p *Pipeline) PlainDerivationStatus() PlainDerivationStatus {
 // from derivationIndex: the terminus's OWN label IS the anchor label the
 // caller seeds from — one derivation, so the two cannot disagree.
 func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
-	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
-		return full.HopIndex{}, false
-	}
-	if len(rs.branches) > 1 {
-		return full.HopIndex{}, false
-	}
-	if !rs.rootHops.Complete {
-		return full.HopIndex{}, false
-	}
-	if rs.rootHops.UnresolvedExpansionPosition() >= 0 {
-		return full.HopIndex{}, false
-	}
-	if rs.rootHops.AnchorIsExpanding() {
-		return full.HopIndex{}, false
-	}
-	if p.diffRetraction {
+	if p.plainDerivationIndexRefusal(rs) != "" {
 		return full.HopIndex{}, false
 	}
 	return rs.rootHops, true
+}
+
+// plainDerivationIndexRefusal is the predicate above, carrying the reason each
+// conjunct refuses on. The two are one function so a caller that needs the
+// reason — the activation gate's message, the static-eligibility predicate
+// below — and a caller that needs only the answer can never be told different
+// things about the same lens.
+func (p *Pipeline) plainDerivationIndexRefusal(rs ruleState) string {
+	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
+		return "it is actor-aware or personal, so its anchor is the actor rather than a vertex this walk could seed from"
+	}
+	if len(rs.branches) > 1 {
+		return "it is a multi-walk lens, and one scan-root graph cannot speak for N independent queries"
+	}
+	if !rs.rootHops.Complete {
+		return "its scan-root pattern graph is incomplete (" + rs.rootHops.Incomplete + "), so which anchors a neighbour event affects cannot be derived"
+	}
+	if rs.rootHops.UnresolvedExpansionPosition() >= 0 {
+		return "its pattern graph carries a taxonomy-expansion position the resolver has not confirmed, and pruning an unconfirmed far end is the unsound direction"
+	}
+	if rs.rootHops.AnchorIsExpanding() {
+		return "its anchor position carries the taxonomy-expansion sigil, so a derived anchor's re-entry would miss its own seed"
+	}
+	if p.diffRetraction {
+		return "it uses target-diff retraction, whose whole-key-set semantics a per-anchor seeded row set would misread"
+	}
+	return ""
 }
 
 // seedMultiPosition reports whether a plain lens's anchor label — the type a
@@ -317,50 +329,21 @@ func isPlainDerivedAnchorReentry(ctx context.Context) bool {
 //     alarm on a freshly activated lens and so rebases its clock at first sight;
 //     the two mechanisms share no state and no constant, only a default value
 //     chosen to keep them legible together (see auditorStaleCycles).
-//   - a full-engine compiled rule, without which neither closure nor the
-//     parameter walk can be asked at all.
-//   - a target that can read a row back (adapter.RowReader). Required twice
-//     over: the Auditor's own enrolment needs it, and so does the zero-row
-//     Delete probe the derived retraction class rests on (§6) — so it is a
-//     conjunct of the mechanism, not merely inherited from enrolment.
-//   - no $now / $projectedAt. $now is wall-clock and $projectedAt derives from
-//     the EVENT vertex's provenance, so a per-anchor re-evaluation produces a
-//     different value for them than the whole-corpus rescan it replaces. A
-//     non-exhaustive walk is a REFUSAL, never a pass: (referenced=false,
-//     exhaustive=false) means the accessor could not rule the parameter out,
-//     and reading that as absence is the read-the-declaration-not-the-matcher
-//     mistake the exhaustive flag exists to prevent.
-//   - per-anchor closure (§5.1): the lens's rows PARTITION by anchor,
-//     full.CompiledRule.ProjectsOneRowPerAnchor — every key column resolves from
-//     the anchor's binding alone AND one of them identifies WHICH anchor the row
-//     is for. This is the conjunct the audit's read-only enrolment does NOT have
-//     and a WRITE licence cannot do without: a lens grouping on a non-root
-//     variable, or on a key several anchors share, computes a TRUNCATED row
-//     under a seeded evaluation. Both halves are load-bearing — a literal key
-//     column is anchor-only by vacuity, so the first half alone would license a
-//     `RETURN 'all' AS key, collect(...)` lens whose every row aggregates across
-//     roots. It is deliberately sufficient rather than necessary: a
-//     neighbour-keyed lens whose rows happen to be partitionable by anchor is
-//     refused too, and keeps today's behaviour.
+//   - everything that is a property of the lens's shape, declaration and
+//     target: plainDerivationStaticallyEligible below, which the activation
+//     gate calls too. Its own doc carries that half's conjunct list, and the
+//     tail of this function is literally the call — the two consumers cannot
+//     be told different things about one lens.
 //
-// The conjuncts the audit shares are asked in auditEnrolment's own order, so a
-// lens the audit also refuses reports the same reason both predicates publish.
-// The conjuncts with no counterpart there sit outside that ordering, at the two
-// ends and for opposite reasons. The auth plane is asked FIRST because it is a
-// single bool and because it is the one exclusion no other conjunct can stand in
-// for — a lens on that plane is refused whatever its audit is doing, and reading
-// any other reason for it would misdirect an operator. The auditor's own health
-// — enrolled, unsuppressed, not stale — follows, ahead of everything derived from
-// the rule, because it is the next-cheapest (field reads off one status snapshot
-// and a clock) and is the conjunct most likely to MOVE under a lens that is
-// otherwise permanently eligible. Closure is asked LAST because it is a fixed
-// property of the query: reporting "not keyed by its anchor alone" only for a
-// lens that is otherwise fully eligible is the reading an operator can act on.
-//
-// The §4.2 conjuncts (plain pipeline, single branch, complete and resolved
-// rootHops, no diffRetraction) are plainDerivationIndex's, not restated here:
-// this predicate answers "may a derived set be acted on", the index answers
-// "is there a derived set at all".
+// The auth plane is asked FIRST because it is a single bool and because it is
+// the one exclusion no other conjunct can stand in for — a lens on that plane
+// is refused whatever its audit is doing, and reading any other reason for it
+// would misdirect an operator. The auditor's own health — enrolled,
+// unsuppressed, not stale — follows, ahead of everything derived from the rule,
+// because it is the next-cheapest (field reads off one status snapshot and a
+// clock) and is the conjunct most likely to MOVE under a lens that is otherwise
+// permanently eligible. The static prefix, which cannot move at all while the
+// rule snapshot stands, is asked last.
 func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal string) {
 	if p.authPlane {
 		return false, "it projects onto the auth plane, which narrows only behind a repair-capable healer proven end to end"
@@ -401,12 +384,67 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 		return false, fmt.Sprintf("its divergence audit has not reached a verdict in %d of its own cadence intervals, so nothing is proven to be re-testing its rows",
 			auditorStaleCycles)
 	}
+	return p.plainDerivationStaticallyEligible(rs)
+}
+
+// plainDerivationStaticallyEligible is the licence's STATIC prefix: every
+// conjunct that is a property of the lens's declaration, its compiled rule and
+// its target — with none of the live state the two conjuncts above read (the
+// auditor's health, the deployment kill switch) and none of the plane
+// exclusion, which is a fact about what the lens projects rather than about
+// whether a derived set can be computed for it.
+//
+// The activation gate and the licence ask the same question
+// (secure-plain-lens-retraction-and-audit-design.md §4.4's T1), so they call ONE
+// function and the licence's own tail IS that call. A gate restating the
+// conjuncts by hand admits whichever ones its copy is missing — a lens the gate
+// waves through and the licence will never license, dark in exactly the way the
+// gate exists to prevent — and the copy drifts silently, because both sides keep
+// passing their own tests. Here the gate cannot drift from the licence without
+// failing the licence's.
+//
+// The conjuncts, in the order the body asks them:
+//
+//   - the derivation index (plainDerivationIndexRefusal above). Asked first
+//     because it answers "is there a derived set at all", which every conjunct
+//     after it presumes. In act mode plainDerivationIndexForAct has already
+//     asked it, so it never fires from inside the licence — the gate is the
+//     caller that needs it asked here.
+//   - a full-engine compiled rule, without which neither closure nor the
+//     parameter walk can be asked at all.
+//   - a target that can read a row back (adapter.RowReader). Required twice
+//     over: the Auditor's own enrolment needs it, and so does the zero-row
+//     Delete probe the derived retraction class rests on.
+//   - exactly one derivable seed anchor label — the audit's own conjunct,
+//     carried here rather than left implicit in the auditor's enrolment. A
+//     licence reached through an enrolled audit inherits it; the GATE has no
+//     auditor to inherit it from, and a lens whose anchor pattern expands to
+//     several concrete types has no single seed a per-anchor evaluation could
+//     narrow to.
+//   - no $now / $projectedAt. Both are reproduced differently by a per-anchor
+//     evaluation than by the whole-corpus rescan it replaces. A non-exhaustive
+//     walk is a REFUSAL, never a pass.
+//   - per-anchor closure, full.CompiledRule.ProjectsOneRowPerAnchor. Asked LAST
+//     because it is a fixed property of the query: reporting "not keyed by its
+//     anchor alone" only for a lens that is otherwise fully eligible is the
+//     reading an operator can act on.
+func (p *Pipeline) plainDerivationStaticallyEligible(rs ruleState) (eligible bool, refusal string) {
+	if reason := p.plainDerivationIndexRefusal(rs); reason != "" {
+		return false, reason
+	}
 	fullCR, isFull := rs.cr.(*full.CompiledRule)
 	if !isFull || fullCR == nil {
 		return false, "its compiled rule is not a full-engine rule, so its closure and parameters cannot be derived"
 	}
 	if _, ok := p.currentAdapter().(adapter.RowReader); !ok {
 		return false, "its target adapter cannot read a row back, which both the audit and the derived path's own presence probe require"
+	}
+	switch len(rs.seedAnchorLabels) {
+	case 1:
+	case 0:
+		return false, "it has no single derivable anchor pattern to seed an evaluation from (multi-walk, unlabeled, or not full-engine)"
+	default:
+		return false, "its anchor pattern expands to several concrete types, which one seeded evaluation cannot narrow to"
 	}
 	for _, param := range []string{"now", "projectedAt"} {
 		referenced, exhaustive := fullCR.ReferencesParam(param)
@@ -421,6 +459,20 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 		return false, "its rows do not partition by anchor (no key column both resolves from the anchor alone and identifies it), so a per-anchor evaluation would compute a truncated row"
 	}
 	return true, ""
+}
+
+// PlainDerivationStaticallyEligible reports whether this lens's shape,
+// declaration and target admit the neighbour-anchor derivation — the licence's
+// static prefix, asked of the pipeline's current rule snapshot.
+//
+// It is the activation gate's T1 test (secure-plain-lens-retraction-and-audit-
+// design.md §4.4) and the corpus census's, both of which run outside this
+// package. What it deliberately does NOT answer is whether the transport is
+// currently ON: the licence's live conjuncts (the auth plane, an enrolled,
+// unsuppressed and fresh auditor) are read per event, and PlainDerivationStatus
+// above is where that answer lives.
+func (p *Pipeline) PlainDerivationStaticallyEligible() (eligible bool, refusal string) {
+	return p.plainDerivationStaticallyEligible(p.ruleState())
 }
 
 // plainDerivationIndexForAct is the gate `act` mode consults before letting a

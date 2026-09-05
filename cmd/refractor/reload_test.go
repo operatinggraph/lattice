@@ -2562,3 +2562,181 @@ func TestReactivateRemedy_IsTheOneTheClearMatches(t *testing.T) {
 	assert.True(t, strings.HasSuffix(hotReloadRefusal(runningEntry(), newLens), health.ReactivateRemedy),
 		"every refusal names the remedy, which is what the persisted-format arm keys on")
 }
+
+// TestReloaderUpdate_MatchChangeRunsTheRetractionGate pins that the activation
+// gate is not something a lens passes once.
+//
+// A MATCH edit can ADD a required neighbour to a lens whose rows nothing could
+// orphan before — precisely the shape activation refuses — and the swap that
+// carries it is the one path no activation follows. A gate the reload skipped
+// would put that lens into production with nothing able to refuse it again.
+//
+// The admitted vector runs first: a MATCH edit that adds a neighbour the
+// derivation licence can narrow to must still land, or a green refusal below
+// would be a reload that refuses every cypher edit touching a hop.
+func TestReloaderUpdate_MatchChangeRunsTheRetractionGate(t *testing.T) {
+	newReloader := func(t *testing.T, eng *full.Engine, running *lens.Rule, spec string) (*reloader, *pipelineEntry, *health.Reporter) {
+		t.Helper()
+		kv := startHealthKV(t)
+		reporter := health.New(kv, running.ID)
+		cr, err := eng.Parse(spec)
+		require.NoError(t, err)
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.True(t, isFull)
+		require.NoError(t, projection.ThreadKeyColumns(fullCR, nil, running.Into.Key))
+		running.CompiledRule = cr
+
+		p, err := pipeline.New(running.ID, "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+		require.NoError(t, err)
+		require.NoError(t, p.UseFullEngineBranches(eng, cr, nil))
+
+		entry := &pipelineEntry{
+			target:        running.Into.Target,
+			bucket:        running.Into.Bucket,
+			canonicalName: running.CanonicalName,
+			pipeline:      p,
+			reporter:      reporter,
+			rule:          running,
+		}
+		return &reloader{
+			ctx:          context.Background(),
+			logger:       discardLogger(),
+			lookup:       func(string) (*pipelineEntry, bool) { return entry, true },
+			buildAdapter: func(*lens.Rule) (adapter.Adapter, error) { return newKVAdapter(t), nil },
+			fullEngine:   eng,
+		}, entry, reporter
+	}
+	edited := func(t *testing.T, eng *full.Engine, base *lens.Rule, spec string, key ...string) *lens.Rule {
+		t.Helper()
+		next := businessRule(base.ID, base.CanonicalName, key...)
+		next.Into.Bucket = base.Into.Bucket
+		next.Match = spec
+		cr, err := eng.Parse(spec)
+		require.NoError(t, err)
+		next.CompiledRule = cr
+		return next
+	}
+
+	t.Run("an edit adding a neighbour the licence can narrow to is admitted", func(t *testing.T) {
+		eng := full.New()
+		running := businessRule("reload-gate-ok", "reloadGateOk")
+		rl, entry, reporter := newReloader(t, eng, running, anchorOnlySpec)
+
+		rl.update(running, edited(t, eng, running, anchorClosedNeighbourSpec), lens.MatchChange)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		assert.Zero(t, status.ErrorCount, "a T1-eligible shape must reload")
+		v := entry.pipeline.PlainRetractionTransport(false)
+		require.True(t, v.DependsOnNeighbour, "the edit must actually have added the obligation, or this proves nothing")
+		assert.Equal(t, pipeline.RetractionTransportDerivation, v.Transport)
+	})
+
+	t.Run("an edit adding an untransportable neighbour is refused and the running rule stays", func(t *testing.T) {
+		eng := full.New()
+		running := businessRule("reload-gate-refused", "reloadGateRefused")
+		rl, entry, reporter := newReloader(t, eng, running, anchorOnlySpec)
+
+		rl.update(running, edited(t, eng, running, untransportedNeighbourSpec, "app_id", "landlord_id"), lens.MatchChange)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), status.ErrorCount)
+		require.NotNil(t, status.LastError)
+		assert.Contains(t, *status.LastError, "neighbour-retraction transport")
+		assert.Contains(t, *status.LastError, "landlord")
+
+		v := entry.pipeline.PlainRetractionTransport(false)
+		assert.False(t, v.DependsOnNeighbour,
+			"a refused reload must leave the lens evaluating the rule it was admitted with, not the one the gate turned back")
+	})
+}
+
+// TestReloaderUpdate_IntoOnlyTracksTheSurfaceAndItsSharing covers the two ways
+// an INTO edit reaches the shared-target rule.
+//
+// An INTO edit is the one path that MOVES an unguarded NATS-KV lens onto a
+// bucket other lenses already write, and the activation check ran against the
+// bucket it is leaving. It is also the path that has to leave the entry
+// describing the surface the pipeline now writes — every later question (the
+// next update's refusal comparisons, which lenses share a bucket) reads those
+// fields, and an entry frozen at its activation values answers about a target
+// the lens stopped writing.
+func TestReloaderUpdate_IntoOnlyTracksTheSurfaceAndItsSharing(t *testing.T) {
+	newRunning := func(t *testing.T) (*reloader, *pipelineEntry, *health.Reporter, []*pipelineEntry) {
+		t.Helper()
+		kv := startHealthKV(t)
+		reporter := health.New(kv, "into-reload")
+		p, err := pipeline.New("into-reload", "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+		require.NoError(t, err)
+		entry := &pipelineEntry{
+			target: "nats_kv", bucket: "own-bucket", canonicalName: "intoReload",
+			pipeline: p, reporter: reporter,
+		}
+		live := []*pipelineEntry{entry}
+		return &reloader{
+			ctx:          context.Background(),
+			logger:       discardLogger(),
+			lookup:       func(string) (*pipelineEntry, bool) { return entry, true },
+			buildAdapter: func(*lens.Rule) (adapter.Adapter, error) { return newKVAdapter(t), nil },
+			fullEngine:   full.New(),
+			liveEntries:  func() []*pipelineEntry { return live },
+		}, entry, reporter, live
+	}
+	rule := func(bucket string) *lens.Rule {
+		r := businessRule("into-reload", "intoReload")
+		r.Into.Bucket = bucket
+		return r
+	}
+
+	t.Run("a bucket move is applied and the entry follows it", func(t *testing.T) {
+		// The positive vector: without it a refusal below could equally come
+		// from a reload that refuses every bucket move.
+		rl, entry, reporter, _ := newRunning(t)
+		rl.update(rule("own-bucket"), rule("empty-bucket"), lens.IntoOnly)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		assert.Zero(t, status.ErrorCount)
+		assert.Equal(t, "empty-bucket", entry.bucket,
+			"the entry must describe the surface the pipeline writes, or the sharing check asks about a target the lens left")
+	})
+
+	t.Run("a move onto a bucket a live unscoped diff reads is refused", func(t *testing.T) {
+		rl, entry, reporter, live := newRunning(t)
+		sibling, err := pipeline.New("live-diff", "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+		require.NoError(t, err)
+		require.NoError(t, sibling.SetDiffRetraction(true))
+		rl.liveEntries = func() []*pipelineEntry {
+			return append(live, &pipelineEntry{
+				target: "nats_kv", bucket: "diffed-bucket", canonicalName: "liveDiffLens", pipeline: sibling,
+			})
+		}
+
+		rl.update(rule("own-bucket"), rule("diffed-bucket"), lens.IntoOnly)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, status.LastError)
+		assert.Contains(t, *status.LastError, "shared-target diff retraction")
+		assert.Contains(t, *status.LastError, "liveDiffLens")
+		assert.Equal(t, "own-bucket", entry.bucket, "a refused move must leave the lens on the target it was admitted against")
+	})
+
+	t.Run("an edit turning target-diff retraction on is refused, not silently dropped", func(t *testing.T) {
+		// The flag and its shared-bucket scoping bind before the lens runs, and
+		// no swap re-installs them. Accepted, the operator reads a spec that
+		// landed while nothing retracts.
+		rl, _, reporter, _ := newRunning(t)
+		next := rule("own-bucket")
+		next.Into.DiffRetraction = true
+
+		rl.update(rule("own-bucket"), next, lens.IntoOnly)
+
+		status, err := reporter.GetStatus(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, status.LastError)
+		assert.Contains(t, *status.LastError, "diffRetraction")
+		assert.Contains(t, *status.LastError, reactivateRemedy)
+	})
+}
