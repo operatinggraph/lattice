@@ -768,6 +768,17 @@ every boundary: the audit never writes (Inc 1 changes only its comparison), the 
 stay in force (Inc 2 admits a Secure lens exactly where a non-Secure one is already licensed), and the
 gate is added last, only once the census pins zero business-plane debt (Inc 3).
 
+**Inc 1 premise, settled (2026-09-05).** The ten `stale` rows were a comparator artifact, but not the one
+§2.4 guessed: `PostgresAdapter.GetRow` returns content columns only, while the computed row carries every
+RETURN alias, key column included — every audited Postgres anchor disagreed on its own key. §4.1's masked
+comparator therefore excludes the row's key columns on both sides for every lens, and the mask on top of
+that for a Secure lens. **Deviation, Winston-adjudicated:** the same key exclusion is applied in
+`Reproject`'s `classifyDivergence` — §4.1's "the shared comparator never learns a mask" clause concerns
+content columns (a masked column may disagree); key columns are identity, and a row fetched by its keys
+cannot differ in them. `rowsComparable` itself stays untouched. The site is unreachable for a Postgres
+target today (all 26 actor-aggregate lenses target NATS buckets; `PostgresAdapter` is no
+`PrefixKeyLister`, so the sweep never enrols one) and is corrected so the first such lens does not
+re-import the artifact.
+
 **Checkpoint.** Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-secure-plain`, branch
-`fire/secure-plain-lens`. Done: — . Next: Inc 1 (masked audit), starting from the `leaseApplicationsRead`
-premise.
+`fire/secure-plain-lens`. Done: Inc 1 (`46ad980e`). Next: Inc 2 (the licence admits a Secure lens).
