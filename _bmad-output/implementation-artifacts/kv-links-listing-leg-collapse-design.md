@@ -170,7 +170,7 @@ an upstream bump that `Validate` (Init-only) cannot catch. −4 RTs on every rea
 or floor gate is touched. Manifest + `Version` bumps; `DIFF_BASE=<base> go run
 ./scripts/lint-package-version.go`. Owned test: the existing confinement tests stay green unmodified,
 plus one new assertion that the memoized path issues a single `appliesToUnit` enumeration (the
-`ScriptReadRecord.Enumerations` list is the observable).
+`ScriptReadRecord.Enumerations` list is the observable). **Correction (2026-09-05, `authority-walk-wall-unit-cost-design.md` §4.1): `Enumerations` is a set keyed `{hub, relation, direction}` and cannot see a doubled identical enumeration — the observable is the per-execution `ListCalls` counter that design adds.**
 
 ### 5.2 Recorded hazards — the dedups that LOOK mechanical and are not (do not sweep these)
 
