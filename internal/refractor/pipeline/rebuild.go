@@ -696,11 +696,15 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 	return nil
 }
 
-// resumeInterruptedRebuild re-arms the rebuilding → active transition for a
-// lens whose persisted health entry still reads "rebuilding" when this process
-// starts. The watcher Rebuild launches lives only as long as the process that
-// armed it; the rescan it watches outlives that process, because the rebuild
-// IS the durable's reset cursor and JetStream keeps it. So after a crash or an
+// resumeInterruptedRebuild re-opens the rebuild window of a lens whose
+// persisted health entry still reads "rebuilding" when this process starts, and
+// returns that window's signal — nil when there is nothing to resume. The watch
+// that ends the window is started separately, by watchResumedRebuild, because
+// the two halves belong on opposite sides of the consumer's registration.
+//
+// The watcher Rebuild launches lives only as long as the process that armed it;
+// the rescan it watches outlives that process, because the rebuild IS the
+// durable's reset cursor and JetStream keeps it. So after a crash or an
 // ordinary cycle the drain carries on with nothing left to declare it
 // finished, and the status reads "rebuilding" for the rest of the lens's life.
 //
@@ -715,27 +719,59 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 // outstanding-not-backlog check exists to prevent. One poll answers both
 // cases: it clears on the first tick when the drain already finished, and
 // holds an honest "rebuilding" while it has not.
-func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
+//
+// ORDERING INVARIANT — Run calls this BEFORE it registers the consumer, and the
+// health read it pays for is on that critical path deliberately. The window is
+// the whole of a personal lens's silence: eventPublishScope reads
+// RebuildInFlight once per event, and the rescan being resumed is a durable
+// cursor JetStream has already rewound, so the pump delivers its first replayed
+// event the instant the supervisor is handed the spec. A window opened after
+// that registration is opened after the event whose scope it governs, and that
+// one event fans out over every actor of the lens and publishes the whole
+// replayed shape at a revision below every device's frame high-water mark —
+// the flood the silence exists to remove, on the one path where the lens has
+// the most left to replay.
+func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) *rebuildSignal {
 	if p.reporter == nil {
-		return
+		return nil
 	}
 	entry, err := p.reporter.GetStatus(ctx)
 	if err != nil {
 		slog.Warn("pipeline: could not read health status to resume an interrupted rebuild",
 			"ruleId", p.ruleID, "err", err)
-		return
+		return nil
 	}
 	if entry.Status != health.StatusRebuilding {
-		return
+		return nil
 	}
 	// A window already open means a rebuild is in flight in THIS process — a
 	// control-plane Rebuild that arrived while Run was still starting — and it
 	// already owns a watcher.
 	sig := p.beginRebuildIfIdle()
 	if sig == nil {
-		return
+		return nil
 	}
 	slog.Info("pipeline: resuming the watch for a rebuild interrupted by a restart", "ruleId", p.ruleID)
+	return sig
+}
+
+// watchResumedRebuild starts the completion watch for the window
+// resumeInterruptedRebuild opened, and does nothing when it opened none.
+//
+// ORDERING INVARIANT — Run calls this AFTER it has registered the consumer, and
+// unlike the open it is not free to run earlier. watchRebuildCompletion polls
+// OutstandingForConsumer, and the supervisor answers "not managed" for a
+// consumer it has not been given yet. That answer is an error, and the
+// watcher's error branch retries at the same delay without recording progress,
+// so an early poll cannot end the window — but it also cannot observe an
+// outstanding count, and every poll spent before the consumer exists is one the
+// rebuild's progress clock (recordRebuildProgress, read by
+// health.evalRebuildWedged) does not get. Starting the watch once the consumer
+// is registered keeps every poll a real observation of the rescan.
+func (p *Pipeline) watchResumedRebuild(ctx context.Context, sig *rebuildSignal) {
+	if sig == nil {
+		return
+	}
 	go p.watchRebuildCompletion(ctx, sig)
 }
 

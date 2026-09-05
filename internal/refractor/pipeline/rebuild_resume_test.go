@@ -2,6 +2,8 @@ package pipeline_test
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 const (
 	sentinelAgreementRsm1 = "TsntTagreementRsm111"
 	sentinelAgreementRsm2 = "TsntVagreementRsm222"
+	sentinelAgreementRsm3 = "TsntWagreementRsm333"
 )
 
 // blockingAdapter holds every Upsert until release is closed, so a delivered
@@ -156,6 +159,87 @@ func TestPipeline_Run_ActiveLensDoesNotArmARebuildWatcher(t *testing.T) {
 
 	require.Never(t, p.RebuildInFlight, 200*time.Millisecond, 5*time.Millisecond,
 		"an active lens must not boot into a rebuild window")
+}
+
+// firstDeliveryProbe records whether a rebuild window was open at the moment
+// the write loop first reached the target, and closes delivered so a test can
+// wait on that instant rather than on a duration. inFlight is wired after
+// pipeline.New, which needs the adapter to exist first.
+type firstDeliveryProbe struct {
+	inFlight    func() bool
+	once        sync.Once
+	openAtFirst atomic.Bool
+	delivered   chan struct{}
+}
+
+func (f *firstDeliveryProbe) record() {
+	f.once.Do(func() {
+		f.openAtFirst.Store(f.inFlight())
+		close(f.delivered)
+	})
+}
+
+func (f *firstDeliveryProbe) Upsert(context.Context, map[string]any, map[string]any, uint64) error {
+	f.record()
+	return nil
+}
+
+func (f *firstDeliveryProbe) Delete(context.Context, map[string]any, uint64) error {
+	f.record()
+	return nil
+}
+func (f *firstDeliveryProbe) Probe(context.Context) error { return nil }
+func (f *firstDeliveryProbe) Close() error                { return nil }
+
+// TestPipeline_Run_ResumedWindowIsOpenBeforeTheFirstReplayedEvent pins the
+// ordering the two resume halves exist to hold: the window of a rescan a
+// restart interrupted is open before the consumer can deliver anything.
+//
+// The window IS a personal lens's silence — eventPublishScope reads
+// RebuildInFlight once per event and scopes the event to Silent while any
+// window is open — and the rescan being resumed is a durable cursor JetStream
+// has already rewound, so the first replayed event is delivered the instant the
+// supervisor is handed the spec. Opening the window after that registration
+// (measured live 2026-09-05: the first replayed event of a restarted
+// edgeCatalog rebuild was scoped `vertices`, fanned out over 135 actors and
+// published 742 messages at a revision every device had long passed) leaves
+// exactly one event publishing the whole replayed shape below every device's
+// frame high-water mark, which is the flood the silence removes.
+//
+// The negative half is the wait itself: a probe that never fires fails, so the
+// assertion cannot pass on an event that was never delivered.
+func TestPipeline_Run_ResumedWindowIsOpenBeforeTheFirstReplayedEvent(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	reporter := reporterOn(t, env, "HEALTH-rule-rsm-order", "rule-rsm-order")
+
+	// The state a process killed mid-rebuild leaves behind, and the backlog its
+	// rescan has not replayed — written before the consumer exists, so Run's
+	// registration is what delivers it.
+	require.NoError(t, reporter.SetRebuilding(context.Background()))
+	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementRsm3,
+		map[string]any{"id": "rsm3", "isDeleted": false})
+
+	eng, cr := compileFullRule(t,
+		"MATCH (a:agreement {key: $actorKey}) RETURN a.id AS agreement_id",
+		[]string{"agreement_id"})
+	// The default poll interval is left alone: the completion watch must not be
+	// able to drain and shut the window inside the test's own wait.
+	probe := &firstDeliveryProbe{delivered: make(chan struct{})}
+	p, err := pipeline.New("rule-rsm-order", "nats_kv", coreKVBucket, env.adjKV, env.coreKV,
+		probe, reporter)
+	require.NoError(t, err)
+	probe.inFlight = p.RebuildInFlight
+	p.UseFullEngine(eng, cr)
+	startPipeline(t, env, p, "rule-rsm-order")
+
+	select {
+	case <-probe.delivered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replayed event never reached the write loop, so the ordering was never observed")
+	}
+	assert.True(t, probe.openAtFirst.Load(),
+		"the resumed rebuild's window must already be open when the consumer delivers its first replayed event")
 }
 
 // closedChan returns an already-closed channel, so a blockingAdapter built on

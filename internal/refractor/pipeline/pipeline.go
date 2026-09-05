@@ -1558,12 +1558,28 @@ func (p *Pipeline) Run(ctx context.Context) {
 		spec.ProbeInterval = ProbeInterval
 	}
 
+	// A rescan a restart interrupted gets its window back BEFORE the consumer is
+	// registered, and its completion watch only after — see the two ordering
+	// invariants on resumeInterruptedRebuild and watchResumedRebuild. The open
+	// governs the scope of the first replayed event, which the pump delivers as
+	// soon as the supervisor holds the spec; the watch polls a consumer that has
+	// to exist for the poll to answer anything.
+	resumed := p.resumeInterruptedRebuild(ctx)
+
 	narrowedFilters := spec.FilterSubjects
 	err := p.registerWithFilterFallback(ctx, narrowedFilters, func() {
 		spec.FilterSubjects = nil
 		spec.FilterSubject = subjects.CoreKVFilter(p.coreKVBucket)
 	}, func() error { return p.supervisor.Add(ctx, spec) })
 	if err != nil {
+		// No consumer, so nothing below will ever start the watch that closes
+		// the window opened above. Ending it here keeps a lens whose Run gave up
+		// from reading as permanently rebuilding — the state that suppresses the
+		// convergence sweep and silences a personal lens for the life of the
+		// process — and pays the content cycle every closing span of silence owes.
+		if resumed != nil {
+			p.endRebuild(resumed)
+		}
 		slog.Error("pipeline: supervisor add", "ruleId", p.ruleID, "err", err)
 		return
 	}
@@ -1571,7 +1587,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 	// Signal that the supervised consumer is registered so Pause/Resume issued
 	// immediately after Run starts (in a goroutine) act on a live consumer.
 	close(p.started)
-	p.resumeInterruptedRebuild(ctx)
+	p.watchResumedRebuild(ctx, resumed)
 
 	<-ctx.Done()
 	// Stop the pump without deleting the durable — its persisted position is the

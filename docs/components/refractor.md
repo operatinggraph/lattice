@@ -162,7 +162,11 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   send sits below the frame high-water a connected device already holds, so the device drops all of it;
   the messages are still acked, so the ordering token advances and the rescan drains normally. The flag
   is read once per event at the scope producer, so an event's rows and its frame are decided by one
-  observation and a rebuild finishing mid-event cannot half-publish it. Business and auth-plane
+  observation and a rebuild finishing mid-event cannot half-publish it. A rebuild a restart interrupted
+  has its window re-opened from the persisted health status **before** the lens's consumer is
+  registered — the first replayed event arrives the instant the supervisor holds the spec, so it is
+  already inside the silence; only the completion watch, which polls that consumer, waits for it to
+  exist. Business and auth-plane
   rebuilds are untouched — their replay is what repairs a stored read model.
   The window silences the lens's **other** publishers on the same terms: a reprojection driven by the
   standing healer — a content cycle or an ordinary frames-only pass — or by the grant-change drain is
