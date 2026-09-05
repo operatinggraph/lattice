@@ -571,3 +571,69 @@ import cycle, no build-tagged double on any touched interface. Five findings, al
 | MINOR | Inc 4 runs `Synthesize` inside the verb's 5 s handler and twice per re-armed gap per pass | §4.4, priced |
 
 Verdict as returned: *build-ready for the mechanism; the two MAJORs are same-fire scope, not re-design.*
+
+---
+
+### fire/weaver-exhausted-gap fire brief (build note, 2026-09-04)
+
+**1. Scope (verbatim, §11).** One fire, four increments, all `internal/weaver`: (1) the budget books attempts;
+the backoff keeps its own exponent; (2) the escalation preserves the leg pin, and every suppression site honours
+the boundary; (3) the escalation is a collapse-only episode: booked nowhere, paced like one; (4) the un-park verb
+and the re-arm arm resolve a goal leg the same way. Green bar: §10's test table, every existing pin it names,
+`docs/components/weaver.md` §"Dispatch suppression" + §"`resetBudget`" rewritten. Sequenced after
+`fire/weaver-surface-workload` — landed as `3c54ddb3`; touch list re-verified against `1e5c925b`.
+
+**2. Verified touch list (live at `1e5c925b`).** `state.go:102` `mark` (+`EscalatedFrom`); `:146` `create` (+the
+escalation's leg); `:218` `replace`; `:293` `dispatchCount` (+`Reclaims`, `Leg`, `EscalatedAt`); `:330`
+`getDispatchCount` (returns the document); `:352` `incrementDispatchCount` (+`actionRef`, `attempt`, `reclaim`);
+`:400` `retryBudgetStore`; `:411` `dispatchCountEntry` (returns the document); `:447` `resetDispatchCount`
+(read-modify-write, keeps `Reclaims`/`Leg`/`EscalatedAt`); `:470` `deleteDispatchCount` (unchanged, blind).
+`evaluator.go:227` lane-1 exhausted routing; `:295` `dispatchGap` (`releaseCompletedLeg` caller at `:425`); `:817`
+`fireEpisode` (`:871–873` stale-external re-arm bumps; `:906–908` fresh bumps); `:910` `bumpDispatchCount`; `:1353`
+`releaseCompletedLeg`; `:1555` `gapSuppressed` (reads the count); `:1575` `gapSuppressedWithCount`; `:1675–1829`
+`escalateExhaustedGap` (surface bail `:1683`; policy `:1699`; `GapBudgetExhausted` `:1710`; pre-escalation clear
+`:1721–1723`; mark read `:1758`; live-mark Ack `:1764`; stale clear `:1766–1776`; `planGap`+`fireEpisode`
+`:1778–1781`; `GapEscalatedToAugur` `:1825`). `reconciler.go:63` `collapseOnlyReclaim`; `:147` `backoffInterval`;
+`:560–760` count leg (corrupt-body clear `:631`; exhausted routing `:634–641`; `count.Count != 0` `:703`;
+`ga.Action == ""` decline `:735`; collapse-only decline `:740`); `:924` reclaim's `releaseCompletedLeg` + advance;
+`:943` reclaim's exhausted routing; `:1047`/`:1064` backoff reads; `:1094` reclaim's count bump; `:1105–1112` the
+"deliberately NOT gated" comment (delete); `:1113–1115` `if !collapseOnly` effect booking. `strategist.go:427`
+`resolvePlannedAction`; `:528` `resolveGoalAction`. `control.go:355–389` `ResetRetryBudget`; `:573–600`
+`reArmDeclines` (`ga.Action == ""` at `:583`). `control_internal_test.go:1129` `budgetStoreStub`.
+`docs/components/weaver.md:365–437` + `:963–990`. Loupe decoders tolerant (`cmd/loupe/weaver.go:208–228`, no
+`DisallowUnknownFields` anywhere). No build-tagged harness implements `retryBudgetStore`.
+
+**3. Precedents.** CAS retry loop: `incrementDispatchCount` itself. Revision-conditioned RMW: `resetDispatchCount`.
+Fresh-episode advance after a release: `reconciler.go:924–940` (`planGap(…, "")` → `fireEpisode(found=false)`).
+Lease-clock pacing: `reconciler.go:1047–1055` (`time.Since(claimedAt) < backoffInterval`). Latch clear guarded by
+`standingAs`: `evaluator.go:1721`. Test harness: `newHandlerHarness` (`replay_internal_test.go`), `exhaustedRow`
+(`reconciler_internal_test.go:2261`), `goalGapFixture` (`goal_dispatch_internal_test.go:19`), `budgetStoreStub`.
+
+**4. Increment order + green checks.** Inc 1+3 (one commit: they share the booking seam) → Inc 2 → Inc 4 → docs.
+Per increment: `go test ./internal/weaver/ -count=1` (+ `-run` the §10 rows), `go build ./...`, `make vet`,
+`golangci-lint run ./internal/weaver/...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`go run ./scripts/lint-weaver-witnessed-retire.go`. Fire close: every `scripts/lint-*.go`, `make verify-kernel`,
+`make test-control-plane-authz`, `go test ./internal/weaver/... ./cmd/loupe/... ./cmd/lattice/...`.
+
+**5. Gotchas + dossier.** Two facts reach `fireEpisode` for an escalation: *it is one* (books neither count nor
+`__effect`) and *the leg it left* (`EscalatedFrom`; empty for a non-goal gap or an old-shape mark). A stale
+escalation mark that already carries `EscalatedFrom` carries it forward on re-fire. `escalateExhaustedGap` moves its
+mark read above the policy check (one read serves the release and the live/stale arm) and takes the count document
+from its caller — `gapSuppressed` returns the document it read. The release re-plans with the gap's own
+`GapAction`, never `esc`. `legOf` on a mark whose `Action` is `"directOp"` without `EscalatedFrom` falls to
+`count.Leg`. Every §10 vector runs capped and uncapped; every clear assertion captures `since`; fixture target ids
+< 20 chars. Weaver dossier entries in force here: *a new dispatch seam inherits the classifier and the pacing*;
+*a shared fixture that always supplies an optional input pins one case*; *the verb refuses exactly what the arm
+permanently declines*; *a Health issue key is a latch — enumerate every raise and clear before adding a clear*
+(live set: raises `evaluator.go:1710`, `:1825`; clears `:701`, `:1274`, `:1722`, `reconciler.go:631` — the
+`surface` arm now raises at `issueKeyGapOpen`, not this key); *every RETIRE above every cannot-act GUARD*; *a fact
+ends by more routes than the one you are editing*; *a presence assertion cannot pin a clear whose caller re-raises —
+the stamp is the observable*; *a level-reconciled retirement states which READ witnessed it*
+(`lint-weaver-witnessed-retire`). Standing checklist 1–6 (`agents/fire-brief-template.md`) applies; #3 binds the
+`escalation` flag and the `Reclaims` exponent swap hardest (both named as revert-proofs in §10).
+
+**6. Adjacent finds.** C1 enumerates 15 capped gaps, not 16 (`price` names no gap) — the classes match; no action.
+The §8 stopgap ran in this Phase 0 (the renewal was unsigned, count 314, mark `directOp`). Nothing else.
+
+**7. Non-goals.** No package edit, no contract edit, no Loupe edit, no new bucket or key shape, no change to
+`LensEffectMismatch` or the Augur review surface, no re-plan on row change (§9 row 4).
