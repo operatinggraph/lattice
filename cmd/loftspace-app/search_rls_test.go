@@ -57,36 +57,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 		exec(stmt)
 	}
 
-	landlordBody := []adapter.ColumnDef{
-		{Name: "entity_key", Type: "text"},
-		{Name: "applicant", Type: "text"},
-		{Name: "landlord_key", Type: "text"},
-		{Name: "unit_key", Type: "text"},
-		{Name: "unit_address", Type: "text"},
-		{Name: "unit_city", Type: "text"},
-		{Name: "unit_region", Type: "text"},
-		{Name: "unit_rent", Type: "double precision"},
-		{Name: "unit_currency", Type: "text"},
-		{Name: "unit_status", Type: "text"},
-		{Name: "signed_at", Type: "text"},
-		{Name: "landlord_decision", Type: "text"},
-		{Name: "decline_reason", Type: "text"},
-		{Name: "terms_move_in_date", Type: "text"},
-		{Name: "terms_lease_term_months", Type: "double precision"},
-		{Name: "terms_requested_rent", Type: "double precision"},
-		{Name: "profile_submitted", Type: "boolean"},
-		{Name: "income_to_rent_met", Type: "boolean"},
-		{Name: "employment_verified", Type: "boolean"},
-		{Name: "reference_count", Type: "double precision"},
-		{Name: "has_co_applicant", Type: "boolean"},
-		{Name: "has_guarantor", Type: "boolean"},
-		{Name: "guarantor_income_to_rent_met", Type: "boolean"},
-		{Name: "applicant_name", Type: "text"},
-		{Name: "applicant_email", Type: "text"},
-		{Name: "applicant_phone", Type: "text"},
-		{Name: "qualified", Type: "boolean"},
-	}
-	landlordDDL, err := adapter.BuildProtectedTableDDL("read_landlord_lease_applications", []string{"app_id", "landlord_id"}, landlordBody)
+	landlordDDL, err := adapter.BuildProtectedTableDDL("read_landlord_lease_applications", []string{"app_id", "landlord_id"}, landlordProtectedColumns())
 	if err != nil {
 		t.Fatalf("build landlord DDL: %v", err)
 	}

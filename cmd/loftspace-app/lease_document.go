@@ -31,20 +31,44 @@ func (s *server) handleLeaseDocument(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// leaseDocumentRow is the narrow shape handleLeaseDocumentGet needs off
+// either the applicant-scoped or the landlord-scoped protected row: whether
+// the landlord has approved, whether the application is signed, and the
+// anchored artifact's pointers. Both protectedApplicationRow and
+// protectedLandlordRow carry these under the same names; this lets the two
+// scopes share one gate + stream path.
+type leaseDocumentRow struct {
+	landlordApproved bool
+	signedAt         string
+	storeName        string
+	filename         string
+	contentType      string
+}
+
 // handleLeaseDocumentGet streams the anchored executed-lease bytes for
 // download, served as an AUTHENTICATED actor off the PROTECTED, RLS-scoped
-// read_lease_applications model (the same read boundary handleApplications
-// uses): a missing/invalid bearer token is 401, and RLS scopes the row to the
-// applicant themself — a leaseAppKey that isn't the caller's returns the same
-// 404 as a genuinely absent one, so the caller cannot tell "not mine" from
-// "not real."
+// read models: a missing/invalid bearer token is 401. It tries the
+// applicant-scoped read_lease_applications row first (the same read boundary
+// handleApplications uses); when that finds no row it falls back to the
+// LANDLORD-scoped read_landlord_lease_applications row under the SAME actor
+// (the managing landlord is a party to the lease too; that lens also anchors
+// on the unit's building, so a building-anchored staffer reads it exactly as
+// they read the application row itself) — RLS does the
+// authorization on both reads, and this handler adds no key-based check of
+// its own. A leaseAppKey that is neither the caller's application nor one
+// they manage returns the same 404 as a genuinely absent one, so the caller
+// cannot tell "not mine" from "not real."
 //
-// The row's doc_store_name / doc_filename / doc_content_type columns carry the
-// anchored artifact's pointers (projected only once the signedLease attachment
-// exists). A signed application whose document has not yet converged answers
-// 404 "being generated" — the honest async answer; the bytes stream from the
-// core-objects store (ObjectGet — NATS verifies the digest as it streams; the
-// Refractor is never in the byte path).
+// The approval gate comes before the document gate: a DECLINED application
+// and a SIGNED-BUT-UNDECIDED one both answer 404 "not approved" — sign
+// precedes decide by design, so a document minted before any decision exists
+// must never be served past a non-approval. Only once the landlord has
+// approved does the doc_store_name / doc_filename / doc_content_type pointer
+// presence matter: null there (a signed, approved application still inside
+// the docGen+attach convergence window) answers 404 "being generated," the
+// honest async answer. The bytes stream from the core-objects store
+// (ObjectGet — NATS verifies the digest as it streams; the Refractor is
+// never in the byte path).
 func (s *server) handleLeaseDocumentGet(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)
 	if err != nil {
@@ -66,24 +90,56 @@ func (s *server) handleLeaseDocumentGet(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 
 	notFoundMsg := "no application " + shortKeyServer(leaseAppKey) +
-		" in the read model (is lease-signing installed and projecting, and are you the applicant?)"
-	row, ok, err := queryApplicationByKey(ctx, s.pgPool, actor.Subject, leaseAppKey)
+		" in the read model (is lease-signing installed and projecting, and are you the applicant or the managing landlord?)"
+
+	appRow, ok, err := queryApplicationByKey(ctx, s.pgPool, actor.Subject, leaseAppKey)
 	if err != nil {
 		s.logger.Error("read protected lease application for document", "error", err)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected lease-applications model")
 		return
 	}
-	if !ok {
-		s.writeError(w, http.StatusNotFound, notFoundMsg)
-		return
+
+	var doc leaseDocumentRow
+	if ok {
+		doc = leaseDocumentRow{
+			landlordApproved: appRow.LandlordApproved,
+			signedAt:         strDeref(appRow.SignedAt),
+			storeName:        strDeref(appRow.DocStoreName),
+			filename:         strDeref(appRow.DocFilename),
+			contentType:      strDeref(appRow.DocContentType),
+		}
+	} else {
+		landlordRow, lok, err := queryLandlordApplicationByKey(ctx, s.pgPool, actor.Subject, leaseAppKey)
+		if err != nil {
+			s.logger.Error("read protected landlord lease application for document", "error", err)
+			s.writeError(w, http.StatusBadGateway, "could not read the protected landlord lease-applications model")
+			return
+		}
+		if !lok {
+			s.writeError(w, http.StatusNotFound, notFoundMsg)
+			return
+		}
+		doc = leaseDocumentRow{
+			landlordApproved: landlordRow.LandlordApproved,
+			signedAt:         strDeref(landlordRow.SignedAt),
+			storeName:        strDeref(landlordRow.DocStoreName),
+			filename:         strDeref(landlordRow.DocFilename),
+			contentType:      strDeref(landlordRow.DocContentType),
+		}
 	}
 
-	storeName := strDeref(row.DocStoreName)
-	if storeName == "" {
-		// The artifact has not anchored yet. A signed application is inside the
-		// convergence window (the docGen vendor + Weaver attach are in flight) —
-		// the honest async answer; anything else has no document to serve.
-		if strings.TrimSpace(strDeref(row.SignedAt)) != "" {
+	if !doc.landlordApproved {
+		// Covers both a landlord DECLINE and a signed-but-undecided application —
+		// sign precedes decide by design, so a document minted ahead of any
+		// decision must never be served until the landlord actually approves.
+		s.writeError(w, http.StatusNotFound, "no executed lease: the application is not approved")
+		return
+	}
+	if doc.storeName == "" {
+		// The artifact has not anchored yet. A signed, approved application is
+		// inside the convergence window (the docGen vendor + Weaver attach are in
+		// flight) — the honest async answer; anything else has no document to serve.
+		if strings.TrimSpace(doc.signedAt) != "" {
 			s.writeError(w, http.StatusNotFound,
 				"the executed lease document is being generated — try again shortly")
 			return
@@ -96,7 +152,7 @@ func (s *server) handleLeaseDocumentGet(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	rc, info, err := conn.ObjectGet(ctx, bootstrap.CoreObjectsBucket, storeName)
+	rc, info, err := conn.ObjectGet(ctx, bootstrap.CoreObjectsBucket, doc.storeName)
 	if err != nil {
 		if errors.Is(err, substrate.ErrObjectNotFound) {
 			s.writeError(w, http.StatusNotFound, "lease document bytes not found")
@@ -107,11 +163,11 @@ func (s *server) handleLeaseDocumentGet(w http.ResponseWriter, r *http.Request) 
 	}
 	defer rc.Close()
 
-	contentType := strings.TrimSpace(strDeref(row.DocContentType))
+	contentType := strings.TrimSpace(doc.contentType)
 	if contentType == "" {
 		contentType = "text/plain; charset=utf-8"
 	}
-	filename := strings.TrimSpace(strDeref(row.DocFilename))
+	filename := strings.TrimSpace(doc.filename)
 	if filename == "" {
 		filename = "signed-lease-" + shortKeyServer(leaseAppKey) + ".txt"
 	}

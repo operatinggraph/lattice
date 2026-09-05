@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
@@ -51,28 +54,35 @@ import (
 // payment, and a signed lease — a plain bool the lens always projects (never
 // null), mirroring the trusted console's applicantApproved.
 type protectedLandlordRow struct {
-	EntityKey                string   `json:"entityKey"`
-	Applicant                string   `json:"applicant"`
-	ApplicantName            *string  `json:"applicantName"`
-	ApplicantEmail           *string  `json:"applicantEmail"`
-	ApplicantPhone           *string  `json:"applicantPhone"`
-	LandlordKey              string   `json:"landlordKey"`
-	UnitKey                  *string  `json:"unitKey"`
-	UnitAddress              *string  `json:"unitAddress"`
-	UnitCity                 *string  `json:"unitCity"`
-	UnitRegion               *string  `json:"unitRegion"`
-	UnitRent                 *float64 `json:"unitRent"`
-	UnitCurrency             *string  `json:"unitCurrency"`
-	UnitStatus               *string  `json:"unitStatus"`
-	SignedAt                 *string  `json:"signedAt"`
-	LandlordDecision         *string  `json:"landlordDecision"`
-	LandlordApproved         bool     `json:"landlordApproved"`
-	LandlordDeclined         bool     `json:"landlordDeclined"`
-	Declined                 bool     `json:"declined"`
-	DeclineReason            *string  `json:"declineReason"`
-	TermsMoveInDate          *string  `json:"termsMoveInDate"`
-	TermsLeaseTerm           *float64 `json:"termsLeaseTermMonths"`
-	TermsRequestedRent       *float64 `json:"termsRequestedRent"`
+	EntityKey          string   `json:"entityKey"`
+	Applicant          string   `json:"applicant"`
+	ApplicantName      *string  `json:"applicantName"`
+	ApplicantEmail     *string  `json:"applicantEmail"`
+	ApplicantPhone     *string  `json:"applicantPhone"`
+	LandlordKey        string   `json:"landlordKey"`
+	UnitKey            *string  `json:"unitKey"`
+	UnitAddress        *string  `json:"unitAddress"`
+	UnitCity           *string  `json:"unitCity"`
+	UnitRegion         *string  `json:"unitRegion"`
+	UnitRent           *float64 `json:"unitRent"`
+	UnitCurrency       *string  `json:"unitCurrency"`
+	UnitStatus         *string  `json:"unitStatus"`
+	SignedAt           *string  `json:"signedAt"`
+	LandlordDecision   *string  `json:"landlordDecision"`
+	LandlordApproved   bool     `json:"landlordApproved"`
+	LandlordDeclined   bool     `json:"landlordDeclined"`
+	Declined           bool     `json:"declined"`
+	DeclineReason      *string  `json:"declineReason"`
+	TermsMoveInDate    *string  `json:"termsMoveInDate"`
+	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
+	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	// The anchored executed-lease artifact's pointers — the SAME columns the
+	// applicant model carries (cmd/loftspace-app's GET /api/lease-document falls
+	// back to this landlord-scoped row when the applicant-scoped read finds
+	// none, so the managing landlord streams the document off their own row too).
+	DocStoreName             *string  `json:"docStoreName"`
+	DocFilename              *string  `json:"docFilename"`
+	DocContentType           *string  `json:"docContentType"`
 	ProfileSubmitted         bool     `json:"profileSubmitted"`
 	IncomeToRentMet          *bool    `json:"incomeToRentMet"`
 	EmploymentVerified       *bool    `json:"employmentVerified"`
@@ -106,6 +116,7 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
        terms_lease_term_months, terms_requested_rent,
+       doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
        guarantor_income_to_rent_met, COALESCE(qualified, false)
@@ -147,6 +158,7 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
 			&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 			&row.TermsRequestedRent,
+			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 			&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
 			&row.GuarantorIncomeToRentMet, &row.Qualified,
@@ -174,6 +186,72 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 		return nil, err
 	}
 	return out, nil
+}
+
+// selectLandlordApplicationByKeySQL is selectLandlordApplicationsSQL narrowed
+// to one entity_key (the lease-document GET's landlord-scope fallback, D1.3/
+// D1.5): the applicant-scoped read finds no row for a key that isn't the
+// caller's own application, and this lets the SAME actor read it off their
+// landlord-anchored row instead. RLS still governs visibility: a key that
+// exists but isn't among the caller's authz_anchors returns zero rows,
+// identical to a genuinely absent key. ORDER BY + LIMIT 1 pick a stable row
+// when a building-wide grant matches more than one co-manager's row for the
+// same application (every facet but landlord_key is identical across them).
+const selectLandlordApplicationByKeySQL = `
+SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
+       landlord_key, unit_key, unit_address, unit_city,
+       unit_region, unit_rent, unit_currency, unit_status, signed_at,
+       landlord_decision, decline_reason, terms_move_in_date,
+       terms_lease_term_months, terms_requested_rent,
+       doc_store_name, doc_filename, doc_content_type,
+       COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
+       reference_count, has_co_applicant, has_guarantor,
+       guarantor_income_to_rent_met, COALESCE(qualified, false)
+FROM read_landlord_lease_applications
+WHERE entity_key = $1
+ORDER BY landlord_id
+LIMIT 1`
+
+// queryLandlordApplicationByKey is queryLandlordApplications narrowed to one
+// application, the landlord-scope counterpart of queryApplicationByKey. Same
+// txn-local actor + pooling-safety discipline; returns ok=false (no error)
+// when RLS or a genuinely missing key yields no row.
+func queryLandlordApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entityKey string) (protectedLandlordRow, bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return protectedLandlordRow{}, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
+		return protectedLandlordRow{}, false, err
+	}
+
+	var row protectedLandlordRow
+	err = tx.QueryRow(ctx, selectLandlordApplicationByKeySQL, entityKey).Scan(
+		&row.EntityKey, &row.Applicant,
+		&row.ApplicantName, &row.ApplicantEmail, &row.ApplicantPhone,
+		&row.LandlordKey, &row.UnitKey,
+		&row.UnitAddress, &row.UnitCity, &row.UnitRegion, &row.UnitRent,
+		&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
+		&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
+		&row.TermsRequestedRent,
+		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
+		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
+		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
+		&row.GuarantorIncomeToRentMet, &row.Qualified,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return protectedLandlordRow{}, false, tx.Commit(ctx)
+		}
+		return protectedLandlordRow{}, false, err
+	}
+	deriveLandlordRowFlags(&row)
+	if err := tx.Commit(ctx); err != nil {
+		return protectedLandlordRow{}, false, err
+	}
+	return row, true, nil
 }
 
 // deriveLandlordRowFlags recomputes the landlord-decision booleans from the raw

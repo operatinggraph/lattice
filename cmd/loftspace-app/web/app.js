@@ -1630,11 +1630,15 @@ function renderApplicationCard(row, highlight) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  // Signed-lease download: once the lease is signed, the platform's docGen
+  // Signed-lease download: gated on the landlord's APPROVAL, not signature
+  // alone — sign precedes decide by design, so a declined or still-undecided
+  // application must never expose the download link even though it may
+  // already carry an anchored artifact. Once approved, the platform's docGen
   // vendor generates the executed-lease artifact and Weaver anchors it to the
   // application; the GET streams the anchored bytes (a 404 "being generated"
-  // inside the brief convergence window).
-  if (!row.missing_signature) {
+  // inside the brief convergence window, or "not approved" if this render is
+  // stale and the decision has since changed).
+  if (row.landlordApproved && !row.missing_signature) {
     const lease = document.createElement("a");
     lease.className = "ghost btn-link";
     lease.textContent = "📄 Signed lease";
@@ -3582,6 +3586,23 @@ function renderRLSApplicantRow(a, unit) {
     reason.textContent = "Reason: " + a.declineReason;
     row.append(reason);
   }
+
+  // Signed-lease download — the landlord-fallback counterpart of the
+  // applicant's own "📄 Signed lease" link (renderApplicationCard): gated on
+  // APPROVAL + signature, same as the applicant side, never on signature
+  // alone. GET /api/lease-document falls back to this landlord-scoped row
+  // when the caller reads it under the landlord lens's own anchors (the
+  // managing landlord, or a building-anchored staffer) rather than as the
+  // applicant.
+  if (a.landlordApproved && a.signedAt) {
+    const lease = document.createElement("a");
+    lease.className = "ghost btn-link";
+    lease.textContent = "📄 Signed lease";
+    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(a.entityKey);
+    lease.target = "_blank";
+    lease.rel = "noopener";
+    row.append(lease);
+  }
   return row;
 }
 
@@ -3726,6 +3747,19 @@ function renderSearchApplicationRow(a) {
     contact.className = "applicant-contact";
     contact.textContent = [a.applicantEmail, a.applicantPhone].filter(Boolean).join(" · ");
     row.append(contact);
+  }
+
+  // Same signed-lease download as renderRLSApplicantRow, same gate: approval
+  // + signature. The search card reads the same landlord-scoped row, so the
+  // document is reachable from either surface.
+  if (a.landlordApproved && a.signedAt) {
+    const lease = document.createElement("a");
+    lease.className = "ghost btn-link";
+    lease.textContent = "📄 Signed lease";
+    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(a.entityKey);
+    lease.target = "_blank";
+    lease.rel = "noopener";
+    row.append(lease);
   }
   return row;
 }

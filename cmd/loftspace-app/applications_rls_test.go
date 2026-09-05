@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,7 +12,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	natsjetstream "github.com/nats-io/nats.go/jetstream"
+
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The D1.3 Fire 3 headline proof: the authenticated read boundary enforces RLS on
@@ -33,6 +39,11 @@ const (
 	rlsTestRole   = "loftspace_rls_test_reader"
 	subAlice      = "AAAAAAAAAAAAAAAAAAAA"
 	subBob        = "BBBBBBBBBBBBBBBBBBBB"
+	// subCarl / subDave / subEve exercise the approval gate's three vectors
+	// (approved+signed+anchored, declined, signed-but-undecided).
+	subCarl = "CCCCCCCCCCCCCCCCCCCC"
+	subDave = "DDDDDDDDDDDDDDDDDDDD"
+	subEve  = "EEEEEEEEEEEEEEEEEEEE"
 )
 
 func skipIfNoPostgresRLS(t *testing.T) string {
@@ -104,51 +115,24 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	for _, stmt := range adapter.BuildGrantTableDDL() {
 		exec(stmt)
 	}
-	body := []adapter.ColumnDef{
-		{Name: "entity_key", Type: "text"},
-		{Name: "applicant", Type: "text"},
-		{Name: "unit_key", Type: "text"},
-		{Name: "unit_address", Type: "text"},
-		{Name: "unit_city", Type: "text"},
-		{Name: "unit_region", Type: "text"},
-		{Name: "unit_rent", Type: "double precision"},
-		{Name: "unit_currency", Type: "text"},
-		{Name: "unit_status", Type: "text"},
-		{Name: "unit_bedrooms", Type: "double precision"},
-		{Name: "unit_bathrooms", Type: "double precision"},
-		{Name: "unit_available_from", Type: "text"},
-		{Name: "signed_at", Type: "text"},
-		{Name: "landlord_decision", Type: "text"},
-		{Name: "decline_reason", Type: "text"},
-		{Name: "terms_move_in_date", Type: "text"},
-		{Name: "terms_lease_term_months", Type: "double precision"},
-		{Name: "terms_requested_rent", Type: "double precision"},
-		{Name: "doc_store_name", Type: "text"},
-		{Name: "doc_filename", Type: "text"},
-		{Name: "doc_content_type", Type: "text"},
-		{Name: "profile_submitted", Type: "boolean"},
-		{Name: "income_to_rent_met", Type: "boolean"},
-		{Name: "employment_verified", Type: "boolean"},
-		{Name: "reference_count", Type: "double precision"},
-		{Name: "has_co_applicant", Type: "boolean"},
-		{Name: "has_guarantor", Type: "boolean"},
-		{Name: "guarantor_income_to_rent_met", Type: "boolean"},
-		{Name: "missing_onboarding", Type: "boolean"},
-		{Name: "missing_bgcheck", Type: "boolean"},
-		{Name: "missing_payment", Type: "boolean"},
-		{Name: "missing_signature", Type: "boolean"},
-		{Name: "missing_decision", Type: "boolean"},
-		{Name: "inflight_bgcheck", Type: "boolean"},
-		{Name: "inflight_payment", Type: "boolean"},
-		{Name: "declined_bgcheck", Type: "boolean"},
-		{Name: "declined_payment", Type: "boolean"},
-		{Name: "declined", Type: "boolean"},
-	}
+	body := applicantProtectedColumns()
 	ddl, err := adapter.BuildProtectedTableDDL("read_lease_applications", []string{"app_id"}, body)
 	if err != nil {
 		t.Fatalf("build protected DDL: %v", err)
 	}
 	for _, stmt := range ddl {
+		exec(stmt)
+	}
+
+	// The lease-document GET falls back to read_landlord_lease_applications
+	// when the applicant-scoped read finds no row (this test's own "A
+	// requesting B's key" vector exercises exactly that fallback) — the
+	// handler always queries it, so it must exist even with zero rows here.
+	landlordDDL, err := adapter.BuildProtectedTableDDL("read_landlord_lease_applications", []string{"app_id", "landlord_id"}, landlordProtectedColumns())
+	if err != nil {
+		t.Fatalf("build landlord protected DDL: %v", err)
+	}
+	for _, stmt := range landlordDDL {
 		exec(stmt)
 	}
 
@@ -162,6 +146,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	exec("CREATE ROLE " + rlsTestRole + " NOSUPERUSER NOLOGIN")
 	exec("GRANT USAGE ON SCHEMA " + rlsTestSchema + " TO " + rlsTestRole)
 	exec("GRANT SELECT ON " + rlsTestSchema + ".read_lease_applications TO " + rlsTestRole)
+	exec("GRANT SELECT ON " + rlsTestSchema + ".read_landlord_lease_applications TO " + rlsTestRole)
 	exec("GRANT SELECT ON " + rlsTestSchema + ".actor_read_grants TO " + rlsTestRole)
 
 	// Seed: A's application (anchor A, signed with NO doc pointers — the
@@ -183,6 +168,55 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subAlice)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subBob)
+
+	// The approval-gate vectors: Carl (approved + signed + ANCHORED — the true
+	// 200 path, proven against a real embedded-NATS object store below), Dave
+	// (declined, signed), Eve (signed, no decision yet — undecided). All three
+	// must read "not approved" from the gate, never "being generated" (that
+	// message is reserved for an approved-but-still-converging document).
+	docBytes := []byte("EXECUTED LEASE — the real bytes a live docGen render would store.")
+	const docStoreName = "docStoreCarl"
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, landlord_decision, signed_at, doc_store_name, doc_filename, doc_content_type, authz_anchors, projection_seq,
+	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      VALUES ('app-C', 'vtx.leaseapp.app-C', 'vtx.identity.`+subCarl+`', 'approved', '2026-07-20T00:00:00Z', $2, 'signed-lease-app-C.txt', 'text/plain; charset=utf-8', $1, 1,
+	      false, false, false, false, false, false, false, false, false, false, false)`, []string{subCarl}, docStoreName)
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, landlord_decision, signed_at, authz_anchors, projection_seq,
+	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      VALUES ('app-D', 'vtx.leaseapp.app-D', 'vtx.identity.`+subDave+`', 'declined', '2026-07-20T00:00:00Z', $1, 1,
+	      false, false, false, false, false, false, false, false, false, false, true)`, []string{subDave})
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, signed_at, authz_anchors, projection_seq,
+	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      VALUES ('app-E', 'vtx.leaseapp.app-E', 'vtx.identity.`+subEve+`', '2026-07-20T00:00:00Z', $1, 1,
+	      false, false, false, false, false, true, false, false, false, false, false)`, []string{subEve})
+	for _, sub := range []string{subCarl, subDave, subEve} {
+		exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
+		      VALUES ($1, $1, 'cap-read', 1, false)`, sub)
+	}
+
+	// An embedded NATS JetStream server carrying the core-objects bucket, with
+	// Carl's executed-lease bytes actually stored under docStoreName — the real
+	// byte-streaming path, not a stand-in. This proves the approved+signed+
+	// anchored vector really answers 200 with the anchored bytes, not merely
+	// "not 404."
+	ns := natsfixture.StartServer(t)
+	natsCtx, natsCancel := context.WithCancel(context.Background())
+	t.Cleanup(natsCancel)
+	natsConn, err := substrate.Connect(natsCtx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loftspace-app-lease-doc-test"})
+	if err != nil {
+		t.Fatalf("connect embedded NATS: %v", err)
+	}
+	t.Cleanup(natsConn.Close)
+	if _, err := natsConn.JetStream().CreateOrUpdateObjectStore(natsCtx, natsjetstream.ObjectStoreConfig{
+		Bucket: bootstrap.CoreObjectsBucket, Storage: natsjetstream.FileStorage,
+	}); err != nil {
+		t.Fatalf("create core-objects bucket: %v", err)
+	}
+	if _, err := natsConn.ObjectPut(natsCtx, bootstrap.CoreObjectsBucket, docStoreName, bytes.NewReader(docBytes), int64(len(docBytes))); err != nil {
+		t.Fatalf("put lease document bytes: %v", err)
+	}
 
 	// The reader pool runs as the non-superuser role.
 	reader := poolInSchema(t, dsn, rlsTestRole)
@@ -238,7 +272,10 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	// The authenticated app: the demo session posture over the shared dev key.
-	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
+	// s.conn is the embedded-NATS connection carrying Carl's anchored bytes —
+	// every OTHER path below that touches NATS is pointer-absent (404 before
+	// ObjectGet is ever reached), so wiring it here does not disturb them.
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader; s.conn = natsConn })
 
 	get := func(t *testing.T, c *http.Cookie, query string) (int, []protectedApplicationRow) {
 		t.Helper()
@@ -340,10 +377,10 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 
 	// The executed-lease document GET: same RLS-scoped model, same authenticated
 	// actor, a different endpoint. The GET streams the ANCHORED artifact by the
-	// row's doc pointer columns; s.conn is nil in this harness (no NATS fixture),
-	// which is fine for every pointer-absent path below — the handler only
-	// touches NATS once a pointer exists (the byte-streaming happy path is the
-	// live e2e's concern).
+	// row's doc pointer columns, off the embedded-NATS s.conn wired above (which
+	// carries ONLY Carl's app-C bytes) — every other vector below is decided
+	// before ObjectGet is reached (not approved, or no pointer yet), so it never
+	// touches NATS at all.
 	getDoc := func(t *testing.T, c *http.Cookie, leaseAppKey string) (int, string) {
 		t.Helper()
 		rec := sessionGET(s, s.handleLeaseDocumentGet, "/api/lease-document?leaseAppKey="+leaseAppKey, c)
@@ -384,6 +421,42 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	t.Run("lease-document: unauthenticated is 401", func(t *testing.T) {
 		if code, _ := getDoc(t, nil, "vtx.leaseapp.app-A"); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
+		}
+	})
+
+	t.Run("lease-document: approved + signed + anchored streams 200 with the real bytes", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subCarl), "vtx.leaseapp.app-C")
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", code, body)
+		}
+		if body != string(docBytes) {
+			t.Fatalf("body = %q, want the anchored bytes %q", body, docBytes)
+		}
+	})
+
+	t.Run("lease-document: declined is 404 not approved", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subDave), "vtx.leaseapp.app-D")
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (declined)", code)
+		}
+		if !strings.Contains(body, "not approved") {
+			t.Fatalf("a declined application must answer the approval-gate message, got %q", body)
+		}
+		if strings.Contains(body, "being generated") {
+			t.Fatalf("a declined application must never read as converging: %q", body)
+		}
+	})
+
+	t.Run("lease-document: signed but undecided is 404 not approved (never being-generated)", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subEve), "vtx.leaseapp.app-E")
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (undecided)", code)
+		}
+		if !strings.Contains(body, "not approved") {
+			t.Fatalf("a signed-but-undecided application must answer the approval-gate message, got %q", body)
+		}
+		if strings.Contains(body, "being generated") {
+			t.Fatalf("undecided must never read as converging (only an APPROVED, still-converging document does): %q", body)
 		}
 	})
 }

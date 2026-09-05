@@ -89,13 +89,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.31.25",
+	Version: "0.31.27",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
 		"the anchored executed-lease artifact's doc_store_name/doc_filename/doc_content_type pointers) plus its " +
 		"landlordLeaseApplicationsRead sibling (the landlord/residence audience anchored on the managing landlord via the " +
-		"loftspace-domain manages link, D1.3 Increment 2), the identity-anchored applicantOnboarding convergence lens + " +
+		"loftspace-domain manages link, D1.3 Increment 2; carries the SAME doc pointers so the managing landlord reads " +
+		"the executed lease off their own anchored row), the identity-anchored applicantOnboarding convergence lens + " +
 		"target (one row per applicant, so the PII request is made once however many applications they hold — " +
 		"leaseApplicationComplete keeps missing_onboarding as a surface-declared column), the task-anchored " +
 		"staleUserTasks lens + target (an open RecordIdentityPII/SignLease/SetRenewalTerms task whose own gap already " +

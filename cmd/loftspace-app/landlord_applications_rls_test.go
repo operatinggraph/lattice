@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
+	natsjetstream "github.com/nats-io/nats.go/jetstream"
+
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The D1.3 Increment 3 headline proof: the authenticated LANDLORD read boundary
@@ -65,35 +72,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	for _, stmt := range adapter.BuildGrantTableDDL() {
 		exec(stmt)
 	}
-	body := []adapter.ColumnDef{
-		{Name: "entity_key", Type: "text"},
-		{Name: "applicant", Type: "text"},
-		{Name: "landlord_key", Type: "text"},
-		{Name: "unit_key", Type: "text"},
-		{Name: "unit_address", Type: "text"},
-		{Name: "unit_city", Type: "text"},
-		{Name: "unit_region", Type: "text"},
-		{Name: "unit_rent", Type: "double precision"},
-		{Name: "unit_currency", Type: "text"},
-		{Name: "unit_status", Type: "text"},
-		{Name: "signed_at", Type: "text"},
-		{Name: "landlord_decision", Type: "text"},
-		{Name: "decline_reason", Type: "text"},
-		{Name: "terms_move_in_date", Type: "text"},
-		{Name: "terms_lease_term_months", Type: "double precision"},
-		{Name: "terms_requested_rent", Type: "double precision"},
-		{Name: "profile_submitted", Type: "boolean"},
-		{Name: "income_to_rent_met", Type: "boolean"},
-		{Name: "employment_verified", Type: "boolean"},
-		{Name: "reference_count", Type: "double precision"},
-		{Name: "has_co_applicant", Type: "boolean"},
-		{Name: "has_guarantor", Type: "boolean"},
-		{Name: "guarantor_income_to_rent_met", Type: "boolean"},
-		{Name: "applicant_name", Type: "text"},
-		{Name: "applicant_email", Type: "text"},
-		{Name: "applicant_phone", Type: "text"},
-		{Name: "qualified", Type: "boolean"},
-	}
+	body := landlordProtectedColumns()
 	// The COMPOSITE key — this is what lets a co-managed unit's application carry one
 	// row per landlord without a primary-key collision.
 	ddl, err := adapter.BuildProtectedTableDDL("read_landlord_lease_applications", []string{"app_id", "landlord_id"}, body)
@@ -104,11 +83,25 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		exec(stmt)
 	}
 
+	// The lease-document GET reads read_lease_applications FIRST, falling back
+	// to this landlord table only when that read finds no row (the "landlord
+	// reads a document off their own landlord-scoped row" vectors below
+	// exercise exactly that fallback) — the handler always queries it, so it
+	// must exist even with zero rows for tests that don't seed it.
+	applicantDDL, err := adapter.BuildProtectedTableDDL("read_lease_applications", []string{"app_id"}, applicantProtectedColumns())
+	if err != nil {
+		t.Fatalf("build applicant protected DDL: %v", err)
+	}
+	for _, stmt := range applicantDDL {
+		exec(stmt)
+	}
+
 	_, _ = owner.Exec(ctx, "DROP OWNED BY "+rlsTestRole+" CASCADE")
 	_, _ = owner.Exec(ctx, "DROP ROLE IF EXISTS "+rlsTestRole)
 	exec("CREATE ROLE " + rlsTestRole + " NOSUPERUSER NOLOGIN")
 	exec("GRANT USAGE ON SCHEMA " + rlsTestSchema + " TO " + rlsTestRole)
 	exec("GRANT SELECT ON " + rlsTestSchema + ".read_landlord_lease_applications TO " + rlsTestRole)
+	exec("GRANT SELECT ON " + rlsTestSchema + ".read_lease_applications TO " + rlsTestRole)
 	exec("GRANT SELECT ON " + rlsTestSchema + ".actor_read_grants TO " + rlsTestRole)
 
 	// Seed:
@@ -143,6 +136,30 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subLarry)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subLinda)
+
+	const landlordDocStoreName = "docStoreLandlordFallback"
+	landlordDocBytes := []byte("EXECUTED LEASE — landlord-fallback bytes.")
+
+	// An embedded NATS JetStream server carrying app-F's anchored bytes (seeded
+	// below, near the lease-document sub-tests, so it does not inflate Larry's
+	// application count for the assertions that run before it), proving the
+	// landlord-fallback 200 is a real byte stream, not merely "not 404."
+	ns := natsfixture.StartServer(t)
+	natsCtx, natsCancel := context.WithCancel(context.Background())
+	t.Cleanup(natsCancel)
+	natsConn, err := substrate.Connect(natsCtx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loftspace-app-landlord-lease-doc-test"})
+	if err != nil {
+		t.Fatalf("connect embedded NATS: %v", err)
+	}
+	t.Cleanup(natsConn.Close)
+	if _, err := natsConn.JetStream().CreateOrUpdateObjectStore(natsCtx, natsjetstream.ObjectStoreConfig{
+		Bucket: bootstrap.CoreObjectsBucket, Storage: natsjetstream.FileStorage,
+	}); err != nil {
+		t.Fatalf("create core-objects bucket: %v", err)
+	}
+	if _, err := natsConn.ObjectPut(natsCtx, bootstrap.CoreObjectsBucket, landlordDocStoreName, bytes.NewReader(landlordDocBytes), int64(len(landlordDocBytes))); err != nil {
+		t.Fatalf("put landlord-fallback lease document bytes: %v", err)
+	}
 
 	reader := poolInSchema(t, dsn, rlsTestRole)
 	defer reader.Close()
@@ -194,7 +211,13 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 	})
 
-	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader; s.conn = natsConn })
+
+	getDoc := func(t *testing.T, c *http.Cookie, leaseAppKey string) (int, string) {
+		t.Helper()
+		rec := sessionGET(s, s.handleLeaseDocumentGet, "/api/lease-document?leaseAppKey="+leaseAppKey, c)
+		return rec.Code, rec.Body.String()
+	}
 
 	type unitGroup struct {
 		UnitKey      string                 `json:"unitKey"`
@@ -392,6 +415,52 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 			if lindaCount != 2 {
 				t.Fatalf("iter %d: Linda leaked/lost rows, appCount=%d", i, lindaCount)
 			}
+		}
+	})
+
+	// app-F / app-G exist ONLY in the landlord table (no read_lease_applications
+	// row at all) — the lease-document GET's landlord-scope fallback vectors:
+	// Larry reads the executed lease off his own landlord-anchored row when he
+	// is not the applicant, and a declined one still gates on approval there.
+	// Seeded here, after every fixed-appCount assertion above, so these two
+	// extra applications never inflate Larry's counted totals.
+	insRow("app-F", subLarry, "vtx.leaseapp.app-F", "vtx.identity."+subAlice, "vtx.identity."+subLarry, "vtx.unit.unit-F", subLarry)
+	insRow("app-G", subLarry, "vtx.leaseapp.app-G", "vtx.identity."+subAlice, "vtx.identity."+subLarry, "vtx.unit.unit-G", subLarry)
+	exec(`UPDATE read_landlord_lease_applications
+	      SET landlord_decision='approved', signed_at='2026-07-25T00:00:00Z',
+	          doc_store_name=$1, doc_filename='signed-lease-app-F.txt', doc_content_type='text/plain; charset=utf-8'
+	      WHERE app_id='app-F'`, landlordDocStoreName)
+	exec(`UPDATE read_landlord_lease_applications
+	      SET landlord_decision='declined', signed_at='2026-07-25T00:00:00Z'
+	      WHERE app_id='app-G'`)
+
+	t.Run("lease-document: landlord fallback streams 200 off the landlord-scoped row", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subLarry), "vtx.leaseapp.app-F")
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", code, body)
+		}
+		if body != string(landlordDocBytes) {
+			t.Fatalf("body = %q, want the anchored bytes %q", body, landlordDocBytes)
+		}
+	})
+
+	t.Run("lease-document: landlord-scoped row declined is 404 not approved", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subLarry), "vtx.leaseapp.app-G")
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (declined)", code)
+		}
+		if !strings.Contains(body, "not approved") {
+			t.Fatalf("a declined landlord-scoped application must answer the approval-gate message, got %q", body)
+		}
+	})
+
+	t.Run("lease-document: a non-managing actor cannot reach the landlord fallback", func(t *testing.T) {
+		code, body := getDoc(t, cookieFor(subLinda), "vtx.leaseapp.app-F")
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (RLS-hidden, not Larry's manager)", code)
+		}
+		if strings.Contains(body, "being generated") {
+			t.Fatalf("an RLS-hidden key must read as absent, never as converging: %q", body)
 		}
 	})
 }
