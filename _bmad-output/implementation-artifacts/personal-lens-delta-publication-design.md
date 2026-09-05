@@ -416,12 +416,25 @@ transport to be exact).
   that clock": `LensProjectionStalled` reads it). A signalled reprojection (drain, interest change, content cycle) and
   a hydrate stamp it on their frame; a `ScopeNone` pass is not output.
 
-### 4.5 Rebuild, reload — `ScopeAll` by construction
+### 4.5 Rebuild, reload — the replay publishes nothing; completion is one content cycle (Inc 4)
 
-A rebuild replays the KV stream per key (§2 row 15): every event is scoped to its own vertex, and the union over a
-full replay reaches every row that has a vertex — which is every row. A rule reload republishes the rule; the next
-evaluation of an actor is scoped like any other, and the content pass or a hydrate carries a changed *shape* to the
-device within a day.
+**The original clause — "a rebuild is a union of scoped events and still reaches every row" — was falsified live
+on 2026-09-04 and is struck (amended 2026-09-05, Inc 4).** A rebuild resets the lens's durable to
+`DeliverLastPerSubject` (`pipeline/rebuild.go`, `ResetAwaitReopen`) and replays every Core KV entry at its
+*original* revision through the CDC write loop, which scopes each to `ScopeVertices` exactly as a live event. Two
+facts make that union the item's largest harm, not a free rebuild: (1) under R8 (§9) an `edgeCatalog` row carries
+its non-producing walks' whole read surface, so a replayed permission-grant or role link admits *every* row of the
+actor — the `edgeCatalog` spec update of 11:34 PT published 26 rows × 277 revisions on the widest actor and ≈ 249 k
+messages / 467 MB across 177 actors in 75 min, 93 % of everything SYNC held; (2) every replayed revision is *below*
+the high-water mark a connected device already holds (the replay runs from 2026-08-26 while the live head is at
+497 k), so the client's `frameHW` guard drops all of it — the flood reached no device. The design's rule is
+unchanged; the scope during a rebuild is what changes: **while the pipeline's rebuild is in flight, the personal
+write loop publishes neither rows nor frame for any actor** (nothing on the wire is nothing to drop), and **rebuild
+completion requests one sweeper content cycle** — the mechanism the boot latch already uses (`ensurePopulation`'s
+`firstSinceBoot`), reached through an injected sink on the pipeline (the §4.3 precedent), so the device receives
+the rebuilt shape once, at a live revision, within one sweep cadence instead of within a day. A rule *reload*
+(spec update without rebuild) republishes nothing by itself either; the next scoped event, the content pass or a
+hydrate carries the changed shape.
 
 ### 4.6 Hydrate — the race scoping unmasks, and the two guards that close it (Inc 2)
 
@@ -549,7 +562,7 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 |---|---|---|---|
 | R1 | A read the row depends on is not recorded (a new executor read path added later without the cursor). | Stale content on the device until the daily content pass or a hydrate — under-display, never over-grant (inclusion is the frame's). | The differential exactness pin (§10, T4) runs the whole personal corpus under mutation and fails on any row whose content changed but whose provenance missed the mutated vertex; a new fetch site that bypasses `fetchNode`/`fetchEdges` fails it. |
 | R2 | The provenance chain's memory on a wide head (3,638 rejected candidates recorded once, flattened per row). | Executor allocation. | Fold memoized per `*provNode` for every visited node; the allocation pin (§10, T2) on the `edgeInstances` fixture AND on a wide-head × many-rows fixture. |
-| R8 (build) | The multi-walk merge's read-set substitution (§4.1 site 7) makes most `edgeCatalog` rows carry a non-producing walk's whole read surface, and the head-chain grain puts every candidate a hop fetched on every row that hop produced — so an event on anything those walks reached admits most rows. Correct (over-publish), but the retirement claimed for H2's live share was sized before this rule existed. | Bytes: the payoff on `edgeCatalog` may fall short of T7's ≥ 90 %. Never a withheld row. | T4 reports rows admitted / rows evaluated per lens and mutation kind so the fraction is a number, not a surprise; Inc 3's T7 measures on the shipped mechanism first (dossier: numbers about a replaced mechanism are not evidence). If it binds, the follow-on is per-hop precision (record a candidate on the child that admitted it, a rejected one on the head) — a narrowing with T4 as its gate. |
+| R8 (build) | The multi-walk merge's read-set substitution (§4.1 site 7) makes most `edgeCatalog` rows carry a non-producing walk's whole read surface, and the head-chain grain puts every candidate a hop fetched on every row that hop produced — so an event on anything those walks reached admits most rows. Correct (over-publish), but the retirement claimed for H2's live share was sized before this rule existed. | Bytes: the payoff on `edgeCatalog` may fall short of T7's ≥ 90 %. Never a withheld row. | T4 reports rows admitted / rows evaluated per lens and mutation kind so the fraction is a number, not a surprise; Inc 3's T7 measures on the shipped mechanism first (dossier: numbers about a replaced mechanism are not evidence). If it binds, the follow-on is per-hop precision (record a candidate on the child that admitted it, a rejected one on the head) — a narrowing with T4 as its gate. **Measured at T7 (2026-09-05): R8 binds only under the rebuild replay (§4.5, now suppressed); on the live path, 17 h post-rebuild across 177 actors, every live revision on the widest subject outside whole-actor passes carried ≤ 2 messages and the ops-event revisions admitted 0 rows — the per-hop narrowing is not built; its trigger, a live `grantedBy` / role-link write reaching every row of every holder, was measured 0 times in the window.** |
 | R3 | The grant scope's anchor match by NanoID admits a row anchored at a same-id vertex of another type. | Over-publish of one row (harmless), never a skip. | NanoIDs are minted per vertex, 20 chars; a collision is a Contract #1 violation upstream. |
 | R4 | The healer's content cycle never triggers because the population walk never wraps (a population larger than 5 × 1,440 = 7,200 identities per day). | The daily content heal degrades to "once per full cycle" — ~33 h at 10k identities, the cadence the trigger design already accepted for the un-signalled worst case. | Stated; the sweeper logs the content-cycle start with its cycle length. |
 | R6 | A hydrate row the client's resurrection guard drops is no longer repaired by the next event's whole-actor republish. | A cold device short of rows until the content pass. | §4.6's two guards (pinned T3/T6); the exposure that remains is a hydrate whose RPC ctx expires while waiting on an in-flight event — it fails loud and the device re-attaches. |
@@ -615,6 +628,7 @@ two cadences; `docs/components/refractor.md`'s "Review keeps catching" dossier i
 |---|---|---|---|---|
 | **1 — the healer and the drain publish what moved** | `publishScope` type (pipeline); `ReprojectPersonalActor(ctx, id, scope)` + `recordProjected` on its frame and Hydrate's; `GrantChangeSink.GrantChanged(actorKey, entryID)` through the widened injected inverse (`SetGrantChangeSink` / `driver.go:690`) and its three producers (§4.3); dirty-set scope merge; sweeper `ScopeNone` per pass + the 24 h content cycle latched at `ensurePopulation`; `docs/components/refractor.md` § transport + sweeper. No engine change. | H3 (39 % of msgs), the drain's share of H2, the corresponding audit entries | T5, T6 (grant + sweep vectors), T3's `ScopeAll`/`ScopeAnchors` arms | **posture-changing** (healer semantics) — full-depth review |
 | **2 — the CDC write loop publishes what the event touched** | `binding` provenance chain + the **seven** record sites and the **three** strip sites (§4.1); per-branch read sets + the merge union; `ProjectionResult.Provenance` / `EvalResult.Provenance`; `ScopeVertices` from the four producers threaded through `evaluateForEntryRaw`/`evaluateForEntry`/`dispositionEvalErr` to the five `writeResults` sites; the two eligibility conjuncts; the personal+`Retry` install refusal; the hydrate guards (§4.6); the write loop's `recordProjected` on frame. Honest size: **L** on its own — the first draft's "one field on each of two structs" undercounted by ~15 edit sites. | H2's live share (61 %), H1 (the byte cap stops binding), H4 | T1, T2, T3, T4, T6 (aspect + hydrate vectors) | engine change — full-depth review; T4 is the gate |
+| **4 — a rebuild publishes nothing per replayed event; completion is one content cycle** (added 2026-09-05 from Inc 3's measurement) | `writeResults` (personal targets) publishes no row and no frame while `RebuildInFlight()`; rebuild completion (`watchRebuildCompletion` → `SetActive`) calls an injected `RebuildCompleteSink` that asks the sweeper for its next cycle to be a content cycle (`RequestContentCycle`, the `firstSinceBoot` latch generalised); §4.5 rewritten. | the rebuild flood (§4.5: 93 % of SYNC's bytes on 2026-09-04) | T8: pl2 e2e — activate a personal lens with a multi-row actor, `Rebuild()`, assert zero SYNC messages on the actor's subject during the replay and one `ScopeAll` pass (rows + frame, revision ≥ live head) after completion; sweeper unit — `RequestContentCycle` makes the next `ensurePopulation` a content cycle exactly once | **posture-changing** (lifecycle) — opus build, cold opus review |
 | **3 — measure on the shipped mechanism** | the two probes as a `-tags livecensus` tool under `scripts/`; re-run C1/C4/C6 after 24 h; correct the parent design's §1.3 and this doc's §1.2 numbers if the shipped mechanism differs; file the `edgeCatalog` row-size package row and, if the residual binds, the cap re-derivation. | the close-pass obligation the dossier names ("numbers about deleted code are not evidence") | T7 | doc + tool |
 
 Inc 1 ships alone and green (no wire change, old and new clients indifferent); Inc 2 lands behind it; Inc 3 closes
@@ -850,3 +864,22 @@ Inc 2 depends on Inc 1's `PublishScope` and the frame `recordProjected` sites.
   and the row closes. **Filing this fire could not do:** §13's `edgeCatalog` row-size row belongs on the verticals lane and this
   stream's fire may not write that lane; the next Verticals Steward or the PO files it from this sentence (~2 KB × 26–97 rows per
   actor, the descriptor vocabulary repeated per row).
+
+### Checkpoint (2026-09-05, T7 measured — Inc 4 opened)
+
+- **T7 on the shipped mechanism, whole stream (18 h 28 min, 2026-09-04 13:44 → 09-05 08:12 PT):** 348,275 msgs / 512 MiB,
+  cap at 99.996 %, first sequence 18.5 h old. Live 248,948 msgs / 467 MB; `edgeCatalog` 326 MB/12 h (−30 % against C4's 465 MB —
+  **fails**). Widest subject (`edu97…`): 1,951 msgs, 305 revisions, live ≤ 2-msg ratio 79.8 % (**fails** ≥ 95 %).
+- **Attribution (the whole shortfall is one event):** all 1,102 upserts on the widest subject landed 13:44–14:59 PT on 09-04 at
+  revisions 254,705–484,865 (Core KV entries dated 08-26 → 09-04, replayed at their original sequence): the `edgeCatalog` spec
+  update of 11:34:42 PT (`vtx.meta.ZvZ3….spec`, op `fVDg…`) triggered `health: rule rebuilding`, the rebuild's `DeliverLastPerSubject`
+  replay ran the CDC write loop per entry, and R8 admitted all 26 rows per admitting entry. 1,406 msgs × 177 actors ≈ the 248,948
+  live messages. §4.5 rewritten; Inc 4 added to §11.
+- **Post-rebuild window (17 h, 09-04 15:24 → 09-05 08:23 PT, four Refractor restarts inside it):** live 421 groups / 1,751 msgs /
+  2.5 MB; whole-actor 93,293 msgs / 45 MB (16,486 upserts = the restart content cycles, 12–16 frame passes per actor);
+  `edgeCatalog` 25.5 MB/12 h = **−94.6 %** against C4 (holds; a restart-free day is lower). Every live revision on the widest subject
+  outside whole-actor passes carried ≤ 2 messages (holds). The byte cap stops binding once the 09-04 burst ages out at 14:59 PT
+  today (post-burst fill ≈ 47 MB/17 h ≈ 66 MB/day against 512 MiB); `REFRACTOR_AUDIT` is another writer's (H4, withdrawn).
+- **Next:** build Inc 4 in `../lattice-wt-pl-delta` (fast-forwarded to `30d29549`), cold review, merge, cycle `bin/refractor`,
+  trigger a rebuild live (a spec-touching package refresh) and re-run `make sync-census -subject` on the widest actor: zero
+  messages during the replay, one content pass after. Then the cumulative close pass over Inc 1–4 and the row closes.
