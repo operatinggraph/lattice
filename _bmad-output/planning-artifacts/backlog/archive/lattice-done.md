@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-31 · `935492df` · [Contracts] #10 §10.8 ratified with posture trims — three-arm param grammar + directOp optionalReads land; gate narration and internal names stay out
 - 2026-08-31 · `0da6c431` · [Contracts] #10-substrate redrive clause adjudicated — branch rejected as mechanism-for-mechanism; clause rewritten to the observable promise; full-file posture sweep queued
 - 2026-08-30 · `9ab532a` · [packages] actor-role walk declared on 31 of 32 ops — baseline walks 130→99, holdsRole 32→1; fixtures resolve the hint from the spec; cold review, 1 MAJOR + 4 MINOR closed
 - 2026-08-30 · `9d0bec7` · [CI] main un-reddened — cafe-app's Relocate action recorded in the op-literal ceiling

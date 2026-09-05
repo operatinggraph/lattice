@@ -128,7 +128,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Refractor/Processor] `capabilityEphemeral` is the last `$now` in the lens corpus** | Its three arms admit a task's grants only while `expiresAt > $now`; the two task-anchored targets already record the lapse on the task, so the lens reads that marker instead, the café stale-tab lens converts alike, and a corpus census pin refuses `$now` blocking. Safe today: the Processor re-checks `expiresAt`. | ★★ | S | ✅ ratified (Winston-adjudicated) · [design](../../implementation-artifacts/capability-ephemeral-recorded-expiry-design.md) |
-| **[Refractor] A perEntry read-grant producer rewrites every unchanged entry of every reached actor** | The guarded adapter never skips an identical row: one `providedTo` create committed 4,993 of 5,938 staff entries; ~400 entries/s, 74 % of `REFRACTOR_AUDIT`. Fix: withhold an equal fresh entry + two refusals in `Reproject`'s delete arm. | ★★★ | S–M | 🏗️ building · owner: claude/bold-tesla-ras9ml · [design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md) §15 · next: Inc 1 refusals |
 | **[Refractor] A neighbour-keyed plain lens that genuinely partitions by anchor is still refused** | `landlordLeaseApplicationsRead`'s composite `(app_id, landlord_id)` key binds the non-anchor half and falls back to whole-corpus rescan even though its rows partition cleanly (bucket G, `with-alias-anchor-closure-design.md` §2.1). Blocks verticals.md's landlord-visibility row. | ★★★ | S–M | ✅ ratified (Winston-adjudicated) · [design](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md) |
 | **[Refractor] The three partition-shaped grant tables keep a whole source-scoped diff per event** | `providerIdentityReadGrants`, `staffReadGrants`, `patientIdentityReadGrants` partition by anchor but stay whole-diff: that per-event diff is an un-truncatable grant table's only shrink path on a rebuild. Needs a grant-writer rebuild diff (or truncate) + `ListKeysWhere`. | ★ | S | 🗄️ shelved (revive: a measured grant-table event cost, or a grant-writer rebuild diff) · [why](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md) §3.7 |
 | **Typed relation signatures — `containedIn: location→location`** | Declare a relation's endpoint types against the taxonomy, enforced at step 6 fail-closed; a signed variable-length hop contributes its endpoint expansion rather than clearing exhaustiveness. Held 2026-08-13: the payoff shrank to 2 lenses, both convertible by a single-hop rewrite (replacement row on verticals). | ★★ | L | 🗄️ shelved (revive: an intermediate containment level, or rewrite-unreachable varlength census) · [design](../../implementation-artifacts/typed-relation-signatures-design.md) |
@@ -152,6 +151,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-05 · `94275eb` · [Refractor] perEntry unchanged-entry withholding SHIPPED — the CDC loop withholds an entry the target already holds (T9: 1 write + 6 withheld, then 0 + 7); `Reproject` refuses an edge-derived retraction from an index behind its token ([design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md))
 - 2026-09-05 · `8a43aa9d` · [Refractor] personal-lens delta publication SHIPPED — rows by provenance, frames per pass, silent rebuild (`edgeCatalog` −94.6 %) ([design](../../implementation-artifacts/personal-lens-delta-publication-design.md))
 - 2026-09-05 · `1225c84c` · [CI] split `internal/refractor` off unit-1 into its own job (unit-refractor) — CI wall-clock 235s avg → 188s, full green
 - 2026-09-05 · `424e2740` · [Refractor] Secure plain lenses audit under a mask + retract by derivation; the neighbour-retraction transport gate ([design](../../implementation-artifacts/secure-plain-lens-retraction-and-audit-design.md))
@@ -176,9 +176,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-01 · (triage, no code) · [orchestration-base] duplicate-human-task row retired — the prescribed work-scoped dedup is REFUTED (3 shapes, code-cited); cause is an anchor-vs-work granularity mismatch, package fix filed on verticals
 - 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
 - 2026-08-31 · `571e45e6` · [Contracts] #10 §10.8 {actor} hub token ratified ahead of build — transitional note in text; build fire filed 📋 ready
-- 2026-08-31 · `935492df` · [Contracts] #10 §10.8 ratified with posture trims — three-arm param grammar + directOp optionalReads land; gate narration and internal names stay out
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `0da6c431`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `935492df`)*
