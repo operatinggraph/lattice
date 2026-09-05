@@ -388,6 +388,13 @@ census against it as you would against a stranger's.
   armed N+1, so the CAS passed and a healthy step was failed; the fix was one level-triggered read (the key's
   presence), the CAS staying for the write window. Write both windows in the state table. (2026-09-04 · deadline
   provenance)
+- **Lifting a conjunct that kept a path UNREACHABLE re-arms every consumer of that path's OUTPUT — and a
+  conjunct derived from the rule alone arms a mechanism the TARGET may not carry.** Enumerate who reads the
+  result (the tail's whole-target diff over `results`, which a licensed neighbour event would have fed K
+  partitions' rows), not only who reads the flag; and bind capability + plane + rule together at activation
+  (`SetDiffRetraction`'s `KeyLister` refusal is the shape) — a rule-only `partition.ok` armed seeding on five
+  grant tables whose adapter had no partition lister. Two BLOCKING findings, one pass.
+  (2026-09-05 · anchor-partitioned plain lens)
 - **Read the ADJACENT fields' comments for the fail-open someone already paid for** — twelve lines below a new
   allow-list, `WebsocketAllowedOrigins` documented that an empty list is allow-any. Whenever an empty
   list/set/map must mean something, write what empty renders to and what the consumer does with it.
