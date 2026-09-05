@@ -345,6 +345,17 @@ jobs:
         # all-clear over zero retiring functions.
         run: STRICT=1 go run ./scripts/lint-weaver-witnessed-retire.go
 
+      - name: Weaver classify-by-shape gate (a reclaim's class is its resolved dispatch)
+        # collapseOnlyReclaim decides pacing, `__effect` booking and the retry
+        # budget's attempt/reclaim split from a dispatch class. A planned-mode
+        # mark records the leg's catalog ref, a goal gap's playbook entry has
+        # an empty Action, an escalation records `directOp` — feeding any of
+        # those reads a confident "not collapse-only" and spends a human task's
+        # budget in minutes. Twice-seen; this gate fails any call whose first
+        # argument is not a resolved-action identifier. Self-tests on every run
+        # and refuses an all-clear over zero calls.
+        run: STRICT=1 go run ./scripts/lint-weaver-classify-by-shape.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

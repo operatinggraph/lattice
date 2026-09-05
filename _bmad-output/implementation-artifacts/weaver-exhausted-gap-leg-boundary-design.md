@@ -90,6 +90,15 @@ So for a human task left unactioned, the series is
 gap is handed to the Augur tier. That is the day between 08-29 17:35 and the terms landing on 08-30 13:04:52Z
 (`termsSetAt` in the live row, §2.3).
 
+**Corrected at build (2026-09-04).** The series above is the *static* `assignTask` gap's. The renewal is a
+goal-mode target, and a goal leg's mark records the leg's catalog **ref** (`setTerms`), never a dispatch class —
+`collapseOnlyReclaim` compared that ref against `assignTask`/`triggerLoom`/`proposedOp` and read **false for every
+goal leg**. So its reclaims were never paced (one per sweep interval), each was booked into the leg's `__effect`
+window (§2.3's live `setTerms` window: 12 attempts for one open task) and each advanced the count: the six were
+spent in minutes, not 15.5 hours. G2/G3 below hold for static gaps only. The fire classifies a reclaim by the
+pinned leg's **resolved dispatch action** (§4.1), which is what makes the rule above true for the target it was
+aimed at.
+
 ### 1.3 [b] — why the terms landing changed nothing
 
 `renewalComplete` is the corpus's only goal-mode target (§3 C2): one gap, a four-leg catalog
@@ -210,8 +219,8 @@ done
 ```
 Result: 16 capped gaps — 10 `directOp`, 2 external `triggerLoom` (`bgcheck`, `payment`), 3 `surface`, **1
 goal-mode (`renewalComplete`)**. `directOp` and external reclaims are real re-submits and stay attempts;
-`surface` never dispatches. **The only gap whose legs are collapse-only is `renewalComplete`** — Inc 1's
-live effect is one target; its class (any planned target with a human leg) is the reason it is a platform
+`surface` never dispatches. **The only gap whose legs are collapse-only is `renewalComplete`** — and until this
+fire nothing classified them so (§1.2, corrected at build); Inc 1's live effect is one target; its class (any planned target with a human leg) is the reason it is a platform
 rule and not a lens edit.
 
 **C2 — planned-mode targets:** `grep -rln 'Mode:.*"planned"' packages/*/*.go | grep -v _test` → 1
@@ -267,6 +276,13 @@ type dispatchCount struct {
 - **Lane 1's own stale-external re-arm is a reclaim too.** `fireEpisode`'s `found && stale` branch
   (`evaluator.go:779-826`) re-arms an expired external episode in place and bumps the count at `:823`; it
   books `attempt = true` *and* `Reclaims++`, so the two seams that re-arm an episode agree.
+- **The reclaim's class is the pinned leg's resolved dispatch action, never the mark's recorded string.**
+  `resolvePlannedAction(…, pinnedAction: rec.Action)` is a pure catalog / candidate lookup for a pinned leg (no
+  admission token, no plan build); its `Action` feeds `collapseOnlyReclaim`, so the pacing, the `__effect` gate
+  and the attempt booking all read the dispatch *shape* (the weaver dossier's first rule). A pin that does not
+  resolve — a vanished leg, an escalation's `directOp` — keeps the mark's string, which is today's behaviour. A
+  static gap resolves to itself. Pinned: `TestSweep_GoalLegReclaim_IsCollapseOnlyByDispatchShape` (and its
+  `directOp` control), revert-proved against the recorded-ref classification.
 - **`resetDispatchCount` becomes a read-modify-write.** Today it marshals a fresh `{count:0}` literal
   (`state.go:447-460`) and its interface (`retryBudgetStore`, `state.go:400-403`) hands the caller only an
   `int`. Widen `dispatchCountEntry` to return the document, and have the reset write `{count:0, reclaims,
@@ -530,6 +546,10 @@ goes dark*.
   no-op is harmless; it becomes a stuck leg only if a check is lost. **Out of scope** — the dossier's first
   entry, on the goal-mode seam; filed as a one-line residual on the board only if the Steward's Phase 0 finds a
   live instance (the census C1 shows none: the bgcheck runaway is closed).
+  **Widened at build (2026-09-04):** the same shape-vs-name class sits in `externalDispatchGap`, which switches on
+  `ga.Action` (`""` for every planned-mode gap), so a planned-mode leg whose resolved dispatch is external never
+  reads concluded-external. Latent: the corpus's one planned-mode target declares no `inflight_<g>`. Disposition
+  recorded in the build note below.
 - **Skew:** two engine instances with clocks apart by more than a lease could re-fire an escalation one
   backoff step early. Single-instance today (HA-NATS is shelved); the same exposure `ClaimedAt` pacing already
   carries.
@@ -637,3 +657,34 @@ The §8 stopgap ran in this Phase 0 (the renewal was unsigned, count 314, mark `
 
 **7. Non-goals.** No package edit, no contract edit, no Loupe edit, no new bucket or key shape, no change to
 `LensEffectMismatch` or the Augur review surface, no re-plan on row change (§9 row 4).
+
+**Close (2026-09-05, SHIPPED `89b61556`).** All four increments in one commit; `bin/weaver` and `bin/lattice`
+rebuilt and the weaver cycled through `make orchestration`; `verify-kernel` green on the live stack.
+Reviews: three cold passes on the build, one on the fix delta, one cumulative close pass (opus, read-only);
+2 BLOCKING + 6 MAJOR + 12 MINOR folded across three fix rounds, each mechanism revert-proved in a scratch
+copy. Deviations from the ratified text, each amended in the body above: the reclaim classifies by the
+pinned leg's resolved dispatch action (§1.2, §4.1); `planGap` reports its `unplannable` substitution and every
+`fireEpisode` caller threads the escalation + displaced leg; `bookDispatch` refuses `directOp` as a leg and
+restarts the count only for a goal-scoped chain (a candidates gap re-ranks per episode); `replace` carries
+`escalatedFrom`; the markless release re-reads the mark and takes a revision-conditioned count delete as its
+mutex before crediting; the count-leg arm pins `planGap` on the ref it classified; `bookEscalation` runs only
+on a real CAS-create and never creates the document (`{count:0}` is the un-park signal); `escalatedFrom` is
+empty unless the gap is goal-mode; `dispatchGap` re-reads a zero count before a goal gap's plan-time
+escalation. **Refuted in review:** the count document expiring under a long-open task (TTL 128 h, reclaims
+re-arm it ≤ 24 h apart); a rowless un-park being a defect (an established verb decision,
+`TestResetRetryBudget_RefusesWhatItCannotHonour` — the arm skips a rowless gap and the next delivery
+dispatches). **Accepted as ratified (§4.3):** the escalation re-fire advances the same `Reclaims` tally the
+sweep paces on and the un-park keeps it, so an un-park after N escalations inherits that pacing, bounded at
+24 h. **The §8 stopgap did not run:** the `nats kv del` on `weaver-state` was refused for the unattended
+session (the `lattice.nk` key cannot write that bucket; the weaver's own key was policy-blocked) — the four
+commands stand for an operator; the renewal ends 2026-09-06. **Review classification** (§4 close pass):
+design-gap ×4 (the §1.2 premise; the `unplannable` door; the escalation doors' pacing model → filed 📐; the
+resolver's double invocation priced by cost not divergence), implementation-bug ×5 (`replace` dropping the
+field; the stale re-arm dropping its parameter; the markless release's mutex; the candidates-mode restart;
+the create leg persisting `{count:0}`), brief-gap ×2 (fixture rule applied to a subset; no vector for a new
+decline), convention ×2 (history-narrating test comments). Dossier: the shape-vs-name class is twice-seen →
+`scripts/lint-weaver-classify-by-shape.go` (CI, STRICT); the exemption-is-a-claim-about-every-reader class
+appended; the witnessed-retire entry retired (its gate is in CI). **Filed (designer):** the `unplannable` /
+no-playbook escalation doors (§12, board). The `staleMark` planned-mode limitation stays parked (§12): the
+resolved-leg form would mint a fresh Loom instance for the renewal's `refreshBgcheck` leg, a claimId decision
+the design did not take.

@@ -1300,7 +1300,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   duplicate task, and it cannot fix that by preserving the `claimId` because the `claimId` lives on the
   mark that is gone. Minted 2026-08-25: the count leg's re-arm dispatched collapse-only gaps. Check: for
   every new seam that fires an episode, name the classifier it calls and the pacing rule it inherits — if
-  a sibling seam guards the same state with a predicate this one skips, prove the skip.
+  a sibling seam guards the same state with a predicate this one skips, prove the skip. Minted a second
+  time 2026-09-04: the reclaim fed `collapseOnlyReclaim` the mark's recorded string, which for a goal leg
+  is the catalog ref, so every goal leg read not-collapse-only — unpaced, booked, an attempt per re-arm.
+  `scripts/lint-weaver-classify-by-shape.go` (CI, STRICT) now gates that predicate's argument;
+  `staleMark`'s own classifier (`externalDispatchGap` over the playbook entry) is not covered — parked.
 - **Classify by whitelist, not blacklist, when the vocabulary can grow** — "has a userTask step ⇒ parks" reads
   a *parse* miss (zero steps, a drifted envelope, a renamed field, a future fourth step kind) as a confident
   "no", landing on the unsafe side silently. "Every step is a known non-parking kind" fails safe by
@@ -1418,14 +1422,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   fixture trap:** a weaver `targetId` is free-form, not a NanoID, but `lint-conventions` reads any 20-char
   value on an `…ID` identifier as one — keep fixture target ids under 20 characters (three renames in one
   fire).
-- **A level-reconciled retirement must state which READ witnessed it** — `boolColumn` and `boolColumnRead`
-  are two verdicts, not one reader with a convenience wrapper: a PRESENT non-bool is a plain `false` to the
-  first and unreadable to the second, so a retirement decided from the first is a claim about a row that
-  never stated anything. Every leg that retires a SHARED membership has to be audited against the same
-  one — the legs are not a list, and the quiet-row legs are the ones nobody edits. Minted 2026-09-04 on the
-  surface `gapOpen:` set, four sightings in one item (lane-1's column close, the non-violating leg, the
-  sweep's mark leg, the sweep's count leg), each of which would have shrunk an operator's open-workload
-  count on a projection fault and restored it on the next clean projection. Check:
-  `scripts/lint-weaver-witnessed-retire.go` (CI, STRICT), plus one non-bool vector per retiring leg — the
-  gate reads one package by source text, so the vectors are what cover a retirement reached through an
-  indirection it does not follow.
+- **A deliberate exemption is a claim about EVERY reader of the value, and a new field on a record is a
+  claim about every WRITER of it** — "the count is deliberately NOT gated: it bounds reclaim effort" priced
+  the backoff's reader and shipped the count into the exhaustion gate's, so an open human task spent a
+  budget of six with zero attempts; and `escalatedFrom` was added to the mark at `create` while `replace`
+  and the stale re-arm rewrote the mark whole without it, so the field died at the first reclaim — three
+  sightings in one item, each caught by a cold reviewer. Minted 2026-09-04 (retry budget → attempts +
+  reclaims). Check: before inheriting an exemption or adding a field, grep every reader of the value and
+  every writer of the record (`grep -n "<field>\|<accessor>(" internal/weaver/*.go`), list them in the
+  brief, and name which one each pin covers.

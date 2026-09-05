@@ -63,8 +63,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[lease-signing/Loom] Supersede a background check automatically when its successor completes** | The primitive exists (`TombstoneSupersededLeaseServiceInstance`, operator-driven, ownership-checked); the durable rule needs the reply op to find the prior instance without a live enumeration, and a product answer on check history. | ★★ | M | 📐 needs designer pass · no-pattern: prior-instance discovery at reply time without a live enumeration · [design](../../implementation-artifacts/bgcheck-runaway-and-broad-filter-design.md) §6 |
 | **[Bootstrap/Loom] The 1 s marker TTL is the delivery window of every TTL-expiry signal** | `LimitMarkerTTL=1s` on all six `PerKeyTTL` buckets means a `deadline.*` expiry (Loom's only rejected/lost-step signal) and a tracker expiry exist for one second; a consumer down across that second never sees it, no startup scan notices, and the deadline handler's Nak on a probe error asks for a redelivery of that same second-lived marker. Decide the value per bucket. | ★★★ | S | 📋 ready · [why](../../implementation-artifacts/loom-state-tombstone-sweep-design.md) §11 |
 | **[Weaver/Loom/Refractor] Retire the holder-less `control-operator` role** | Decided: its intended holder went to `consoleOperator` (a strict superset) one day after it shipped, two later ratified designs declined to use it, nothing references it. Recipe: `control-authz` version bump; `diffManifest` tombstones the orphans (two-way door); drop the lint allowlist entry. | ★ | XS | 📋 ready · [triage §9](../../../docs/reviews/lattice-designer-triage-2026-08-27.md) |
+| **[Weaver] The `unplannable` / no-playbook escalation doors have no pacing or booking model** | Both doors fire a reasoning claim the reclaim re-arms every mark lease; a plan-time-escalated goal gap re-plans only when its mark leaves; the no-entry door books the count + an `__effect` window, which is also its only bound. | ★★ | S–M | 📐 needs designer pass · no-pattern: escalation-episode pacing + booking outside the exhausted door · [why](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md) §12 |
 | **[Refractor] `adjacency.upsertEdge` removes an edge by `EdgeID` with no ordering guard** | Link keys are deterministic `EdgeID`s, so a revoke→re-grant reuses one; the removal has no sequence compare and a Nak'd adjacency message redelivers — an older tombstone applied after the newer create deletes a live edge, read as absent by every walk, the enumerator and the cap-read prefix diff. Fix: guard removal + upsert per edge with the event's stream seq. | ★★ | S–M | 📋 ready · [why](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md) §4.4 |
-| **[Weaver] An exhausted gap never re-plans, and re-escalates every 30 minutes forever** | Live renewal `QomdjY7hAGS6mHvN9d2j`: exhausted a day before the terms landed, never re-planned; the escalation re-fires a rejected claim op every lease (309 vs budget 6). Fix: the pin survives escalation; the budget books attempts. | ★★★ | S–M | 🏗️ building · owner: fire/weaver-exhausted-gap · [design](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md) · next: Phase 0 + Inc 1 |
 
 ### Survey log (round-robin rotation)
 
@@ -145,6 +145,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-05 · `89b61556` · [Weaver] an exhausted goal gap re-plans at its leg boundary; the budget books attempts, the escalation books nothing and is paced ([design](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md))
 - 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is ONE counted entry per (target, gap column); refused raises paced, overflow windowed ([design](../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
 - 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
 - 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))
@@ -169,9 +170,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-08-31 · `0da6c431` · [Contracts] #10-substrate redrive clause adjudicated — branch rejected as mechanism-for-mechanism; clause rewritten to the observable promise; full-file posture sweep queued
 - 2026-08-30 · `9ab532a` · [packages] actor-role walk declared on 31 of 32 ops — baseline walks 130→99, holdsRole 32→1; fixtures resolve the hint from the spec; cold review, 1 MAJOR + 4 MINOR closed
 - 2026-08-30 · `9d0bec7` · [CI] main un-reddened — cafe-app's Relocate action recorded in the op-literal ceiling
-- 2026-08-29 · `bcc2681` · [Pkgmgr] descriptor-declared kv.Links walks SHIPPED — the fourth declaration surface end to end, cafe's 8 ops declaring through it, 7 baseline rows retired; 3 cold reviews, 1 BLOCKING severed hop + 4 MAJOR closed
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `5699325`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `bcc2681`)*
