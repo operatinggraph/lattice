@@ -363,7 +363,7 @@ new tool (the stream's subject counts are already the per-lens census).
 |---|---|---|---|---|
 | `EvalResult.Unchanged` | per evaluation, in `multiEntryRetractions` | never (per-batch value) | never across batches | n/a |
 | `EntriesWithheld` / `WithholdReadFailures` | first withhold / first failure | never (monotone) | carried forward on the health entry (§2 row 16) | n/a |
-| adjacency `AppliedSeq` (a retired-max atomic + the owed set, in the bootstrapper) | first retired message or first caught-up poll | 0 at process start (refuses until set) | per process, never durable; reports the shared durable's floor, so a restart against a drained durable reports prior work | contiguous floor: max(retired) capped below min(owed) |
+| adjacency `AppliedSeq` (a retired-max atomic + the owed set, in the bootstrapper) | first retired message or first drained poll | 0 at process start (refuses until set); the owed set is cleared by every DRAINED observation of the standing progress poll (a drained durable owes nothing — the reconciliation that frees an orphaned Nak and bounds the set; amended at close, 2026-09-05) | per process, never durable; reports the shared durable's floor, so a restart against a drained durable reports prior work | contiguous floor: max(retired) capped below min(owed); the poll reads the head BEFORE the drained check |
 | rebuild generation (one atomic beside `rebuildInFlight`) | first `Rebuild` | never | per process | monotone |
 
 ---
@@ -652,6 +652,36 @@ guard* row (§13). Non-goals = §4.7 (doc-mode actorAggregate, plain, personal, 
 Scope-diff gate: every §15.2 touch traces to §4.1–§4.6; nothing widens §4; dependencies re-verified — the `WITH`-scope Inc 2 and
 the delta design's close are independent both ways (§11).
 
-### 15.7 Checkpoint
+### 15.7 Checkpoint (close, 2026-09-05)
 
-*(amended at close)*
+**State: Inc 1 + Inc 2 BUILT on `claude/bold-tesla-ras9ml`, merged to `main` once when green (the §15 landing
+shape).** Branch commits: `ae73cc2` first cut · `cbc20c7` review round 1 (three cold reviewers, 18 findings, all
+folded — §4.3/§4.4/§5 amended where the build sharpened the body) · `10750fc` T9 · the close round (two majors + five
+minors from the cumulative pass, folded). The merge SHA is the Done-log entry on `backlog/lattice.md`.
+
+**Green bar as run:** T1–T8, T11, T12 (Inc 1) and T9 (Inc 2) green; X1–X5 re-pinned (§15.2); `go build`, `make vet`,
+`golangci-lint`, `lint-conventions`, `lint-flag-consumer-census`, `lint-slog-values`, `lint-board` STRICT-clean; the
+nine build-tagged harness tags compile; `go test ./...` with `POSTGRES_TEST_DSN` green; every new guard revert-proven
+in a scratch copy (see the three commit messages for the proof ledger).
+
+**Deviations from the brief, recorded:** `seq == 0` keeps its `ErrNoOrderingToken` precedence ahead of the two
+refusals (four existing tests assert it); T4 finds 20 writer sites (the census matches by name + arity on any
+receiver — the design's grep-derived 18 missed `replayWrite`'s `a.`-receiver pair), floor 20; T9 runs on the base
+`edgeManifest` domain (§10, corrected); the refusal is family-scoped via `EvalResult.AbsenceFromEdgeIndex` (§4.4,
+amended); `Unchanged` ships as `UnchangedAt`, the adapter generation (§4.1's carrier, bound to the adapter the
+compare ran against); the freshness clock advances on a withholding pass (§4.3, amended).
+
+**T10 (live X6 before/after on the dev stack): PENDING — Mac-only** (`agents/steward/REMOTE.md` §3: this fire ran
+in a remote container with no shared stack; the dev stack's 5,938-entry staff domain cannot be reproduced here).
+The e2e T9 is the shipped proof of the mechanism on the real producer; the audit-share / churn numbers in §3 X6 are
+the next Mac-side fire's (or Andrew's) 20-second measurement after `bin/refractor` is rebuilt from `main` and
+cycled — record them here when taken. **MERGED ≠ RUNNING:** `bin/refractor` and `bin/lattice` (which links
+`internal/refractor`) must be rebuilt from `main`; the Refractor is the one to cycle.
+
+**Residuals, each with its out:** R1 (a lost retraction surfacing as a transient under-grant) — design-ratified,
+pinned both faces; R7 / S-wrong — the board's *`adjacency.upsertEdge` … no ordering guard* row (📋); nothing else
+open. **Review classification (close pass):** design-gap 2 (the replacement cursor's re-arm path; S-wrong, filed) ·
+implementation-bug 9 · brief-gap 2 (the health-schema doc missing from §15.2; the board `next:` cell and this
+checkpoint as part of the close) · convention 3 · review-over-reach 0. The component-shaped lesson is the dossier
+entry minted in `docs/components/refractor.md` (a lifted fence's second axis + a refusing cursor's re-arm path);
+the `omitempty`-vs-doc corollary rides on it as a second sighting of the absent-vs-zero class.

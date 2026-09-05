@@ -151,12 +151,18 @@ type Entry struct {
 	// says the lens is working rather than stalled.
 	//
 	// Cumulative for the life of the process and never reset, so a rate is
-	// what a reader takes from two samples. ABSENT means the lens cannot
-	// withhold at all — a plain, doc-mode or personal lens, which has no
-	// per-entry set to compare — and the poller writes nothing for one rather
-	// than a zero that would read as a mechanism installed and saving nothing.
-	// A published 0 is a real reading: a perEntry lens whose entries really
-	// are changing.
+	// what a reader takes from two samples.
+	//
+	// ABSENT AND ZERO ARE THE SAME READING ON THE WIRE, and deliberately so:
+	// omitempty is what keeps the three wholesale writers from publishing a
+	// fabricated 0 on every plain, doc-mode and personal lens as they carry the
+	// field forward. So absence means either "this lens has no such mechanism"
+	// or "it has one and has decided nothing yet", and no reader can tell those
+	// apart from this field alone. Nothing needs to: what says the mechanism is
+	// LIVE is a NON-ZERO count on a lens whose audit subject is also moving —
+	// the pairing, not the field. A perEntry lens rewriting everything it
+	// derives shows a busy audit subject and no count here, which is the shape
+	// worth acting on.
 	//
 	// It counts DECIDED withholds, at the point recordProjectionWrite counts a
 	// write, which means a redelivered batch counts its withholds again — the

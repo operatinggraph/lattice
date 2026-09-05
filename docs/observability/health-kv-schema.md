@@ -1611,10 +1611,13 @@ count and a near-silent audit trail, which is the healthy shape. `withholdReadFa
 batched read-backs that failed, each of which cost exactly one actor's entries one unconditional
 rewrite and nothing afterwards: it is a **rate** to read against `entriesWithheld`, never a latch,
 and a lens with a rising rate is paying writes it could have avoided, not projecting wrongly. Both
-are published only for a perEntry lens — the one shape that has the mechanism — so ABSENT means
-the lens has no such mechanism, not that it has withheld nothing; a lens that predates the field
-is absent for the same reason. A perEntry lens whose target cannot arm it (unguarded, or unable
-to read rows back) publishes real zeroes: the mechanism exists and has decided nothing.
+are published only for a perEntry lens — the one shape that has the mechanism — and, like
+`peakBindingRows`, a zero is never written: ABSENT means the lens has no such mechanism, or has
+it and has decided nothing yet (a perEntry lens on a target that cannot arm it — unguarded, or
+unable to read rows back — stays absent for the life of the process), or predates the field.
+The positive reading is therefore the PAIR: a non-zero `entriesWithheld` on a perEntry lens
+whose audit subject is busy says the mechanism is live; a busy audit subject with the field
+absent says it is not, and that is the shape to investigate.
 
 `sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
 position and cumulative heal count; both are omitted for a lens that does not sweep. They

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
@@ -118,27 +119,28 @@ func (p *Pipeline) withholdingArmed(adpt adapter.Adapter) (adapter.RowsReader, b
 // means for an entry the target does not hold. So is a body neither side can
 // render.
 //
+// generation NAMES adpt, and both are the caller's — read together under one
+// hold of adapterMu (currentAdapterAndGeneration). It is stamped onto every
+// verdict this function reaches, and the write loop honours a verdict only
+// while it still names the installed adapter, so a hot reload landing anywhere
+// between the caller's capture and the write invalidates all of them.
+//
 // FAILURE IS A RATE, NOT A LATCH. A batch that errors marks nothing: this
 // actor's entries are all written, exactly as they are with withholding
 // disarmed, one Warn is logged for the actor and a counter moves. Nothing is
 // remembered, so the next event withholds normally — a read fault must not
 // make itself permanent.
-func (p *Pipeline) markUnchangedEntries(ctx context.Context, adpt adapter.Adapter, actorKey string, keys []string, fresh []ruleengine.EvalResult) {
+func (p *Pipeline) markUnchangedEntries(ctx context.Context, adpt adapter.Adapter, generation uint64, actorKey string, keys []string, fresh []ruleengine.EvalResult) {
 	reader, armed := p.withholdingArmed(adpt)
 	if !armed {
 		return
 	}
-	// Captured with the read, not after it: the verdict below is a statement
-	// about the adapter this read ran against, and the write loop honours it
-	// only while that is still the installed one.
-	generation := p.adapterGeneration()
 	stored, err := reader.GetRows(ctx, keys)
 	if err != nil {
 		p.withholdReadFailures.Add(1)
 		p.warnWithholdReadFailure(actorKey, len(keys), err)
 		return
 	}
-	p.withholdReadWarned.Store(false)
 	for i := range fresh {
 		// A retraction is always written, and a FailClosed result's whole
 		// purpose is that its write cannot be passed over silently.
@@ -173,17 +175,35 @@ func (p *Pipeline) honoursUnchanged(result ruleengine.EvalResult) bool {
 	return result.UnchangedAt != 0 && result.UnchangedAt == p.adapterGeneration()
 }
 
+// withholdWarnInterval is the floor between two read-back-failure lines from
+// one pipeline. It is a TIME bound rather than a success-clears-it latch
+// because the failure mode that matters is intermittent, not total: a target
+// failing one read in ten clears the latch on every success and would then log
+// once per failing actor — thousands of lines per fan-out event, which is the
+// volume the latch existed to prevent. A clock cannot be reset by the
+// alternating success.
+const withholdWarnInterval = time.Minute
+
 // warnWithholdReadFailure reports a failed read-back at most once per pipeline
-// until one succeeds again. A fan-out event reaches thousands of actors and
-// calls the read once per actor, so a target that has gone unreadable would
-// otherwise emit thousands of identical lines per event; the latch keeps the
-// first one, and WithholdReadFailures carries the rate. A success clears it, so
-// the next outage is reported again rather than swallowed by the last.
+// per withholdWarnInterval. A fan-out event reaches thousands of actors and
+// calls the read once per actor, so an unreadable target would otherwise emit
+// one identical line per actor; the counter (WithholdReadFailures) carries the
+// rate, and this decides only whether the line is emitted.
+//
+// The window is compared, never slept on: the clock is read at the call, so a
+// quiet minute costs nothing and a busy one costs one line.
 func (p *Pipeline) warnWithholdReadFailure(actorKey string, keys int, err error) {
-	if p.withholdReadWarned.Swap(true) {
-		return
+	now := time.Now()
+	for {
+		last := p.withholdWarnedAt.Load()
+		if last != nil && now.Sub(*last) < withholdWarnInterval {
+			return
+		}
+		if p.withholdWarnedAt.CompareAndSwap(last, &now) {
+			break
+		}
 	}
-	slog.Warn("pipeline: unchanged-entry read-back failed — every entry of this actor is written; further failures are counted, not logged, until one succeeds",
+	slog.Warn("pipeline: unchanged-entry read-back failed — every entry of this actor is written; further failures are counted, not logged, for the next minute",
 		"ruleId", p.ruleID, "actorKey", actorKey, "keys", keys, "err", err)
 }
 

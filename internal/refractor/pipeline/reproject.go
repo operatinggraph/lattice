@@ -607,9 +607,16 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			// clamping the token or dropping the arm — the sweep retries every
 			// pass, and a loud refusal is preferred to a quiet retraction of a
 			// grant that is still live.
-			if applied := p.adjacencyAppliedSeq(); result.AbsenceFromEdgeIndex && (applied == 0 || applied < seq) {
-				fold.addBlocked(VerdictBlocked, BlockedUnknown, adjacencyBehindReason)
-				continue
+			if result.AbsenceFromEdgeIndex {
+				// The cursor is read ONLY for a marked result. Its accessor
+				// takes the adjacency bootstrapper's own mutex, which the index
+				// build holds on its hot path, so asking on every result would
+				// put a lock acquisition per reconciled row behind the consumer
+				// that has to drain the whole Core KV stream.
+				if applied := p.adjacencyAppliedSeq(); applied == 0 || applied < seq {
+					fold.addBlocked(VerdictBlocked, BlockedUnknown, adjacencyBehindReason)
+					continue
+				}
 			}
 			if reportsDelete {
 				outcome, derr := outcomeDeleter.DeleteWithOutcome(ctx, result.Keys, seq)

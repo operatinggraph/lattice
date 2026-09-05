@@ -1002,7 +1002,14 @@ type retractionCall struct {
 // call says which of this function's two callers is asking; see
 // retractionCall for what each flag decides.
 func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult, call retractionCall) ([]ruleengine.EvalResult, error) {
-	adpt := p.currentAdapter()
+	// The adapter and the generation that names it, taken together. Everything
+	// below — the prefix listing, the per-key liveness reads, the batched
+	// read-back — runs against THIS adapter, and the withholding verdict the
+	// mark produces is a statement about it. Reading the generation later,
+	// after those reads, would let a hot reload landing in between stamp the
+	// NEW adapter's number onto a comparison made against the old one, and the
+	// write loop would then honour it against a target holding nothing.
+	adpt, generation := p.currentAdapterAndGeneration()
 	lister, ok := adpt.(adapter.PrefixKeyLister)
 	if !ok {
 		return nil, fmt.Errorf("pipeline: multi-entry retraction: adapter %T cannot enumerate keys by prefix — a perEntry lens cannot retract a dropped anchor", adpt)
@@ -1082,7 +1089,7 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		})
 	}
 	if call.costed && len(retained) > 0 {
-		p.markUnchangedEntries(ctx, adpt, actorKey, retained, fresh)
+		p.markUnchangedEntries(ctx, adpt, generation, actorKey, retained, fresh)
 	}
 	if len(tombstones) == 0 {
 		return fresh, nil

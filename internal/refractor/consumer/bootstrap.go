@@ -15,9 +15,15 @@ import (
 
 const (
 	adjConsumerName = "refractor-adjacency"
-	// bootstrapReadyPoll is how often pollReady checks the durable's pending
-	// count to detect the empty-stream "already caught up" case.
+	// bootstrapReadyPoll is how often pollProgress checks the durable's pending
+	// count BEFORE Ready, to detect the empty-stream "already caught up" case.
 	bootstrapReadyPoll = 100 * time.Millisecond
+	// bootstrapProgressPollFactor slows the same poll down once Ready has been
+	// signalled. Before Ready the poll is a startup gate and every tick costs a
+	// lens its start; after it, the poll is a background reconciliation of the
+	// applied-sequence cursor with the durable's real state, which nothing waits
+	// on — so it runs at a fraction of the rate for the life of the process.
+	bootstrapProgressPollFactor = 5
 )
 
 // Bootstrapper drives the dedicated adjacency consumer on the Core KV stream
@@ -79,10 +85,13 @@ func (b *Bootstrapper) Ready() <-chan struct{} {
 //
 // Ready is signalled by two complementary paths: the message handler closes it
 // when it processes a delivery whose in-message pending count is zero (the
-// non-empty-stream case), and a startup poll closes it when the durable reports
-// zero pending without ever delivering a message (the empty-stream case).
+// non-empty-stream case), and the progress poll closes it when the durable
+// reports zero pending without ever delivering a message (the empty-stream
+// case). That poll then keeps running for the life of the process, at a slower
+// tick, reconciling the applied-sequence cursor with the durable's real state
+// (pollProgress).
 func (b *Bootstrapper) Run(ctx context.Context) error {
-	go b.pollReady(ctx)
+	go b.pollProgress(ctx)
 	return b.conn.RunDurableConsumer(ctx, substrate.DurableConsumerConfig{
 		Stream:        b.streamName,
 		FilterSubject: b.filterSubj,
@@ -90,65 +99,96 @@ func (b *Bootstrapper) Run(ctx context.Context) error {
 	}, b.handle)
 }
 
-// pollReady covers the empty-stream case: RunDurableConsumer never invokes the
-// handler when there is nothing to deliver, so Ready would never fire from the
-// handler. The poll closes Ready once the durable is fully caught up — both
-// NumPending and NumAckPending zero (ConsumerCaughtUp), which is immediate for an
-// empty stream. The ack-aware check is essential: NumPending alone drops the
-// instant a backlog is prefetched into the client buffer, so signalling on
+// pollProgress is the bootstrapper's standing observation of the durable, and
+// it runs for the life of the process rather than only until Ready.
+//
+// BEFORE READY it covers the empty-stream case: RunDurableConsumer never
+// invokes the handler when there is nothing to deliver, so Ready would never
+// fire from the handler. It closes Ready once the durable is fully caught up —
+// both NumPending and NumAckPending zero (ConsumerCaughtUp), which is immediate
+// for an empty stream. The ack-aware check is essential: NumPending alone drops
+// the instant a backlog is prefetched into the client buffer, so signalling on
 // NumPending==0 would fire Ready while the handler is still building the
 // adjacency index for that prefetched batch — closing the gate on a partial
-// index. Requiring NumAckPending==0 means pollReady never fires mid-drain; on a
+// index. Requiring NumAckPending==0 means it never fires mid-drain; on a
 // non-empty stream the handler's msg.NumPending==0 path (delivery-accurate,
-// raised after the last edge is built) signals first. pollReady exits once Ready
-// is signalled (by either path) or ctx is done.
-func (b *Bootstrapper) pollReady(ctx context.Context) {
+// raised after the last edge is built) signals first.
+//
+// AFTER READY, at a fifth of the rate, it keeps doing the same reconciliation
+// for the reason a one-shot raise cannot: the cursor this poll maintains is
+// otherwise only ever moved forward by deliveries, and two states leave it
+// wrong with no delivery to fix them.
+//
+//   - An OWED sequence the durable will never redeliver — a consumer deleted
+//     and recreated, a stream purged under a live process — would pin the floor
+//     below it forever, so every reader that consults the cursor refuses
+//     forever. A drained durable owes nothing BY DEFINITION, which makes a
+//     caught-up observation the one moment the owed set can be cleared
+//     wholesale. That is also what bounds the map: it cannot grow without a
+//     drained observation eventually emptying it.
+//   - A process that reaches Ready through the HANDLER never ran the head
+//     raise at all, and one whose first head read failed reached Ready with the
+//     cursor wherever the handler left it. Both are corrected by the next
+//     drained observation.
+//
+// A head read that FAILS skips the tick entirely — it never falls through to
+// the drained branch, because retiring to a head nobody read is retiring to
+// zero, and clearing the owed set on the strength of a failed observation would
+// free debts the index still owes. Ready is not held hostage to that failure
+// either: the handler path signals it independently, and a later successful
+// tick signals it here.
+func (b *Bootstrapper) pollProgress(ctx context.Context) {
 	ticker := time.NewTicker(bootstrapReadyPoll)
 	defer ticker.Stop()
+	slowed := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-b.ready:
-			return
 		case <-ticker.C:
-			// The HEAD IS READ FIRST, and the drained check second. A message
-			// committed between the two reads is above the head this pass will
-			// raise to, so the worst it costs is a cursor one message stale —
-			// refusing more, never less. Reading the head after the check would
-			// invert that: the head would then include a commit the consumer
-			// had not been asked about, and the cursor would claim the index
-			// reflects an edge it has never seen. That inversion is worst at
-			// startup, which is the one moment this poll is load-bearing.
-			last, serr := b.conn.StreamLastSequence(ctx, b.streamName)
-			if serr != nil && ctx.Err() == nil {
-				// The cursor stays where it is, which is the refusing answer
-				// for its readers — never a reason to hold Ready and with it
-				// every lens on this process.
+		}
+
+		// Slow the tick the first time round after Ready — by either path, so
+		// this covers the handler's signal as well as this loop's own.
+		if !slowed && b.isReady() {
+			ticker.Reset(bootstrapReadyPoll * bootstrapProgressPollFactor)
+			slowed = true
+		}
+
+		// The HEAD IS READ FIRST, and the drained check second. A message
+		// committed between the two reads is above the head this pass would
+		// raise to, so the worst it costs is a cursor one message stale —
+		// refusing more, never less. Reading the head after the check would
+		// invert that: the head would then include a commit the consumer had
+		// not been asked about, and the cursor would claim the index reflects
+		// an edge it has never seen. That inversion is worst at startup, which
+		// is the one moment this poll is load-bearing for correctness rather
+		// than for reconciliation.
+		last, serr := b.conn.StreamLastSequence(ctx, b.streamName)
+		if serr != nil {
+			if ctx.Err() == nil {
 				slog.Warn("adjacency bootstrap: could not read the stream head — the applied-sequence cursor stays where it is",
 					"stream", b.streamName, "err", serr)
 			}
-			caughtUp, err := b.conn.ConsumerCaughtUp(ctx, b.streamName, adjConsumerName)
-			if err != nil {
-				// The durable may not be created yet (RunDurableConsumer creates
-				// it as it starts) — keep polling.
-				continue
-			}
-			if caughtUp {
-				// A drained consumer has retired everything the stream held at
-				// the read above, which is the only moment the index's progress
-				// can be read off the stream rather than off a delivery. It is
-				// what gives AppliedSeq a value on the path where the handler
-				// never runs: an empty stream, and a restart against a durable
-				// another process had already drained. Raised before Ready is
-				// signalled so a reader released by Ready sees the cursor.
-				if serr == nil {
-					b.retire(last)
-				}
-				b.signalReady()
-				return
-			}
+			continue
 		}
+		caughtUp, err := b.conn.ConsumerCaughtUp(ctx, b.streamName, adjConsumerName)
+		if err != nil {
+			// The durable may not be created yet (RunDurableConsumer creates
+			// it as it starts) — keep polling.
+			continue
+		}
+		if !caughtUp {
+			continue
+		}
+
+		// A drained consumer has retired everything the stream held at the read
+		// above and owes nothing at all. Both facts are applied together: the
+		// owed set is cleared (releasing any debt no redelivery will ever
+		// retire) and the cursor is raised to that head. Raised BEFORE Ready is
+		// signalled so a reader released by Ready sees the cursor.
+		b.reconcileToDrainedHead(last)
+		b.signalReady()
 	}
 }
 
@@ -210,6 +250,38 @@ func (b *Bootstrapper) AppliedSeq() uint64 {
 		}
 	}
 	return floor
+}
+
+// isReady reports whether Ready has been signalled, without blocking.
+func (b *Bootstrapper) isReady() bool {
+	select {
+	case <-b.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcileToDrainedHead applies the two facts a drained observation carries at
+// once: the durable owes NOTHING (so every outstanding debt is released), and
+// it has retired everything the stream held at head.
+//
+// Clearing the set is the only thing that can free a debt no redelivery will
+// ever retire — a sequence Nak'd by a process whose consumer was then deleted
+// and recreated, or whose stream was purged — which would otherwise pin the
+// floor below it for the life of the process and make every reader refuse
+// forever. It is also what bounds the map: nothing else removes an entry that
+// is never redelivered.
+//
+// The two are applied under one hold of seqMu so no reader can see the cleared
+// set without the head that justifies it, or the head without the clear.
+func (b *Bootstrapper) reconcileToDrainedHead(head uint64) {
+	b.seqMu.Lock()
+	clear(b.owed)
+	if head > b.maxRetired {
+		b.maxRetired = head
+	}
+	b.seqMu.Unlock()
 }
 
 // retire records that seq will never be delivered again — applied, or

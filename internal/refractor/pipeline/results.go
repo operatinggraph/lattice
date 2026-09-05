@@ -372,7 +372,7 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		p.recordProjected()
 		p.writeAudit(ctx, auditPipeline, key, committedResults[i])
 	}
-	if withheld > 0 && len(committedResults) == 0 {
+	if withheld > 0 && len(committedResults) == 0 && len(terminalErrs) == 0 && !transientActorRetry {
 		// A pass that wrote nothing because everything was already current is
 		// still a pass that projected: it evaluated the event and confirmed the
 		// target correct, which is exactly what lastProjectedAt is asked about.
@@ -380,9 +380,17 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		// a tally — and skipped when a committed row already marked it, so the
 		// two paths cannot double-stamp the same instant.
 		//
-		// The audit trail and recordProjectionWrite stay silent: both describe
-		// a row landing in the target, and no row landed. Only the liveness
-		// clock has a true thing to say about a withheld pass.
+		// And only when the pass FAILED nothing. A batch that withheld some
+		// entries and DLQ'd or re-queued others landed no row and left work
+		// owed: stamping the liveness clock for it would report a projecting
+		// lens on exactly the passes an operator needs to see stop projecting.
+		// The claim is "this pass confirmed the target current", and a pass
+		// carrying a failure has confirmed no such thing.
+		//
+		// The audit trail and recordProjectionWrite stay silent whatever
+		// happens here: both describe a row landing in the target, and no row
+		// landed. Only the liveness clock has a true thing to say about a
+		// wholly-withheld, wholly-clean pass.
 		p.recordProjected()
 	}
 

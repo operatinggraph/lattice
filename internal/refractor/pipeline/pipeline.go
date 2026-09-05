@@ -163,12 +163,15 @@ type Pipeline struct {
 	// to one log line: the condition is a property of the lens's declaration,
 	// so it answers identically for every event this pipeline ever handles.
 	secureWithholdRefusalOnce sync.Once
-	// withholdReadWarned latches a logged read-back failure until a later read
-	// succeeds. A fan-out event calls the read once per reached actor —
-	// thousands on a wide one — so an unreadable target would otherwise write
-	// the same line thousands of times per event. The counter carries the rate;
-	// this only decides whether the line is emitted.
-	withholdReadWarned atomic.Bool
+	// withholdWarnedAt is when this pipeline last logged a read-back failure,
+	// nil until the first. A fan-out event calls the read once per reached
+	// actor — thousands on a wide one — so an unreadable target would
+	// otherwise write the same line once per actor. A TIME window rather than a
+	// success-clears-it latch: an intermittently failing target alternates
+	// success and failure, which would reset a latch on every actor and emit
+	// the whole flood anyway. The counter carries the rate; this decides only
+	// whether the line is emitted.
+	withholdWarnedAt atomic.Pointer[time.Time]
 
 	// plainReprojectLabels is the exhaustive set of vertex types this lens's
 	// patterns can bind (full.CompiledRule.ReferencedLabels), used by the
@@ -732,6 +735,16 @@ type Pipeline struct {
 	// frame is the whole answer when the admitted row set is empty, because the
 	// frame is then the retraction.
 	//
+	// One case stamps it without a write, and only one: a perEntry CDC pass
+	// that landed nothing because every entry it re-derived was already
+	// current, and that failed nothing (results.go). The lens evaluated the
+	// event and CONFIRMED the target correct, which is the question this clock
+	// answers; leaving it frozen through a converged steady state would make a
+	// healthy read-grant producer indistinguishable from a stalled one. It is
+	// stamped once for the pass, never once per withheld entry, and never for a
+	// pass that also DLQ'd or re-queued a result — a pass carrying a failure
+	// has confirmed nothing.
+	//
 	// TWO frames are NOT output and do not stamp this, for one reason:
 	//
 	//   - The standing healer's frames-only pass (ScopeNone). That pass re-asks
@@ -918,19 +931,25 @@ func (p *Pipeline) seedAppliedSeqFromAckFloor(ctx context.Context) {
 	p.progressMu.Unlock()
 }
 
-// recordProjected stamps the read-model's last-touch clock. Called only after
-// real output has reached the target — a successful adapter write
+// recordProjected stamps the read-model's last-touch clock. Called after real
+// output has reached the target — a successful adapter write
 // (Create/Update/Delete), a Hydrate, or a SIGNALLED personal reprojection's
 // keyset frame (a drain signal, an interest change, the healer's content
 // cycle), whose frame is the whole answer when the admitted row set is empty.
 //
-// Never on ack-and-skip, never on a write error, and never on a frame that is
-// not itself output: the standing healer's frames-only pass, and the CDC write
-// loop's frame, which every event publishes whatever its rows did. Stamping
-// either would turn this clock into a heartbeat for the pass or the event
-// rather than for the projection — see lastProjectedAt for why those two
-// exclusions are what keep LensProjectionStalled able to fire on a personal
-// lens at all.
+// And once more without a write, for the one pass that has the same thing to
+// say: a perEntry CDC batch that wrote nothing because every entry was already
+// current and that failed nothing (results.go's withheld arm). Confirming the
+// target correct is projecting; a converged read-grant producer that froze this
+// clock would read exactly like a stalled one.
+//
+// Never on ack-and-skip, never on a write error, never on a withheld pass that
+// also DLQ'd or re-queued a result, and never on a frame that is not itself
+// output: the standing healer's frames-only pass, and the CDC write loop's
+// frame, which every event publishes whatever its rows did. Stamping any of
+// those would turn this clock into a heartbeat for the pass or the event rather
+// than for the projection — see lastProjectedAt for why those exclusions are
+// what keep LensProjectionStalled able to fire on a personal lens at all.
 func (p *Pipeline) recordProjected() {
 	p.progressMu.Lock()
 	p.lastProjectedAt = time.Now()
@@ -1332,6 +1351,22 @@ func (p *Pipeline) currentAdapter() adapter.Adapter {
 	return p.adpt
 }
 
+// currentAdapterAndGeneration returns the active adapter together with the
+// generation that NAMES it, both read under one hold of adapterMu.
+//
+// The pair is what a caller needs whenever it will act on the adapter and then
+// hand a verdict about it to someone else. Reading the two separately looks
+// harmless and is not: HotReloadInto swaps the handle and raises the count
+// under this same lock, so a caller that captured adapter A and later asked for
+// the generation would be handed B's number for A's answer — and every
+// consumer checking "is this still the current generation" would then say yes
+// about the wrong target. Taken together they cannot disagree.
+func (p *Pipeline) currentAdapterAndGeneration() (adapter.Adapter, uint64) {
+	p.adapterMu.RLock()
+	defer p.adapterMu.RUnlock()
+	return p.adpt, p.adapterSwaps.Load() + 1
+}
+
 // SetRetryQueue configures the pipeline to use q for transient write failure retry.
 // maxAttempts is the maximum number of retry attempts before DLQ escalation (0 = no retry).
 // baseBackoff is the base exponential-backoff duration (doubles each attempt).
@@ -1436,7 +1471,8 @@ func (p *Pipeline) rebuildGeneration() uint64 {
 // generation — which is what lets EvalResult.UnchangedAt carry "no verdict" in
 // its zero value while a pipeline that has never reloaded still has one.
 func (p *Pipeline) adapterGeneration() uint64 {
-	return p.adapterSwaps.Load() + 1
+	_, generation := p.currentAdapterAndGeneration()
+	return generation
 }
 
 // RequireGuardedAdapter declares that every adapter this pipeline writes

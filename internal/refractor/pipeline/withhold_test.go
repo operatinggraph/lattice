@@ -6,10 +6,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -32,6 +34,11 @@ type recordingEntryAdapter struct {
 	// rowsErr, when set, fails the batched read-back — the fixture for "a read
 	// failure marks nothing and every entry is written".
 	rowsErr error
+
+	// upsertErrKey, when set, fails that key's upsert with a TERMINAL error —
+	// the fixture for "a pass that withheld some entries and lost others is not
+	// a projecting lens".
+	upsertErrKey string
 
 	// onListKeysPrefix, when set, runs at the start of every prefix listing.
 	// It is the interleaving hook the ordering pins drive: the listing is the
@@ -64,12 +71,33 @@ func (a *recordingEntryAdapter) ListKeysPrefix(ctx context.Context, prefix strin
 
 func (a *recordingEntryAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any, seq uint64) error {
 	a.recordUpsert(keys)
+	if err := a.injectedUpsertErr(keys); err != nil {
+		return err
+	}
 	return a.NatsKVAdapter.Upsert(ctx, keys, row, seq)
 }
 
 func (a *recordingEntryAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, seq uint64) (adapter.UpsertOutcome, error) {
 	a.recordUpsert(keys)
+	if err := a.injectedUpsertErr(keys); err != nil {
+		return adapter.UpsertOutcome{}, err
+	}
 	return a.NatsKVAdapter.UpsertWithOutcome(ctx, keys, row, seq)
+}
+
+// injectedUpsertErr returns the scripted terminal failure for upsertErrKey.
+// Both spellings of the write route through it, because the pipeline prefers
+// the outcome form and overriding only the plain one would leave the injection
+// silently bypassed.
+func (a *recordingEntryAdapter) injectedUpsertErr(keys map[string]any) error {
+	k, _ := keys["key"].(string)
+	a.mu.Lock()
+	failKey := a.upsertErrKey
+	a.mu.Unlock()
+	if failKey != "" && k == failKey {
+		return failure.Terminal(errors.New("injected: this entry can never be written"))
+	}
+	return nil
 }
 
 func (a *recordingEntryAdapter) Delete(ctx context.Context, keys map[string]any, seq uint64) error {
@@ -269,6 +297,59 @@ func TestWithholding_UnchangedEntryIsNotWritten(t *testing.T) {
 	require.Equal(t, substrate.Ack, decision)
 	_, upserts, _ = adpt.snapshot()
 	require.Equal(t, []string{"child.a2"}, upserts, "only the entry that changed is written")
+}
+
+// TestWithholding_AFailedPassDoesNotStampTheFreshnessClock is the boundary on
+// the one thing a wholly-withheld pass DOES move.
+//
+// Stamping lastProjectedAt for a pass that landed nothing is the claim "this
+// lens evaluated the event and confirmed the target current". A pass that also
+// DLQ'd a result has confirmed no such thing: it lost work, and the clock is
+// precisely what an operator watches to notice a lens that has stopped
+// projecting. So the stamp is gated on the pass being clean.
+//
+// The positive control runs first: the same fixture, nothing failing, does
+// stamp — so the assertion below is about the failure and not about a pass that
+// never withheld.
+func TestWithholding_AFailedPassDoesNotStampTheFreshnessClock(t *testing.T) {
+	ctx := context.Background()
+	p, adpt, _ := newWithholdFixture(t, "withhold-failed-pass", "a1", "a2", "a3")
+
+	first := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	_, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 90}, withholdActor, first, nil, ScopeAll())
+	require.NoError(t, err)
+
+	// CONTROL: a clean, wholly-withheld pass stamps the clock.
+	cleanBefore := p.Progress().LastProjectedAt
+	clean := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	for _, r := range clean {
+		require.True(t, p.honoursUnchanged(r))
+	}
+	_, err = p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 91}, withholdActor, clean, nil, ScopeAll())
+	require.NoError(t, err)
+	require.True(t, p.Progress().LastProjectedAt.After(cleanBefore),
+		"the control: a clean pass that withheld everything is a projecting lens")
+
+	// One entry now differs, so it is written — and its write fails
+	// terminally. The other two are still withheld.
+	require.NoError(t, adpt.NatsKVAdapter.Upsert(ctx, map[string]any{"key": "child.a3"},
+		map[string]any{"key": "child.a3", "id": "a3", "via": "something-else"}, 92))
+	adpt.mu.Lock()
+	adpt.upsertErrKey = "child.a3"
+	adpt.mu.Unlock()
+
+	failedBefore := p.Progress().LastProjectedAt
+	withheldBefore := p.EntriesWithheld()
+	mixed := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	decision, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 93}, withholdActor, mixed, nil, ScopeAll())
+	require.NoError(t, err)
+	require.Equal(t, substrate.Ack, decision, "a terminal failure is DLQ'd and acked, not redelivered")
+
+	require.Equal(t, withheldBefore+2, p.EntriesWithheld(),
+		"the pass really did withhold two entries — without that this proves nothing")
+	require.Equal(t, failedBefore, p.Progress().LastProjectedAt,
+		"a pass that landed nothing and LOST something has not confirmed the target current, "+
+			"so it must not report the lens as projecting")
 }
 
 // TestWithholding_TheProcessedLineReportsTheCount is T8's operator half. A
@@ -474,14 +555,96 @@ func TestWithholding_ABatchReadFailureWritesEverythingAndCounts(t *testing.T) {
 		require.True(t, p.honoursUnchanged(r), "a read failure is a rate, never a latch that disables the mechanism")
 	}
 
-	// And the latch is re-armed by that success, so the NEXT outage is
-	// reported rather than swallowed by the last one.
+	// An INTERMITTENT target — alternating success and failure — is the shape a
+	// success-clears-it latch gets wrong: it would re-arm on every success and
+	// emit one line per failing actor, which is the whole flood the limit
+	// exists to prevent. The window is a clock, so the alternation cannot reset
+	// it and the count stays at one.
+	for range 4 {
+		adpt.mu.Lock()
+		adpt.rowsErr = errors.New("injected: the target is intermittently unreadable")
+		adpt.mu.Unlock()
+		evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+
+		adpt.mu.Lock()
+		adpt.rowsErr = nil
+		adpt.mu.Unlock()
+		evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	}
+	require.Equal(t, failuresBefore+7, p.WithholdReadFailures(), "every failure is still counted")
+	require.Equal(t, 1, strings.Count(logs(), "unchanged-entry read-back failed"),
+		"a success does not re-arm the line: the bound is one per pipeline per minute, and "+
+			"an intermittently failing target must not talk its way past it one actor at a time")
+
+	// The window is compared against a stored instant, so moving that instant
+	// back is what a later minute looks like — no sleep, and no clock the
+	// production path does not already read.
+	long := time.Now().Add(-2 * withholdWarnInterval)
+	p.withholdWarnedAt.Store(&long)
 	adpt.mu.Lock()
 	adpt.rowsErr = errors.New("injected: the target is unreadable again")
 	adpt.mu.Unlock()
 	evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
 	require.Equal(t, 2, strings.Count(logs(), "unchanged-entry read-back failed"),
-		"a successful read clears the latch, so a later outage is its own report")
+		"once the window has passed, a still-failing target is reported again rather than "+
+			"going quiet forever")
+}
+
+// TestWithholding_AHotReloadInsideTheEvaluationWindowInvalidatesTheVerdict is
+// the interleaving the generation exists for, and the one a
+// swap-between-passes test cannot reach.
+//
+// The window is not the gap between evaluation and write: it is INSIDE the
+// evaluation. multiEntryRetractions captures the adapter, then does a prefix
+// listing and one liveness read per dropped key, and only then compares. A hot
+// reload landing anywhere in there swaps the installed adapter while the
+// comparison is still running against the captured one — so a verdict stamped
+// with the generation read AFTER those reads would carry the NEW adapter's
+// number for a comparison made against the OLD adapter's contents, and the
+// write loop would honour it against a target holding nothing.
+//
+// The reload is driven from inside the prefix listing, which is exactly that
+// interval. The entry must be written on the new target.
+func TestWithholding_AHotReloadInsideTheEvaluationWindowInvalidatesTheVerdict(t *testing.T) {
+	ctx := context.Background()
+	p, adpt, _ := newWithholdFixture(t, "withhold-inwindow-reload", "a1", "a2")
+
+	// The old target holds both entries, so a comparison against IT would find
+	// them unchanged — which is what makes the verdict wrong for the new one.
+	first := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	_, err := p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 80}, withholdActor, first, nil, ScopeAll())
+	require.NoError(t, err)
+	_, upserts, _ := adpt.snapshot()
+	require.Len(t, upserts, 2, "the control: the old target really does hold both entries")
+
+	replacementKVs := newTestKVs(t, "REPLACEMENT")
+	replacementInner, err := adapter.New(replacementKVs[0], []string{"key"}, adapter.DeleteModeSoft)
+	require.NoError(t, err)
+	replacementInner.SetGuarded(true)
+	replacement := &recordingEntryAdapter{NatsKVAdapter: replacementInner}
+
+	// The swap lands DURING the evaluation, at the prefix listing — after the
+	// adapter has been captured and before the comparison it feeds.
+	var once sync.Once
+	adpt.mu.Lock()
+	adpt.onListKeysPrefix = func() {
+		once.Do(func() { require.NoError(t, p.HotReloadInto(replacement)) })
+	}
+	adpt.mu.Unlock()
+
+	second := evaluateWithhold(t, p, "2026-05-15T10:00:00Z")
+	require.Len(t, second, 2)
+	for _, r := range second {
+		require.False(t, p.honoursUnchanged(r),
+			"the comparison ran against the adapter the evaluation captured, and that adapter "+
+				"is no longer installed — the verdict cannot be honoured against its replacement")
+	}
+
+	_, err = p.writeResults(ctx, p.ruleState(), substrate.Message{Sequence: 81}, withholdActor, second, nil, ScopeAll())
+	require.NoError(t, err)
+	_, newUpserts, _ := replacement.snapshot()
+	require.ElementsMatch(t, []string{"child.a1", "child.a2"}, newUpserts,
+		"every entry lands on the new target, which held none of them")
 }
 
 // TestHonoursUnchanged_RefusesShapesThatMayNeverBeSkipped pins the belt on the
