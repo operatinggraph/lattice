@@ -8,6 +8,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // Front-desk unconfined grant for ClinicCreateAccount, ClinicDebitAccount,
@@ -67,6 +68,8 @@ func TestFrontDesk_ClinicCreateAccountUnconfined(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "patient",
 		Payload:       json.RawMessage(`{"fullName":"Front Desk Test Patient"}`),
+		ContextHint: &processor.ContextHint{
+			Enumerations: testutil.DeclaredEnumerations("CreatePatient", ledFDActorKey, clinicdomain.OpMetas())},
 	}
 	testutil.PublishOp(t, conn, patientEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
