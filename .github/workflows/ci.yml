@@ -50,10 +50,26 @@ on:
 #                         summed per package, never from memory or from LOC —
 #                         a slow test added later skews this and re-splitting
 #                         off fresh measurements is the fix, not a bigger
-#                         timeout). Each shard sums to ~243s of measured
-#                         per-package elapsed time.                 (each a Postgres
+#                         timeout). unit-1 was still measurably the shard pole
+#                         (~200-210s vs ~130-150s for unit-2/3/4) because
+#                         internal/refractor alone (its own package, not
+#                         counting its Postgres-gated adapter/pipeline/
+#                         ruleengine subtrees) measured ~150s solo — see
+#                         unit-refractor below, which now carries it.        (each a Postgres
 #                                                                     service container;
 #                                                                     otherwise no Docker,
+#                                                                     embedded NATS)
+#   unit-refractor      — internal/refractor/... alone (the package that made
+#                         unit-1 the pole), split off the same way natsperm
+#                         was split off unit-4: it shares no JetStream/file
+#                         state with unit-1's remaining glob, so isolating it
+#                         lets both halves run at their own pace instead of
+#                         one dominating the other's job. Carries its own
+#                         Postgres service (structural_pause_recovery_e2e_test.go
+#                         + the adapter/pipeline/ruleengine/full subtrees) and
+#                         the isolated p99 latency gate step (unchanged
+#                         reasoning, moved verbatim from unit-1).    (Postgres
+#                                                                     service container;
 #                                                                     embedded NATS)
 #   unit-natsperm       — internal/natsperm alone, outside the unit-1..unit-4
 #                         globs, so that package alone can take a higher
@@ -534,22 +550,57 @@ jobs:
         run: make test-control-plane-authz
 
   # Shard package globs (also referenced verbatim by unit-shard-coverage below —
-  # keep the four in sync; the coverage job fails CI if they ever drift). One
-  # package, internal/natsperm, is deliberately absent from all four globs and
-  # runs as its own job, unit-natsperm, for its -parallel setting (see there);
-  # the coverage job lists it so the union still accounts for every package.
-  # All four carry their own Postgres service (not the docker-compose stack)
+  # keep the four in sync; the coverage job fails CI if they ever drift). Two
+  # packages are deliberately absent from all four globs and run as their own
+  # jobs instead: internal/natsperm (unit-natsperm, for its own -parallel
+  # setting — see there) and internal/refractor (unit-refractor, the package
+  # that made unit-1 the shard pole — see the jobs comment above); the
+  # coverage job lists both so the union still accounts for every package.
+  # unit-2/3/4 carry their own Postgres service (not the docker-compose stack)
   # so whichever shard an RLS integration test (skipIfNoPostgres) lands in —
-  # today that's internal/refractor's adapter + ruleengine/full subtrees,
-  # cmd/loftspace-app, internal/gateway, packages/clinic-reminders — it runs
-  # instead of silently skipping; they used to run under the now-retired
-  # Gate 3 stack-gates step, the only place POSTGRES_TEST_DSN was previously
-  # set. Weight-balanced by MEASURED `go test -json` per-package elapsed time
-  # (~243s summed per shard), not LOC — LOC tracks package size, not the
-  # I/O-bound wall-clock cost that actually determines the job's runtime, so
-  # a prior LOC-balanced 3-way split still left one shard as the pole. See the
-  # jobs comment above for the re-derive command; never rebalance from memory.
+  # today that's cmd/loftspace-app, internal/gateway, packages/clinic-reminders
+  # (internal/refractor's own Postgres-gated tests moved with it to
+  # unit-refractor) — it runs instead of silently skipping; they used to run
+  # under the now-retired Gate 3 stack-gates step, the only place
+  # POSTGRES_TEST_DSN was previously set. unit-1 carries no Postgres service:
+  # none of its remaining glob has a Postgres-gated test. Weight-balanced by
+  # MEASURED `go test -json` per-package elapsed time, not LOC — LOC tracks
+  # package size, not the I/O-bound wall-clock cost that actually determines
+  # the job's runtime, so a prior LOC-balanced 3-way split still left one
+  # shard as the pole. See the jobs comment above for the re-derive command;
+  # never rebalance from memory.
   unit-1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Run shard-1 tests (unit + integration)
+        # -p 4: up to four test packages run concurrently. Every embedded
+        # NATS+JetStream fixture binds a random port and owns a private
+        # StoreDir under jsstore.Dir(t), so concurrent packages share no
+        # JetStream file state. No Postgres service here: none of this glob's
+        # packages carry a POSTGRES_TEST_DSN-gated test (internal/refractor,
+        # the one package here that did, is now unit-refractor's alone —
+        # see the jobs comment above).
+        run: >-
+          go test -count=1 -p 4 -timeout 10m
+          ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/...
+          ./internal/chronicler/...
+          ./internal/identityceremony/...
+          ./internal/pkgregistry/...
+          ./internal/testutil/... ./internal/weaver/...
+          ./packages/console-operator/... ./packages/front-desk/...
+          ./packages/privacy-operator-grant/...
+          ./packages/rbac-domain/...
+          ./packages/wellness-reminders/...
+
+  unit-refractor:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -574,33 +625,23 @@ jobs:
           go-version: "1.26"
           check-latest: true
 
-      - name: Run shard-1 tests (unit + integration)
-        # -p 4: up to four test packages run concurrently. Every embedded
-        # NATS+JetStream fixture binds a random port and owns a private
-        # StoreDir under jsstore.Dir(t), so concurrent packages share no
-        # JetStream file state — Postgres integration tests are the exception,
-        # sharing the service container above (unique per-test table/role names
-        # keep them -p-parallel-safe, per their own doc comments).
+      - name: Run internal/refractor tests (the package that made unit-1 the pole)
+        # Split off unit-1 (see the jobs comment above): this package alone
+        # measured ~150s of unit-1's ~200-210s, well above unit-2/3/4's
+        # ~130-150s. Its own Postgres-gated test (structural_pause_recovery_
+        # e2e_test.go) plus the adapter/pipeline/ruleengine/full subtrees'
+        # RLS + audit integration tests need the service container above.
         # -skip TestRefractor_E2E_P99: that test asserts an absolute wall-clock
         # latency budget (NFR-P3, 500ms); run inside this -p 4 batch it shares
-        # the runner's CPU with up to three other packages (weaver, cafe-domain,
-        # privacy-base and friends routinely land in the same slot) and the
-        # measurement reads contention, not regression — CI run 31288862556
-        # timed out mid-assertion when the NATS connection it was measuring
-        # against got starved and closed. It runs alone in the step below.
+        # the runner's CPU with its own subpackages and the measurement reads
+        # contention, not regression — CI run 31288862556 timed out
+        # mid-assertion when the NATS connection it was measuring against got
+        # starved and closed. It runs alone in the step below.
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m -skip '^TestRefractor_E2E_P99$'
-          ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/...
-          ./internal/chronicler/...
-          ./internal/identityceremony/...
-          ./internal/pkgregistry/... ./internal/refractor/...
-          ./internal/testutil/... ./internal/weaver/...
-          ./packages/console-operator/... ./packages/front-desk/...
-          ./packages/privacy-operator-grant/...
-          ./packages/rbac-domain/...
-          ./packages/wellness-reminders/...
+          ./internal/refractor/...
 
       - name: Run Refractor E2E p99 latency gate alone (NFR-P3, isolated from -p4 contention)
         # Job steps run sequentially, so this has the runner to itself: the
@@ -816,15 +857,16 @@ jobs:
         # A fast (no Docker) guard against silent coverage loss: a package
         # added later that isn't sorted into any shard's glob list above
         # would otherwise never run in CI again. The list below is unit-1..
-        # unit-4's four globs plus internal/natsperm, which runs in its own
-        # job, unit-natsperm, rather than inside any shard's glob.
+        # unit-4's four globs plus internal/natsperm and internal/refractor,
+        # which run in their own jobs (unit-natsperm, unit-refractor) rather
+        # than inside any shard's glob.
         run: |
           go list ./... | sort -u > /tmp/all.txt
           go list \
             ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/... \
             ./internal/chronicler/... \
             ./internal/identityceremony/... \
-            ./internal/pkgregistry/... ./internal/refractor/... \
+            ./internal/pkgregistry/... \
             ./internal/testutil/... ./internal/weaver/... \
             ./packages/console-operator/... ./packages/front-desk/... \
             ./packages/privacy-operator-grant/... \
@@ -854,6 +896,7 @@ jobs:
             ./internal/modelrunner/... ./internal/descriptorform/... \
             ./internal/guardgrammar/... ./internal/healthkv/... ./internal/jsstore/... \
             ./internal/lenstest/... ./internal/natsperm/... ./internal/opstatus/... \
+            ./internal/refractor/... \
             ./internal/spike/... ./internal/starlarksandbox/... ./internal/substrate/... \
             ./packages/clinic-domain/... ./packages/clinic-reminders/... \
             ./packages/control-authz/... ./packages/location-domain/... \
