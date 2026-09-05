@@ -565,6 +565,45 @@ func TestHolderTypeRebuildTargets(t *testing.T) {
 	}
 }
 
+// TestHolderTypeRebuildTargets_ADeclaredPersonalLensIsLabelledWithoutAPipeline
+// pins the fallback the label's SAFE direction depends on.
+//
+// The consumer refuses a Personal target and withholds the class-key erasure
+// attestation, so `Personal: false` is the answer that ADMITS. The running
+// adapter is the primary reading — an INTO-only reload can move a lens onto a
+// personal target its activation spec never named — but where there is no
+// running pipeline to ask, the answer falls back to what the lens declared
+// itself to be at activation, never to the admitting default.
+func TestHolderTypeRebuildTargets_ADeclaredPersonalLensIsLabelledWithoutAPipeline(t *testing.T) {
+	registry := map[string]*pipelineEntry{
+		"personal-clinical-notes": {
+			personal: true,
+			secureColumns: []lens.SecureColumn{
+				{Column: "note", HolderTypes: []string{"retentionclass"}},
+			},
+		},
+		"stored-clinical-notes": {
+			secureColumns: []lens.SecureColumn{
+				{Column: "note", HolderTypes: []string{"retentionclass"}},
+			},
+		},
+	}
+
+	labelled := map[string]bool{}
+	for _, tgt := range holderTypeRebuildTargets(registry, "retentionclass") {
+		labelled[tgt.RuleID] = tgt.Personal
+	}
+	if len(labelled) != 2 {
+		t.Fatalf("both declarers must be enumerated, got %v", labelled)
+	}
+	if !labelled["personal-clinical-notes"] {
+		t.Fatal("a lens declared personal must be labelled Personal even with no running pipeline to ask")
+	}
+	if labelled["stored-clinical-notes"] {
+		t.Fatal("a lens that is neither declared nor running personal must not be labelled Personal")
+	}
+}
+
 // An empty registry, or a holder type nothing declares, yields no targets —
 // which the consumer treats as "no read model holds this plaintext" and attests
 // on. It must therefore never be an error or a panic.

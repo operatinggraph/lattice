@@ -41,7 +41,7 @@ func TestSweepPass_ASuppressedTickRecordsWhyAndDoesNotAgeTheClock(t *testing.T) 
 	require.False(t, firstPassAt.IsZero(), "a completed pass stamps the clock")
 	require.Empty(t, sw.Status().Suppression)
 
-	p.rebuildInFlight.Store(true)
+	p.rebuildWindows.Store(1)
 	sw.pass(context.Background())
 
 	st := sw.Status()
@@ -85,11 +85,11 @@ func TestSweepPass_ATickThatRunsClearsAStaleSuppression(t *testing.T) {
 	p := newSweepPipeline(t, &listingAdapter{}, 10)
 	sw := p.Sweeper()
 
-	p.rebuildInFlight.Store(true)
+	p.rebuildWindows.Store(1)
 	sw.pass(context.Background())
 	require.NotEmpty(t, sw.Status().Suppression)
 
-	p.rebuildInFlight.Store(false)
+	p.rebuildWindows.Store(0)
 	sw.pass(context.Background())
 	require.Empty(t, sw.Status().Suppression)
 	require.False(t, sw.Status().LastPassAt.IsZero())

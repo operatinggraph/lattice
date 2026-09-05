@@ -9,9 +9,11 @@ package classkeyshredded
 // decision table.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -370,4 +372,76 @@ func TestHandle_TheNotRegisteredBudgetSurvivesAnExhaustedReadinessBudget(t *test
 
 	assert.Equal(t, substrate.NakWithDelay, dec,
 		"an unregistered lens must still get its own retries after readiness used up its own")
+}
+
+// newLoggingHarness is newHarness with the handler's log captured, for a
+// refusal whose whole operator-facing surface is the line it writes.
+func newLoggingHarness(t *testing.T, actorKey string) (*harness, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	h := &harness{svc: control.NewService()}
+	h.mgr = New(Config{
+		Control:  h.svc,
+		ActorKey: actorKey,
+		Logger:   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
+	h.mgr.SetRegistryReady(func(context.Context, string) error { return nil })
+	return h, &logs
+}
+
+// A personal lens declaring a destroyed holder's type is REFUSED, and the
+// refusal takes the attestation with it.
+//
+// The rebuild this package delivers erasures through works by replaying every
+// row and upserting null over the plaintext. A personal lens publishes nothing
+// at all while it replays, so that rebuild would return cleanly having written
+// nothing — the destruction would attest over plaintext still on the SYNC
+// stream and on every device holding it, which is the compliant-looking
+// survival this whole package exists to prevent. Nothing in the corpus declares
+// a secure column on a personal lens today, so the refusal is the fail-closed
+// answer for the day one does.
+func TestHandle_APersonalTargetIsRefusedAndWithholdsTheAttestation(t *testing.T) {
+	h, logs := newLoggingHarness(t, attestingActor)
+	// Registered, so the refusal is not the not-registered arm wearing another
+	// name: this lens's rebuilder is present and would have run.
+	h.register(lensSecure, nil)
+	h.register(lensOther, nil)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget {
+		return []RebuildTarget{{RuleID: lensSecure, Personal: true}, {RuleID: lensOther}}
+	})
+
+	dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+	// The harness carries an ActorKey (so the submit is enabled) and no Conn (so
+	// a submit panics on the nil connection), which is what makes reaching Ack
+	// the assertion that nothing was attested.
+	assert.Equal(t, substrate.Ack, dec)
+	assert.Equal(t, []string{lensOther}, h.built,
+		"the personal target is never rebuilt, and the refusal does not skip the lenses that can be")
+	assert.Empty(t, h.failed)
+	assert.Empty(t, h.paused,
+		"the lens is not at fault — the delivery mechanism cannot reach its devices — so pausing it would take an unrelated read model down")
+	assert.Contains(t, logs.String(), ErrPersonalTargetErasureUnsupported.Error(),
+		"the operator is told which lens still holds the plaintext, and why")
+	assert.Contains(t, logs.String(), lensSecure)
+}
+
+// A refused target is refused whatever else the handler is doing: an exhausted
+// budget must not relabel it as a lens the clock merely ran out on, because
+// those are answered differently — one is retried on the next destruction, this
+// one can never succeed until the delivery mechanism changes.
+func TestHandle_APersonalTargetIsRefusedAheadOfTheHandlerBudget(t *testing.T) {
+	h, logs := newLoggingHarness(t, attestingActor)
+	h.mgr.cfg.HandlerBudget = -time.Second // every target is already over budget
+	h.register(lensSecure, nil)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget {
+		return []RebuildTarget{{RuleID: lensSecure, Personal: true}}
+	})
+
+	dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+	assert.Equal(t, substrate.Ack, dec)
+	assert.Empty(t, h.built)
+	assert.Contains(t, logs.String(), ErrPersonalTargetErasureUnsupported.Error())
+	assert.NotContains(t, logs.String(), "handler budget exhausted")
 }

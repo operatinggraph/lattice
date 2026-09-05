@@ -300,7 +300,7 @@ func TestSweepPass_SuppressedWhileRebuilding(t *testing.T) {
 	adpt := &listingAdapter{}
 	p := newSweepPipeline(t, adpt, 10)
 	writeAnchor(t, p, sweepActorA, false)
-	p.rebuildInFlight.Store(true)
+	p.rebuildWindows.Store(1)
 
 	p.Sweeper().pass(context.Background())
 	require.Empty(t, adpt.upserts)

@@ -291,6 +291,46 @@ func TestEvalCapabilityLenses_AWedgedRebuildLosesTheExemption(t *testing.T) {
 	}
 }
 
+func TestEvalCapabilityLenses_ARebuildThatNeverObservedACountWedgesFromItsOpen(t *testing.T) {
+	// The watcher's poll of the un-drained count can fail forever — a consumer
+	// that never becomes readable — and that path records no progress on purpose,
+	// because the retry is unbounded. The clock the rebuild is judged on is
+	// therefore its WINDOW OPEN (pipeline.beginRebuild), never a first successful
+	// poll: a zero timestamp reads as unknown here, so a rebuild that observed
+	// nothing at all would be exempt for as long as it kept failing. It is the
+	// longest a personal lens can be silent, since that silence lasts exactly as
+	// long as the window.
+	start := time.Now()
+	cur := sweepSnap("capability", start, 0, "")
+	h := &LatticeHeartbeater{CapabilityLensProvider: func() []CapabilityLensStatus {
+		return []CapabilityLensStatus{cur}
+	}}
+	h.evalCapabilityLenses(start)
+
+	// Inside the window the rebuild is slow, not stuck.
+	early := start.Add(stallWindow / 2)
+	cur = sweepSnap("capability", early, stallWindow/2, "rebuild in flight")
+	cur.Status = "rebuilding"
+	cur.RebuildProgressAt = start // opened here; no poll has ever returned a count
+	if _, wedged := evalRebuildWedged(cur, early, stallWindow); wedged {
+		t.Fatal("a rebuild inside the staleness window is slow, not wedged")
+	}
+
+	at := start.Add(stallWindow * 4)
+	cur = sweepSnap("capability", at, stallWindow*4, "rebuild in flight")
+	cur.Status = "rebuilding"
+	cur.RebuildProgressAt = start
+	_, issues := h.evalCapabilityLenses(at)
+
+	is, ok := issueByCode(issues, issueCapabilitySweepStalled)
+	if !ok {
+		t.Fatalf("expected %s, got %v", issueCapabilitySweepStalled, issues)
+	}
+	if is.Severity != "error" {
+		t.Fatalf("severity = %q, want error — a window nothing has ever reported on is the wedge, not the exemption", is.Severity)
+	}
+}
+
 func TestEvalCapabilityLenses_AFinishedRebuildPublishesNoStaleCount(t *testing.T) {
 	// The last count a finished rebuild ended on is not a fact about the lens
 	// now; publishing it would read as a rebuild permanently stuck there.

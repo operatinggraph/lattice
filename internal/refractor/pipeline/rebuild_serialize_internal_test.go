@@ -98,8 +98,9 @@ func TestRebuildAndWait_WaitsOutARebuildStartedElsewhere(t *testing.T) {
 }
 
 // Concurrent callers queue rather than overlapping. Without the per-pipeline
-// serialization both would reach Rebuild, and Rebuild stores rebuildInFlight
-// unconditionally (not by CAS), so the second would clobber the first's window.
+// serialization both would reach Rebuild, and each rebuild resets the consumer
+// under the other, so the second would replay over a rescan the first is still
+// attesting to.
 func TestRebuildAndWait_SerializesConcurrentCallers(t *testing.T) {
 	ad := newBlockingTruncAdapter()
 	p, err := New("rule-rebuild-serial", "nats_kv", "CORE", nil, nil, ad, nil)
@@ -278,7 +279,6 @@ func TestAbandonRebuild_DoesNotClearANewerRebuildsInFlightState(t *testing.T) {
 	p := newRebuildWaitPipeline(t)
 	older := p.beginRebuild()
 	newer := p.beginRebuild() // the newer rebuild now owns the pipeline-wide state
-	p.rebuildInFlight.Store(true)
 
 	require.Error(t, p.abandonRebuild(context.Background(), older, assert.AnError))
 
@@ -295,14 +295,13 @@ func TestAbandonRebuild_DoesNotClearANewerRebuildsInFlightState(t *testing.T) {
 // abandon path, the watcher's deferred exit, its drained arm, and the unwatched
 // branch — so the ownership test belongs to it rather than to any one caller,
 // and the watcher's two gates have no coverage of their own without this. A
-// non-owner releases only its OWN waiters: the flag it does not own stays set,
-// because that flag is what keeps the convergence sweep suppressed while the
-// newer rescan drains.
+// non-owner releases only its OWN waiters and closes only its OWN window: the
+// newer rebuild's window stays open, and that is what keeps the convergence
+// sweep suppressed while the newer rescan drains.
 func TestEndRebuild_ANonOwnerReleasesItsWaitersWithoutClearingTheFlag(t *testing.T) {
 	p := newRebuildWaitPipeline(t)
 	older := p.beginRebuild()
 	newer := p.beginRebuild()
-	p.rebuildInFlight.Store(true)
 
 	assert.False(t, p.endRebuild(older), "the older rebuild no longer owns the pipeline-wide state")
 	assert.True(t, p.RebuildInFlight(),

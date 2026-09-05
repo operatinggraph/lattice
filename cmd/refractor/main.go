@@ -87,6 +87,13 @@ type pipelineEntry struct {
 	reporter      *health.Reporter
 	canonicalName string // keyed under lensLatency in heartbeats.
 	authPlane     bool   // projects the capability-kv authorization surface (projection.IsAuthPlane).
+	// personal is the DECLARED half of "this lens publishes to devices"
+	// (projection.IsPersonalLens over the activated rule), read alongside the
+	// running pipeline's adapter by publishesToDevices. The declaration is what
+	// makes the answer safe where the pipeline is absent: on the class-key
+	// erasure path a "no" ADMITS the target, so an entry that has not yet been
+	// activated must still answer for what its spec says it is.
+	personal bool
 	// guarded reports whether the adapter the RUNNING pipeline was activated
 	// with enforces the §6.2 projection-write guard, and the fields under it
 	// are the surface the lens writes as its spec declares it. A guarded lens
@@ -339,17 +346,46 @@ func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.Nulli
 // instead would make an erasure's completeness depend on a parser agreeing with
 // a declaration. Pure over its input so it is testable without a live registry
 // mutex; the caller holds the lock, exactly as capReadShredTargets is used.
+//
+// A lens that publishes to devices is enumerated and LABELLED, never omitted:
+// the consumer refuses such a target and withholds the attestation, where
+// dropping it here would leave the destruction reading as complete over
+// plaintext its devices still hold.
 func holderTypeRebuildTargets(registry map[string]*pipelineEntry, holderType string) []classkeyshredded.RebuildTarget {
 	var targets []classkeyshredded.RebuildTarget
 	for id, entry := range registry {
 		for _, col := range entry.secureColumns {
 			if slices.Contains(col.HolderTypes, holderType) {
-				targets = append(targets, classkeyshredded.RebuildTarget{RuleID: id})
+				targets = append(targets, classkeyshredded.RebuildTarget{
+					RuleID:   id,
+					Personal: entry.publishesToDevices(),
+				})
 				break
 			}
 		}
 	}
 	return targets
+}
+
+// publishesToDevices reports whether this entry writes to a per-actor subject
+// stream devices subscribe to — either because the lens was activated as one
+// (projection.IsPersonalLens over its rule) or because the adapter it is writing
+// through right now is a per-actor publisher.
+//
+// Both, and the union is deliberate. The RUNNING adapter has to be asked because
+// an INTO-only reload can move a lens onto a personal target the spec this entry
+// was built from never named. The DECLARED fact has to be asked because the
+// running one is unavailable on a nil pipeline — the unit fixtures that build
+// entries out of the declared fields, and any entry not yet activated.
+//
+// Which way an absent answer resolves is the whole point. This label reaches the
+// class-key erasure attestation, where FALSE is the ADMITTING answer: a target
+// labelled non-personal is rebuilt and attested on, while a personal one is
+// refused because its plaintext also sits on devices no rebuild reaches. So an
+// unavailable running answer must fall back to what the lens declares itself to
+// be, never to the admitting default.
+func (e *pipelineEntry) publishesToDevices() bool {
+	return e.personal || (e.pipeline != nil && e.pipeline.PublishesToDevices())
 }
 
 // validatePerEntryCapReadAdapter refuses a PerEntry cap-read.* lens whose

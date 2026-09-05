@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,10 +118,12 @@ func TestRebuildProgress_AdvancesOnlyWhenTheBacklogShrinks(t *testing.T) {
 	assert.True(t, drained.After(first), "a shrinking backlog advances the progress clock")
 }
 
-// TestRebuild_ClearsThePreviousRebuildsProgress: a finished rebuild's timestamp
-// must not be inherited by the next one, or a fresh rebuild is judged on a clock
-// it never started.
-func TestRebuild_ClearsThePreviousRebuildsProgress(t *testing.T) {
+// TestRebuild_RebaselinesTheProgressClockOnItsOwnWindow: a finished rebuild's
+// timestamp must not be inherited by the next one, or a fresh rebuild is judged
+// on a clock it never started — and the fresh clock starts at the OPEN rather
+// than at zero, because zero reads as "unknown, not wedged" and would leave a
+// rebuild whose watcher only errors permanently unjudgeable.
+func TestRebuild_RebaselinesTheProgressClockOnItsOwnWindow(t *testing.T) {
 	ad := &guardedTruncAdapter{guarded: true}
 	p, err := New("rule-rebuild-progress-reset", "nats_kv", "CORE", nil, nil, ad, nil)
 	require.NoError(t, err)
@@ -132,6 +135,29 @@ func TestRebuild_ClearsThePreviousRebuildsProgress(t *testing.T) {
 	require.Error(t, p.Rebuild(context.Background(), false)) // no supervisor
 	outstanding, after := p.RebuildProgress()
 
-	assert.Zero(t, outstanding)
-	assert.True(t, after.IsZero(), "a new rebuild starts with no progress record of its own")
+	assert.Zero(t, outstanding, "the previous rebuild's backlog is not this one's")
+	assert.True(t, after.After(before), "the clock restarts at this rebuild's own window")
+}
+
+// TestBeginRebuild_StampsTheProgressClockSoASilentWindowIsJudgeable is the same
+// invariant at the seam that matters: the window a personal lens is silent
+// through is opened here, and the completion watcher records NO progress on a
+// poll that errors — deliberately, since that retry is unbounded. With a zero
+// timestamp health.evalRebuildWedged reads the whole window as unknown, so a
+// watcher erroring forever would keep the lens silent with nothing surfacing it.
+func TestBeginRebuild_StampsTheProgressClockSoASilentWindowIsJudgeable(t *testing.T) {
+	p, err := New("rule-rebuild-window-clock", "nats_kv", "CORE", nil, nil, &guardedTruncAdapter{}, nil)
+	require.NoError(t, err)
+	_, unstarted := p.RebuildProgress()
+	require.True(t, unstarted.IsZero(), "no rebuild has started, so there is nothing to judge")
+
+	opened := time.Now()
+	sig := p.beginRebuild()
+
+	outstanding, at := p.RebuildProgress()
+	assert.Zero(t, outstanding, "no poll has observed a count yet")
+	require.False(t, at.IsZero(), "a started rebuild is never unknown")
+	assert.False(t, at.Before(opened.Add(-time.Second)), "the clock is this window's own")
+
+	p.endRebuild(sig)
 }

@@ -167,6 +167,17 @@ type PersonalSweeper struct {
 	lastContentCycleStart time.Time
 	contentCycle          bool
 
+	// contentCycleRequested is a standing ask for the NEXT cycle to carry
+	// content, whatever the clock says — RequestContentCycle's whole state.
+	//
+	// LIFETIME: set by a caller, CONSUMED by the latch at ensurePopulation's
+	// re-list (cleared there whether or not the clock had already decided the
+	// same way), so one request buys exactly one content cycle. It does not
+	// survive the process, and does not need to: a restart makes the first
+	// cycle a content cycle on the zero lastContentCycleStart anyway, which is
+	// strictly more than the request was asking for.
+	contentCycleRequested bool
+
 	// now is the clock the content-cycle latch reads. Defaulted to time.Now by
 	// NewPersonalSweeper; a test replaces it to cross a day's interval without
 	// waiting one out.
@@ -239,6 +250,32 @@ func (s *PersonalSweeper) Nudge() {
 	case s.nudge <- struct{}{}:
 	default:
 	}
+}
+
+// RequestContentCycle asks for the next cycle this sweeper starts to republish
+// every swept actor's rows rather than the authoritative frame alone. It
+// satisfies pipeline.RebuildCompleteSink.
+//
+// One request buys exactly ONE content cycle: the flag is consumed by the latch
+// at ensurePopulation's re-list, so a burst of requests — fifteen personal
+// lenses rebuilt by one package install — costs one cycle between them, and the
+// cycle after it returns to frames-only on the ordinary clock.
+//
+// It does NOT interrupt the cycle in progress. A cycle's kind is latched where
+// the cycle starts and read unchanged by every pass of it, precisely so the
+// population cannot be half republished; a request arriving mid-cycle is
+// therefore honoured by the next one, within one cycle length rather than within
+// PersonalContentHealInterval. That is the whole gain being asked for.
+//
+// Nil-safe: a deployment with no standing healer has nowhere to record the ask,
+// and a caller must not have to know whether it wired one.
+func (s *PersonalSweeper) RequestContentCycle() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.contentCycleRequested = true
+	s.mu.Unlock()
 }
 
 // SetBounds overrides the per-tick batch and the tick interval. Zero or
@@ -609,14 +646,23 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) (populated, read
 	// PersonalContentHealInterval and at most once per cycle. Batch and interval
 	// are read in this same locked section as the latch they feed, so a
 	// concurrent SetBounds cannot land between the projection and the decision.
+	//
+	// Three ways in, one latch. The CLOCK is the standing backstop; the zero
+	// lastContentCycleStart is boot, which has sent nothing yet; and an explicit
+	// REQUEST is a caller that knows the devices are behind and cannot wait a
+	// day for the clock to say so — a rebuild whose replay published nothing.
+	// The request is consumed here, at the same site and under the same lock,
+	// so it buys exactly one cycle whether or not the clock had already agreed.
 	batch, interval := s.batch, s.interval
 	cycleLength := projectedCycleLength(len(ids), batch, interval)
 	firstSinceBoot := s.lastContentCycleStart.IsZero()
+	requested := s.contentCycleRequested
+	s.contentCycleRequested = false
 	var elapsed time.Duration
 	if !firstSinceBoot {
 		elapsed = s.now().Sub(s.lastContentCycleStart)
 	}
-	contentCycle := firstSinceBoot || elapsed+cycleLength >= PersonalContentHealInterval
+	contentCycle := firstSinceBoot || requested || elapsed+cycleLength >= PersonalContentHealInterval
 	s.contentCycle = contentCycle
 	if contentCycle {
 		s.lastContentCycleStart = s.now()
@@ -630,6 +676,9 @@ func (s *PersonalSweeper) ensurePopulation(ctx context.Context) (populated, read
 		since := elapsed.String()
 		if firstSinceBoot {
 			since = "first since boot"
+		}
+		if requested {
+			since += " (requested)"
 		}
 		slog.Info("grantchange: personal sweep is starting a CONTENT cycle — this cycle republishes every swept actor's rows; the cycles between it publish the authoritative frame alone",
 			"elapsedSinceLastContentCycle", since,

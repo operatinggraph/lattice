@@ -552,6 +552,31 @@ func PersonalDerivationRuleRefusal(cr ruleengine.CompiledRule) string {
 	return personalDerivationRuleRefusal(fullCR)
 }
 
+// ruleSetPersonalClockRefusal is PersonalDerivationRuleRefusal over a multi-walk
+// lens's WHOLE branch set — the value published into
+// ruleState.personalClockRefusal.
+//
+// One branch is enough, exactly as one is enough for the label sigil
+// (ruleSetExpandsALabelSigil). A branch-carrying lens merges N independent
+// queries into one row set, so a $now anywhere in that set makes the merged rows
+// move with the wall clock just as a $now in the head would: after the narrowing
+// nothing but the sweep's own cycle would refresh them. Asking the head alone
+// would license a lens whose SECOND walk is the one reading the clock.
+//
+// The first refusal found is the one reported, head first, so a single-walk lens
+// (branches empty) answers exactly as it always has.
+func ruleSetPersonalClockRefusal(cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) string {
+	if refusal := PersonalDerivationRuleRefusal(cr); refusal != "" {
+		return refusal
+	}
+	for _, branch := range branches {
+		if refusal := PersonalDerivationRuleRefusal(branch); refusal != "" {
+			return refusal
+		}
+	}
+	return ""
+}
+
 // notePersonalDerivationLicensed logs, once per transition into the licensed
 // state, that a personal lens has started acting on its derived anchor set.
 //

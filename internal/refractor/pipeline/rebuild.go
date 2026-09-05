@@ -15,6 +15,90 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// RebuildCompleteSink is the standing personal healer, as a rebuilding personal
+// lens sees it (personal-lens-delta-publication-design.md §4.5).
+//
+// A personal lens publishes NOTHING for as long as its rebuild window is open
+// (ScopeSilent), so at the instant that window closes, every connected device
+// still holds the shape it held when the window opened. Nothing else would
+// correct that within a bounded time: the CDC path only republishes a row an
+// event touches, and the healer's own content cycle is a day away. So the end of
+// the window asks for one.
+//
+// The interface is one method for the reason SetGrantChangeSink's is: the
+// pipeline package cannot import grantchange (grantchange imports pipeline), so
+// the healer arrives injected rather than named.
+type RebuildCompleteSink interface {
+	// RequestContentCycle asks for the next full sweep cycle to republish
+	// every swept actor's rows, not the authoritative frame alone.
+	//
+	// Implementations must not block: it is called inline wherever a rebuild
+	// window ends — the completion watcher's goroutine, or the caller's own on
+	// a rebuild abandoned before it ever reset its consumer.
+	RequestContentCycle()
+}
+
+// SetRebuildCompleteSink installs the healer this lens tells when its rebuild
+// window closes. Like SetGrantChangeSink it is called at construction time,
+// before the pipeline starts writing.
+//
+// A nil sink is a no-op and a deployment with no standing personal healer at
+// all — every harness, and any embedder that wired none. The rebuild still
+// completes and the lens still returns to "active"; what is missing is the one
+// prompt republication, so its devices carry the pre-rebuild shape until their
+// next hydrate. Fail-SLOW, the same posture and for the same reason as a missing
+// grant-change sink.
+func (p *Pipeline) SetRebuildCompleteSink(sink RebuildCompleteSink) {
+	if sink == nil {
+		return
+	}
+	p.rebuildCompleteSink = sink
+}
+
+// HasRebuildCompleteSink reports whether this lens can ask a standing healer for
+// a content cycle when its rebuild window closes. Its reader is the host's own wiring
+// test: the call that installs the sink is one line in an activation sequence,
+// and a deployment that dropped it would rebuild silently and never republish —
+// a difference nothing else on the plane can be asked about.
+func (p *Pipeline) HasRebuildCompleteSink() bool { return p.rebuildCompleteSink != nil }
+
+// announceRebuildComplete asks the standing personal healer for a content cycle
+// on behalf of a personal lens whose silent window has just ended.
+//
+// Personal targets only, and the restriction turns on what a rebuild REPAIRS.
+// A business or auth-plane rebuild's output is a stored read model, and its own
+// replay is what rewrites it: nothing that replay produces was ever pushed to a
+// device, so there is nothing left for a content cycle to deliver. A personal
+// lens is the one shape whose replay publishes nothing at all, which is exactly
+// why its devices still hold the pre-rebuild shape when the window closes.
+//
+// What the cycle costs is the same whoever asks: it republishes every registered
+// personal lens's rows for every swept actor, not the asking lens's alone. So an
+// ask made on a stored target's behalf would buy a whole-population republish
+// for a rebuild that had already repaired itself.
+func (p *Pipeline) announceRebuildComplete() {
+	if p.rebuildCompleteSink == nil {
+		return
+	}
+	if !p.PublishesToDevices() {
+		return
+	}
+	p.rebuildCompleteSink.RequestContentCycle()
+	slog.Info("pipeline: rebuild window closed on a personal lens — it published nothing while it was open, so the standing healer's next cycle is a CONTENT cycle that hands every actor the rebuilt shape once, at a live revision",
+		"ruleId", p.ruleID)
+}
+
+// PublishesToDevices reports whether this lens's RUNNING target is a personal
+// one — a per-actor subject stream connected devices hold a live subscription
+// to, rather than a stored read model something reads back.
+//
+// The running ADAPTER answers it, not the spec: what a device receives is
+// decided by what the pipeline is writing through right now.
+func (p *Pipeline) PublishesToDevices() bool {
+	_, personal := p.currentAdapter().(adapter.KeySetPublisher)
+	return personal
+}
+
 // Rebuild performs an in-place rebuild of the rule's target store. It:
 //  1. Sets health KV status to "rebuilding" (AC4).
 //  2. If truncate is true and the adapter implements adapter.Truncater, truncates
@@ -62,12 +146,14 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 	// draining and nothing further will end it — but `drained` is never set, so
 	// the waiter reads it as the failure it is.
 	//
-	// endRebuild clears the in-flight flag when this rebuild still owns it, and
-	// reports that ownership. The status write below belongs to whichever rebuild
-	// is current, and this one may no longer be it: announcing "active" under a
-	// NEWER rebuild's live rescan would report a lens that is still draining. An
-	// older rebuild's failure is still worth recording, but it does not get to
-	// retire a newer one's status.
+	// endRebuild closes this rebuild's window, asks the standing healer for the
+	// content cycle a personal lens's silence owes its devices once the last
+	// window on the lens has closed however it ended, and reports whether this
+	// rebuild was still the installed one. The status write below belongs to
+	// whichever rebuild is current, and this one may no longer be it: announcing
+	// "active" under a NEWER rebuild's live rescan would report a lens that is
+	// still draining. An older rebuild's failure is still worth recording, but it
+	// does not get to retire a newer one's status.
 	if owned := p.endRebuild(sig); !owned {
 		if p.reporter != nil {
 			if recErr := p.reporter.RecordError(ctx, cause.Error()); recErr != nil {
@@ -100,9 +186,11 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 
 // rebuildSignal is one rebuild's completion record. `done` is closed when that
 // rebuild ends for ANY reason; `drained` is set only by the watcher that
-// actually observed the rescan reach zero outstanding.
+// actually observed the rescan reach zero outstanding; `ended` is the
+// once-latch that makes the window this rebuild opened close exactly once,
+// however many enders reach it.
 //
-// The two are separate because a closed channel alone cannot answer the
+// The first two are separate because a closed channel alone cannot answer the
 // question an attesting caller is asking. Every exit closes `done`, including a
 // watcher cancelled at shutdown — and a waiter selecting on a closed channel and
 // an expired context takes either arm at random, so a close read as completion
@@ -112,65 +200,161 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 type rebuildSignal struct {
 	done    chan struct{}
 	drained atomic.Bool
+	ended   atomic.Bool
 }
 
-// beginRebuild installs a fresh completion signal for a rebuild about to start
-// and returns it. The returned signal belongs to that rebuild: only the
-// goroutine that ends it (its watcher, or the error path that abandons it)
-// ends it, via endRebuild.
+// beginRebuild OPENS a rebuild window: it raises the pipeline's live-window
+// count, installs a fresh completion signal for the rebuild about to start, and
+// starts that rebuild's progress clock. The returned signal belongs to that
+// rebuild: only the goroutine that ends it (its watcher, or the error path that
+// abandons it) ends it, via endRebuild — and whichever of those runs first
+// lowers the count again, exactly once.
+//
+// The count rises HERE, before the health write, the registration wait, the
+// truncate and the consumer reset — so nothing that follows can publish "active"
+// over a rescan about to start, and a personal lens is already silent by the
+// time the first replayed event could reach its write loop.
+//
+// The progress clock is stamped here too, and reset rather than carried: a fresh
+// rebuild judged on the timestamp a finished one left behind is judged on a
+// clock it never started. Stamping at the open rather than at the first poll is
+// what keeps a rebuild whose watcher only ever ERRORS judgeable — that path
+// records no progress on purpose, and a zero timestamp reads as "unknown, not
+// wedged" (health.evalRebuildWedged), so a lens could stay silent indefinitely
+// with nothing surfacing it.
 func (p *Pipeline) beginRebuild() *rebuildSignal {
-	sig := &rebuildSignal{done: make(chan struct{})}
 	p.rebuildWatchMu.Lock()
-	p.rebuildWatch = sig
+	sig := p.openRebuildWindowLocked()
 	p.rebuildWatchMu.Unlock()
+	p.baselineRebuildProgress()
 	return sig
 }
 
-// endRebuild ends sig: it clears the pipeline-wide in-flight flag, retracts the
-// installed signal and releases every waiter, and reports whether sig was still
-// the installed rebuild. The equality check keeps a slow finisher from
-// retracting a newer rebuild's signal: a rebuild that started after this one has
-// already replaced rebuildWatch, and its own waiters must keep waiting.
+// beginRebuildIfIdle opens a window only when this pipeline has none open,
+// returning nil when one is already in flight. It is how a rebuild interrupted
+// by a restart re-arms its watcher without opening a second window for a rescan
+// this process is already watching.
 //
-// Ownership, the flag and the release all move inside ONE critical section
+// The test and the open share beginRebuild's critical section rather than
+// asking and then calling it: between an unlocked answer and the open, a
+// control-plane Rebuild arriving while Run is still starting would give the same
+// rescan two windows, and the second would never be closed by anything.
+func (p *Pipeline) beginRebuildIfIdle() *rebuildSignal {
+	p.rebuildWatchMu.Lock()
+	if p.rebuildWindows.Load() > 0 {
+		p.rebuildWatchMu.Unlock()
+		return nil
+	}
+	sig := p.openRebuildWindowLocked()
+	p.rebuildWatchMu.Unlock()
+	p.baselineRebuildProgress()
+	return sig
+}
+
+// openRebuildWindowLocked raises the live-window count and installs the new
+// rebuild's signal. Callers hold rebuildWatchMu, which is what makes the two
+// one step: releaseRebuildSignal takes the same lock, so no ender can lower a
+// count between the raise and the install.
+func (p *Pipeline) openRebuildWindowLocked() *rebuildSignal {
+	sig := &rebuildSignal{done: make(chan struct{})}
+	p.rebuildWatch = sig
+	p.rebuildWindows.Add(1)
+	return sig
+}
+
+// baselineRebuildProgress starts an opening rebuild's progress clock, discarding
+// the previous rebuild's record. Outside rebuildWatchMu because the two locks
+// guard unrelated state and nothing reads the pair atomically.
+func (p *Pipeline) baselineRebuildProgress() {
+	p.rebuildMu.Lock()
+	p.rebuildOutstanding, p.rebuildProgressAt = 0, time.Now()
+	p.rebuildMu.Unlock()
+}
+
+// endRebuild ends sig: it closes that rebuild's window, and — when the window
+// closed was the LAST one open on this pipeline — asks the standing personal
+// healer for one content cycle. It reports whether sig was still the installed
+// rebuild, which is a narrower fact the health status write turns on.
+//
+// The ask lives here because EVERY way a window ends passes through it: a
+// drained rescan, a rebuild abandoned before its consumer was ever reset, and a
+// rebuild on a pipeline with no reporter, which has no watcher to end it later.
+// A personal lens scopes every CDC event to ScopeSilent for as long as any
+// window is open, so what the ask answers is the SILENCE, not the success: a
+// window that lasted twelve seconds and then failed left exactly as many rows
+// stale on exactly as many devices as one that drained. A personal lens that was
+// silent for any span asks for one content cycle when that span ends.
+//
+// Once per span of silence, in both directions. The 1 → 0 transition is what
+// asks, so a rebuild that begins and abandons under an earlier live rescan stays
+// silent — the lens is still not publishing, and the surviving rescan's own end
+// is what will ask — while sig.ended keeps the deferred endRebuild on the way
+// out of watchRebuildCompletion from closing a second window after the drained
+// branch has already closed this one.
+//
+// The ask is made after releaseRebuildSignal has lowered the count, so an event
+// racing it publishes normally rather than silently: the content cycle is the
+// backstop for a window that published nothing, not a substitute for the live
+// path. It is also made outside that function's mutex, because the sink is
+// another component's lock and the window's state is already settled.
+func (p *Pipeline) endRebuild(sig *rebuildSignal) bool {
+	owned, last := p.releaseRebuildSignal(sig)
+	if last {
+		p.announceRebuildComplete()
+	}
+	return owned
+}
+
+// releaseRebuildSignal closes sig's rebuild window: it lowers the live-window
+// count, retracts the installed signal, and releases every waiter. It reports
+// two different facts — whether sig was still the INSTALLED rebuild, and whether
+// the window it closed was the LAST one open.
+//
+// Ownership keeps a slow finisher from retracting a newer rebuild's signal: a
+// rebuild that started after this one has already replaced rebuildWatch, and its
+// own waiters must keep waiting. It is the health STATUS write's question,
+// because a status describes the rebuild the lens is currently running.
+//
+// `last` is the SILENCE's question, and it is the one the count answers that a
+// single installed signal cannot. rebuildWatch names the most recently BEGUN
+// rebuild, not the set of rescans still running: `Rebuild` is fire-and-forget
+// and does not take rebuildSerial, so a second caller can begin — and then
+// abandon — a rebuild while an earlier watcher is still polling a live rescan.
+// That abandon owns the signal; what it must not do is declare the lens live,
+// because the earlier rescan is still replaying and a personal lens is still
+// publishing nothing. So each rebuild lowers its OWN window (sig.ended makes
+// that exactly once per rebuild however many enders reach it), and only the
+// transition to zero windows both un-suppresses the convergence sweep
+// (Sweeper.suppressed reads RebuildInFlight) and asks for the content cycle.
+//
+// The count, ownership and the release all move inside ONE critical section
 // because they are one decision. Checking ownership through a separate call
-// leaves a window between the answer and the mutation it gates, and clearing the
-// flag after the release leaves a wider one: a waiter freed by the close can
+// leaves a window between the answer and the mutation it gates, and lowering the
+// count after the release leaves a wider one: a waiter freed by the close can
 // begin the next rebuild — beginRebuild takes this same lock, so it cannot — and
-// have its `rebuildInFlight` cleared out from under it by the goroutine that
-// just ended. That un-suppresses the convergence sweep (Sweeper.suppressed reads
-// RebuildInFlight) while the newer rescan is still draining.
+// see its own window closed out from under it by the goroutine that just ended.
 //
-// What ownership means here is narrow, and the narrowness is why this is not the
-// whole story: rebuildWatch tracks the most recently BEGUN rebuild, not the set
-// of rescans still running. `Rebuild` is fire-and-forget and does not take
-// rebuildSerial, so a second caller can begin — and then abandon — a rebuild
-// while an earlier watcher is still polling a live rescan; that abandon owns the
-// signal, clears the flag, and un-suppresses the sweep under the earlier rescan.
-// The ordering below closes the successor race, NOT that one. Closing it too
-// needs the flag to count live watchers rather than name one signal, and the
-// consequence meanwhile is bounded: the sweep is a healer, and the attestation
-// path reads `drained`, never this flag.
-//
-// The health STATUS write also stays with the caller, after this returns: it is
+// The health STATUS write stays with the caller, after this returns: it is
 // remote I/O and does not belong under a mutex every watcher takes. Two residues
 // follow, both bounded. An older goroutine's "active" can land after a newer
 // rebuild's "rebuilding", which the newer rebuild corrects when it drains; and
-// waiters are now released BEFORE that write, so a caller can return from
+// waiters are released BEFORE that write, so a caller can return from
 // RebuildAndWait while the entry still reads "rebuilding" — no consumer reads
-// status after a rebuild, and the flag, which is the load-bearing half, is
-// ordered here.
+// status after a rebuild, and the window count, which is the load-bearing half,
+// is ordered here.
 //
 // It does NOT set `drained` — only the watcher that saw the rescan finish does
 // that — so every other exit (abandoned, cancelled, never watched) releases
 // waiters with an honest "this did not drain".
-func (p *Pipeline) endRebuild(sig *rebuildSignal) bool {
+func (p *Pipeline) releaseRebuildSignal(sig *rebuildSignal) (owned, last bool) {
 	p.rebuildWatchMu.Lock()
 	defer p.rebuildWatchMu.Unlock()
-	owned := p.rebuildWatch == sig
+	owned = p.rebuildWatch == sig
 	if owned {
 		p.rebuildWatch = nil
-		p.rebuildInFlight.Store(false)
+	}
+	if sig.ended.CompareAndSwap(false, true) {
+		last = p.rebuildWindows.Add(-1) == 0
 	}
 	// Closing under the lock rather than beside it: two enders racing on the
 	// select/default form would both see it open and double-close, which panics.
@@ -179,7 +363,7 @@ func (p *Pipeline) endRebuild(sig *rebuildSignal) bool {
 	default:
 		close(sig.done)
 	}
-	return owned
+	return owned, last
 }
 
 // currentRebuildSignal returns the in-flight rebuild's completion signal, or
@@ -398,16 +582,9 @@ func (p *Pipeline) TruncateForReactivation(ctx context.Context, requested bool) 
 }
 
 func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSignal) error {
-	// Mark the rebuild in flight before the status write so a concurrent
-	// supervisor health persist (probe recovery, operator resume) cannot
-	// publish "active" while the rescan is still draining.
-	p.rebuildInFlight.Store(true)
-
-	// Clear the previous rebuild's progress record so this one is judged on its
-	// own draining, not on a stale timestamp a finished rebuild left behind.
-	p.rebuildMu.Lock()
-	p.rebuildOutstanding, p.rebuildProgressAt = 0, time.Time{}
-	p.rebuildMu.Unlock()
+	// sig's window is already open (beginRebuild) and its progress clock already
+	// started, so none of the steps below can publish "active" over a rescan
+	// about to start.
 
 	// 1. Set health status to "rebuilding".
 	if p.reporter != nil {
@@ -508,6 +685,11 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		// still running, it simply cannot be watched. The Rebuilder contract
 		// exists so an attesting caller cannot be handed a completion nobody
 		// observed, and this is the branch that would otherwise hand it one.
+		//
+		// This rebuild's silent window ends here too — its own and only end, so
+		// the count falls by exactly one — which is where a personal lens's
+		// devices are owed the content cycle endRebuild asks for once the last
+		// window on the lens has closed.
 		p.endRebuild(sig)
 	}
 
@@ -546,14 +728,15 @@ func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
 	if entry.Status != health.StatusRebuilding {
 		return
 	}
-	// Losing this swap means a rebuild is already in flight in THIS process —
-	// a control-plane Rebuild that arrived while Run was still starting — and
-	// it already owns a watcher.
-	if !p.rebuildInFlight.CompareAndSwap(false, true) {
+	// A window already open means a rebuild is in flight in THIS process — a
+	// control-plane Rebuild that arrived while Run was still starting — and it
+	// already owns a watcher.
+	sig := p.beginRebuildIfIdle()
+	if sig == nil {
 		return
 	}
 	slog.Info("pipeline: resuming the watch for a rebuild interrupted by a restart", "ruleId", p.ruleID)
-	go p.watchRebuildCompletion(ctx, p.beginRebuild())
+	go p.watchRebuildCompletion(ctx, sig)
 }
 
 // watchRebuildCompletion polls the supervised consumer's outstanding count,
@@ -574,12 +757,11 @@ func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
 // actually moving is checked promptly again right when it might finish.
 func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSignal) {
 	// The rebuild window ends when this watcher exits for any reason, so the
-	// deferred endRebuild both releases the waiters on THIS rebuild and clears
-	// the in-flight flag — but only while this rebuild still owns it. Clearing it
-	// unconditionally is the same hazard the abandon path guards against, on the
-	// path that runs every time: a watcher cancelled at shutdown, or one that
-	// returns after a newer rebuild has already begun, would otherwise
-	// un-suppress the convergence sweep under a live rescan.
+	// deferred endRebuild both releases the waiters on THIS rebuild and lowers
+	// the live-window count by one — sig's own window, never another rebuild's.
+	// A watcher cancelled at shutdown, or one returning after a newer rebuild has
+	// begun, therefore leaves that newer rescan's window open and the convergence
+	// sweep suppressed under it.
 	defer p.endRebuild(sig)
 	delay := p.rebuildPollInterval
 	timer := time.NewTimer(delay)
@@ -614,12 +796,13 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSigna
 				// before the release below, so no waiter can observe the closed
 				// channel without it.
 				sig.drained.Store(true)
-				// endRebuild clears the in-flight flag before releasing waiters,
-				// so a concurrent health sink re-checking the flag converges on
-				// "active" — and reports whether this rebuild is still the current
-				// one. Announcing "active" when it is not would retire a newer
-				// rescan's status mid-drain. The deferred endRebuild runs again on
-				// the way out and is a no-op by then.
+				// endRebuild closes this rebuild's window before releasing
+				// waiters, so a concurrent health sink re-checking the count
+				// converges on "active" — and reports whether this rebuild is
+				// still the current one. Announcing "active" when it is not would
+				// retire a newer rescan's status mid-drain. The deferred
+				// endRebuild runs again on the way out and is a no-op by then,
+				// this rebuild's content-cycle ask included.
 				if owned := p.endRebuild(sig); owned && p.reporter != nil {
 					if serr := p.reporter.SetActive(ctx); serr != nil {
 						slog.Error("pipeline: rebuild: set active", "ruleId", p.ruleID, "err", serr)
@@ -657,7 +840,9 @@ func nextRebuildPollDelay(current, floor, capDelay time.Duration, first, decreas
 // progress record. The timestamp advances only on a STRICT decrease, so it
 // answers "when did this rebuild last actually drain something" rather than
 // "when was it last observed" — the second is true of a wedged rebuild every
-// poll interval and would report it as healthy forever.
+// poll interval and would report it as healthy forever. The window's OPEN is the
+// clock's baseline (beginRebuild), so a rebuild that has drained nothing since it
+// started ages from the moment it started.
 //
 // A count that goes UP is still progress in the sense that matters here: the
 // consumer is live and the backlog is real, and a rebuild racing new writes can
@@ -673,8 +858,10 @@ func (p *Pipeline) recordRebuildProgress(outstanding uint64) {
 }
 
 // RebuildProgress reports the rebuild's un-drained count and when it last
-// decreased. progressAt is zero when no rebuild has polled yet, which a consumer
-// must read as "unknown", never as "stalled since the epoch".
+// decreased — or, until a poll observes a decrease, when its window opened.
+// progressAt is zero only when this process has started no rebuild on the lens
+// at all, which a consumer must read as "unknown", never as "stalled since the
+// epoch".
 func (p *Pipeline) RebuildProgress() (outstanding uint64, progressAt time.Time) {
 	p.rebuildMu.Lock()
 	defer p.rebuildMu.Unlock()

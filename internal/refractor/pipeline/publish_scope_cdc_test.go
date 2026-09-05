@@ -498,6 +498,49 @@ func TestRuleSetExpandsALabelSigil(t *testing.T) {
 		"a rule this predicate cannot read is not a licence")
 }
 
+// TestRuleSetPersonalClockRefusal_ABranchReadingTheClockRefusesTheLens is the
+// clock conjunct's branch-set reading, the sibling of the sigil's.
+//
+// A multi-walk lens's rows are the MERGE of its branches, so a $now on the
+// second walk moves the merged row set with the wall clock exactly as one in the
+// head would — and after the narrowing nothing but the sweep's own cycle would
+// refresh it. Asking only the head licenses precisely that lens.
+//
+// No shipped personal lens references either clock parameter, so both vectors
+// are authored: that latency is why the conjunct exists before a corpus needs it.
+func TestRuleSetPersonalClockRefusal_ABranchReadingTheClockRefusesTheLens(t *testing.T) {
+	eng := full.New()
+	clean := mustParse(t, eng,
+		"MATCH (identity:identity {key: $actorKey})-[:mayRead]->(x:unit)\nRETURN x.key AS anchor, x.name AS name")
+	clock := mustParse(t, eng,
+		"MATCH (identity:identity {key: $actorKey})-[:mayBook]->(y:unit)\nRETURN y.key AS anchor, $now AS asOf")
+
+	t.Run("the predicate reads every branch, not the head alone", func(t *testing.T) {
+		assert.Empty(t, ruleSetPersonalClockRefusal(clean, nil))
+		assert.Empty(t, ruleSetPersonalClockRefusal(clean, []ruleengine.CompiledRule{clean, clean}))
+		assert.NotEmpty(t, ruleSetPersonalClockRefusal(clock, nil))
+		assert.Contains(t, ruleSetPersonalClockRefusal(clean, []ruleengine.CompiledRule{clean, clock}), "$now",
+			"one branch reading the clock is enough — the merged rows move with it")
+	})
+
+	t.Run("a publication carries the branch set's verdict into the scope refusal", func(t *testing.T) {
+		p := &Pipeline{ruleID: "branch-clock-lens"}
+		require.NoError(t, p.UseFullEngineBranches(eng, clean, []ruleengine.CompiledRule{clean, clock}))
+
+		assert.NotEmpty(t, p.ruleState().publishScopeRefusal(),
+			"the lens the head alone would have licensed is refused a scope")
+	})
+
+	t.Run("and a clock-free branch set is scopeable", func(t *testing.T) {
+		// The positive vector: without it the refusal above would hold for a
+		// derivation that answered "refused" for every rule.
+		p := &Pipeline{ruleID: "branch-clock-free-lens"}
+		require.NoError(t, p.UseFullEngineBranches(eng, clean, []ruleengine.CompiledRule{clean, clean}))
+
+		assert.Empty(t, p.ruleState().personalClockRefusal)
+	})
+}
+
 // unreadableCompiledRule is a compiled rule of no engine this package can read
 // for a pattern sigil — the shape the refusing default exists for.
 type unreadableCompiledRule struct{}

@@ -73,6 +73,8 @@ func TestPublishScope_Admits(t *testing.T) {
 		{"an over-bound constructor set is ScopeAll", ScopeAnchors(scopeIDs(MaxScopedAnchors + 1)), scopeRow(keyA), true},
 		{"an unparseable anchor is still admitted under ScopeAll", ScopeAll(), scopeRow("not-a-key"), true},
 		{"an unparseable anchor is still declined under ScopeNone", ScopeNone(), scopeRow("not-a-key"), false},
+		{"ScopeSilent admits nothing", ScopeSilent(), scopeRow(keyA), false},
+		{"ScopeSilent declines a row with no anchor at all", ScopeSilent(), ruleengine.EvalResult{}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,11 +95,33 @@ func TestPublishScope_KindAndZeroValue(t *testing.T) {
 	assert.Equal(t, "anchors(1):"+scopeAnchorA, ScopeAnchors([]string{"nope", scopeAnchorA}).String(),
 		"the malformed token is dropped from the set, not carried in it")
 
+	assert.Equal(t, ScopeKindSilent, ScopeSilent().Kind())
+
 	assert.Equal(t, "all", ScopeAll().String())
 	assert.Equal(t, "none", ScopeNone().String())
+	assert.Equal(t, "silent", ScopeSilent().String())
 	assert.Equal(t, "anchors(2):"+scopeAnchorA+","+scopeAnchorB,
 		ScopeAnchors([]string{scopeAnchorB, scopeAnchorA}).String(),
 		"the printed set is sorted, so two equal scopes print identically")
+}
+
+// TestPublishScope_OnlySilentWithholdsTheFrame pins the one exception to the
+// design's rule that every surviving row is framed. The frame is the retraction
+// transport, so a scope that withheld it by accident would leave a device
+// holding rows nothing can ever prune.
+func TestPublishScope_OnlySilentWithholdsTheFrame(t *testing.T) {
+	framing := map[string]PublishScope{
+		"the zero value": {},
+		"ScopeAll":       ScopeAll(),
+		"ScopeNone":      ScopeNone(),
+		"ScopeAnchors":   ScopeAnchors([]string{scopeAnchorA}),
+		"ScopeVertices":  ScopeVertices([]string{substrate.VertexKey("lease", scopeAnchorA)}),
+	}
+	for name, scope := range framing {
+		assert.Truef(t, scope.Frames(), "%s publishes the authoritative frame", name)
+	}
+	assert.False(t, ScopeSilent().Frames(),
+		"a frame at a replayed revision is dropped by the device like every other message of the replay")
 }
 
 func TestPublishScope_Merge(t *testing.T) {
@@ -151,6 +175,23 @@ func TestPublishScope_Merge(t *testing.T) {
 		{
 			name: "the zero value merges as All", left: PublishScope{}, right: anchorsA,
 			wantKind: ScopeKindAll, admits: []string{scopeAnchorB},
+		},
+		// Silent is the bottom of the lattice — it publishes strictly less than
+		// None, which still frames — so it yields to everything. Closure, not a
+		// live path: only the reprojector's dirty set merges scopes, and nothing
+		// enqueues the CDC write loop's scope into it.
+		{name: "Silent ⊔ All = All", left: ScopeSilent(), right: ScopeAll(), wantKind: ScopeKindAll},
+		{name: "All ⊔ Silent = All", left: ScopeAll(), right: ScopeSilent(), wantKind: ScopeKindAll},
+		{name: "Silent ⊔ None = None", left: ScopeSilent(), right: ScopeNone(), wantKind: ScopeKindNone},
+		{name: "None ⊔ Silent = None", left: ScopeNone(), right: ScopeSilent(), wantKind: ScopeKindNone},
+		{name: "Silent ⊔ Silent = Silent", left: ScopeSilent(), right: ScopeSilent(), wantKind: ScopeKindSilent},
+		{
+			name: "Silent ⊔ Anchors = Anchors", left: ScopeSilent(), right: anchorsA,
+			wantKind: ScopeKindAnchors, admits: []string{scopeAnchorA}, declines: []string{scopeAnchorB},
+		},
+		{
+			name: "Anchors ⊔ Silent = Anchors", left: anchorsA, right: ScopeSilent(),
+			wantKind: ScopeKindAnchors, admits: []string{scopeAnchorA}, declines: []string{scopeAnchorB},
 		},
 	}
 	for _, tc := range cases {

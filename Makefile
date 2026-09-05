@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2339,6 +2339,21 @@ lint-gap-column-declaration:
 lint-slog-values:
 	@echo "==> Linting slog attribute values..."
 	go run ./scripts/lint-slog-values.go
+
+## lint-flag-consumer-census — a process-wide flag may not gain a reader without
+## that reader being declared. A flag's comment prices being briefly wrong FOR
+## THE CONSUMER it was written for, and every later reader inherits the flag and
+## the price without re-reading it: the rebuild in-flight flag was priced
+## "bounded, the sweep is a healer", which held through three readers and stopped
+## holding at the fourth — a personal lens that publishes NOTHING while it is
+## set. Holds a ledger of each registered flag's readers (file + function, parsed
+## with go/ast) and fails an UNDECLARED reader as well as a declared one that has
+## stopped reading, so the ledger cannot rot. `_test.go` files are out of scope:
+## a test pins the mechanism rather than inheriting its bound. Advisory by
+## default; STRICT=1 exits non-zero.
+lint-flag-consumer-census:
+	@echo "==> Linting flag consumer census..."
+	go run ./scripts/lint-flag-consumer-census.go
 
 ## install-skills — Symlink the canonical agentic-ops role-skills from agents/
 ## into the (gitignored) .claude/skills/ where the harness discovers them. A

@@ -37,6 +37,13 @@
 // key rebuilds lenses that also carry other classes' rows. That over-rebuild is
 // the fail-closed direction and the event is rare; narrowing it would require
 // per-instance declaration and buys nothing.
+//
+// The rebuild delivers the erasure to STORED read models, and one target shape
+// is outside that: a personal lens publishes to devices, and its rebuild
+// publishes nothing at all while it replays. So a personal lens declaring a
+// destroyed holder's type is REFUSED, loudly, and takes the attestation with it
+// (ErrPersonalTargetErasureUnsupported) rather than being rebuilt into a clean
+// result nobody's device saw.
 package classkeyshredded
 
 import (
@@ -128,9 +135,31 @@ const (
 	classKeyPrefetch = 1
 )
 
+// ErrPersonalTargetErasureUnsupported is the refusal a personal lens draws when
+// a retention-class destruction enumerates it. It is a gap in the DELIVERY
+// mechanism, not a fault of the lens, and it is fatal to the attestation.
+//
+// A rebuild delivers an erasure by replaying every row through the
+// SecureDecryptor and upserting null over the plaintext the target still holds.
+// A personal lens's rebuild publishes nothing at all while it replays — every
+// message would land below the frame high-water its devices already hold and be
+// dropped there — so the replay upserts nothing, the rebuild reports success,
+// and the plaintext stays on the SYNC stream and on every device that holds it.
+// That is the shape this whole package exists to refuse: an erasure that reads
+// as compliant from every surface while the sensitive value is still readable.
+var ErrPersonalTargetErasureUnsupported = errors.New(
+	"class-key erasure through a personal lens's rebuild publishes nothing to its devices; the attestation cannot be recorded")
+
 // RebuildTarget names one lens whose projection must be rebuilt.
 type RebuildTarget struct {
 	RuleID string
+	// Personal marks a lens whose target is a per-actor subject stream devices
+	// subscribe to, rather than a stored read model. Such a target is REFUSED
+	// rather than rebuilt (ErrPersonalTargetErasureUnsupported), and it is
+	// carried as a label rather than filtered out at the enumeration precisely
+	// so the refusal is visible: a target dropped from the set would read as
+	// "no live lens holds this plaintext" and attest.
+	Personal bool
 }
 
 // Config configures the Manager.
@@ -373,6 +402,19 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 	deadline := time.Now().Add(m.cfg.HandlerBudget)
 
 	for _, t := range targets {
+		// Ahead of the budget, so a target that must never be rebuilt cannot be
+		// reported as one the clock ran out on — and ahead of RebuildRule, which
+		// makes the rebuild unreachable for it rather than merely discouraged.
+		// The attestation goes with it: a personal lens reached here is holding
+		// plaintext this destruction cannot take away, and the operator's
+		// in-flight retentionKeyStatus row is the honest reading.
+		if t.Personal {
+			allClean = false
+			m.cfg.Logger.Error("refractor classkeyshredded: a personal lens declares this holder type; its rebuild cannot deliver the erasure (privacy-critical, its devices still hold the plaintext) — NOT attesting",
+				"retentionClassKey", holderKey, "holderType", holderType, "ruleId", t.RuleID,
+				"error", failure.PrivacyCritical(ErrPersonalTargetErasureUnsupported))
+			continue
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			allClean = false

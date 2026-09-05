@@ -199,7 +199,9 @@ func (p *Pipeline) hydrateInFlight(actorID string) bool {
 // result is framed whatever the scope says (personal-lens-delta-publication-
 // design.md §4.3). A row the scope withholds is one the device already holds
 // unchanged, and the frame naming it is what keeps it from being pruned. The
-// zero value is ScopeAll, which publishes the whole actor.
+// zero value is ScopeAll, which publishes the whole actor. The one scope that
+// frames nothing — ScopeSilent, this lens's rebuild replaying — publishes
+// nothing at all and stamps nothing.
 //
 // The whole of it runs under the keyed (lens, actor) publish lock, revision
 // capture included — see lockPersonalActor.
@@ -254,6 +256,22 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 		// fails outright. Refusing hands it to the caller, which logs it and
 		// raises the lens's Health fault instead of serving a doomed frame.
 		return fmt.Errorf("pipeline: reproject personal actor %q: %w", identityID, ErrNoOrderingToken)
+	}
+
+	if !scope.Frames() {
+		// ScopeSilent, the one scope that withholds the frame as well as the
+		// rows: this lens's rebuild is replaying, and every message a
+		// reprojection would send — row, Delete or frame — sits below the frame
+		// high-water a connected device already holds and is dropped there. So
+		// nothing goes out and, because nothing went out, nothing stamps the
+		// read model's last-touch clock either; a stamp for a publication that
+		// never happened is exactly what LensProjectionStalled reads as health.
+		//
+		// No caller hands one here today — the sweeper passes All or None and
+		// the drain passes Anchors or None — but this is the entry point every
+		// non-CDC republish flows through, so it answers the scope rather than
+		// assuming its callers.
+		return nil
 	}
 
 	adpt := p.currentAdapter()

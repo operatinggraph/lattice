@@ -156,6 +156,20 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   guards keep a scoped live publish from racing ahead of it: the write loop publishes an actor whole
   while a hydrate holds that actor's publish slot, and a hydrate waits for the event already in flight
   to leave the handler before capturing.
+  `ScopeSilent` publishes **nothing** — no row, no `Delete`, and, uniquely, no frame — and is what the
+  CDC write loop scopes every event to while a personal lens's own **rebuild** is replaying (§4.5). A
+  rebuild re-delivers every Core KV entry at its original revision, and every message that replay would
+  send sits below the frame high-water a connected device already holds, so the device drops all of it;
+  the messages are still acked, so the ordering token advances and the rescan drains normally. The flag
+  is read once per event at the scope producer, so an event's rows and its frame are decided by one
+  observation and a rebuild finishing mid-event cannot half-publish it. Business and auth-plane
+  rebuilds are untouched — their replay is what repairs a stored read model.
+  One consumer of the rebuild pays for that silence and is refused rather than served: a
+  **retention-class key destruction** delivers the erasure by rebuilding every lens declaring the
+  holder's type, and a personal lens's replay would upsert no null over anything. Such a target is
+  enumerated, **labelled and refused loudly**, and takes the destruction's attestation with it — a
+  rebuild that reported clean there would record a completed erasure over plaintext still held on the
+  SYNC stream and on every device.
 - **Stream provisioning.** The adapter JIT-provisions the backing stream via `substrate.EnsureStream`
   (mirrors the `nats_kv` case's JIT bucket creation) rather than a bootstrap pre-provision, and
   **unions** the lens's `subjectPrefix` wildcard into the stream's existing `Subjects` rather than
@@ -342,7 +356,16 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   ≥ 24 h) makes **every** cycle a content cycle and saves nothing. The cycle's kind is latched where a
   cycle starts, at the population re-list, and holds for every batch of that cycle; the first cycle
   after boot is a content cycle, and its start is logged with the elapsed time since the last one, the
-  projected cycle length, and the population/batch/interval it was computed from. Both mechanisms report on each personal lens's
+  projected cycle length, and the population/batch/interval it was computed from. **Every owned end of
+  a personal lens's rebuild window** asks for one as well (`RequestContentCycle`, injected onto the
+  pipeline the way the grant-change sink is): the lens published nothing for the length of that window,
+  so the content cycle is what hands every device the rebuilt shape once, at a live revision, within a
+  cycle rather than within a day. The ask answers the **silence, not the success** — a rebuild
+  abandoned at its consumer reset was silent for exactly as long as one that drained — while a
+  superseded finisher stays quiet, because the newer rescan's own end is what will ask. One request
+  buys exactly one cycle — it is consumed by the same latch, so a package install that rebuilds fifteen
+  lenses costs one content cycle between them, and a lens whose target is a stored read model asks for
+  none at all (its own replay is what repairs it). Both mechanisms report on each personal lens's
   own health entry: faults through `RecordGrantReprojectIssue` (dropped signals, a failed
   reprojection), and the sweep's cursor / last completed cycle / drain queue depth through
   `personalSweep*` (personal-lens-grant-change-trigger-design.md). The sweep also publishes what its
@@ -1450,11 +1473,14 @@ every 25 minutes against 50 at the 5-minute `BusinessSweepInterval`.
   **draining** does escalate to `error`: `watchRebuildCompletion` records the un-drained count
   and when it last *decreased*, and a rebuild that has not drained a message within the same
   staleness window is stuck rather than slow, superseding the sweep with nothing. A rebuild
-  still draining is exempt however long it runs; one that has not yet reported a count is
-  unknown, not wedged. While a rebuild is in flight the metric carries `rebuildOutstanding`
-  and `rebuildProgressAt` (dropped once it finishes, so a stale final count is never published
-  as a stuck one). A poll that keeps erroring records no progress deliberately — that retry is
-  unbounded, so an error that never clears must read as wedged. A
+  still draining is exempt however long it runs. `rebuildProgressAt` is stamped when the
+  rebuild's window OPENS, so a started rebuild is never "unknown": a zero value means only
+  that this process has started no rebuild on the lens. While a rebuild is in flight the metric
+  carries `rebuildOutstanding` and `rebuildProgressAt` (dropped once it finishes, so a stale
+  final count is never published as a stuck one). A poll that keeps erroring records no
+  progress deliberately — that retry is unbounded, so an error that never clears ages from the
+  window's open and reads as wedged, which is what keeps a personal lens's silent rebuild
+  window observable. A
   paused lens is exempt — already an error in its own right — and the exemption re-baselines
   the clock, so a resume does not read as stalled for the length of the pause. The cursor and
   heal count persist on the lens's existing health entry, so a restart resumes rather than
@@ -1947,8 +1973,15 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   per-CONNECTION async budget (R9). Minted: personal-lens whole-actor cost (2026-09-03) — the same defect
   three times, found by three cold reviewers. Check: every new substrate primitive or batch states, in its
   doc, what bounds it when the ctx carries no deadline and against which SHARED budget it is sized (name the
-  denominator); a new exported ctx-taking substrate func without that sentence is the smell. Promotion
-  candidate: a `lint-conventions` rule over `internal/substrate`'s exported ctx-taking funcs. (Displaced the
+  denominator); a new exported ctx-taking substrate func without that sentence is the smell. **Second
+  sighting, and the widened thing is a FLAG rather than an operation:** `rebuildInFlight`'s comment priced
+  being briefly wrong as bounded *because the sweep is a healer and the attestation reads `drained`* — true
+  for its three readers, false for the fourth, a personal lens that publishes nothing while it is set, where
+  the same brief wrongness is a resumed flood of messages every device drops. That half is now mechanized by
+  `scripts/lint-flag-consumer-census.go`, which holds each registered flag's reader set (file + function) and
+  fails an undeclared reader as well as a declared one that has stopped reading, so adding a reader means
+  re-reading the bound. The substrate half stays unmechanized; promotion candidate: a `lint-conventions` rule
+  over `internal/substrate`'s exported ctx-taking funcs. (Displaced the
   check-less *"an upsert-only reprojection retracts nothing whose key drops out"* note — its subject is the
   delta-publication row on the board, not a review check.) Sighted again (personal-lens delta Inc 4, 2026-09-05) in a new form: a process-wide FLAG gaining a reader — `rebuildInFlight` acquired publication silence while `releaseRebuildSignal`'s doc still priced the concurrent-abandon race as "the sweep is a healer"; the stale bound hid in the flag's own comment. Promoted: `scripts/lint-flag-consumer-census.go` fails when a registered flag gains a reader the registry does not declare — the fix path is to declare it and re-read every bound the flag's comment asserts.
 - **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒

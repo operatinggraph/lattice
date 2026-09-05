@@ -23,6 +23,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
@@ -95,6 +96,16 @@ func newPL2Harness(t *testing.T) *pl2Harness {
 // grants (personal_lens_pl3_e2e_test.go).
 func activatePersonalLens(t *testing.T, h *pl2Harness, lensID, cypher string, businessKeys []string, capKV *substrate.KV) (*pipeline.Pipeline, *adapter.NatsSubjectAdapter) {
 	t.Helper()
+	return activatePersonalLensReporting(t, h, lensID, cypher, businessKeys, capKV, nil)
+}
+
+// activatePersonalLensReporting is activatePersonalLens with a health reporter
+// threaded in. A nil reporter is the ordinary case — the lens's health entry is
+// observability these suites do not read — but the rebuild lifecycle lives on
+// it: Rebuild's completion watcher is launched only for a reporting pipeline,
+// so a rebuild without one has no observable end.
+func activatePersonalLensReporting(t *testing.T, h *pl2Harness, lensID, cypher string, businessKeys []string, capKV *substrate.KV, reporter *health.Reporter) (*pipeline.Pipeline, *adapter.NatsSubjectAdapter) {
+	t.Helper()
 	const subjectPrefix = "lattice.sync.user"
 	const syncStream = "SYNC"
 
@@ -102,7 +113,7 @@ func activatePersonalLens(t *testing.T, h *pl2Harness, lensID, cypher string, bu
 		append([]string{adapter.PersonalActorKeyField}, businessKeys...))
 	require.NoError(t, err)
 
-	p, err := pipeline.New(lensID, "nats_subject", "core-kv", h.adjKV, h.coreKV, adpt, nil)
+	p, err := pipeline.New(lensID, "nats_subject", "core-kv", h.adjKV, h.coreKV, adpt, reporter)
 	require.NoError(t, err)
 
 	src := lens.NewCoreKVSource(h.conn, "core-kv", "test", h.logger)

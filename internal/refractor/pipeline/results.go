@@ -40,6 +40,14 @@ import (
 // result is still framed, and a Delete is never scoped — a retraction is not a
 // content change. On any other target the scope is ScopeAll by construction
 // and this loop is what it has always been.
+//
+// ScopeSilent is the one scope that also withholds the frame, and the one that
+// withholds Deletes: it is a personal event handled while this lens's rebuild is
+// replaying, where every message would land below the connected device's frame
+// high-water mark and be dropped there (§4.5). Nothing else changes — the
+// message is acked, so the ordering token advances and the rescan drains — and
+// the rebuilt shape reaches the device from the content cycle the completion
+// requests.
 func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string, scope PublishScope) (substrate.Decision, error) {
 	if p.supersededRule(rs) {
 		slog.Info("pipeline: rule swapped mid-event — naking so redelivery evaluates the new rule",
@@ -73,8 +81,14 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	// rather than per row: the answer is a property of the actor, the row loop
 	// below is thousands of iterations wide, and a hydrate that begins after
 	// this read is closed by guard 2 on its own side.
+	//
+	// Not asked under ScopeSilent, which withholds the frame as well as the
+	// rows. The hazard this guard closes is a scoped publish advancing the
+	// device's frame high-water past a running hydrate's, and a pass that
+	// publishes no frame advances nothing — so the exemption would only put
+	// replayed rows back on the wire for the one actor least able to use them.
 	var hydrating map[string]struct{}
-	if scoped && scope.Kind() != ScopeKindAll {
+	if scoped && scope.Kind() != ScopeKindAll && scope.Kind() != ScopeKindSilent {
 		for _, actorVtxKey := range enumeratedActors {
 			_, actorID, ok := substrate.ParseVertexKey(actorVtxKey)
 			if !ok || !p.hydrateInFlight(actorID) {
@@ -90,7 +104,19 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	// get written. A non-personal target and a Delete both answer yes without
 	// consulting anything.
 	admits := func(result ruleengine.EvalResult) bool {
-		if !scoped || result.Delete {
+		if !scoped {
+			return true
+		}
+		if scope.Kind() == ScopeKindSilent {
+			// Ahead of the Delete exemption, which every other scope grants: a
+			// silent pass puts nothing on the wire at all. A retraction it
+			// withholds is carried by the authoritative frame of the content
+			// cycle the rebuild's completion requests — a key that frame omits
+			// is what actually prunes the row on the device — where a replayed
+			// Delete below the device's high-water mark prunes nothing.
+			return false
+		}
+		if result.Delete {
 			return true
 		}
 		if scope.Admits(result) {
@@ -368,7 +394,9 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		return substrate.Ack, nil
 	}
 
-	p.emitPersonalFrames(ctx, adpt, enumeratedActors, results, msg.Sequence)
+	if scope.Frames() {
+		p.emitPersonalFrames(ctx, adpt, enumeratedActors, results, msg.Sequence)
+	}
 
 	attrs := []any{"ruleId", p.ruleID, "entityId", key, "stage", "pipeline", "adapter", p.adapterName}
 	if scoped {

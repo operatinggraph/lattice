@@ -240,6 +240,31 @@ func TestPersonalLensActivationAssertsTheDerivationLicence(t *testing.T) {
 		require.Equal(t, pipeline.PersonalHealerVerdictNeverPassed, p.PersonalHealerVerdictNow().Summary())
 	})
 
+	t.Run("the same call wires the rebuild's way BACK to the healer", func(t *testing.T) {
+		// The other direction of the pairing (personal-lens-delta-publication-
+		// design.md §4.5). A personal lens's rebuild publishes nothing while it
+		// replays, so its completion has to ask this healer for one content
+		// cycle — otherwise every connected device carries the pre-rebuild shape
+		// until it next hydrates, with nothing failing and nothing to read.
+		// registerPersonalHealer is the one site that knows both halves.
+		p := newPipeline(t)
+		require.False(t, p.HasRebuildCompleteSink(),
+			"before registration the lens has no healer to ask")
+
+		r := grantchange.New()
+		sweeper := grantchange.NewPersonalSweeper(r, &staticKeyLister{}, &staticKeyLister{})
+		registerPersonalHealer(r, sweeper, nil, rule.ID, p, fullyWired)
+
+		require.True(t, p.HasRebuildCompleteSink())
+	})
+
+	t.Run("and a deployment with no healer rebuilds anyway", func(t *testing.T) {
+		p := newPipeline(t)
+		registerPersonalHealer(grantchange.New(), nil, nil, rule.ID, p, fullyWired)
+		require.False(t, p.HasRebuildCompleteSink(),
+			"fail-SLOW: the rebuild still completes, and its devices converge on their next hydrate")
+	})
+
 	t.Run("the sink census is READ LIVE by the licence, in both directions", func(t *testing.T) {
 		// The §4.3(d) amendment's consumer half, end to end. The census itself is
 		// pinned where it is written (projection's

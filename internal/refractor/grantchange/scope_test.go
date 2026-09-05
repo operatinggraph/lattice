@@ -316,6 +316,89 @@ func TestSweep_ContentCycleMeasuresAgainstTheProjectedCycleEnd(t *testing.T) {
 	})
 }
 
+// TestSweep_RequestContentCycleCarriesContentOnTheNextCycleOnly is T8's sweeper
+// arm: the mechanism a personal lens's rebuild completion reaches for.
+//
+// A rebuild's replay publishes nothing, so at completion every connected device
+// still holds the pre-rebuild shape and nothing else would correct it inside a
+// day. RequestContentCycle makes the next cycle republish rows — and exactly the
+// next one: the request is consumed by the latch, so the cycle after it is back
+// to frames-only on the ordinary clock. Asserted through the scope the
+// reprojection actually received, not through the flag.
+func TestSweep_RequestContentCycleCarriesContentOnTheNextCycleOnly(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)}
+	// A batch that covers the population, so one Sweep is one whole cycle and
+	// the cycle boundaries are the Sweep calls.
+	s, _, lens, ids := newSweptFixture(t, 3, 3)
+	s.SetClock(clock.Now)
+	ctx := context.Background()
+
+	// Cycle 1 is the boot content cycle; cycle 2, a minute later, is
+	// frames-only. Both are the shipped behaviour, established here so the
+	// request's effect is a change against a known-quiet baseline.
+	s.Sweep(ctx)
+	clock.advance(time.Minute)
+	s.Sweep(ctx)
+	require.Len(t, lens.scopesSeen(), 2*len(ids))
+	assert.Equal(t, pipeline.ScopeKindNone, lens.scopesSeen()[len(ids)].Kind(),
+		"the cycle before the request must be frames-only, or the request proves nothing")
+
+	// A rebuild completes.
+	s.RequestContentCycle()
+
+	clock.advance(time.Minute)
+	s.Sweep(ctx)
+	requested := lens.scopesSeen()[2*len(ids):]
+	require.Len(t, requested, len(ids))
+	for i, scope := range requested {
+		assert.Equal(t, pipeline.ScopeKindAll, scope.Kind(),
+			"reprojection %d of the requested cycle must republish rows — a minute after the last heal, the clock alone would not", i)
+	}
+
+	// And exactly one cycle: the request is consumed where it is read.
+	clock.advance(time.Minute)
+	s.Sweep(ctx)
+	after := lens.scopesSeen()[3*len(ids):]
+	require.Len(t, after, len(ids))
+	for i, scope := range after {
+		assert.Equal(t, pipeline.ScopeKindNone, scope.Kind(),
+			"reprojection %d of the cycle AFTER the requested one must be frames-only again", i)
+	}
+}
+
+// TestSweep_RequestContentCycleIsConsumedByACycleTheClockAlreadyChose pins the
+// consumption site rather than the effect: a request that lands on a cycle the
+// clock was going to make a content cycle anyway is spent by it, not carried
+// forward into a second one.
+//
+// It matters because the requesting caller is a rebuild, and a rebuild at boot
+// is exactly when the clock's own first-cycle rule already applies — a request
+// that survived it would republish the whole population twice.
+func TestSweep_RequestContentCycleIsConsumedByACycleTheClockAlreadyChose(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)}
+	s, _, lens, ids := newSweptFixture(t, 3, 3)
+	s.SetClock(clock.Now)
+	ctx := context.Background()
+
+	s.RequestContentCycle()
+
+	// The boot cycle: a content cycle on the clock's own rule, and the one that
+	// consumes the request.
+	s.Sweep(ctx)
+	first := lens.scopesSeen()
+	require.Len(t, first, len(ids))
+	assert.Equal(t, pipeline.ScopeKindAll, first[0].Kind())
+
+	clock.advance(time.Minute)
+	s.Sweep(ctx)
+	next := lens.scopesSeen()[len(ids):]
+	require.Len(t, next, len(ids))
+	for i, scope := range next {
+		assert.Equal(t, pipeline.ScopeKindNone, scope.Kind(),
+			"reprojection %d: the boot cycle already carried the request's content, so nothing is owed here", i)
+	}
+}
+
 // TestSweep_TheCycleKindIsLatchedAtTheCycleStart pins that the decision is per
 // CYCLE, not per pass: a content cycle whose latch was stamped at its first
 // tick must not read as "recently healed" on its own later ticks and drop the

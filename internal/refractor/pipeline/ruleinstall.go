@@ -405,12 +405,13 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// The personal narrowing licence's cypher-level conjunct — $now /
 	// $projectedAt — derived unconditionally like the label set above and for
 	// the same reason: a reload must never leave a previous rule body's verdict
-	// standing. Unconditional across the multi-walk arm too, because the licence
-	// is asked of the LENS and a branch-carrying rule's head is still what its
-	// rows are computed from. Derived HERE rather than in the licence because it
-	// is two exhaustive walks of the compiled rule's clauses answering a
+	// standing. Derived over the BRANCH SET as well as the head, because the
+	// licence is asked of the LENS and a branch-carrying rule's rows are the
+	// merge of every walk: one branch reading the clock is enough to make the
+	// merged rows move with it. Derived HERE rather than in the licence because
+	// it is two exhaustive walks of each compiled rule's clauses answering a
 	// question that cannot change until this function runs again.
-	next.personalClockRefusal = PersonalDerivationRuleRefusal(next.cr)
+	next.personalClockRefusal = ruleSetPersonalClockRefusal(next.cr, next.branches)
 
 	// The publication scope's label-sigil conjunct, derived here for the same
 	// reason — and over the BRANCH SET as well as the head, because one branch

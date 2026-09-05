@@ -455,6 +455,12 @@ type Pipeline struct {
 	grantSink          GrantChangeSink
 	grantAnchorFromKey func(targetKey string) (actorKey, entryID string, ok bool)
 
+	// rebuildCompleteSink is the standing personal healer this lens asks for a
+	// content cycle when its rebuild has finished draining. Nil (the default)
+	// means this deployment wired no healer, which is a no-op — see
+	// SetRebuildCompleteSink. Set at construction time, like grantSink.
+	rebuildCompleteSink RebuildCompleteSink
+
 	// personalPublishLocks holds one publish slot per actor currently being
 	// reprojected on this lens, and personalPublishMu guards the map itself.
 	// Slots are created on demand and dropped the moment nobody holds or wants
@@ -519,13 +525,21 @@ type Pipeline struct {
 
 	// Rebuild support. rebuildPollInterval is captured from RebuildPollInterval
 	// at construction time; watchRebuildCompletion polls the supervisor for
-	// pending count. rebuildInFlight is true from the start of Rebuild until
-	// watchRebuildCompletion observes zero consumer lag (or the rebuild aborts);
-	// the health sink consults it so a supervisor-driven active-persist (e.g.
-	// probe recovery mid-rebuild) re-persists "rebuilding" instead of
-	// prematurely reporting "active" while the rescan is still draining.
+	// pending count.
+	//
+	// rebuildWindows counts the rebuild windows open on this pipeline right now:
+	// beginRebuild raises it, and the one end of each rebuild's own window
+	// lowers it. RebuildInFlight is "> 0", so the answer is about the SET of
+	// rescans still running rather than about the most recently begun one — a
+	// second rebuild that begins and immediately fails leaves the earlier one's
+	// window open, where a boolean either ender could clear would declare the
+	// lens live under a rescan still replaying. Three readers turn on that
+	// difference: the health sink (a supervisor-driven active-persist mid-rebuild
+	// re-persists "rebuilding" rather than a premature "active"), the convergence
+	// sweep's suppression, and a personal lens's publication scope, which
+	// publishes NOTHING for as long as any window is open.
 	rebuildPollInterval time.Duration
-	rebuildInFlight     atomic.Bool
+	rebuildWindows      atomic.Int64
 	// rebuildSerial (capacity 1) serializes RebuildAndWait callers per pipeline.
 	// A channel rather than a sync.Mutex because acquisition must honour the
 	// caller's context: a rebuild drain is unbounded in principle, and a shutting
@@ -535,12 +549,11 @@ type Pipeline struct {
 	// a channel one rebuild creates and its OWN watcher closes, non-nil only
 	// while that rebuild is un-drained. A caller waits on the channel it was
 	// handed, never on shared state, which is what makes the wait
-	// un-clobberable — rebuildInFlight cannot serve, because abandonRebuild
-	// clears it unconditionally and the two callers that bypass rebuildSerial
-	// (the MATCH hot-reloader and the operator rebuild op) reach abandonRebuild
-	// on any failure of their own. A waiter polling that flag would then return
-	// over a rescan still running and, for the retention-class consumer,
-	// attest to an erasure that had not reached the read models.
+	// un-clobberable — rebuildWindows cannot serve, because it counts every
+	// rescan on the pipeline rather than the caller's own: a waiter polling it
+	// would be released by an unrelated rebuild's end and, for the
+	// retention-class consumer, attest to an erasure that had not reached the
+	// read models.
 	rebuildWatchMu sync.Mutex
 	rebuildWatch   *rebuildSignal
 	// rebuildOutstanding is the most recent un-drained count watchRebuildCompletion
@@ -550,6 +563,13 @@ type Pipeline struct {
 	// exempts a rebuild from escalation entirely. A poll that ERRORS deliberately
 	// advances neither: OutstandingForConsumer is retried indefinitely, so an
 	// error that never clears is exactly the wedge this is here to expose.
+	//
+	// rebuildProgressAt is stamped when the window OPENS, so it is never zero for
+	// a rebuild this process started. Zero means "no rebuild here to judge", and
+	// only that: the detector treats it as unknown, so leaving a started rebuild
+	// at zero would make an ERRORING watcher — the one that records no progress
+	// on purpose — permanently unjudgeable, and a personal lens is silent for
+	// exactly as long as that window stays open.
 	rebuildMu          sync.Mutex
 	rebuildOutstanding uint64
 	rebuildProgressAt  time.Time
@@ -1323,13 +1343,21 @@ func (p *Pipeline) AckStats(ctx context.Context) (substrate.AckStats, error) {
 	return p.supervisor.AckStatsForConsumer(ctx, p.consumerCfg.Name)
 }
 
-// RebuildInFlight reports whether a rebuild rescan is still draining — true
-// from the start of Rebuild until the completion watcher observes the consumer
-// fully drained (or the rebuild aborts). While true the lens's health entry is
+// RebuildInFlight reports whether ANY rebuild rescan on this pipeline is still
+// draining — true from the start of the first Rebuild until the last live
+// window ends, whether by its watcher observing the consumer fully drained or by
+// that rebuild being abandoned. While true the lens's health entry is
 // "rebuilding": a supervisor active-persist during the window re-persists
 // "rebuilding" rather than a premature "active".
+//
+// "Any", not "the latest": two rebuilds can overlap (RebuildAndWait serializes
+// its own callers, and neither the MATCH hot-reloader nor the operator rebuild
+// op passes through it), and the window a caller cares about is the one during
+// which the lens is not itself. A new reader of this flag must read the
+// rebuildWindows field comment for what the count promises;
+// scripts/lint-flag-consumer-census.go fails a reader the census does not name.
 func (p *Pipeline) RebuildInFlight() bool {
-	return p.rebuildInFlight.Load()
+	return p.rebuildWindows.Load() > 0
 }
 
 // RequireGuardedAdapter declares that every adapter this pipeline writes
@@ -1524,7 +1552,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 	spec.Handler = p.handleTracked
 	spec.Classify = classifyForSupervisor
 	spec.Probe = func(pctx context.Context) error { return p.currentAdapter().Probe(pctx) }
-	spec.Health = newHealthSink(p.reporter, p.rebuildInFlight.Load)
+	spec.Health = newHealthSink(p.reporter, p.RebuildInFlight)
 	// ProbeInterval is exported so tests can shrink it for fast recovery detection.
 	if spec.ProbeInterval <= 0 {
 		spec.ProbeInterval = ProbeInterval

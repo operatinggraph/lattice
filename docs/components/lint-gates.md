@@ -21,6 +21,7 @@ non-advisory finding.
 | `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map |
 | `lint-board` | The backlog is an index, not a journal |
 | `lint-slog-values` | An slog attribute value's in-module struct type implements `slog.LogValuer`/`json.Marshaler`/`encoding.TextMarshaler` — a JSON handler never consults `fmt.Stringer` |
+| `lint-flag-consumer-census` | A registered process-wide flag's readers are a declared ledger (file + function), so a new reader re-reads the bound the flag's own comment prices |
 
 ## The author-declares shape
 

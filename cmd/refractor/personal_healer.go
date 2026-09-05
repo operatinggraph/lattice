@@ -43,6 +43,18 @@ func registerPersonalHealer(
 	reprojector.RegisterPersonal(ruleID, p)
 	p.SetPersonalPlaneHealer(true)
 
+	// The other direction of the same pairing: a personal lens's rebuild
+	// publishes nothing at all while it replays, so its completion asks this
+	// healer for one content cycle and the devices receive the rebuilt shape
+	// once, at a live revision, within a cycle instead of within a day. Wired
+	// from here rather than beside the install so the healer a lens talks to is
+	// the one it was just registered with — a second site could hand it another.
+	// SetRebuildCompleteSink ignores a nil sink, which is a deployment running
+	// with no standing personal healer at all.
+	if sweeper != nil {
+		p.SetRebuildCompleteSink(sweeper)
+	}
+
 	// The two conjuncts that are live CENSUSES rather than boot-time constants,
 	// wired as accessors the licence calls at every gate evaluation rather than
 	// as values sampled here. Both name things that can come into existence

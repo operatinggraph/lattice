@@ -368,6 +368,7 @@ func newPipelineEntry(
 		reporter:           reporter,
 		canonicalName:      r.CanonicalName,
 		authPlane:          projection.IsAuthPlane(r),
+		personal:           projection.IsPersonalLens(r),
 		guarded:            adapterIsGuarded(adpt),
 		target:             r.Into.Target,
 		bucket:             r.Into.Bucket,

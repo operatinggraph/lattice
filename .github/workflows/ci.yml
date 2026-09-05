@@ -19,7 +19,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
-#   lint-static        — golangci + the 16 STRICT scripts/lint-*.go gates,
+#   lint-static        — golangci + the 19 STRICT scripts/lint-*.go gates,
 #                         split off lint-build so the compile/vet half and the
 #                         static-analysis half run in parallel instead of
 #                         serially — lint-build's own wall-clock (Build+Vet+
@@ -371,6 +371,22 @@ jobs:
         # argument is not a resolved-action identifier. Self-tests on every run
         # and refuses an all-clear over zero calls.
         run: STRICT=1 go run ./scripts/lint-weaver-classify-by-shape.go
+
+      - name: Flag consumer census (a flag's new reader re-reads its bound)
+        # A process-wide flag's comment prices being briefly wrong FOR THE
+        # CONSUMER it was written for, and every later reader inherits both the
+        # flag and that price without re-reading it. Refractor's rebuild
+        # in-flight flag is the worked example: priced "bounded, the sweep is a
+        # healer and the attestation reads `drained`", which holds for its first
+        # three readers and does not hold for a personal lens, which publishes
+        # NOTHING while it is set — there the same brief wrongness is a resumed
+        # flood of messages every device drops. Twice-seen. This gate holds a ledger of each registered flag's
+        # readers (file + function, parsed with go/ast) and fails both an
+        # UNDECLARED reader and a declared one that has stopped reading — the
+        # second so the ledger cannot rot into a gate inspecting nothing. Tests
+        # are out of scope by design: a test pins the mechanism rather than
+        # inheriting its bound.
+        run: STRICT=1 go run ./scripts/lint-flag-consumer-census.go
 
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
