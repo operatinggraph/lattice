@@ -70,13 +70,23 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		return substrate.NakWithDelay
 	}
 
+	// The row's `violating` column, read ONCE for every leg below that turns on
+	// it. The full read is taken because one of those legs — the `surface`
+	// retirement — needs to know whether the row actually STATED the column, and
+	// the single read is what keeps the column's RowDataError raised exactly
+	// once per delivery. Every other leg wants the conservative false a
+	// non-bool yields, which is what `violating` alone carries.
+	//
 	// Contraction monitor (design weaver-planner-mandate-design.md §3.4):
 	// records this row's current violating state on EVERY delivery, violating
-	// or not, including the tombstone case (row == nil reads as boolColumn's
-	// safe nil-map false) — the heartbeat-cadence trajectory input. Purely
+	// or not, including the tombstone case (row == nil, which states nothing and
+	// records the safe false) — the heartbeat-cadence trajectory input. Purely
 	// in-memory bookkeeping; runs even for a disabled target, mirroring
 	// mark-clearing above.
-	violating := row != nil && e.boolColumn(targetID, entityID, row, "violating")
+	violating, violatingReadable := false, false
+	if row != nil {
+		violating, violatingReadable = e.boolColumnRead(targetID, entityID, row, "violating")
+	}
 	e.contraction.observe(targetID, entityID, violating)
 
 	// The same read settles every `surface` membership this row holds. The lens
@@ -89,7 +99,15 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	// a row the lens says holds nothing. removeEntity across every column set is
 	// the same reach the tombstone leg needs and for the same reason. A row that
 	// starts violating again re-adds on that delivery's own dispatch.
-	if row != nil && !violating {
+	//
+	// It is the READABLE verdict that licenses the sweep, not the conservative
+	// false: a present non-bool `violating` is the lens failing to state
+	// anything, and acting on it would drop the entity from every column set of
+	// the target — the widest retirement there is — on the strength of a
+	// projection fault, then re-add it the moment the column projects as a bool
+	// again. A tombstone is the other shape that says nothing here, and its
+	// membership is swept by clearClosedMarks' own deletion leg instead.
+	if violatingReadable && !violating {
 		e.surface.removeEntity(targetID, entityID, e.surfaceReflector(targetID))
 	}
 
@@ -1263,13 +1281,17 @@ func (e *Engine) retireClosedGapIssues(targetID, entityID, gapColumn string) {
 // non-surface gap and for an entity that holds no membership at the column, so
 // the caller needs no action test.
 //
-// Its callers are exactly the legs that WITNESSED the column read false: lane-1's
-// candidate walk under its readable guard, the sweep's count-cleared leg, and the
-// sweep's mark-reclaimed gap-closed leg. It is deliberately absent from the
-// sweep's row-gone leg — a missing row is not evidence its work is done, and a
-// row that is mid-rebuild would leave the backlog under-reported until it
-// re-projected. What retires the membership of a genuinely deleted entity is
-// lane-1's tombstone leg, which sweeps every column set of the target.
+// Its callers are exactly the legs that WITNESSED the column read false, and
+// each stands behind the `readable` half of that read: lane-1's candidate walk,
+// the sweep's mark leg, and the sweep's dispatch-count leg. A present non-bool
+// is not a false — boolColumnRead's conservative value is a default, not a fact
+// about the row — so no caller may decide this from boolColumn.
+//
+// It is deliberately absent from the sweep's row-gone legs — a missing row is
+// not evidence its work is done, and a row that is mid-rebuild would leave the
+// backlog under-reported until it re-projected. What retires the membership of a
+// genuinely deleted entity is lane-1's tombstone leg, which sweeps every column
+// set of the target.
 func (e *Engine) retireSurfaceMembership(targetID, entityID, gapColumn string) {
 	e.surface.remove(targetID, gapColumn, entityID, e.surfaceReflector(targetID))
 }
@@ -1948,8 +1970,21 @@ func (e *Engine) alertStanding(key, severity, code, message string) {
 // this seam's target-scoped key sees are other entities' closes rather than
 // repairs, so a latch-borne stamp resets about once a pass. pacedRaise's doc
 // states what the pace-borne one can and cannot distinguish.
+//
+// Two per-row budgets can turn this raise away, and the (target, family) refusal
+// clock answers only the case where BOTH did. A raise the PACE budget alone
+// refuses still latches: the fact is on the board with its own `since`, and the
+// pacing it lost is a log record, so damping it to Debug costs an operator
+// nothing and spends no loud token. A raise the LATCH also refuses reaches no
+// plane at all — nothing tracks the key, so no later pass can raise its level
+// again — and that is the raise the clock exists to let through, loud on its
+// arrival and once per logPaceInterval per (target, family) after.
 func (e *Engine) alertPaced(key, severity, code, message string) {
-	loud, arrivedAt := e.issues.pacedRaise(key, severity, code, e.now())
+	loud, arrivedAt, paceRefused := e.issues.pacedRaise(key, severity, code, e.now())
+	latchRefused := e.issues.setSince(key, severity, code, message, arrivedAt)
+	if paceRefused && latchRefused {
+		loud = e.issues.refusedLoud(key, e.now())
+	}
 	switch {
 	case !loud:
 		e.logger.Debug("weaver: " + message)
@@ -1958,7 +1993,6 @@ func (e *Engine) alertPaced(key, severity, code, message string) {
 	default:
 		e.logger.Warn("weaver: " + message)
 	}
-	e.issues.setSince(key, severity, code, message, arrivedAt)
 }
 
 // The issue-key family prefixes. Every key constructor below and every

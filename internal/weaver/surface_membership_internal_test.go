@@ -85,6 +85,74 @@ func TestHandleRow_SurfaceMembershipSurvivesAnUnreadableColumn(t *testing.T) {
 	}
 }
 
+// TestHandleRow_SurfaceMembershipSurvivesAnUnreadableViolating holds the same
+// boundary at the widest removal leg there is.
+//
+// The non-violating leg drops the entity from EVERY column set of the target at
+// once — it acts on the lens's verdict about the whole row, not about one column
+// — so it is the leg with the most to lose from a value that states nothing. A
+// present non-bool `violating` (the string "true", say) yields the conservative
+// false every other consumer of the read wants, and taking that false here would
+// sweep the row out of the backlog, delete the entry's `since` when it was the
+// last member, and put it back the moment the column projected as a bool again.
+// The gap column reading TRUE throughout is what isolates the leg: the candidate
+// walk takes its open branch and touches nothing.
+func TestHandleRow_SurfaceMembershipSurvivesAnUnreadableViolating(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureSurfaceBadFlag"
+	const col = "missing_claim"
+	h.seedTarget(surfaceTarget(targetID, col, "UnroutedTasks", "warning"))
+	entityID := testNanoID(t)
+	key := issueKeyGapOpen(targetID, col)
+
+	open := map[string]any{"entityKey": "vtx.task." + entityID, "violating": true, col: true}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("surface dispatch: decision = %v, want Ack", dec)
+	}
+	entry, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("setup: expected the entry at %s, issues = %+v", key, h.engine.issues.snapshot())
+	}
+	arrival := entry.Since
+
+	// The next projection carries `violating` as the STRING "true", with the gap
+	// column still an honest bool true. The lens has stated nothing about whether
+	// this row still holds work.
+	unreadable := map[string]any{"entityKey": "vtx.task." + entityID, "violating": "true", col: true}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, unreadable, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("unreadable-violating delivery: decision = %v, want Ack", dec)
+	}
+	if n := h.engine.surface.count(targetID, col); n != 1 {
+		t.Fatalf("membership = %d, want 1: a row that cannot state whether it is violating has not said "+
+			"its work is done, and this leg sweeps every column set of the target", n)
+	}
+	entry, ok = issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("the entry must stand — the row still holds the work; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+	if want := "target " + targetID + ": 1 row has column " + col + " true"; entry.Message != want {
+		t.Fatalf("entry message = %q, want %q", entry.Message, want)
+	}
+	if entry.Since != arrival {
+		t.Fatalf("the entry's since moved %q -> %q across an unreadable `violating`: the backlog never "+
+			"emptied, so the fact never re-arose", arrival, entry.Since)
+	}
+	// The unreadable value is still reported, in the family that owns it, exactly
+	// once for the column it is on.
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "violating")); !ok {
+		t.Fatalf("a present non-bool `violating` is a per-row data fault and must be raised; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
 // TestHandleRow_NonViolatingRowLeavesTheOpenRowSet pins the removal leg that no
 // per-column walk can supply.
 //
@@ -287,5 +355,135 @@ func TestSweep_CountLegRowGoneKeepsTheOpenRowMembership(t *testing.T) {
 	}
 	if entry.Since != arrival {
 		t.Fatalf("the entry's since moved %q -> %q across a sweep that observed nothing", arrival, entry.Since)
+	}
+}
+
+// TestSweep_MarkLegRowGoneKeepsTheOpenRowMembership is the row-gone guard on the
+// sweep's other leg.
+//
+// A `surface` gap mints no mark of its own, so a mark at such a column is
+// stranded state — a column an earlier package version remediated. The sweep
+// reaches it, finds no row in weaver-targets, and clears the mark on the
+// standing "no column of an absent row can be true" reconcile. That reconcile is
+// about the MARK. It reads no column, so it witnesses nothing about the row's
+// open workload, and a row absent for a rebuild window has not completed its
+// business work. Deciding the membership from the delete's REASON rather than
+// from a read is what merges this leg with the one that did read: both arrive
+// carrying `gapClosed`.
+func TestSweep_MarkLegRowGoneKeepsTheOpenRowMembership(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureSurfaceMarkGone"
+	const col = "missing_claim"
+	h.seedTarget(surfaceTarget(targetID, col, "UnroutedTasks", "warning"))
+	entityID := testNanoID(t)
+	key := issueKeyGapOpen(targetID, col)
+
+	h.engine.surface.add(targetID, col, entityID, "UnroutedTasks", "warning", h.engine.surfaceReflector(targetID))
+	entry, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("setup: expected the entry at %s, issues = %+v", key, h.engine.issues.snapshot())
+	}
+	arrival := entry.Since
+
+	mk := markKey(targetID, entityID, col)
+	h.putMark(t, ctx, mk, fixtureMark(targetID, entityID, col, "directOp", pastLease()))
+	h.pass(ctx)
+
+	if h.markExists(t, ctx, mk) {
+		t.Fatalf("setup: the stranded mark must be cleared by the row-gone reconcile, so this test " +
+			"exercises the leg it means to")
+	}
+	if n := h.engine.surface.count(targetID, col); n != 1 {
+		t.Fatalf("membership = %d, want 1: a row absent from KV has not finished its work, and this leg "+
+			"read no column at all", n)
+	}
+	entry, ok = issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("the entry must stand; issues = %+v", h.engine.issues.snapshot())
+	}
+	if want := "target " + targetID + ": 1 row has column " + col + " true"; entry.Message != want {
+		t.Fatalf("entry message = %q, want %q", entry.Message, want)
+	}
+	if entry.Since != arrival {
+		t.Fatalf("the entry's since moved %q -> %q across a sweep that observed nothing", arrival, entry.Since)
+	}
+}
+
+// TestSweep_UnreadableColumnKeepsTheOpenRowMembership carries the unreadable-value
+// boundary onto both sweep legs at once.
+//
+// Each reaches its gap from a different stranded key — a mark, and a
+// dispatch-count — and each decides "closed" from the same column read. The
+// conservative false that read hands back on a present non-bool is what clears
+// the stranded key, which is right: a key nothing can read a live column for is
+// no use to anyone. It is not evidence about the row's open WORKLOAD, and the two
+// legs must not diverge from lane 1 on that, since the sweep is the only leg that
+// runs at all for a row that has gone quiet.
+//
+// One pass carries both vectors: the count leg defers to the mark leg whenever
+// the same gap holds both, so the two entities keep them apart.
+func TestSweep_UnreadableColumnKeepsTheOpenRowMembership(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureSurfBadCol"
+	const col = "missing_claim"
+	h.seedTarget(surfaceTarget(targetID, col, "UnroutedTasks", "warning"))
+	marked, counted := testNanoID(t), testNanoID(t)
+	key := issueKeyGapOpen(targetID, col)
+
+	for _, entityID := range []string{marked, counted} {
+		h.engine.surface.add(targetID, col, entityID, "UnroutedTasks", "warning", h.engine.surfaceReflector(targetID))
+		// Both rows are PRESENT and project the column as the string "true".
+		h.putRow(t, ctx, targetID, entityID, map[string]any{
+			"entityKey": "vtx.task." + entityID, "violating": true, col: "true",
+		})
+	}
+	entry, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("setup: expected the entry at %s, issues = %+v", key, h.engine.issues.snapshot())
+	}
+	arrival := entry.Since
+
+	mk := markKey(targetID, marked, col)
+	h.putMark(t, ctx, mk, fixtureMark(targetID, marked, col, "directOp", pastLease()))
+	h.seedCount(t, ctx, targetID, counted, col, 2)
+	h.pass(ctx)
+
+	// Both legs took their close branch — the stranded keys are gone — so the
+	// membership assertion below is about the retirement they did NOT make.
+	if h.markExists(t, ctx, mk) {
+		t.Fatalf("setup: the mark leg must have taken its close branch")
+	}
+	if h.countExists(t, ctx, targetID, counted, col) {
+		t.Fatalf("setup: the count leg must have taken its close branch")
+	}
+	if n := h.engine.surface.count(targetID, col); n != 2 {
+		t.Fatalf("membership = %d, want 2: a column neither leg could READ is not a column that closed", n)
+	}
+	entry, ok = issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("the entry must stand; issues = %+v", h.engine.issues.snapshot())
+	}
+	if want := "target " + targetID + ": 2 rows have column " + col + " true"; entry.Message != want {
+		t.Fatalf("entry message = %q, want %q", entry.Message, want)
+	}
+	if entry.Since != arrival {
+		t.Fatalf("the entry's since moved %q -> %q across a sweep that read no usable column",
+			arrival, entry.Since)
 	}
 }

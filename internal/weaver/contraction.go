@@ -26,10 +26,11 @@ const (
 // afterwards. A lane-1 durable that SURVIVES the restart resumes from its
 // persisted ack floor, so a violating row that was already acked and has not
 // re-projected is never re-counted — the count is a lower bound on the true one
-// until every violating row projects again. The two things that re-derive it in
-// full are a durable created from scratch (a cold boot, a newly registered
-// target) and Engine.ReplayTarget, which recreates one target's lane-1 durable
-// so DeliverLastPerSubject re-presents that target's whole current row set.
+// until every violating row projects again. The two things that re-derive it
+// from what the re-presented rows state are a durable created from scratch (a
+// cold boot, a newly registered target) and Engine.ReplayTarget, which recreates
+// one target's lane-1 durable so DeliverLastPerSubject re-presents that target's
+// whole current row set.
 //
 // Best-effort with an honest bound is the right posture here because nothing
 // gates on the number: it feeds the heartbeat's trajectory metric and no
@@ -141,16 +142,16 @@ type surfaceReflection struct {
 //	added         | in dispatchGap's actionSurface arm, on a TRANSITION to open only — a repeat
 //	              | delivery of an already-open row is a no-op (contractionStats.observe's rule)
 //	removed       | (a) the entity's column READ false, via retireSurfaceMembership — lane-1's
-//	              | candidate walk under its readable guard, the sweep's count-cleared leg, and
-//	              | the sweep's mark-reclaimed close leg; a leg that merely failed to see the
-//	              | column is not one of them; (b) the row delivered NON-VIOLATING, via
-//	              | removeEntity across every column set of the target: the lens's own verdict is
-//	              | that the row holds no open work, and the dispatch loop that would re-add it is
-//	              | not reached; (c) the entity tombstoned, via removeEntity across EVERY column
-//	              | set of the target: on an empty body markCandidateColumns yields the playbook's
-//	              | keys alone, so a column the playbook has since dropped never yields and a
-//	              | membership recorded while it was still declared would leak with the entity
-//	              | gone; (d) the target leaving, via removeTarget at Revoke and at
+//	              | candidate walk, the sweep's dispatch-count leg and the sweep's mark leg, each
+//	              | behind boolColumnRead's readable verdict; a leg that merely failed to see the
+//	              | column, or read a present non-bool, is not one of them; (b) the row delivered
+//	              | NON-VIOLATING and readably so, via removeEntity across every column set of the
+//	              | target: the lens's own verdict is that the row holds no open work, and the
+//	              | dispatch loop that would re-add it is not reached; (c) the entity tombstoned, via
+//	              | removeEntity across EVERY column set of the target: on an empty body
+//	              | markCandidateColumns yields the playbook's keys alone, so a column the playbook
+//	              | has since dropped never yields and a membership recorded while it was still
+//	              | declared would leak with the entity gone; (d) the target leaving, via removeTarget at Revoke and at
 //	              | reconcileConsumers' removal
 //	issue entry   | rewritten on EVERY membership change, add and remove alike, so the count an
 //	              | operator reads is the count this instance holds; the rewrite is invoked by the

@@ -213,7 +213,11 @@ type pacedLog struct {
 //
 //	created     | lazily, at that (target, family)'s first refused raise
 //	incremented | refusedWindow on every refused latch raise, which also folds its severity into refusedWorst
-//	stamped     | refusedLoudAt whenever refusedLoud lets a refused raise log loudly
+//	stamped     | refusedLoudAt whenever refusedLoud lets a refused raise log loudly — and a raise
+//	            | reaches refusedLoud only once the LATCH refused it, so rowIssues[target] is at the
+//	            | cap, hence non-zero, at every stamp. That is what keeps the map reachable: the two
+//	            | drain routes below run off releaseRowIssueLocked / clearPrefix counting that entry
+//	            | down to zero, and a stamp laid where no latch entry existed would outlive them
 //	reset       | refusedWindow at the heartbeat boundary — rollRefusalWindow rewrites the overflow
 //	            | entry's message from the counts and zeroes them, which is what makes the number a
 //	            | window. refusedLoudAt is NOT reset there: it paces across windows
@@ -318,6 +322,12 @@ func (c *issueCache) setSince(key, severity, code, message string, arrivedAt tim
 // DeliverLastPerSubject on a stable durable, so the row is never delivered again
 // until it re-projects. One "not re-derivable" clause covering all four would be
 // affirmatively false for half of them.
+//
+// The window and the SEVERITY are on different clocks, and the message says so:
+// the counts are per heartbeat, while the severity is the worst refused since
+// the entry arrived and holds until the target's per-row set drains to nothing
+// (releaseRowIssueLocked's doc gives the reason). Without that clause a window
+// that refused nothing reads as an `error` about zero raises.
 func rowIssuesCappedMessage(target string, window map[string]int) string {
 	families := [...]string{issuePrefixData, issuePrefixGapEntity, issuePrefixTemplate, issuePrefixSweep}
 	total := 0
@@ -335,7 +345,8 @@ func rowIssuesCappedMessage(target string, window map[string]int) string {
 	return "target " + target + ": per-row issue tracking reached its cap of " +
 		strconv.Itoa(rowIssueCapPerTarget) + " entries; " + strconv.Itoa(total) +
 		" raises for untracked rows were refused since the last heartbeat (" + breakdown.String() +
-		"). Refused " + issuePrefixTemplate + " and exhaustion facts re-derive on their own cadence " +
+		"); the entry stands at the worst refused severity until the target's tracked set drains" +
+		". Refused " + issuePrefixTemplate + " and exhaustion facts re-derive on their own cadence " +
 		"and land when a slot frees; refused " + issuePrefixData + " and " + issuePrefixSweep +
 		" facts are not re-derivable until those rows project again."
 }
@@ -517,21 +528,24 @@ func (c *issueCache) clear(key string) {
 // without the budget the map would be sized by the consumer's MaxAckPending
 // rather than by the cap the design advertises.
 //
-// A refused key is dated `now` — an untracked key has no per-key clock to tell
-// arrival from continuation — and paced on the (target, family) refusal clock
-// instead, so the fault is heard on its arrival and once per logPaceInterval
-// after. Reporting it not-loud unconditionally would be permanent silence: the
-// key never enters c.paced, so nothing else in this function could ever raise
-// its level again, and a `template:` fault behind a full budget would log at
-// Debug for the life of the process.
-func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud bool, arrivedAt time.Time) {
+// A key the pace budget REFUSES is dated `now` — an untracked key has no per-key
+// clock to tell arrival from continuation — reported not-loud, and flagged
+// paceRefused so the caller knows this raise has no pace entry behind it. The
+// (target, family) refusal clock is deliberately not spent here. The pace budget
+// and the LATCH budget are separate budgets, and a key this one turns away is
+// routinely still latched: the fact is then on the board, carrying its own
+// `since`, and no log record is needed to keep it. Spending the loud token on
+// such a raise would silence the refusal the clock exists for — one the latch
+// turned away, which reaches no plane at all. Engine.alertPaced holds both
+// verdicts and consults the clock only when both budgets refused.
+func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud bool, arrivedAt time.Time, paceRefused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	last, ok := c.paced[key]
 	if !ok {
-		if target, family, perRow := rowIssueFamily(key); perRow {
+		if target, _, perRow := rowIssueFamily(key); perRow {
 			if c.rowPaced[target] >= rowIssueCapPerTarget {
-				return c.refusedLoudLocked(target, family, now), now
+				return false, now, true
 			}
 			c.rowPaced[target]++
 		}
@@ -542,7 +556,7 @@ func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud
 			severity: severity, code: code,
 			arrivedAt: now, lastLoudAt: now, lastRaiseAt: now,
 		}
-		return true, now
+		return true, now, false
 	}
 	loud = now.Sub(last.lastLoudAt) >= logPaceInterval
 	if loud {
@@ -550,7 +564,7 @@ func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud
 	}
 	last.lastRaiseAt = now
 	c.paced[key] = last
-	return loud, last.arrivedAt
+	return loud, last.arrivedAt, false
 }
 
 // prunePaced drops every pace entry not raised for at least twice

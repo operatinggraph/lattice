@@ -907,7 +907,7 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	// refusal clock instead. The loop above already spent this family's window on
 	// its first refusal, so a further refusal inside the same window is damped —
 	// the record is lowered to Debug, never dropped.
-	loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
+	loud, _, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
 		"warning", "TemplateDataError", now)
 	if loud {
 		t.Fatalf("a refused pace key inside its family's window must not report loud — every raise " +
@@ -915,7 +915,7 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	}
 	// A target-scoped key is never counted against the per-row budget, so the
 	// config latch keeps pacing even under a per-row flood.
-	if loud, _ := c.pacedRaise(issueKeyGapConfig(targetID, "missing_a"), "warning", "PlaybookConfigError", now); !loud {
+	if loud, _, _ := c.pacedRaise(issueKeyGapConfig(targetID, "missing_a"), "warning", "PlaybookConfigError", now); !loud {
 		t.Fatalf("a target-scoped paced key must not be refused by the per-ROW budget")
 	}
 	// The prune returns slots, so a target whose faults age out can pace again.
@@ -923,7 +923,7 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	if len(c.paced) != 0 || len(c.rowPaced) != 0 {
 		t.Fatalf("prunePaced must return every slot it drops, paced=%d rowPaced=%v", len(c.paced), c.rowPaced)
 	}
-	if loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
+	if loud, _, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
 		"warning", "TemplateDataError", now.Add(3*logPaceInterval)); !loud {
 		t.Fatalf("a freed pace slot must be readmitted")
 	}
@@ -957,6 +957,14 @@ func assertRefusalWindow(t *testing.T, c *issueCache, targetID string, total int
 	}
 	if !strings.Contains(is.Message, breakdown) {
 		t.Fatalf("overflow message must attribute the window per family (%q), got %q", breakdown, is.Message)
+	}
+	// The counts are per heartbeat and the severity is not: a window that
+	// refused nothing still stands at the worst severity refused since the entry
+	// arrived, and the message has to say so or it reads as an `error` about
+	// zero raises.
+	const severityClause = "the entry stands at the worst refused severity until the target's tracked set drains"
+	if !strings.Contains(is.Message, severityClause) {
+		t.Fatalf("overflow message must say the severity outlives the window (%q), got %q", severityClause, is.Message)
 	}
 }
 
@@ -1014,29 +1022,108 @@ func TestAlertStanding_RefusedRaiseIsPacedNotFlooded(t *testing.T) {
 	}
 }
 
-// TestPacedRaise_RefusedKeyIsLoudOncePerInterval closes the other inversion.
-// alertPaced reads its level from the pace map, and a refused key never enters
-// it — so reporting the refusal not-loud unconditionally is not damping but
-// permanent silence: nothing else in pacedRaise could ever raise that key's
-// level again for the life of the process.
-func TestPacedRaise_RefusedKeyIsLoudOncePerInterval(t *testing.T) {
-	t.Parallel()
-	c := newIssueCache()
-	const targetID = "targetRefusedPaced"
-	now := time.Now()
+// fillPacedRowIssueBudget takes the whole of one target's per-row PACE budget
+// with `data:` faults, the sibling of fillRowIssueBudget for the other of the
+// two budgets a per-row raise passes. A key refused by this one alone still
+// latches; a key refused by both reaches no plane at all.
+func fillPacedRowIssueBudget(c *issueCache, targetID string, now time.Time) {
 	for i := 0; i < rowIssueCapPerTarget; i++ {
-		c.pacedRaise(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"),
+		c.pacedRaise(issueKeyDataEntity(targetID, "p"+strconv.Itoa(i), "violating"),
 			"warning", "RowDataError", now)
 	}
-	key := issueKeyTemplateEntity(targetID, "eParked", "missing_a")
-	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now); !loud {
-		t.Fatalf("a refused key's arrival must be loud — not-loud unconditionally is silence forever")
+}
+
+// TestPacedRaise_RefusedKeyIsLoudOncePerInterval closes the other inversion. A
+// key BOTH budgets refuse is on no plane at all: it never enters the pace map,
+// so nothing in pacedRaise could ever raise its level again, and the latch
+// turned it away, so the Health board does not carry it either. Reporting that
+// not-loud is not damping but permanent silence — the fault would exist only as
+// a Debug line for the life of the process.
+func TestPacedRaise_RefusedKeyIsLoudOncePerInterval(t *testing.T) {
+	t.Parallel()
+	const targetID = "targetRefusedPaced"
+	const parked = "PARKEDpacedNANOIDxxx"
+	logs := &logCapture{}
+	clock := time.Now()
+	e := &Engine{
+		logger: slog.New(logs),
+		issues: newIssueCache(),
+		clock:  func() time.Time { return clock },
 	}
-	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now.Add(time.Minute)); loud {
-		t.Fatalf("a refused key must be damped for the rest of its family's window")
+	fillRowIssueBudget(e.issues, targetID)
+	fillPacedRowIssueBudget(e.issues, targetID, clock)
+
+	raise := func() {
+		e.alertPaced(issueKeyTemplateEntity(targetID, parked, "missing_a"), "warning", "TemplateDataError",
+			"target "+targetID+" entity "+parked+": template does not resolve")
 	}
-	if loud, _ := c.pacedRaise(key, "warning", "TemplateDataError", now.Add(logPaceInterval)); !loud {
-		t.Fatalf("past logPaceInterval a refused key must be audible again")
+	raise()
+	levels := logs.levelsContaining(parked)
+	if len(levels) != 1 || levels[0] != slog.LevelWarn {
+		t.Fatalf("a doubly-refused key's arrival must be loud at its own severity, got %v", levels)
+	}
+	clock = clock.Add(time.Minute)
+	raise()
+	levels = logs.levelsContaining(parked)
+	if got := levels[len(levels)-1]; got != slog.LevelDebug {
+		t.Fatalf("a doubly-refused key must be damped for the rest of its family's window, got %v", got)
+	}
+	clock = clock.Add(logPaceInterval)
+	raise()
+	levels = logs.levelsContaining(parked)
+	if got := levels[len(levels)-1]; got != slog.LevelWarn {
+		t.Fatalf("past logPaceInterval a doubly-refused key must be audible again, got %v", got)
+	}
+}
+
+// TestAlertPaced_PaceOnlyRefusalSpendsNoLoudToken pins which refusal the
+// (target, family) loud clock answers. The pace budget and the latch budget are
+// separate, and a raise only the PACE one turns away still LATCHES: the fact
+// stands on the board with its own `since`, so the log record it lost costs an
+// operator nothing. Spending the family's loud token on it would hand the token
+// to the raise that needs it least and silence the one that reaches no plane at
+// all — and the stamp would outlive its target, since nothing counts a
+// pace-refused key down to the zero that drains refusedLoudAt.
+func TestAlertPaced_PaceOnlyRefusalSpendsNoLoudToken(t *testing.T) {
+	t.Parallel()
+	const targetID = "targetPaceOnly"
+	const parked = "PACEONLYnanoidXXXXXX"
+	logs := &logCapture{}
+	clock := time.Now()
+	e := &Engine{
+		logger: slog.New(logs),
+		issues: newIssueCache(),
+		clock:  func() time.Time { return clock },
+	}
+	fillPacedRowIssueBudget(e.issues, targetID, clock)
+
+	key := issueKeyTemplateEntity(targetID, parked, "missing_a")
+	e.alertPaced(key, "warning", "TemplateDataError",
+		"target "+targetID+" entity "+parked+": template does not resolve")
+
+	levels := logs.levelsContaining(parked)
+	if len(levels) != 1 || levels[0] != slog.LevelDebug {
+		t.Fatalf("a pace-only refusal is damped, not loud: the latch carries the fact, got %v", levels)
+	}
+	if _, standing := issueAt(e.issues, key); !standing {
+		t.Fatalf("a pace-only refusal must still latch — that is why it needs no loud record")
+	}
+	e.issues.mu.Lock()
+	stamped := len(e.issues.refusedLoudAt[targetID])
+	e.issues.mu.Unlock()
+	if stamped != 0 {
+		t.Fatalf("a pace-only refusal must spend no loud token, got %d stamped family clock(s)", stamped)
+	}
+
+	// With the LATCH budget full too the raise reaches no plane, and the clock
+	// it left unspent is there to make its arrival heard.
+	fillRowIssueBudget(e.issues, targetID)
+	clock = clock.Add(time.Minute)
+	e.alertPaced(key+".second", "warning", "TemplateDataError",
+		"target "+targetID+" entity "+parked+": a second template does not resolve")
+	levels = logs.levelsContaining(parked)
+	if got := levels[len(levels)-1]; got != slog.LevelWarn {
+		t.Fatalf("a doubly-refused raise must be loud on its arrival, got %v", got)
 	}
 }
 

@@ -329,6 +329,22 @@ jobs:
         # refuses an all-clear over zero examined columns.
         run: STRICT=1 go run ./scripts/lint-gap-column-declaration.go
 
+      - name: Weaver witnessed-retire lint (a `surface` membership leaves only on a READ column)
+        # internal/weaver has two column readers with two verdicts: boolColumnRead
+        # reports the value AND whether the row stated it, while boolColumn
+        # discards the second half and reads a PRESENT non-bool as a plain false.
+        # The `surface` gap's open-row set counts a target's open WORKLOAD, so
+        # shrinking it claims a row's work is DONE — a claim a conservative false
+        # cannot support: the count would fall by one per broken row and climb
+        # back on the next clean projection, flapping the number an operator
+        # reads. This gate parses internal/weaver with go/ast and fails any
+        # function that retires a membership (retireSurfaceMembership, or
+        # surface.removeEntity) while reading the column that retirement turns on
+        # through boolColumn — including a column argument it cannot resolve,
+        # which is never a clean pass. Self-tests on every run and refuses an
+        # all-clear over zero retiring functions.
+        run: STRICT=1 go run ./scripts/lint-weaver-witnessed-retire.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

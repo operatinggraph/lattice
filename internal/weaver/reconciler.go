@@ -316,11 +316,21 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 			return
 		}
 	}
-	if !e.boolColumn(targetID, entityID, row, gapColumn) {
+	open, readable := e.boolColumnRead(targetID, entityID, row, gapColumn)
+	if !open {
 		// The gap is closed (or the column is gone from the row): prompt
 		// level-reconciled clear, no lease wait.
 		s.deleteMark(ctx, key, entry.Revision, rec.Action, sweepReasonGapClosed,
 			targetID, entityID, gapColumn)
+		// The mark and the fault latches go on the conservative false: a mark
+		// nothing can read a live column for is no use to anyone, and the faults
+		// are this row's own. The `surface` membership does not — it stands for
+		// a row of open WORKLOAD, so only a column this leg actually READ false
+		// is evidence the row holds that work no longer, and a present non-bool
+		// would shrink the operator's backlog count on a projection fault.
+		if readable {
+			e.retireSurfaceMembership(targetID, entityID, gapColumn)
+		}
 		return
 	}
 
@@ -586,11 +596,19 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 			return
 		}
 	}
-	if !e.boolColumn(targetID, entityID, row, gapColumn) {
+	open, readable := e.boolColumnRead(targetID, entityID, row, gapColumn)
+	if !open {
 		// The gap is closed (or the column is gone from the row) and no mark
 		// exists to carry the level reconcile: this leg is the one that resets
 		// the budget and retires the standing issue.
 		s.deleteCount(ctx, key, entry.Revision, targetID, entityID, gapColumn)
+		// The `surface` membership retires only on a column this leg READ false,
+		// for the reason the mark leg gives: a present non-bool states nothing
+		// about the row's open workload, and shrinking the count on it would
+		// under-report the backlog until the column projected as a bool again.
+		if readable {
+			e.retireSurfaceMembership(targetID, entityID, gapColumn)
+		}
 		return
 	}
 
@@ -782,9 +800,9 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 // observed the close — idempotent when none stands. A won delete counts on the
 // sweepOrphansDeleted metric, like every other key this sweep removes.
 //
-// That read is of the PRESENT row's column, and it read false, so this leg also
-// witnessed a `surface` column close and retires the entity's open-row
-// membership. Its sibling row-gone leg witnessed no column and does not.
+// The `surface` open-row membership is NOT retired here. It turns on the column
+// having been READ false rather than on the conservative false these latches
+// take, so its retirement stays at the call site holding that verdict.
 func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, targetID, entityID, gapColumn string) {
 	e := s.engine
 	if err := e.conn.KVDeleteRevision(ctx, e.cfg.WeaverStateBucket, key, revision); err != nil {
@@ -801,7 +819,6 @@ func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, 
 		s.bump(&s.orphansDeleted)
 	}
 	e.retireClosedGapIssues(targetID, entityID, gapColumn)
-	e.retireSurfaceMembership(targetID, entityID, gapColumn)
 }
 
 // reclaim handles an expired (or lease-less) mark whose column is still true:
@@ -1203,6 +1220,13 @@ func (s *sweeper) retireCorrupt(key string) {
 // and this delete — the fresh episode is intact and the delete is skipped.
 // Orphan deletes log at Warn (operator visibility); a gapClosed delete is the
 // routine level reconcile and logs at Info.
+//
+// It retires this row's own FAULT latches, which is a decision it can make from
+// the reason alone. It does NOT touch the column's `surface` open-row
+// membership: two callers pass sweepReasonGapClosed and only one of them read a
+// column at all — the other reached it from a row that is ABSENT, which is not
+// evidence its work is done. That retirement belongs to the caller holding the
+// read that witnessed the close.
 func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 	action, reason, targetID, entityID, gapColumn string) bool {
 
@@ -1240,15 +1264,12 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
 		}
-		// The delete won and the column itself read false, so this gap has
-		// ENDED for this entity — the same fact lane-1's clearClosedMarks acts
-		// on, through the same two functions, so the legs cannot drift apart.
-		// This leg is not a duplicate of that one: for a row that has gone quiet
-		// lane-1 never runs again, and the sweep is the only leg that will ever
-		// observe the close. Having read the column false, it is entitled to the
-		// membership retirement as well as the fault retirement.
+		// The delete won, so this gap has ENDED for this entity — the same fact
+		// lane-1's clearClosedMarks acts on, through the same function, so the
+		// legs cannot drift apart. This leg is not a duplicate of that one: for
+		// a row that has gone quiet lane-1 never runs again, and the sweep is
+		// the only leg that will ever observe the close.
 		e.retireClosedGapIssues(targetID, entityID, gapColumn)
-		e.retireSurfaceMembership(targetID, entityID, gapColumn)
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
 		// The orphan reasons say this gap is no longer DISPATCHABLE — the

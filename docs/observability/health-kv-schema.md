@@ -1050,7 +1050,7 @@ consumes no slot at any backlog size.
 ```json
 {"severity": "<the worst severity among the raises it refused — warning or error>",
  "code": "RowIssuesCapped",
- "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> raises for untracked rows were refused since the last heartbeat (data: <a> · gap: <b> · template: <c> · sweep: <d>). Refused template: and exhaustion facts re-derive on their own cadence and land when a slot frees; refused data: and sweep: facts are not re-derivable until those rows project again.",
+ "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> raises for untracked rows were refused since the last heartbeat (data: <a> · gap: <b> · template: <c> · sweep: <d>); the entry stands at the worst refused severity until the target's tracked set drains. Refused template: and exhaustion facts re-derive on their own cadence and land when a slot frees; refused data: and sweep: facts are not re-derivable until those rows project again.",
  "since": "<RFC3339 — when the cap was first reached>"}
 ```
 

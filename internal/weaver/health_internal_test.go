@@ -673,7 +673,7 @@ func TestAlert_LogsTheArrivalLoudlyAndTheRepeatQuietly(t *testing.T) {
 // loudPacedRaise records a raise and reports only whether it was loud, for the
 // subtests whose subject is the pacing verdict rather than the arrival stamp.
 func loudPacedRaise(c *issueCache, key, severity, code string, now time.Time) bool {
-	loud, _ := c.pacedRaise(key, severity, code, now)
+	loud, _, _ := c.pacedRaise(key, severity, code, now)
 	return loud
 }
 
@@ -949,7 +949,7 @@ func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
 
 	t.Run("a continuously re-derived fault keeps its first arrival", func(t *testing.T) {
 		c := newIssueCache()
-		_, arrived := c.pacedRaise(key, sev, code, start)
+		_, arrived, _ := c.pacedRaise(key, sev, code, start)
 		if !arrived.Equal(start) {
 			t.Fatalf("the arrival is the first raise, got %v want %v", arrived, start)
 		}
@@ -960,7 +960,7 @@ func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
 			if minute == 30 {
 				c.clear(key)
 			}
-			_, arrived = c.pacedRaise(key, sev, code, at)
+			_, arrived, _ = c.pacedRaise(key, sev, code, at)
 			if !arrived.Equal(start) {
 				t.Fatalf("minute %d reported the arrival as %v; a fault re-derived every pass never stopped "+
 					"holding and keeps its first arrival %v", minute, arrived, start)
@@ -975,7 +975,7 @@ func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
 		// its return is a genuinely new one rather than a continuation. This is
 		// what bounds how far the stamp can reach back.
 		back := start.Add(logPaceInterval + time.Minute)
-		loud, arrived := c.pacedRaise(key, sev, code, back)
+		loud, arrived, _ := c.pacedRaise(key, sev, code, back)
 		if !loud {
 			t.Fatal("a fault returning after a silence longer than the interval must arrive loudly")
 		}
@@ -988,7 +988,7 @@ func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
 		c := newIssueCache()
 		c.pacedRaise(key, "warning", "UnresolvedReference", start)
 		at := start.Add(time.Minute)
-		_, arrived := c.pacedRaise(key, "error", "PlaybookConfigError", at)
+		_, arrived, _ := c.pacedRaise(key, "error", "PlaybookConfigError", at)
 		if !arrived.Equal(at) {
 			t.Fatalf("arrival = %v, want %v: a different severity or code is a different fault, "+
 				"and it did not arise when the previous one did", arrived, at)
@@ -1000,7 +1000,7 @@ func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
 		c.pacedRaise(key, sev, code, start)
 		c.clearPrefix("gapConfig:t1.")
 		at := start.Add(time.Minute)
-		_, arrived := c.pacedRaise(key, sev, code, at)
+		_, arrived, _ := c.pacedRaise(key, sev, code, at)
 		if !arrived.Equal(at) {
 			t.Fatalf("arrival = %v, want %v: a revoked target's return is a new fault, not a continuation",
 				arrived, at)
