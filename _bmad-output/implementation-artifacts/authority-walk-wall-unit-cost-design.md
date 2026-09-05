@@ -361,6 +361,17 @@ still crosses the wall on a quiet Refractor): §8 row 4's trigger, with the numb
   parent did. A row whose probe passes closes to the Done log with the numbers; a row whose probe fails
   re-blocks on §8 row 4's trigger.
 
+**§9 acceptance — recorded (Verticals steward, 2026-09-05, ~23:00Z, read from the step-4→step-5 interval;
+Inc A unshipped).** Paced 1/s at head, one actor each, the Appendix A reduction over `processor.log`:
+`SetRenewalTerms` landlord `Vro7gNhE` 20/20 accepted, 0 timeouts, median 28.5 ms, max 85; café staff `Charge`
+`EEpzBUuC` with `menuItemKey` 20/20, 0 timeouts, median 86.5 ms, max 193 (the resident `dTerZvij` on the same
+tab 10/10, median 41 ms; the same staffer's `VoidCharge` ×30 median 55 ms, max 136); clinic front desk
+`ocZv1PtnocWiy37gcwbn` `CreateAppointment` 7/7 median 30 ms + `SetAppointmentStatus` 8/8 median 33 ms, 0
+timeouts. **All three PASS** the criterion above; the café staff walk carries the thinnest margin (median at
+0.87 of the 100 ms bar, max at 0.77 of the wall) and is the first to cross on the next flood day — the
+tripwire is Inc A's `step5-latency`. The three verticals rows are closed to that lane's Done log with these
+numbers; the probe tab (`vtx.tab.vV74vKvwmip9tHuxLrYz`) was voided line-by-line and settled at $0.
+
 ## 11. Decomposition for the Steward
 
 | Inc | Scope | Size | Review depth |
