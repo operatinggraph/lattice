@@ -1046,6 +1046,35 @@ func TestReloaderUpdate_ReactivationThatDoesNotTakeIsRecordedOnHealth(t *testing
 			"infra is the pause the supervisor's probe loop serves, so the next activation resumes the entry on its own; a structural one is held until an operator issues resume, which no restart does")
 	})
 
+	// A lens an activation guard refused holds no registry entry and no retry
+	// queue; the spec edit that answers the guard's reason reaches the reloader
+	// as an update on a lens it does not hold, and must activate it rather than
+	// be dropped as unknown. Delete the activation call in update's unknown
+	// branch and this fails.
+	t.Run("an update on a lens the registry does not hold activates the edited spec", func(t *testing.T) {
+		kv := startHealthKV(t)
+		reporter := health.New(kv, "lens-reload-test")
+
+		rl, rig := newReactivationRig(t, businessLensEntry(t, &scopedTruncAdapter{}, reporter))
+		rl.lookup = func(string) (*pipelineEntry, bool) { return nil, false }
+		var activated *lens.Rule
+		rl.activateForTaxonomy = func(r *lens.Rule) {
+			rig.order = append(rig.order, "activate")
+			activated = r
+		}
+
+		old := businessLensRule(t)
+		old.ID = "unregistered-lens-id"
+		edited := businessLensRule(t)
+		edited.ID = old.ID
+		edited.Output.BodyColumns = []string{"tasks", "grants"}
+		rl.update(old, edited, lens.MatchChange)
+
+		require.Equal(t, []string{"activate"}, rig.order,
+			"nothing is torn down — there is no running pipeline — and the edited spec is what activates")
+		require.Same(t, edited, activated)
+	})
+
 	// A lens whose activation was refused for an UNKNOWN taxonomy expansion is not
 	// dark in that sense: it is queued, and retryRefused drives it on the next
 	// taxonomy event exactly as it would a first load. Reporting it as dark would

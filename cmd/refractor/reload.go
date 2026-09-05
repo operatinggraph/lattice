@@ -531,6 +531,20 @@ func (rl *reloader) update(old, newLens *lens.Rule, kind lens.UpdateKind) {
 				"lensId", newLens.ID, "kind", kind)
 			return
 		}
+		// A lens an activation guard refused (dark: the retraction-transport
+		// gate, the DiffRetraction guard, a shared-target collision) holds no
+		// registry entry and sits in no retry queue, so this edit — the
+		// operator's fix for whatever the guard named — is its only way back
+		// before a restart. Activation is the existence-checked entry point a
+		// first load uses, so a lens a concurrent load already registered is
+		// not raced, and a shape the guard still refuses is refused again with
+		// the reason re-recorded.
+		if rl.activateForTaxonomy != nil {
+			rl.logger.Info("lens update on a lens the registry does not hold; activating the edited spec",
+				"lensId", newLens.ID, "kind", kind)
+			rl.activateForTaxonomy(newLens)
+			return
+		}
 		rl.logger.Warn("update on unknown lens", "lensId", newLens.ID, "kind", kind)
 		return
 	}
