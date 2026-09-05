@@ -747,3 +747,115 @@ rather than left as an erratum:
 12. **Two quotes now match their sources.** The header quotes the lane row's current title, and §10 no
     longer carries a board item — the row correction landed with this design's own commit, and the one
     phrase still outstanding is named in §1.1. §7.2's F17 citation is requoted verbatim.
+
+---
+
+### Fire brief (build note, 2026-09-04) — one fire, Inc 1 then Inc 2
+
+**1. Scope (verbatim, ratification banner).** *"a `surface` gap raises one counted entry per (target, gap column);
+per-row identity stays in the target's projected row set. One fire, size M, Increment 1 first. Contract #10
+§10.8's `surface` clause of record is in §6 and lands WITH the fire's commit."* Green bar: §9's Inc 1 + Inc 2
+vectors, `make test-unrouted-convergence` unchanged and green, all `scripts/lint-*.go` STRICT, CI green.
+
+**2. Verified touch-list (checked live at `3f77318b`).** Every §2 ledger row re-verified; only `temporal.go`
+rotted (+7 lines: raises at `:127`, `:144`, `:165`). Censuses re-run: **C1 = 7** (`privacy-base/targets.go`
+now `:194`, `:199`), **C3 = 11**, `gapOpen` unused anywhere.
+- `internal/weaver/health.go` — `rowIssueCapPerTarget` + comment `:46-62` · cache struct `:188-197`
+  (`refused`, `refusedWorst`) · `set` `:213` · `setSince` `:236-257` · `setLocked` `:259-268` ·
+  `releaseRowIssueLocked` `:282-291` · `retireRowIssueOverflowLocked` `:296-301` · `clear` `:331-343` ·
+  `pacedRaise` `:380-407` (refusal `return false, now` at `:386`) · `clearPrefix` `:463-501` ·
+  `snapshot` `:504-519` · heartbeat consumer `emit` `:709-710` (`prunePaced` then `snapshot`) ·
+  `listingRank` `:957-968` · `perEntityIssueFamily` `:995-1002`.
+- `internal/weaver/evaluator.go` — surface arm `:316-334` · `surfaceOnlyGap` `:585` · `clearClosedMarks`
+  `:989` (tombstone leg + three prefix clears `:1005-1011`; candidate walk retire `:1064`; surface no-mark
+  branch `:1066-1069`) · `retireClosedGapIssues` `:1176-1194` · `surfaceOnlyGap` guard in
+  `escalateExhaustedGap` `:1542-1560` · `markCandidateColumns` `:1696-1712` · `alert` `:1753` ·
+  `alertStanding` `:1775-1782` · `alertPaced` `:1819-1830` · prefix consts `:1835-1846` ·
+  `perEntityIssuePrefixes` `:1864-1869` · `targetScopedIssuePrefixes` `:1875-1882` ·
+  `issueKeyTargetPrefixes` `:1911-1919` · `issueKeyGapEntity` `:1927` · `rowIssueTarget` `:2075-2093`.
+- `internal/weaver/contraction.go` — `contractionStats` + doc `:18-77` (the mirror; `surfaceStats` lands here).
+- `internal/weaver/engine.go` — `Engine` fields `:280-292` (`contraction` at `:288`; constructor `:381`) ·
+  `reconcileConsumers` teardown `:570-590` (`issueKeyTargetPrefixes` loop `:579`, `republish.clearTarget`).
+- `internal/weaver/control.go` — Revoke teardown `:244` · `ReplayTarget` `:460`.
+- `internal/weaver/reconciler.go` — `defaultSweepInterval` `:21` · `escalateExhaustedGap` calls `:634`,
+  `:943` · surface skip `:701-707` · `retireClosedGapIssues` callers `:568`, `:792`, `:1237`.
+- Tests to migrate: `evaluator_internal_test.go` `:1303-1332`, `:1471`, `:1577`, `:2037`, `:2052`, `:2414` ·
+  `replay_internal_test.go` `:388-416` · `decline_retry_internal_test.go` `:181`, `:379`, `:394`,
+  `:1142-1163` · `health_internal_test.go` `:333`, `:423`, `:457` · `listing_rank_internal_test.go:15`.
+- Docs: `docs/observability/health-kv-schema.md` `:943-1042` · `docs/components/weaver.md:1174` (Actions row,
+  `surface` sentence) · `docs/contracts/10-orchestration-weaver.md:169` (§6 clause, lands with the commit).
+- `cmd/loupe` — **no change** (§7.2); `web_logic_weaver_test.go:203` renders the action, unaffected.
+
+**3. Precedents.** Member set = `contractionStats.observe` (`contraction.go:60-77`: transition-only, admit on
+first open sighting, lower-bound posture). Family prefix + teardown = the ten consts + `issueKeyTargetPrefixes`
+(`evaluator.go:1835-1919`). Tier classification = `targetScopedIssuePrefixes` + the pin
+`TestListingRank_EveryIssueFamilyIsClassified`. Target-scoped message convention `"target <id>: …"` =
+`GapWithoutPlaybook` (`evaluator.go:305`). Nested per-target teardown = `retireRowIssueOverflowLocked`'s
+`delete(m, target)`. Heartbeat-boundary hook = `prunePaced` at `health.go:709`.
+
+**4. Increments + green checks (Winston's implementation decisions, recorded here).**
+- **Inc 1.** (a) `issuePrefixGapOpen = "gapOpen:"`, `issueKeyGapOpen(t, col)`; add to `targetScopedIssuePrefixes`
+  (tier 2) and to `issueKeyTargetPrefixes`. `rowIssueTarget`'s switch does not match it, so it leaves the budget
+  by construction; §9's dotted-column vector pins that. (b) `surfaceStats` in `contraction.go`:
+  `map[target]map[col]*surfaceColumn{code, severity, members map[entity]struct{}}`; methods `add(t, col, e, code,
+  sev) (n int, changed bool)`, `remove(t, col, e) (col surfaceColumn, changed bool)`, `removeEntity(t, e) []changed
+  columns`, `removeTarget(t)`. Code/severity are stored at add so a remove can rewrite the entry without the
+  `*Target` (`retireClosedGapIssues` has none). (c) Engine helper `reflectSurface(t, col, sc)`: `n>0` ⇒
+  `issues.set(issueKeyGapOpen, sev, code, "target T: N rows have column C true")`; `n==0` ⇒ `issues.clear`.
+  Written only on a membership *change* (a repeat delivery is a no-op, the transition rule). (d) Surface arm
+  `:331` calls `add` + reflect; the per-entity `issues.set` is deleted. (e) `retireClosedGapIssues` adds
+  `remove` + reflect — its existing `issues.clear(issueKeyGapEntity…)` **stays**: that latch still carries
+  `GapBudgetExhausted` / `GapEscalatedToAugur`, and so does the tombstone leg's `gap:` prefix clear (the design's
+  "its clears are removed" means the *surface* writes; the `gap:` clears serve the two exhaustion codes and are
+  not surface-specific). The sweep legs at `reconciler.go:568/792/1237` reach the same helper; a surface column
+  has no mark, so their `remove` is a no-op there and harmless. (f) Tombstone leg `:1005`: `removeEntity` across
+  the target's column sets + reflect each. (g) Both teardowns (`control.go:244`, `engine.go:579`):
+  `surface.removeTarget(id)` beside `republish.clearTarget` — the prefix clear retires the entries, this retires
+  the set. `ReplayTarget` needs no clear: DeliverLastPerSubject re-presents every current row incl. tombstones,
+  so the set re-derives. (h) Rewrite the latch half of the `surfaceOnlyGap` guard comment (`:1542-1560`);
+  fix `rowIssueCapPerTarget`'s family list to four (`gap:`/`data:`/`template:`/`sweep:`); rewrite the surface arm
+  comment and `clearClosedMarks`' `:1066` comment. (i) Fixture migration per C2; cap/listing stress fixtures
+  re-seed with `RowDataError` at `issueKeyDataEntity`. (j) Schema doc: new key-table row, the "N entries carrying
+  the SAME code" paragraph rewritten to the per-column entry, `gap:` row's codes drop the surface codes, budget
+  paragraph says four families + `gapOpen:` excluded. `weaver.md:1174` surface sentence. Contract §10.8 `surface`
+  row: append the §6 clause after "…at `issueSeverity` (default `warning`)". Green:
+  `go test ./internal/weaver/... -count=1`, `make test-unrouted-convergence`.
+- **Inc 2.** (a) `rowIssueFamily(key) (target, family string, ok bool)` beside `rowIssueTarget` (family = the
+  prefix const). (b) Cache state: drop the monotone `refused map[string]int`; add `refusedWindow
+  map[target]map[family]int` and `refusedLoudAt map[target]map[family]time.Time`; `retireRowIssueOverflowLocked`
+  deletes both `[target]`. (c) `setSince` returns `refused bool`; the refusal increments the window and rewrites
+  the overflow entry with the honest message: *"target T: per-row issue tracking reached its cap of 500 entries;
+  N raises for untracked rows were refused since the last heartbeat (data: a · gap: b · template: c · sweep: d).
+  Refused template: and exhaustion facts re-derive on their own cadence and land when a slot frees; refused data:
+  and sweep: facts are not re-derivable until those rows project again."* `set` returns the same bool.
+  (d) `refusedLoud(key, now) bool` — loud iff no stamp or `now-stamp >= logPaceInterval`, stamping when loud.
+  (e) `alertStanding`: `standing := standingAs(); refused := set(); refused ⇒ level by refusedLoud; standing ⇒
+  Debug; else Error`. (f) `pacedRaise` refusal path returns `c.refusedLoudLocked(target, family, now), now`
+  instead of `false, now`. (g) `rollRefusalWindow(now)` on the cache: rewrite every standing overflow entry's
+  message from the window counts, then zero them; called from `emit` immediately before `prunePaced`
+  (`health.go:709`). (h) Schema doc: overflow message + the "refused" paragraph; cache-struct lifetime table
+  in `health.go:160-197` updated. Green: `go test ./internal/weaver/... -count=1` incl. §9 Inc 2 vectors with a
+  fake clock; revert-proof (e) and (f).
+- **Fire close.** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`, `go test
+  ./internal/weaver/... ./cmd/loupe/... ./internal/healthkv/...`, `make test-unrouted-convergence`, every
+  `scripts/lint-*.go` with `STRICT=1`. No `packages/` edit ⇒ no version bump. Cycle `bin/weaver` via
+  `pkill -x weaver && make orchestration` (MERGED ≠ RUNNING).
+
+**5. Gotchas + dossier (copied).** CLAUDE.md: no history comments; Health-emission change ⇒ schema doc in the
+same commit; contract clause lands with the commit (Andrew 2026-09-01, no transitional note). Weaver dossier
+entries this fire trips: *A Health issue key is a LATCH — enumerate every OTHER leg that raises at that key before
+adding a clear* (the `gap:` latch is shared with the exhaustion codes: keep its clears); *A per-entity Health issue
+is unbounded, and the heartbeat is ONE KV value — select the listing by SEVERITY, classify the new family
+deliberately*; *A fact ends by more routes than the one you are editing — enumerate the LEGS* (lane-1 close,
+tombstone, sweep row-gone/count/mark legs, Revoke, reconcileConsumers); *Prove each changed line by reverting
+THAT LINE*; *A presence assertion cannot pin a clear whose caller re-raises in the same pass — the STAMP is the
+observable* (§9's N−1 vector asserts `since` unchanged); *A shared test fixture that always supplies an OPTIONAL
+input pins only the supplied case*. Standing checklist #1 (lifetime table = §5, done), #2 (censuses re-run
+above), #3 (revert-proof every seam change in the worktree, never the shared tree), #4 (the per-entity surface
+write is REPLACED: obligations = raise, close-retire, tombstone-retire, target-teardown-retire, listing tier,
+budget membership — each accounted in part 4), #5 (one writer per `gapOpen:` key: the reflect helper), #6.
+
+**6. Adjacent finds.** None at Phase 0 beyond the design's own §11 residuals, all inherited and priced there.
+
+**7. Non-goals.** No change to `rowIssueCapPerTarget`'s value, no Loupe code, no `packages/` edit, no new
+Contract #5 field (the count rides in `message`), no admission ranking or eviction (§8).
