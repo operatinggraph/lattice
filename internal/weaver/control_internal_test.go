@@ -305,7 +305,7 @@ func TestRevoke_RemovesDurableMarksAndStaysDisabled(t *testing.T) {
 
 	// Seed an in-flight mark under t1.
 	entityID := testNanoID(t)
-	if _, _, _, err := h.engine.marks.create(ctx, "t1", entityID, "missing_x", "vtx.leaseApp."+entityID, "directOp"); err != nil {
+	if _, _, _, err := h.engine.marks.create(ctx, "t1", entityID, "missing_x", "vtx.leaseApp."+entityID, "directOp", ""); err != nil {
 		t.Fatalf("create mark: %v", err)
 	}
 
@@ -1098,14 +1098,14 @@ func TestResetRetryBudget_RefusesAConcurrentBump(t *testing.T) {
 	h.seedCount(t, ctx, targetID, entityID, "missing_x", 2)
 
 	// What the verb read: the budget as the operator saw it.
-	previous, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, "missing_x")
-	if err != nil || !found || previous != 2 {
-		t.Fatalf("read = (%d, rev %d, found=%v, %v), want (2, _, true, nil)", previous, revision, found, err)
+	prior, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, "missing_x")
+	if err != nil || !found || prior.Count != 2 {
+		t.Fatalf("read = (%+v, rev %d, found=%v, %v), want count 2, found true, nil", prior, revision, found, err)
 	}
 	// What landed in between: one more dispatch on the same chain.
-	h.engine.bumpDispatchCount(ctx, targetID, entityID, "missing_x")
+	h.engine.bumpDispatchCount(ctx, targetID, entityID, "missing_x", actionDirectOp, true, false, false)
 
-	conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, "missing_x", revision)
+	conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, "missing_x", prior, revision)
 	if err != nil {
 		t.Fatalf("resetDispatchCount: %v", err)
 	}
@@ -1128,22 +1128,27 @@ func TestResetRetryBudget_RefusesAConcurrentBump(t *testing.T) {
 
 // budgetStoreStub is a retryBudgetStore whose answers a test chooses, so the
 // verb's own branches can be exercised without racing a live KV for them.
+// priorSeen records the document the verb handed the write, which is how a test
+// proves the reset carries the rest of the document forward rather than
+// flattening it.
 type budgetStoreStub struct {
-	count     int
+	doc       dispatchCount
 	revision  uint64
 	found     bool
 	conflict  bool
 	readErr   error
 	writeErr  error
 	writeSeen int
+	priorSeen dispatchCount
 }
 
-func (b *budgetStoreStub) dispatchCountEntry(context.Context, string, string, string) (int, uint64, bool, error) {
-	return b.count, b.revision, b.found, b.readErr
+func (b *budgetStoreStub) dispatchCountEntry(context.Context, string, string, string) (dispatchCount, uint64, bool, error) {
+	return b.doc, b.revision, b.found, b.readErr
 }
 
-func (b *budgetStoreStub) resetDispatchCount(_ context.Context, _, _, _ string, expectedRevision uint64) (bool, error) {
+func (b *budgetStoreStub) resetDispatchCount(_ context.Context, _, _, _ string, prior dispatchCount, expectedRevision uint64) (bool, error) {
 	b.writeSeen++
+	b.priorSeen = prior
 	if expectedRevision != b.revision {
 		return false, fmt.Errorf("stub: write conditioned on revision %d, want the revision the verb read (%d)",
 			expectedRevision, b.revision)
@@ -1177,7 +1182,7 @@ func TestResetRetryBudget_ReportsALostRace(t *testing.T) {
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
 	})
 	entityID := testNanoID(t)
-	stub := &budgetStoreStub{count: 3, revision: 7, found: true, conflict: true}
+	stub := &budgetStoreStub{doc: dispatchCount{Count: 3}, revision: 7, found: true, conflict: true}
 	h.engine.budgets = stub
 
 	_, err := h.engine.ResetRetryBudget(ctx, targetID, entityID, "missing_x")
@@ -1407,84 +1412,5 @@ func TestResetRetryBudget_RefusesASurfaceGap(t *testing.T) {
 	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
 		t.Fatalf("the re-arm must decline a `surface` gap by its own predicate, not by planning one and "+
 			"alerting a config error against a contract-legal playbook (issues: %+v)", h.engine.issues.snapshot())
-	}
-}
-
-// TestResetRetryBudget_RefusesAPlanTimeResolvedGap pins the verb against a
-// planned/goal-mode gap: one whose playbook states candidates or a goal instead
-// of an action, leaving the action to be picked when a delivery plans it.
-//
-// Such a gap dispatches and accumulates a budget like any other, so it parks
-// like any other — but the sweep's re-arm declines it, because only a plan could
-// say what it would fire and running one there would consume an admission token
-// and clear the gap's standing issues for a dispatch that may never happen. The
-// re-arm therefore leaves this gap to a delivery, permanently, and a reset would
-// spend the budget on a pass that skips it.
-//
-// The control is an explicit-action gap on the SAME planned-mode target, so what
-// is pinned is the gap's empty action and not the target's mode.
-func TestResetRetryBudget_RefusesAPlanTimeResolvedGap(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	h := newSweepHarness(t, ctx)
-	h.agePastWarmup()
-
-	const targetID = "fixtureResetBudgetPlanTime"
-	const budget = 2
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Mode:     targetModePlanned,
-		Gaps: map[string]GapAction{
-			"missing_p": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "FixP"}}},
-			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
-		},
-	})
-	planned, control := testNanoID(t), testNanoID(t)
-	for gap, entityID := range map[string]string{"missing_p": planned, "missing_x": control} {
-		h.seedCount(t, ctx, targetID, entityID, gap, budget)
-		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
-	}
-
-	// The control: an explicit action on the same planned-mode target resets.
-	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, control, "missing_x"); err != nil || previous != budget {
-		t.Fatalf("an explicit-action gap must reset: got (%d, %v), want (%d, nil)", previous, err, budget)
-	}
-
-	if got := h.countValue(t, ctx, targetID, planned, "missing_p"); got != budget {
-		t.Fatalf("setup: the planned gap's budget = %d, want %d — "+
-			"a refusal over an absent budget would prove nothing", got, budget)
-	}
-	_, err := h.engine.ResetRetryBudget(ctx, targetID, planned, "missing_p")
-	if err == nil {
-		t.Fatal("a plan-time-resolved gap's budget must not be reset: the sweep's re-arm leaves it to a delivery")
-	}
-	if !strings.Contains(err.Error(), "plan time") || !strings.Contains(err.Error(), "names no action") {
-		t.Fatalf("error = %q, want it to name the absent action and its plan-time resolution", err)
-	}
-	for _, wrong := range []string{"collapse-only", "no gaps entry", actionSurface} {
-		if strings.Contains(err.Error(), wrong) {
-			t.Fatalf("error = %q, want the plan-time reason and not the %q wording — "+
-				"the four declines have four different remedies", err, wrong)
-		}
-	}
-	if got := h.countValue(t, ctx, targetID, planned, "missing_p"); got != budget {
-		t.Fatalf("refused reset left the budget at %d, want %d (nothing written)", got, budget)
-	}
-
-	// The refusal's reason, executed: at the budget an accepted reset would have
-	// written, the re-arm still declines this gap while the control re-arms.
-	h.seedReArmedCount(t, ctx, targetID, planned, "missing_p")
-	h.pass(ctx)
-	if op := h.nextOp(t); op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX: the control must re-arm, or the negative proves nothing",
-			op["operationType"])
-	}
-	h.requireNoOp(t)
-	if h.markExists(t, ctx, markKey(targetID, planned, "missing_p")) {
-		t.Fatal("a re-armed plan-time-resolved gap must still be left to a delivery — which is why the verb refuses it")
 	}
 }

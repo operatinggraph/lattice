@@ -329,7 +329,7 @@ func TestPlanGap_AdmissionControl(t *testing.T) {
 		e := newBareEngine()
 		target := &Target{TargetID: "t1", Gaps: map[string]GapAction{"missing_x": ga}}
 		for i := 0; i < 5; i++ {
-			pl, action, dec := e.planGap(ctx, target, "t1", fmt.Sprintf("entity-%d", i), "missing_x", ga, row, 1, "")
+			pl, action, _, dec := e.planGap(ctx, target, "t1", fmt.Sprintf("entity-%d", i), "missing_x", ga, row, 1, "")
 			if dec != substrate.Ack || pl == nil || action != actionDirectOp {
 				t.Fatalf("call %d: got (%v, %q, %v), want (non-nil plan, %q, Ack)", i, pl, action, dec, actionDirectOp)
 			}
@@ -341,11 +341,11 @@ func TestPlanGap_AdmissionControl(t *testing.T) {
 		e := newBareEngine()
 		target := &Target{TargetID: "t2", Gaps: map[string]GapAction{"missing_x": ga},
 			Admission: &AdmissionPolicy{GlobalRate: 1}}
-		pl1, _, dec1 := e.planGap(ctx, target, "t2", "entityA", "missing_x", ga, row, 1, "")
+		pl1, _, _, dec1 := e.planGap(ctx, target, "t2", "entityA", "missing_x", ga, row, 1, "")
 		if dec1 != substrate.Ack || pl1 == nil {
 			t.Fatalf("first dispatch should be admitted (fresh capacity): dec=%v pl=%v", dec1, pl1)
 		}
-		pl2, _, dec2 := e.planGap(ctx, target, "t2", "entityB", "missing_x", ga, row, 1, "")
+		pl2, _, _, dec2 := e.planGap(ctx, target, "t2", "entityB", "missing_x", ga, row, 1, "")
 		if dec2 != substrate.NakWithDelay || pl2 != nil {
 			t.Fatalf("second dispatch should be deferred (budget exhausted): dec=%v pl=%v", dec2, pl2)
 		}

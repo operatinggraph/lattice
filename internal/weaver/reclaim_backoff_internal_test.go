@@ -257,11 +257,19 @@ func TestSweep_ReclaimBackoff_MarkTTLOutlastsBackoff(t *testing.T) {
 
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
-	// Seed the dispatch-count to 3, so the NEXT backoff (count 4 = base*2^3 = 8h)
+	// The episode's own first dispatch, which is what creates its count
+	// document: a re-arm books against a document, never into being (an
+	// absent one has no episode to re-arm and a created {count:0} would read
+	// to the sweep's count leg as an operator's un-park).
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", actionTriggerLoom, true, false, false); err != nil {
+		t.Fatalf("seed the episode's first dispatch: %v", err)
+	}
+	// Seed the episode's re-arm tally to 3 — three collapse-only reclaims, which
+	// is what the backoff is keyed on — so the NEXT backoff (4 = base*2^3 = 8h)
 	// is far past the default markTTLBackstopFactor*lease (60m) backstop.
 	for i := 0; i < 3; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
-			t.Fatalf("seed dispatch-count: %v", err)
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", actionTriggerLoom, false, true, false); err != nil {
+			t.Fatalf("seed re-arm tally: %v", err)
 		}
 	}
 	// ClaimedAt aged past backoffInterval(3) = 4h, so this reclaim is NOT paced.
@@ -283,8 +291,8 @@ func TestSweep_ReclaimBackoff_MarkTTLOutlastsBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read raw reclaimed mark message: %v", err)
 	}
-	// The reclaim bumped the count to 4, so the next backoff (and the armed TTL)
-	// is sized for count 4.
+	// The reclaim bumped the tally to 4, so the next backoff (and the armed TTL)
+	// is sized for 4 re-arms.
 	wantTTL := (h.engine.sweep.backoffInterval(4) + 2*h.engine.sweep.interval).String()
 	if got := raw.Header.Get("Nats-TTL"); got != wantTTL {
 		t.Fatalf("reclaimed userTask mark Nats-TTL = %q, want %q (TTL must outlast the next backoff window)", got, wantTTL)

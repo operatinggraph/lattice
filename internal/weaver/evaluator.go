@@ -207,8 +207,17 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		// Fall straight through to the dispatch leg, which is where `surface` is
 		// actually handled.
 		suppressed, exhausted, budgetIsDefault := false, false, false
+		// The count document read by the suppression gate, with the revision it
+		// was read at, threaded on to whichever leg acts on the verdict: both of
+		// them need the leg the chain is charged to, and neither may pay a second
+		// round trip for it. A gap the gate answered without reading the count
+		// (an in-flight remediation, no usable cap) yields the zero document at
+		// revision 0, which every reader treats as "nothing recorded" — the same
+		// disposition a gap that has never dispatched has.
+		var count dispatchCount
+		var countRev uint64
 		if !surfaceOnlyGap(ga) {
-			suppressed, exhausted, budgetIsDefault = e.gapSuppressed(ctx, targetID, entityID, row, col, ga.Action)
+			suppressed, exhausted, budgetIsDefault, count, countRev = e.gapSuppressed(ctx, targetID, entityID, row, col, ga.Action)
 		}
 		if suppressed {
 			// A remediation is in flight (inflight_<g>): ordinary in-progress
@@ -224,7 +233,7 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 			// redirects to the Augur AI tier if the target opts "exhausted"
 			// into its augur block, else raises that standing issue itself.
 			if exhausted {
-				switch e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, col, row, msg.Sequence, budgetIsDefault) {
+				switch e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, col, row, msg.Sequence, budgetIsDefault, count, countRev) {
 				case substrate.Nak:
 					nak = true
 				case substrate.NakWithDelay:
@@ -236,7 +245,7 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 			}
 			continue
 		}
-		switch e.dispatchGap(ctx, target, targetID, entityID, entityKey, col, row, msg) {
+		switch e.dispatchGap(ctx, target, targetID, entityID, entityKey, col, row, msg, count, countRev) {
 		case substrate.Nak:
 			nak = true
 		case substrate.NakWithDelay:
@@ -292,8 +301,12 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 // re-publish per-GAP and conditional on a real publish failure; a message's own
 // redelivery count cannot serve, being per-MESSAGE for an obligation each of the
 // row's gaps holds separately.
+// count is the caller's already-read count document, at countRev, consulted to
+// name the leg a mark cannot (an old-shape escalation mark) and to condition a
+// markless release's writes. It is the zero value at revision 0 whenever the
+// suppression gate answered without reading the count.
 func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
-	row map[string]any, msg substrate.Message) substrate.Decision {
+	row map[string]any, msg substrate.Message, count dispatchCount, countRev uint64) substrate.Decision {
 
 	ga, ok := target.Gaps[col]
 	if !ok {
@@ -422,9 +435,20 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// bookkeeping and, on release, the rest of this call proceeds as a
 	// genuinely fresh episode: planGap synthesizes/dispatches the NEXT leg
 	// from the now-advanced state. A no-op for every non-goal gap.
-	if found && e.releaseCompletedLeg(ctx, targetID, entityID, col, ga, pinnedAction, row, markRev) {
+	//
+	// The leg comes from legOf, not from the mark's action alone: an escalation
+	// mark records the reasoning op's dispatch class and carries the displaced
+	// leg in its own field, so a gap whose budget was re-armed under a standing
+	// escalation still releases at the boundary the contract promises.
+	if found && e.releaseCompletedLeg(ctx, targetID, entityID, col, ga, legOf(ga, rec, count), row, markRev, countRev) {
 		found = false
 		pinnedAction = ""
+		// The release deleted both the mark and the count document, so nothing
+		// records a leg any more: an escalation substituted for the NEXT leg
+		// below displaces nothing this pass can name. countRev is left as it is
+		// because the release was its only reader — what remains below reads the
+		// document's leg, not the revision it was at.
+		rec, count = nil, dispatchCount{}
 	}
 
 	// staleMark reports whether col is an EXTERNAL gap (Contract #10 §10.3: "a
@@ -490,12 +514,30 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// than minting a second episode.
 	}
 
-	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
+	pl, action, escalated, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
 	if pl == nil {
 		return dec
 	}
 
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, rec, markRev, found, stale)
+	// An escalation substituted for an unplannable gap is dispatched AS one:
+	// booked nowhere, and carrying forward the leg it displaced. Fired as an
+	// ordinary episode it would re-charge the chain to its own dispatch class
+	// and take the pin off the leg the gap is on (planGap's doc).
+	//
+	// The leg it displaces has one source this delivery may not hold: the count
+	// document, which the suppression gate reads only when its verdict rests on
+	// the budget term. An UNCAPPED goal gap never reaches that term, so a gap
+	// with no mark to name its leg would escalate recording no leg at all —
+	// exactly the pin whose loss takes the boundary dark. Read the document here,
+	// for the one shape that needs it and only when nothing already answered. An
+	// error is not worth a decision: the zero document is what this pass would
+	// have used anyway.
+	if escalated && ga.Goal != nil && count == (dispatchCount{}) {
+		count, _, _ = e.marks.getDispatchCount(ctx, targetID, entityID, col)
+	}
+	dec, _ = e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, rec, markRev, found, stale,
+		escalated, ga.Goal != nil, escalationLeg(escalated, ga, rec, count))
+	return dec
 }
 
 // staleMark reports whether gap column col is declared as an EXTERNAL gap
@@ -671,15 +713,27 @@ func surfaceOnlyGap(ga GapAction) bool {
 // meaning extends to 'no playbook entry AND no derivable plan'; no new
 // trigger token"), so a target with that policy redirects a stuck goal chain
 // to AI reasoning instead of alerting forever.
+//
+// escalated reports that the plan handed back is that substituted ESCALATION
+// rather than the gap's own remediation, and every caller must dispatch it as
+// the escalation episode it is: booked neither against the gap's retry budget
+// nor into an `__effect` window, and carrying the displaced leg forward on its
+// mark. Nothing in the returned actionRef says so — it is a dispatch class,
+// indistinguishable from an ordinary directOp leg — so a caller that fired it
+// as an ordinary episode would re-charge the chain to that class, take the pin
+// off the leg the chain is actually on, and postpone the gap's exhaustion gate
+// for as long as the two alternated.
 func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID, col string, ga GapAction, row map[string]any,
-	rowRevision uint64, pinnedAction string) (*plan, string, substrate.Decision) {
+	rowRevision uint64, pinnedAction string) (*plan, string, bool, substrate.Decision) {
 
+	escalated := false
 	resolved, actionRef, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, col, ga, row, pinnedAction)
 	if perr != nil && perr.unplannable {
 		entityKey, _ := row["entityKey"].(string)
-		if esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col); escalated {
+		if esc, substituted := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col); substituted {
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			resolved, actionRef, perr = esc, esc.Action, nil
+			escalated = true
 		}
 	}
 	if perr == nil {
@@ -718,9 +772,9 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			if !e.admitGap(target, targetID, entityID, col, resolved.Adapter, row) {
 				e.logger.Debug("weaver: gap dispatch deferred by admission control",
 					"targetId", targetID, "entityId", entityID, "gap", col)
-				return nil, "", substrate.NakWithDelay
+				return nil, "", false, substrate.NakWithDelay
 			}
-			return pl, actionRef, substrate.Ack
+			return pl, actionRef, escalated, substrate.Ack
 		}
 	}
 	// Every arm below is re-derived on a CADENCE, not on an event: for a parked
@@ -747,7 +801,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// row would leave neither surface able to say which row.
 		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
 			"target "+targetID+" entity "+entityID+" gap "+col+" dispatch deferred for redelivery: "+perr.msg)
-		return nil, "", substrate.NakWithDelay
+		return nil, "", false, substrate.NakWithDelay
 	case errData:
 		// The fault is template × row: a template reference that resolves null
 		// against THIS row. One of its two fix paths — an edit to the action
@@ -758,7 +812,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// redelivery).
 		e.alertPaced(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError",
 			"target "+targetID+" entity "+entityID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.NakWithLongDelay
+		return nil, "", false, substrate.NakWithLongDelay
 	default:
 		// A CONFIG error — an action the deployment cannot dispatch. Only a
 		// package re-author fixes it and that produces no new row delivery, so
@@ -769,7 +823,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// other target dispatches normally.
 		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.NakWithLongDelay
+		return nil, "", false, substrate.NakWithLongDelay
 	}
 }
 
@@ -814,14 +868,36 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 // drop for every other live-mark delivery is taken there, above planning. This
 // arm is therefore the re-publish and nothing else. Every other caller passes
 // found=false, so none of them can reach it.
+//
+// escalation says this episode is an Augur escalation of the gap rather than a
+// remediation OF it, and that changes what is booked. Its "action" is a
+// dispatch class, not an entry in the gap's catalog, and its lineage is the
+// reasoning claim's own deterministic handle — so it advances neither the gap's
+// retry budget (an escalation is not an attempt at the gap's remediation) nor
+// the `__effect` confidence window (whose slots are keyed on a catalog ref that
+// nothing can ever close). The oscillation record stands: the reasoning op's
+// declared effects are still writes against real aspect paths.
+//
+// escalatedFrom is the plan leg the escalation displaces, carried onto its mark
+// so the leg boundary stays testable while the escalation stands.
+//
+// legScoped says the gap's budget is per LEG (a goal gap), which is what lets a
+// change of action restart it — bookDispatch states the rule.
+//
+// created reports that THIS call won the CAS and minted the episode's mark. It
+// is false for every other disposition — a re-publish of a live episode, a
+// re-arm of a stale one, and a create the concurrent winner took — so a caller
+// that records something about the fire it just made (the escalation's own
+// pacing stamp) records it for a dispatch that actually happened, and not for
+// one another instance owns.
 func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey, col, action string,
-	pl *plan, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
+	pl *plan, rec *mark, markRev uint64, found, stale, escalation, legScoped bool, escalatedFrom string) (substrate.Decision, bool) {
 
 	if found && !stale {
 		// Re-publish the same episode with the existing mark's preserved
 		// claimId, so the userTask identity — and the derived requestId — stay
 		// stable and the Processor collapses the duplicate.
-		return e.fire(ctx, targetID, entityID, col, markRev, rec.ClaimID, pl)
+		return e.fire(ctx, targetID, entityID, col, markRev, rec.ClaimID, pl), false
 	}
 
 	if found && stale {
@@ -856,36 +932,55 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 		if err != nil {
 			e.logger.Error("weaver: stale mark reclaim claimId mint failed; nak with delay",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
-			return substrate.NakWithDelay
+			return substrate.NakWithDelay, false
 		}
-		rev, conflict, err := e.marks.replace(ctx, targetID, entityID, col, entityKey, action, claimID,
-			markRev, markTTLBackstopFactor*e.marks.lease)
+		// The displaced leg the re-armed mark carries: for an ESCALATION it is
+		// the caller's, which is the leg this episode stands over as decided by
+		// the plan that produced it — the same value the create leg below writes,
+		// and the reclaim's own re-arm applies. For any other episode the mark
+		// keeps what it already carried; taking the caller's there would write a
+		// displaced leg onto an ordinary leg mark, which is not standing over
+		// anything.
+		from := markEscalatedFrom(rec)
+		if escalation {
+			from = escalatedFrom
+		}
+		rev, conflict, err := e.marks.replace(ctx, targetID, entityID, col, entityKey, action, from,
+			claimID, markRev, markTTLBackstopFactor*e.marks.lease)
 		if err != nil {
 			e.logger.Error("weaver: stale mark reclaim failed; nak with delay",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
-			return substrate.NakWithDelay
+			return substrate.NakWithDelay, false
 		}
 		if conflict {
 			// The mark changed since this delivery's read — a concurrent
 			// reclaim (a redelivery of this same message, or the sweep) already
 			// won; the winner dispatched.
-			return substrate.Ack
+			return substrate.Ack, false
 		}
-		e.bumpDispatchCount(ctx, targetID, entityID, col)
-		e.bumpEffectDispatch(ctx, targetID, col, action)
+		// A stale-mark re-arm is BOTH: the external call it mounts is a genuinely
+		// new attempt against the vendor, and it re-armed an episode that was
+		// already open — so it books against the budget and lengthens the next
+		// re-arm's wait, exactly as the sweep's own reclaim of the same shape does.
+		// An escalation books neither, on this leg for the same reason as on the
+		// create leg below.
+		if !escalation {
+			e.bumpDispatchCount(ctx, targetID, entityID, col, action, true, true, legScoped)
+			e.bumpEffectDispatch(ctx, targetID, col, action)
+		}
 		e.bumpOscillation(ctx, targetID, action)
-		return e.fire(ctx, targetID, entityID, col, rev, claimID, pl)
+		return e.fire(ctx, targetID, entityID, col, rev, claimID, pl), false
 	}
 
-	rev, claimID, lost, err := e.marks.create(ctx, targetID, entityID, col, entityKey, action)
+	rev, claimID, lost, err := e.marks.create(ctx, targetID, entityID, col, entityKey, action, escalatedFrom)
 	if err != nil {
 		e.logger.Error("weaver: mark create failed; nak with delay",
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
-		return substrate.NakWithDelay
+		return substrate.NakWithDelay, false
 	}
 	if lost {
 		// A concurrent evaluation won the CAS — the winner dispatched.
-		return substrate.Ack
+		return substrate.Ack, false
 	}
 	// The CAS-create won: a fresh episode is being dispatched, so the chain's
 	// retry-budget dispatch-count advances by one. This is the SOLE
@@ -896,19 +991,38 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 	// budget is a backstop, and over-counting (re-incrementing on a redelivery
 	// that lost the CAS) is structurally impossible, while under-counting only
 	// allows one extra attempt — far safer than wedging a live dispatch.
-	e.bumpDispatchCount(ctx, targetID, entityID, col)
-	e.bumpEffectDispatch(ctx, targetID, col, action)
+	//
+	// An escalation books neither: it is a dispatch ABOUT the gap's exhausted
+	// chain, not a member of it (see this function's doc).
+	if !escalation {
+		e.bumpDispatchCount(ctx, targetID, entityID, col, action, true, false, legScoped)
+		e.bumpEffectDispatch(ctx, targetID, col, action)
+	}
 	e.bumpOscillation(ctx, targetID, action)
-	return e.fire(ctx, targetID, entityID, col, rev, claimID, pl)
+	return e.fire(ctx, targetID, entityID, col, rev, claimID, pl), true
 }
 
-// bumpDispatchCount increments the gap's chain-scoped retry-budget dispatch-count
-// on an actual fresh dispatch (the CAS-create-won lane-1 path and the sweep's
-// reclaim). A failure is logged, never propagated: the count is a bound, not a
-// gate on the dispatch itself, and the gapSuppressed read tolerates a stale count
-// on the safe (dispatch) side.
-func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col string) {
-	if _, err := e.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+// markEscalatedFrom is the displaced leg a re-armed mark carries forward: the
+// value already on it. A re-arm rewrites the whole mark, so the field survives
+// only by being threaded back through, and losing it would take the leg pin off
+// an escalation that is still standing.
+func markEscalatedFrom(rec *mark) string {
+	if rec == nil {
+		return ""
+	}
+	return rec.EscalatedFrom
+}
+
+// bumpDispatchCount books one dispatch against the gap's chain-scoped count
+// document. attempt advances the retry budget the exhaustion gate reads;
+// reclaim advances the re-arm tally the backoff exponent reads; actionRef names
+// the leg the attempts are charged to and legScoped says whether a change of
+// that leg is a chain boundary (incrementDispatchCount states the rules).
+// A failure is logged, never propagated: the count is a bound, not a gate on
+// the dispatch itself, and the gapSuppressed read tolerates a stale count on
+// the safe (dispatch) side.
+func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col, actionRef string, attempt, reclaim, legScoped bool) {
+	if _, err := e.marks.incrementDispatchCount(ctx, targetID, entityID, col, actionRef, attempt, reclaim, legScoped); err != nil {
 		e.logger.Warn("weaver: dispatch-count increment failed; the retry budget may under-count",
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 	}
@@ -1344,13 +1458,37 @@ func (e *Engine) reflectSurface(targetID string, reflection surfaceReflection) {
 // after a true return — the next resolveGoalAction call synthesizes the NEXT
 // leg from the now-advanced row state, per the design's "replanning happens
 // only at leg boundaries (effects-hold) and gap boundaries (close→reopen)."
-// markRev is the revision the caller read the mark at (dispatchGap's
+// EVERY release takes a mutex first, and which key holds it is what markRev
+// decides. markRev is the revision the caller read the mark at (dispatchGap's
 // up-front read, or the sweep's own read this pass) — the delete is
 // revision-conditioned on it so a mark that changed underneath (a concurrent
 // path already released/advanced this SAME leg) is left alone rather than
 // blindly cleared, mirroring the revision-conditioning every other
-// sweep-path mark mutation (replace, deleteMark) already applies.
-func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, col string, ga GapAction, pinnedAction string, row map[string]any, markRev uint64) bool {
+// sweep-path mark mutation (replace, deleteMark) already applies. Exactly one
+// caller can win that delete, so it serializes the rest.
+//
+// markRev 0 is the markless caller (the sweep's count leg, which reaches a gap
+// through its budget and has no mark to condition on). The release is owed just
+// the same — the leg's effects hold whether or not anything is still holding a
+// claim on the gap — but there is no mark to take the mutex on, so the COUNT
+// DOCUMENT takes it: countRev is the revision the caller read the count at, and
+// the release begins by deleting it at that revision. Nothing else here is
+// idempotent (recordEffectClose flips one pending slot per call), and two
+// markless derivations of the same boundary genuinely race — a lane-1 delivery
+// and the sweep's count leg both read the mark absent — so the loser of the
+// count delete must abandon the whole release rather than credit the leg a
+// second time. countRev 0 means there is no document at all, and a release has
+// no budget to release: also nothing to do.
+//
+// The gap's entity-scoped latch is cleared with the rest. Both facts that can
+// stand there for a parked gap — a spent budget, and a budget spent and handed
+// to the reasoning tier — describe a budget that no longer exists once the
+// document is deleted, and the fresh plan that follows a release can fail to
+// build (a config fault alerts at a different key), which would otherwise leave
+// "escalated to Augur" standing over a gap that has left the reasoning tier.
+func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, col string, ga GapAction, pinnedAction string,
+	row map[string]any, markRev, countRev uint64) bool {
+
 	if ga.Goal == nil || pinnedAction == "" {
 		return false
 	}
@@ -1370,29 +1508,135 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 			return false
 		}
 	}
-	conflict, err := e.marks.deleteRevision(ctx, targetID, entityID, col, markRev)
-	if err != nil {
-		e.logger.Error("weaver: goal leg release mark clear failed",
-			"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction, "err", err)
-		return false
-	}
-	if conflict {
-		// The mark changed since the caller's read — a concurrent path
-		// already released or is otherwise handling this episode. Not this
-		// caller's release to claim.
-		return false
-	}
-	if err := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); err != nil {
-		e.logger.Warn("weaver: goal leg release dispatch-count reset failed",
-			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+	if markRev != 0 {
+		conflict, err := e.marks.deleteRevision(ctx, targetID, entityID, col, markRev)
+		if err != nil {
+			e.logger.Error("weaver: goal leg release mark clear failed",
+				"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction, "err", err)
+			return false
+		}
+		if conflict {
+			// The mark changed since the caller's read — a concurrent path
+			// already released or is otherwise handling this episode. Not this
+			// caller's release to claim.
+			return false
+		}
+	} else {
+		// The markless caller conditions on the mark's ABSENCE, re-read here at
+		// the last moment the release can still be abandoned. A gap with no mark
+		// is exactly the gap a lane-1 delivery may CAS-create a fresh episode for
+		// at any instant, and the writes below would then delete that new
+		// episode's budget and credit this leg's close against it. A read
+		// failure is the same refusal: the release is level-triggered and the
+		// next pass re-derives it.
+		if _, _, found, err := e.marks.get(ctx, targetID, entityID, col); err != nil || found {
+			e.logger.Debug("weaver: markless goal leg release abandoned; the gap holds a mark now",
+				"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction,
+				"found", found, "err", err)
+			return false
+		}
+		if countRev == 0 {
+			// No budget document, so there is no budget to release and no key to
+			// take the mutex on. The mark's absence alone cannot serialize this:
+			// it is a state every concurrent derivation reads identically.
+			e.logger.Debug("weaver: markless goal leg release skipped; the gap holds no dispatch-count",
+				"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction)
+			return false
+		}
+		conflict, err := e.marks.deleteDispatchCountRevision(ctx, targetID, entityID, col, countRev)
+		if err != nil {
+			e.logger.Error("weaver: markless goal leg release dispatch-count clear failed",
+				"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction, "err", err)
+			return false
+		}
+		if conflict {
+			// The count changed or is already gone since the caller's read — a
+			// concurrent release credited this leg, or a concurrent dispatch
+			// booked against the budget. Either way this is not the release to
+			// claim, and the credit below must not be made twice.
+			e.logger.Debug("weaver: markless goal leg release lost the dispatch-count delete; another pass owns this boundary",
+				"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction)
+			return false
+		}
 	}
 	if err := e.marks.recordEffectClose(ctx, targetID, col, pinnedAction); err != nil {
 		e.logger.Warn("weaver: goal leg release effect-close record failed",
 			"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction, "err", err)
 	}
+	if markRev != 0 {
+		// The mark delete above was this release's mutex, so the budget follows
+		// it blind — nothing else can be holding this document, and the caller's
+		// count read may be older than the mark's. The close credit goes in
+		// FIRST: a crash between the two leaves the leg credited with a chain the
+		// next pass re-derives from the row, where the other order leaves the
+		// leg's oldest pending slot stranded with nothing left to say it ever
+		// completed. The markless branch has already deleted the document — that
+		// delete WAS its mutex — so there is nothing left to remove here.
+		if err := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); err != nil {
+			e.logger.Warn("weaver: goal leg release dispatch-count reset failed",
+				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+		}
+	}
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
 	e.logger.Info("weaver: goal leg released; re-planning from the advanced state",
 		"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction)
 	return true
+}
+
+// legOf resolves the plan leg a gap's dispatch state is charged to, from the
+// three places that can carry it, in the order that survives an escalation:
+//
+//  1. the mark's escalatedFrom — the leg an Augur escalation displaced, which
+//     is the only record of it once the escalation owns the mark;
+//  2. the mark's own action, when it names an entry in the gap's catalog — an
+//     ordinary leg mark. An escalation's action is a dispatch class, never a
+//     Ref, so this term skips it rather than resolving to a leg that does not
+//     exist;
+//  3. the count document's leg — the answer for a gap with no mark at all (the
+//     sweep's count leg), and for an escalation mark that carries no displaced
+//     leg of its own.
+//
+// An empty answer means nothing recorded a leg, which every reader treats as
+// "no release": a gap whose leg is unknown cannot have its boundary tested.
+func legOf(ga GapAction, rec *mark, count dispatchCount) string {
+	if rec != nil {
+		if rec.EscalatedFrom != "" {
+			return rec.EscalatedFrom
+		}
+		if rec.Action != "" {
+			for i := range ga.Actions {
+				if ga.Actions[i].Ref == rec.Action {
+					return rec.Action
+				}
+			}
+		}
+	}
+	return count.Leg
+}
+
+// displacedLeg is the plan leg an escalation of this gap stands over — the value
+// its mark carries as escalatedFrom.
+//
+// Only a GOAL gap has legs. Every other shape records its own single dispatch
+// action as the count document's leg, and that is not a plan leg at all: carried
+// onto an escalation mark it would read back through legOf as a pin whose
+// boundary could be tested, for a gap that has no boundary and no next leg to
+// advance to.
+func displacedLeg(ga GapAction, rec *mark, count dispatchCount) string {
+	if ga.Goal == nil {
+		return ""
+	}
+	return legOf(ga, rec, count)
+}
+
+// escalationLeg is the displaced leg a fire carries onto its mark: the leg the
+// gap is on when planGap substituted an ESCALATION for its plan, and nothing at
+// all otherwise — an ordinary episode does not displace a leg, it is one.
+func escalationLeg(escalated bool, ga GapAction, rec *mark, count dispatchCount) string {
+	if !escalated {
+		return ""
+	}
+	return displacedLeg(ga, rec, count)
 }
 
 // boolColumn reads a §10.2 bool column off a row. A present value of any other
@@ -1547,21 +1791,29 @@ const defaultDirectOpRetryBudget = 3
 // never silently wedges a real gap. budgetIsDefault reports (only when
 // exhausted) whether the spent budget was this engine default rather than a
 // declared cap, so the caller's escalation message can say which.
-func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol, action string) (suppressed, exhausted, budgetIsDefault bool) {
+//
+// It also returns the count document it read and the KV revision it was read at,
+// so the leg that acts on the verdict — the escalation, which needs the leg the
+// chain is on, when it last re-fired, and a revision to condition a markless
+// release's writes on — spends no second round trip on the same key. The zero
+// document at revision 0 means the verdict never rested on the budget term and
+// no read happened.
+func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol, action string) (suppressed, exhausted, budgetIsDefault bool, count dispatchCount, countRev uint64) {
 	terms := e.gapSuppressionTerms(targetID, entityID, row, gapCol, action)
 	if !terms.needsCount {
-		return terms.suppressed, false, false
+		return terms.suppressed, false, false, dispatchCount{}, 0
 	}
-	count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
+	count, countRev, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
 	if err != nil {
 		// A transient count read failure must not silently wedge the gap: leave
 		// inflight authoritative and let the gap dispatch (the safe side). The next
 		// evaluation re-reads the count.
 		e.logger.Warn("weaver: dispatch-count read failed; not suppressing on the cap term",
 			"targetId", targetID, "entityId", entityID, "gap", gapCol, "err", err)
-		return false, false, false
+		return false, false, false, dispatchCount{}, 0
 	}
-	return terms.verdict(count)
+	suppressed, exhausted, budgetIsDefault = terms.verdict(count.Count)
+	return suppressed, exhausted, budgetIsDefault, count, countRev
 }
 
 // gapSuppressedWithCount is gapSuppressed's verdict over a dispatch-count the
@@ -1672,8 +1924,24 @@ func (e *Engine) hasUsableRetryCap(targetID, entityID string, row map[string]any
 // life of the budget, so only its arrival is loud.
 // budgetIsDefault (gapSuppressed's verdict) only shapes the un-escalated
 // alert's wording below — it never changes the escalation/alert branch taken.
+//
+// count is the caller's already-read count document, at countRev — the same read
+// that decided the gap was exhausted, so no site pays a second round trip per
+// parked gap per pass. It carries three things this function needs: the leg the
+// chain is on (for the release and for the escalation's own mark), the pacing
+// pair (when the escalation last fired, and how many re-arms the episode has
+// had) the re-fire arm is level-tested against, and the revision a markless
+// release conditions its writes on.
+//
+// A LEG BOUNDARY IS TESTED FIRST, above the augur-policy check: the fact that
+// the pinned leg's declared effects now hold in the row is true whether or not
+// the target escalates, and the escalation is precisely what would otherwise
+// keep it from ever being tested (a retire above every cannot-act guard). On a
+// release the gap re-plans against its OWN playbook entry and dispatches the
+// next leg, exactly as the sweep's leg-advance does — the exhausted budget went
+// with the leg it bounded.
 func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targetID, entityID, entityKey, gapColumn string,
-	row map[string]any, rowRevision uint64, budgetIsDefault bool) substrate.Decision {
+	row map[string]any, rowRevision uint64, budgetIsDefault bool, count dispatchCount, countRev uint64) substrate.Decision {
 
 	if surfaceOnlyGap(target.Gaps[gapColumn]) {
 		// A surface gap has no remediation chain, so it has no budget to have
@@ -1695,6 +1963,51 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		e.logger.Debug("weaver: exhausted-gap escalation skipped for a surface gap; its budget is stranded state, not a spent chain",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return substrate.Ack
+	}
+
+	// The gap's mark, read ONCE for both jobs below: the leg-boundary release
+	// here, and the live/stale disposition of the escalation itself further
+	// down. Reading it twice could let it change in between and act on two
+	// different snapshots of the same episode.
+	// A read failure is NOT a reason to drop the whole derivation. Everything
+	// below the mark that this function owes an exhausted gap — the loud
+	// GapBudgetExhausted for a target with no escalation policy above all — is
+	// answerable without it, and a KV blip that Nak'd here would take the one
+	// record that says a row has stopped remediating off the air for as long as
+	// it lasted. What the mark decides is skipped instead: the leg boundary
+	// cannot be tested (its writes are conditioned on the mark, present or
+	// absent, and neither is known), and the escalation's own re-fire falls to
+	// its CAS-create, which loses harmlessly against a mark that is in fact
+	// there. Level-triggered either way: the next pass re-reads.
+	rec, markRev, found, err := e.marks.get(ctx, targetID, entityID, gapColumn)
+	markReadable := err == nil
+	if err != nil {
+		e.logger.Warn("weaver: mark read failed ahead of exhausted-gap escalation; the leg boundary is untestable this pass",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)
+		rec, markRev, found = nil, 0, false
+	}
+
+	// The leg boundary the contract promises (§10.8: "the pin releases once the
+	// leg's declared effects all hold in the current row"), tested before the
+	// policy check because a finished leg is a fact about the gap's chain, not
+	// about the target's escalation policy. legOf finds the leg through an
+	// escalation that owns the mark; a gap with no leg recorded anywhere never
+	// releases.
+	ga := target.Gaps[gapColumn]
+	leg := displacedLeg(ga, rec, count)
+	if markReadable && e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, leg, row, markRev, countRev) {
+		// The gap's OWN playbook entry, never the escalation's: the release
+		// advanced the chain, so what fires next is the next leg of that chain.
+		pl, actionRef, escalated, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, "")
+		if pl == nil {
+			return dec
+		}
+		// The release deleted the mark and the budget, so an escalation
+		// substituted for the advanced chain's next leg displaces nothing this
+		// pass can name — but it is still an escalation, and books nothing.
+		dec, _ = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
+			escalated, ga.Goal != nil, "")
+		return dec
 	}
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)
@@ -1746,17 +2059,36 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	//     never clobbered, then fire fresh. This is the ONLY recovery a dead
 	//     escalation episode has: the reasoning claim's own Loom instance or
 	//     bridge call can be lost, and nothing else re-derives it, so this arm
-	//     must stay reachable from every derivation. Its re-fire rate is one per
-	//     mark lease per gap, because each re-fire mints a fresh live mark —
-	//     which is what keeps it from becoming a per-pass model call.
-	rec, markRev, found, err := e.marks.get(ctx, targetID, entityID, gapColumn)
-	if err != nil {
-		e.logger.Warn("weaver: mark read failed ahead of exhausted-gap escalation; nak with delay",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)
-		return substrate.NakWithDelay
-	}
+	//     must stay reachable from every derivation. The arm is PACED on the
+	//     count document below, not on the mark, because the mark it re-fires
+	//     from is the very thing a dead episode may have lost.
+	//
+	// The mark for both arms is the one read at the top of this function.
 	if found && leaseLive(rec.LeaseExpiresAt, time.Now()) {
 		return substrate.Ack
+	}
+
+	// An escalation re-fire is a re-arm of an episode that is already open, so
+	// it waits the same exponential the sweep makes every other collapse-only
+	// re-dispatch wait — a level test against the last fire, keyed on the
+	// document rather than on the mark, so the arm is unaffected by whether the
+	// mark is stale or gone. The stale mark is left standing while the wait
+	// runs; its own TTL is the backstop, and an absent mark takes this same arm,
+	// so losing it changes nothing. An absent or unparseable EscalatedAt means
+	// no fire is recorded: fire now — and so does a stamp AHEAD of this engine's
+	// clock, which is not evidence of a recent fire but of a clock that
+	// disagrees (or a document edited by hand). Read as an elapsed time it would
+	// be negative, i.e. inside every window there is, and would park the one
+	// recovery a dead reasoning episode has for as long as the skew lasted.
+	if count.EscalatedAt != "" {
+		if firedAt, perr := time.Parse(time.RFC3339Nano, count.EscalatedAt); perr == nil && !firedAt.After(time.Now()) {
+			if wait := e.sweep.backoffInterval(count.Reclaims); time.Since(firedAt) < wait {
+				e.logger.Debug("weaver: exhausted-gap escalation re-fire paced; the last one is still inside its backoff window",
+					"targetId", targetID, "entityId", entityID, "gap", gapColumn,
+					"escalatedAt", count.EscalatedAt, "reclaims", count.Reclaims, "wait", wait)
+				return substrate.Ack
+			}
+		}
 	}
 	if found {
 		if conflict, derr := e.marks.deleteRevision(ctx, targetID, entityID, gapColumn, markRev); derr != nil {
@@ -1770,11 +2102,12 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		}
 	}
 
-	pl, actionRef, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, esc, row, rowRevision, "")
+	pl, actionRef, _, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, esc, row, rowRevision, "")
 	if pl == nil {
 		return dec
 	}
-	dec = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
+	dec, created := e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
+		true, ga.Goal != nil, leg)
 	if dec != substrate.Ack {
 		// A publish failure inside `fire` records a republish obligation at this
 		// gap's key, and for an escalation that obligation is both useless and
@@ -1798,6 +2131,22 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		e.republish.clear(targetID, entityID, gapColumn)
 		return dec
 	}
+	// The fire is real, so it is recorded on the count document: the next
+	// re-fire is level-tested against this instant, and the episode's re-arm
+	// tally advances so that test lengthens. Booked only past a dispatch this
+	// call actually made — pacing a re-fire against an escalation that never ran
+	// would delay the very retry the failure asked for, and an Ack that came
+	// from LOSING the CAS-create is another instance's dispatch, whose own
+	// booking is the one that counts.
+	if created {
+		if booked, bErr := e.marks.bookEscalation(ctx, targetID, entityID, gapColumn, time.Now()); bErr != nil {
+			e.logger.Warn("weaver: recording the escalation fire failed; the next re-fire may not be paced",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", bErr)
+		} else if !booked {
+			e.logger.Debug("weaver: no dispatch-count to record the escalation fire on; the next re-fire is unpaced",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		}
+	}
 	// The escalation is now a standing FACT about this gap, recorded as one so an
 	// operator can see which gaps are on the reasoning tier and how long they
 	// have been there. It replaces, at the same latch, the GapBudgetExhausted the
@@ -1806,10 +2155,11 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	// them on the same retirement machinery.
 	//
 	// It is a RECORD, not a gate. Nothing reads it back to decide whether to
-	// escalate: what bounds the re-escalation of one gap is the mark lease read
-	// above — a live mark Acks, an expired one re-fires — and a latch consulted
-	// as a gate there would suppress the expired-mark arm too, which is the only
-	// recovery a dead reasoning episode has.
+	// escalate: what bounds the re-escalation of one gap is the mark lease and
+	// the re-fire backoff above — a live mark Acks, a dead one waits out its
+	// window and then re-fires — and a latch consulted as a gate there would
+	// suppress the re-fire arm entirely, which is the only recovery a dead
+	// reasoning episode has.
 	//
 	// The raise sits BELOW planGap, which clears this latch for any gap whose
 	// plan builds — including this escalation's own. Written above the plan it

@@ -1496,3 +1496,248 @@ func TestWeaverE2E_AugurDispatch_ScopeEscapeInvalid(t *testing.T) {
 
 	requireNoOp(t, ops, 2*time.Second)
 }
+
+// readCountDoc reads a gap's `…__count` retry-budget document out of
+// weaver-state as the engine wrote it. Missing is the zero document, which is
+// what an un-dispatched gap reads as.
+func readCountDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) map[string]any {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, weaverStateBucket, key)
+	if err != nil {
+		return map[string]any{}
+	}
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &doc))
+	return doc
+}
+
+// countField reads one integer field off a count document (absent reads 0).
+func countField(doc map[string]any, field string) int {
+	n, _ := doc[field].(float64)
+	return int(n)
+}
+
+// weaverIssues reads the Contract #5 issue list off one instance's heartbeat
+// document, empty when it has not been written yet.
+func weaverIssues(t *testing.T, ctx context.Context, conn *substrate.Conn, instance string) []map[string]any {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, healthKVBucket, "health.weaver."+instance)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if json.Unmarshal(entry.Value, &doc) != nil {
+		return nil
+	}
+	return doc.Issues
+}
+
+// waitIssue polls one instance's heartbeat until code is present (want true) or
+// gone (want false), failing with the issue list it last saw.
+func waitIssue(t *testing.T, ctx context.Context, conn *substrate.Conn, instance, code string, want bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var issues []map[string]any
+	for time.Now().Before(deadline) {
+		issues = weaverIssues(t, ctx, conn, instance)
+		if hasIssue(issues, code) == want {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("%s: issue %q present=%v, want %v; heartbeat issues: %v", msg, code, !want, want, issues)
+}
+
+// TestWeaverE2E_ExhaustedGoalLegReleasesAndAdvances is the whole story on a live
+// engine: a goal-mode target whose first leg assigns a human task, a per-leg
+// budget of one that the leg's own dispatch spends, the gap handed to the Augur
+// reasoning tier on the next evaluation, and then the leg's declared effect
+// written into the row.
+//
+// What the platform must do at that point — with no operator verb, no
+// resetBudget, no replay — is notice that the pinned leg has FINISHED, release
+// it, and dispatch the next one. The escalation owns the gap's mark by then and
+// its action is a dispatch class, so the whole chain of custody for the leg runs
+// through the escalation's own escalatedFrom: lose it anywhere and the
+// effects-hold release the contract promises has nothing left to test, and the
+// gap stays open with its next leg fully satisfiable.
+//
+// The budget is spent by the one route that legitimately spends it — a real
+// dispatch against a cap of one. It is deliberately NOT spent by re-claiming an
+// unopened human task: a reclaim of a collapse-only leg mounts no attempt and
+// books nothing, whether the leg is static or planned, so that route exhausts
+// nothing at all.
+func TestWeaverE2E_ExhaustedGoalLegReleasesAndAdvances(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+	ops := subscribeOps(t, nc)
+
+	installOpMeta(t, ctx, conn, mustNanoID(t), "SignFixture")
+
+	const targetID = "renewalLegE2E"
+	const gapColumn = "missing_g"
+	// One attempt per leg: the fresh dispatch below is the whole budget, so the
+	// very next evaluation of the row reads the gap as exhausted.
+	const budget = 1
+	installWeaverTarget(t, ctx, conn, mustNanoID(t), map[string]any{
+		"targetId": targetID,
+		"lensRef":  mustNanoID(t),
+		"mode":     "planned",
+		// The exhausted gap goes to the reasoning tier rather than merely
+		// alerting: the disposition under which the escalation takes the gap's
+		// mark, and the leg survives only on the escalation's own record of it.
+		"augur": map[string]any{"escalate": []any{"exhausted"}},
+		"gaps": map[string]any{
+			gapColumn: map[string]any{
+				"goal": map[string]any{"allOf": []any{
+					map[string]any{"present": "subject.data.aDone"},
+					map[string]any{"present": "subject.data.bDone"},
+				}},
+				"actions": []any{
+					map[string]any{
+						"ref": "legA", "action": "assignTask", "operation": "SignFixture",
+						"assignee": "row.applicant", "target": "row.entityKey",
+						"effects": []any{map[string]any{"present": "subject.data.aDone"}},
+					},
+					map[string]any{
+						"ref": "legB", "action": "directOp", "operation": "DoBFixture",
+						"pre":     map[string]any{"present": "subject.data.aDone"},
+						"effects": []any{map[string]any{"present": "subject.data.bDone"}},
+					},
+				},
+			},
+		},
+	})
+
+	instance := "e2e-leg-" + mustNanoID(t)
+	engine := newEngine(conn, instance)
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
+
+	entityID := mustNanoID(t)
+	entityKey := "vtx.leaseApp." + entityID
+	row := map[string]any{
+		"entityKey": entityKey,
+		"violating": true,
+		gapColumn:   true,
+		"applicant": "vtx.identity." + mustNanoID(t),
+		// The per-leg cap the goal target declares.
+		"maxretries_g": budget,
+	}
+	putRow(t, ctx, conn, targetID, entityID, row)
+
+	// The first leg dispatches unaided: a task on the applicant's inbox.
+	first := nextOp(t, ops, 20*time.Second)
+	require.Equal(t, "CreateTask", first.OperationType,
+		"the goal's first leg must dispatch its human task")
+	taskID, _ := first.Payload["taskId"].(string)
+	require.NotEmpty(t, taskID)
+
+	markK := targetID + "." + entityID + "." + gapColumn
+	countK := markK + ".__count"
+	waitMark(t, ctx, conn, markK)
+	entry, err := conn.KVGet(ctx, weaverStateBucket, markK)
+	require.NoError(t, err)
+	var pinned map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &pinned))
+	require.Equal(t, "legA", pinned["action"], "the mark must pin the leg's own ref")
+
+	doc := readCountDoc(t, ctx, conn, countK)
+	require.Equal(t, budget, countField(doc, "count"),
+		"the dispatch spends the leg's whole budget, which is what makes the next evaluation an exhausted one")
+	require.Equal(t, "legA", doc["leg"],
+		"the budget must be charged to the leg it was spent on — the leg the release is about")
+
+	// The episode's live lease is all that stands between the spent budget and
+	// the escalation, so age it out: a task nobody has opened is exactly the
+	// state a lease expiry finds.
+	expired := map[string]any{}
+	for k, v := range pinned {
+		expired[k] = v
+	}
+	expired["claimedAt"] = substrate.FormatTimestamp(time.Now().Add(-time.Hour))
+	expired["leaseExpiresAt"] = substrate.FormatTimestamp(time.Now().Add(-time.Minute))
+	body, err := json.Marshal(expired)
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, weaverStateBucket, markK, body)
+	require.NoError(t, err)
+
+	// Re-deliver the unchanged row: the gate reads exhausted and the target's
+	// augur policy hands the gap to the reasoning tier.
+	putRow(t, ctx, conn, targetID, entityID, row)
+
+	escalated := nextOp(t, ops, 30*time.Second)
+	require.Equal(t, "CreateAugurReasoningClaim", escalated.OperationType,
+		"an exhausted gap on a target that escalates `exhausted` goes to the reasoning tier")
+
+	entry, err = conn.KVGet(ctx, weaverStateBucket, markK)
+	require.NoError(t, err)
+	var escMark map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &escMark))
+	require.Equal(t, "directOp", escMark["action"],
+		"the escalation's mark records the reasoning op's dispatch class, not a leg")
+	require.Equal(t, "legA", escMark["escalatedFrom"],
+		"the leg the escalation displaced rides its mark — the only record of it once the escalation owns the key")
+	doc = readCountDoc(t, ctx, conn, countK)
+	require.Equal(t, budget, countField(doc, "count"),
+		"an escalation is a dispatch ABOUT the spent chain, not a member of it: it books no attempt")
+	require.Equal(t, "legA", doc["leg"], "and it leaves the chain charged to the leg that spent it")
+	waitIssue(t, ctx, conn, instance, "GapEscalatedToAugur", true,
+		"an escalated gap is a standing fact an operator can see")
+
+	// Everything the parked gap could still publish has published; from here a
+	// single op is the whole claim.
+	drainOps(t, ops)
+
+	// The human finally signs: legA's declared effect lands in the row while the
+	// gap itself stays open (bDone is still missing).
+	row["aDone"] = true
+	putRow(t, ctx, conn, targetID, entityID, row)
+
+	advanced := nextOp(t, ops, 30*time.Second)
+	require.Equal(t, "DoBFixture", advanced.OperationType,
+		"an exhausted gap whose pinned leg has finished must release and dispatch the NEXT leg, "+
+			"with no operator verb and no reset")
+
+	entry, err = conn.KVGet(ctx, weaverStateBucket, markK)
+	require.NoError(t, err)
+	var fresh map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &fresh))
+	require.Equal(t, "legB", fresh["action"], "the advance must pin the next leg")
+	require.NotEqual(t, pinned["claimId"], fresh["claimId"], "a leg boundary mints a fresh episode")
+	require.Empty(t, fresh["escalatedFrom"], "the fresh leg is not an escalation and displaced nothing")
+	// The release DELETES the count document; what stands here is the one the
+	// advance's own dispatch created, charged to the new leg — the per-leg
+	// budget semantics, observed from outside.
+	doc = readCountDoc(t, ctx, conn, countK)
+	require.Equal(t, 1, countField(doc, "count"),
+		"the release resets the per-leg budget, so legB starts on a full one")
+	require.Equal(t, "legB", doc["leg"],
+		"a count still charged to legA would mean the old document survived the release")
+	waitIssue(t, ctx, conn, instance, "GapEscalatedToAugur", false,
+		"the escalation latch retires once the chain advances past the leg it was raised for")
+}
+
+// drainOps consumes every op already published, so a later assertion about "the
+// next op" is about an op this test's own action caused.
+func drainOps(t *testing.T, sub *nats.Subscription) {
+	t.Helper()
+	for {
+		if _, err := sub.NextMsg(300 * time.Millisecond); err != nil {
+			return
+		}
+	}
+}

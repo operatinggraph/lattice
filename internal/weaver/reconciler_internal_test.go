@@ -1348,7 +1348,7 @@ func TestMarkCreate_TTLBackstop(t *testing.T) {
 	entityID := testNanoID(t)
 	before := time.Now()
 	_, _, exists, err := h.engine.marks.create(ctx, targetID, entityID, "missing_x",
-		"vtx.leaseApp."+entityID, "directOp")
+		"vtx.leaseApp."+entityID, "directOp", "")
 	if err != nil || exists {
 		t.Fatalf("mark create: err=%v exists=%v", err, exists)
 	}
@@ -1457,7 +1457,7 @@ func TestSweep_ExhaustedBudgetGapNotReclaimed(t *testing.T) {
 	rev := h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
 	// Seed the dispatch-count to the cap: the budget is spent.
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -1509,7 +1509,7 @@ func TestSweep_ExhaustedBudgetGapEscalatesToAugur(t *testing.T) {
 	key := markKey(targetID, entityID, "missing_a")
 	rev := h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_a", "directOp", pastLease()))
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -1578,8 +1578,8 @@ func TestSweep_DirectOpDefaultBudgetEscalates(t *testing.T) {
 		h.nextOp(t)
 		h.reexpireMark(t, ctx, key)
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != defaultDirectOpRetryBudget {
-		t.Fatalf("dispatch-count after %d reclaims = %d (err=%v), want %d", defaultDirectOpRetryBudget, got, err, defaultDirectOpRetryBudget)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != defaultDirectOpRetryBudget {
+		t.Fatalf("dispatch-count after %d reclaims = %d (err=%v), want %d", defaultDirectOpRetryBudget, got.Count, err, defaultDirectOpRetryBudget)
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
 		t.Fatalf("must not exhaust before the engine default %d is reached", defaultDirectOpRetryBudget)
@@ -1650,8 +1650,8 @@ func TestSweep_DeclaredMaxRetriesKeepsOwnBudget(t *testing.T) {
 		}
 		h.reexpireMark(t, ctx, key)
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != cap {
-		t.Fatalf("dispatch-count = %d (err=%v), want the declared cap %d", got, err, cap)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != cap {
+		t.Fatalf("dispatch-count = %d (err=%v), want the declared cap %d", got.Count, err, cap)
 	}
 
 	// The NEXT pass: the declared cap is spent — escalate, no reclaim.
@@ -1698,6 +1698,11 @@ func TestSweep_UserTaskReclaimNeverCappedByEngineDefault(t *testing.T) {
 
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
+	// The episode's one real dispatch, which is what creates the count document
+	// its re-arms book against.
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", actionTriggerLoom, true, false, false); err != nil {
+		t.Fatalf("seed the episode's first dispatch: %v", err)
+	}
 	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "triggerLoom", pastLease()))
 	h.putRow(t, ctx, targetID, entityID, map[string]any{
 		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
@@ -1712,8 +1717,16 @@ func TestSweep_UserTaskReclaimNeverCappedByEngineDefault(t *testing.T) {
 	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
 		t.Fatalf("a triggerLoom gap must never be capped by defaultDirectOpRetryBudget")
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != attempts {
-		t.Fatalf("dispatch-count = %d (err=%v), want %d (every reclaim above must have fired, uncapped)", got, err, attempts)
+	doc, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x")
+	if err != nil {
+		t.Fatalf("read the count document: %v", err)
+	}
+	if doc.Reclaims != attempts {
+		t.Fatalf("re-arm tally = %d, want %d (every reclaim above must have fired, uncapped)", doc.Reclaims, attempts)
+	}
+	if doc.Count != 1 {
+		t.Fatalf("retry budget = %d, want 1 — the one real dispatch: this gap's pattern parks on a human, so "+
+			"every reclaim collapses onto the open task and mounts no attempt", doc.Count)
 	}
 	if reclaims, _, _, _, _, _ := h.engine.sweep.metrics(); reclaims != attempts {
 		t.Fatalf("sweepReclaims = %d, want %d", reclaims, attempts)
@@ -1751,8 +1764,8 @@ func TestSweep_ReclaimIncrementsBudget(t *testing.T) {
 	h.pass(ctx)
 	h.nextOp(t) // the reclaim re-dispatched
 
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 1 {
-		t.Fatalf("a reclaim must increment the dispatch-count: got %d (err=%v), want 1", got, err)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != 1 {
+		t.Fatalf("a reclaim must increment the dispatch-count: got %d (err=%v), want 1", got.Count, err)
 	}
 	if reclaims, _, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 {
 		t.Fatalf("sweepReclaims = %d, want 1", reclaims)
@@ -1805,8 +1818,9 @@ func TestSweep_ReclaimRecordsEffectDispatch(t *testing.T) {
 // NOT book a pending `__effect` episode. Booking one would append a slot no
 // close can ever answer — a human userTask held open across enough reclaims
 // would fill its whole window and trip a LensEffectMismatch describing nothing.
-// The retry-budget dispatch-count is asserted to still advance: it bounds
-// reclaim effort, which a repeat reclaim genuinely spends.
+// The retry budget books the SAME predicate: a re-dispatch that mounts no
+// attempt spends none of a budget that bounds attempts. What it does advance is
+// the re-arm tally the backoff is paced on.
 func TestSweep_CollapseOnlyReclaimBooksNoEffectDispatch(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1830,6 +1844,12 @@ func TestSweep_CollapseOnlyReclaimBooksNoEffectDispatch(t *testing.T) {
 	h.engine.source.mu.Unlock()
 
 	entityID := testNanoID(t)
+	// The episode's one real dispatch — the fresh assignTask that created the
+	// task the reclaim below collapses onto. It is what creates the count
+	// document a re-arm books against.
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, actionAssignTask, true, false, false); err != nil {
+		t.Fatalf("seed the episode's first dispatch: %v", err)
+	}
 	h.putMark(t, ctx, markKey(targetID, entityID, gap),
 		fixtureMark(targetID, entityID, gap, actionAssignTask, pastLease()))
 	h.putRow(t, ctx, targetID, entityID, map[string]any{
@@ -1843,8 +1863,16 @@ func TestSweep_CollapseOnlyReclaimBooksNoEffectDispatch(t *testing.T) {
 	if _, _, ok, err := readEffectStats(ctx, h.engine.marks, targetID, gap, actionAssignTask); err != nil || ok {
 		t.Fatalf("a collapse-only reclaim must book no effect episode: present=%v (err=%v)", ok, err)
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 1 {
-		t.Fatalf("the retry-budget count must still advance: got %d (err=%v), want 1", got, err)
+	got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gap)
+	if err != nil {
+		t.Fatalf("read the count document: %v", err)
+	}
+	if got.Count != 1 {
+		t.Fatalf("the retry budget = %d, want 1 — the one real dispatch: a collapse-only reclaim mounts no "+
+			"attempt and must spend none", got.Count)
+	}
+	if got.Reclaims != 1 {
+		t.Fatalf("the re-arm tally = %d, want 1: the reclaim did re-arm the episode, and that is what paces the next one", got.Reclaims)
 	}
 }
 
@@ -2065,15 +2093,15 @@ func TestSweep_CountKeySurvives(t *testing.T) {
 
 	const targetID = "fixtureCountKey"
 	entityID := testNanoID(t)
-	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 		t.Fatalf("seed dispatch-count: %v", err)
 	}
 
 	h.pass(ctx)
 	h.pass(ctx)
 
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 1 {
-		t.Fatalf("the dispatch-count must survive sweep passes: got %d (err=%v), want 1", got, err)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != 1 {
+		t.Fatalf("the dispatch-count must survive sweep passes: got %d (err=%v), want 1", got.Count, err)
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
 		t.Fatalf("a dispatch-count must never be enumerated as a CorruptMark")
@@ -2141,11 +2169,11 @@ func (h *sweepHarness) countExists(t *testing.T, ctx context.Context, targetID, 
 // cannot tell an untouched budget from a consumed one.
 func (h *sweepHarness) countValue(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string) int {
 	t.Helper()
-	n, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gapColumn)
+	doc, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gapColumn)
 	if err != nil {
 		t.Fatalf("dispatch-count read: %v", err)
 	}
-	return n
+	return doc.Count
 }
 
 // seedCount drives the gap's dispatch-count to n through the real increment
@@ -2154,7 +2182,7 @@ func (h *sweepHarness) countValue(t *testing.T, ctx context.Context, targetID, e
 func (h *sweepHarness) seedCount(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gapColumn, "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -2169,11 +2197,11 @@ func (h *sweepHarness) seedCount(t *testing.T, ctx context.Context, targetID, en
 func (h *sweepHarness) seedReArmedCount(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string) {
 	t.Helper()
 	h.seedCount(t, ctx, targetID, entityID, gapColumn, 1)
-	_, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
+	prior, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
 	if err != nil || !found {
 		t.Fatalf("read seeded count: (rev %d, found=%v, %v)", revision, found, err)
 	}
-	if conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision); err != nil || conflict {
+	if conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn, prior, revision); err != nil || conflict {
 		t.Fatalf("reset seeded count: (conflict=%v, %v)", conflict, err)
 	}
 }
@@ -2379,9 +2407,10 @@ func TestSweep_CountLegReRaisesExhaustedGapAfterRestart(t *testing.T) {
 // branch: where the target's augur block escalates "exhausted", the leg does
 // not merely alert — it fires a real CreateAugurReasoningClaim episode for a
 // gap that has no mark and no fresh CDC delivery, and retires the standing
-// warning in favour of that escalation. The fresh episode is a genuine
-// dispatch, so it bumps the chain's count exactly once; anything more would
-// mean the leg double-counted an attempt it made once.
+// warning in favour of that escalation. The budget the escalation reports on is
+// left exactly where it found it: the reasoning episode is a dispatch ABOUT the
+// spent chain, not a member of it, so booking it would spend a budget it is
+// only there because of.
 func TestSweep_CountLegEscalatesToAugurWithNoMark(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -2414,8 +2443,8 @@ func TestSweep_CountLegEscalatesToAugurWithNoMark(t *testing.T) {
 	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_a")) {
 		t.Fatal("the escalation episode must hold the gap's mark (its own anti-storm claim)")
 	}
-	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_a"), budget+1; got != want {
-		t.Fatalf("dispatch-count = %d, want %d: the escalation is ONE fresh dispatch, counted once", got, want)
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_a"); got != budget {
+		t.Fatalf("dispatch-count = %d, want %d: the escalation books no attempt against the chain it escalated", got, budget)
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
 		t.Fatal("an escalated gap must not also hold the un-escalated standing warning")

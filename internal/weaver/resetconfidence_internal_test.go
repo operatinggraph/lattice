@@ -71,10 +71,10 @@ func TestResetConfidence_DeletesOnlyThisTargetsEffectWindows(t *testing.T) {
 	// Everything the reset must NOT touch, all under t1's own prefix.
 	entityID := testNanoID(t)
 	if _, _, _, err := m.create(ctx, "t1", entityID, "missing_x",
-		"vtx.leaseApp."+entityID, actionDirectOp); err != nil {
+		"vtx.leaseApp."+entityID, actionDirectOp, ""); err != nil {
 		t.Fatalf("create mark: %v", err)
 	}
-	if _, err := m.incrementDispatchCount(ctx, "t1", entityID, "missing_x"); err != nil {
+	if _, err := m.incrementDispatchCount(ctx, "t1", entityID, "missing_x", "", true, false, false); err != nil {
 		t.Fatalf("incrementDispatchCount: %v", err)
 	}
 	if err := m.setDisabled(ctx, "t1", true); err != nil {
@@ -103,10 +103,10 @@ func TestResetConfidence_DeletesOnlyThisTargetsEffectWindows(t *testing.T) {
 	} else if !found {
 		t.Error("t1's in-flight mark was deleted — a reset must never clear dispatch state")
 	}
-	if n, err := m.getDispatchCount(ctx, "t1", entityID, "missing_x"); err != nil {
+	if n, _, err := m.getDispatchCount(ctx, "t1", entityID, "missing_x"); err != nil {
 		t.Fatalf("getDispatchCount: %v", err)
-	} else if n != 1 {
-		t.Errorf("t1's dispatch count = %d, want 1 (retry budget is live state, not a fossil)", n)
+	} else if n.Count != 1 {
+		t.Errorf("t1's dispatch count = %d, want 1 (retry budget is live state, not a fossil)", n.Count)
 	}
 	if disabled, err := m.isDisabled(ctx, "t1"); err != nil {
 		t.Fatalf("isDisabled: %v", err)

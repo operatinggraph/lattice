@@ -373,20 +373,47 @@ remediation already in flight, and a spent retry budget — sourced differently:
   a `gaps` key, so the gap-column scans (`openGapColumns`, `markCandidateColumns`, which match the
   `missing_` prefix only) never treat it as a gap or write a mark at it. An **absent or non-bool**
   `inflight_<g>` reads `false` (via `boolColumn`, which surfaces a non-bool as a `RowDataError`).
-- **The retry budget — a Weaver-state dispatch-count bounded by `maxretries_<g>`.** Weaver keeps a
-  per-`(targetId, entityId, gapColumn)` **dispatch-count** in `weaver-state`
+- **The retry budget — a Weaver-state attempt count bounded by `maxretries_<g>`.** Weaver keeps a
+  per-`(targetId, entityId, gapColumn)` **count document** in `weaver-state`
   (`<targetId>.<entityId>.<gapColumn>.__count`, a reserved key shape disjoint from marks and the
-  `__control` marker). It is **incremented on each actual dispatch** — the lane-1 CAS-create-and-fire
-  and the sweep's reclaim, so it tracks one-per-anti-storm-window real attempts from **both** dispatch
-  legs — and **reset (deleted) on gap-close** by whichever level-reconciled path observes the close
-  first: `clearClosedMarks` on a row delivery, or the reconciler sweep's own **count leg**
+  `__control` marker). It carries two independent tallies, plus the leg they belong to and the last
+  escalation instant, because **one integer cannot serve the two populations that read it**:
+  - **`count` — ATTEMPTS.** The exhaustion gate's input. It advances on a dispatch that genuinely
+    mounts something: a fresh episode (the lane-1 CAS-create-and-fire), and a re-dispatch that is a
+    real re-submit — an external gap's re-call of a vendor, a `directOp` re-submitted. It does **not**
+    advance on a re-dispatch the consumer *collapses* onto the artifact the open episode already
+    created (an `assignTask`, a userTask-parking `triggerLoom`, an Augur `proposedOp` — the sweep's
+    `collapseOnlyReclaim` predicate, the same one the `__effect` window books on). A human who has not
+    yet opened their task is not a chain of failed retries, and time-on-inbox must not spend a budget
+    that bounds attempts. A reclaim's class is read from the **pinned leg's resolved dispatch action**,
+    never from the action string the mark happens to carry — a planned-mode mark records the leg's own
+    catalog **Ref** (`setTerms`, `signRenewal`), which is not a dispatch contract type at all — so a
+    goal leg dispatching `assignTask`/`triggerLoom` is collapse-only, and paced, exactly like a static
+    one.
+  - **`reclaims` — RE-ARMS of the open episode.** The reclaim backoff's exponent. It advances on
+    *every* re-arm, collapse-only included, plus lane 1's own stale-external re-arm and each Augur
+    escalation re-fire — so an episode a person has left open for a week still climbs 30 min → 24 h
+    while its attempt count stays where the one real dispatch left it.
+  - **`leg`** is the `actionRef` the attempts are charged to. It is what lets a goal-mode chain's leg
+    survive the mark that pinned it — the count leg reaches a gap with no mark at all. For a
+    **goal-mode** gap, and only there, an attempt booked under a *different* leg restarts `count` at 1
+    (per-leg budget semantics): a goal chain advances leg by leg, so a change of leg is a chain
+    boundary. Every other shape re-decides its dispatch per *episode* from inputs that move under it —
+    a candidates gap ranks over the `__effect` close-rate windows — so a differing ref there records
+    the current pick and the budget keeps counting toward the cap, which is what stops two alternating
+    candidates from parking the gap forever short of its exhaustion.
+  - **`escalatedAt`** is the last Augur escalation fire, level-tested to pace the next one.
+
+  The document is **reset (deleted) on gap-close** by whichever level-reconciled path observes the
+  close first: `clearClosedMarks` on a row delivery, or the reconciler sweep's own **count leg**
   (`sweepCount`), the only one that reaches a gap whose row has gone quiet. That leg also re-derives
   the §10.8 `GapBudgetExhausted` standing issue from the count on every pass — so the alert that
   explains a suppression outlives a restart for as long as the suppression itself does — and retires
   it on the row's own evidence (the gap closed, the row is gone, or the playbook stopped naming the
-  column). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
-  (package policy baked into the cypher, like the freshness window). The budget term suppresses when
-  `dispatchCount(target, entity, gap) >= maxretries_<g>`.
+  column). Every field but `count` is absent on a document written by an older build and reads as its
+  zero value. The Lens supplies only the **cap**: an integer `maxretries_<g>` column (package policy
+  baked into the cypher, like the freshness window). The budget term suppresses when
+  `count(target, entity, gap) >= maxretries_<g>`.
 
 The budget lives in Weaver-state, not the Lens, because a true reset-on-success ("failures since the
 last success") is **not expressible as a lens predicate**: a lifetime `count(failed) >= cap` never
@@ -396,7 +423,7 @@ forever. Gap-close **is** the reset, and it lives where Weaver owns the close pa
 with a long TTL backstop (`dispatchCountTTLBackstopFactor × MarkLease`, far larger than the mark's)
 **only** to GC an orphaned count whose gap-close was never observed — never to expire mid-chain.
 
-The gate (`gapSuppressed` = `inflight_<g>` **OR** dispatch-count `>= maxretries_<g>`) is read in
+The gate (`gapSuppressed` = `inflight_<g>` **OR** attempt count `>= maxretries_<g>`) is read in
 **both** dispatch legs:
 
 1. the **lane-1 dispatch loop** (`evaluator.go`, before `dispatchGap`), and
@@ -408,9 +435,37 @@ While either ground holds, Weaver **does not (re-)dispatch** the gap's remediati
 **stays violating** (the entity is genuinely unsatisfied); only re-dispatch is suppressed. Every
 default is the **safe (dispatch) side**: an absent/non-bool `inflight_<g>`, an absent/non-positive
 `maxretries_<g>`, or a transient count-read failure all leave the gap dispatchable, so a missing or
-garbled input never silently wedges a real gap. Once the budget is spent the gap is the
-operator-/Loupe-visible **"needs human escalation"** terminal — a human-submitted remediation that
-*completes* closes the gap, which deletes the count, so a later reopen starts a fresh budget.
+garbled input never silently wedges a real gap.
+
+**A spent budget is a decision point, not a terminal.** Two things still reach a parked gap, and both
+run from the state above rather than from a mark the exhausted gap stopped refreshing:
+
+- **The leg boundary is honoured first.** For a **goal-mode** gap the budget bounds the leg the
+  chain is *currently on*, and the moment that leg's declared `effects` all hold in the row the pin
+  **releases** — the mark clears, the leg's `__effect` close is credited, the count document is
+  deleted, the gap's standing exhaustion/escalation latch retires, and the **next leg dispatches** as
+  a genuinely fresh episode on a full budget. This is tested at all three suppression sites — a
+  delivery, a lease expiry, and the count-anchored leg for a quiet row — and it runs **above** the
+  augur-policy check, because a leg finishing is a fact about the gap's own chain whether or not the
+  target escalates. The leg is resolved from the mark's `escalatedFrom` if an escalation owns the
+  mark, else the mark's own action when it names a catalog entry, else the count document's `leg`; a
+  gap where none of those names a leg has no boundary to test and keeps escalating.
+- **Otherwise the §10.8 loud stop stands.** `escalateExhaustedGap` either raises the standing
+  `GapBudgetExhausted` issue, or — where the target's `augur` block escalates `"exhausted"` —
+  dispatches a reasoning episode and records `GapEscalatedToAugur` at the same latch.
+
+A human-submitted remediation that *completes* closes the gap, which deletes the count, so a later
+reopen starts a fresh budget.
+
+**An escalation is booked nowhere and paced like a re-arm.** The reasoning episode is a dispatch
+*about* the spent chain, not a member of it: its action is a dispatch class rather than an entry in
+the gap's catalog, so it advances neither the retry budget (which its own exhaustion caused) nor an
+`__effect` window (whose slots are keyed on a catalog ref and could never be closed at that key). Its
+oscillation record still stands — the reasoning op writes real aspect paths. Its **re-fire** — the
+only recovery a reasoning episode whose claim was never minted has — waits out the same exponential
+every other re-arm waits, level-tested against `escalatedAt` on the count document rather than
+against a mark a dead episode may have lost; the first fire is immediate, and each subsequent one
+advances `reclaims` so the next waits longer, to the 24 h cap.
 
 The lease-signing convergence lens is the reference user — for the bgcheck/payment external-call gaps
 it projects `inflight_<g>` (a service instance with a `.dispatch` marker **present** and no
@@ -693,7 +748,13 @@ gap-boundary clearing: it checks whether the currently-pinned leg's declared `ef
 `rowState(row, ga.goalColumnPaths)` and, if so, revision-conditionally deletes the mark (`markStore.
 deleteRevision` — new, mirroring `replace`/`deleteMark`'s existing conflict-skip discipline so a mark a
 concurrent path already released/advanced is left alone rather than blindly cleared), resets the gap's
-per-chain dispatch-count, and credits the finished leg's `__effect` close. **A release is a leg boundary,
+per-chain dispatch-count, and credits the finished leg's `__effect` close. **Every release holds a
+mutex**, because the close credit is not idempotent — it flips one pending `__effect` slot per call.
+With a mark that mutex is the revision-conditioned mark delete; a **markless** caller (the count leg,
+and any site that reaches an exhausted gap whose mark has gone) has none, so the count DOCUMENT takes
+it instead: the release opens by deleting the count at the revision the caller read it at, and a
+conflict — a concurrent release, or a dispatch that booked against the budget — abandons the whole
+release rather than crediting the leg twice. **A release is a leg boundary,
 not a gap boundary** — the gap's own `missing_<g>` column may still be `true` (more legs remain), so both
 call sites treat a release as "now dispatch a genuinely fresh episode from the advanced state," never as
 "done." `dispatchGap` (lane-1) does this in the same call: release, then fall through to `planGap` with
@@ -712,6 +773,13 @@ uses (Contract #10 §10.8: "its meaning extends to 'no playbook entry AND no der
 trigger token") before falling through to the ordinary `TemplateDataError`/`PlaybookConfigError`
 disposition — a target with that escalation policy redirects a stuck goal chain to AI reasoning instead of
 alerting forever.
+
+An escalation substituted this way is **dispatched as an escalation**, not as the leg it stands in for.
+Nothing in the plan it hands back says so — its action is the same dispatch class an ordinary leg could
+carry — so `planGap` reports the substitution, and every dispatch seam books it nowhere and carries the
+displaced leg onto its mark. Fired as an ordinary episode it would re-charge the chain to that dispatch
+class, take the pin off the leg the gap is on, and postpone the exhaustion gate for as long as the leg
+and the escalation alternated.
 
 Proven in `goal_dispatch_internal_test.go`: a fresh episode synthesizes a multi-leg chain and dispatches
 its first leg (unit-level, and end-to-end through `handleRow`); a pinned episode reuses its leg verbatim
@@ -963,16 +1031,23 @@ its Lens (out of this story's scope — an op-path/Refractor concern).
 ### `resetBudget`
 
 `resetBudget <targetId> <entityId> <gapColumn>` re-arms one gap's §10.8 retry budget: it writes that
-gap's `<targetId>.<entityId>.<gapColumn>.__count` dispatch-count back to **0** and returns the count
-it replaced. Scope is one gap, never a target — the budget is per-`(target, entity, gap)` and so is
-the `GapBudgetExhausted` latch, so a target-wide reset would re-arm parks nobody looked at.
+gap's `<targetId>.<entityId>.<gapColumn>.__count` **attempt count** back to **0** and returns the
+count it replaced. Scope is one gap, never a target — the budget is per-`(target, entity, gap)` and
+so is the `GapBudgetExhausted` latch, so a target-wide reset would re-arm parks nobody looked at.
+
+**It re-arms the budget and says nothing else.** The count document's other fields — the `reclaims`
+re-arm tally, the `leg` the chain is on, the `escalatedAt` instant — are written back verbatim. An
+operator saying "let this gap try again" is not saying how often the sweep has re-armed the episode,
+and zeroing that would restart the pacing of an episode that may still be open: a task sitting on
+someone's inbox would go back to being re-dispatched every half hour.
 
 Why it exists: a gap whose budget is spent stops dispatching and holds a standing
-`GapBudgetExhausted` issue (§10.8's "loud stop, never a silent park"). That state is correct and
-**terminal** — the count clears only on gap-close, gap-close needs a remediation dispatch, and
-dispatch is what the budget suppresses. Once the operator has fixed whatever the retries were
-failing against, this is the only thing that lets the gap try again without re-authoring
-`maxretries_<g>` in the package.
+`GapBudgetExhausted` issue (§10.8's "loud stop, never a silent park"). For a **goal/candidates** gap
+the platform ends that state on its own the moment the pinned leg's declared effects hold in the row
+(the leg boundary, above) — but a chain that never finishes its leg has no such exit: the count
+clears only on gap-close, gap-close needs a remediation dispatch, and dispatch is what the budget
+suppresses. Once the operator has fixed whatever the retries were failing against, this is the only
+thing that lets the gap try again without re-authoring `maxretries_<g>` in the package.
 
 **It writes 0; it does not delete the key**, and that is load-bearing rather than incidental. The
 reconciler's count leg is *count-anchored* — it enumerates `…__count` keys — so a gap whose count
@@ -996,16 +1071,36 @@ has actually dispatched, so inventing one would hand the sweep a gap nobody chos
 honest answer to a mistyped `entityId`), and when a dispatch bumped the count between the read and
 the write (the operator's intent is stale; re-running is the remedy).
 
-That third refusal covers the two shapes the count leg's re-arm arm declines, and each is reported
-with its own reason because each has a different fix:
+That third refusal covers the shapes the count leg's re-arm arm declines, and each is reported with
+its own reason because each has a different fix:
 
-- **the action is collapse-only** — an `assignTask`, or a `triggerLoom` over a pattern that parks on a
-  human. Its task or Loom instance may still be open, so a re-armed episode would mint a fresh
-  `claimId` and duplicate it (an EXTERNAL gap, whose re-dispatch §10.3 calls for, is not refused);
+- **the resolved action is collapse-only** — an `assignTask`, or a `triggerLoom` over a pattern that
+  parks on a human. Its task or Loom instance may still be open, so a re-armed episode would mint a
+  fresh `claimId` and duplicate it (an EXTERNAL gap, whose re-dispatch §10.3 calls for, is not
+  refused);
 - **the playbook declares no `gaps` entry for the column** — the column is orphaned, so there is no
-  remediation to re-arm at all; a package re-author dropped it, and the budget expires with its TTL.
+  remediation to re-arm at all; a package re-author dropped it, and the budget expires with its TTL;
+- **the action is FR29's `surface`** — the gap dispatches nothing, so it has no episode to re-arm and
+  its budget is stranded from an action a package upgrade replaced;
+- **the gap's plan resolves no action for this row at all** — no eligible candidate, no derivable
+  plan. There is nothing for the arm to fire until the playbook or the row changes.
 
-In both cases writing the 0 would leave the gap parked with a fresh budget and turn its standing
+One further refusal is TRANSIENT rather than a property of the gap: a row the verb could not read (a
+KV failure, an unparseable body). It is reported under its own reason, naming the read failure and
+saying to re-run, because handing an unreadable row to the resolver would answer "no derivable
+plan" — a permanent-sounding verdict about the playbook, from a fault that is gone on the next
+attempt. A row that is simply ABSENT is not that case: it is a real state, and the collapse-only
+test over it reaches the same answer the arm does.
+
+A gap that names **no action** — a planned/goal-mode gap that picks its leg at plan time — is **not**
+refused for that alone. Both the verb and the arm resolve the leg **without planning**
+(`resolvedLegAction`: a bounded goal regression over the catalog, or a rank over the `__effect`
+windows — neither consumes an admission token nor clears a standing issue), and then apply the same
+collapse-only test to the **resolved** dispatch action. Because they share the resolver, the verb
+refuses exactly what the arm permanently declines and accepts exactly what it would fire; the
+refusal's wording names the resolved action and that a plan resolved it.
+
+In every refusal, writing the 0 would leave the gap parked with a fresh budget and turn its standing
 `GapBudgetExhausted` from a true statement into one describing a budget it no longer has. An
 unregistered target keeps its own refusal rather than being reported as an orphaned column: a
 replaying registry is not evidence that any package dropped anything.

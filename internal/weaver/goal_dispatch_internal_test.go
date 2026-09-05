@@ -430,7 +430,7 @@ func TestReleaseCompletedLeg_RevisionConflict_LeavesMarkStanding(t *testing.T) {
 	// fire here — but pass a revision one past the mark's actual current
 	// revision, as if a concurrent path had already advanced it.
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "aDone": true}
-	if released := h.engine.releaseCompletedLeg(ctx, targetID, entityID, "missing_x", ga, "legA", row, rev+1); released {
+	if released := h.engine.releaseCompletedLeg(ctx, targetID, entityID, "missing_x", ga, "legA", row, rev+1, 0); released {
 		t.Fatalf("releaseCompletedLeg with a stale/mismatched revision = true, want false (conflict)")
 	}
 

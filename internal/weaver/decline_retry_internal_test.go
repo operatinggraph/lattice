@@ -486,7 +486,7 @@ func TestHandleRow_ExhaustedBranchCarriesTheLongFloor(t *testing.T) {
 	})
 	entityID := testNanoID(t)
 	// One declared attempt, already spent: the suppression arm's exhausted term.
-	h.engine.bumpDispatchCount(ctx, targetID, entityID, col)
+	h.engine.bumpDispatchCount(ctx, targetID, entityID, col, actionDirectOp, true, false, false)
 	row := map[string]any{
 		"entityKey": "vtx.leaseapp." + entityID, "violating": true,
 		col: true, "maxretries_a": 1,

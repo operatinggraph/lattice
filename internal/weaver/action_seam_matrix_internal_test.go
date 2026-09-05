@@ -246,10 +246,12 @@ var playbookActionSeamMatrix = []actionSeamSpec{
 		dispatchOps: []string{"SendMatrixReminder"},
 		reclaimOps:  []string{"SendMatrixReminder"},
 		escalateOps: []string{defaultAugurOp},
-		// The re-arm refuses it: only a plan could say what it would fire, and
-		// running one would spend an admission token and clear the gap's
-		// standing issues for a dispatch that may never happen.
-		reArmOps: nil,
+		// The re-arm resolves the leg WITHOUT planning (resolvedLegAction — a
+		// rank over the `__effect` windows here, a bounded goal regression for a
+		// goal gap), so it knows the dispatch is a directOp before it spends an
+		// admission token: not collapse-only, therefore re-armed. The operator
+		// verb runs the same resolver, which is what keeps the two agreeing.
+		reArmOps: []string{"SendMatrixReminder"},
 	},
 }
 
@@ -765,7 +767,7 @@ func runEscalateSeam(t *testing.T, ctx context.Context, seam actionSeam) *seamOu
 		out.plant(gapColumn)
 		entityKey, _ := row["entityKey"].(string)
 		h.engine.escalateExhaustedGap(ctx, out.target, targetID, out.entity[gapColumn],
-			entityKey, gapColumn, row, 42, false)
+			entityKey, gapColumn, row, 42, false, dispatchCount{}, 0)
 		out.observe(gapColumn)
 		out.record(t, gapColumn, drainOps(t, h.ops, cellOpCount(seam, gapColumn)))
 	})

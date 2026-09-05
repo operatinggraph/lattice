@@ -139,21 +139,56 @@ func newSweeper(e *Engine, interval, warmup, backoffBase, backoffCap time.Durati
 	}
 }
 
-// backoffInterval returns how long a repeat reclaim of the same open episode
-// must wait, given the episode's current dispatch-count: backoffBase × 2^(count-1),
-// capped at backoffCap. count 0 or 1 (the first reclaim) returns the base, so the
-// first reclaim fires at lease-expiry as today; each subsequent real reclaim bumps
-// the count, lengthening the next interval up to the cap.
-func (s *sweeper) backoffInterval(count int) time.Duration {
-	if count < 1 {
+// backoffMaxDoublings bounds the WORK backoffInterval does. The series reaches
+// any reachable cap within 64 doublings for a base of a nanosecond or more, so
+// past it the answer is the cap and there is nothing left to walk toward.
+const backoffMaxDoublings = 64
+
+// backoffInterval returns how long a re-arm of the same open episode must wait,
+// given how many times that episode has already been re-armed (the count
+// document's Reclaims): backoffBase × 2^(reclaims-1), capped at backoffCap.
+// reclaims 0 or 1 returns the base, so the first re-arm fires at lease-expiry;
+// each subsequent one lengthens the wait up to the cap.
+//
+// The exponent is the re-arm tally, NOT the retry budget's attempt count. They
+// answer different questions — "how many times has the sweep re-armed this
+// episode" against "how many attempts has this chain mounted" — and a
+// collapse-only re-dispatch advances only the first, so an episode a human has
+// left open for a week still climbs to the cap while its budget stays where the
+// first attempt left it.
+//
+// The same series paces the escalation re-fire (escalateExhaustedGap), which is
+// a re-arm of an open episode by the same argument.
+//
+// The walk itself is bounded by backoffMaxDoublings, because the tally is not,
+// and every doubling is clamped to the cap BEFORE it happens, so the arithmetic
+// cannot overflow int64 nanoseconds into a negative wait however large the tally
+// grows.
+func (s *sweeper) backoffInterval(reclaims int) time.Duration {
+	if reclaims < 1 || s.backoffBase <= 0 {
+		// A zero or negative base is "no backoff": doubling never leaves it, so
+		// the answer is the base however many re-arms are behind the episode,
+		// and the loop below would run the whole tally to reach it.
 		return s.backoffBase
 	}
+	if reclaims > backoffMaxDoublings {
+		// The tally is unbounded — an episode a human leaves open climbs it for
+		// as long as it stays open — while the series reaches the cap in a
+		// handful of steps. Answer from the cap directly rather than walking a
+		// tally that has no bound.
+		return s.backoffCap
+	}
 	interval := s.backoffBase
-	for i := 1; i < count; i++ {
-		interval *= 2
-		if interval >= s.backoffCap {
+	for i := 1; i < reclaims; i++ {
+		if interval > s.backoffCap/2 {
+			// The next doubling would reach or pass the cap, so the cap IS the
+			// answer. Taking it before the multiply rather than after is what
+			// bounds the arithmetic: an interval past half of int64's range
+			// would double into a negative Duration, i.e. a wait that has always
+			// already elapsed.
 			return s.backoffCap
 		}
+		interval *= 2
 	}
 	if interval > s.backoffCap {
 		return s.backoffCap
@@ -656,7 +691,8 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 			// The loud stop, re-derived from the state that causes the
 			// suppression rather than from a mark the exhausted gap stopped
 			// refreshing (§10.8: "never a silent park").
-			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowEntry.Revision, budgetIsDefault) != substrate.Ack {
+			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowEntry.Revision,
+				budgetIsDefault, count, entry.Revision) != substrate.Ack {
 				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			}
@@ -731,26 +767,33 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// contract-legal declaration. Leave the count to its TTL.
 		return
 	}
-	// The action is read from the playbook rather than from planGap's resolved
-	// actionRef, because the decision must precede the plan: planGap consumes
-	// an admission token and clears this gap's standing issues on the strength
-	// of a dispatch about to happen, neither of which may occur for a gap this
-	// arm then declines. For every shape that reaches here the two are the same
-	// value — resolvePlannedAction returns ga unchanged for any explicit
-	// Action, and the empty Action of a planned/goal-mode gap is refused just
-	// below, precisely because only a plan could say what it would fire and
-	// this arm must not run one to find out.
-	if ga.Action == "" {
-		e.logger.Debug("weaver sweep: gap resolves its action at plan time; leaving the re-arm to a delivery",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+	// The action the collapse-only test is taken over is RESOLVED, not read off
+	// the playbook — but resolved without planning, because the decision must
+	// precede the plan: planGap consumes an admission token and clears this
+	// gap's standing issues on the strength of a dispatch about to happen,
+	// neither of which may occur for a gap this arm then declines.
+	// resolvedLegAction is exactly that: the leg's dispatch contract type, from
+	// a pure regression over the catalog (or the playbook's own Action, for
+	// every gap that names one). A gap whose plan resolves nothing for this row
+	// would dispatch nothing either, so it is left to a delivery.
+	resolvedAction, resolvedRef, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
+	if perr != nil {
+		e.logger.Debug("weaver sweep: gap resolves no action for this row; leaving the re-arm to a delivery",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "why", perr.msg)
 		return
 	}
-	if collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
 		e.logger.Debug("weaver sweep: collapse-only gap; not re-arming a markless episode that may still be open",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", ga.Action)
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", resolvedAction)
 		return
 	}
-	pl, actionRef, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, "")
+	// The plan is PINNED to the ref the classification above was taken over, so
+	// one resolution decides both. Left unpinned it would resolve a second time,
+	// and a candidates gap ranks on the `__effect` confidence windows — live,
+	// time-varying inputs that a concurrent close can move between the two
+	// calls. The gap would then dispatch a candidate the collapse-only refusal
+	// was never applied to: the exact re-arm this arm exists to withhold.
+	pl, actionRef, escalated, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, resolvedRef)
 	if pl == nil {
 		// planGap already surfaced whatever it was (an unresolved reference, a
 		// playbook config error) on its own issue keys, or declined for
@@ -763,7 +806,17 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	e.logger.Warn("weaver sweep: dispatching a markless open gap",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
 		"action", actionRef, "reason", sweepReasonBudgetReArm)
-	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
+	// An escalation substituted for an unplannable gap is dispatched as one:
+	// booked nowhere, carrying the leg the count document records (planGap's
+	// doc). There is no mark here to read a leg off.
+	//
+	// escalated is false by construction at this site: the plan is pinned to a
+	// ref resolvedLegAction just resolved out of the same catalog, so planGap's
+	// unplannable substitution cannot be reached. The threading stays because
+	// every other dispatch seam carries it and this one must not be the seam
+	// that silently books an escalation if that construction ever changes.
+	if dec, _ := e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
+		escalated, ga.Goal != nil, escalationLeg(escalated, ga, nil, count)); dec != substrate.Ack {
 		// Either the CAS-create failed outright (still markless — the next pass
 		// retries) or its op publish failed (the mark exists and its lease
 		// bounds the retry, like any other stuck episode). Bounded and retried
@@ -910,6 +963,20 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
+	// The gap's count document and the revision it was read at, taken ONCE for
+	// everything this pass asks of them: the leg the chain is charged to (the
+	// release just below) and the revision that release conditions on, the
+	// suppression verdict, and the re-arm tally the backoff is keyed on. A read
+	// failure is the same safe side gapSuppressed takes for one — the zero
+	// document never suppresses, so the reclaim proceeds and the next pass
+	// re-reads.
+	count, countRev, cErr := e.marks.getDispatchCount(ctx, targetID, entityID, gapColumn)
+	if cErr != nil {
+		e.logger.Warn("weaver sweep: dispatch-count read failed; not suppressing and not pacing this reclaim",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
+		count, countRev = dispatchCount{}, 0
+	}
+
 	// Fire 6, R1: the pinned leg's declared effects may already hold in the
 	// CURRENT row (releaseCompletedLeg re-reads it fresh here, independent of
 	// CDC delivery timing) even though the mark's lease has expired — a leg
@@ -921,14 +988,22 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Dispatch the next leg as a genuinely fresh episode via the SAME
 	// CAS-create path lane-1 uses (fireEpisode's found=false branch)
 	// instead of merely releasing.
-	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, rec.Action, row, markRev) {
-		pl, actionRef, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, "")
+	//
+	// legOf, not the mark's action alone: a gap handed to the reasoning tier
+	// carries its displaced leg on the escalation's own mark, so its boundary
+	// stays testable from this leg too.
+	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, legOf(ga, rec, count), row, markRev, countRev) {
+		pl, actionRef, escalated, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, "")
 		if pl == nil {
 			e.logger.Warn("weaver sweep: leg-advance plan failed; the gap stays markless until the next row delivery",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
 			return
 		}
-		if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
+		// The release deleted the mark and the budget, so an escalation
+		// substituted for the advanced chain's next leg displaces nothing this
+		// pass can name — but it is still an escalation, and books nothing.
+		if fired, _ := e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
+			escalated, ga.Goal != nil, ""); fired != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
 			// its op publish failed (the mark exists; the lease/reclaim
@@ -949,7 +1024,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
-	if suppressed, exhausted, budgetIsDefault := e.gapSuppressed(ctx, targetID, entityID, row, gapColumn, ga.Action); suppressed {
+	if suppressed, exhausted, budgetIsDefault := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, count.Count); suppressed {
 		// Mirrors lane-1's dispatch-suppression gate: a gap with inflight_<g> set
 		// must NOT be re-dispatched. This is the LOAD-BEARING skip — the
 		// mark-lease expiry → reclaim is the actual re-dispatch path for a
@@ -969,7 +1044,8 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// touches this gap's own (already-exhausted, possibly already-expired)
 		// mark.
 		if exhausted {
-			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowRevision, budgetIsDefault) != substrate.Ack {
+			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowRevision,
+				budgetIsDefault, count, countRev) != substrate.Ack {
 				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			}
@@ -997,7 +1073,28 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Default per-key TTL backstop for the re-armed mark; widened below for any
 	// paced reclaim, so the mark outlives its own backoff window.
 	markTTL := markTTLBackstopFactor * e.marks.lease
-	collapseOnly := collapseOnlyReclaim(rec.Action, confirmedConcluded)
+
+	// A gap's class is decided by the dispatch's SHAPE, never by the action
+	// NAME the mark happens to carry: a planned-mode mark records the leg's
+	// own catalog Ref ("setTerms", "signRenewal"), which is not a dispatch
+	// contract type at all, so classifying rec.Action directly would read
+	// every goal leg as not-collapse-only — an unpaced re-fire every sweep
+	// interval, each one booked as an attempt against a human task nobody has
+	// opened. Resolve the PINNED leg to its dispatch action first, without
+	// planning (resolvePlannedAction's pinned branch is a pure catalog lookup;
+	// planGap below consumes an admission token and clears the gap's standing
+	// issues, neither of which may happen for a reclaim this block then paces
+	// away). For every gap that names its own Action the resolution returns ga
+	// unchanged, so a static gap resolves to its own action and classifies on
+	// that action. A pinned ref the catalog no longer holds — a re-authored
+	// playbook, or an escalation whose mark pins the reasoning op's own
+	// "directOp" — resolves to a planError; those classify on the mark's
+	// recorded action instead.
+	dispatchAction := rec.Action
+	if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
+		dispatchAction = resolved.Action
+	}
+	collapseOnly := collapseOnlyReclaim(dispatchAction, confirmedConcluded)
 
 	// Defense in depth for Contract #10 §10.3's rule that a gap declaring
 	// inflight_<g> MUST also declare maxretries_<g>. An external gap's reclaim is
@@ -1038,30 +1135,31 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// (§inflight_<g>/maxretries_<g>), never backed off; confirmedConcluded
 		// clears the term for exactly that reason. It reaches here only on the
 		// uncappedExternal term above, where the cap that was supposed to bound
-		// it is missing. Best-effort either way: a count read or ClaimedAt parse
+		// it is missing. The exponent is the episode's re-arm tally, read from the
+		// count document above — an attempt this reclaim does not mount must not
+		// lengthen its own wait, and a chain of real attempts against a vendor is
+		// not what this pacing is about. Best-effort either way: a ClaimedAt parse
 		// failure falls through to a normal (unpaced) reclaim.
-		if count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
-			e.logger.Debug("weaver sweep: reclaim backoff dispatch-count read failed; not pacing",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)
-		} else if claimedAt, perr := time.Parse(time.RFC3339Nano, rec.ClaimedAt); perr == nil {
-			if elapsed := time.Since(claimedAt); elapsed < s.backoffInterval(count) {
+		if claimedAt, perr := time.Parse(time.RFC3339Nano, rec.ClaimedAt); perr == nil {
+			if elapsed := time.Since(claimedAt); elapsed < s.backoffInterval(count.Reclaims) {
 				// Dispatched within the backoff window: leave the mark untouched —
 				// no replace/fire/bumpDispatchCount. The mark survives on its
 				// backoff-sized TTL (set by the prior reclaim below); the next sweep
 				// re-enters this cheap compare until ClaimedAt ages past the interval.
 				e.logger.Debug("weaver sweep: reclaim backed off; episode dispatched recently",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn,
-					"action", rec.Action, "dispatchCount", count, "elapsed", elapsed,
+					"action", rec.Action, "dispatchAction", dispatchAction,
+					"reclaims", count.Reclaims, "elapsed", elapsed,
 					"uncappedExternal", uncappedExternal)
 				s.bump(&s.reclaimsSuppressed)
 				return
 			}
 			// Proceeding: size the re-armed mark's TTL to outlast the NEXT backoff
-			// window (the count bumps after fire) plus a sweep-cadence margin, so the
+			// window (the tally bumps after fire) plus a sweep-cadence margin, so the
 			// mark is always reclaimed before it can TTL-expire into a markless open
 			// gap — which a CDC redelivery would otherwise re-dispatch with a fresh
 			// claimId, minting a DUPLICATE task. Never below the default backstop.
-			if want := s.backoffInterval(count+1) + 2*s.interval; want > markTTL {
+			if want := s.backoffInterval(count.Reclaims+1) + 2*s.interval; want > markTTL {
 				markTTL = want
 			}
 		}
@@ -1075,7 +1173,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// episode, never a fresh one, so a planned-mode candidates gap must reuse
 	// the mark's recorded pick rather than re-ranking it (design §2 — a
 	// reclaim never replans mid-episode).
-	pl, resolvedAction, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, rec.Action)
+	pl, resolvedAction, escalated, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, rec.Action)
 	if pl == nil {
 		e.logger.Warn("weaver sweep: reclaim plan failed; leaving expired mark for the next sweep",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
@@ -1115,7 +1213,18 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// (== ga.Action) and re-pins the SAME candidate for a planned-mode one
 	// (== rec.Action, by construction of resolvePlannedAction's pinned-lookup
 	// branch) — the mark's Action never drifts across a reclaim.
-	newRev, conflict, err := e.marks.replace(ctx, targetID, entityID, gapColumn, entityKey, resolvedAction, claimID, markRev, markTTL)
+	//
+	// escalatedFrom is the leg the re-armed mark still stands over: the one it
+	// already carried, or — when the plan resolved to a substituted ESCALATION
+	// (an unplannable goal chain, including one whose pin was a prior
+	// escalation) — the leg that escalation displaces. Rewriting the mark
+	// without it would drop the pin and take the gap's leg boundary dark.
+	escalatedFrom := rec.EscalatedFrom
+	if escalated {
+		escalatedFrom = displacedLeg(ga, rec, count)
+	}
+	newRev, conflict, err := e.marks.replace(ctx, targetID, entityID, gapColumn, entityKey, resolvedAction, escalatedFrom,
+		claimID, markRev, markTTL)
 	if err != nil {
 		e.logger.Warn("weaver sweep: reclaim re-arm failed; leaving expired mark for the next sweep",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)
@@ -1128,12 +1237,29 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	s.bump(&s.reclaims)
 	e.logger.Warn("weaver sweep: mark reclaimed",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
-		"action", rec.Action, "reason", sweepReasonLeaseExpired)
-	// A reclaim IS a fresh dispatch (a new episode against a re-armed mark), so it
-	// advances the chain's retry-budget dispatch-count exactly like the lane-1
-	// CAS-create path — this is how a multi-attempt chain driven by sweep
-	// re-dispatches (not just CDC touches) accumulates toward maxretries_<g>.
-	e.bumpDispatchCount(ctx, targetID, entityID, gapColumn)
+		"action", rec.Action, "dispatchAction", dispatchAction, "reason", sweepReasonLeaseExpired)
+	// A reclaim is always a RE-ARM of an open episode, and it is an ATTEMPT only
+	// when the re-dispatch actually mounts one. Both readers of the count
+	// document are booked on that one predicate, the same `collapseOnly` the
+	// `__effect` window below branches on:
+	//
+	//   - the retry budget (Count) advances only for a re-dispatch that mounts a
+	//     new attempt — a fresh vendor call, a re-submitted op. A re-dispatch
+	//     the consumer collapses onto the artifact the open episode already
+	//     created mounts nothing, so it must not spend a budget that bounds
+	//     attempts (§10.8's retry budget): a human who has not opened their task
+	//     is not a chain of failed retries.
+	//   - the re-arm tally (Reclaims) advances for every reclaim, collapse-only
+	//     included: it is how many times the sweep has re-armed THIS episode,
+	//     which is exactly what the backoff above is keyed on.
+	//
+	// An ESCALATION books neither, on either seam: it is a dispatch ABOUT the
+	// gap's spent chain, not a member of it, its "action" is a dispatch class
+	// no `__effect` close can ever answer, and charging the chain to it would
+	// restart the very budget whose exhaustion produced it.
+	if !escalated {
+		e.bumpDispatchCount(ctx, targetID, entityID, gapColumn, resolvedAction, !collapseOnly, true, ga.Goal != nil)
+	}
 	// The `__effect` confidence window books ATTEMPTS, not dispatches, and its
 	// close side credits at most once per episode (clearClosedMarks flips the
 	// oldest pending slot when the GAP closes). A collapse-only re-dispatch
@@ -1141,10 +1267,8 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// open episode already created — so booking one appends a pending slot no
 	// close can ever answer. An episode held open across many reclaims (a human
 	// userTask can sit for days) would fill its whole window that way and trip a
-	// LensEffectMismatch that describes nothing real. The retry-budget count
-	// above is deliberately NOT gated: it bounds reclaim effort per §10.8,
-	// which is exactly what a repeat reclaim spends.
-	if !collapseOnly {
+	// LensEffectMismatch that describes nothing real.
+	if !collapseOnly && !escalated {
 		e.bumpEffectDispatch(ctx, targetID, gapColumn, resolvedAction)
 	}
 	e.bumpOscillation(ctx, targetID, resolvedAction)

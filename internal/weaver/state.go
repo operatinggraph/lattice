@@ -99,11 +99,20 @@ const dispatchCountTTLBackstopFactor = 256
 // instanceId) so re-dispatch of the same open gap collapses on the existing
 // artifact instead of minting a duplicate (§10.3 consumer-enforced idempotency).
 // A legitimate close→reopen mints a new mark ⇒ new ClaimID ⇒ a fresh artifact.
+//
+// EscalatedFrom carries the plan LEG this episode displaced: an Augur
+// escalation replaces the gap's leg mark with its own, whose Action is the
+// reasoning op's dispatch class rather than a catalog Ref, and without this
+// field the leg the gap was on would be unrecoverable — every level test on the
+// pin (releaseCompletedLeg's effects-hold release) would go dark for as long as
+// the escalation stood. It is empty on an ordinary leg mark, and on any mark
+// that does not carry it — for which legOf falls to the count document.
 type mark struct {
 	TargetID       string `json:"targetId"`
 	EntityKey      string `json:"entityKey"`
 	Gap            string `json:"gap"`
 	Action         string `json:"action"`
+	EscalatedFrom  string `json:"escalatedFrom,omitempty"`
 	ClaimID        string `json:"claimId,omitempty"`
 	ClaimedAt      string `json:"claimedAt"`
 	LeaseExpiresAt string `json:"leaseExpiresAt,omitempty"`
@@ -143,7 +152,10 @@ func markKey(targetID, entityID, gapColumn string) string {
 // heldBy = this instance) and a NATS per-key TTL of markTTLBackstopFactor ×
 // lease — the backstop that bounds the mark's life even if no reconciler ever
 // sweeps it.
-func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action string) (revision uint64, claimID string, exists bool, err error) {
+//
+// escalatedFrom is the plan leg this episode displaces — set only by an Augur
+// escalation, empty for every ordinary dispatch.
+func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom string) (revision uint64, claimID string, exists bool, err error) {
 	claimID, err = substrate.NewNanoID()
 	if err != nil {
 		return 0, "", false, fmt.Errorf("weaver: mint mark claimId: %w", err)
@@ -154,6 +166,7 @@ func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, e
 		EntityKey:      entityKey,
 		Gap:            gapColumn,
 		Action:         action,
+		EscalatedFrom:  escalatedFrom,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
@@ -215,7 +228,14 @@ func (m *markStore) get(ctx context.Context, targetID, entityID, gapColumn strin
 // collapse-only userTask reclaim that the sweep will deliberately pace with a
 // backoff longer than the default backstop (so the mark survives until the next
 // scheduled reclaim instead of TTL-expiring into a markless open gap).
-func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, claimID string,
+//
+// escalatedFrom is the displaced plan leg the mark carries (the mark type's
+// doc). The whole value is rewritten here, so a re-arm that did not thread it
+// through would drop the leg an escalation is standing over and take every
+// level test on that pin dark — the caller passes the leg the re-armed episode
+// is still displacing, which for an ordinary re-arm is the one already on the
+// mark.
+func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, claimID string,
 	expectedRevision uint64, ttl time.Duration) (revision uint64, conflict bool, err error) {
 
 	now := time.Now()
@@ -224,6 +244,7 @@ func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, 
 		EntityKey:      entityKey,
 		Gap:            gapColumn,
 		Action:         action,
+		EscalatedFrom:  escalatedFrom,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
@@ -289,9 +310,31 @@ func (m *markStore) deleteRevision(ctx context.Context, targetID, entityID, gapC
 const countKeySuffix = ".__count"
 
 // dispatchCount is the JSON body of a `<targetId>.<entityId>.<gapColumn>.__count`
-// key: the number of actual dispatches of that gap in the current chain.
+// key. It carries two independent tallies for the two populations that read it,
+// because one integer cannot serve both:
+//
+//   - Count is the ATTEMPTS mounted in the current chain — a dispatch that
+//     actually mounts something against the vendor, the task or the op. It is
+//     the exhaustion gate's input (`maxretries_<g>`).
+//   - Reclaims is how many times the sweep (or lane 1's stale-external re-arm,
+//     or an escalation re-fire) has RE-ARMED the same open episode. It is the
+//     reclaim backoff's exponent. A re-arm that collapses onto an artifact the
+//     open episode already created mounts no attempt, so it advances Reclaims
+//     alone — the same predicate the `__effect` window books on.
+//
+// Leg is the actionRef Count is charged to, so the plan leg a gap was on
+// survives the mark that pinned it (the count leg reaches a gap with no mark at
+// all). EscalatedAt is the last Augur escalation fire, which paces the next one
+// on the Reclaims series.
+//
+// A document may carry Count alone; each other field then reads as its zero
+// value, which is the same disposition a first reclaim and a first escalation
+// have anyway.
 type dispatchCount struct {
-	Count int `json:"count"`
+	Count       int    `json:"count"`
+	Reclaims    int    `json:"reclaims,omitempty"`
+	Leg         string `json:"leg,omitempty"`
+	EscalatedAt string `json:"escalatedAt,omitempty"`
 }
 
 // countKey builds the §E dispatch-count key. Entity is keyed by NanoID (the same
@@ -323,71 +366,208 @@ func splitCountKey(key string) (targetID, entityID, gapColumn string, ok bool) {
 // a count failure as the safe side (do not over-suppress).
 const dispatchCountCASRetries = 5
 
-// getDispatchCount reads the current dispatch-count for one gap (0 when absent —
-// no dispatch has happened yet, or the count was reset on a gap-close). The read
-// is the gate's authority: the budget is spent iff this count has reached the
-// row's maxretries_<g>.
-func (m *markStore) getDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) (int, error) {
+// getDispatchCount reads the whole dispatch-count document for one gap (the
+// zero value when absent — no dispatch has happened yet, or the count was reset
+// on a gap-close). The read is the gate's authority: the budget is spent iff
+// Count has reached the row's maxretries_<g>. Callers that pace, resolve a leg
+// or re-fire an escalation read the document's other fields from the SAME read,
+// so a gap costs one round trip per pass however many of its tallies are
+// consulted.
+//
+// The KV revision comes back with the document, and revision 0 means there was
+// no document to read. It is what a caller conditions a write on to prove it is
+// acting on the value it looked at — releaseCompletedLeg's markless branch takes
+// its whole mutual exclusion from it, having no mark to condition on.
+func (m *markStore) getDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) (dispatchCount, uint64, error) {
 	entry, err := m.conn.KVGet(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return 0, nil
+			return dispatchCount{}, 0, nil
 		}
-		return 0, err
+		return dispatchCount{}, 0, err
 	}
 	var dc dispatchCount
 	if err := json.Unmarshal(entry.Value, &dc); err != nil {
-		return 0, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, err)
+		return dispatchCount{}, 0, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, err)
 	}
-	return dc.Count, nil
+	return dc, entry.Revision, nil
 }
 
-// incrementDispatchCount bumps the gap's dispatch-count by one (creating it at 1
-// on absence) and returns the new value. It is the read-modify-write analogue of
-// an atomic increment: a CAS-create on absence, else a revision-conditioned
-// update, retried a bounded number of times so a concurrent increment (lane-1 vs
-// the sweep's reclaim) does not lose a count. Every write arms the long TTL
-// backstop (dispatchCountTTLBackstopFactor × lease) — the count is chain-scoped
-// and the gap-close reset is its prompt removal; the TTL only GCs an orphan.
-func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) (int, error) {
+// incrementDispatchCount books one dispatch against the gap's count document
+// (creating it on absence) and returns the document it wrote. It is the
+// read-modify-write analogue of an atomic increment: a CAS-create on absence,
+// else a revision-conditioned update, retried a bounded number of times so a
+// concurrent increment (lane-1 vs the sweep's reclaim) does not lose a booking.
+// Every write arms the long TTL backstop (dispatchCountTTLBackstopFactor ×
+// lease) — the count is chain-scoped and the gap-close reset is its prompt
+// removal; the TTL only GCs an orphan.
+//
+// The caller states what the dispatch WAS, on two independent axes, because the
+// two tallies answer different questions (dispatchCount's doc):
+//
+//   - attempt: this dispatch mounts a genuinely new attempt, so Count advances
+//     toward maxretries_<g>. actionRef names the leg the attempts are charged
+//     to, and a document with no leg recorded takes it as its own.
+//   - reclaim: this dispatch re-armed an already-open episode, so Reclaims
+//     advances and the next re-arm waits one step longer.
+//   - legScoped: this gap's budget is PER LEG, so a stored leg different from
+//     actionRef is a leg boundary and restarts the bookkeeping under the new
+//     ref (bookDispatch states the rule and why only a goal gap gets it).
+//
+// A collapse-only re-dispatch is a reclaim and not an attempt; a fresh episode
+// is an attempt and not a reclaim; an external or directOp re-arm is both.
+func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entityID, gapColumn, actionRef string,
+	attempt, reclaim, legScoped bool) (dispatchCount, error) {
+
 	key := countKey(targetID, entityID, gapColumn)
 	ttl := dispatchCountTTLBackstopFactor * m.lease
-	for attempt := 0; attempt < dispatchCountCASRetries; attempt++ {
+	for try := 0; try < dispatchCountCASRetries; try++ {
 		entry, err := m.conn.KVGet(ctx, m.bucket, key)
 		if err != nil {
 			if !errors.Is(err, substrate.ErrKeyNotFound) {
-				return 0, err
+				return dispatchCount{}, err
 			}
-			body, mErr := json.Marshal(dispatchCount{Count: 1})
+			if !attempt {
+				// A re-arm with no document to re-arm against. Creating one
+				// would persist {count:0}, and a count key that exists and
+				// reads 0 is the ONE state the sweep's count leg treats as an
+				// operator's un-park — it would fire a fresh markless episode
+				// for a gap nobody re-armed. The re-arm tally has nothing to
+				// pace here either: the first booking creates the document at
+				// the first attempt.
+				return dispatchCount{}, nil
+			}
+			next := bookDispatch(dispatchCount{}, actionRef, attempt, reclaim, legScoped)
+			body, mErr := json.Marshal(next)
 			if mErr != nil {
-				return 0, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+				return dispatchCount{}, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
 			}
 			if _, cErr := m.conn.KVCreateWithTTL(ctx, m.bucket, key, body, ttl); cErr != nil {
 				if errors.Is(cErr, substrate.ErrRevisionConflict) {
 					continue // someone created it first — re-read and update.
 				}
-				return 0, cErr
+				return dispatchCount{}, cErr
 			}
-			return 1, nil
+			return next, nil
 		}
 		var dc dispatchCount
 		if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {
-			return 0, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, uErr)
+			return dispatchCount{}, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, uErr)
 		}
-		next := dc.Count + 1
-		body, mErr := json.Marshal(dispatchCount{Count: next})
+		next := bookDispatch(dc, actionRef, attempt, reclaim, legScoped)
+		body, mErr := json.Marshal(next)
 		if mErr != nil {
-			return 0, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+			return dispatchCount{}, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
 		}
 		if _, uErr := m.conn.KVUpdateWithTTL(ctx, m.bucket, key, body, entry.Revision, ttl); uErr != nil {
 			if errors.Is(uErr, substrate.ErrRevisionConflict) {
 				continue // lost the race — re-read and retry.
 			}
-			return 0, uErr
+			return dispatchCount{}, uErr
 		}
 		return next, nil
 	}
-	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
+	return dispatchCount{}, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
+}
+
+// bookDispatch applies one dispatch's booking to a count document — the pure
+// half of incrementDispatchCount's read-modify-write, so the rule is testable
+// without a KV and identical on the create and update legs.
+//
+// actionDirectOp is never taken as a leg. It is a dispatch CLASS, and the one
+// dispatch that carries it as an "actionRef" is the Augur escalation, whose
+// episode is booked nowhere at all; a booking that let it through would rewrite
+// Leg to a name no catalog holds and restart the budget of the chain the
+// escalation is standing over — which is exactly the leg the escalation must
+// preserve. Every leg a goal catalog can declare is a Ref, so nothing legitimate
+// is lost.
+//
+// legScoped is what makes a leg change a BOUNDARY rather than merely a different
+// pick, and only a goal gap has it. A goal chain advances leg by leg, each
+// boundary witnessed by releaseCompletedLeg (which deletes the whole document),
+// so a change seen here is a boundary nothing witnessed and the previous leg's
+// attempts no longer bound this one. Every other shape re-decides its action per
+// EPISODE from live inputs — a candidates gap re-ranks over the `__effect`
+// close-rate windows, which move under it — so two candidates alternating would
+// restart the budget on every booking, the gate would never see it reach the
+// cap, and the gap would sit in the silent park §10.8 forbids instead of
+// escalating. There the differing ref records the current pick and nothing more.
+func bookDispatch(dc dispatchCount, actionRef string, attempt, reclaim, legScoped bool) dispatchCount {
+	next := dc
+	leg := actionRef
+	if leg == actionDirectOp {
+		leg = ""
+	}
+	if attempt {
+		if legScoped && leg != "" && next.Leg != "" && next.Leg != leg {
+			// A leg change IS a new chain: the attempts charged to the previous
+			// leg bound that leg, not this one. It restarts the whole episode's
+			// bookkeeping, not just the tally: the re-arm history and the last
+			// escalation belong to the leg they were spent on, and carrying them
+			// would make the new leg's first reclaim wait the old leg's
+			// exponential.
+			next.Count = 1
+			next.Reclaims = 0
+			next.EscalatedAt = ""
+		} else {
+			next.Count++
+		}
+		if leg != "" {
+			next.Leg = leg
+		}
+	}
+	if reclaim {
+		next.Reclaims++
+	}
+	return next
+}
+
+// bookEscalation records that an Augur escalation fired for this gap just now:
+// EscalatedAt carries the fire instant the next re-fire is paced against, and
+// Reclaims advances so that pacing lengthens exactly like every other re-arm of
+// an open episode. Same bounded CAS read-modify-write loop as
+// incrementDispatchCount; booked=false means nothing was written.
+//
+// An ABSENT document is not created. An escalation is reached only past a spent
+// budget, so the document normally exists; creating one at Count 0 would make
+// the reconciler's count leg read it as an operator's un-park — the one state
+// that arm fires a fresh markless episode on — and hand the gap a dispatch
+// nobody asked for. Skipping the write costs the re-fire its pacing for one
+// cycle (an absent EscalatedAt fires now), which is the same disposition the
+// first escalation has.
+func (m *markStore) bookEscalation(ctx context.Context, targetID, entityID, gapColumn string, now time.Time) (booked bool, err error) {
+	key := countKey(targetID, entityID, gapColumn)
+	ttl := dispatchCountTTLBackstopFactor * m.lease
+	for try := 0; try < dispatchCountCASRetries; try++ {
+		entry, gErr := m.conn.KVGet(ctx, m.bucket, key)
+		if gErr != nil {
+			if errors.Is(gErr, substrate.ErrKeyNotFound) {
+				return false, nil
+			}
+			return false, gErr
+		}
+		var dc dispatchCount
+		if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {
+			return false, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, uErr)
+		}
+		dc.EscalatedAt = substrate.FormatTimestamp(now)
+		dc.Reclaims++
+		body, mErr := json.Marshal(dc)
+		if mErr != nil {
+			return false, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+		}
+		if _, uErr := m.conn.KVUpdateWithTTL(ctx, m.bucket, key, body, entry.Revision, ttl); uErr != nil {
+			if errors.Is(uErr, substrate.ErrRevisionConflict) {
+				continue // lost the race — re-read and retry.
+			}
+			if errors.Is(uErr, substrate.ErrKeyNotFound) {
+				return false, nil
+			}
+			return false, uErr
+		}
+		return true, nil
+	}
+	return false, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
 // retryBudgetStore is the two-operation view of weaver-state the un-park verb
@@ -398,29 +578,34 @@ func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entity
 // produce one is the kind of proof that passes when it feels like it. markStore
 // is the only production implementation.
 type retryBudgetStore interface {
-	dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (count int, revision uint64, found bool, err error)
-	resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string, expectedRevision uint64) (conflict bool, err error)
+	dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (doc dispatchCount, revision uint64, found bool, err error)
+	resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string, prior dispatchCount, expectedRevision uint64) (conflict bool, err error)
 }
 
-// dispatchCountEntry reads one gap's dispatch-count together with the KV
-// revision it was read at — the revision a conditioned write must name to prove
-// it is replacing the value it looked at. found=false means no chain has ever
-// dispatched this gap. An unreadable body reports count 0 with its real
-// revision: the value is unknowable, but the key is still the one to condition
-// on, and a reset is exactly the repair for it.
-func (m *markStore) dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (count int, revision uint64, found bool, err error) {
+// dispatchCountEntry reads one gap's dispatch-count document together with the
+// KV revision it was read at — the revision a conditioned write must name to
+// prove it is replacing the value it looked at. found=false means no chain has
+// ever dispatched this gap. An unreadable body reports the zero document with
+// its real revision: the value is unknowable, but the key is still the one to
+// condition on, and a reset is exactly the repair for it.
+//
+// The whole document, not just the count: an un-park replaces the budget and
+// keeps everything else the document says about the episode (its pacing history
+// and the leg it is on), which the writer can only do if the reader hands it
+// over.
+func (m *markStore) dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (doc dispatchCount, revision uint64, found bool, err error) {
 	entry, err := m.conn.KVGet(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return 0, 0, false, nil
+			return dispatchCount{}, 0, false, nil
 		}
-		return 0, 0, false, err
+		return dispatchCount{}, 0, false, err
 	}
 	var dc dispatchCount
 	if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {
-		return 0, entry.Revision, true, nil
+		return dispatchCount{}, entry.Revision, true, nil
 	}
-	return dc.Count, entry.Revision, true, nil
+	return dc, entry.Revision, true, nil
 }
 
 // resetDispatchCount re-arms one gap's §E retry budget by writing its
@@ -444,8 +629,18 @@ func (m *markStore) dispatchCountEntry(ctx context.Context, targetID, entityID, 
 // its own, and forcing it back to 0 would hand it a second full budget nobody
 // asked for. A key that vanished mid-flight reports the same way; both are
 // "the state you decided on is gone", and re-reading is the remedy.
-func (m *markStore) resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string, expectedRevision uint64) (conflict bool, err error) {
-	body, mErr := json.Marshal(dispatchCount{Count: 0})
+//
+// It re-arms the BUDGET and nothing else: prior is the document the caller read
+// at expectedRevision, and every field but Count is written back verbatim. An
+// operator's un-park says "let this gap try again"; it says nothing about how
+// often the sweep has re-armed the episode, which leg the chain is on, or when
+// the escalation last fired — and zeroing those would restart the pacing of an
+// episode that may still be open, re-firing it at the base interval.
+func (m *markStore) resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string,
+	prior dispatchCount, expectedRevision uint64) (conflict bool, err error) {
+
+	prior.Count = 0
+	body, mErr := json.Marshal(prior)
 	if mErr != nil {
 		return false, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
 	}
@@ -473,6 +668,29 @@ func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID,
 		return err
 	}
 	return nil
+}
+
+// deleteDispatchCountRevision clears one gap's dispatch-count, but ONLY if it is
+// still at revision — the count's counterpart to deleteRevision, and the same
+// semantics: conflict=true means the document changed or is already gone, and
+// the caller must not proceed as if ITS delete won.
+//
+// It is what makes the count document a MUTEX. A release with no mark to
+// condition on (releaseCompletedLeg's markless branch) has nothing else to
+// serialize two concurrent derivations of the same leg boundary against, and the
+// rest of the release is not idempotent: recordEffectClose flips one pending
+// slot per call, so two blind releases would credit one leg twice. Winning this
+// delete is the right to run the rest exactly once.
+func (m *markStore) deleteDispatchCountRevision(ctx context.Context, targetID, entityID, gapColumn string,
+	revision uint64) (conflict bool, err error) {
+
+	if err := m.conn.KVDeleteRevision(ctx, m.bucket, countKey(targetID, entityID, gapColumn), revision); err != nil {
+		if errors.Is(err, substrate.ErrRevisionConflict) || errors.Is(err, substrate.ErrKeyNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // countInFlight reports how many in-flight marks exist in the bucket, scanned

@@ -3,6 +3,7 @@ package weaver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -357,7 +358,13 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 	if !ok {
 		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
 	}
-	if reason := e.reArmDeclines(ctx, target, targetID, entityID, gapColumn); reason != "" {
+	if reason, transient := e.reArmDeclines(ctx, target, targetID, entityID, gapColumn); reason != "" {
+		if transient {
+			// Nothing is known about the gap's shape, so the consequence clause
+			// below would be a claim this verb cannot make. The reason names the
+			// failure and the remedy, and that is the whole answer.
+			return 0, fmt.Errorf("weaver: target %q entity %q gap %q: %s", targetID, entityID, gapColumn, reason)
+		}
 		// The sweep's re-arm will not act on this gap whatever the budget says,
 		// so writing a 0 would change nothing an operator can observe: the gap
 		// would sit at a count of 0, still parked, still holding a
@@ -368,7 +375,7 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 		return 0, fmt.Errorf("weaver: target %q entity %q gap %q: %s; resetting its budget would leave it parked with a fresh budget",
 			targetID, entityID, gapColumn, reason)
 	}
-	previous, revision, found, err := e.budgets.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
+	prior, revision, found, err := e.budgets.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
 	if err != nil {
 		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
 	}
@@ -380,17 +387,20 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 		return 0, fmt.Errorf("weaver: no retry budget for target %q entity %q gap %q (nothing has dispatched it)",
 			targetID, entityID, gapColumn)
 	}
-	conflict, err := e.budgets.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision)
+	// The document goes back whole with only its Count zeroed: the un-park re-arms
+	// the budget and says nothing about the episode's pacing history or the leg it
+	// is on.
+	conflict, err := e.budgets.resetDispatchCount(ctx, targetID, entityID, gapColumn, prior, revision)
 	if err != nil {
 		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
 	}
 	if conflict {
-		return previous, fmt.Errorf("weaver: retry budget for target %q entity %q gap %q changed during the reset; re-run to reset the current value",
+		return prior.Count, fmt.Errorf("weaver: retry budget for target %q entity %q gap %q changed during the reset; re-run to reset the current value",
 			targetID, entityID, gapColumn)
 	}
 	e.logger.Info("weaver: retry budget reset",
-		"targetId", targetID, "entityId", entityID, "gap", gapColumn, "previousCount", previous)
-	return previous, nil
+		"targetId", targetID, "entityId", entityID, "gap", gapColumn, "previousCount", prior.Count)
+	return prior.Count, nil
 }
 
 // ReplayTarget re-delivers targetID's CURRENT row set through the unchanged
@@ -548,16 +558,30 @@ func (e *Engine) ReplayTarget(ctx context.Context, targetID string) (rowsQueued 
 //     itself calls): the gap dispatches nothing at all, so it has no episode to
 //     re-arm and its count is stranded from an action a package upgrade
 //     replaced;
-//   - the playbook names no action, leaving a planned/goal-mode gap to resolve
-//     one at plan time. The arm refuses it because only a plan could say what it
-//     would fire, and running one to find out would consume an admission token
-//     and clear the gap's standing issues for a dispatch that may not happen;
-//   - the action is collapse-only (the arm's collapseOnlyReclaim over
+//   - the gap's plan resolves no action for this row at all (no eligible
+//     candidate, no derivable plan): there is nothing for the arm to fire, and
+//     only a package re-author or a row change alters that;
+//   - the resolved action is collapse-only (the arm's collapseOnlyReclaim over
 //     staleMark), read over the gap's current row so an EXTERNAL gap — whose
 //     re-dispatch §10.3 calls for — is not refused alongside the human ones. A
-//     row that is missing or unreadable classifies as collapse-only for the
-//     three collapse-only actions, which is the same answer the arm reaches: it
-//     does not dispatch a gap with no row either.
+//     row that is missing classifies as collapse-only for the three
+//     collapse-only actions, which is the same answer the arm reaches: it does
+//     not dispatch a gap with no row either.
+//
+// A row this verb could not READ is the one TRANSIENT decline, reported as such
+// through the second return so the caller drops the "would leave it parked with
+// a fresh budget" consequence — a claim nothing here is in a position to make.
+// Handing an unreadable row to the resolver instead would produce "no derivable
+// plan": a permanent-sounding verdict about the playbook, from a KV blip that
+// will be gone on the operator's next attempt. The remedy is to re-run, and the
+// reason says so.
+//
+// A planned/goal-mode gap is NOT refused for naming no action. The arm resolves
+// the leg without planning (resolvedLegAction — a pure regression over the
+// catalog, or a rank over the `__effect` windows, neither of which consumes an
+// admission token or clears an issue), and this verb resolves it through the
+// same helper, so the verb refuses exactly what the arm declines and accepts
+// exactly what it would fire.
 //
 // It answers only what this gap's own definition decides, never "will this gap
 // dispatch" — that depends on gates (a freeze, the registry, the row's own
@@ -567,36 +591,52 @@ func (e *Engine) ReplayTarget(ctx context.Context, targetID string) (rowsQueued 
 // dropped anything, so the verb refuses that one check earlier, under its own
 // reason, and a target mid-replay is never reported as an orphaned column.
 //
-// The two action-shape declines are answered before the row is read, mirroring
-// the arm's own order: neither consults the row, and a gap that dispatches
-// nothing has no reason to cost a KV round trip.
-func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, entityID, gapColumn string) string {
+// The two declines that read the playbook alone are answered before the row is
+// read: a gap with no entry, and a gap that dispatches nothing, have no reason
+// to cost a KV round trip.
+func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, entityID, gapColumn string) (reason string, transient bool) {
 	ga, planned := target.Gaps[gapColumn]
 	if !planned {
 		return fmt.Sprintf("its playbook declares no gaps entry for %q, so there is no remediation to re-arm — "+
-			"the column is orphaned (a package re-author dropped it) and its budget expires with its own TTL", gapColumn)
+			"the column is orphaned (a package re-author dropped it) and its budget expires with its own TTL", gapColumn), false
 	}
 	if surfaceOnlyGap(ga) {
 		return fmt.Sprintf("its playbook action is %q, which raises a Health issue while the column is true and "+
 			"dispatches nothing — there is no episode to re-arm, and the budget is stranded from the action "+
-			"the package replaced", ga.Action)
+			"the package replaced", ga.Action), false
 	}
-	if ga.Action == "" {
-		return "its playbook names no action and resolves one at plan time (a planned/goal-mode gap), and the " +
-			"sweep's re-arm never runs a plan to find out what it would fire — the re-arm this verb serves " +
-			"would decline it on every pass"
+	unreadable := func(cause error) string {
+		return fmt.Sprintf("its row could not be read (%s), so nothing can say what the sweep's re-arm would "+
+			"fire — a transient failure, not a verdict about the gap; re-run", cause)
 	}
 	var row map[string]any
-	if entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID); err == nil {
+	entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID)
+	switch {
+	case err == nil:
 		if uErr := json.Unmarshal(entry.Value, &row); uErr != nil {
-			row = nil
+			return unreadable(uErr), true
 		}
+	case errors.Is(err, substrate.ErrKeyNotFound):
+		// No row for this entity: a real state, and the arm's own answer for it
+		// is below — it dispatches nothing for a gap with no row either.
+	default:
+		return unreadable(err), true
 	}
-	if collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+	resolvedAction, _, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
+	if perr != nil {
+		return fmt.Sprintf("its plan resolves no action for this row (%s), so the sweep's re-arm has nothing to "+
+			"fire — a fresh budget would change nothing until the playbook or the row does", perr.msg), false
+	}
+	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+		if ga.Action == "" {
+			return fmt.Sprintf("its plan resolves to %q, whose artifact may still be open, and the sweep never "+
+				"re-arms a collapse-only gap — a fresh episode would mint a new claimId and duplicate it",
+				resolvedAction), false
+		}
 		return fmt.Sprintf("it dispatches %q, whose artifact may still be open, and the sweep never re-arms a "+
-			"collapse-only gap — a fresh episode would mint a new claimId and duplicate it", ga.Action)
+			"collapse-only gap — a fresh episode would mint a new claimId and duplicate it", resolvedAction), false
 	}
-	return ""
+	return "", false
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the

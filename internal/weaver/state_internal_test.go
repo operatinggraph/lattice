@@ -43,7 +43,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	const tID, eID, gap = "t1", "entityAAAAAAAAAAAAAA", "missing_onboarding"
 	eKey := "vtx.leaseapp." + eID
 
-	rev, claim1, exists, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom")
+	rev, claim1, exists, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "")
 	if err != nil || exists {
 		t.Fatalf("create: err=%v exists=%v", err, exists)
 	}
@@ -52,7 +52,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	}
 
 	// Reclaim-replace preserves the claimId verbatim.
-	if _, conflict, err := m.replace(ctx, tID, eID, gap, eKey, "triggerLoom", claim1, rev, markTTLBackstopFactor*m.lease); err != nil || conflict {
+	if _, conflict, err := m.replace(ctx, tID, eID, gap, eKey, "triggerLoom", "", claim1, rev, markTTLBackstopFactor*m.lease); err != nil || conflict {
 		t.Fatalf("replace: err=%v conflict=%v", err, conflict)
 	}
 	rec, _, found, err := m.get(ctx, tID, eID, gap)
@@ -67,7 +67,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	if err := m.delete(ctx, tID, eID, gap); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	_, claim2, _, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom")
+	_, claim2, _, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "")
 	if err != nil {
 		t.Fatalf("re-create: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDeleteByTargetPrefix_OnlyMatchesOwnTarget(t *testing.T) {
 	m := newStateTestStore(t, ctx)
 
 	// t1's marks.
-	if _, _, _, err := m.create(ctx, "t1", "entityAAAAAAAAAAAAAA", "missing_a", "vtx.entity.entityAAAAAAAAAAAAAA", "MarkExpired"); err != nil {
+	if _, _, _, err := m.create(ctx, "t1", "entityAAAAAAAAAAAAAA", "missing_a", "vtx.entity.entityAAAAAAAAAAAAAA", "MarkExpired", ""); err != nil {
 		t.Fatalf("create t1 mark: %v", err)
 	}
 	if err := m.setDisabled(ctx, "t1", true); err != nil {
@@ -198,7 +198,7 @@ func TestDeleteByTargetPrefix_OnlyMatchesOwnTarget(t *testing.T) {
 	}
 
 	// t10's marks — must survive deleteByTargetPrefix(ctx, "t1").
-	if _, _, _, err := m.create(ctx, "t10", "entityBBBBBBBBBBBBBB", "missing_b", "vtx.entity.entityBBBBBBBBBBBBBB", "MarkExpired"); err != nil {
+	if _, _, _, err := m.create(ctx, "t10", "entityBBBBBBBBBBBBBB", "missing_b", "vtx.entity.entityBBBBBBBBBBBBBB", "MarkExpired", ""); err != nil {
 		t.Fatalf("create t10 mark: %v", err)
 	}
 	if err := m.setDisabled(ctx, "t10", true); err != nil {
@@ -268,26 +268,26 @@ func TestDispatchCount_RoundTrip(t *testing.T) {
 	const targetID, gap = "t1", "missing_x"
 	entityID := "entityAAAAAAAAAAAAAA"
 
-	if got, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 0 {
-		t.Fatalf("absent dispatch-count = %d (err=%v), want 0", got, err)
+	if got, _, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got.Count != 0 {
+		t.Fatalf("absent dispatch-count = %+v (err=%v), want 0", got, err)
 	}
 	for want := 1; want <= 4; want++ {
-		got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap)
-		if err != nil || got != want {
-			t.Fatalf("increment #%d = %d (err=%v), want %d", want, got, err, want)
+		got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap, "", true, false, false)
+		if err != nil || got.Count != want {
+			t.Fatalf("increment #%d = %+v (err=%v), want count %d", want, got, err, want)
 		}
-		if read, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || read != want {
-			t.Fatalf("getDispatchCount after increment #%d = %d (err=%v), want %d", want, read, err, want)
+		if read, _, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || read.Count != want {
+			t.Fatalf("getDispatchCount after increment #%d = %+v (err=%v), want count %d", want, read, err, want)
 		}
 	}
 	if err := m.deleteDispatchCount(ctx, targetID, entityID, gap); err != nil {
 		t.Fatalf("deleteDispatchCount: %v", err)
 	}
-	if got, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 0 {
-		t.Fatalf("after the reset dispatch-count = %d (err=%v), want 0", got, err)
+	if got, _, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got.Count != 0 {
+		t.Fatalf("after the reset dispatch-count = %+v (err=%v), want 0", got, err)
 	}
-	if got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 1 {
-		t.Fatalf("post-reset increment = %d (err=%v), want 1 (fresh budget)", got, err)
+	if got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap, "", true, false, false); err != nil || got.Count != 1 {
+		t.Fatalf("post-reset increment = %+v (err=%v), want count 1 (fresh budget)", got, err)
 	}
 	// The reset is idempotent: deleting an already-absent count is success.
 	other := "entityBBBBBBBBBBBBBB"
@@ -369,7 +369,7 @@ func TestDispatchCount_TTLBackstop(t *testing.T) {
 
 	const targetID, gap = "t1", "missing_x"
 	entityID := "entityAAAAAAAAAAAAAA"
-	if _, err := m.incrementDispatchCount(ctx, targetID, entityID, gap); err != nil {
+	if _, err := m.incrementDispatchCount(ctx, targetID, entityID, gap, "", true, false, false); err != nil {
 		t.Fatalf("increment dispatch-count: %v", err)
 	}
 	key := countKey(targetID, entityID, gap)

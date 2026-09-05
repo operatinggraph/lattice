@@ -65,9 +65,37 @@ func escalatingTarget(t *testing.T, ctx context.Context, h *handlerHarness, targ
 		h.engine.source.handle(specEvent(t, id, spec))
 	}
 	for i := 0; i < budget; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
+	}
+}
+
+// ageEscalation pushes the gap's recorded escalation fire back by age, so the
+// re-fire arm's level test against the reclaim backoff series reads as elapsed.
+// It goes through the real count document, so a vector that ages the fire sees
+// exactly the shape a genuinely old escalation leaves behind.
+func ageEscalation(t *testing.T, ctx context.Context, h *handlerHarness, targetID, entityID, col string, age time.Duration) {
+	t.Helper()
+	key := countKey(targetID, entityID, col)
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil {
+		t.Fatalf("read dispatch-count %q: %v", key, err)
+	}
+	var doc dispatchCount
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal dispatch-count %q: %v", key, err)
+	}
+	if doc.EscalatedAt == "" {
+		t.Fatalf("dispatch-count %q records no escalation fire to age; the escalation did not book one", key)
+	}
+	doc.EscalatedAt = substrate.FormatTimestamp(time.Now().Add(-age))
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal dispatch-count %q: %v", key, err)
+	}
+	if _, err := h.conn.KVPut(ctx, "weaver-state", key, body); err != nil {
+		t.Fatalf("put aged dispatch-count %q: %v", key, err)
 	}
 }
 
@@ -168,9 +196,13 @@ func TestEscalateExhaustedGap_LiveEscalationIsNotRePaidAndADeadOneIsRetried(t *t
 	}
 
 	// Half two — the same delivery once that episode is presumed dead. The lease
-	// has expired, so the gap is owed a fresh escalation and gets one; the
-	// standing record must not have turned into a gag.
+	// has expired AND the re-fire's own backoff window has elapsed, so the gap is
+	// owed a fresh escalation and gets one; the standing record must not have
+	// turned into a gag. Both conditions are needed and neither substitutes for
+	// the other: the lease says the episode is dead, the window says the re-fire
+	// is due (TestEscalateExhaustedGap_RefireIsPacedByReclaims owns the other side).
 	expireMark(t, ctx, h, targetID, entityID, "missing_a")
+	ageEscalation(t, ctx, h, targetID, entityID, "missing_a", 48*time.Hour)
 	if !h.engine.issues.standingAs(issueKey, "warning", codeGapEscalatedToAugur) {
 		t.Fatalf("the record must still stand — this half is about it NOT suppressing the retry")
 	}

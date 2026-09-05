@@ -467,6 +467,38 @@ func (e *Engine) resolvePlannedAction(ctx context.Context, target *Target, targe
 	return ga, ga.Action, nil
 }
 
+// resolvedLegAction answers "what dispatch contract type would this gap fire
+// right now" WITHOUT building a plan — the question a caller must settle before
+// it may plan, because planGap consumes an admission token and clears the gap's
+// standing issues on the strength of a dispatch about to happen.
+//
+// It is exactly resolvePlannedAction's fresh-episode resolution, whose two
+// planned-mode branches are cheap and side-effect-free: a goal gap's bounded
+// regression is a pure function of (row, catalog), and a candidates gap's rank
+// reads only the `__effect` confidence windows. For every other shape it
+// returns the playbook's own Action unchanged, so one helper answers for the
+// static and the plan-time-resolved gaps alike — which is what lets the
+// operator verb refuse exactly what the sweep's re-arm permanently declines.
+//
+// A planError is the honest "it would fire nothing for this row": no candidate
+// eligible, no derivable plan, a pinned ref the catalog dropped.
+//
+// It returns the resolved REF alongside the action, so a caller that goes on to
+// plan can pin the plan to the same resolution rather than taking a second one.
+// The two would not always agree: a candidates gap's rank reads the `__effect`
+// confidence windows, which a concurrent close moves, so a second unpinned
+// resolution can pick a different candidate — and the classification this helper
+// exists to serve would then have been taken over an action that never fires.
+func (e *Engine) resolvedLegAction(ctx context.Context, target *Target, targetID, entityID, gapColumn string,
+	ga GapAction, row map[string]any) (action, ref string, perr *planError) {
+
+	resolved, actionRef, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, "")
+	if perr != nil {
+		return "", "", perr
+	}
+	return resolved.Action, actionRef, nil
+}
+
 // candidateGapAction materializes a chosen GapCandidate into the GapAction
 // shape buildPlan consumes (registry.go's GapCandidate doc: "the same
 // action-contract shape as GapAction ... dispatches exactly like an explicit

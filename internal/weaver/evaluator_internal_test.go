@@ -533,7 +533,7 @@ func TestGapSuppressed_Companions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotExhausted, gotDefault := h.engine.gapSuppressed(ctx, "t1", entityID, tc.row, tc.col, actionAssignTask)
+			got, gotExhausted, gotDefault, _, _ := h.engine.gapSuppressed(ctx, "t1", entityID, tc.row, tc.col, actionAssignTask)
 			if got != tc.want || gotExhausted != tc.wantExhausted {
 				t.Fatalf("gapSuppressed(%v, %q) = (%v, %v), want (%v, %v)", tc.row, tc.col, got, gotExhausted, tc.want, tc.wantExhausted)
 			}
@@ -673,32 +673,32 @@ func TestGapSuppressed_BudgetCap(t *testing.T) {
 	row := map[string]any{"missing_x": true, "maxretries_x": 3}
 
 	// Zero count: under cap → not suppressed.
-	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+	if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
 		t.Fatalf("a zero dispatch-count under the cap must not suppress (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// Drive the count to cap-1: still under → not suppressed.
 	for i := 0; i < 2; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 			t.Fatalf("increment dispatch-count: %v", err)
 		}
 	}
-	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+	if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
 		t.Fatalf("a dispatch-count of cap-1 must not suppress (one more attempt allowed) (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// One more → count == cap: suppressed AND exhausted (the escalation-eligible
 	// reason, distinct from inflight) — via the row's OWN declared cap, not the
 	// engine default.
-	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 		t.Fatalf("increment dispatch-count: %v", err)
 	}
-	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); !suppressed || !exhausted || isDefault {
+	if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); !suppressed || !exhausted || isDefault {
 		t.Fatalf("a dispatch-count at the cap must suppress AND report exhausted=true via the DECLARED cap (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// The gap-close reset deletes the count → dispatchable again (fresh budget).
 	if err := h.engine.marks.deleteDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
 		t.Fatalf("delete dispatch-count: %v", err)
 	}
-	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+	if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
 		t.Fatalf("after the gap-close reset the budget must be fresh → not suppressed (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 }
@@ -729,18 +729,18 @@ func TestGapSuppressed_DirectOpDefaultBudget(t *testing.T) {
 		row := map[string]any{"missing_x": true}
 
 		for i := 0; i < defaultDirectOpRetryBudget-1; i++ {
-			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 				t.Fatalf("increment dispatch-count: %v", err)
 			}
-			if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+			if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
 				t.Fatalf("dispatch-count %d must stay under the engine default %d (got suppressed=%v exhausted=%v isDefault=%v)",
 					i+1, defaultDirectOpRetryBudget, suppressed, exhausted, isDefault)
 			}
 		}
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 			t.Fatalf("increment dispatch-count: %v", err)
 		}
-		suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp)
+		suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp)
 		if !suppressed || !exhausted || !isDefault {
 			t.Fatalf("dispatch-count at the engine default %d must suppress, report exhausted, AND flag budgetIsDefault (got suppressed=%v exhausted=%v isDefault=%v)",
 				defaultDirectOpRetryBudget, suppressed, exhausted, isDefault)
@@ -753,11 +753,11 @@ func TestGapSuppressed_DirectOpDefaultBudget(t *testing.T) {
 		row := map[string]any{"missing_x": true, "inflight_x": false}
 
 		for i := 0; i < defaultDirectOpRetryBudget+2; i++ {
-			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 				t.Fatalf("increment dispatch-count: %v", err)
 			}
 		}
-		if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+		if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
 			t.Fatalf("a directOp gap declaring inflight_<g> (even absent maxretries_<g>) must never fall back to the engine default, got suppressed=%v exhausted=%v isDefault=%v", suppressed, exhausted, isDefault)
 		}
 	})
@@ -768,11 +768,11 @@ func TestGapSuppressed_DirectOpDefaultBudget(t *testing.T) {
 		row := map[string]any{"missing_x": true}
 
 		for i := 0; i < defaultDirectOpRetryBudget+2; i++ {
-			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 				t.Fatalf("increment dispatch-count: %v", err)
 			}
 		}
-		if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionAssignTask); suppressed || exhausted || isDefault {
+		if suppressed, exhausted, isDefault, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionAssignTask); suppressed || exhausted || isDefault {
 			t.Fatalf("assignTask must never be capped by the directOp engine default, got suppressed=%v exhausted=%v isDefault=%v", suppressed, exhausted, isDefault)
 		}
 	})
@@ -871,8 +871,8 @@ func TestHandleRow_BudgetIncrementsThenSuppresses(t *testing.T) {
 			t.Fatalf("attempt %d must Ack, got %v", i, dec)
 		}
 		h.nextOp(t) // the dispatch op fired
-		if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != i {
-			t.Fatalf("dispatch-count after attempt %d = %d (err=%v), want %d", i, got, err, i)
+		if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != i {
+			t.Fatalf("dispatch-count after attempt %d = %d (err=%v), want %d", i, got.Count, err, i)
 		}
 		// Clear the mark so the next delivery dispatches afresh (the count
 		// PERSISTS across this clear — it is chain-scoped, not mark-bound).
@@ -890,8 +890,8 @@ func TestHandleRow_BudgetIncrementsThenSuppresses(t *testing.T) {
 	if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_x"); err != nil || found {
 		t.Fatalf("no mark may be created once the budget is spent (err=%v, found=%v)", err, found)
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != cap {
-		t.Fatalf("a suppressed delivery must not increment the count: got %d (err=%v), want %d", got, err, cap)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != cap {
+		t.Fatalf("a suppressed delivery must not increment the count: got %d (err=%v), want %d", got.Count, err, cap)
 	}
 }
 
@@ -920,7 +920,7 @@ func TestHandleRow_ExhaustedGapEscalatesToAugur(t *testing.T) {
 	entityID := testNanoID(t)
 	const cap = 2
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -972,13 +972,13 @@ func TestHandleRow_LiveEscalationMarkNotTornDownAndRefired(t *testing.T) {
 	entityKey := "vtx.leaseApp." + entityID
 	const cap = 2
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
 	// Simulate an escalation episode this function already fired: a LIVE
 	// mark (fresh lease) at the exact key the escalation dispatches under.
-	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp)
+	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "")
 	if err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
@@ -1023,11 +1023,11 @@ func TestHandleRow_ExhaustedEscalationRetiresThisEntitysIssue(t *testing.T) {
 	entityKey := "vtx.leaseApp." + entityID
 	const budget = 2
 	for i := 0; i < budget; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
-	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp); err != nil {
+	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, ""); err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
 	// Raised on an earlier pass, before the package added the augur policy.
@@ -1069,7 +1069,7 @@ func TestHandleRow_ExhaustedGapWithoutAugurRaisesHealthIssue(t *testing.T) {
 	entityID := testNanoID(t)
 	const cap = 2
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -1114,7 +1114,7 @@ func TestHandleRow_BudgetResetsOnGapClose(t *testing.T) {
 
 	// Seed the count straight to the cap (the gate's view of a spent chain).
 	for i := 0; i < cap; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -1136,8 +1136,8 @@ func TestHandleRow_BudgetResetsOnGapClose(t *testing.T) {
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
 		t.Fatalf("gap-close row must Ack, got %v", dec)
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 0 {
-		t.Fatalf("the gap-close must reset the dispatch-count: got %d (err=%v), want 0", got, err)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != 0 {
+		t.Fatalf("the gap-close must reset the dispatch-count: got %d (err=%v), want 0", got.Count, err)
 	}
 
 	// The gap REOPENS (a later renewal): the budget is fresh, so it dispatches.
@@ -1148,8 +1148,8 @@ func TestHandleRow_BudgetResetsOnGapClose(t *testing.T) {
 	if op["operationType"] != "FixX" {
 		t.Fatalf("a reopened gap on a fresh budget must dispatch; got op %v", op["operationType"])
 	}
-	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 1 {
-		t.Fatalf("the fresh-budget redispatch must restart the count at 1: got %d (err=%v)", got, err)
+	if got, _, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got.Count != 1 {
+		t.Fatalf("the fresh-budget redispatch must restart the count at 1: got %d (err=%v)", got.Count, err)
 	}
 }
 
@@ -1677,7 +1677,7 @@ func TestHandleRow_ExhaustedGapIssueIsPerEntity(t *testing.T) {
 	stuck, cleared := testNanoID(t), testNanoID(t)
 	for _, entityID := range []string{stuck, cleared} {
 		for i := 0; i < budget; i++ {
-			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col, "", true, false, false); err != nil {
 				t.Fatalf("seed dispatch-count: %v", err)
 			}
 		}
@@ -1962,7 +1962,7 @@ func TestHandleRow_FreshPlanRetiresStaleExhaustedIssue(t *testing.T) {
 	entityID := testNanoID(t)
 	entityKey := "vtx.leaseApp." + entityID
 	for i := 0; i < 2; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col, "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -2088,7 +2088,7 @@ func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID}
 	// A pin the catalog no longer names is the unplannable-flagged error.
-	if pl, _, dec := e.planGap(context.Background(), target, targetID, entityID, col,
+	if pl, _, _, dec := e.planGap(context.Background(), target, targetID, entityID, col,
 		goalGapFixture(t), row, 42, "aGhostLeg"); pl != nil || dec != substrate.NakWithDelay {
 		t.Fatalf("the escalated gap must escalate, build, then defer on admission, got plan=%v decision %v",
 			pl != nil, dec)
@@ -2150,7 +2150,7 @@ func TestGapSuppressedWithCount_MatchesTheReadingVariant(t *testing.T) {
 			for k, v := range tc.row {
 				row[k] = v
 			}
-			wantS, wantE, wantD := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", tc.action)
+			wantS, wantE, wantD, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", tc.action)
 			gotS, gotE, gotD := h.engine.gapSuppressedWithCount(targetID, entityID, row, "missing_x", tc.action, tc.count)
 			if gotS != wantS || gotE != wantE || gotD != wantD {
 				t.Fatalf("gapSuppressedWithCount = (%v,%v,%v), gapSuppressed = (%v,%v,%v)",
@@ -2192,7 +2192,7 @@ func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
 	})
 	entityID := testNanoID(t)
 	for i := 0; i < budget; i++ {
-		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_s"); err != nil {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_s", "", true, false, false); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
@@ -2203,7 +2203,7 @@ func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
 
 	// Setup: the stranded count really does read as spent for this gap, so the
 	// assertions below pin the guard and not an unreachable branch.
-	if _, exhausted, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_s", actionSurface); !exhausted {
+	if _, exhausted, _, _, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_s", actionSurface); !exhausted {
 		t.Fatal("setup: this vector must reach the suppression branch — the stranded count must read as spent")
 	}
 
