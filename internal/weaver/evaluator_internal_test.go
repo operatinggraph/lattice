@@ -1320,10 +1320,11 @@ func TestHandleRow_SurfaceGap(t *testing.T) {
 	if open1.Code != "UnroutedTasks" || open1.Severity != "warning" {
 		t.Fatalf("entry = %+v, want the package's declared code/severity (UnroutedTasks/warning)", open1)
 	}
-	if want := "target " + targetID + ": 1 rows have column missing_claim true"; open1.Message != want {
+	if want := "target " + targetID + ": 1 row has column missing_claim true"; open1.Message != want {
 		t.Fatalf("entry message = %q, want %q", open1.Message, want)
 	}
-	// The per-ROW key is gone, and with it the budget slot it used to hold.
+	// No per-row key exists for a surface gap, and the per-row budget holds no
+	// slot for it.
 	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
 		t.Fatalf("a surface gap must not raise a per-row entry; issues = %+v", h.engine.issues.snapshot())
 	}
@@ -1639,7 +1640,7 @@ func TestIssueKeyGapOpen_DottedColumnStaysOutOfTheBudget(t *testing.T) {
 	c := newIssueCache()
 	const targetID = "dottedColumnTarget"
 	for _, col := range []string{"missing_a", "missing_a.b", "missing_a.b.c"} {
-		c.set(issueKeyGapOpen(targetID, col), "warning", "UnroutedTasks", "target "+targetID+": 1 rows have column "+col+" true")
+		c.set(issueKeyGapOpen(targetID, col), "warning", "UnroutedTasks", "target "+targetID+": 1 row has column "+col+" true")
 	}
 	c.mu.Lock()
 	tracked, present := c.rowIssues[targetID]

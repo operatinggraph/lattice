@@ -426,8 +426,8 @@ func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
 	// The in-memory membership behind a surface column's entry is torn down on
 	// the same leg: no consumer means no delivery, so nothing could ever consult
 	// or retire it.
-	h.engine.surface.add(targetID, "missing_s", entityA, "UnroutedTasks", "warning")
-	h.engine.surface.add(targetID+"Sibling", "missing_s", entityA, "UnroutedTasks", "warning")
+	h.engine.surface.add(targetID, "missing_s", entityA, "UnroutedTasks", "warning", discardReflection)
+	h.engine.surface.add(targetID+"Sibling", "missing_s", entityA, "UnroutedTasks", "warning", discardReflection)
 
 	// Leave the registry the non-Revoke way — the state removeVertex /
 	// removeSpec / a renamed targetId all land in before firing the reconcile

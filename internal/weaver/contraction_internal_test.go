@@ -78,3 +78,68 @@ func TestContractionStats_SampleAndSnapshot(t *testing.T) {
 		t.Fatalf("ring length = %d, want it capped at %d (5 samples pushed)", got, contractionWindowSize)
 	}
 }
+
+// discardReflection is the reflect callback for a test that seeds or drives
+// surfaceStats directly and asserts on the SET rather than on the Health entry
+// the set writes.
+func discardReflection(surfaceReflection) {}
+
+// TestSurfaceStats_AddIsATransition pins the rule the count rests on: only a
+// TRANSITION writes. A CDC redelivery of a row already in the set under the same
+// issue identity must report no change AND invoke no reflect callback — the two
+// are separate observables, and a reflect fired on an unchanged set would rewrite
+// the entry on every redelivery, which is the write the whole design exists to
+// avoid on a steady backlog.
+func TestSurfaceStats_AddIsATransition(t *testing.T) {
+	t.Parallel()
+	s := newSurfaceStats()
+	reflects := 0
+	count := func(surfaceReflection) { reflects++ }
+
+	if changed := s.add("t1", "missing_claim", "e1", "UnroutedTasks", "warning", count); !changed {
+		t.Fatal("the first add of a member must report a change")
+	}
+	if reflects != 1 {
+		t.Fatalf("reflect invocations after the first add = %d, want 1", reflects)
+	}
+	if changed := s.add("t1", "missing_claim", "e1", "UnroutedTasks", "warning", count); changed {
+		t.Fatal("a second add of the same member under the same code/severity must report no change")
+	}
+	if reflects != 1 {
+		t.Fatalf("reflect invocations after the redelivery = %d, want 1: an unchanged set must not "+
+			"rewrite the entry", reflects)
+	}
+	if n := s.count("t1", "missing_claim"); n != 1 {
+		t.Fatalf("count = %d, want 1 — a set, not a tally", n)
+	}
+}
+
+// TestSurfaceStats_AddCarriesAReauthoredIdentity is the other half of the
+// transition rule, and it is not symmetric with the one above. The entry's
+// identity — the package's declared issueCode and issueSeverity — is recorded at
+// the add, so a package re-author reaches the wire only through an add. If
+// membership alone decided the change, a target whose backlog is steady (every
+// open row already in the set) would go on publishing the OLD code and severity
+// for as long as no row opened or closed, which for a parked backlog is forever.
+func TestSurfaceStats_AddCarriesAReauthoredIdentity(t *testing.T) {
+	t.Parallel()
+	s := newSurfaceStats()
+	var last surfaceReflection
+	capture := func(r surfaceReflection) { last = r }
+
+	s.add("t1", "missing_claim", "e1", "UnroutedTasks", "warning", capture)
+	s.add("t1", "missing_claim", "e2", "UnroutedTasks", "warning", capture)
+
+	if changed := s.add("t1", "missing_claim", "e1", "UnroutedTasks", "error", capture); !changed {
+		t.Fatal("a redelivery under a re-authored severity must report a change")
+	}
+	if last.severity != "error" || last.count != 2 {
+		t.Fatalf("reflection = %+v, want the re-authored severity at the unchanged count of 2", last)
+	}
+	if changed := s.add("t1", "missing_claim", "e1", "StaleClaims", "error", capture); !changed {
+		t.Fatal("a redelivery under a re-authored code must report a change")
+	}
+	if last.code != "StaleClaims" || last.count != 2 {
+		t.Fatalf("reflection = %+v, want the re-authored code at the unchanged count of 2", last)
+	}
+}

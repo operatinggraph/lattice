@@ -978,7 +978,8 @@ is computed from and what Loupe's entity page already renders the column's `open
 Two honest bounds on that count, and neither is a defect to report. It is a **lower bound** while
 rows re-project after a restart — a lane-1 durable that survives resumes from its persisted ack
 floor, so a row already acked and not since re-projected is not re-counted; `replayTarget`
-re-presents a target's whole current row set and re-derives it exactly. And it is **per instance**:
+re-presents a target's whole current row set and re-derives the count from what those rows state.
+And it is **per instance**:
 lane-1 durables are one per target, so with more than one Weaver a target's rows shard across
 instances and each instance's heartbeat carries the count it observes — which is why Loupe reports
 Weaver heartbeats per instance and never merges them. The contract states both on the wire.

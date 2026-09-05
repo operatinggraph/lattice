@@ -109,7 +109,7 @@ func (c *contractionStats) snapshot() map[string]string {
 // surfaceColumn is one (target, gap column)'s open-row membership together with
 // the issue identity its Health entry is written under. The package's declared
 // issueCode/issueSeverity are recorded at the ADD because the removal legs hold
-// no *Target to read them from — retireClosedGapIssues is handed a
+// no *Target to read them from — retireSurfaceMembership is handed a
 // (target, entity, column) triple, and the tombstone leg an empty row.
 type surfaceColumn struct {
 	code     string
@@ -140,26 +140,33 @@ type surfaceReflection struct {
 //	created       | lazily, at a (target, column)'s first observed-open row
 //	added         | in dispatchGap's actionSurface arm, on a TRANSITION to open only — a repeat
 //	              | delivery of an already-open row is a no-op (contractionStats.observe's rule)
-//	removed       | (a) the entity's column observed false, via retireClosedGapIssues — the leg
-//	              | clearClosedMarks' candidate walk and the sweep both reach; (b) the entity
-//	              | tombstoned, via removeEntity across EVERY column set of the target: on an
-//	              | empty body markCandidateColumns yields the playbook's keys alone, so a column
-//	              | the playbook has since dropped never yields and a membership recorded while it
-//	              | was still declared would leak with the entity gone; (c) the target leaving, via
-//	              | removeTarget at Revoke and at reconcileConsumers' removal
+//	removed       | (a) the entity's column READ false, via retireSurfaceMembership — lane-1's
+//	              | candidate walk under its readable guard, the sweep's count-cleared leg, and
+//	              | the sweep's mark-reclaimed close leg; a leg that merely failed to see the
+//	              | column is not one of them; (b) the row delivered NON-VIOLATING, via
+//	              | removeEntity across every column set of the target: the lens's own verdict is
+//	              | that the row holds no open work, and the dispatch loop that would re-add it is
+//	              | not reached; (c) the entity tombstoned, via removeEntity across EVERY column
+//	              | set of the target: on an empty body markCandidateColumns yields the playbook's
+//	              | keys alone, so a column the playbook has since dropped never yields and a
+//	              | membership recorded while it was still declared would leak with the entity
+//	              | gone; (d) the target leaving, via removeTarget at Revoke and at
+//	              | reconcileConsumers' removal
 //	issue entry   | rewritten on EVERY membership change, add and remove alike, so the count an
-//	              | operator reads is the count this instance holds; setLocked preserves an
-//	              | existing `since`, so a rewrite restates the count without disturbing the
-//	              | entry's age. Only the remove that EMPTIES a column retires the entry, and that
-//	              | retirement deletes the `since` — so the entry's age means "when this column
-//	              | last went from no open rows to some"
+//	              | operator reads is the count this instance holds; the rewrite is invoked by the
+//	              | mutating call ITSELF, under s.mu, so two legs racing on one column can never
+//	              | land their counts out of order. setLocked preserves an existing `since`, so a
+//	              | rewrite restates the count without disturbing the entry's age. Only the remove
+//	              | that EMPTIES a column retires the entry, and that retirement deletes the
+//	              | `since` — so the entry's age means "when this column last went from no open
+//	              | rows to some"
 //	ordering      | none is promised: the set is a membership, not a sample
-//	crash/restart | empty, like the latch it replaces. Rebuilt from whatever lane 1 delivers
-//	              | afterwards, so the count is a LOWER BOUND until every open row re-projects: a
-//	              | lane-1 durable that survives resumes from its persisted ack floor. What
-//	              | re-derives it in full is a durable created from scratch (a cold boot, a newly
-//	              | registered target) or Engine.ReplayTarget, whose DeliverLastPerSubject
-//	              | re-presents the target's whole current row set
+//	crash/restart | empty. Rebuilt from whatever lane 1 delivers afterwards, so the count is a
+//	              | LOWER BOUND until every open row re-projects: a lane-1 durable that survives
+//	              | resumes from its persisted ack floor. What re-derives it is a durable created
+//	              | from scratch (a cold boot, a newly registered target) or Engine.ReplayTarget,
+//	              | whose DeliverLastPerSubject re-presents the target's whole current row set —
+//	              | so the rebuilt count is what those re-presented rows state
 //	reconnect     | untouched — in-memory, no substrate dependency
 //	upgrade       | starts empty; the count climbs back as rows redeliver
 //	loss          | degrades to a missing or low count, never to a wrong verdict — nothing gates
@@ -170,6 +177,14 @@ type surfaceReflection struct {
 // instances and each instance's heartbeat carries the count it observes. That is
 // why Loupe reports Weaver heartbeats per instance rather than merging them, and
 // why the contract clause states both bounds on the wire.
+//
+// Every mutating method takes a reflect callback and invokes it while s.mu is
+// held, so the membership change and the Health entry that states it are one
+// atomic step: lane 1 and the reconciler sweep both remove, and a reflect made
+// after the unlock could interleave so the entry ends up naming a count the set
+// no longer holds. The lock order is surfaceStats.mu → issueCache.mu, and it is
+// the only order that exists — issueCache reads nothing from this structure, so
+// no path can take the two the other way round.
 type surfaceStats struct {
 	mu      sync.Mutex
 	columns map[string]map[string]*surfaceColumn // targetId -> gapColumn -> membership
@@ -180,15 +195,16 @@ func newSurfaceStats() *surfaceStats {
 }
 
 // add records entityID as holding (targetID, col) open, under the package's
-// declared code and severity. It reports the column's state and whether this
-// delivery CHANGED the membership — only a change may rewrite the Health entry,
-// so a CDC redelivery of an already-open row writes nothing.
+// declared code and severity, and calls reflect with the column's new state when
+// anything the entry says has changed. It reports that change to the caller too.
 //
-// code and severity are refreshed on every add, not only on the first: a
-// package re-author that changes either takes effect on the next delivery
-// through the entry's rewrite, rather than being pinned to whatever the first
-// open row of the process carried.
-func (s *surfaceStats) add(targetID, col, entityID, code, severity string) (surfaceReflection, bool) {
+// TWO things make an add a change: the membership itself, and the identity the
+// entry is written under. A CDC redelivery of an already-open row under the same
+// code and severity writes nothing — the count is the same and so is the entry.
+// A redelivery under a RE-AUTHORED issueCode or issueSeverity does write, at the
+// same count: without that, a package re-author would reach the wire only when
+// the backlog next moved, which for a steady backlog is never.
+func (s *surfaceStats) add(targetID, col, entityID, code, severity string, reflect func(surfaceReflection)) (changed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cols := s.columns[targetID]
@@ -201,53 +217,54 @@ func (s *surfaceStats) add(targetID, col, entityID, code, severity string) (surf
 		sc = &surfaceColumn{members: make(map[string]struct{})}
 		cols[col] = sc
 	}
-	sc.code, sc.severity = code, severity
-	if _, was := sc.members[entityID]; was {
-		return surfaceReflection{}, false
+	_, member := sc.members[entityID]
+	if member && sc.code == code && sc.severity == severity {
+		return false
 	}
+	sc.code, sc.severity = code, severity
 	sc.members[entityID] = struct{}{}
-	return reflectionOf(col, sc), true
+	reflect(reflectionOf(col, sc))
+	return true
 }
 
-// remove drops entityID from (targetID, col) and reports the column's remaining
-// state. changed is false when the entity held no membership there — which is
-// the ordinary case for every non-surface gap, since every gap-close leg calls
-// through retireClosedGapIssues whether the column is a surface one or not.
-func (s *surfaceStats) remove(targetID, col, entityID string) (surfaceReflection, bool) {
+// remove drops entityID from (targetID, col) and calls reflect with the column's
+// remaining state. changed is false when the entity held no membership there —
+// which is the ordinary case for every non-surface gap, since retireSurfaceMembership
+// is called for whichever column a leg observed close, surface or not.
+func (s *surfaceStats) remove(targetID, col, entityID string, reflect func(surfaceReflection)) (changed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sc := s.columns[targetID][col]
 	if sc == nil {
-		return surfaceReflection{}, false
+		return false
 	}
-	if _, was := sc.members[entityID]; !was {
-		return surfaceReflection{}, false
+	if _, member := sc.members[entityID]; !member {
+		return false
 	}
 	delete(sc.members, entityID)
-	out := reflectionOf(col, sc)
+	reflect(reflectionOf(col, sc))
 	s.pruneLocked(targetID, col, sc)
-	return out, true
+	return true
 }
 
-// removeEntity drops entityID from EVERY column set of targetID, reporting one
-// reflection per column whose membership actually changed. This is the entity
-// TOMBSTONE leg: an empty row names no columns, and the playbook may have
-// dropped one since the membership was recorded, so no per-column walk can
-// reach them all — the in-memory analogue of the `gap:` prefix clear the same
-// leg runs.
-func (s *surfaceStats) removeEntity(targetID, entityID string) []surfaceReflection {
+// removeEntity drops entityID from EVERY column set of targetID, calling reflect
+// once per column whose membership actually changed. Two legs need that reach.
+// The entity TOMBSTONE: an empty row names no columns, and the playbook may have
+// dropped one since the membership was recorded, so no per-column walk can reach
+// them all — the in-memory analogue of the `gap:` prefix clear the same leg runs.
+// And a row delivered NON-VIOLATING: the lens has stated that this row holds no
+// open work at all, which is a verdict about every column of it at once.
+func (s *surfaceStats) removeEntity(targetID, entityID string, reflect func(surfaceReflection)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []surfaceReflection
 	for col, sc := range s.columns[targetID] {
-		if _, was := sc.members[entityID]; !was {
+		if _, member := sc.members[entityID]; !member {
 			continue
 		}
 		delete(sc.members, entityID)
-		out = append(out, reflectionOf(col, sc))
+		reflect(reflectionOf(col, sc))
 		s.pruneLocked(targetID, col, sc)
 	}
-	return out
 }
 
 // removeTarget drops the target's whole membership. The caller's own prefix

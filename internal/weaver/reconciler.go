@@ -560,9 +560,16 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
 			// Absence is not evidence: the row may be mid-rebuild. Retire this
-			// gap's standing issues — every one of them states a fact about a
+			// gap's standing FAULTS — every one of them states a fact about a
 			// row that is not there — and leave the bound itself to the TTL. The
 			// next pass re-raises whatever still holds if the row returns.
+			//
+			// This leg reads no column, so it does not touch the column's
+			// `surface` open-row membership: a row that is not there has not
+			// stated that its work is done, and shrinking the backlog count on a
+			// mid-rebuild absence would under-report it until the row came back.
+			// The entity that is genuinely gone is retired by lane-1's tombstone
+			// leg, which sweeps every column set of the target.
 			e.logger.Debug("weaver sweep: row gone; retiring this gap's issues, leaving the dispatch-count",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			e.retireClosedGapIssues(targetID, entityID, gapColumn)
@@ -774,6 +781,10 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 // delete's outcome, so the latches are retired by the same level reconcile that
 // observed the close — idempotent when none stands. A won delete counts on the
 // sweepOrphansDeleted metric, like every other key this sweep removes.
+//
+// That read is of the PRESENT row's column, and it read false, so this leg also
+// witnessed a `surface` column close and retires the entity's open-row
+// membership. Its sibling row-gone leg witnessed no column and does not.
 func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, targetID, entityID, gapColumn string) {
 	e := s.engine
 	if err := e.conn.KVDeleteRevision(ctx, e.cfg.WeaverStateBucket, key, revision); err != nil {
@@ -790,6 +801,7 @@ func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, 
 		s.bump(&s.orphansDeleted)
 	}
 	e.retireClosedGapIssues(targetID, entityID, gapColumn)
+	e.retireSurfaceMembership(targetID, entityID, gapColumn)
 }
 
 // reclaim handles an expired (or lease-less) mark whose column is still true:
@@ -1230,11 +1242,13 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 		}
 		// The delete won and the column itself read false, so this gap has
 		// ENDED for this entity — the same fact lane-1's clearClosedMarks acts
-		// on, through the same function, so the two legs cannot drift apart.
+		// on, through the same two functions, so the legs cannot drift apart.
 		// This leg is not a duplicate of that one: for a row that has gone quiet
 		// lane-1 never runs again, and the sweep is the only leg that will ever
-		// observe the close.
+		// observe the close. Having read the column false, it is entitled to the
+		// membership retirement as well as the fault retirement.
 		e.retireClosedGapIssues(targetID, entityID, gapColumn)
+		e.retireSurfaceMembership(targetID, entityID, gapColumn)
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
 		// The orphan reasons say this gap is no longer DISPATCHABLE — the

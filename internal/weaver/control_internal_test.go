@@ -403,8 +403,8 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 	// The in-memory membership behind a surface column's entry goes with the
 	// entry: left standing, the first row a re-added target delivered would
 	// re-raise the count the prefix clear just retired.
-	h.engine.surface.add("t1", "missing_s", entityA, "UnroutedTasks", "warning")
-	h.engine.surface.add("t10", "missing_s", entityA, "UnroutedTasks", "warning")
+	h.engine.surface.add("t1", "missing_s", entityA, "UnroutedTasks", "warning", discardReflection)
+	h.engine.surface.add("t10", "missing_s", entityA, "UnroutedTasks", "warning", discardReflection)
 
 	if err := h.engine.Revoke(ctx, "t1"); err != nil {
 		t.Fatalf("Revoke: %v", err)

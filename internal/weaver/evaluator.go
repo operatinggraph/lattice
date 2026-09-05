@@ -79,6 +79,20 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	violating := row != nil && e.boolColumn(targetID, entityID, row, "violating")
 	e.contraction.observe(targetID, entityID, violating)
 
+	// The same read settles every `surface` membership this row holds. The lens
+	// has stated that the row is not violating, which is its verdict that the
+	// row carries no open work of any kind — and the dispatch loop that would
+	// re-add a membership is not reached for such a row (it returns at the L1
+	// gate below). A per-column walk cannot answer this: a gap column may still
+	// read true beside `violating: false`, so the candidate walk above skips the
+	// retire and the membership would stand for the process's lifetime, counting
+	// a row the lens says holds nothing. removeEntity across every column set is
+	// the same reach the tombstone leg needs and for the same reason. A row that
+	// starts violating again re-adds on that delivery's own dispatch.
+	if row != nil && !violating {
+		e.surface.removeEntity(targetID, entityID, e.surfaceReflector(targetID))
+	}
+
 	// Anchor bookkeeping, decided on every delivery that reaches here — a row key
 	// that parses, a registered target, a body that parses, mark-clearing that
 	// succeeded — alongside the contraction monitor above. The fact is "this row
@@ -324,11 +338,14 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// Row identity stays where it is authoritative and complete — the
 		// projected row set this gap is computed from.
 		//
-		// Only a membership TRANSITION writes: a CDC redelivery of an
-		// already-open row leaves the entry untouched, count and `since` alike.
-		// The retirements are surfaceStats' three removal legs (its doc
-		// comment); clearClosedMarks below reaches the first of them when this
-		// row stops naming the column.
+		// Only a TRANSITION writes: a CDC redelivery of an already-open row
+		// under the same code and severity leaves the entry untouched, count and
+		// `since` alike. A redelivery under a RE-AUTHORED issueCode or
+		// issueSeverity does write, at the same count, so a package re-author
+		// reaches the wire without waiting for the backlog to move. The
+		// retirements are surfaceStats' four removal legs (its doc comment);
+		// clearClosedMarks below reaches the first of them when this row stops
+		// naming the column.
 		//
 		// A message whose value changes is safe on this seam and only on this
 		// seam: bare issues.set touches neither standingAs (which ignores
@@ -343,9 +360,7 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		if code == "" {
 			code = "Surface"
 		}
-		if reflection, changed := e.surface.add(targetID, col, entityID, code, sev); changed {
-			e.reflectSurface(targetID, reflection)
-		}
+		e.surface.add(targetID, col, entityID, code, sev, e.surfaceReflector(targetID))
 		return substrate.Ack
 	}
 
@@ -1035,9 +1050,7 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// from an empty body and the membership would leak with the entity gone
 		// and no leg able to reach it. Each changed column's entry is rewritten
 		// with the smaller count, or retired if the deleted row was its last.
-		for _, reflection := range e.surface.removeEntity(targetID, entityID) {
-			e.reflectSurface(targetID, reflection)
-		}
+		e.surface.removeEntity(targetID, entityID, e.surfaceReflector(targetID))
 	}
 	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
@@ -1080,25 +1093,38 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// leaving rather than one entity's gap ending. Idempotent when none
 		// stands.
 		//
-		// It is also the only retirement here that turns on the column having
-		// genuinely CLOSED rather than merely not reading true, and the only
-		// one whose key is shared with every other entity of the target. An
-		// unreadable column (present, non-bool) is not evidence of closure, and
-		// retiring a target-scoped fact on it would let one repeatedly
+		// Two retirements here turn on the column having genuinely CLOSED rather
+		// than merely not reading true, and both sit behind `readable`. An
+		// unreadable column (present, non-bool) is not evidence of closure.
+		//
+		// The config latch is target-scoped, shared with every other entity of
+		// the target: retiring it on an unreadable read would let one repeatedly
 		// re-projecting broken row clear the latch at its projection rate,
 		// re-stamping the `since` of a config fault every other row is still
-		// raising. The per-entity retirements below are unaffected: they are
-		// this row's own facts, and a row that cannot state the column has no
+		// raising.
+		//
+		// The `surface` membership is this entity's own, but it stands for a
+		// row of open WORKLOAD, and a row that cannot state its column has not
+		// stopped holding that work — dropping it would shrink the count an
+		// operator reads on the strength of a projection fault, then re-add it
+		// the moment the column projects as a bool again, flapping the backlog
+		// figure at the rate the broken row projects. A tombstone takes neither
+		// branch: it reads readable (the whole entity is gone), and the entity's
+		// membership was retired by the removeEntity sweep above.
+		//
+		// The per-entity retirements outside the guard are unaffected: they are
+		// this row's own FAULTS, and a row that cannot state the column has no
 		// use for them either way.
 		e.retireClosedGapIssues(targetID, entityID, col)
 		if readable {
 			e.issues.clear(issueKeyGapConfig(targetID, col))
+			e.retireSurfaceMembership(targetID, entityID, col)
 		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column. Its one
 			// piece of state, the entity's membership in the column's open-row
-			// set, was retired by retireClosedGapIssues above.
+			// set, is retired by the readable-guarded leg above.
 			continue
 		}
 		rec, markRev, found, gErr := e.marks.get(ctx, targetID, entityID, col)
@@ -1202,18 +1228,17 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 	}
 }
 
-// retireClosedGapIssues retires everything a gap ACTUALLY ENDING retires: the
-// plan-side facts above, the gap's own entity-scoped latch (a spent retry
-// budget, a budget spent and escalated to the reasoning tier), and this entity's
-// membership in the column's `surface` open-row set — which rewrites that
-// column's one gapOpen: entry with the smaller count, or retires it when this
-// was the last open row.
+// retireClosedGapIssues retires the FAULTS a gap ACTUALLY ENDING retires: the
+// plan-side facts above, and the gap's own entity-scoped latch (a spent retry
+// budget, a budget spent and escalated to the reasoning tier).
 //
-// The membership remove is a no-op for every non-surface gap, which is why it
-// rides here rather than behind an action test: the sweep legs that reach this
-// helper hold a mark or a dispatch-count and a `surface` gap has neither, so
-// they can never carry one, and the one leg that can — clearClosedMarks'
-// candidate walk — reaches it for the column that actually closed.
+// It does NOT touch the column's `surface` open-row membership, and the split is
+// deliberate: this helper is reached by legs that never observed the column
+// itself — the sweep's row-gone leg retires these facts precisely BECAUSE the
+// row is absent, and absence is not closure (the row may be mid-rebuild).
+// retireSurfaceMembership is the narrower helper, called only from a leg that
+// read the column false, so a workload count is never shrunk on evidence that
+// would not close a gap.
 //
 // The split from retireGapPlanIssues is the difference between "this gap ended"
 // and "this gap is no longer dispatchable", and it is load-bearing. A gap the
@@ -1229,10 +1254,31 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 // row cease to exist — may retire it.
 func (e *Engine) retireClosedGapIssues(targetID, entityID, gapColumn string) {
 	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
-	if reflection, changed := e.surface.remove(targetID, gapColumn, entityID); changed {
-		e.reflectSurface(targetID, reflection)
-	}
 	e.retireGapPlanIssues(targetID, entityID, gapColumn)
+}
+
+// retireSurfaceMembership drops this entity from the column's `surface` open-row
+// set, which rewrites that column's one gapOpen: entry with the smaller count,
+// or retires the entry when this was the last open row. A no-op for every
+// non-surface gap and for an entity that holds no membership at the column, so
+// the caller needs no action test.
+//
+// Its callers are exactly the legs that WITNESSED the column read false: lane-1's
+// candidate walk under its readable guard, the sweep's count-cleared leg, and the
+// sweep's mark-reclaimed gap-closed leg. It is deliberately absent from the
+// sweep's row-gone leg — a missing row is not evidence its work is done, and a
+// row that is mid-rebuild would leave the backlog under-reported until it
+// re-projected. What retires the membership of a genuinely deleted entity is
+// lane-1's tombstone leg, which sweeps every column set of the target.
+func (e *Engine) retireSurfaceMembership(targetID, entityID, gapColumn string) {
+	e.surface.remove(targetID, gapColumn, entityID, e.surfaceReflector(targetID))
+}
+
+// surfaceReflector binds one target's gapOpen: writer for surfaceStats to invoke
+// under its own lock, so a membership change and the Health entry stating it are
+// one atomic step (surfaceStats' doc comment carries the lock order).
+func (e *Engine) surfaceReflector(targetID string) func(surfaceReflection) {
+	return func(reflection surfaceReflection) { e.reflectSurface(targetID, reflection) }
 }
 
 // reflectSurface writes a `surface` gap column's one Health entry from the
@@ -1253,8 +1299,12 @@ func (e *Engine) reflectSurface(targetID string, reflection surfaceReflection) {
 		e.issues.clear(key)
 		return
 	}
+	rows := " rows have column "
+	if reflection.count == 1 {
+		rows = " row has column "
+	}
 	e.issues.set(key, reflection.severity, reflection.code,
-		"target "+targetID+": "+strconv.Itoa(reflection.count)+" rows have column "+reflection.column+" true")
+		"target "+targetID+": "+strconv.Itoa(reflection.count)+rows+reflection.column+" true")
 }
 
 // releaseCompletedLeg reports whether gap col's currently-pinned goal-mode
