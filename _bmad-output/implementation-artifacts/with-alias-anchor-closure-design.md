@@ -311,7 +311,7 @@ row set for that anchor either way.
 |---|---|---|
 | Narrowing licence | 3 F lenses refused at the partition conjunct | `leaseApplicationsRead` licensed (the other two still refuse on Secure Lens) |
 | Filter-retraction | `leaseApplicationsRead`, `renewalsRead`: **nothing retracts**. `clinicPatientsRead`: `DiffRetraction`'s full `ListKeys()` per event | all three take the read-free anchor `Delete`; `clinicPatientsRead` **keeps** `DiffRetraction` as its orphan healer (§13 Inc 3, amended at build) |
-| Audit should-not-exist | `AuditClassRetained` never asked on the three | asked on `leaseApplicationsRead`; **not** on `renewalsRead` or `clinicPatientsRead` — a Secure Lens is refused enrolment outright (`audit.go`, no plaintext re-derivation off-request), so their gain is retraction only (amended 2026-09-03, close pass) |
+| Audit should-not-exist | `AuditClassRetained` never asked on the three | asked on `leaseApplicationsRead`; and, since [secure-plain-lens-retraction-and-audit-design.md](secure-plain-lens-retraction-and-audit-design.md) (2026-09-05), on `renewalsRead` and `clinicPatientsRead` too — a Secure Lens enrols under a column mask |
 
 ---
 
@@ -384,9 +384,10 @@ otherwise introduce.
   `wellnessMemberAccounts` (bucket G) key on a non-anchor variable, and a per-anchor evaluation would
   compute a truncated row. That is the widening §5.1 called *"a real partitionability derivation"*, and it
   is still a separate design. This fire does not file a row for it — no consumer is waiting.
-- **The Secure Lens conjunct is untouched.** `renewalsRead` and `clinicPatientsRead` gain retraction and
-  audit, never narrowing. Whether a Secure Lens can be narrowed at all is its own question (a per-anchor
-  re-entry decrypts twice over) and is not opened here.
+- **The Secure Lens conjunct is untouched here.** `renewalsRead` and `clinicPatientsRead` gain retraction and
+  audit, never narrowing. *(Superseded 2026-09-05: [secure-plain-lens-retraction-and-audit-design.md](secure-plain-lens-retraction-and-audit-design.md)
+  drops that conjunct — the double-decrypt seam is closed at the shared re-entry, which never decrypts —
+  and the audit's Secure refusal with it.)*
 - **The 8 bucket-B lenses are unaffected**, and each is refused for a reason this design does not touch.
 - **`landlordUnitsRead`'s refusal is *not* the `WITH`.** The `clinic-domain` comment that cites it as "the
   same shape" is wrong on that point; §9 corrects the comment, and the lens itself needs no change.
@@ -522,7 +523,9 @@ plaintext re-derivation; the sweep enrols auth-plane actor-aggregate lenses only
 is one healer for none, so the field stays; the retraction transport the predicate now gives it is pinned by
 `TestClinicPatientsRead_TombstonedPatientRetractsItsRow`, and §10.8's "existing clinic retraction e2e" did
 not exist (the tombstone test proved the root, not the row). The healer gap for Secure plain lenses that
-never declared `DiffRetraction` (`renewalsRead`) is pre-existing and filed as a designer row.
+never declared `DiffRetraction` (`renewalsRead`) is pre-existing and filed as a designer row — closed by
+[secure-plain-lens-retraction-and-audit-design.md](secure-plain-lens-retraction-and-audit-design.md), which
+lifts both refusals and adds the business-plane retraction-transport gate.
 
 ---
 

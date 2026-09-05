@@ -1900,6 +1900,12 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   boundary from the CONSUMERS the refusal was protecting, and expect the true limit to sit somewhere inside
   the old one. Corollary from the same fire: a refuted reason lives in more documents than the one you are
   building, so grep it — this one was normative text in three sibling designs, one of them the parent.
+  **Fifth sighting (Secure plain lens retraction+audit, 2026-09-05): a conjunct's stated reason can name a code
+  path the conjunct's own consumer never takes.** Two refusals cited "plaintext" against an evaluation path
+  (`executeFullForAudit`) that never calls the decryptor, a third cited the diff against a path that never
+  diffs, and the licence's was a real plumbing seam described as a soundness bound. Check: for every
+  enrolment/licence conjunct, name the function the consumer actually calls and grep it for the thing the
+  reason fears; a reason that names a different function is a claim about the wrong consumer.
   **Third sighting (expiry-as-a-recorded-fact, 2026-09-02): a lifted refusal reveals the conjunct behind it,
   and a GRANTED licence logs nothing.** The design's "`$now` is the last conjunct refusing
   `leaseApplicationsRead`" was true of the log line and false of the licence: once the audit enrolled and
@@ -2021,5 +2027,10 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   so a census can tell "nothing matched" from "nothing ran".
   `TestPersonalSweepVerdict_VocabularyIsClosed` pins the vocabulary half (a verdict summary is
   default-denied, so a new state cannot land as an unnamed empty string).
+  **Corollary (Secure plain lens retraction+audit, 2026-09-05): a transport with a cap has a fallback, and
+  the fallback needs a health field.** `recordDerivationFellBack` reached no published surface, so a
+  transport that fell back on every event read identical to one that never had to — a transport that can
+  be silently off. Check: for every bounded mechanism, name the branch taken past the bound and the health
+  key that counts it; a shadow-path tally with no publisher is a zero indistinguishable from not measured.
 
 - **An operator-driven repair promoted to an AUTOMATIC one carries every tolerance the operator path had, and each must be re-derived.** Minted: lens-output-reactivation (2026-09-03), where an Output edit began re-activating the lens with the rebuild's purge ahead of the replay. Three tolerances rode in, all found by the cold reviewer, none by the brief: (a) a listing SCOPE is not an ownership set — `KeyPrefix`'s own doc says a prefix admits siblings (`cap.` contains `cap.roles.`), and `truncateKeys` purged the listing whole, so a `bodyColumns` edit to the kernel `capability` lens would have wiped four sibling producers' rows; (b) a healer's clear keyed to nothing clears every writer's latch — the clean-registration `ClearLastError` erased the purge-failure diagnosis seconds after it was raised; (c) a flag consulted on the wrong side of a force rule guards nothing — `requested` gated the purge while `resolveTruncate` forces one for any guarded adapter, so a protected Postgres table was still purgeable. Check: ownership is exact (`OutputDescriptor.OwnsKey`, bound by `ApplyTruncateScope`, pinned by `TestTruncateScope_KernelCapabilityLensPurgesOnlyTheKeysItsOwnInverseClaims`), a clear names what it owns (`Reporter.ClearLastErrorIf`), and a refusal is by construction (`reactivationPreflight`) — and a design that automates a repair lists the operator path's tolerances (scope, clears, teardown result, target family) as premises to falsify.

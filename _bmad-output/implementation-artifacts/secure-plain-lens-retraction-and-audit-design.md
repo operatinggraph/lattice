@@ -203,14 +203,21 @@ No Secure lens references `$now` or `$projectedAt`.
 
 Population: every `pkgmgr.LensSpec{` under `packages/` (non-test) with no `ProjectionKind`, no `$actorKey`,
 not `Personal`. The hand pass found **63**; the shipped pin `plain_scanroot_corpus_census_test.go` holds
-**65** rows (its header still says 61). The delta is unreconciled here and is the first thing Inc 3's census
-test settles: **the pin is the population, this table is the hypothesis.** Note the pin's `hasNeighbour` is
+**65** rows, and the retraction-transport census takes its population from that pin in both directions — its
+prose header carries no count (a number nothing re-derives). *(Settled at build, 2026-09-05: the pin is the
+population, this table was the hypothesis, and it missed one member — see the gap-set table.)* Note the pin's `hasNeighbour` is
 a *weaker* predicate (any relation referenced, OPTIONAL included) than this design's *existence depends on
 a required neighbour*, so the two fields coexist by name.
 
 Classifier: a lens's row *existence* depends on a neighbour when a non-`OPTIONAL` `MATCH` reaches a
 non-anchor node, or a `MATCH`/`WITH` `WHERE` reads a non-anchor variable **or an alias derived from one**
-(§4.4). Result: **31 YES**; of those **22 carry no `DiffRetraction`** — the gap set — and 9 do.
+(§4.4). Result: **32 YES** (the hand pass said 31 — it missed the kernel `capabilityReadWildcardGrants`, a
+required `holdsRole` hop plus a WHERE on the role); of those **23 carry no `DiffRetraction`** — the gap set —
+and 9 do. The kernel member: `capabilityReadWildcardGrants` · **auth** · `actor_read_grants` · `closureHolds`;
+the kernel `LensDefinition` surface carries no `DiffRetraction` flag, so T2 is not expressible for it. Its
+`holdsRole` unwire IS retracted today (the link arm re-evaluates the anchor endpoint and the presence probe
+fires); what has no transport is a `role` vertex tombstone or an edit to the operator role's
+`canonicalName`, which seed from the role and rescan unseeded.
 
 | Gap set (22) | Plane | Secure | Target | Pinned scan-root verdict |
 |---|---|---|---|---|
@@ -357,7 +364,7 @@ shared.
 | clinic-domain · `clinicPatientsRead` | **keep `DiffRetraction: true`**; rewrite the comment block (`lenses.go:326-345`) | the sweep sentence is wrong (§2.2), and the healer rationale names the wrong channel: its OPTIONAL-only shape cannot produce a neighbour drop-out (§3.1), so what the per-event diff heals is an anchor-event loss (the retry queue across a restart, §2.3). That is a rarer channel than the comment says, but it is a real one, and this design ships a detector for it (`retained`, now reachable on this lens) and no repair (§7 row 3). Trading the healer for a detector on a PHI table is a downgrade the design declines; the cost it keeps paying — seeding disabled, so every event rescans and decrypts the table (`rulestate.go:400-402`) — is priced in §7 row 2 and stays until the deferred repair lands |
 | one-bill · `oneBillClinicEntries`, `oneBillWellnessEntries` | reverse the trailing pattern so it is headed by a bound variable: `MATCH (id)<-[:applicationFor]-(l:leaseapp)` for `MATCH (l:leaseapp)-[:applicationFor]->(id)` (`lenses.go:116`, `:138`) | the edit is **not** a no-op and is not meant to be: a MATCH headed by an unbound variable is `rootUngrounded` (`hopindex.go:429-437`, `:848`) and its execution is a `ListKeysPrefix("vtx.leaseapp.")` corpus scan (`seed_nodes.go:86`); reversed, the head is bound, `ScanRootHopIndex.Complete` flips to true, `plainDerivationIndex` admits the lens (`anchor_derivation_plain.go:118`), and the scan becomes an adjacency hop. Row semantics are unchanged (same edges, same direction; `DirIn` parses, `ast.go:21`; shipped precedent `lease-signing/lenses.go:1030`) |
 | console-operator · `consoleOperatorReadGrants`; demo-operator · `demoOperatorReadGrants` | `DiffRetraction: true` + `GrantSource: "<producer>"` — **recommended, not gate-forced** (auth plane, §4.4) | the licence refuses the auth plane by design; the family's sanctioned transport is `staffReadGrants`'s shape (`service-location/lenses.go:66-73`); legal per `bucketguard.go:172-178`; the diff is `GrantSource`-scoped by `GrantWriterAdapter.ListKeys` → `ListGrantsBySource` (`read_path_adapters.go:226-231`, `rls.go:470-471`), so no cross-delete |
-| rbac-domain · `capabilityRoleIndex` | **no edit; named debt on the auth plane** | its key is minted Go-side by `capabilityenv.NewRoleIndexWrapper` at the `isOperationRoleIndexLens` arm (`cmd/refractor/main.go:1669-1679`, `SetEnvelopeFn` only); it has no `Output` descriptor, `SetKeyPrefix` runs only in the actor-aggregate driver (`projection/driver.go:893-894`), so a declared `OutputKeyPattern` would be inert or collide. Consumer: the denial-response builder (`rolesCarryingPermission`, `lenses.go:83-85`) — a stale entry names a role in a denial message. Outside this gate's plane (§4.4); recorded on the auth plane's own ledger by the dossier entry (§13) |
+| rbac-domain · `capabilityRoleIndex` | **no edit; named debt on the auth plane** | its key is minted Go-side by `capabilityenv.NewRoleIndexWrapper` at the `isOperationRoleIndexLens` arm (`cmd/refractor/main.go:1669-1679`, `SetEnvelopeFn` only); it has no `Output` descriptor, `SetKeyPrefix` runs only in the actor-aggregate driver (`projection/driver.go:893-894`), so a declared `OutputKeyPattern` would be inert or collide. Consumer: the denial-response builder (`rolesCarryingPermission`, `lenses.go:83-85`) — a stale entry names a role in a denial message. Outside this gate's plane (§4.4); recorded on the auth plane's own ledger by the census pin (`plain_retraction_transport_corpus_census_test.go`), which names both auth-plane debtors with their reasons |
 
 Each package edit bumps the package version and its `Version` constant (`lint-package-version`).
 
@@ -365,8 +372,10 @@ Each package edit bumps the package version and its `Version` constant (`lint-pa
 
 **Scope: the business plane** — `!projection.IsAuthPlane(r)`, the same boundary the audit draws
 (`audit.go:915-925`) and for the same reason: an auth-plane verdict belongs to the plane that has a code, a
-severity ladder and an escalation for it. The three auth-plane members of the gap set (§3.1) are outside
-the gate, named, with their transport story in §4.3. (§7 row 6 records why "Protected tables only" was the
+severity ladder and an escalation for it. The four auth-plane members of the gap set (§3.1) are outside
+the gate, named, with their transport story in §4.3: the two operator grant tables take T2, and
+`capabilityRoleIndex` + `capabilityReadWildcardGrants` carry none — pinned by name, with reasons, in
+`plain_retraction_transport_corpus_census_test.go`. (§7 row 6 records why "Protected tables only" was the
 wrong boundary — the business buckets carry the same shape.)
 
 **Rule.** A plain, full-engine, business-plane lens whose row existence depends on a required neighbour
@@ -375,7 +384,7 @@ wrong boundary — the business buckets carry the same shape.)
 
 - **T1 — derivation-eligible statically.** Not a hand-listed conjunct set: T1 **is** the static prefix of the
   licence chain, exposed as one function the licence and the gate both call —
-  `plainDerivationStaticallyEligible(rs, adpt)` = `plainDerivationIndex`'s conditions (`≤ 1` branch, index
+  `(*Pipeline).plainDerivationStaticallyEligible(rs)` (the adapter is read off the pipeline) = `plainDerivationIndex`'s conditions (`≤ 1` branch, index
   complete, no unresolved expansion position, `anchor_derivation_plain.go:111-128`) ∧ the audit's static
   enrolment conjuncts (full engine, exactly one seed label, no actor/envelope, `RowReader`, no
   `$now`/`$projectedAt`, `audit.go:927-997`) ∧ `ProjectsOneRowPerAnchor`. The licence's *dynamic*
@@ -409,10 +418,10 @@ backstop rather than the place an author learns of it. A lens that passes T1 sta
 unlicensed (audit stale, over cap) activates and publishes `retractionTransport: "derivation"` with the
 licence's own refusal or fallback counters beside it (§5).
 
-**Population at the gate's landing.** Business-plane gap set: 19 of the 22 (§3.1). After §4.1–§4.3 all
+**Population at the gate's landing.** Business-plane gap set: 19 of the 23 (§3.1). After §4.1–§4.3 all
 19 pass T1 (the five Secure ones admitted by the two lifts; the two one-bill lenses by the rewrite; the
 rest already `closureHolds`). The six business-plane covered lenses pass T2. **Zero business-plane debt ⇒
-the gate lands blocking** (the "same design, blocking when the migration leaves zero debt" rule). The three
+the gate lands blocking** (the "same design, blocking when the migration leaves zero debt" rule). The four
 auth-plane members are outside the gate by its scope, not by omission. The corpus census test pins every
 plain lens's `(plane, dependsOnNeighbour, transport)` triple by name — population taken from the pin, not
 from §3.1 — with a floor on the count.
@@ -443,7 +452,7 @@ filters to `Sweep*` fields (`cmd/refractor/sweepstatus_test.go:128`), so §10 ad
 | Fact | Created | Reset | Published | Never-written row |
 |---|---|---|---|---|
 | `auditMaskedColumns` | with the `AuditPlan` at `InstallAudit` | re-read at every enrolment re-check (top of every pass, `audit.go:473-503`) — a hot reload that adds a secure column audits under the new mask | only for an **enrolled** lens; the audit family sits behind the refused-lens early return (`lattice_heartbeater.go:2274-2280`), so a refused lens publishes none — same as `auditCoverageBasis` | a non-Secure enrolled lens publishes `[]`, following `divergentRows`' rule that the container is published even when empty (`:2288-2299`, *"never as null"*); absence means *not enrolled* |
-| `retractionTransport` (`derivation` / `diffRetraction` / `diffRetraction-prefix` / `derivation (audit disarmed)`) | at activation, from the compiled rule + descriptor + adapter + plane | re-derived on every hot reload that swaps the rule or the adapter (the `InstallAudit` hook in `reload.go`) | always, for a business-plane plain lens whose existence depends on a neighbour; absent otherwise | a lens the gate refused never activates and so has no status — its `RecordError` is the record |
+| `retractionTransport` (`derivation` / `diffRetraction` / `diffRetraction-prefix` / `derivation (audit disarmed)` / `none` / `unclassified`) | none — derived on demand, at activation (the gate) and per heartbeat, from the copy-on-write rule snapshot + descriptor + adapter + plane | n/a — a MATCH or INTO hot-reload moves the published value on the next beat with nothing to invalidate; the MATCH reload re-runs the gate and is refused if the new shape owes a transport it lacks | for a business-plane plain lens whose existence depends on a neighbour; absent otherwise (auth-plane lenses publish `CapabilityLensStatus`) | a lens the gate refused never activates and so has no status — its `RecordError` is the record; `none` / `unclassified` are the error-tier backstop for a state the two gates make unreachable |
 | `derivationEligible`-gated `derivationArmed`, `derivationFellBack`, `derivationOverCapSize` | first fallback after activation | never; a restart zeroes both — unlike `reconciled`, which the sweep restores from the health entry, these are process-lifetime with no restore, so a low count on a recently restarted instance says nothing about the day | for a lens whose shape admits the derivation (act mode, index complete): `derivationArmed` (the licence's live verdict — `false` reads "declared, currently off", never "no transport"), `derivationFellBack` (every event that took the rescan: failed walk, declined walk, over-cap), and `derivationOverCapSize` only once it has fired (a last size, not a count); nothing for an ineligible lens | an unlicensed eligible lens keeps its accrued count on the wire |
 
 The licence's `LastPassAt` window (§4.2) is existing state with an existing lifetime; this design adds
@@ -536,7 +545,7 @@ observe against the current text changes. Nothing is staged in `docs/contracts/`
 | `TestRenewalsRead_ManagesTombstoneStopsProjectingTheRow` (`packages/lease-signing`) | the `manages` link is tombstoned **after** the row exists and the row leaves the matched set — the existing test proves only the fresh projection. `internal/lenstest` exposes no connection, so no `Pipeline` or target exists in that package; the retraction itself is pinned at pipeline level by the e2e above, on a synthetic required-two-hop Secure lens rather than `renewalsRead`'s four-hop shape (its static eligibility is pinned by the scan-root and with-alias census tests) | 2 |
 | `TestExistenceDependsOnNeighbour_Contract` (`ruleengine/full`) | required hop → true; OPTIONAL-only → false; WHERE on a non-anchor variable → true; WHERE on an alias of an aggregate over an OPTIONAL neighbour → true; an unresolvable alias or unparsed construct → `exhaustive=false` | 3 |
 | `TestPlainDerivationStaticallyEligible_IsTheLicencePrefix` | for every corpus lens, the static predicate agrees with the licence's own static verdicts (the licence called with a fresh, armed audit) — one derivation, two consumers | 3 |
-| `plain_retraction_transport_corpus_census_test.go` | every plain lens's `(plane, dependsOnNeighbour, transport ∈ {none, T1, T2, T2-prefix})` pinned by name through `forEachCorpusCypher`; population from the scan-root pin; floor on the count; **no business-plane lens with `(true, none)`**; the three auth-plane members pinned as `(auth, true, none|T2)` with their reasons | 3 |
+| `plain_retraction_transport_corpus_census_test.go` | every plain lens's `(plane, dependsOnNeighbour, transport ∈ {none, T1, T2, T2-prefix})` pinned by name through `forEachCorpusCypher`; population from the scan-root pin; floor on the count; **no business-plane lens with `(true, none)`**; the auth-plane members pinned as `(auth, true, none|T2)` with their reasons — two operator grant tables T2, `capabilityRoleIndex` + `capabilityReadWildcardGrants` none | 3 |
 | `TestActivation_RefusesUntransportedNeighbourLens` | a synthetic business-plane lens with a required hop, no `DiffRetraction`, non-partitioning key → activation refuses, `RecordError` carries the reason | 3 |
 | `TestApplyDiffRetraction_SharedBucketListsOwnPrefixOnly` | two lenses on one bucket, one `DiffRetraction` with a derivable prefix: its diff never Deletes the sibling's keys; a single-column key on a shared bucket without a prefix → activation refuses | 3 |
 | `TestOneBill_ReversedPatternProjectsSameRows` (`packages/one-bill`) | the reversed `clinicEntriesSpec`/`wellnessEntriesSpec` project byte-identical rows on the package fixture, and `ScanRootHopIndex.Complete` is true for both | 3 |
@@ -580,8 +589,19 @@ reads `auditMaskedColumns`, `retractionTransport`, `derivationFellBack` off the 
 - **The presence probe's RLS assumption** (§2.3): every derived Delete rests on the projector role bypassing
   row security. Hardening that role is a platform-wide change with this consequence among others; the
   derivation design owns the probe.
-- **Auth-plane plain lenses** (`capabilityRoleIndex`, the two operator grant tables) are outside the gate by
-  its plane boundary; their transport story is §4.3's.
+- **Auth-plane plain lenses** are outside the gate by its plane boundary: the two operator grant tables take
+  T2 (§4.3); `capabilityRoleIndex` and `capabilityReadWildcardGrants` carry no transport and are the plane's
+  named debt, pinned in the census. The heartbeat publishes `retractionTransport` for business-plane lenses
+  only (auth-plane lenses publish `CapabilityLensStatus`), so that debt is visible in the pin, not on the wire.
+- **A MATCH hot-reload that makes a lens neighbour-dependent** re-runs the gate and is refused (the lens
+  keeps its running rule); the wire backstop for a classified business-plane lens that nonetheless owes a
+  transport and has none is `retractionTransport: "none"` (or `"unclassified"` for a non-exhaustive
+  answer) with an error-tier alert — reachable only if that reload gate is bypassed.
+- **Derived-anchor cap sizing and the presence probe's projector-role RLS assumption** are the derivation
+  design's (plain-lens-neighbour-anchor-derivation-design.md); this section is their record, not a board row.
+- **A stored-only table column** (a migration leftover no RETURN alias produces, returned by `SELECT *`) is
+  excluded from the audit's comparison: the computed row's key set is exactly the RETURN alias set, so a
+  stored-only key can never be a projected column that evaluated null.
 
 ---
 
@@ -600,7 +620,7 @@ reads `auditMaskedColumns`, `retractionTransport`, `derivationFellBack` off the 
   `auditArmed` switch gets a published state and a warning; §10 pins the agreement corpus-wide.
 - **F3 — `capabilityRoleIndex` cannot take T2-prefix** (key minted by an envelope wrapper,
   `main.go:1669-1679`; `SetKeyPrefix` only in the actor-aggregate driver), so "zero debt ⇒ blocking" was
-  unearned. → §4.4 scopes the gate to the business plane (the audit's own boundary), names the three
+  unearned. → §4.4 scopes the gate to the business plane (the audit's own boundary), names the
   auth-plane members and their transport story (§4.3); zero business-plane debt is what the blocking gate
   now rests on.
 - **F4 — the banner asserted a pass that had not run.** → this section.
@@ -780,9 +800,36 @@ target today (all 26 actor-aggregate lenses target NATS buckets; `PostgresAdapte
 `PrefixKeyLister`, so the sweep never enrols one) and is corrected so the first such lens does not
 re-import the artifact.
 
-**Checkpoint.** Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-secure-plain`, branch
-`fire/secure-plain-lens`. Done: Inc 1 (`46ad980e`), Inc 2 (`292a9ed0`). Next: Inc 3 (the gate and the
-package debt), then the close pass (live acceptance on the shared stack, dossier entry, Done-log).
+**SHIPPED (2026-09-05).** Inc 1 `46ad980e` · Inc 2 `292a9ed0` · Inc 3 `424e2740` · reload follow-up
+`ec9f90af`; CI green on each landing (the `424e2740` run reddened once on the edge-manifest e2e's 20 s
+activation wait — the Whetstone-owned wall-clock class, green on the unchanged re-run). Worktree removed.
+
+**Inc 3 close pass (three cold reviewers + one cold verifier) — folded:** the shared-bucket scoping was
+order-dependent (a diff lens loading first on an empty bucket ran unscoped forever) — scoping is now
+unconditional, the sibling check reads the INSTALLED prefix, and every key space on a bucket a diff reads
+must be provably disjoint, symmetric in load order, held corpus-wide by
+`TestPlainRetractionTransportCensus_SharedBucketsAreDisjoint`; `ExistenceDependsOnNeighbour` was fail-open
+on anonymous pattern elements; a MATCH hot-reload bypassed the gate and the wire hid the result (the reload
+re-runs both guards and restores the running rule on refusal; `none` / `unclassified` are the error-tier
+backstop); the gate is pinned on the production activation order; `corpusLensRule` carries the declaration
+fields every census reads the plane off; the second comparator artifact (a stored-only table column) is
+excluded on the `projectItems` premise. §3.1's hand census had missed `capabilityReadWildcardGrants`
+(32 / 23 / four auth-plane members; the builder's "retracted only by the identity tombstone" claim was
+refuted — the `holdsRole` unwire retracts via the link arm; the role vertex tombstone is the residue).
+Found live after the merge: a guard-refused lens held no registry entry and no retry queue, so the
+package refresh that fixed the two one-bill lenses left them dark until a cycle — `ec9f90af` hands an
+update on an unregistered lens to the existence-checked activation entry.
+
+**Live acceptance (§11), shared stack, `health.refractor.rfx-fe2bf3a99d1a`, after the first audit pass:**
+12 Secure lenses `auditEnrolled` with non-empty `auditMaskedColumns`; `leaseApplicationsRead` 10 audited /
+0 divergent, `alert: ok` (was 10 of 10 `stale`); `visitSeriesRead` 6 audited / 0 divergent (was 2 of 2
+`stale` on the stored-only `active` column); 9 of 12 `derivationArmed: true` (the two `DiffRetraction`
+Secure lenses are refused by the index by design; `applicantRosterRead` is in its post-restart audit
+window); no `cannot act on this lens … Secure Lens` line since the cycle; live `retractionTransport`
+census: derivation 19, diffRetraction 6 — the pin's business-plane split exactly; zero activation
+refusals once the three edited packages were refreshed in place. Open measurement: `derivationFellBack` /
+`derivationOverCapSize` across a day of PO traffic on the five Secure lenses (§11 row 4) — the instrument
+is live, the reading is not yet taken.
 
 **Inc 2 review (three cold reviewers, nothing blocking) — folded:** the published shape is
 `derivationEligible`-gated (§5 row 3, amended in place); the derivation index refuses an expanding `*`
