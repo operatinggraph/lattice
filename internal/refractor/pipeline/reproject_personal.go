@@ -203,6 +203,20 @@ func (p *Pipeline) hydrateInFlight(actorID string) bool {
 // frames nothing — ScopeSilent, this lens's rebuild replaying — publishes
 // nothing at all and stamps nothing.
 //
+// A REBUILD WINDOW OVERRIDES THE CALLER'S SCOPE (personal-lens-delta-
+// publication-design.md §4.5). While any rescan on this lens is in flight the
+// scope is ScopeSilent whatever was asked for, so the standing healer's passes
+// and the grant-change drain go as quiet as the CDC write loop already does.
+// Nothing is lost by the silence: a rebuild rewinds the ordering token to the
+// revision of whichever Core KV entry the replay is re-delivering, so every
+// message a pass would publish at it sits BELOW the frame high-water mark a
+// connected device already holds — the rows die on the client's resurrection
+// guard, the frame dies on frameHW — and the rebuilt shape reaches the device
+// once, at a live revision, from the content cycle the window's own close asks
+// for (SetRebuildCompleteSink). What the gate removes is the cost of saying it
+// anyway: the healer's boot content cycle republished every row of every swept
+// actor into a rewound cursor, on every registered personal lens at once.
+//
 // The whole of it runs under the keyed (lens, actor) publish lock, revision
 // capture included — see lockPersonalActor.
 func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string, scope PublishScope) error {
@@ -213,6 +227,40 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 		return fmt.Errorf("pipeline: reproject personal actor %q: awaiting the publish slot: %w", identityID, err)
 	}
 	defer unlock()
+
+	// The rebuild window has the last word on the scope. A caller reaching here
+	// knows what moved; it does not know whether this lens is currently itself,
+	// and a pass driven into a replayed cursor is a whole-actor republish every
+	// device throws away.
+	//
+	// THE FLAG IS READ ONCE, HERE, which is eventPublishScope's invariant on the
+	// CDC arm and holds for the same reason: one observation decides the rows AND
+	// the frame, so a rebuild that ends mid-reprojection can never leave a pass
+	// half-published — the rows withheld under a frame that went out, or the
+	// reverse. Which side of the transition a pass falls on does not matter: one
+	// decided silent published nothing at all, and one decided live publishes
+	// exactly what any live pass publishes.
+	//
+	// It is read AHEAD of the evaluation and of the ordering-token refusal
+	// because a pass that publishes nothing has nothing to evaluate and no
+	// revision to publish at — the token the refusal guards is the rewound one —
+	// and because the caller's verdict must count this pass as attempted and
+	// SUCCEEDED. The sweeper's Failed count is the health signal for a lens that
+	// cannot project; a lens that was asked to speak while it is deliberately
+	// silent is not one.
+	if p.RebuildInFlight() {
+		scope = ScopeSilent()
+	}
+	if !scope.Frames() {
+		// ScopeSilent, the one scope that withholds the frame as well as the
+		// rows — set just above, or handed in by a caller: this is the entry
+		// point every non-CDC republish flows through, so it answers the scope
+		// rather than assuming its callers. Nothing goes out and, because
+		// nothing went out, nothing stamps the read model's last-touch clock
+		// either; a stamp for a publication that never happened is exactly what
+		// LensProjectionStalled reads as health.
+		return nil
+	}
 
 	// This entry point runs off the consumer goroutine, so it takes its own
 	// rule snapshot — the same posture Hydrate takes, and no weaker. A rule
@@ -256,22 +304,6 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 		// fails outright. Refusing hands it to the caller, which logs it and
 		// raises the lens's Health fault instead of serving a doomed frame.
 		return fmt.Errorf("pipeline: reproject personal actor %q: %w", identityID, ErrNoOrderingToken)
-	}
-
-	if !scope.Frames() {
-		// ScopeSilent, the one scope that withholds the frame as well as the
-		// rows: this lens's rebuild is replaying, and every message a
-		// reprojection would send — row, Delete or frame — sits below the frame
-		// high-water a connected device already holds and is dropped there. So
-		// nothing goes out and, because nothing went out, nothing stamps the
-		// read model's last-touch clock either; a stamp for a publication that
-		// never happened is exactly what LensProjectionStalled reads as health.
-		//
-		// No caller hands one here today — the sweeper passes All or None and
-		// the drain passes Anchors or None — but this is the entry point every
-		// non-CDC republish flows through, so it answers the scope rather than
-		// assuming its callers.
-		return nil
 	}
 
 	adpt := p.currentAdapter()

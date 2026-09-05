@@ -164,6 +164,13 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   is read once per event at the scope producer, so an event's rows and its frame are decided by one
   observation and a rebuild finishing mid-event cannot half-publish it. Business and auth-plane
   rebuilds are untouched — their replay is what repairs a stored read model.
+  The window silences the lens's **other** publishers on the same terms: a reprojection driven by the
+  standing healer — a content cycle or an ordinary frames-only pass — or by the grant-change drain is
+  scoped to `ScopeSilent` whatever its caller asked for, since it too would publish at the rewound
+  ordering token the replay leaves behind. The flag is read once there as well, ahead of the evaluation
+  and of the ordering-token refusal, so the caller's verdict counts such a pass as attempted and
+  **succeeded** — a lens asked to speak while it is deliberately silent has not failed to project. The
+  rebuilt shape reaches the device on the content cycle the window's close asks for.
   One consumer of the rebuild pays for that silence and is refused rather than served: a
   **retention-class key destruction** delivers the erasure by rebuilding every lens declaring the
   holder's type, and a personal lens's replay would upsert no null over anything. Such a target is

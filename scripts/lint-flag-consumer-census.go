@@ -85,6 +85,7 @@ var registry = []flagSpec{{
 		"internal/refractor/pipeline/sweep.go#suppressed",
 		"internal/refractor/pipeline/audit.go#suppressed",
 		"internal/refractor/pipeline/publishscope.go#eventPublishScope",
+		"internal/refractor/pipeline/reproject_personal.go#ReprojectPersonalActor",
 	},
 }}
 

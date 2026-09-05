@@ -199,6 +199,100 @@ func TestPersonalLens_RebuildPublishesNothingAndAsksForAContentCycle(t *testing.
 	assert.EqualValues(t, 1, sink.asks.Load(), "and a live event asks for no content cycle of its own")
 }
 
+// TestPersonalLens_TheHealersCyclesAreSilentInsideTheRebuildWindow is the
+// window's OTHER publisher.
+//
+// The CDC write loop goes quiet for the length of a rescan, but the standing
+// healer is not on that loop: it drives every registered personal lens through
+// ReprojectPersonalActor on its own clock — ScopeAll on a content cycle,
+// ScopeNone on every other — and it knows nothing about which of those lenses is
+// currently replaying. Measured on the dev stack: one boot content cycle reached
+// the widest actor and published that actor's whole row set plus its frame
+// through the one rebuilding pipeline of fifteen, at a revision three orders of
+// magnitude below the live head, every message of it dropped on the devices' own
+// frameHW and resurrection guards. So the window has the last word at that entry
+// point too, and this drives a REAL PersonalSweeper across a real rebuild to
+// prove it on the wire.
+//
+// The window is held open by the completion watcher's own poll clock, which is
+// captured at pipeline construction: a poll interval longer than this test means
+// the first poll — the only thing that can observe the rescan drained and close
+// the window — never comes. That the window really was open across the whole
+// measurement is asserted at both ends, with the un-asked content cycle as a
+// third witness.
+//
+// What happens once the window CLOSES is the test below: the rows withheld here
+// reach the device on the cycle that close asks for, at a live revision.
+func TestPersonalLens_TheHealersCyclesAreSilentInsideTheRebuildWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in -short mode")
+	}
+	origPoll := pipeline.RebuildPollInterval
+	pipeline.RebuildPollInterval = 10 * time.Minute
+	t.Cleanup(func() { pipeline.RebuildPollInterval = origPoll })
+
+	h := newPL2Harness(t)
+
+	lensID := pl2NanoID("rebuild-heal-silence-lens")
+	identityID := pl2NanoID("rebuild-heal-silence-identity")
+	subject := "lattice.sync.user." + identityID
+
+	p := rebuildingPersonalLens(t, h, lensID, "HEALTH-rebuild-heal-silence")
+
+	// The healer as cmd/refractor assembles it, the same wiring the delivery arm
+	// below uses.
+	reprojector := grantchange.New()
+	reprojector.RegisterPersonal(lensID, p)
+	sweeper := grantchange.NewPersonalSweeper(reprojector, h.coreKV, nil)
+	sweeper.SetBounds(100, 0)
+	sink := &countingContentCycleSink{to: sweeper}
+	p.SetRebuildCompleteSink(sink)
+
+	cons := pl3Consumer(t, h, identityID)
+	entities := seedPersonalActorRows(t, h, identityID, "rebuild-heal-silence")
+	deltaDrainUntilFrame(t, cons, lensID, entities)
+	require.Empty(t, drainBriefly(t, cons), "the fixture must be quiet before the cycles are measured")
+
+	// The positive control, taken FIRST: cycle 1 is the boot content cycle, which
+	// is exactly the pass the live measurement caught republishing a whole actor
+	// into a rewound cursor. Without seeing it do its job here, every silence
+	// below would be satisfied by a sweeper that reaches this lens never.
+	sweepOneCycle(t, h, sweeper)
+	healed := drainUntilQuiet(t, cons)
+	assert.ElementsMatch(t, entities, upsertKeys(healed, lensID),
+		"the healer's content cycle republishes the whole actor while the lens is itself")
+	require.Len(t, frames(healed, lensID), 1, "under its authoritative frame")
+
+	depthBefore := syncSubjectDepth(t, h, subject)
+	require.NotZero(t, depthBefore, "the actor's subject must hold the pre-rebuild publication, or nothing is being measured")
+
+	require.NoError(t, p.Rebuild(context.Background(), false))
+	require.True(t, p.RebuildInFlight(), "the rescan's window is open, which is the condition under test")
+
+	// Both cadences, inside the window: the content cycle a request buys, and the
+	// ordinary frames-only pass that follows it. ScopeNone already withholds the
+	// rows; what the window adds is the frame, which at a replayed revision
+	// retracts nothing on any device and costs one message per swept actor.
+	sweeper.RequestContentCycle()
+	sweepOneCycle(t, h, sweeper)
+	sweepOneCycle(t, h, sweeper)
+
+	assert.Equal(t, depthBefore, syncSubjectDepth(t, h, subject),
+		"neither cycle put a message on the actor's subject: both would have published at the replay's rewound revision")
+	assert.Empty(t, drainBriefly(t, cons), "and the device received nothing")
+	require.True(t, p.RebuildInFlight(),
+		"the window was open across the whole measurement, so the silence is the window's rather than the lens having died")
+	assert.EqualValues(t, 0, sink.asks.Load(),
+		"a window that never closed asks for nothing — the third witness that it stayed open")
+
+	// The replay has to be shown to have REACHED the write loop and been withheld
+	// there: a recreated durable admitting no subject at all would leave the
+	// subject depth equally unchanged, and the two are the same observation on
+	// the wire.
+	assert.GreaterOrEqual(t, replayDeliveries(t, h, lensID), uint64(len(entities)),
+		"the rescan must have re-delivered the actor's entries; an equal subject depth over an empty replay proves nothing")
+}
+
 // TestPersonalLens_TheRequestedContentCycleDeliversTheRebuiltShape is T8's
 // DELIVERY arm: the same seam, driven through a REAL standing healer, asserted
 // on what the device receives rather than on the request being made.

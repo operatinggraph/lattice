@@ -161,6 +161,82 @@ func TestReprojectPersonalActor_SilentPublishesNothingAndStampsNothing(t *testin
 		"a pass that reached nobody is not output, and stamping it would report freshness the device never got")
 }
 
+// TestReprojectPersonalActor_ARebuildInFlightOverridesTheCallersScope pins the
+// non-CDC publishers to the same window the write loop already honours.
+//
+// Neither the standing healer nor the grant-change drain knows whether the lens
+// it is driving is currently itself: the sweeper's content cycle asks for
+// ScopeAll and its ordinary pass for ScopeNone, both at whatever ordering token
+// the pipeline holds — which during a replay is a revision from the middle of
+// the stream's history. Measured on the dev stack: one boot content cycle drove
+// a whole-actor republish through the one rebuilding pipeline of fifteen at a
+// rewound cursor, every message of it dropped on the devices' own guards. So the
+// window has the last word here as well, and the caller's verdict still counts
+// the pass as attempted and succeeded — a lens asked to speak while it is
+// deliberately silent has not failed to project.
+func TestReprojectPersonalActor_ARebuildInFlightOverridesTheCallersScope(t *testing.T) {
+	everyRow := []string{"lease-a", "lease-b", "lease-c"}
+
+	t.Run("a content cycle's ScopeAll publishes nothing while the rescan replays", func(t *testing.T) {
+		p, target := newScopedPersonalFixture(t)
+		p.rebuildWindows.Store(1)
+
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()),
+			"the pass is attempted and SUCCEEDS — Failed is the health signal for a lens that cannot project")
+
+		assert.Empty(t, target.upsertKeys(),
+			"no row: every one of them would publish at the replay's rewound revision, below the device's high-water mark")
+		assert.Empty(t, target.snapshot(),
+			"and no frame either — it would carry the same rewound revision and be dropped on frameHW")
+		assert.True(t, p.Progress().LastProjectedAt.IsZero(),
+			"nothing reached the target, so nothing may stamp the freshness clock LensProjectionStalled reads")
+	})
+
+	t.Run("and the healer's ordinary frames-only pass is silent too", func(t *testing.T) {
+		// ScopeNone already withholds the rows; what the window adds is the
+		// frame, which at a replayed revision retracts nothing on any device.
+		p, target := newScopedPersonalFixture(t)
+		p.rebuildWindows.Store(1)
+
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeNone()))
+
+		assert.Empty(t, target.upsertKeys())
+		assert.Empty(t, target.snapshot())
+	})
+
+	t.Run("the same ScopeAll pass with the window shut publishes the whole actor", func(t *testing.T) {
+		// The positive control. Without it every assertion above would hold for
+		// a fixture that publishes nothing under any scope, and the silence
+		// would be attributable to the pipeline rather than to the window.
+		p, target := newScopedPersonalFixture(t)
+
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
+
+		assert.ElementsMatch(t, everyRow, target.upsertKeys(), "every row the actor holds")
+		frames := target.snapshot()
+		require.Len(t, frames, 1)
+		assert.ElementsMatch(t, everyRow, frameEntityIDs(t, frames[0]),
+			"under the authoritative frame naming them")
+		assert.False(t, p.Progress().LastProjectedAt.IsZero(), "and a signalled pass IS output")
+	})
+
+	t.Run("the silence lifts with the last window, not with a latch", func(t *testing.T) {
+		p, target := newScopedPersonalFixture(t)
+		p.rebuildWindows.Store(2) // two rescans overlapping, as the count exists for
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
+		require.Empty(t, target.upsertKeys())
+
+		p.rebuildWindows.Store(1)
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
+		require.Empty(t, target.upsertKeys(), "one window still open is still a replaying lens")
+
+		p.rebuildWindows.Store(0)
+		require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA, ScopeAll()))
+		assert.ElementsMatch(t, everyRow, target.upsertKeys())
+		assert.Len(t, target.snapshot(), 1)
+	})
+}
+
 // TestRebuildWindow_TheLastWindowToCloseAsksThePersonalHealerOnce pins the ask
 // to the end of the SILENT SPAN rather than to a drained rescan, through the
 // real window accounting every ending runs.
