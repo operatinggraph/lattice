@@ -234,10 +234,20 @@ func (cr *CompiledRule) keyColumnShape(admits keyColumnReference) (anchorProject
 	// First the general scope walk (withscope.go), memoized by Parse: it proves
 	// every clause and expression in the query is a shape it models — an AST
 	// node with no case there refuses rather than shortening a referenced set —
-	// and that no boundary dropped a name a later clause re-reads, whose rebind
-	// would be a fresh binding rather than the one it appears to name. It also
-	// refuses `WITH *` and a pattern-variable rename in either direction. The
-	// residue is exactly the case the substitution below is defined for.
+	// and that no boundary stranded a name a later clause then re-reads as
+	// something the name does not denote. It also refuses `WITH *` and a
+	// pattern-variable rename in either direction. The residue is exactly the
+	// case the substitution below is defined for.
+	//
+	// THE ONE RE-READ IT ADMITS IS SAFE FOR THIS SUBSTITUTION TOO, and the
+	// reason is not the hop index's. judgeMatch admits a stranded name only
+	// where a later MATCH re-walks the IDENTICAL chain from a head that is still
+	// carried and bound, so the name goes on denoting the same walk from the
+	// same variable — a fresh executor binding, but of the same pattern variable
+	// at the same position, reached the same way. What this substitution asks of
+	// a name is exactly that: WHICH pattern variable produced the value, not
+	// which subset of rows it held. So an admitted re-binding leaves every
+	// resolution below reading what it read before the boundary existed.
 	//
 	// A rule that never went through Parse carries no resolution, so a
 	// WITH-bearing query is refused outright rather than judged against an

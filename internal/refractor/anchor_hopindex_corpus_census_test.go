@@ -67,14 +67,16 @@ const (
 // corpusAnchorIndexVerdicts pins the conjunct for every anchored cypher the
 // installed corpus ships.
 //
-// No row here is refused by either WITH conjunct, and that is the shipped
-// corpus's own shape rather than a property of the predicate: a staging WITH
-// exists to collapse an arm's fan-out back to one row per anchor before the
-// next arm fans out (packages/privacy-base/lenses.go states the measurement),
-// so it carries the anchor and lets the spent arm go, and no later clause names
-// the arm again. The refusal cases are held by
-// ruleengine/full's TestAnchorHopIndex_WithScope, which does not need a lens to
-// be written badly in order to cover them.
+// Exactly one row here is refused by a WITH conjunct — edgeManifestReadGrants,
+// below, on a genuine cross-walk variable collision. Every other row's staging
+// WITH carries the anchor cleanly: it exists to collapse an arm's fan-out back
+// to one row per anchor before the next arm fans out
+// (packages/privacy-base/lenses.go states the measurement), so it carries the
+// anchor and lets the spent arm go, and no later clause names the arm again —
+// or, for edgeManifestStaffReadGrants, re-opens the very chain that bound the
+// name, which judgeMatch admits rather than refuses. The refusal shapes in
+// general are held by ruleengine/full's TestAnchorHopIndex_WithScope, which
+// does not need a lens to be written badly in order to cover them.
 var corpusAnchorIndexVerdicts = map[string]string{
 	"appointmentReminders":     hopIndexed,
 	"augurDispatchPending":     hopIndexed,
@@ -116,29 +118,49 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"edgeIdentity":                   hopIndexed,
 	"edgeInstances":                  hopIndexed,
 	"edgeManifestProviderReadGrants": hopIndexed,
-	// Held by the WITH refusal, which the completeness switch reports only once
-	// no earlier conjunct declines: `generateProducerSpec` stages one WITH per
-	// walk and four base walks re-open `chainResidence`, so `container` is
-	// dropped at one stage boundary and re-bound at the next. Lifting that
-	// refusal is Increment 2 of the varlength-anchor-derivation design, held at
-	// ratification behind a live measurement.
-	"edgeManifestReadGrants":      hopWithDropped,
-	"edgeManifestStaffReadGrants": hopWithDropped, // Same shape, dropping `role`.
-	"edgeProviderQueue":           hopIndexed,
-	"edgeProviderSchedule":        hopIndexed,
-	"edgeServices":                hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeStaffPanes":              hopIndexed,
-	"edgeStaffWorkOrders":         hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeTasks#0":                 hopIndexed,
-	"edgeTasks#1":                 hopIndexed,
-	"followUpReminders":           hopIndexed,
-	"applicantOnboarding":         hopIndexed,
-	"identityAnchors":             hopIndexed,
-	"identityErasureResidue":      hopIndexed,
-	"leaseApplicationComplete":    hopIndexed,
-	"leaseExpiry":                 hopIndexed,
-	"leaseRentSettlement":         hopIndexed,
-	"myTasks":                     hopIndexed,
+	// The two generated read-grant producers, and they answer differently
+	// because `generateProducerSpec`'s staging strands names for two different
+	// reasons and only one of them is recoverable.
+	//
+	// The recoverable one is a walk RE-OPENING a chain a previous stage already
+	// walked: the staff producer's `role` (and its `work`/`place`) is dropped at
+	// one stage boundary and re-bound at the next by a textually identical MATCH
+	// from the carried `identity`. withScopeReject admits that re-binding
+	// (judgeMatch states the conditions), and the argument for acting on
+	// this lens's derived anchor set is that the re-binding changes neither half
+	// of what the walk reads: the head is still bound, so executor.matchPath
+	// walks the chain from it rather than seeding a bucket scan — the row's
+	// dependency really is the link path — and hopIndexBuilder.position merges
+	// the two occurrences by name onto ONE position whose incident hops are
+	// already the same hops, so Hops gains duplicates only, Dist is unchanged,
+	// and AnchorSideSeeds (Dist's only consumer) drops no seed. The graph the
+	// derivation walks is the graph it walked before the re-open existed.
+	"edgeManifestStaffReadGrants": hopIndexed,
+	// The base producer is still held, and on a DIFFERENT variable than its
+	// residence chain: two of its walks bind `op` to a meta over different
+	// chains — `(tpl)-[:permitsOperation]->(op:meta)` in one stage and
+	// `(task)-[:forOperation]->(op:meta)` in a later one, after the boundary
+	// stranded it. That is the colliding-walk-variable shape staging exists to
+	// keep apart (pkgmgr's TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart),
+	// so the two occurrences are NOT one binding and merging them would assert a
+	// hop no row walks. Its residence chain re-opens are admitted; this one name
+	// is what declines the lens.
+	"edgeManifestReadGrants":   hopWithDropped,
+	"edgeProviderQueue":        hopIndexed,
+	"edgeProviderSchedule":     hopIndexed,
+	"edgeServices":             hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeStaffPanes":           hopIndexed,
+	"edgeStaffWorkOrders":      hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeTasks#0":              hopIndexed,
+	"edgeTasks#1":              hopIndexed,
+	"followUpReminders":        hopIndexed,
+	"applicantOnboarding":      hopIndexed,
+	"identityAnchors":          hopIndexed,
+	"identityErasureResidue":   hopIndexed,
+	"leaseApplicationComplete": hopIndexed,
+	"leaseExpiry":              hopIndexed,
+	"leaseRentSettlement":      hopIndexed,
+	"myTasks":                  hopIndexed,
 	// Its untyped `-[r]->` is a WILDCARD hop: it names no relation, and every
 	// consumer of the index reads that as admit-any.
 	"objectAttachments":                 hopIndexed,

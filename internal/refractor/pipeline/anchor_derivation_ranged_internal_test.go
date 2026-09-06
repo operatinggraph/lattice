@@ -24,7 +24,27 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 )
+
+// generatedReadGrantProducerSpec returns the cypher pkgmgr emits for one of
+// edge-manifest's generated read-grant producers, read off the package
+// definition rather than copied. The Increment 2 lens is generated, so a copy
+// here would go on pinning an emission nobody ships the moment the generator or
+// the package's walk list changes.
+func generatedReadGrantProducerSpec(t *testing.T, canonicalName string) string {
+	t.Helper()
+	expanded, err := edgemanifest.Package.ExpandReadGrantWalks()
+	require.NoError(t, err, "edge-manifest's read-grant walks must compose")
+	for _, l := range expanded.Lenses {
+		if l.CanonicalName == canonicalName {
+			require.NotEmpty(t, l.Spec, "%s must carry a generated cypher", canonicalName)
+			return l.Spec
+		}
+	}
+	t.Fatalf("edge-manifest ships no lens named %q", canonicalName)
+	return ""
+}
 
 // rangedResidenceSpec is capabilityServiceAccess's positive arm reduced to its
 // steppable skeleton: a fixed hop in, a ranged containment walk, a fixed hop
@@ -796,6 +816,7 @@ func TestSeedMultiPosition_MultiPositionPathEqualsTheSingleSeedResult(t *testing
 // false below would be caught rather than mistaken for a proof.
 func TestActorTypeBindsAnchorOnly_NeverArmsForAConvertedLens(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
+	stagedStaffReadGrantsSpec := generatedReadGrantProducerSpec(t, "edgeManifestStaffReadGrants")
 
 	t.Run("positive vector: a single-position actor lens does arm", func(t *testing.T) {
 		p := derivationPipeline(t, adjKV, rolesSpec)
@@ -820,6 +841,31 @@ func TestActorTypeBindsAnchorOnly_NeverArmsForAConvertedLens(t *testing.T) {
 				continue
 			}
 			require.Empty(t, ix.Labels[pos], "the extra positions are the unlabelled ones")
+		}
+		require.False(t, ActorTypeBindsAnchorOnly(ix, "identity"))
+	})
+
+	t.Run("edgeManifestStaffReadGrants", func(t *testing.T) {
+		p := derivationPipeline(t, adjKV, stagedStaffReadGrantsSpec)
+		ix := p.ruleState().anchorHops
+		require.True(t, ix.Complete, "%s", ix.Incomplete)
+		require.Equal(t, -1, ix.UnresolvedExpansionPosition(),
+			"the pin has to be earned on a fully resolved index, or it holds for the wrong reason")
+
+		// The governing fact, named rather than left to the verdict. This
+		// producer carries two UNLABELLED positions — `work` and `place`, the
+		// ends of the worksAt + containedIn*0.. spine the generator emits
+		// without types — and an unlabelled position admits ANY vertex type,
+		// the identity actor type included. So an identity event can land at
+		// three positions, not one, and answering it with that one key would
+		// drop every other actor whose row renders the same vertex.
+		positions := ix.PositionsBinding("identity")
+		require.Len(t, positions, 3, "identity binds at %v, anchor=%d", positions, ix.Anchor)
+		for _, pos := range positions {
+			if pos == ix.Anchor {
+				continue
+			}
+			require.Empty(t, ix.Labels[pos], "the two extra positions are the unlabelled spine ends")
 		}
 		require.False(t, ActorTypeBindsAnchorOnly(ix, "identity"))
 	})

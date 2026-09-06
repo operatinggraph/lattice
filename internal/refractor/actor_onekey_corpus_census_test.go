@@ -118,21 +118,26 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"edgeInstances":                  walkNoHealer,
 	"edgeManifestProviderReadGrants": oneKey,
 	"edgeManifestReadGrants":         walkIncompleteIndex,
-	"edgeManifestStaffReadGrants":    walkIncompleteIndex,
-	"edgeProviderQueue":              walkNoHealer,
-	"edgeProviderSchedule":           walkNoHealer,
-	"edgeServices":                   walkNoHealer,
-	"edgeStaffPanes":                 walkNoHealer,
-	"edgeStaffWorkOrders":            walkNoHealer,
-	"edgeTasks#0":                    walkNoHealer,
-	"edgeTasks#1":                    walkNoHealer,
-	"followUpReminders":              oneKey,
-	"identityAnchors":                walkMultiPosition,
-	"identityErasureResidue":         walkMultiPosition,
-	"leaseApplicationComplete":       oneKey,
-	"leaseExpiry":                    oneKey,
-	"leaseRentSettlement":            oneKey,
-	"myTasks":                        walkMultiPosition,
+	// Its index is complete, so the position count is read rather than
+	// refused — and the answer is still the walk: the producer's
+	// `(identity)-[:worksAt]->(work)<-[:containedIn*0..]-(place)` chain carries
+	// two UNLABELED positions, which admit any type and therefore the identity
+	// actor type. Another anchor's row really can render this vertex.
+	"edgeManifestStaffReadGrants": walkMultiPosition,
+	"edgeProviderQueue":           walkNoHealer,
+	"edgeProviderSchedule":        walkNoHealer,
+	"edgeServices":                walkNoHealer,
+	"edgeStaffPanes":              walkNoHealer,
+	"edgeStaffWorkOrders":         walkNoHealer,
+	"edgeTasks#0":                 walkNoHealer,
+	"edgeTasks#1":                 walkNoHealer,
+	"followUpReminders":           oneKey,
+	"identityAnchors":             walkMultiPosition,
+	"identityErasureResidue":      walkMultiPosition,
+	"leaseApplicationComplete":    oneKey,
+	"leaseExpiry":                 oneKey,
+	"leaseRentSettlement":         oneKey,
+	"myTasks":                     walkMultiPosition,
 	// PositionsBinding("object") is {0, 1}: the `(owner)` end is unlabeled, so it
 	// admits every type — an object attached to another object included.
 	"objectAttachments":   walkMultiPosition,

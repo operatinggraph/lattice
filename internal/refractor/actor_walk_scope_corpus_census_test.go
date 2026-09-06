@@ -109,37 +109,59 @@ const corpusWalkScopeMinimum = 55
 // derivation already is. Every OTHER lens's absence of an `instanceOf` entry is
 // the descriptor hop being pruned, which is what this scope buys.
 var corpusActorWalkScopeDigests = map[string]string{
-	"applicantOnboarding":               "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|meta:forOperation|task:forOperation,scopedTo|unit:appliesToUnit",
-	"appointmentReminders":              "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
-	"augurDispatchPending":              "none",
-	"backgroundCheckFreshness":          "none",
-	"cafeArrearsReminders":              "cafeaccount:heldFor|leaseapp:heldFor",
-	"cafeStaleTabSettlement":            "none",
-	"cafeTabSettlement":                 "cafetransaction:settles|leaseapp:chargedTo,openFor|tab:chargedTo,openFor,settles",
-	"capability":                        "identity:holdsRole|role:holdsRole",
-	"capabilityAuthorPending":           "none",
-	"capabilityEphemeral":               "identity:assignedTo,holdsRole,reportsTo|role:holdsRole,queuedFor|task:assignedTo,forOperation,queuedFor,scopedTo|any:forOperation,scopedTo",
-	"capabilityRead":                    "none",
-	"capabilityRoles":                   "identity:holdsRole|permission:grantedBy|role:grantedBy,holdsRole",
-	"capabilityServiceAccess":           "building:availableAt,containedIn,residesIn|identity:residesIn|property:availableAt,containedIn,residesIn|service:availableAt,instanceOf,permitsOperation,unavailableAt|unit:availableAt,containedIn,residesIn|any:containedIn,permitsOperation,unavailableAt",
-	"clauseSatisfaction":                "account:chargesTo|clause:authorizedBy,chargesTo,conditionedOn,requiresInspectionBy|identity:requiresInspectionBy|transaction:authorizedBy|any:conditionedOn",
-	"clinicNoShowSettlement":            "appointment:forPatient,settles|clinicaccount:heldFor|clinictransaction:reverses,settles|patient:forPatient,heldFor",
-	"clinicSiteBackfill":                "appointment:atSite|building:atSite",
-	"edgeCatalog#0":                     "identity:residesIn|meta:permitsOperation|service:availableAt,permitsOperation|any:availableAt,containedIn,residesIn",
-	"edgeCatalog#1":                     "identity:holdsRole|meta:forOperation,permitsOperation|permission:forOperation,grantedBy|role:grantedBy,holdsRole|service:permitsOperation",
-	"edgeCatalog#2":                     "identity:assignedTo|meta:forOperation,permitsOperation|service:permitsOperation|task:assignedTo,forOperation",
-	"edgeEntityBookings":                "booking:bookedBy,forSession|identity:bookedBy|instructor:ledBy|session:atStudio,forSession,ledBy|studio:atStudio",
-	"edgeEntityMenuItems":               "identity:residesIn|menuitem:servedAt|any:containedIn,residesIn,servedAt",
-	"edgeEntityProviders":               "identity:residesIn|provider:practicesAt|any:containedIn,practicesAt,residesIn",
-	"edgeEntitySessions#0":              "identity:residesIn|instructor:ledBy|session:atStudio,ledBy|studio:atStudio,locatedAt|any:containedIn,locatedAt,residesIn",
-	"edgeEntitySessions#1":              "identity:identifiedBy|instructor:identifiedBy,ledBy|session:atStudio,ledBy|studio:atStudio",
-	"edgeEntityStudios":                 "identity:worksAt|studio:locatedAt|any:containedIn,locatedAt,worksAt",
-	"edgeEntityTabs":                    "identity:applicationFor|leaseapp:applicationFor,appliesToUnit,openFor|tab:openFor|unit:appliesToUnit",
-	"edgeIdentity":                      "identity:applicationFor,holdsRole,identifiedBy,residesIn,worksAt|instructor:identifiedBy|leaseapp:applicationFor|patient:identifiedBy|provider:identifiedBy|role:holdsRole|serviceprovider:identifiedBy|any:containedIn,residesIn,worksAt",
-	"edgeInstances":                     "identity:providedTo|service:instanceOf,providedTo",
-	"edgeManifestProviderReadGrants":    "appointment:withProvider|identity:identifiedBy|instructor:identifiedBy,ledBy|provider:identifiedBy,withProvider|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy|session:ledBy",
-	"edgeManifestReadGrants":            scopeNil,
-	"edgeManifestStaffReadGrants":       scopeNil,
+	"applicantOnboarding":            "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|meta:forOperation|task:forOperation,scopedTo|unit:appliesToUnit",
+	"appointmentReminders":           "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
+	"augurDispatchPending":           "none",
+	"backgroundCheckFreshness":       "none",
+	"cafeArrearsReminders":           "cafeaccount:heldFor|leaseapp:heldFor",
+	"cafeStaleTabSettlement":         "none",
+	"cafeTabSettlement":              "cafetransaction:settles|leaseapp:chargedTo,openFor|tab:chargedTo,openFor,settles",
+	"capability":                     "identity:holdsRole|role:holdsRole",
+	"capabilityAuthorPending":        "none",
+	"capabilityEphemeral":            "identity:assignedTo,holdsRole,reportsTo|role:holdsRole,queuedFor|task:assignedTo,forOperation,queuedFor,scopedTo|any:forOperation,scopedTo",
+	"capabilityRead":                 "none",
+	"capabilityRoles":                "identity:holdsRole|permission:grantedBy|role:grantedBy,holdsRole",
+	"capabilityServiceAccess":        "building:availableAt,containedIn,residesIn|identity:residesIn|property:availableAt,containedIn,residesIn|service:availableAt,instanceOf,permitsOperation,unavailableAt|unit:availableAt,containedIn,residesIn|any:containedIn,permitsOperation,unavailableAt",
+	"clauseSatisfaction":             "account:chargesTo|clause:authorizedBy,chargesTo,conditionedOn,requiresInspectionBy|identity:requiresInspectionBy|transaction:authorizedBy|any:conditionedOn",
+	"clinicNoShowSettlement":         "appointment:forPatient,settles|clinicaccount:heldFor|clinictransaction:reverses,settles|patient:forPatient,heldFor",
+	"clinicSiteBackfill":             "appointment:atSite|building:atSite",
+	"edgeCatalog#0":                  "identity:residesIn|meta:permitsOperation|service:availableAt,permitsOperation|any:availableAt,containedIn,residesIn",
+	"edgeCatalog#1":                  "identity:holdsRole|meta:forOperation,permitsOperation|permission:forOperation,grantedBy|role:grantedBy,holdsRole|service:permitsOperation",
+	"edgeCatalog#2":                  "identity:assignedTo|meta:forOperation,permitsOperation|service:permitsOperation|task:assignedTo,forOperation",
+	"edgeEntityBookings":             "booking:bookedBy,forSession|identity:bookedBy|instructor:ledBy|session:atStudio,forSession,ledBy|studio:atStudio",
+	"edgeEntityMenuItems":            "identity:residesIn|menuitem:servedAt|any:containedIn,residesIn,servedAt",
+	"edgeEntityProviders":            "identity:residesIn|provider:practicesAt|any:containedIn,practicesAt,residesIn",
+	"edgeEntitySessions#0":           "identity:residesIn|instructor:ledBy|session:atStudio,ledBy|studio:atStudio,locatedAt|any:containedIn,locatedAt,residesIn",
+	"edgeEntitySessions#1":           "identity:identifiedBy|instructor:identifiedBy,ledBy|session:atStudio,ledBy|studio:atStudio",
+	"edgeEntityStudios":              "identity:worksAt|studio:locatedAt|any:containedIn,locatedAt,worksAt",
+	"edgeEntityTabs":                 "identity:applicationFor|leaseapp:applicationFor,appliesToUnit,openFor|tab:openFor|unit:appliesToUnit",
+	"edgeIdentity":                   "identity:applicationFor,holdsRole,identifiedBy,residesIn,worksAt|instructor:identifiedBy|leaseapp:applicationFor|patient:identifiedBy|provider:identifiedBy|role:holdsRole|serviceprovider:identifiedBy|any:containedIn,residesIn,worksAt",
+	"edgeInstances":                  "identity:providedTo|service:instanceOf,providedTo",
+	"edgeManifestProviderReadGrants": "appointment:withProvider|identity:identifiedBy|instructor:identifiedBy,ledBy|provider:identifiedBy,withProvider|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy|session:ledBy",
+	"edgeManifestReadGrants":         scopeNil,
+	// THE ONE ROW HERE THAT WENT `nil` → SCOPE, which this file's header names
+	// as the direction needing the argument written down. It is derived from
+	// the same pattern graph the anchor index reports Complete for
+	// (anchor_hopindex_corpus_census_test.go states why the staged re-opens are
+	// admitted), and §5.1's claim transfers to it because the graph the scope
+	// reads is the graph the UNSTAGED five walks produce — the staged re-opens
+	// add duplicate hop records and nothing else, which
+	// TestEdgeManifestStaffReadGrants_IndexesToItsUnstagedGraph asserts hop set
+	// by hop set and seed by seed. So every path an actor's row depends on is a
+	// path of pattern hops here, and a walk following only these relations
+	// still reaches every one of them.
+	//
+	// Read the digest against the producer's five walks: `holdsRole` off the
+	// actor into `role`, then `grantedBy`+`forOperation` to an op meta,
+	// `queuedFor` to a queued task and `offeredTo` to a pane meta; and
+	// `worksAt` off the actor into the workplace, then `containedIn` down the
+	// spine and `locatedAt` out to a studio or a work order. The `any:` entry
+	// carries `containedIn`, `locatedAt` and `worksAt` because the generator
+	// emits that spine's two intermediate positions UNLABELLED, and an
+	// unlabelled position is followable from every type — the same two
+	// positions that keep this lens off the one-key answer
+	// (actor_onekey_corpus_census_test.go).
+	"edgeManifestStaffReadGrants":       "identity:holdsRole,worksAt|meta:forOperation,offeredTo|permission:forOperation,grantedBy|role:grantedBy,holdsRole,offeredTo,queuedFor|studio:locatedAt|task:queuedFor|workorder:locatedAt|any:containedIn,locatedAt,worksAt",
 	"edgeProviderQueue":                 "identity:identifiedBy|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy",
 	"edgeProviderSchedule":              "appointment:withProvider|identity:identifiedBy|provider:identifiedBy,withProvider",
 	"edgeServices":                      "identity:residesIn|service:availableAt,providedBy|any:availableAt,containedIn,providedBy,residesIn",
@@ -182,8 +204,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 // conjunct added to the derivation without a constant lands here as a string
 // nobody reviewed.
 var corpusActorWalkScopeRefusals = map[string]string{
-	"edgeManifestReadGrants":      "a branch's pattern graph is incomplete",
-	"edgeManifestStaffReadGrants": "a branch's pattern graph is incomplete",
+	"edgeManifestReadGrants": "a branch's pattern graph is incomplete",
 	// Its `(o:object)-[r]->(owner)` is a wildcard hop at an unlabeled position:
 	// any relation, at any type, so nothing is left to scope. The affected-anchor
 	// derivation reads that same index and DOES act on it — the two arms disagree

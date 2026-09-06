@@ -1,6 +1,7 @@
 package pkgmgr
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -100,23 +101,35 @@ func TestExpandReadGrantWalks_GeneratesOneProducerPerDomain(t *testing.T) {
 	// shares nothing textually between walks), then a `WITH` that folds them
 	// into that walk's grant slice before the next walk's clauses run. The
 	// final RETURN concatenates every slice.
-	want := `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
-WITH identity,
-  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(tpl.key), via: ['residesIn', 'containedIn', 'availableAt']}) AS grantSlice0
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
-WITH identity, grantSlice0,
-  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['residesIn', 'containedIn', 'practicesAt']}) AS grantSlice1
-RETURN
-  identity.key AS actorKey,
-  grantSlice0 + grantSlice1 AS readableAnchors
-`
+	//
+	// The expected text lives in twoWalkProducerGoldenPath rather than inline
+	// because a second test reads the SAME file: Refractor's
+	// TestAnchorHopIndex_GeneratedProducerIndexesToTheUnstagedGraph indexes
+	// this emission and proves the derivation can act on it. Sharing the file
+	// is what makes that a link rather than a copy — an emission change reds
+	// here, and the moment the file is updated the index test re-reads the new
+	// text and reds too if the new shape stops indexing.
+	want := readTwoWalkProducerGolden(t)
 	if p.Spec != want {
 		t.Errorf("generated producer mismatch\n got:%s\nwant:%s", p.Spec, want)
 	}
+}
+
+// twoWalkProducerGoldenPath holds the generated two-walk producer emission, so
+// tests in two packages assert against one text. It is relative to this
+// package's directory; the Refractor side spells the path out from its own
+// (hopindex_test.go's generatedTwoWalkProducerGolden) — a test file's
+// identifiers do not leave their package, so the FILE is the shared thing here,
+// not this constant.
+const twoWalkProducerGoldenPath = "testdata/generated_two_walk_producer.cypher"
+
+func readTwoWalkProducerGolden(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(twoWalkProducerGoldenPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", twoWalkProducerGoldenPath, err)
+	}
+	return string(b)
 }
 
 // TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart is the guard

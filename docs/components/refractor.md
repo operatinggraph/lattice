@@ -747,6 +747,30 @@ incomparable `-1` sentinel — `AnchorSideSeeds` then seeds **both** endpoints, 
 derived set. An over-stated distance would be the unsound direction: `consider` drops the endpoint
 whose distance is larger.
 
+#### A stranded name re-bound over its own chain
+
+`withScopeReject` (`withscope.go`) refuses a lens whose `WITH` drops a name a later clause still uses:
+the rebind is a bucket scan rather than a link, so the adjacency walk cannot see the row's real
+dependency and the derived anchor set comes out **smaller** than the truth — on the auth plane, a
+revocation that never reprojects.
+
+One shape is exempt, and only one. Where the later clause re-binds the name at a **non-head** position
+of a `MATCH` pattern whose **head is still in scope**, over a chain **identical** to the one that first
+bound it — every relationship and every intervening node compared field for field, intermediate
+variable names included — the name returns to scope. Both hazards are closed for that shape rather than
+just the merge one: the head is bound, so `executor.matchPath` walks the re-binding from it instead of
+seeding a whole-bucket scan, and `hopIndexBuilder.position` merges the two occurrences by name onto one
+position whose incident hops are already the same hops, so `Hops` gains only duplicates, `Dist` is
+unchanged, and `AnchorSideSeeds` — `Dist`'s only consumer — drops no seed.
+
+Everything else keeps the refusal, and the boundary is a whitelist over a proven-identical shape rather
+than a classifier: a head-position rebind, a head the boundary did not carry, a relationship variable, a
+name whose first introduction this walk could not read exactly, a chain differing in any field, or a
+property expression the comparison cannot decide all refuse verbatim. This is what lets `pkgmgr`'s
+`generateProducerSpec` producers index at all — they stage one `WITH` per walk and several walks
+re-open the same residence chain. A producer whose walks bind **one name to unrelated chains** stays
+refused, which is the same collision `generateProducerSpec`'s own staging exists to keep apart.
+
 #### `OPTIONAL MATCH … WHERE` null-restore semantics
 
 When an `OPTIONAL MATCH` pattern matches real neighbors but a `WHERE` then excludes
@@ -2058,7 +2082,7 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   re-reading the bound. The substrate half stays unmechanized; promotion candidate: a `lint-conventions` rule
   over `internal/substrate`'s exported ctx-taking funcs. (Displaced the
   check-less *"an upsert-only reprojection retracts nothing whose key drops out"* note — its subject is the
-  delta-publication row on the board, not a review check.) Sighted again (personal-lens delta Inc 4, 2026-09-05) in a new form: a process-wide FLAG gaining a reader — `rebuildInFlight` acquired publication silence while `releaseRebuildSignal`'s doc still priced the concurrent-abandon race as "the sweep is a healer"; the stale bound hid in the flag's own comment. Promoted: `scripts/lint-flag-consumer-census.go` fails when a registered flag gains a reader the registry does not declare — the fix path is to declare it and re-read every bound the flag's comment asserts.
+  delta-publication row on the board, not a review check.) Sighted again (personal-lens delta Inc 4, 2026-09-05) in a new form: a process-wide FLAG gaining a reader — `rebuildInFlight` acquired publication silence while `releaseRebuildSignal`'s doc still priced the concurrent-abandon race as "the sweep is a healer"; the stale bound hid in the flag's own comment. Promoted: `scripts/lint-flag-consumer-census.go` fails when a registered flag gains a reader the registry does not declare — the fix path is to declare it and re-read every bound the flag's comment asserts. **Sighted again (WITH-scope re-binding narrowing, 2026-09-06), and the dropped bound is a POSITION:** the blanket refusal — any reference to a name a `WITH` dropped — was position-free because it refused everything, so the narrowing that admits "the name is re-bound over its own chain" inherited no notion of WHERE in the clause the reference sits. A `MATCH` lists several patterns and `executor.matchPatterns` evaluates them left to right, so admitting clause-wide let a stranded name that HEADS an earlier pattern — the seed `matchPath` bucket-scans — be excused by a later pattern re-opening its chain; on a required `MATCH` the later pattern constrains the scan away, on an `OPTIONAL MATCH` `nullBindNewVars` nulls only variables not already bound, so the row survives carrying the bucket-scanned binding and an actor collects anchors it has no path to, with `AnchorSideSeeds` never walking back to it. Two cold reviewers built the counterexample independently, and a third found that the vector named for the head-position rule survived every mutation of that rule. Check: when a predicate over a clause list is narrowed, name the executor function that establishes the binding (`matchPatterns` / `matchPath` / `seedNodes`) and evaluate references and admissions at ITS granularity — property maps included, since the walk evaluates them during the match — pinned by two orderings of one clause that differ only in position and must get different verdicts (`TestAnchorHopIndex_WithScope`).
 - **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒
   widen the filter" reads as safe and is, for delivery; the same unresolved answer also published an empty
   matcher, so the lens went to zero rows and a retracting lens to a mass Delete. Minted: dynamic-type-taxonomy

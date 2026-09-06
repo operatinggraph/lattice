@@ -2,6 +2,8 @@ package full
 
 import (
 	"fmt"
+	"os"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -458,6 +460,375 @@ RETURN i.key AS k, p.key AS pk`,
 			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i, count(r.key) AS r RETURN i.key AS k, r AS n`,
 			reject: "projecting a computed value under `r`",
 		},
+
+		// --- The re-binding narrowing: one admitted shape, and one refusal per
+		// way a re-reference can fall outside it. `withScopeRebindBase` is the
+		// admitted shape, and each field vector below is that query with exactly
+		// one field of the re-opening MATCH changed, so what it pins is that
+		// field and nothing else. The two structural vectors — a stranded name
+		// standing at a head, and a re-binding from a head the boundary let go
+		// of — need their own shapes, and each is written so the name the
+		// refusal reports is the one whose admission that vector denies.
+		{
+			// The shape generateProducerSpec emits: the stage boundary strands
+			// `m` and `z`, and the next stage re-opens the SAME chain from the
+			// carried head `a`. matchPath walks it from `a` rather than seeding
+			// a bucket, and the merged position's incident hops are the hops it
+			// already had, so nothing the derivation reads moves.
+			name: "a re-opened chain from a carried head re-binds the names it dropped",
+			body: withScopeRebindBase,
+		},
+		{
+			// The NON-HEAD half of the positional rule. Pattern 1 reads `u` at a
+			// non-head position over a chain that is not the one that bound it,
+			// and pattern 2 re-binds `u` correctly — but strictly afterwards, so
+			// pattern 1 still ran against whatever `u` was (nothing). Judged as
+			// one flat clause the later re-binding excuses the earlier misuse;
+			// judged positionally it cannot.
+			name: "a later pattern's re-binding does not excuse an earlier NON-HEAD use",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(u:unit)
+WITH a
+OPTIONAL MATCH (a)-[:worksAt]->(u:unit), (a)-[:residesIn]->(u:unit)
+RETURN a.key AS k, u.key AS uk`,
+			reject: "a WITH dropped `u`",
+		},
+		{
+			// The head has to be BOUND for the re-binding to be a walk. Here the
+			// chain re-opening `b` is the one that bound it, from the same head
+			// `zz` — and it is still refused, because the boundary stranded `zz`
+			// too, so matchPath seeds the whole chain from a bucket rather than
+			// walking it. `b` sorts before `zz`, so the name the refusal reports
+			// is the one whose admission this vector denies.
+			name: "a re-binding from a head the boundary did not carry is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(zz)
+OPTIONAL MATCH (zz)-[:containedIn*0..]->(b:unit)
+WITH a
+OPTIONAL MATCH (zz)-[:containedIn*0..]->(b:unit)
+RETURN a.key AS k, b.key AS bk`,
+			reject: "a WITH dropped `b`",
+		},
+		{
+			name: "a re-binding over a different relation type is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:worksAt]->(m)-[:containedIn*0..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			name: "a re-binding over the same relation in the other direction is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)<-[:residesIn]-(m)-[:containedIn*0..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// `*1..` and `*0..` reach different vertex sets — the second admits
+			// the standing node itself — so the re-binding is a different walk.
+			name: "a re-binding over a different hop range is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m)-[:containedIn*1..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			name: "a re-binding onto a different label is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m)-[:containedIn*0..]->(z:building)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			// `(z:unit*)` admits the label's whole downward closure and
+			// `(z:unit)` admits exactly one type, so the sigil alone makes two
+			// spellings of one name two different bindings.
+			name: "a re-binding that adds the taxonomy-expansion sigil is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m)-[:containedIn*0..]->(z:unit*)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			// The intermediate NAME is compared, not merely its shape: `m2` is a
+			// position the builder keyed nothing to, so a chain running through
+			// it is not the chain that bound `z`.
+			name: "a re-binding through a differently-named intermediate is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m2)-[:containedIn*0..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			name: "a re-binding whose intermediate carries a property filter is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m {tier: 'primary'})-[:containedIn*0..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// Only NODE positions are re-admitted. A relationship variable binds
+			// no pattern position the chain comparison could stand on, so a
+			// stranded one refuses even where the node beside it re-binds
+			// cleanly.
+			name: "a dropped RELATIONSHIP variable is never re-admitted",
+			body: `MATCH (a:identity {key: $actorKey})-[rel:residesIn]->(m)
+WITH a
+OPTIONAL MATCH (a)-[rel:residesIn]->(m)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `rel`",
+		},
+		{
+			// A WHERE reads bindings, it does not establish them, so a stranded
+			// name reaching one is unbound at the moment the predicate runs.
+			name: "a dropped name reaching a MATCH's WHERE is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m) WHERE m.key <> z.key
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			name: "a dropped name reaching a later WITH's own item is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+WITH a, count(z.key) AS n
+RETURN a.key AS k, n AS c`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			name: "a dropped name reaching a RETURN item is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			// The HEAD half of the positional rule, and the vector with a
+			// measured consequence behind it. matchPath evaluates a clause's
+			// patterns left to right, so pattern 1 here runs with `u` UNBOUND
+			// and seedNodes scans the whole unit bucket. traverseRel's
+			// constrained-target rule would intersect that away for a required
+			// MATCH — but this is OPTIONAL, so when pattern 2 yields nothing
+			// matchPatterns falls to nullBindNewVars, which nulls only variables
+			// NOT already bound, and the row survives carrying the scanned `u`.
+			// The anchor's projection then depends on a BUCKET while
+			// AnchorSideSeeds("unit", "locatedAt", "studio") seeds the unit end
+			// and walks residesIn back to that unit's own residents only: every
+			// other resident is an anchor the derivation never reaches. Judging
+			// the clause's names as one flat set — excusing pattern 1's use by
+			// pattern 2's re-binding — is exactly how this gets admitted.
+			name: "a re-binding written AFTER a HEAD use does not excuse it",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(u:unit)
+WITH a
+OPTIONAL MATCH (u:unit)-[:locatedAt]->(w:studio), (a)-[:residesIn]->(u:unit)
+RETURN a.key AS k, w.key AS wk`,
+			reject: "a WITH dropped `u`",
+		},
+		{
+			// The same two patterns in the executor's own order: the re-binding
+			// runs FIRST, so `u` is bound by a walk from the carried `a` before
+			// anything reads it. The two orders getting different verdicts is
+			// the point — a positional judgement is the only one that can tell
+			// them apart.
+			name: "the same clause with the re-binding first is admitted",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(u:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(u:unit), (u:unit)-[:locatedAt]->(w:studio)
+RETURN a.key AS k, w.key AS wk`,
+		},
+		{
+			// A property value is evaluated while the pattern is walked
+			// (propsAllMatch → evalExpr), so a stranded name read from an
+			// earlier pattern's property map is read just as early as a bare
+			// reference — and an `Optional` guard on the clause would not see
+			// it at all.
+			name: "a stranded name read from an earlier pattern's property map is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(u:unit)
+WITH a
+OPTIONAL MATCH (a)-[:worksAt]->(o:office {tag: u.key}), (a)-[:residesIn]->(u:unit)
+RETURN a.key AS k, o.key AS ok`,
+			reject: "a WITH dropped `u`",
+		},
+		{
+			// hopIndexBuilder.position merges by NAME and mints a fresh class
+			// for every sighting of an ANONYMOUS node, so re-opening a chain
+			// through one adds a position and two hops that duplicate nothing —
+			// a second, parallel route between the same named ends. The
+			// admission's whole soundness argument is that a re-binding adds
+			// only duplicates, so a shape that falsifies the claim is refused
+			// rather than argued about on its own terms.
+			name: "a re-binding through an unnamed intermediate is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(:place)-[:containedIn]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(:place)-[:containedIn]->(z:unit)
+RETURN a.key AS k, z.key AS zk`,
+			reject: "a WITH dropped `z`",
+		},
+		{
+			// The one part of a pattern that runs BEFORE the hop beside it: the
+			// HEAD node's property map. matchPath evaluates the head's
+			// properties at the seed (propsAllMatch), so `u` is read while it is
+			// still unbound however cleanly `-[:residesIn]->(u:unit)` re-binds it
+			// a moment later. Not a bucket scan — the head `a` is bound — but the
+			// row's filter reads a null, which is not what the query says, so the
+			// index declines rather than modelling a shape it would have to
+			// reason about separately.
+			name: "a stranded name read from the re-binding pattern's own HEAD property map is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(u:unit)
+WITH a
+OPTIONAL MATCH (a {tag: u.key})-[:residesIn]->(u:unit)
+RETURN a.key AS k, u.key AS uk`,
+			reject: "a WITH dropped `u`",
+		},
+		{
+			// The provenance rule at its NON-`With` recording site: a name a
+			// clause references but no top-level MATCH pattern position accounts
+			// for is recorded inadmissible, and stays inadmissible however
+			// cleanly a later pattern binds it. `b` is introduced by a WHERE
+			// pattern — existsAsPredicate discards those bindings — so the
+			// second clause's `(i)-[:holdsRole]->(b:role)` is not the whole story
+			// of what `b` is, and the re-open after the boundary must not be
+			// checked as though it were.
+			name: "a name a WHERE pattern introduced is never re-admitted by a later chain",
+			body: `MATCH (i:identity {key: $actorKey}) WHERE (i)-[:blocked]->(b:badge)
+MATCH (i)-[:holdsRole]->(b:role)
+WITH i
+OPTIONAL MATCH (i)-[:holdsRole]->(b:role)
+RETURN i.key AS k, b.key AS bk`,
+			reject: "a WITH dropped `b`",
+		},
+		{
+			// The same provenance rule at its `With`-boundary recording sites.
+			// `x` first appears inside a projected pattern comprehension, whose
+			// binding is comprehension-local and never reaches the outer row, so
+			// it is recorded inadmissible there — before any MATCH pattern binds
+			// the name — and the re-open two clauses later cannot appeal to the
+			// chain that came after.
+			name: "a name a WITH item introduced is never re-admitted by a later chain",
+			body: `MATCH (i:identity {key: $actorKey})
+WITH i, [ (i)-[:holdsRole]->(x:role) | x.key ] AS ks
+OPTIONAL MATCH (i)-[:worksAt]->(x:office)
+WITH i
+OPTIONAL MATCH (i)-[:worksAt]->(x:office)
+RETURN i.key AS k, x.key AS xk`,
+			reject: "a WITH dropped `x`",
+		},
+		{
+			// The vector the whole narrowing is held against, and the shape
+			// pkgmgr's staging exists to keep apart
+			// (TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart):
+			// two walks of one domain independently bind `x`. They are two
+			// bindings, not one, and merging them by name would assert a hop no
+			// row ever walks — so the boundary between them must keep refusing,
+			// whatever else it admits.
+			//
+			// The two walks differ in the RELATION ALONE (both reach a task), so
+			// deleting the relation comparison alone is enough to make this
+			// shape admit. A vector differing in several fields at once would
+			// still refuse under any single deletion and would pin none of them.
+			name: "two walks binding one name over different relations are refused",
+			body: `MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(x:task)
+WITH identity,
+  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(x.key), via: ['assignedTo']}) AS grantSlice0
+OPTIONAL MATCH (identity)<-[:queuedFor]-(x:task)
+WITH identity, grantSlice0,
+  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(x.key), via: ['queuedFor']}) AS grantSlice1
+RETURN
+  identity.key AS actorKey,
+  grantSlice0 + grantSlice1 AS readableAnchors`,
+			reject: "a WITH dropped `x`",
+		},
+		{
+			// The general collision closer, which the chain comparison alone
+			// does not provide. `m` is bound TWICE before any boundary — once by
+			// residesIn and once by worksAt — so the WITH strands a name with two
+			// incompatible provenances. The re-open repeats ONE of them exactly
+			// and would pass the chain comparison; what refuses it is noteBinding
+			// demoting `m` to inadmissible the moment its two introductions
+			// disagreed. Without that demotion the re-binding is admitted and the
+			// worksAt occurrence is merged onto a position no row reaches that
+			// way.
+			name: "a name two patterns bound over different chains is never re-admitted",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)
+OPTIONAL MATCH (a)-[:worksAt]->(m)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// The chain is identical field for field; only the HEAD it hangs off
+			// differs, and that head is carried and in scope, so nothing else
+			// here refuses. A walk from `q` binds a different set of units than
+			// the walk from `a` that first bound `m`, and the builder keys both
+			// to one position.
+			name: "an identical chain re-opened from a different head is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m:unit)
+OPTIONAL MATCH (a)-[:worksAt]->(q:identity)
+WITH a, q
+OPTIONAL MATCH (q)-[:residesIn]->(m:unit)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// The relationship's own VARIABLE is part of the chain: two
+			// spellings binding the hop under different names are two
+			// relationship bindings, and a row carries whichever one its own
+			// clause wrote.
+			name: "a re-binding naming the relationship differently is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[r1:residesIn]->(m:unit)
+WITH a
+OPTIONAL MATCH (a)-[r2:residesIn]->(m:unit)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// The UPPER bound of a range, which the `*0..` vs `*1..` vector
+			// above does not move: both of these admit the standing node, and
+			// they differ only in how far the frontier runs.
+			name: "a re-binding with a different range upper bound is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:containedIn*0..3]->(m:unit)
+WITH a
+OPTIONAL MATCH (a)-[:containedIn*0..5]->(m:unit)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// A RELATIONSHIP property map filters which links the hop may cross,
+			// so dropping it widens the walk — the same difference the node-side
+			// property vector pins, on the other half of the chain.
+			name: "a re-binding dropping a relationship property filter is refused",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn {tier: 'primary'}]->(m:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m:unit)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
+		{
+			// An ANONYMOUS head names nothing the scope walk can test for
+			// boundness — and matchPath seeds it from a bucket for exactly that
+			// reason — so the pattern admits nothing hanging off it.
+			//
+			// This one is OVER-DETERMINED and stays because the behaviour is
+			// worth stating, not because it isolates a comparison: an anonymous
+			// head is refused by the in-scope test (it is never a member of
+			// seen) AND by rebindsIdentically's head-identity test (a record is
+			// only ever `admissible` with a NAMED head, so `b.head` can never be
+			// ""). No single deletion admits it.
+			name: "a pattern with an unnamed head admits nothing",
+			body: `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m:unit)
+WITH a
+OPTIONAL MATCH (:identity)-[:residesIn]->(m:unit)
+RETURN a.key AS k, m.key AS mk`,
+			reject: "a WITH dropped `m`",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ix := indexOf(t, tc.body)
@@ -471,6 +842,405 @@ RETURN i.key AS k, p.key AS pk`,
 			require.Contains(t, ix.Incomplete, tc.reject)
 		})
 	}
+}
+
+// withScopeRebindBase is the admitted re-binding shape the refusal vectors
+// beside it are each one field away from: a boundary strands `m` and `z`, and
+// the next clause re-opens the identical chain from the carried head `a`.
+const withScopeRebindBase = `MATCH (a:identity {key: $actorKey})-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(m)-[:containedIn*0..]->(z:unit)
+RETURN a.key AS k, z.key AS zk`
+
+// generatedTwoWalkProducerGolden is the file internal/pkgmgr's
+// TestExpandReadGrantWalks_GeneratesOneProducerPerDomain asserts
+// generateProducerSpec's emission against, read here so the two tests hold ONE
+// text between them rather than two copies that can drift.
+//
+// The link runs in the direction that matters. An emission change reds the
+// pkgmgr golden first; whoever updates this file to the new emission thereby
+// changes what generatedTwoWalkProducer() below indexes, so a new shape that
+// the WITH conjunct cannot admit reds here on the same edit. A private copy
+// would have gone on measuring the old text forever. (The path is spelled out
+// rather than imported: the pkgmgr side names it from a test file, and a test
+// file's identifiers do not leave their package. A moved or renamed golden reds
+// both tests, which is the same signal.)
+const generatedTwoWalkProducerGolden = "../../../pkgmgr/testdata/generated_two_walk_producer.cypher"
+
+func generatedTwoWalkProducer(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(generatedTwoWalkProducerGolden)
+	require.NoErrorf(t, err, "read the shared generator golden %s", generatedTwoWalkProducerGolden)
+	return string(b)
+}
+
+// unstagedTwoWalkProducer is the same two walks written as ONE scope — no
+// boundary, so no name is ever stranded and no chain is ever re-opened. It is
+// the index the staged form has to agree with, and the whole soundness claim
+// stated as a comparison rather than as prose: staging changes what the
+// EXECUTOR binds row by row, and the argument for indexing it is that it
+// changes nothing the derivation reads.
+const unstagedTwoWalkProducer = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
+OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
+OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
+RETURN
+  identity.key AS actorKey,
+  tpl.key AS a,
+  prov.key AS b
+`
+
+// TestAnchorHopIndex_GeneratedProducerIndexesToTheUnstagedGraph is the positive
+// vector for the re-binding narrowing, measured against the graph the same
+// walks produce with no boundary between them.
+//
+// `Complete` alone would only say the predicate stopped refusing. What licenses
+// the pipeline to act on this lens's derived anchor set is the stronger claim
+// judgeMatch makes: because each re-opened chain is identical to the one
+// that first bound its names, hopIndexBuilder.position merges the two sightings
+// onto the position that already existed, so the staged graph is the unstaged
+// graph plus DUPLICATE hops — same positions, same labels, same distances, and
+// the same seeds for every relation either of them can bind.
+func TestAnchorHopIndex_GeneratedProducerIndexesToTheUnstagedGraph(t *testing.T) {
+	staged := indexOf(t, generatedTwoWalkProducer(t))
+	require.True(t, staged.Complete,
+		"the generator's own emission must index, not fall back — got %q", staged.Incomplete)
+
+	unstaged := indexOf(t, unstagedTwoWalkProducer)
+	require.True(t, unstaged.Complete, "%s", unstaged.Incomplete)
+
+	require.Equal(t, unstaged.Labels, staged.Labels, "the boundary creates no position of its own")
+	require.Equal(t, unstaged.LabelExpand, staged.LabelExpand)
+	require.Equal(t, unstaged.Anchor, staged.Anchor)
+	require.Equal(t, unstaged.Dist, staged.Dist,
+		"Dist is computed from Hops, and the re-opens add only hops that were already there")
+
+	// Hops as SETS, and the multiset difference stated rather than left
+	// implicit: the staged form carries strictly more hop records (the
+	// residence chain appears once per stage), and every one of them is a hop
+	// the unstaged graph already had.
+	require.Greater(t, len(staged.Hops), len(unstaged.Hops),
+		"the re-opened chain really is emitted twice, or this comparison pins nothing")
+	require.ElementsMatch(t, uniqueHops(unstaged.Hops), uniqueHops(staged.Hops))
+
+	// The seeds are what the pipeline acts on, so they are asserted per
+	// relation rather than inferred from the graph above. Duplicated hops
+	// duplicate seeds; the SET is what a consumer reprojects.
+	for _, link := range []struct{ src, rel, dst string }{
+		{"identity", "residesIn", ""},
+		{"", "containedIn", ""},
+		{"service", "availableAt", ""},
+		{"provider", "practicesAt", ""},
+	} {
+		want := uniqueSeeds(unstaged.AnchorSideSeeds(link.src, link.rel, link.dst))
+		got := uniqueSeeds(staged.AnchorSideSeeds(link.src, link.rel, link.dst))
+		require.NotEmptyf(t, want, "the unstaged graph must seed `%s`, or the comparison pins nothing", link.rel)
+		require.ElementsMatchf(t, want, got, "staging moved the seeds for `%s`", link.rel)
+	}
+}
+
+func uniqueHops(hops []PatternHop) []PatternHop {
+	seen := map[PatternHop]struct{}{}
+	out := make([]PatternHop, 0, len(hops))
+	for _, h := range hops {
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
+	return out
+}
+
+func uniqueSeeds(seeds []Seed) []Seed {
+	seen := map[Seed]struct{}{}
+	out := make([]Seed, 0, len(seeds))
+	for _, s := range seeds {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestWithScopeReject_UnmodelledPropertyExpressionRefusesTheRebind holds the
+// chain comparison to its default-deny arm. Two chains are identical only where
+// every field the AST carries compares exactly, property maps included — and a
+// property whose value is a shape sameExpr cannot decide (an embedded pattern
+// here) is not a shape it may call equal. Refusing costs one BFS fallback;
+// guessing costs a grant that outlives its revocation.
+//
+// Built as a clause list rather than as cypher because the parser has no
+// spelling for a pattern inside a property map: the AST admits it, so the
+// comparison has to answer for it.
+func TestWithScopeReject_UnmodelledPropertyExpressionRefusesTheRebind(t *testing.T) {
+	// An anonymous pattern, so the property expression introduces no variable
+	// of its own — the only stranded name in the query is `m`, and the only
+	// thing that can refuse its re-binding is the property comparison.
+	residence := func() PathPattern {
+		return PathPattern{
+			Nodes: []NodePattern{
+				{Variable: "a", Label: "identity", Properties: map[string]Expr{"key": &ParameterRef{Name: "actorKey"}}},
+				{Variable: "m", Properties: map[string]Expr{"within": &PatternExpr{Pattern: PathPattern{
+					Nodes: []NodePattern{{Label: "unit"}, {Label: "building"}},
+					Rels:  []RelPattern{{Type: "containedIn", Direction: DirOut, MinHops: 1, MaxHops: 1}},
+				}}}},
+			},
+			Rels: []RelPattern{{Type: "residesIn", Direction: DirOut, MinHops: 1, MaxHops: 1}},
+		}
+	}
+	clauses := []Clause{
+		&Match{Patterns: []PathPattern{residence()}},
+		&With{Items: []ProjectionItem{{Expr: &VariableRef{Name: "a"}}}},
+		&Match{Optional: true, Patterns: []PathPattern{residence()}},
+		&Return{Items: []ProjectionItem{{Expr: &PropertyAccess{Target: &VariableRef{Name: "a"}, Key: "key"}, Alias: "k"}}},
+	}
+	require.Contains(t, withScopeReject(clauses), "a WITH dropped `m`")
+}
+
+// TestWithScopeReject_HoldsNothingAcrossCalls pins that the walk's answer is a
+// function of the clauses alone. It builds and MUTATES scope sets as it goes —
+// a re-binding deletes from the dropped set — and every one of them has to be
+// per-call state: a compiled rule is shared across concurrent evaluations, and
+// AnchorHopIndex asks this question again on every re-derivation.
+//
+// Repeating one query would pin nothing: a set that leaked between calls would
+// still be the SAME set, and the second answer would match the first by
+// accident. So the queries are INTERLEAVED — an admitting one, a refusing one
+// whose refused name is not a name the first query mentions, and a third — and
+// each is re-asked after the others have run. A leaked `dropped` or `bound`
+// would carry one query's stranded names into the next and change an answer
+// here; and the same interleaving is then run CONCURRENTLY, which is how the
+// pipeline really asks it, so shared state shows up as a data race under
+// `-race` as well as a wrong verdict.
+func TestWithScopeReject_HoldsNothingAcrossCalls(t *testing.T) {
+	type vector struct {
+		name    string
+		clauses []Clause
+		want    string
+	}
+	vectors := []vector{
+		{name: "admitted rebind", clauses: parseFull(t, withScopeRebindBase).Query.Clauses, want: ""},
+		{name: "generated producer", clauses: parseFull(t, generatedTwoWalkProducer(t)).Query.Clauses, want: ""},
+		{name: "refused rebind", clauses: parseFull(t, `MATCH (a:identity {key: $actorKey})-[:worksAt]->(q:office)
+WITH a
+OPTIONAL MATCH (a)-[:residesIn]->(q:office)
+RETURN a.key AS k, q.key AS qk`).Query.Clauses, want: "a WITH dropped `q`"},
+		{name: "no WITH at all", clauses: parseFull(t, shippedCapabilityRoles).Query.Clauses, want: ""},
+	}
+	check := func(t *testing.T, v vector) {
+		t.Helper()
+		got := withScopeReject(v.clauses)
+		if v.want == "" {
+			require.Emptyf(t, got, "%s must stay admitted", v.name)
+			return
+		}
+		require.Containsf(t, got, v.want, "%s must stay refused on the same name", v.name)
+	}
+
+	// Two full interleaved passes: every vector is asked once with a clean
+	// walk, then again only after every other vector has run one.
+	for pass := 0; pass < 2; pass++ {
+		for _, v := range vectors {
+			check(t, v)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, v := range vectors {
+				check(t, v)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestWithScopeComparisons_CompareEveryShapeTheyClaimTo is the direct unit test
+// for the chain comparison's expression half.
+//
+// It is here because that half is otherwise reached only through its
+// default-deny arm: the query-level vectors differ in a relation type or a
+// label, so every equality branch of sameExpr / sameExprs / sameLiteralValue
+// runs but none of them decides anything, and a branch that started answering
+// "equal" for two DIFFERENT expressions would leave the whole suite green while
+// widening the admission. Each row below is one shape the comparison claims to
+// decide, asked once with a pair it must call identical and once with a pair it
+// must not.
+//
+// sameExpr's own doc states the reason the last rows exist: it must never reach
+// `==` on a dynamic type that cannot be compared, and a shape it does not model
+// answers "not identical" rather than guessing.
+func TestWithScopeComparisons_CompareEveryShapeTheyClaimTo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		a, b    Expr
+		same    bool
+		differs Expr // compared against a; must answer false
+	}{
+		{
+			name: "a literal string", a: &Literal{Value: "x"}, b: &Literal{Value: "x"}, same: true,
+			differs: &Literal{Value: "y"},
+		},
+		{
+			name: "a literal int", a: &Literal{Value: int64(3)}, b: &Literal{Value: int64(3)}, same: true,
+			differs: &Literal{Value: int64(4)},
+		},
+		{
+			name: "a literal float", a: &Literal{Value: 1.5}, b: &Literal{Value: 1.5}, same: true,
+			differs: &Literal{Value: 2.5},
+		},
+		{
+			name: "a literal bool", a: &Literal{Value: true}, b: &Literal{Value: true}, same: true,
+			differs: &Literal{Value: false},
+		},
+		{
+			// A literal null equals a literal null and nothing else — including
+			// an int, which is where a bare `==` on `any` would answer false
+			// only by luck of the dynamic types lining up.
+			name: "a literal null", a: &Literal{Value: nil}, b: &Literal{Value: nil}, same: true,
+			differs: &Literal{Value: int64(0)},
+		},
+		{
+			// The arm the type switch exists for: a dynamic type `==` would
+			// PANIC on. It must answer false, not crash and not guess.
+			name: "a literal holding an uncomparable dynamic type",
+			a:    &Literal{Value: []string{"a"}}, b: &Literal{Value: []string{"a"}}, same: false,
+			differs: &Literal{Value: []string{"b"}},
+		},
+		{
+			name: "a parameter", a: &ParameterRef{Name: "actorKey"}, b: &ParameterRef{Name: "actorKey"}, same: true,
+			differs: &ParameterRef{Name: "now"},
+		},
+		{
+			name: "a variable", a: &VariableRef{Name: "u"}, b: &VariableRef{Name: "u"}, same: true,
+			differs: &VariableRef{Name: "v"},
+		},
+		{
+			name: "a property access",
+			a:    &PropertyAccess{Target: &VariableRef{Name: "u"}, Key: "key"},
+			b:    &PropertyAccess{Target: &VariableRef{Name: "u"}, Key: "key"}, same: true,
+			differs: &PropertyAccess{Target: &VariableRef{Name: "u"}, Key: "name"},
+		},
+		{
+			name: "a property access differing only in its target",
+			a:    &PropertyAccess{Target: &VariableRef{Name: "u"}, Key: "key"},
+			b:    &PropertyAccess{Target: &VariableRef{Name: "u"}, Key: "key"}, same: true,
+			differs: &PropertyAccess{Target: &VariableRef{Name: "w"}, Key: "key"},
+		},
+		{
+			name: "a binary op",
+			a:    &BinaryOp{Op: "=", Left: &VariableRef{Name: "u"}, Right: &Literal{Value: "x"}},
+			b:    &BinaryOp{Op: "=", Left: &VariableRef{Name: "u"}, Right: &Literal{Value: "x"}}, same: true,
+			differs: &BinaryOp{Op: "<>", Left: &VariableRef{Name: "u"}, Right: &Literal{Value: "x"}},
+		},
+		{
+			name: "an AND/OR",
+			a:    &AndOr{Op: "AND", Operands: []Expr{&VariableRef{Name: "u"}, &VariableRef{Name: "v"}}},
+			b:    &AndOr{Op: "AND", Operands: []Expr{&VariableRef{Name: "u"}, &VariableRef{Name: "v"}}}, same: true,
+			differs: &AndOr{Op: "AND", Operands: []Expr{&VariableRef{Name: "u"}}},
+		},
+		{
+			name: "an AND/OR differing only in operand order",
+			a:    &AndOr{Op: "OR", Operands: []Expr{&VariableRef{Name: "u"}, &VariableRef{Name: "v"}}},
+			b:    &AndOr{Op: "OR", Operands: []Expr{&VariableRef{Name: "u"}, &VariableRef{Name: "v"}}}, same: true,
+			differs: &AndOr{Op: "OR", Operands: []Expr{&VariableRef{Name: "v"}, &VariableRef{Name: "u"}}},
+		},
+		{
+			name: "a negation",
+			a:    &Not{Operand: &VariableRef{Name: "u"}}, b: &Not{Operand: &VariableRef{Name: "u"}}, same: true,
+			differs: &Not{Operand: &VariableRef{Name: "v"}},
+		},
+		{
+			name: "a function call",
+			a:    &FunctionCall{Name: "collect", Distinct: true, Args: []Expr{&VariableRef{Name: "u"}}},
+			b:    &FunctionCall{Name: "collect", Distinct: true, Args: []Expr{&VariableRef{Name: "u"}}}, same: true,
+			differs: &FunctionCall{Name: "collect", Distinct: false, Args: []Expr{&VariableRef{Name: "u"}}},
+		},
+		{
+			name: "a namespaced function call",
+			a:    &FunctionCall{Namespace: []string{"lattice"}, Name: "f"},
+			b:    &FunctionCall{Namespace: []string{"lattice"}, Name: "f"}, same: true,
+			differs: &FunctionCall{Namespace: []string{"other"}, Name: "f"},
+		},
+		{
+			name: "a map literal",
+			a:    &MapLiteral{Keys: []string{"k"}, Values: map[string]Expr{"k": &Literal{Value: "v"}}},
+			b:    &MapLiteral{Keys: []string{"k"}, Values: map[string]Expr{"k": &Literal{Value: "v"}}}, same: true,
+			differs: &MapLiteral{Keys: []string{"k"}, Values: map[string]Expr{"k": &Literal{Value: "w"}}},
+		},
+		{
+			name: "a map literal differing only in its key",
+			a:    &MapLiteral{Keys: []string{"k"}, Values: map[string]Expr{"k": &Literal{Value: "v"}}},
+			b:    &MapLiteral{Keys: []string{"k"}, Values: map[string]Expr{"k": &Literal{Value: "v"}}}, same: true,
+			differs: &MapLiteral{Keys: []string{"j"}, Values: map[string]Expr{"j": &Literal{Value: "v"}}},
+		},
+		{
+			name: "a list literal",
+			a:    &ListLiteral{Elements: []Expr{&Literal{Value: "a"}, &Literal{Value: "b"}}},
+			b:    &ListLiteral{Elements: []Expr{&Literal{Value: "a"}, &Literal{Value: "b"}}}, same: true,
+			differs: &ListLiteral{Elements: []Expr{&Literal{Value: "a"}}},
+		},
+		{
+			name: "a CASE",
+			a: &CaseExpr{Alternatives: []CaseWhenThen{{When: &VariableRef{Name: "u"}, Then: &Literal{Value: "y"}}},
+				Else: &Literal{Value: "n"}},
+			b: &CaseExpr{Alternatives: []CaseWhenThen{{When: &VariableRef{Name: "u"}, Then: &Literal{Value: "y"}}},
+				Else: &Literal{Value: "n"}}, same: true,
+			differs: &CaseExpr{Alternatives: []CaseWhenThen{{When: &VariableRef{Name: "u"}, Then: &Literal{Value: "y"}}},
+				Else: &Literal{Value: "maybe"}},
+		},
+		{
+			// An embedded pattern is a shape the comparison does not model, so
+			// it is not identical even to itself — the default-deny arm, which
+			// is what a property map carrying one relies on.
+			name: "an embedded pattern is never identical, even to a copy of itself",
+			a:    &PatternExpr{Pattern: PathPattern{Nodes: []NodePattern{{Label: "unit"}}}},
+			b:    &PatternExpr{Pattern: PathPattern{Nodes: []NodePattern{{Label: "unit"}}}}, same: false,
+			differs: &PatternExpr{Pattern: PathPattern{Nodes: []NodePattern{{Label: "building"}}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equalf(t, tc.same, sameExpr(tc.a, tc.b), "identical pair")
+			require.False(t, sameExpr(tc.a, tc.differs), "differing pair must never compare identical")
+			require.False(t, sameExpr(tc.differs, tc.a), "and the comparison is symmetric")
+		})
+	}
+
+	// Shapes with no expression inside them: a nil pair is identical, a nil
+	// against anything is not, and a typed-nil *Literal answers rather than
+	// panicking.
+	require.True(t, sameExpr(nil, nil))
+	require.False(t, sameExpr(nil, &Literal{Value: "x"}))
+	require.False(t, sameExpr(&Literal{Value: "x"}, nil))
+	require.False(t, sameExpr((*Literal)(nil), &Literal{Value: "x"}))
+	require.False(t, sameExpr(&Literal{Value: "x"}, (*Literal)(nil)))
+
+	// sameExprs is length-sensitive before it is element-sensitive.
+	require.True(t, sameExprs(nil, nil))
+	require.True(t, sameExprs([]Expr{&VariableRef{Name: "u"}}, []Expr{&VariableRef{Name: "u"}}))
+	require.False(t, sameExprs([]Expr{&VariableRef{Name: "u"}}, nil))
+
+	// samePropertyMaps compares the KEY SET and each value, so a map differing
+	// only in a value — same length, same keys — must still answer false. Every
+	// query-level property vector differs in length and would pass a comparison
+	// that only counted.
+	require.True(t, samePropertyMaps(nil, nil))
+	require.True(t, samePropertyMaps(
+		map[string]Expr{"tier": &Literal{Value: "primary"}},
+		map[string]Expr{"tier": &Literal{Value: "primary"}}))
+	require.False(t, samePropertyMaps(
+		map[string]Expr{"tier": &Literal{Value: "primary"}},
+		map[string]Expr{"tier": &Literal{Value: "backup"}}))
+	require.False(t, samePropertyMaps(
+		map[string]Expr{"tier": &Literal{Value: "primary"}},
+		map[string]Expr{"rank": &Literal{Value: "primary"}}))
 }
 
 // TestWithScopeReject_EmptyProjectionList pins the WITH conjunct's answer for a

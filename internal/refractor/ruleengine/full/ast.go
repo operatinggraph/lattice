@@ -554,6 +554,15 @@ func (cr *CompiledRule) ValidateNoFilteringWhereForConvergence() error {
 // pass — reading "could not tell" as "does not depend" is the fail-open
 // direction, and the flag exists so no caller can take it by accident.
 //
+// The scope walk admits one re-read across a boundary — a later MATCH re-walking
+// the IDENTICAL chain from a head that is still carried and bound (judgeMatch) —
+// and that shape needs no separate argument here, because this walk reads the
+// AST rather than the row set. It asks, per clause, whether a REQUIRED pattern
+// or a WHERE reaches an element other than the anchor; a re-opened chain is
+// judged exactly as the chain it repeats would be, in the clause it is written
+// in. A re-binding can therefore add a clause to weigh but can never make an
+// already-weighed one mean something else.
+//
 // reasons names each dependency found, in clause order and de-duplicated, so a
 // refusal an operator reads says which variable carries the dependency rather
 // than only that one does.
