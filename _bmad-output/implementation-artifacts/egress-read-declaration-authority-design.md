@@ -802,3 +802,93 @@ grounding rather than the row's. Thirteen corrections, folded into the body abov
 13. **Contract posture settled at ratification (Andrew)**: no transitional note — contracts carry
     observable promises only — and the two lines land with Increment 1's commit rather than ahead of the
     runtime; they are held out of the tree until then, text of record in §7 — §7, §9.
+
+---
+
+### Fire brief (build note, 2026-09-06 — steward fire `claude/bold-tesla-7swasr`)
+
+**1. Scope sentence (verbatim, §3 + §9).** *An egress declaration is the platform speaking to itself, so only the
+platform's own engines may make one — and no Loom call site should be able to make one by accident.* One fire,
+XS + S, Increment 2 first. Green bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go test ./internal/loom/... ./internal/processor/...` ·
+`make test-lease-convergence` (the `leaseshortwindow` harness) · CI green on `main`.
+
+**2. Verified touch-list (checked live 2026-09-06; the design's line cites drifted, none rotted).**
+- Inc 2 — `internal/loom/actuator.go:142` `buildOutbox(... egressReads []string)`; `:102-109` the relay envelope's
+  `ContextHint.EgressReads` from the record (unchanged). `internal/loom/engine.go` call sites: `:939` systemOp
+  (`nil`), `:1081-1082` userTask (`nil`), `:1154-1158` externalTask (**the one non-nil supplier**, via
+  `inferExternalTaskReads(inst.SubjectKey, step.Params)` at `externaltask_params.go:42`), `:1188-1189`
+  completePattern (`nil`), `:1224` failPattern (`nil`). Test: `internal/loom/systemop_reads_internal_test.go:407`
+  already asserts a systemOp record carries no egress list.
+- Inc 1 — `internal/processor/step4_hydrate.go:196` (`declared := declaredReadsFromEnvelope(env)`; the predicate
+  goes immediately after, before the floor at `:209-213` and the NFR-S6 closure at `:229-233`);
+  `HydratorImpl.PrimordialActors` at `:51-57`; `HydrationError` at `script_context.go:244-249`;
+  `classifyStepError` at `commit_path.go:1081-1087` (copies `Code` + `MissingKey` into `details`, so a blank key
+  renders `"missingKey": ""`); the NFR-S6 reply seam `commit_path.go:1161-1181` (`replyRejection` collapses on
+  `operationType`, records `claimOutcomePlatformRefused` when the outcome is blank); `nfr_s6_wire_shape.go:32-35`
+  the two-op set. Wiring: `cmd/processor/main.go:418-421` (`{"loom","weaver"}` literal), `commit_path.go:1342`.
+  Contract: `docs/contracts/02-operation-envelope.md:37` (§2.3 `contextHint` row) and `:139` (§2.5 class (f) row).
+- Test migration (predicate row 5): `internal/processor`'s **internal** tests hydrate egress keys under
+  `newTestEnvelope`'s actor `vtx.identity.<testNanoID2>` on hydrators with no `PrimordialActors` —
+  `sensitive_egress_test.go` (9 sites), `sensitive_decrypt_deleted_test.go:348`, `sensitive_decrypt_keyid_test.go:159,182`,
+  `descriptor_floor_test.go:198,228` (`TestHydrate_FlooredEgressAbsenceIsKnownNotRequired`), `derive_reads_test.go:271`
+  (via `hydrateWithDerivation`, `:53`), `step4_hydrate_test.go:403`. These cannot import `internal/testutil`
+  (cycle), so the sanctioned route is an in-package test helper wiring a fixed primordial map onto the hydrator
+  and stamping the envelope actor — **never a test-only arm in the predicate**. `descriptor_floor_test.go:1149-1169`
+  (`TestHydrate_NFRS6ClosedDeclaredSet`'s egressReads row) asserts `UndeclaredContextHintKey`; per §5.2 row 6 the
+  new predicate fires first for a non-primordial submitter, so that row's expected code becomes
+  `EgressDeclarationUnauthorized` (MissingKey still blank) — the wire pin (§6.5) is what holds the outcome fixed.
+  `TestRefuseUndeclaredContextHint` (`:776`) drives the closure function directly and is unaffected. Every
+  `testutil.NewPipeline` consumer already wires `PrimordialActors` (`internal/testutil/pipeline.go:312`, helper `:463`).
+
+**3. Precedents to mirror.** `refuseUndeclaredContextHint` (`descriptor_floor.go:511-541`): Warn with
+`operationType`/`requestId` + the refused fact, `HydrationError` with a code that names the rule, `MissingKey`
+blank, `Cause` text that quotes no key. `primordialActorToStarlark` (`starlark_runner.go:810`) for the
+membership-over-values idiom. Loom: `inferExternalTaskReads` stays the single derivation; the new constructor
+wraps it exactly as the externalTask arm does today.
+
+**4. Increment order + green checks.**
+- **Inc 2 (Loom, XS, mechanical).** Drop the parameter; `buildExternalTaskOutbox(requestID, operation, payload,
+  target, lane, actor, subjectKey, params)` derives reads + egressReads itself; four call sites lose a `nil`.
+  Tests: a unit test that `buildOutbox`'s record carries no egress declaration (whatever its arguments) and that
+  the externalTask constructor derives the egress set from the params template (positive vector) — plus the
+  existing `:407`. Green: `go test ./internal/loom/...`, `go build ./...`.
+- **Inc 1 (Processor, S, posture-changing).** `primordialEngineActor(actor, m)`; the predicate at the step-4
+  head; code `EgressDeclarationUnauthorized`; Warn `operationType`/`requestId`/`actor`/`declaredCount`. Pins:
+  §6.5 negative (non-primordial actor ⇒ terminal `HydrationError`, code as above, `MissingKey == ""`, fault text
+  quotes no key) **with its positive vector** (same envelope under a primordial actor hydrates the ref); the empty
+  map / empty actor / empty map-value arms (row 5); the **NFR-S6 masking pin** — `ClaimIdentity` carrying
+  `egressReads` from a non-primordial submitter replies `ErrCodeClaimKeyInvalid` + `claimRejectionMessage` + nil
+  details and records exactly one `claimOutcomePlatformRefused` claim attempt (mirror
+  `TestNFRS6_EveryCollapsedRejectionIsAccounted`'s `recordingClaimEmitter` + `dispatchAndReply`). The contract's
+  two lines (§7) land in this increment's commit. Green: `go test ./internal/processor/...`, then
+  `make test-lease-convergence`, then the full gate list in part 1.
+- Revert-proof every guard: delete the predicate ⇒ the negative fails; delete the constructor's
+  `inferExternalTaskReads` call ⇒ the positive fails; the builder's report lists each guard beside its reddening
+  test (processor dossier, seventh sighting).
+
+**5. In-scope gotchas.** Censuses §6.1–§6.3 re-run 2026-09-06 and hold: producers = `loom/actuator.go` (×2) +
+`processor/derive_reads.go:79`; 7 `actor-guard:` annotations, all `(primordial)`, zero `(caller-guarded)`; all 7
+external emitters granted `Scope:"any"`; zero `egressReads` in JS/TS. §6.4: 17 test files / 24 sites — the
+in-package processor list above is the part the predicate reaches. The design cites the `leaseshortwindow`
+harness as mandatory (`Makefile:1908`, the three `TestLeaseConvergence_SensitiveParamEgress_*` tests match its
+first `-run` filter). No Health-KV emission changes. No `packages/` content edit (no version bump owed).
+Dossier entries copied in — Processor: *a gate's negative test must first prove its positive vector reaches the
+gate* (seventh sighting's report shape: every guard beside its reddening test); *a guard whose SUBJECT is
+computed from submitter-supplied input is not a guard* (the admitted set here is `PrimordialActors`, a
+Processor-wiring literal — state in one sentence that no envelope field reaches its derivation); *a new refusal
+placed ahead of an existing one changes which one fires* (§5.2 row 6 — pin the wire shape). Loom: *a fixture that
+hand-seeds `loom-state` cannot reach the states a real transition leaves behind* (the `:407` precedent reads the
+record back through a real `transition`). Standing checklist #2 (every census is a premise — re-run, done above)
+and #3 (positive vector first; revert-prove) apply.
+
+**6. Adjacent finds.** None new. §10.2's "the admitted set has no gate" is recorded in the design and is not this
+fire's to widen (a `PrimordialActors` membership pin is a one-line decision Andrew left with the wider set).
+
+**7. Non-goals.** No change to `contextHint.reads` (§10.5), no bridge/MAC/custody change, no new envelope
+field, no descriptor vocabulary, no `readScope` revival (§8.2), no narrowing of the raw `ops.>` publisher
+position (For Andrew (iv)), the seven package actor pins stay (§3.4).
+
+**Scope-diff gate:** every touch above traces to the scope sentence; the brief narrows nothing and substitutes
+nothing. Declared dependency re-verified both ways: Inc 1's test migration lands against Inc 2's reduced surface
+(Loom is the sole producer either way), and Inc 2 does not depend on Inc 1.
