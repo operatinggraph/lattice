@@ -49,6 +49,12 @@
 > are test-pinned, not asserted. `8dea6284` is confirmed as the prior cypher-rewrite precedent §10 D
 > prices on both sides.
 >
+> **Build-time correction, 2026-09-06 (Increment 2 shipped).** The banner's *"the two lenses the live
+> symptom actually names"* holds for the **blocker** and not for the **payoff**: the WITH refusal masks
+> both producers, and lifting it converts only `edgeManifestStaffReadGrants`. `edgeManifestReadGrants`
+> carries a *second* stranded name, `op`, bound over unrelated chains in two of its walks — a real
+> collision the narrowing must refuse. §5 carries the correction; §6.1, §6.3, §13 and §14 are amended.
+>
 > **Standing obligation carried into the build:** Phase 0 of Increment 1 runs census **C3** and **stops
 > if its expectation fails** — §6's payoff table and the increment split are derived from it. C4's live
 > figures are a build-time re-derivation, before and after.
@@ -273,6 +279,20 @@ pattern that is **textually identical** to the earlier one — the generator emi
 `chainResidence` string. So the merge adds no hop that was not already in the graph; it adds the same
 hops twice.
 
+**Amended at build, 2026-09-06 — this section's premise is right and its payoff claim is wrong.** The
+`chainResidence` re-opening is exactly as described, and the narrowing below admits it. But it is not the
+*only* thing a stage boundary strands in `edgeManifestReadGrants`: three of `edgeCatalog`'s walks bind
+`op` to a `meta` over **three unrelated chains** — `(tpl)-[:permitsOperation]->(op:meta)`,
+`(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)` and
+`(task)-[:forOperation]->(op:meta)` (`packages/edge-manifest/lenses.go:139,148,157`) — and two of them
+land in the **base** producer. That is the colliding-walk-variable shape `generateProducerSpec`'s own
+guard exists to keep apart (`TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart`): the two
+occurrences are not one binding, and merging them would assert a hop no row walks. The narrowing
+therefore **must** refuse it, and does. **Increment 2 converts `edgeManifestStaffReadGrants` only**
+(one `op` occurrence, no collision); the base producer's closer is per-walk anchor-variable scoping,
+which the shared `edgeCatalogTail` (`op` and `role` by name) makes a real mechanism question rather
+than a rename — filed as its own 📐 designer row. §6.1, §6.3, §13 and §14 are amended to match.
+
 **Increment 2 narrows the refusal to exactly that case:** a dropped name re-bound at a **non-head**
 position of a pattern whose head is a **carried** variable, where the re-binding pattern is
 **structurally identical** (same relation types, directions, ranges and labels along the path from the
@@ -305,7 +325,7 @@ rows 10–11), and a multi-walk lens gets no index at all (row 12).
 | Lens | Kind | After Inc 1 | After Inc 1+2 |
 |---|---|---|---|
 | **capabilityServiceAccess** | actorAggregate | **converts** | converts |
-| **edgeManifestReadGrants** | actorAggregate (generated) | still refused — `withReject` | **converts** |
+| **edgeManifestReadGrants** | actorAggregate (generated) | still refused — `withReject` | still refused — `withReject`, on `op` (amended 2026-09-06, §5) |
 | **edgeManifestStaffReadGrants** | actorAggregate (generated) | still refused — `withReject` | **converts** |
 | edgeServices | Personal | refused — `patternClosedOutput`, `sweeper == nil` | unchanged |
 | edgeEntityProviders | Personal | idem | unchanged |
@@ -340,11 +360,13 @@ change, independent of whether the derivation then answers. T7 pins it.
 ### 6.3 What the payoff actually is
 
 **Increment 1:** one auth-plane `cap.svc.*` producer + four plain business lenses off the BFS.
-**Increment 2:** the two `cap-read.edgeManifest*` producers — the lenses in the live evidence.
+**Increment 2 (amended 2026-09-06, measured at build):** **one** of the two `cap-read.edgeManifest*`
+producers — `edgeManifestStaffReadGrants` (57k events at the hub-walk fire's read). The base producer
+stays on the BFS behind a second refusal this narrowing must not admit (§5).
 
-Honest and narrow. The value is not breadth; it is that `capabilityServiceAccess` and the two
-read-grant producers are authorization surfaces whose re-execution cost is what suppresses the sweep
-and lags nineteen co-tenant lenses.
+Honest and narrow. The value is not breadth; it is that `capabilityServiceAccess` and the read-grant
+producers are authorization surfaces whose re-execution cost is what suppresses the sweep and lags
+nineteen co-tenant lenses. Half that population is what Increment 2 actually buys.
 
 ### 6.4 One narrowing that does *not* fire, checked rather than assumed
 
@@ -406,6 +428,24 @@ Where any part of that fails — the head is not carried, the name heads a patte
 a relation type, a direction, a range or a label — the refusal stands verbatim. The narrowing is a
 whitelist over a proven-identical shape, not a classifier, which is what keeps it on the safe side of
 `withScopeReject`'s stated posture.
+
+**Amended at build, 2026-09-06 — the condition carries a POSITION, and stating it clause-wide is
+unsound.** A `MATCH` may list several comma-separated patterns, and `executor.matchPatterns` evaluates
+them left to right, so "the name is re-bound over its own chain" has to hold *at the point of each
+reference*, not somewhere in the clause. Admitting clause-wide lets a stranded name that HEADS an
+earlier pattern — the seed `matchPath` bucket-scans — be excused by a later pattern re-opening its
+chain. On a required `MATCH` the later pattern does constrain the scan away; on an `OPTIONAL MATCH` it
+does not, because `nullBindNewVars` nulls only variables not already bound, so the row survives
+carrying the bucket-scanned binding. Two cold reviewers built that query independently and traced it to
+an actor collecting anchors it has no path to, with `AnchorSideSeeds` never walking back to it — the
+under-approximation this unit exists to refuse. The shipped predicate therefore evaluates references
+and admissions **per pattern, in AST order** (the head node's own property map judged first, since
+`matchPath` evaluates it at the seed), with the clause's `WHERE` judged last against the final scope.
+Two further conjuncts came from the same rounds: every intermediate node on the compared chain must be
+**named**, because `position()` mints a fresh class for each unnamed node so an anonymous intermediate
+makes "`Hops` gains only duplicates" false; and a name whose first introduction the walk could not read
+exactly — a `WHERE` pattern expression, a projection alias, a pattern comprehension — is recorded
+inadmissible and can never be promoted by a later chain.
 
 ---
 
@@ -582,8 +622,9 @@ commit message.** The `lint-lens-anchors` rule from §7.2 ships here. Metrics: t
 `recordDerivationFellBack` counter, plus a ranged-closure read count so the read cap's firing rate is
 visible. Tests T1–T8, T11.
 
-**Increment 2 — the WITH narrowing** (engine; converts the two `cap-read.edgeManifest*` producers —
-the live symptom). Depends on Increment 1 only for the census baseline, not for code. `withScopeReject`
+**Increment 2 — the WITH narrowing** (engine; converts `edgeManifestStaffReadGrants` — amended
+2026-09-06 from "the two `cap-read.edgeManifest*` producers", per §5). Depends on Increment 1 only for
+the census baseline, not for code. `withScopeReject`
 gains the structural-identity whitelist (§5, §7.3). Tests T9, T10, T12. **HELD at ratification
 (Andrew, 2026-08-27) — revive trigger: Increment 1 shipped and observed live (C4 re-derived after)
 with no derivation-soundness regression.** The hold is deliberate and its reason is the security
@@ -618,7 +659,7 @@ re-openings after Increment 2 lands.
 | T9 | The WITH narrowing admits the generated producer shape | the `anchorwalk_test.go` golden cypher indexes; assert the derived set equals the BFS's | 2 |
 | T10 | The WITH narrowing refuses everything else | one vector each: head-position rebind, non-carried head, a path differing in relation type / direction / range / label | 2 |
 | T11 | The walk holds nothing across events | two consecutive derivations on disjoint graphs; assert no carry | 1 |
-| T12 | e2e: a `containedIn` link create reprojects only the affected actor for `edgeManifestReadGrants` | extend the capability e2e harness; assert the re-execution count | 2 |
+| T12 | e2e: a `containedIn` link create reprojects only the affected actor for `edgeManifestStaffReadGrants` (amended 2026-09-06 — the base producer does not convert, §5) | extend the capability e2e harness; assert the derivation acts rather than falls back, that an unaffected actor's row is untouched, and that the derived set agrees with the enumerator's | 2 |
 | T13 | Corpus censuses move exactly as C3 predicted, and no other row moves | the two harnesses, with the argument per moved row | 1, 2 |
 
 **Fixture discipline:** §9's classes need synthetic graphs — the corpus's containment trees are
@@ -947,8 +988,10 @@ the package confirms has no existing normalizer to reuse (stated, not assumed).
    `WHERE`, a `WITH` item, a `RETURN`). → same
 4. **Census** — the two pin rows move, each carrying its argument. →
    `go test ./internal/refractor/ -count=1`
-5. **T12 e2e** — a `containedIn` link create reprojects only the affected actor for
-   `edgeManifestReadGrants`. → `go test ./internal/refractor/ -run E2E -count=1`
+5. **T12 e2e** — a `containedIn` link create reprojects only the affected actor. Written against
+   `edgeManifestStaffReadGrants`: the base producer turned out not to convert (§5), so the lens §14
+   named is unreachable and the test targets the one this increment does convert. →
+   `go test ./internal/refractor/ -run E2E -count=1`
 6. **Docs** — `docs/components/refractor.md`.
 
 Fire green bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
@@ -1010,3 +1053,52 @@ its own named trigger. `ReferencedLabels`' exhaustiveness clear. Any cypher edit
 five Personal lenses, the two multi-walk lenses and the two `SecureColumns` plain lenses (§13's named
 conjuncts — unreachable work, not deferred work). `position()`, `Dist` and the completeness switch's
 ordering.
+
+### 18.9 Build checkpoint (2026-09-06) — Increment 2 SHIPPED
+
+Branch `claude/bold-newton-a48ino`, merged to `main` as `860bb73` (build `0ffa663`). The item is complete:
+Increment 1 shipped 2026-08-28, Increment 2 here, and §13's remaining entries are unreachable work with
+their conjuncts named, not deferred work.
+
+**Deviations from the ratified body, amended in place above (dated 2026-09-06):**
+
+- **(a) The payoff is one producer, not two** — §5, §6.1, §6.3, §13, §14 and the banner. Measured, not
+  predicted: the base producer's second stranded name is `op`, bound over unrelated chains in two walks.
+- **(b) The condition carries a POSITION** — §7.3. Stating the whitelist clause-wide is unsound; the
+  shipped predicate judges admissions and references per pattern in AST order, head property map first,
+  `WHERE` last.
+- **(c) Two conjuncts the body did not name** — §7.3: named intermediates only, and a first introduction
+  the walk could not read exactly is permanently inadmissible.
+- **(d) The verdict gates three predicates besides the hop-index conjunct** — `ExistenceDependsOnNeighbour`,
+  `ProjectsOneRowPerAnchor`/`AnchorProjectionKey` (`ast.go`, `anchor_delete.go`). Each answer was
+  re-derived rather than assumed, both gate comments restated, all three pinned for the converted lens.
+- **(e) T12 targets the lens that converts** — §14, §18.4.
+
+**Review round: four cold adversarial passes (opus), two BLOCKING findings and eight MAJOR/MINOR, all
+closed.** Two reviewers found the clause-vs-pattern granularity BLOCKING independently, each with a
+proven `OPTIONAL MATCH` counterexample rather than an argument; a third found a vector named for the
+head-position rule that survived every mutation of that rule, four load-bearing comparisons no test
+reached, and ~100 lines of comparison helpers exercised only through their default-deny arm; the closing
+pass found the three side-gated predicates and two untested provenance rules. Every fix is pinned by a
+vector proven against its own mutation in a scratch copy — 41 subtests in `TestAnchorHopIndex_WithScope`.
+
+**Findings classified (per `agents/steward/SKILL.md` §4).** The granularity BLOCKING is a **second
+sighting** of the Refractor dossier's *"A widened operation silently drops the bound or budget its narrow
+predecessor carried"* — the dropped bound here is a **position**: the blanket refusal was position-free
+because it refused everything, so the narrowing inherited no notion of where in the clause a reference
+sits. The dossier entry carries it, with the check (name the executor function that establishes the
+binding and evaluate at ITS granularity; pin with two orderings of one clause that must differ). The
+test-adequacy findings are a second sighting of *"A fixture that establishes the favourable ORDER or ARM
+is an argument, not a test"*, already mechanized as a mandated shape: every comparison the admission
+rests on is deleted in a scratch copy and must red a named vector.
+
+**C4 not re-derived** — §17.9's reason unchanged (remote container, no accumulated lag to measure).
+Acceptance was the census move, T9/T10/T12, and the full gate set. The live figure stays a live
+observation; the item's board row ships without claiming one.
+
+**Gates:** `go build ./...` · `make vet` · `gofmt` · `golangci-lint` (0 issues) · 19 STRICT lints ·
+`go test ./... -p 4` with `POSTGRES_TEST_DSN` · `make test-lease-convergence` / `-object-gc` /
+`-augur-convergence` / `-unrouted-convergence` / `-crypto-shred` / `-system-actor-capability` /
+`-control-plane-authz` — all green. The Docker **stack-gates** job (`make up` → `verify-kernel` → 12
+`verify-package-*`) has no equivalent in a remote container (`agents/steward/REMOTE.md` §3) and was left
+to CI.

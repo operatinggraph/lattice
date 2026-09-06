@@ -248,7 +248,11 @@ a load-generator artefact (noted for the Vertical PO in the commit).
 The PO's 20 s sample (589 req/s / 2,871 msgs/s) under-read the load by an order of magnitude: the 41-hour average was 27,800 msgs/s, and the profile placed it in the stuck handlers' hub drains, not the timers. The timer savings (§5.3) are real but invisible while 1.2 M messages drain — re-measure once the backlog is gone.
 
 **Residual after the fire — every stuck consumer sits in a named class with a named closer:**
-- `edgeManifestReadGrants` / `edgeManifestStaffReadGrants` (90k / 57k): scope refused on the `WITH`-scope rebind → the varlength design's Inc 2, whose revive trigger this fire met (row revived).
+- `edgeManifestStaffReadGrants` (57k): scope refused on the `WITH`-scope rebind → closed by the varlength
+  design's Inc 2 (2026-09-06). **Amended the same day:** `edgeManifestReadGrants` (90k) is NOT closed by that
+  increment and never was — its refusal is a second, genuinely unsafe shape (`op` bound to a meta over unrelated
+  chains across stage boundaries), which no engine-side narrowing may admit; its closer is the per-walk
+  anchor-variable scoping filed as its own 📐 row.
 - `edgeCatalog` (128k), `edgeInstances` (75k, draining at 3/min): the pattern genuinely crosses a descriptor / same-label hub — only the pattern-directed derivation removes it; personal lenses are refused it by §4.4 → 📐 row *derivation licence for personal lenses*.
 - `objectLiveness` / `objectAttachments` (40k each): an untyped hop at an unlabeled position (`(o)-[r]->(owner)`, by design — objects attach over several relations) → nil scope. **Corrected 2026-09-01:** NOT the personal-lens row's territory — both are `actorAggregate` plain lenses (`packages/objects-base/lenses.go:32,:48`) for which `driver.go:502` already asserts pattern closure; they are refused on `AnchorHopIndex`'s `"pattern carries an untyped relationship"` alone → their own 📐 row.
   *(Amended 2026-09-04: closed — `objectLiveness` binds no relationship and sits on the `vtx.object.>` filter; `objectAttachments` derives across the hop as a wildcard; see [untyped-hop-anchor-derivation-design.md](untyped-hop-anchor-derivation-design.md).)*
