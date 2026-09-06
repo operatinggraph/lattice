@@ -222,7 +222,10 @@ a stopwatch; the platform had the numbers and threw them away.
   instance start — a reader diffs two ticks; never reset, so a failed emit loses nothing) and
   `meanLiveReads`, `meanListings` over the same ring window, **`null` when `count` is 0** (Contract #5 §5.4:
   an unmeasured metric reports `null`, never a fabricated `0`). Category A TTL, lock-step with the
-  heartbeat. `cmd/processor/main.go` wires it beside `AttachBacklogReader` (`:213`).
+  heartbeat. `MakePipeline` (`commit_path.go`) wires it beside `AttachDDLCache` — the executor is built there
+  and never reaches `cmd/processor/main.go` (amended 2026-09-06 at build; the body had named `main.go:213`).
+  The test harness (`internal/testutil/pipeline.go`) attaches the same way, so a harness heartbeat carries
+  the key production does.
 - **Ring semantics, stated, not assumed** (`latency_ring.go:40-73`, read in full): capacity 128,
   overwrite-only, `Count` = occupancy (never resets, pins at 128), no time window — a burst's p99
   persists until 128 newer samples displace it; on an idle Processor `count` stays at its last value.
@@ -569,3 +572,32 @@ own row), `BackfillAppointmentSite`, `CreateAppointment`'s walk (§4.3).
 **Scope-diff gate:** every touch above traces to the scope sentence; the one deviation (attach site) narrows
 nothing and substitutes no mechanism. Dependencies: none declared; Inc A/B independent (§11) — verified, no
 shared file.
+
+### Build note — shipped (2026-09-06, Lattice steward, remote; resumed from `claude/serene-meitner-c3uqwk`)
+
+**Landed** (one fire, three increments): A2 `64f27a5` (the `processor-event` summary arm — carried over from the
+prior owner branch, idle 4 h), A1 `2a4a952` (Processor: `LiveReadCalls` / `ListCalls`, the executor's clock +
+three-column ring + `timeoutsTotal`, the step-5 executed/aborted log fields, `AttachExecutor` + `step5-latency`
+emit, schema row + shape, completeness entry), B `15ecc5b` (clinic `appointment_sites(appt_id, provider)` at
+the five sites, the `(d)`→`(e)` annotation, `ExtraScriptReadObservers`, `ListCalls == 3` pinned; 0.34.23).
+Inc C: the parent's §5.1 pointer already stands (`kv-links-listing-leg-collapse-design.md:173`); the three
+verticals rows were closed by the Verticals steward on the §9 acceptance, nothing left to flip there.
+
+**Deviations from the body, amended where they stood:** §4.1 wiring site (`MakePipeline`, not `main.go:213`);
+the harness attaches too. `wallMs` is `int64` ms; the aborted line also logs the error's `code`
+(`*ScriptError.Code` / `*HydrationError.Code` / `InternalError`, `classifyStepError`'s own discrimination).
+
+**Review record.** Lead review (observation-only + a pure resolver refactor; no capability-plane change — §11's
+"Standard"). Every mechanism revert-proved by its builder and the dedup by the lead: counter increments, ring
+record, timeout increment, the `emit()` call, the null means, the log attributes on both lines; the dedup reads
+`ListCalls` 4 with the helper re-resolving the provider and 3 with it in place, while `len(Enumerations)` reads 3
+either way. Gates: `go build`, `make vet`, `golangci-lint`, every `STRICT=1 scripts/lint-*.go`,
+`lint-package-version` (`DIFF_BASE=eca8a40`), the build-tagged harness vets, `go test ./... -p 4` with
+`POSTGRES_TEST_DSN`; live on the native stack `verify-kernel`, `verify-package-clinic-domain` (405 OK),
+`test-health-completeness` with the new key, and `lattice health summary` rendering the step5 row.
+
+**Findings classified.** One implementation-bug of the test-shape kind, found by the A1 builder in the step3
+precedent it mirrored: `TestEmitCapabilityAuthSignals_LiveKV` called the emitter directly, so deleting the call
+from the tick loop left it green — fixed in the same increment for both signals (a subtest drives `emit()`).
+It is the standing checklist's #3 (a fix proven by reverting it), not a new component class; the Processor
+dossier sits at its cap of 12 and a single sighting does not displace an entry. No design-gap, no brief-gap.

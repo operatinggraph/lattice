@@ -140,7 +140,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Thirteen parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` + `internal/refractor` each their own job. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/refractor` split off unit-1 into unit-refractor (1225c84c): 235s avg → 188s, full green · next: re-measure the pole once this split settles |
 | **No gate can observe the 250ms production script wall** | `internal/testutil`'s `init()` assigns `processor.DefaultScriptWallBudget = 5s`, so all 24 packages linking it — cafe-domain's own `workplace_confinement_test.go` included — exercise their DDLs at 20× the budget the running Processor enforces. A walk that blows the wall live is green in CI; twice now it shipped and only live PO discovery found it (`0bda5e71`, `b997ff2a`). | ★★ | S | 📋 ready · owner: Whetstone |
 | **A correctly-bounded confinement walk still blows the wall — no batched-read primitive exists** | Re-derived: staff Charge is 20–23 live RTs (doubled `leaseapp_unit` walk); all three batched substrate transports refuted against the pinned server on load axes quiet benches can't see — the primitive is refuted, not unbuilt. Build: café memo + paced live probe. | ★★ | S | ✅ ratified (Winston-adjudicated) · [design](../../implementation-artifacts/kv-links-listing-leg-collapse-design.md) |
-| **[Processor] The confinement/authority-walk wall fix (row above) is café-only** | Measured: the walks are 2–8 listings; the wall was crossed by the per-listing unit cost on the Refractor's flood days (139 ms → timeout → 30 ms, same op + actor). No walk primitive: ships step-5 wall/read telemetry (log + `step5-latency` + summary arm), clinic's doubled `withProvider` listing, the re-measure at head. | ★★★ | S–M | 🏗️ building · owner: claude/serene-meitner-p28d7g · [design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md) · next: Inc A1 + Inc B |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -149,6 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-06 · `72b6b26` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
 - 2026-09-06 · `5495fdc` · [Refractor] anchor-partitioned plain lens retraction SHIPPED — 5 business lenses seed on the anchor and diff its partition ([design](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md))
 - 2026-09-06 · `ffb5208` · [Processor/Loom] egress declaration admitted only from a platform engine; Loom declares one only via the externalTask constructor ([design](../../implementation-artifacts/egress-read-declaration-authority-design.md))
 - 2026-09-05 · `94275eb` · [Refractor] perEntry unchanged-entry withholding SHIPPED — the CDC loop withholds an entry the target already holds ([design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md))
@@ -173,9 +173,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
 - 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
 - 2026-09-01 · `1fca25cf` · [Refractor] pattern-scoped actor walk + Postgres `GetRow` + idle-aware periodic loops + rebuild registration race — 8 stuck personal lenses drain at 10–25 msg/s
-- 2026-09-01 · (triage, no code) · [orchestration-base] duplicate-human-task row retired — the prescribed work-scoped dedup is REFUTED (3 shapes, code-cited); cause is an anchor-vs-work granularity mismatch, package fix filed on verticals
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `044ac715`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest 2026-09-01 (triage))*
