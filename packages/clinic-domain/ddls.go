@@ -2320,8 +2320,11 @@ def sites_for_provider(provider):
             sites.append(lk.targetVertex)
     return sites
 
-def appointment_sites(appt_id):
-    sites = sites_for_provider(appointment_provider(appt_id))
+def appointment_sites(appt_id, provider):
+    # Takes the provider the caller already resolved (appointment_provider),
+    # so the withProvider listing that names it runs once per execution
+    # rather than once per caller plus once here.
+    sites = sites_for_provider(provider)
     if sites:
         return sites
     # TombstoneProvider soft-deletes with no cascade onto practicesAt, so
@@ -2354,10 +2357,11 @@ def actor_bound_to_appointment_provider(actor_key, provider):
         return False
     _, actor_id = parts_of(actor_key, "actor", "identity")
     _, provider_id = parts_of(provider, "provider", "provider")
-    # read-posture: (d) declared in contextHint.optionalReads by the standing
-    # caller's dispatcher (probing whether ITS OWN actor is this appointment's
-    # bound provider; absent -> falls through to require_workplace, never a
-    # hard failure)
+    # read-posture: (e) per-candidate follow-up read off the withProvider
+    # enumeration the caller already performed (the provider key is
+    # data-derived from that listing, not a caller-supplied payload field) --
+    # probing whether ITS OWN actor is this appointment's bound provider;
+    # absent -> falls through to require_workplace, never a hard failure.
     lnk = kv.Read("lnk.provider." + provider_id + ".identifiedBy.identity." + actor_id)
     return lnk != None and not lnk.isDeleted
 
@@ -2928,7 +2932,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace_confined(appointment_sites(appt_id), "cannot reschedule appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id, standing_provider), "cannot reschedule appointment " + appt_key)
 
         # The appointment's provider / patient — required so the move is conflict-
         # checked against each book exactly as CreateAppointment is, and so the OLD
@@ -3073,7 +3077,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace_confined(appointment_sites(appt_id), "cannot set status on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id, standing_provider), "cannot set status on appointment " + appt_key)
 
         status = required_status(p)
 
@@ -3199,7 +3203,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace_confined(appointment_sites(appt_id), "cannot correct status on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id, standing_provider), "cannot correct status on appointment " + appt_key)
 
         status = required_status(p)
         if status not in TERMINAL_STATUSES:
@@ -3394,7 +3398,7 @@ def execute(state, op):
         # RescheduleAppointment's block above being the scope=self exception.
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             if not actor_bound_to_appointment_provider(op.actor, provider):
-                enforce_workplace_confined(appointment_sites(appt_id), "cannot set site on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id, provider), "cannot set site on appointment " + appt_key)
 
         # Already has a live atSite link — reassignment is out of scope (the
         # gap this closes is "27 appointments carry NO site", never "the site
@@ -3455,7 +3459,7 @@ def execute(state, op):
         if not (op.authTargetValidated or actor_holds_operator(op.actor)):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                enforce_workplace_confined(appointment_sites(appt_id), "cannot record encounter on appointment " + appt_key)
+                enforce_workplace_confined(appointment_sites(appt_id, standing_provider), "cannot record encounter on appointment " + appt_key)
 
         # The post-visit record splits across two aspects along the sensitivity
         # boundary: .encounter carries the raw clinical content (SENSITIVE, DEK
