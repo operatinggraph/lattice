@@ -490,6 +490,11 @@ census against it as you would against a stranger's.
   the rejections were priced against a world without it, and the principal's first question will be "do we
   still need the thing?" When a fork hinges on read cost, a ~60-line read-only spike against the live stack
   settles it in minutes (31 µs/key batched vs 153 µs sequential); attach the numbers. (2026-08-09 · adjacency)
+- **A derived set handed to an EXISTING consumer is only consumed if that consumer BINDS on the same key —
+  read how it selects its inputs before naming it as a payoff.** The lint keys a target's feeders on the declared
+  key *prefix*, so RETURN columns for a plain lens (which has no prefix) made it column-readable and never
+  feeder-eligible; "the lint's UNREADABLE bucket retires" was a BLOCKING false consumer. Tell: a payoff phrased as
+  "X can now read Y" without the line where X chooses what to read. (2026-09-06 · gap-declaration holder)
 - **"Mirrors X" — read the twenty lines ABOVE X.** The sibling's doc comment records the last bug its shape
   caused (`contentRequestID`'s silently-dropped work; `packageLifecycleType`'s "stands down for exactly the
   envelope that most needs it"); a mirror re-imports it with a citation that reads as verified. Four findings in
