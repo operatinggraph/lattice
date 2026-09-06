@@ -107,3 +107,27 @@ func TestPackage_ClassPriceSettlementEscalatesExhaustedToAugur(t *testing.T) {
 	}
 	t.Fatalf("%s target not found in Package.WeaverTargets", ClassPriceSettlementTarget)
 }
+
+// TestPackage_RefundSettlementPostsRefundReason pins the missing_refund gap's
+// dispatched WellnessCreditAccount Params to carry reason:"refund" (a plain
+// string literal, not a "row." template — strategist.go's resolveParam only
+// templates a "row." prefix or decodes a "json:" literal) — without it, a
+// Weaver-settled refund posts as an indistinguishable reason:"payment"
+// credit, and a member's statement can never tell a refund from cash handed
+// over at the front desk.
+func TestPackage_RefundSettlementPostsRefundReason(t *testing.T) {
+	for _, target := range Package.WeaverTargets {
+		if target.TargetID != RefundSettlementTarget {
+			continue
+		}
+		gap, ok := target.Gaps["missing_refund"]
+		if !ok {
+			t.Fatalf("%s target: no missing_refund gap declared", RefundSettlementTarget)
+		}
+		if got, want := gap.Params["reason"], "refund"; got != want {
+			t.Fatalf("%s target: missing_refund gap Params[\"reason\"] = %q, want %q", RefundSettlementTarget, got, want)
+		}
+		return
+	}
+	t.Fatalf("%s target not found in Package.WeaverTargets", RefundSettlementTarget)
+}

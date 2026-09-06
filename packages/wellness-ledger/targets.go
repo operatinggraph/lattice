@@ -153,8 +153,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// Pin the vertexType DDL this target dispatches to
 					// (MissingClass otherwise) — same rationale as the
 					// two targets above.
-					Class:  "wellnesstransaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey", "memo": "row.memo"},
+					Class: "wellnesstransaction",
+					// reason is a plain string, not a "row."-prefixed template —
+					// strategist.go's resolveParam only templates a "row."
+					// prefix or decodes a "json:" typed literal, so a bare
+					// literal like "refund" is the correct spelling here.
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey", "memo": "row.memo", "reason": "refund"},
 					// memo excluded from Reads deliberately — same rationale as
 					// NoShowSettlementTarget's gap above.
 					Reads: []string{"row.accountKey", "row.refundKey"},

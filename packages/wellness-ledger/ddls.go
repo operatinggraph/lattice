@@ -128,11 +128,12 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"cancelled booking is already tombstoned by the time any refund posts, wellness-domain/ddls.go): when " +
 			"present, writes a settlesRefund audit link (transaction→wellnessrefund) that the wellnessRefundSettlement " +
 			"lens (lenses.go/targets.go) walks to converge the refund gap once posted. " +
-			"A credit's reason (payment|waiver, default payment when omitted) distinguishes cash actually collected from debt the " +
-			"studio forgave (e.g. a no-show fee waived as a courtesy) — both reduce the derived balance identically, but the " +
-			"wellnessLedgerHistory lens projects reason so a reader never mistakes a waiver for money received. reason:\"waiver\" is " +
-			"rejected on a self-scoped (member) credit — post_entry's own authContextTarget branch — since a member may pay " +
-			"down their own balance but never forgive it.",
+			"A credit's reason (payment|waiver|refund, default payment when omitted) distinguishes cash actually collected from debt the " +
+			"studio forgave (e.g. a no-show fee waived as a courtesy) from a credit that returns money already collected (a settled " +
+			"class price or no-show fee reversed by wellnessRefundSettlement) — all three reduce the derived balance identically, but the " +
+			"wellnessLedgerHistory lens projects reason so a reader never mistakes a refund or a waiver for a fresh payment. " +
+			"reason:\"waiver\" and reason:\"refund\" are both rejected on a self-scoped (member) credit — post_entry's own " +
+			"authContextTarget branch — since a member may pay down their own balance but never forgive or refund it.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> the transaction posts to (WellnessDebitAccount/WellnessCreditAccount; required, validated alive)."},` +
@@ -141,7 +142,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`"bookingRef":{"type":"string","description":"WellnessDebitAccount only; optional vtx.booking.<NanoID> back-reference to the no-show booking this charge settles. When supplied, validated alive (UnknownBooking otherwise) and a settles audit link (transaction→booking) is written — the wellnessNoShowSettlement lens reads it to converge the gap. Mirrors clinic-ledger's appointmentRef."},` +
 			`"priceBookingRef":{"type":"string","description":"WellnessDebitAccount only; optional vtx.booking.<NanoID> back-reference to the booking this charge settles the CLASS PRICE for. Independent of bookingRef (a WellnessDebitAccount may carry either, both, or neither). When supplied, validated alive (UnknownBooking otherwise) and a settlesClassPrice audit link (transaction→booking) is written — the wellnessClassPriceSettlement lens reads it to converge the gap."},` +
 			`"refundRef":{"type":"string","description":"WellnessCreditAccount only; optional vtx.wellnessrefund.<NanoID> back-reference to the refund marker this payment settles. When supplied, validated alive (UnknownRefund otherwise) and a settlesRefund audit link (transaction→wellnessrefund) is written — the wellnessRefundSettlement lens reads it to converge the gap."},` +
-			`"reason":{"type":"string","enum":["payment","waiver"],"description":"WellnessCreditAccount only; optional, defaults to \"payment\" when omitted. \"waiver\" records the credit as debt the studio forgave rather than cash collected — both reduce the derived balance the same way, but the wellnessLedgerHistory lens projects reason so the two are never confused. Rejected on WellnessDebitAccount, and rejected on a self-scoped (member) credit — a member may pay down their own balance but never waive it."}},` +
+			`"reason":{"type":"string","enum":["payment","waiver","refund"],"description":"WellnessCreditAccount only; optional, defaults to \"payment\" when omitted. \"waiver\" records the credit as debt the studio forgave rather than cash collected; \"refund\" records a credit that returns money already collected (a settled class price or no-show fee reversed by wellnessRefundSettlement) — all three reduce the derived balance the same way, but the wellnessLedgerHistory lens projects reason so none are ever confused. Rejected on WellnessDebitAccount, and rejected on a self-scoped (member) credit — a member may pay down their own balance but never waive or refund it."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.wellnesstransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
@@ -152,7 +153,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"bookingRef":      "WellnessDebitAccount only: optional full vtx.booking.<NanoID> key of the no-show booking this charge settles. Validated alive when supplied (UnknownBooking otherwise); writes a settles link (transaction→booking) the wellnessNoShowSettlement lens walks to converge the gap.",
 			"priceBookingRef": "WellnessDebitAccount only: optional full vtx.booking.<NanoID> key of the booking this charge settles the class price for. Independent of bookingRef. Validated alive when supplied (UnknownBooking otherwise); writes a settlesClassPrice link (transaction→booking) the wellnessClassPriceSettlement lens walks to converge the gap.",
 			"refundRef":       "WellnessCreditAccount only: optional full vtx.wellnessrefund.<NanoID> key of the refund marker this payment settles (minted by wellness-domain's CancelBooking, ddls.go, when a cancelled booking already carried a posted class-price charge). Validated alive when supplied (UnknownRefund otherwise); writes a settlesRefund link (transaction→wellnessrefund) the wellnessRefundSettlement lens walks to converge the gap.",
-			"reason":          "WellnessCreditAccount only: \"payment\" or \"waiver\" (default \"payment\" when omitted). Stored on the .entry aspect; projected by the wellnessLedgerHistory lens. Rejected on WellnessDebitAccount, and rejected on a self-scoped (member) credit — only front-desk staff / the operator may waive a charge.",
+			"reason":          "WellnessCreditAccount only: \"payment\", \"waiver\", or \"refund\" (default \"payment\" when omitted). \"refund\" records a credit that returns money already collected (a settled class price or no-show fee reversed by wellnessRefundSettlement), distinct from cash collected (payment) and debt forgiven (waiver). Stored on the .entry aspect; projected by the wellnessLedgerHistory lens. Rejected on WellnessDebitAccount, and rejected on a self-scoped (member) credit — only front-desk staff / the operator may waive or refund a charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{

@@ -42,9 +42,10 @@ type ledgerEntryProjection struct {
 }
 
 // ledgerEntryRow is the billing-history row the FE renders. Reason is empty
-// for a debit (charge-only rows never carry it) and "payment"/"waiver" for a
-// credit — the FE labels a waiver distinctly so forgiven debt is never
-// mistaken for cash collected.
+// for a debit (charge-only rows never carry it) and "payment"/"waiver"/
+// "refund" for a credit — the FE labels a waiver or a refund distinctly so
+// forgiven debt and money handed back are never mistaken for cash freshly
+// collected.
 type ledgerEntryRow struct {
 	TransactionKey string `json:"transactionKey"`
 	Type           string `json:"type"`

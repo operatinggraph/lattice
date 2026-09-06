@@ -235,6 +235,45 @@ func TestFrontDesk_WellnessCreditAccountDeniedWithoutIt(t *testing.T) {
 	}
 }
 
+// TestFrontDesk_WellnessCreditAccountRefundAccepted proves a staff/automation
+// actor (scope=any grant, the same one wellnessRefundSettlement's
+// Weaver-dispatched WellnessCreditAccount submits under) may post
+// reason:"refund" and that it persists distinctly on the .entry aspect — the
+// board's Unit 4: without a third reason value, an automated refund posts as
+// an indistinguishable reason:"payment" credit, so the FE can never badge it
+// apart from cash the member actually handed over.
+func TestFrontDesk_WellnessCreditAccountRefundAccepted(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgerrefund")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLFDRFD23456789ABCDE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdrefundacct000001", identityKey)
+
+	reqID := testutil.GenReqID("fdrefundtx00000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"memo":"Class cancelled — refund","reason":"refund"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk WellnessCreditAccount reason:refund = %v, want Accepted", got)
+	}
+
+	txKey := "vtx.wellnesstransaction." + nanoIDFromRequestID(reqID)
+	entryDoc := readDoc(t, ctx, conn, txKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["reason"].(string); got != "refund" {
+		t.Fatalf("entry.reason = %q, want %q", got, "refund")
+	}
+}
+
 // TestConsumer_CreateAccountSelfScopeAllowed proves a real member, holding
 // only the consumer scope=self grant, can open THEIR OWN ledger account —
 // most bookings are self-service (wellness-domain's CreateBooking self-scope
@@ -497,5 +536,53 @@ func TestConsumer_CreditAccountSelfScopeDebitStaysStaffOnly(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
 		t.Fatalf("self-scoped WellnessDebitAccount outcome = %v, want Rejected (no matching grant)", got)
+	}
+}
+
+// TestConsumer_CreditAccountSelfScopeRefundRejected proves reason:"refund"
+// is refused on a self-scoped (member) credit, same as reason:"waiver" — a
+// member may pay down their own balance but never refund it. A front-desk
+// debit first establishes exactly the $15 owed the self-credit below claims
+// — an ordinary (reason omitted) self-credit for that same amount would be
+// Accepted by the ownership/amount-trust checks below, so this isolates the
+// rejection to the reason=="refund" branch itself rather than the no-balance
+// or over-balance guards a self-credit against a never-charged account would
+// also trip.
+func TestConsumer_CreditAccountSelfScopeRefundRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledConsumerCreditCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfrefund")
+
+	seedIdentity(t, ctx, conn, ledConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselfrfndsetup", ledConsumerKey)
+
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditselfrfnddbt01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T09:10:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"memo":"Class price"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	reqID := testutil.GenReqID("creditselfrfnd00001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledConsumerKey,
+		SubmittedAt:   "2026-07-08T09:15:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"reason":"refund"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("self-service WellnessCreditAccount reason:refund outcome = %v, want Rejected (AuthDenied)", got)
 	}
 }
