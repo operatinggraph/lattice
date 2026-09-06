@@ -993,7 +993,12 @@ func TestManager_FirstPaintGate_ShutdownRetiresTheGateButAFailureKeepsIt(t *test
 	t.Run("a transient consumer failure keeps the gate armed", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		h := newGateRunHarness(t, 0, gateConfig{revision: 42, startSeq: 3, endSeq: 5, deadline: 40 * time.Millisecond})
+		// The deadline is armed at attach, before this test observes the gate,
+		// and its only job here is to fire AFTER the consumer failure below.
+		// It is sized so a loaded runner cannot let it elapse between the
+		// attach and the armed assertion (a 40 ms deadline did, on CI), while
+		// staying well inside awaitFired's budget.
+		h := newGateRunHarness(t, 0, gateConfig{revision: 42, startSeq: 3, endSeq: 5, deadline: 2 * time.Second})
 		h.tr.consumerErr = errors.New("edge/sync: simulated consumer failure")
 
 		runCtx, runCancel := context.WithCancel(ctx)
