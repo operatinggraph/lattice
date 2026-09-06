@@ -75,6 +75,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-05 · `d49f77ed` · Clinic self-pay cap's `.balance` is hydrated by the script's own `derive_reads`; legacy replay only for a self-pay, after the ownership proof; whole-cents money (found by the café unit, fixed same run).
 - 2026-09-05 · `e01be391` · A house-tab payment can never exceed what is owed — every `CreditCafeAccount` leg capped against a platform-hydrated `.balance` cache (clinic mirror + `derive_reads`); refusals proven live.
 - 2026-09-05 · `b2c4ea38` · A menu item can be renamed or repriced in place — `UpdateMenuItem` rewrites `.price` under OCC, Manage Menu gets an Edit form; proven live via the Gateway and restored.
 - 2026-09-05 · `2e73d122` · A resident who paid ahead is no longer chased for charges the credit covered — `deriveStatement` carries the surplus forward and prepays later debits in order; six never-in-credit live debtors unchanged.
