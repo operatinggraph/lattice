@@ -95,16 +95,15 @@ const (
 type planError struct {
 	kind errKind
 	msg  string
-	// unplannable marks a failure planGap must retry through the target's
+	// unplannable marks a failure planGap offers to the target's
 	// augur.escalate("unplannable") policy before falling through to this
 	// error's ordinary disposition (Fire 6, R1: design
 	// loftspace-lease-renewal-goal-authored-target-design.md §5 — "'no plan
-	// derivable' flows into the existing unplannable trigger"). Set only by
-	// resolveGoalAction: a fresh Synthesize returning planner.ErrNoPlan, or a
-	// pinned leg ref the gap's Actions catalog no longer declares (which is
-	// indistinguishable, without more bookkeeping, from a redelivered episode
-	// that was itself already escalated to the augur — retrying the
-	// escalation re-derives the identical deterministic dispatch either way).
+	// derivable' flows into the existing unplannable trigger"). Set at exactly
+	// one site: resolveGoalAction's fresh Synthesize returning planner.ErrNoPlan
+	// — the gap has a catalog and a goal, and no chain of its own actions
+	// reaches that goal from this row. A fault in what the playbook DECLARES is
+	// a config error instead, whichever branch finds it.
 	unplannable bool
 }
 
@@ -564,17 +563,18 @@ func (e *Engine) resolveGoalAction(gapColumn string, ga GapAction, row map[strin
 				return catalogEntryGapAction(entry), entry.Ref, nil
 			}
 		}
-		// The pinned ref isn't in the current catalog. Two indistinguishable
-		// causes: the playbook changed since dispatch (a genuine config
-		// error), or this episode was previously escalated to the augur
-		// reasoning tier (planGap's unplannable retry pins the escalated
-		// directOp's OWN Action string, which lives outside this gap's Ref
-		// space entirely) and is being redelivered/reclaimed. Route through
-		// the SAME unplannable-escalation retry a fresh Synthesize failure
-		// gets, so a redelivered escalated episode re-derives the identical
-		// deterministic augur dispatch instead of alerting; a target with no
-		// escalation policy still surfaces this as a data error either way.
-		return GapAction{}, "", &planError{kind: errData, unplannable: true, msg: fmt.Sprintf(
+		// The pinned ref isn't in the current catalog: the playbook changed
+		// since this episode was dispatched. A CONFIG error, the sibling of the
+		// candidates branch's identical verdict above — only a package re-author
+		// can fix it, and retrying the same row changes nothing.
+		//
+		// An escalation's mark pins a dispatch CLASS that lives outside this
+		// gap's Ref space entirely and reaches this arm the same way. The two
+		// causes are not indistinguishable: an escalation declares its class on
+		// its own mark (mark.Escalation), so a reader that must tell them apart
+		// reads that field rather than inferring a cause from a resolution that
+		// failed.
+		return GapAction{}, "", &planError{kind: errConfig, msg: fmt.Sprintf(
 			"gap %q: pinned plan leg %q is not in the goal's actions catalog", gapColumn, pinnedAction)}
 	}
 
@@ -627,6 +627,24 @@ const (
 	defaultAugurReplyOp = "RecordProposal" // op-name: (policy) Weaver never publishes this; it names the verb in the dispatch params, the augur script copies it into the external event, and the Bridge posts it — a core-owned default over a verb packages/augur owns pin=TestAugurConvergence_HappyPath
 )
 
+// escalatesTrigger reports whether the target's augur block opts this trigger
+// into its escalate list (Contract #10 §10.8's two tokens). It is the policy
+// question on its own, for the sites that must know whether a standing
+// escalation is still one the target wants — the orphan-column arm, which
+// spares a door-2 episode only while the policy that produced it stands — from
+// the sites that go on to build the dispatch.
+func escalatesTrigger(target *Target, trigger string) bool {
+	if target.Augur == nil {
+		return false
+	}
+	for _, t := range target.Augur.Escalate {
+		if t == trigger {
+			return true
+		}
+	}
+	return false
+}
+
 // augurEscalation builds the reasoning-tier GapAction for a stuck gap whose
 // target escalates `trigger` to the Augur AI tier (Contract #10 §10.8 "Augur
 // escalation"). It is a plain directOp straight to the bridge (Option F): the
@@ -642,17 +660,7 @@ const (
 // per the frozen contract) — or the target's meta vertex is unresolved (it
 // always resolves for a registered target whose row we are processing).
 func augurEscalation(source *targetSource, target *Target, trigger, targetID, entityID, entityKey, gapColumn string) (GapAction, bool) {
-	if target.Augur == nil {
-		return GapAction{}, false
-	}
-	escalates := false
-	for _, t := range target.Augur.Escalate {
-		if t == trigger {
-			escalates = true
-			break
-		}
-	}
-	if !escalates {
+	if !escalatesTrigger(target, trigger) {
 		return GapAction{}, false
 	}
 	// The targetId param + the forTarget no-orphan endpoint need the FULL meta

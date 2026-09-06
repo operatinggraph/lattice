@@ -138,7 +138,7 @@ automatically an Ack.
 
 | Class | Exits | Decision | Why |
 |---|---|---|---|
-| **Config error** | an open gap column the playbook does not name (`GapWithoutPlaybook`); an action the deployment cannot dispatch (`PlaybookConfigError`); a template that resolves null against the row (`TemplateDataError`) | **Nak on the LONG floor** (`Config.LongRedeliveryDelay`, default 5 m) | the fix is a package/target re-author, which projects **no new row** — the redelivery is the only automatic uptake path. Each redelivery re-evaluates against the *current* playbook, so the fix lands within one floor with no rebuild and no re-projection |
+| **Config error** | an open gap column the playbook does not name (`GapWithoutPlaybook` — unless the target's `augur` block escalates `unplannable`, in which case the row is routed to the escalation seam instead); an action the deployment cannot dispatch (`PlaybookConfigError`); a template that resolves null against the row (`TemplateDataError`) | **Nak on the LONG floor** (`Config.LongRedeliveryDelay`, default 5 m) | the fix is a package/target re-author, which projects **no new row** — the redelivery is the only automatic uptake path. Each redelivery re-evaluates against the *current* playbook, so the fix lands within one floor with no rebuild and no re-projection |
 | **Transient** | an unresolved pattern/op reference mid-convergence (`UnresolvedReference`); missing JetStream metadata; a KV read/CAS failure; an admission deferral | **Nak on the transient floor** (5 s) | the retry itself is the fix |
 | **Data error** | a body that does not parse; a non-bool `violating` or `missing_*`; a violating row with no `entityKey` echo; an unusable `freshUntil` | **Ack + a standing `RowDataError`** | every fix is a re-projection, and the fresh revision supersedes the pending one and delivers on its own — so a Nak would buy no retry value, only a held pending slot. The standing issue is the durable "acked but declined" record |
 | **Nothing owed** | a malformed row key; an unregistered target; a deletion tombstone; a **disabled** target; `violating` reading a genuine `false`; a live in-flight mark whose op published (the anti-storm drop) | **Ack** | there is no work to redeliver for. A frozen target owes nothing while frozen, and `Enable`'s Resume redelivers whatever was already Nak'd-pending on its own timestamps |
@@ -457,15 +457,41 @@ run from the state above rather than from a mark the exhausted gap stopped refre
 A human-submitted remediation that *completes* closes the gap, which deletes the count, so a later
 reopen starts a fresh budget.
 
-**An escalation is booked nowhere and paced like a re-arm.** The reasoning episode is a dispatch
-*about* the spent chain, not a member of it: its action is a dispatch class rather than an entry in
-the gap's catalog, so it advances neither the retry budget (which its own exhaustion caused) nor an
-`__effect` window (whose slots are keyed on a catalog ref and could never be closed at that key). Its
-oscillation record still stands — the reasoning op writes real aspect paths. Its **re-fire** — the
-only recovery a reasoning episode whose claim was never minted has — waits out the same exponential
-every other re-arm waits, level-tested against `escalatedAt` on the count document rather than
-against a mark a dead episode may have lost; the first fire is immediate, and each subsequent one
-advances `reclaims` so the next waits longer, to the 24 h cap.
+**One escalation episode, three doors.** Weaver reaches the Augur reasoning tier through three
+doors — a spent retry budget (`exhausted`), a gap column the playbook does not name, and a goal gap
+from whose current state no plan derives (both `unplannable`) — and every door calls the same seam,
+`escalateGap`. The seam owns the episode for any trigger: a live mark Acks; a **re-fire** — the only
+recovery a reasoning episode whose claim was never minted has — waits out the same exponential every
+other re-arm waits, level-tested against `escalatedAt` on the count document rather than against a
+mark a dead episode may have lost (the first fire is immediate, each subsequent one advances
+`reclaims` so the next waits longer, to the 24 h cap); a stale mark is cleared revision-conditioned;
+a publish failure withdraws the republish obligation; the fire is recorded on the count document —
+**created** `{count:0, reclaims:1, escalatedAt}` for an `unplannable` escalation over no leg, which
+has no document by construction, updated otherwise; and `GapEscalatedToAugur` is set at the row's
+latch with a message naming the door. The reasoning episode is a dispatch *about* the gap, not a
+member of its chain: it is booked against neither the retry budget nor an `__effect` window, and
+the mark it holds **declares its class** (`escalation: unplannable | exhausted`) so no path infers
+"this is an escalation" from an action string that fails to resolve — a vanished catalog pin under
+an open leg is a `PlaybookConfigError`, not an escalation. A fresh chain booked over an
+escalation-only document restarts its `reclaims` / `escalatedAt`; an operator un-park of a goal gap (a
+document that still names its leg) keeps inheriting them, and an un-parked static `directOp` gap (whose
+stored leg is empty) restarts them too.
+
+**An escalation releases by two rules, the first always winning.** *Rule 1 — over a plan leg, only at
+that leg's boundary:* an escalation whose mark or count document names a displaced leg releases when
+that leg's declared effects hold, exactly as above — "the gap is plannable now" is never a release for
+it, because the displaced leg's artifact may still be open. *Rule 2 — over no leg, when the gap can
+act again:* an `unplannable` escalation releases the moment the gap resolves (the playbook gains the
+entry; a plan derives from the current row), an `exhausted` one the moment the gap is no longer
+exhausted (an un-park). The release is one write — the mark deleted, conditioned on its revision —
+plus the latch's clear; the count document is kept, because it is the count leg's only handle on a
+quiet row. Lane 1 then continues down its ordinary path as a fresh episode; the sweep reclaim
+dispatches nothing and leaves the released gap to a delivery or to the count leg's un-park arm; the
+count leg routes a markless `escalatedAt`-stamped document above its zero test, Rule 1 first, then
+Rule 2. The reclaim's orphan-column arm spares a standing no-entry escalation while the policy still
+escalates `unplannable`, and its surface arm releases an escalation whose column was re-authored to
+`surface` (lane 1's surface arm answers above the mark read, so the sweep is the site). Rule 1 is a
+goal-gap rule: a non-goal gap has no plan leg, so its escalation is always "over no leg" and takes Rule 2.
 
 The lease-signing convergence lens is the reference user — for the bgcheck/payment external-call gaps
 it projects `inflight_<g>` (a service instance with a `.dispatch` marker **present** and no
@@ -1315,7 +1341,9 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   later `exhaustedRow` always set `maxretries_<g>`, so the entire count-leg family was capped-gap-only and
   both of that leg's blocking defects — a re-arm that pre-empted `reclaim`'s backoff, and one that
   duplicated a human task — were untestable by construction, not merely untested. Minted: the
-  reclaim/backoff corpus, then the count-leg corpus (2026-08-25). Check: for every fixture helper, list the
+  reclaim/backoff corpus, then the count-leg corpus (2026-08-25); a third time 2026-09-06, when every un-park
+  fixture omitted `escalatedAt`, so a count-leg route that swallowed an un-parked, previously-escalated goal gap
+  shipped green until lead review traced the live document shape. Check: for every fixture helper, list the
   columns it writes that production code treats as OPTIONAL, and require one vector that omits each.
 - **An operator verb that hands a gap to a reconciler arm must refuse exactly what that arm PERMANENTLY
   declines** — the verb's whole effect is the arm's next pass, so accepting a shape the arm will never act
@@ -1348,29 +1376,34 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   row. Check: for every resolver you extend, list its callers and classify each as value-typed or
   string-typed; the string-typed ones refuse the new form, and the refusal is asserted at dispatch, at load
   and at install. Ask separately which upstream gate compares that field raw.
-- **A Health issue key is a LATCH: scope it to the fact it states, and split it only with every clear
-  re-paired** — a key naming `(target, column)` merges N subjects onto one latch, so the first subject to
-  close retires the issue raised for the one still stuck, and the operator surface stops showing a
-  genuinely broken row. But blanket-segmenting is the opposite error: a raise about the PLAYBOOK
-  (`GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError`) is identical for every row and would
-  mint N copies. Splitting is where clears get stranded — one key served both scopes, so a single clear
-  incidentally retired facts that now need naming. Minted: `issueKeyGap`, two concurrent erasures
-  (2026-08-23); the missing-`entityKey` data key carried the same shape one function over. **Before adding
-  a CLEAR, enumerate every OTHER leg that raises at that key** — a clear one leg believes against a raise
-  another believes does not settle: the latch flaps, re-stamps its `since` on every re-raise, and defeats
-  any arrival-vs-repeat damping downstream. Minted 2026-08-25: the sweep's count leg cleared an orphan
-  column's `GapBudgetExhausted` while lane-1's `openGapColumns` kept raising it, that scan enumerating
-  every true `missing_*` whether the playbook names it or not. Check: enumerate every raise and every
-  clear — grep the family's key CONSTRUCTOR, not only the file you are editing — assert each raise still
-  reaches each clear it had, and pin two entities on one column.
-- **Segmenting a Health key by entity is safe only where a clear site names that exact COLUMN — enumerate
-  the raise COLUMNS, not the raise functions** — a shared reader (`boolColumn`/`intColumn`) raises for
-  whatever column its caller passes, so counting the two call sites says nothing about how many latches
-  exist. Six columns flowed through those two readers and one had a clear; segmenting turned four O(1)
-  stuck entries into O(entities), held for process lifetime and re-sorted every heartbeat. The issue cap
-  bounds the DOCUMENT, not the cache. Minted: the `data:` key split (2026-08-23) — the per-increment
-  reviews all passed; only the cumulative close pass saw it. Check: for every raise, name the clear that
-  retires that exact column, and pair the retirement with the READ so it is level-driven.
+- **A Health issue key is a LATCH: scope it to the fact it states, split it only with every clear re-paired,
+  and enumerate the raise COLUMNS, not the raise functions** — a key naming `(target, column)` merges N
+  subjects onto one latch, so the first subject to close retires the issue raised for the one still stuck;
+  but blanket-segmenting is the opposite error: a raise about the PLAYBOOK (`GapWithoutPlaybook`,
+  `UnresolvedReference`, `PlaybookConfigError`) is identical for every row and would mint N copies, and a
+  shared reader (`boolColumn`/`intColumn`) raises for whatever column its caller passes, so counting call
+  sites says nothing about how many latches exist (six columns flowed through two readers and one had a
+  clear; segmenting turned four O(1) stuck entries into O(entities) — the issue cap bounds the DOCUMENT, not
+  the cache). Splitting is where clears get stranded. Minted: `issueKeyGap`, two concurrent erasures, and the
+  `data:` key split (2026-08-23 — the per-increment reviews all passed; only the cumulative close pass saw
+  it). **Before adding a CLEAR, enumerate every OTHER leg that raises at that key** — a clear one leg
+  believes against a raise another believes does not settle: the latch flaps, re-stamps its `since` on every
+  re-raise, and defeats any arrival-vs-repeat damping downstream. Minted 2026-08-25: the sweep's count leg
+  cleared an orphan column's `GapBudgetExhausted` while lane-1's `openGapColumns` kept raising it; a third
+  time 2026-09-06: the count leg's class release cleared `issueKeyGapEntity` unconditionally every pass,
+  retiring a `GapBudgetExhausted` it never raised. Check: enumerate every raise and every clear — grep the
+  family's key CONSTRUCTOR, not only the file you are editing — assert each raise still reaches each clear it
+  had, gate a shared-latch clear on `standingAs(<your code>)`, pin two entities on one column, and pair each
+  column's retirement with its READ so it is level-driven.
+- **A field whose meaning differs by gap SHAPE is not a predicate** — `count.Leg` names a plan leg for a
+  goal gap and the gap's own dispatch action for every other (`bookDispatch` stores the action ref there
+  unless it is `directOp`), so a rule written as `leg != ""` reads a non-goal gap's action back as a boundary
+  the gap does not have. Minted 2026-09-06: the class release's Rule 1 gated on `legOf`, which would have
+  re-parked every un-parked `exhausted` escalation on lease-signing's screening gaps; a cold reviewer traced
+  the live shapes, every test vector had been goal-mode or no-entry. Check: for every field a new rule tests,
+  list its writers per gap shape (goal · candidates · static · no-entry · `surface`) and add one vector per
+  shape the rule was not written for; where a helper already encodes the shape split (`displacedLeg` vs
+  `legOf`), name why you chose the one you did.
 - **Prove each changed line by reverting THAT LINE, not the feature — and a line whose two orders are
   provably equivalent cannot be proven at all** — a builder who proves only its own new lines leaves the
   line it was asked to change covered by nothing: reverting the whole feature reds the new tests, so the

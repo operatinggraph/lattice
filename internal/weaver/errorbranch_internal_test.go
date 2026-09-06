@@ -103,7 +103,7 @@ func TestFireEpisode_StaleReclaim_ConflictSkipsDispatch(t *testing.T) {
 	row := map[string]any{
 		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true, "inflight_x": false,
 	}
-	pl, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
+	pl, _, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
 	if pl == nil {
 		t.Fatalf("planGap must produce a plan, got dec=%v", dec)
 	}
@@ -120,7 +120,7 @@ func TestFireEpisode_StaleReclaim_ConflictSkipsDispatch(t *testing.T) {
 	}
 
 	got, _ := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, &expired, staleRev, true, true, false, false, "")
+		pl, &expired, staleRev, true, true, "", false, "")
 	if got != substrate.Ack {
 		t.Fatalf("a conflicted stale-reclaim must Ack (the winner already dispatched), got %v", got)
 	}
@@ -154,14 +154,14 @@ func TestFireEpisode_StaleReclaim_ReplaceFailureNaksWithDelay(t *testing.T) {
 	row := map[string]any{
 		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true, "inflight_x": false,
 	}
-	pl, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
+	pl, _, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
 	if pl == nil {
 		t.Fatalf("planGap must produce a plan, got dec=%v", dec)
 	}
 	expired := fixtureMark(targetID, entityID, "missing_x", actionDirectOp, pastLease())
 
 	got, _ := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, &expired, 1, true, true, false, false, "")
+		pl, &expired, 1, true, true, "", false, "")
 	if got != substrate.NakWithDelay {
 		t.Fatalf("a mark-store failure during reclaim must nak with delay, got %v", got)
 	}
@@ -188,13 +188,13 @@ func TestFireEpisode_MarkCreateFailureNaksWithDelay(t *testing.T) {
 	h.seedTarget(target)
 	entityID := testNanoID(t)
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true}
-	pl, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
+	pl, _, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
 	if pl == nil {
 		t.Fatalf("planGap must produce a plan, got dec=%v", dec)
 	}
 
 	got, _ := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, nil, 0, false, false, false, false, "")
+		pl, nil, 0, false, false, "", false, "")
 	if got != substrate.NakWithDelay {
 		t.Fatalf("a mark-create failure must nak with delay, got %v", got)
 	}
@@ -227,13 +227,13 @@ func TestFireEpisode_MarkCreateLostAcksWithoutDispatch(t *testing.T) {
 	h.putMark(t, ctx, key, winner)
 
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true}
-	pl, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
+	pl, _, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
 	if pl == nil {
 		t.Fatalf("planGap must produce a plan, got dec=%v", dec)
 	}
 
 	got, _ := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, nil, 0, false, false, false, false, "")
+		pl, nil, 0, false, false, "", false, "")
 	if got != substrate.Ack {
 		t.Fatalf("a lost CAS-create race must Ack (the winner already dispatched), got %v", got)
 	}

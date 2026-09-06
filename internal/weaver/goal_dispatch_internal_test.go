@@ -76,20 +76,24 @@ func TestResolveGoalAction_PinnedEpisodeReusesLeg(t *testing.T) {
 	}
 }
 
-// TestResolveGoalAction_PinVanished_FlagsUnplannable proves a pin whose ref
-// the catalog no longer names surfaces as an unplannable-flagged error —
-// planGap retries this through the SAME augur.escalate("unplannable") policy
-// a fresh Synthesize dead-end uses, because it is indistinguishable from a
-// redelivered episode previously escalated to the augur (resolveGoalAction's
-// doc).
-func TestResolveGoalAction_PinVanished_FlagsUnplannable(t *testing.T) {
+// TestResolveGoalAction_PinVanished_IsAConfigError proves a pin whose ref the
+// catalog no longer names is a CONFIG error, the sibling of the candidates
+// branch's identical verdict: only a package re-author adds the ref back, and
+// re-running the same row changes nothing.
+//
+// It is deliberately NOT the unplannable flag, which routes a gap to the
+// reasoning tier. An escalation's mark pins a dispatch class outside this gap's
+// Ref space and reaches this same arm, and the two are told apart by the class
+// the mark declares (mark.Escalation) — not by a resolution that failed, which a
+// removed catalog ref under an open leg produces identically.
+func TestResolveGoalAction_PinVanished_IsAConfigError(t *testing.T) {
 	t.Parallel()
 	e := shadowTestEngine(t)
 	target := &Target{TargetID: "t1", Mode: targetModePlanned}
 	ga := goalGapFixture(t)
 	_, _, perr := e.resolvePlannedAction(context.Background(), target, "t1", "e1", "missing_x", ga, map[string]any{}, "aGhostLeg")
-	if perr == nil || !perr.unplannable {
-		t.Fatalf("expected an unplannable-flagged error for a pin the catalog no longer names, got %v", perr)
+	if perr == nil || perr.kind != errConfig || perr.unplannable {
+		t.Fatalf("expected a config error (never unplannable) for a pin the catalog no longer names, got %v", perr)
 	}
 }
 

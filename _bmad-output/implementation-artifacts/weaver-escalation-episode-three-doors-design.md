@@ -286,8 +286,11 @@ Door 1's release is the leg boundary: a fact about the row, tested *above* the a
 suppression site ("a retire above every cannot-act guard"). This design adds a second release, and orders the
 two so the first always wins:
 
-**Rule 1 — an escalation that stands over a plan leg releases only at that leg's boundary.** `legOf(ga, rec,
-count)` non-empty (`escalatedFrom`, or the count document's `leg`) ⇒ the only release is
+**Rule 1 — an escalation that stands over a plan leg releases only at that leg's boundary.** `displacedLeg(ga,
+rec, count)` non-empty (`escalatedFrom`, or the count document's `leg`, **goal gaps only** — *amended at build,
+2026-09-06:* `legOf` was the first cut and is wrong here, because for a non-goal gap `bookDispatch` stores the
+gap's own action ref as `leg`, which read back as a boundary no non-goal gap has and would have re-parked every
+un-parked `exhausted` escalation on lease-signing's screening gaps) ⇒ the only release is
 `releaseCompletedLeg` (effects hold), which every suppression site already tests first (lane 1 `:474`, the
 exhausted door `:1998`, the reclaim `reconciler.go:989`, the count leg through `escalateExhaustedGap`). "The gap
 is plannable now" is **not** a release for it: the displaced leg's artifact (an `assignTask`, a parked Loom
@@ -296,7 +299,11 @@ refuses (`:786-790`) and §10.8's "replanning happens only at leg boundaries" fo
 
 **Rule 2 — an escalation over no leg releases when the gap can act again**, by class:
 - `unplannable`: the gap **resolves now** — door 2: `target.Gaps[col]` exists (any action, `surface`
-  included: the ordinary path's `surface` arm holds no mark, so the release is right); door 3:
+  included). *Amended at build, 2026-09-06:* a column re-authored to `surface` is released by the **sweep's
+  surface arm**, not by lane 1 — lane 1's surface arm returns above the mark read (a column of many open rows
+  must not pay a mark read per delivery), so the mark leg, which already holds the mark, is the site
+  (`TestSweep_SurfaceReAuthorReleasesTheEscalation`); §4.5's "the `surface` guards stay as they are" holds for
+  lane 1 only. Door 3:
   `resolvedLegAction` (`strategist.go:492-505` — a pure regression, no admission token, no issue clear)
   returns no `unplannable` error.
 - `exhausted`: the gap is **not exhausted now** — which is the only way its mark reaches the general path at
@@ -694,3 +701,51 @@ the `surface` guards; the admission gate; any `packages/` opt-in to `unplannable
 no adjacent mechanism substituted. Declared dependency (the exhausted-gap design's seams) re-verified both ways: its
 `escalateExhaustedGap`, `bookEscalation`, `EscalatedAt` pacing and `escalatedFrom` are all live at head and are the
 precedents in part 3. Censuses C1–C3, C6, C7 re-run live: identical to §3.
+
+### Close note (2026-09-06 — Steward, remote fire `claude/serene-meitner-ogelun`)
+
+**Shipped whole, one fire, both increments + docs; landing shape: merged once when complete** (main never
+partial). Gates: `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go` STRICT ·
+`make test-control-plane-authz` · `make test-unrouted-convergence` · `make test-lease-convergence` ·
+`make test-augur-convergence` (door 2 end to end: the harness's synthetic target escalates `unplannable` with
+an empty gaps map) · full `go test ./... -p 4` with `POSTGRES_TEST_DSN`. `make verify-kernel` not run remotely
+(needs the compose stack; it checks the kernel seed, which this fire does not touch — CI's stack-gates job
+carries it).
+
+**Body amendments made at build (§4.3):** Rule 1 gates on `displacedLeg` (goal-only), not `legOf`; the
+`surface` re-author release is the sweep's, not lane 1's. **Deviations accepted:** the seam is handed the
+MARK's own trigger, never a door's literal (§4.2's routing-on-any-class made concrete); `escalationLeg` deleted;
+the two `escalate` routes §4.1 named at the reclaim and the count-leg re-arm are not built — both always pin,
+and `unplannable` is set only under an unpinned synthesis; a re-arm whose action differs from the mark's
+writes the class and the displaced leg empty (§4.2's "thread like `escalatedFrom`" holds only while the
+re-armed dispatch is still the escalation's); the count leg's release clear is gated on the latch standing as
+`GapEscalatedToAugur`; both count-leg routes sit behind warm-up, as §4.3 says.
+
+**Review record.** Lead review per increment + one cold adversarial pass (opus) at close, re-verified after
+fixes. Findings, classified per component (Weaver), and their route:
+- *design-gap ×3* — (1) the count leg's escalation route intercepted an operator un-park
+  (`{count:0, leg:L, escalatedAt}` — `resetDispatchCount` keeps the stamp; §4.3's "a stamped, not-exhausted
+  document is an escalation" was false for it; found by lead review); (2) **BLOCKING** — §4.3's Rule 1 was
+  written over `legOf`, whose `count.Leg` fallback is the gap's own action ref for every non-goal gap, so an
+  un-parked `exhausted` escalation on lease-signing's screening gaps would have been re-parked and re-fired
+  paced instead of released; (3) the `surface` release had no site (lane 1's arm answers above the mark read).
+  All three fixed in the fire and the body amended.
+- *design-gap ×2 (minor)* — the class field threaded unconditionally through a re-arm that changes the
+  dispatch; the two always-pinned `escalate` routes §4.1 named. Fixed.
+- *implementation-bug ×2* — count-leg routes above warm-up; an unconditional latch clear on the count leg
+  (a third sighting of the dossier's Health-latch class). Fixed.
+- *review-over-reach ×0*; *brief-gap ×0*.
+
+**Dossier routing:** one new Weaver class — *a field whose meaning differs by gap shape is not a predicate*
+(`count.Leg` is a plan leg for a goal gap and the gap's own action for every other; `leg != ""` read the second
+as the first) — added to `docs/components/weaver.md`, displacing nothing: the two Health-latch entries are
+consolidated into one to make room, with this fire's third sighting appended. The un-park sighting joins the
+existing shared-fixture-optional-input entry (every un-park fixture omitted `escalatedAt`).
+
+**Residuals (each with its out):** none filed. The three builder observations — a redundant
+`resolvedLegAction` on the count leg for a released gap (one pure regression per quiet-row pass), an
+`unplannable` pacing document kept until gap close after a `surface` re-author (TTL-bounded, inert), and a
+republish obligation left by an ordinary episode on a gap that later escalates (unread until the mark
+expires; the escalation's own obligation is withdrawn at the seam) — are priced as inert here and need
+neither Andrew nor a designer pass; the §12 `TemplateDataError`-under-a-sibling's-code arm stays as §12
+records it (not folded: no consumer reaches it while no package escalates `unplannable`).

@@ -43,7 +43,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	const tID, eID, gap = "t1", "entityAAAAAAAAAAAAAA", "missing_onboarding"
 	eKey := "vtx.leaseapp." + eID
 
-	rev, claim1, exists, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "")
+	rev, claim1, exists, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "", "")
 	if err != nil || exists {
 		t.Fatalf("create: err=%v exists=%v", err, exists)
 	}
@@ -52,7 +52,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	}
 
 	// Reclaim-replace preserves the claimId verbatim.
-	if _, conflict, err := m.replace(ctx, tID, eID, gap, eKey, "triggerLoom", "", claim1, rev, markTTLBackstopFactor*m.lease); err != nil || conflict {
+	if _, conflict, err := m.replace(ctx, tID, eID, gap, eKey, "triggerLoom", "", "", claim1, rev, markTTLBackstopFactor*m.lease); err != nil || conflict {
 		t.Fatalf("replace: err=%v conflict=%v", err, conflict)
 	}
 	rec, _, found, err := m.get(ctx, tID, eID, gap)
@@ -67,7 +67,7 @@ func TestMarkClaimID_MintedThenPreserved(t *testing.T) {
 	if err := m.delete(ctx, tID, eID, gap); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	_, claim2, _, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "")
+	_, claim2, _, err := m.create(ctx, tID, eID, gap, eKey, "triggerLoom", "", "")
 	if err != nil {
 		t.Fatalf("re-create: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDeleteByTargetPrefix_OnlyMatchesOwnTarget(t *testing.T) {
 	m := newStateTestStore(t, ctx)
 
 	// t1's marks.
-	if _, _, _, err := m.create(ctx, "t1", "entityAAAAAAAAAAAAAA", "missing_a", "vtx.entity.entityAAAAAAAAAAAAAA", "MarkExpired", ""); err != nil {
+	if _, _, _, err := m.create(ctx, "t1", "entityAAAAAAAAAAAAAA", "missing_a", "vtx.entity.entityAAAAAAAAAAAAAA", "MarkExpired", "", ""); err != nil {
 		t.Fatalf("create t1 mark: %v", err)
 	}
 	if err := m.setDisabled(ctx, "t1", true); err != nil {
@@ -198,7 +198,7 @@ func TestDeleteByTargetPrefix_OnlyMatchesOwnTarget(t *testing.T) {
 	}
 
 	// t10's marks — must survive deleteByTargetPrefix(ctx, "t1").
-	if _, _, _, err := m.create(ctx, "t10", "entityBBBBBBBBBBBBBB", "missing_b", "vtx.entity.entityBBBBBBBBBBBBBB", "MarkExpired", ""); err != nil {
+	if _, _, _, err := m.create(ctx, "t10", "entityBBBBBBBBBBBBBB", "missing_b", "vtx.entity.entityBBBBBBBBBBBBBB", "MarkExpired", "", ""); err != nil {
 		t.Fatalf("create t10 mark: %v", err)
 	}
 	if err := m.setDisabled(ctx, "t10", true); err != nil {
