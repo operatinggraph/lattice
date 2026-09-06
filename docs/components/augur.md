@@ -162,14 +162,14 @@ bridge `augur` adapter is bridge-registry config. No kernel change.
 
 | Surface | Status |
 |---------|--------|
-| Escalation branch (`unplannable` gap → L3 reasoning) | ✅ Built |
+| Escalation branch (`unplannable` gap → L3 reasoning) | ✅ Built — both `unplannable` doors (no playbook entry; no derivable plan for a goal gap) share the `escalateGap` seam with `exhausted`: paced re-fire on the count document, class-declaring mark, released when the gap resolves again |
 | Proposal vertex DDL + record-time deterministic validation | ✅ Built |
 | Reasoning capture — `augurReasoning` pattern + bridge `augur` adapter (model + `FakeAugur` for CI) | ✅ Built |
 | Human verdict — `ReviewProposal`, re-validated on approve | ✅ Built |
 | Approved-proposal dispatch — `augurDispatch` target + dispatch-time re-validation + `proposedOp` | ✅ Built |
 | Proposal-scoped deterministic requestId (collapse-only under reclaim) | ✅ Built |
 | Autonomy dial (`augur.autoApply` allow-list + confidence gate) | 🔒 Designed, parsed + validated, **Andrew-gated** — human-in-the-loop ships until ratified |
-| `exhausted`-trigger escalation (spent retry budget → L3) | ✅ Built — shares `augurEscalation` with `unplannable`; wired in `lease-signing` (screening gaps) |
+| `exhausted`-trigger escalation (spent retry budget → L3) | ✅ Built — shares `augurEscalation` and the `escalateGap` seam with `unplannable`; released at the leg boundary or on an un-park; wired in `lease-signing` (screening gaps) |
 
 **What ships today:** a stuck, unplannable gap becomes a reasoned, human-reviewed proposal that, once
 approved, dispatches through the existing Weaver machinery. **Zero autonomous mutation** under the

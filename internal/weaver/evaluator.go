@@ -430,28 +430,23 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 		return substrate.NakWithDelay
 	}
-	if noEntryEscalated {
-		// The no-playbook-entry door. It routes from here — below the metadata
-		// defer, which every dispatch owes (an escalation's op carries the row's
-		// OCC revision like any other), and below the mark read, which is the
-		// snapshot the seam's live/stale disposition is taken from.
-		//
-		// The pacing document with its revision: a column with no entry is read
-		// by the suppression gate with no action to consult, so that gate answers
-		// without reading the count unless the row happens to declare a
-		// maxretries_<g> for it. Read it here when nothing already did — the seam
-		// paces the re-fire on it, and it is the only document either
-		// `unplannable` door has.
-		if countRev == 0 && count == (dispatchCount{}) {
-			count, countRev, _ = e.marks.getDispatchCount(ctx, targetID, entityID, col)
-		}
-		return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, noEntryEsc, escalateUnplannable,
-			row, msg.Sequence, rec, markRev, found, count, countRev)
-	}
-
 	pinnedAction := ""
 	if found {
 		pinnedAction = rec.Action
+	}
+
+	// An escalation's own pacing document, read before either release below,
+	// because it is where the displaced leg is recorded when no mark names one:
+	// an UNCAPPED gap's suppression verdict never rests on the budget, so this
+	// delivery reaches here holding the zero pair, and both rules tested against
+	// it would read "over no leg" for an escalation that stands over an open one.
+	// The read is paid only by a delivery whose mark declares a class — the gap
+	// is on the reasoning tier, and the seam below needs the same document to
+	// pace its re-fire on.
+	pacingRead := false
+	if found && rec.Escalation != "" {
+		count, countRev = e.pacingDocument(ctx, targetID, entityID, col, count, countRev)
+		pacingRead = true
 	}
 
 	// Fire 6, R1: a goal-mode gap's pinned LEG may have already completed
@@ -475,6 +470,62 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// paced on is gone. The zero pair is what every reader below treats as
 		// "nothing recorded", which is exactly the state the release left.
 		rec, count, countRev = nil, dispatchCount{}, 0
+	}
+
+	// The class release (design §4.3, Rule 2), tested for ANY trigger the mark
+	// declares and ordered strictly after the leg boundary above, which always
+	// wins: an escalation standing over a PLAN leg releases at that leg's
+	// boundary and nowhere else, however plannable the gap has since become.
+	//
+	// A plan leg is a goal gap's, and only a goal gap's, so displacedLeg is what
+	// the ordering is tested with rather than legOf: legOf falls through to the
+	// count document's `leg`, which for every other shape is the gap's own
+	// dispatch action (bookDispatch records the pick the attempts are charged
+	// to), and reading that back as a pin would give a triggerLoom or assignTask
+	// gap a "boundary" no releaseCompletedLeg can ever test — the escalation
+	// would stand for the life of the gap with Rule 2 unreachable.
+	//
+	// Released, the gap is a genuinely fresh episode: the ordinary path below
+	// plans its own entry and CAS-creates its own mark, and that create books the
+	// chain 0→1 over the kept count document (bookDispatch's restart rule keeps
+	// the escalation's pacing out of it). Not released, the escalation still
+	// stands, and the seam gives it the disposition every door's episode gets —
+	// a live mark Acks, a dead one waits out its window and re-fires.
+	//
+	// The trigger the seam is handed is the MARK's, not this door's: routing an
+	// exhausted-class mark under `unplannable` would ask a policy that escalates
+	// only `exhausted` a question it answers no to, stranding exactly the mark
+	// (the budget re-armed under a standing escalation) the class routing exists
+	// to reach. A policy that no longer escalates the mark's class strands it
+	// here too — nothing routes it, and the ordinary path's own dispositions
+	// apply, as they did before any policy covered the gap.
+	if found && rec.Escalation != "" {
+		pacingRead = true
+		released := displacedLeg(ga, rec, count) == "" &&
+			e.escalationCanRelease(ctx, target, targetID, entityID, col, rec.Escalation, ga, ok, row) &&
+			e.releaseEscalation(ctx, targetID, entityID, col, markRev)
+		if released {
+			found, rec, pinnedAction = false, nil, ""
+		} else if esc, escalates := augurEscalation(e.source, target, rec.Escalation, targetID, entityID, entityKey, col); escalates {
+			return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, esc, rec.Escalation,
+				row, msg.Sequence, rec, markRev, found, count, countRev)
+		}
+	}
+
+	if noEntryEscalated {
+		// The no-playbook-entry door, for a gap no standing escalation mark
+		// already routed above. It routes from here — below the metadata defer,
+		// which every dispatch owes (an escalation's op carries the row's OCC
+		// revision like any other), below the mark read, which is the snapshot
+		// the seam's live/stale disposition is taken from, and below the two
+		// releases, because a re-authored playbook that names this column again
+		// is not a dead end at all: that release is why this arm is reached only
+		// while the column genuinely has no entry.
+		if !pacingRead {
+			count, countRev = e.pacingDocument(ctx, targetID, entityID, col, count, countRev)
+		}
+		return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, noEntryEsc, escalateUnplannable,
+			row, msg.Sequence, rec, markRev, found, count, countRev)
 	}
 
 	// staleMark reports whether col is an EXTERNAL gap (Contract #10 §10.3: "a
@@ -549,12 +600,10 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// The leg it displaces has one source this delivery may not hold: the
 		// count document, which the suppression gate reads only when its verdict
 		// rests on the budget term. An UNCAPPED goal gap never reaches that term,
-		// so a gap with no mark to name its leg would escalate recording no leg at
-		// all — exactly the pin whose loss takes the boundary dark. Read the
-		// document here when nothing already answered. An error is not worth a
-		// decision: the zero document is what this pass would have used anyway.
-		if countRev == 0 && count == (dispatchCount{}) {
-			count, countRev, _ = e.marks.getDispatchCount(ctx, targetID, entityID, col)
+		// so a gap with no mark to name its leg would escalate recording no leg
+		// at all — exactly the pin whose loss takes the boundary dark.
+		if !pacingRead {
+			count, countRev = e.pacingDocument(ctx, targetID, entityID, col, count, countRev)
 		}
 		return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, esc, escalateUnplannable,
 			row, msg.Sequence, rec, markRev, found, count, countRev)
@@ -967,12 +1016,19 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 		// The displaced leg and the class the re-armed mark carries: for an
 		// ESCALATION they are the caller's, which is what this episode stands
 		// over and why, as decided by the plan that produced it — the same pair
-		// the create leg below writes, and the reclaim's own re-arm applies. For
-		// any other episode the mark keeps what it already carried: the re-arm
-		// changed the lease, not what the episode is, and taking the caller's
-		// there would write a displaced leg and a trigger onto an ordinary leg
-		// mark, which is standing over nothing and was escalated by nothing.
-		from, class := markEscalatedFrom(rec), markEscalation(rec)
+		// the create leg below writes, and the reclaim's own re-arm applies.
+		//
+		// Any other episode keeps what the mark already carried, and ONLY while
+		// the dispatch is still the one that pair describes: a re-arm under the
+		// same action is the same episode with a fresh lease, but a re-arm that
+		// resolves a different action is a different dispatch — an escalation
+		// whose policy was withdrawn, re-armed as the gap's own remediation —
+		// and carrying the class forward there would leave a mark declaring an
+		// escalation for an ordinary episode, which every class route reads.
+		from, class := "", ""
+		if action == rec.Action {
+			from, class = markEscalatedFrom(rec), markEscalation(rec)
+		}
 		if escalation != "" {
 			from, class = escalatedFrom, escalation
 		}
@@ -1672,6 +1728,126 @@ func displacedLeg(ga GapAction, rec *mark, count dispatchCount) string {
 	return legOf(ga, rec, count)
 }
 
+// escalationCanRelease reports whether the gap a standing escalation covers can
+// ACT AGAIN — Rule 2 of the class release (design §4.3). It is asked only of an
+// escalation that stands over no plan leg: an escalation over a leg releases at
+// that leg's boundary and nowhere else (Rule 1, releaseCompletedLeg), because
+// the displaced leg's artifact — an assignTask on a human's queue, a parked Loom
+// instance — may still be open, and a fresh episode beside it mints a duplicate.
+//
+// The class decides which fact is asked, and each is a level test over state the
+// engine already holds:
+//
+//   - unplannable: the gap RESOLVES now. A column the playbook names again
+//     answers it for the no-entry door (any action, `surface` included — the
+//     ordinary path's surface arm holds no mark, so releasing to it is right),
+//     and for the no-derivable-plan door the answer is resolvedLegAction's: a
+//     pure regression over the gap's own catalog, no admission token and no
+//     issue clear, so asking it costs nothing that a decline would then owe.
+//     A non-unplannable planError still releases — the gap has a different
+//     disposition now (a data or config fault the ordinary path alerts), and
+//     holding it on the reasoning tier would hide that.
+//   - exhausted: the gap is NOT exhausted now. Every suppression site routes an
+//     exhausted gap to its own door first, so an exhausted-class mark that
+//     reaches a general path at all reached it past that gate: the release holds
+//     by construction, and it is exactly the un-park (a resetBudget, or a lens
+//     raising maxretries_<g>) that the class release exists to notice.
+//
+// A class this build does not know releases nothing: the mark is still routed
+// (§4.2 — the class decides the release test, never whether the mark is routed),
+// and the seam's paced re-fire is what it gets.
+func (e *Engine) escalationCanRelease(ctx context.Context, target *Target, targetID, entityID, col, class string,
+	ga GapAction, planned bool, row map[string]any) bool {
+
+	switch class {
+	case escalateExhausted:
+		return true
+	case escalateUnplannable:
+		if !planned {
+			return false
+		}
+		_, _, perr := e.resolvedLegAction(ctx, target, targetID, entityID, col, ga, row)
+		return perr == nil || !perr.unplannable
+	default:
+		return false
+	}
+}
+
+// releaseEscalation is the class release's ONE write: delete the escalation's
+// mark, conditioned on the revision the caller read it at, and retire the
+// standing record that says the gap is on the reasoning tier.
+//
+// The mark delete is the mutex, mirroring releaseCompletedLeg's marked branch:
+// exactly one caller can win it, and a conflict means a concurrent pass owns the
+// key — Ack and let the next pass re-test the level. The count document is
+// deliberately NOT deleted. It is the only handle the sweep's count leg has on a
+// quiet row, and a delete conditioned on a revision lane 1 does not hold
+// (countRev is 0 for both door shapes) would conflict forever; what keeps the
+// escalation's pacing out of the fresh chain is bookDispatch's restart over an
+// escalation-only document instead.
+//
+// The latch clear is owed for the reason releaseCompletedLeg gives for its own:
+// the plan that follows a release can fail to build, and the escalation record
+// would otherwise stand over a gap that has left the reasoning tier.
+func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col string, markRev uint64) bool {
+	conflict, err := e.marks.deleteRevision(ctx, targetID, entityID, col, markRev)
+	if err != nil {
+		e.logger.Warn("weaver: escalation release mark clear failed; the escalation stands until the next pass",
+			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+		return false
+	}
+	if conflict {
+		e.logger.Debug("weaver: escalation release lost the mark delete; a concurrent pass owns the gap",
+			"targetId", targetID, "entityId", entityID, "gap", col)
+		return false
+	}
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
+	e.logger.Info("weaver: escalation released; the gap can act again",
+		"targetId", targetID, "entityId", entityID, "gap", col)
+	return true
+}
+
+// advanceReleasedLeg plans and dispatches the NEXT leg of a chain whose previous
+// leg just released — the gap's OWN playbook entry, never an escalation's, as a
+// genuinely fresh episode (no pin, no mark, no budget: the release deleted
+// both). Where the advanced chain has no derivable next leg and the target
+// escalates that, the escalation seam takes it instead.
+func (e *Engine) advanceReleasedLeg(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
+	ga GapAction, row map[string]any, rowRevision uint64) substrate.Decision {
+
+	pl, actionRef, esc, escalate, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, rowRevision, "")
+	if escalate {
+		return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, esc, escalateUnplannable,
+			row, rowRevision, nil, 0, false, dispatchCount{}, 0)
+	}
+	if pl == nil {
+		return dec
+	}
+	dec, _ = e.fireEpisode(ctx, targetID, entityID, entityKey, col, actionRef, pl, nil, 0, false, false,
+		"", ga.Goal != nil, "")
+	return dec
+}
+
+// pacingDocument is the escalation's count document with the revision it was
+// read at: the caller's own read when it holds one, else the read this makes.
+// A gap whose suppression verdict never rested on the budget term reaches a
+// dispatch leg with the zero pair, and for the two `unplannable` doors that
+// document is the only thing a re-fire can be paced on — and the only place the
+// displaced leg is recorded once no mark names it. An error is not worth a
+// decision: the zero document is what the pass would have used anyway.
+func (e *Engine) pacingDocument(ctx context.Context, targetID, entityID, col string,
+	count dispatchCount, countRev uint64) (dispatchCount, uint64) {
+
+	if countRev != 0 || count != (dispatchCount{}) {
+		return count, countRev
+	}
+	doc, rev, err := e.marks.getDispatchCount(ctx, targetID, entityID, col)
+	if err != nil {
+		return count, countRev
+	}
+	return doc, rev
+}
+
 // boolColumn reads a §10.2 bool column off a row. A present value of any other
 // type is a Lens data error: surfaced (Warn log + Health KV issue) and treated
 // conservatively as not actionable — never silently inverted into a clean
@@ -2019,28 +2195,15 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	// The leg boundary the contract promises (§10.8: "the pin releases once the
 	// leg's declared effects all hold in the current row"), tested before the
 	// policy check because a finished leg is a fact about the gap's chain, not
-	// about the target's escalation policy. legOf finds the leg through an
-	// escalation that owns the mark; a gap with no leg recorded anywhere never
+	// about the target's escalation policy. displacedLeg finds the plan leg
+	// through an escalation that owns the mark, and answers nothing for a gap
+	// that has no legs at all; a gap with no leg recorded anywhere never
 	// releases.
 	ga := target.Gaps[gapColumn]
 	if markReadable && e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, displacedLeg(ga, rec, count), row, markRev, countRev) {
 		// The gap's OWN playbook entry, never the escalation's: the release
 		// advanced the chain, so what fires next is the next leg of that chain.
-		pl, actionRef, esc, escalate, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, "")
-		if escalate {
-			// The advanced chain has no derivable next leg and the target
-			// escalates that: an episode of its own, over a gap the release left
-			// markless and budgetless — so nothing here names a mark, a revision
-			// or a document for it.
-			return e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
-				row, rowRevision, nil, 0, false, dispatchCount{}, 0)
-		}
-		if pl == nil {
-			return dec
-		}
-		dec, _ = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
-			"", ga.Goal != nil, "")
-		return dec
+		return e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision)
 	}
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)

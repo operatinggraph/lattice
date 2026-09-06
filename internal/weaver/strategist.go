@@ -627,6 +627,24 @@ const (
 	defaultAugurReplyOp = "RecordProposal" // op-name: (policy) Weaver never publishes this; it names the verb in the dispatch params, the augur script copies it into the external event, and the Bridge posts it — a core-owned default over a verb packages/augur owns pin=TestAugurConvergence_HappyPath
 )
 
+// escalatesTrigger reports whether the target's augur block opts this trigger
+// into its escalate list (Contract #10 §10.8's two tokens). It is the policy
+// question on its own, for the sites that must know whether a standing
+// escalation is still one the target wants — the orphan-column arm, which
+// spares a door-2 episode only while the policy that produced it stands — from
+// the sites that go on to build the dispatch.
+func escalatesTrigger(target *Target, trigger string) bool {
+	if target.Augur == nil {
+		return false
+	}
+	for _, t := range target.Augur.Escalate {
+		if t == trigger {
+			return true
+		}
+	}
+	return false
+}
+
 // augurEscalation builds the reasoning-tier GapAction for a stuck gap whose
 // target escalates `trigger` to the Augur AI tier (Contract #10 §10.8 "Augur
 // escalation"). It is a plain directOp straight to the bridge (Option F): the
@@ -642,17 +660,7 @@ const (
 // per the frozen contract) — or the target's meta vertex is unresolved (it
 // always resolves for a registered target whose row we are processing).
 func augurEscalation(source *targetSource, target *Target, trigger, targetID, entityID, entityKey, gapColumn string) (GapAction, bool) {
-	if target.Augur == nil {
-		return GapAction{}, false
-	}
-	escalates := false
-	for _, t := range target.Augur.Escalate {
-		if t == trigger {
-			escalates = true
-			break
-		}
-	}
-	if !escalates {
+	if !escalatesTrigger(target, trigger) {
 		return GapAction{}, false
 	}
 	// The targetId param + the forTarget no-orphan endpoint need the FULL meta

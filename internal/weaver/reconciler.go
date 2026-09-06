@@ -677,9 +677,39 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	}
 	ga, planned := target.Gaps[gapColumn]
 	if !planned {
-		// A column the playbook no longer names: nothing here to bound and
-		// nothing to escalate. The latch at this key belongs to lane 1, which
-		// raises for exactly this column too — leave it alone (see arm (j)).
+		// A column the playbook does not name. There is no remediation here to
+		// bound, and the latch at this key belongs to lane 1, which raises for
+		// exactly this column too — leave it alone (see arm (j)).
+		//
+		// One thing IS owed: a document stamped `escalatedAt` over such a column
+		// is the no-entry door's own episode, whose mark has gone (its TTL is
+		// shorter than every backoff step past the second), and this leg is the
+		// only one that still visits a row with no deliveries. Without the
+		// re-fire here a reasoning claim that was never minted is never
+		// re-derived for a quiet row.
+		//
+		// The arm sits ABOVE the violating and suppression gates, so the route
+		// restates both inline rather than inheriting them: the column is open
+		// (read above), the row must be violating, and the gap must not be
+		// suppressed — a call in flight, or a budget somehow spent on a column
+		// with no action, is not a gap to escalate. The policy must still
+		// escalate `unplannable`, which is also what keeps the mark leg's orphan
+		// arm from deleting this episode's mark while it lives.
+		if count.EscalatedAt == "" || !s.warmedUp() || !e.boolColumn(targetID, entityID, row, "violating") {
+			return
+		}
+		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, count.Count); suppressed {
+			return
+		}
+		esc, escalates := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, gapColumn)
+		if !escalates {
+			return
+		}
+		if dec := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
+			row, rowEntry.Revision, nil, 0, false, count, entry.Revision); dec != substrate.Ack {
+			e.logger.Warn("weaver sweep: no-entry escalation re-fire from the count leg did not complete cleanly; will retry",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		}
 		return
 	}
 	if !e.boolColumn(targetID, entityID, row, "violating") {
@@ -699,6 +729,82 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		}
 		return
 	}
+	// A markless document stamped `escalatedAt` is an escalation whose mark has
+	// gone — the normal state between paced re-fires, the mark's TTL being
+	// shorter than every backoff step past the second. It is routed HERE: below
+	// the violating and suppression gates, so it never acts where lane 1 would
+	// not and an exhausted gap has already gone to its own door above; and above
+	// arm (n)'s `Count == 0` test, because an escalation that displaced a leg
+	// left that leg's attempts on the document, and a route below the zero test
+	// would never reach it — a dead claim over a leg would then never retry on a
+	// quiet row.
+	//
+	// Rule 1 first, for a document that names a leg: the boundary is that
+	// escalation's only release (releaseCompletedLeg's markless branch takes the
+	// count document as its mutex, at the revision read this pass), and what
+	// follows a release is the chain's next leg, exactly as the mark leg's own
+	// advance does. Not at the boundary, the escalation stands and the seam
+	// paces its re-fire.
+	//
+	// Rule 2 for a document over no leg: the gap either resolves now — in which
+	// case the release is to fall through into arm (n), whose `Count == 0` holds
+	// by construction (a leg-less escalation document never booked an attempt)
+	// and whose collapse-only refusal is exactly the one this leg must not skip
+	// — or it is still unplannable, and the seam re-fires it paced. The route is
+	// gated on the policy: a target that no longer escalates `unplannable` has
+	// no episode to re-fire, and the standing TemplateDataError for a gap that
+	// resolves nothing is lane 1's to raise.
+	//
+	// One stamped shape is NOT this route's: an operator's un-park. resetBudget
+	// zeroes the attempts and keeps everything else — the leg, the re-arm tally
+	// and the escalation instant (the ratified inheritance: the verb re-arms the
+	// budget, not the pacing of an episode that may still be open) — so a
+	// document reading zero attempts while naming a leg is an un-park, and it is
+	// arm (n)'s to dispatch. Nothing else writes that pair: an `unplannable`
+	// escalation creates with no leg, a leg change books Count 1, an escalation
+	// over a leg updates a document whose attempts are already charged, and
+	// incrementDispatchCount refuses to create at zero. It is the same
+	// discriminator bookDispatch reads to decide whether a fresh attempt
+	// inherits the pacing or restarts it.
+	if count.EscalatedAt != "" && !(count.Count == 0 && count.Leg != "") && s.warmedUp() {
+		esc, escalates := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, gapColumn)
+		refire := func() {
+			if !escalates {
+				return
+			}
+			if dec := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
+				row, rowEntry.Revision, nil, 0, false, count, entry.Revision); dec != substrate.Ack {
+				e.logger.Warn("weaver sweep: escalation re-fire from the count leg did not complete cleanly; will retry",
+					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			}
+		}
+		if ga.Goal != nil && count.Leg != "" {
+			if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, count.Leg, row, 0, entry.Revision) {
+				if dec := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowEntry.Revision); dec != substrate.Ack {
+					e.logger.Warn("weaver sweep: leg advance after an escalation release did not complete cleanly; will retry",
+						"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+				}
+				return
+			}
+			refire()
+			return
+		}
+		if !e.escalationCanRelease(ctx, target, targetID, entityID, gapColumn, escalateUnplannable, ga, planned, row) {
+			refire()
+			return
+		}
+		// Released: the gap resolves again, so the record saying it is on the
+		// reasoning tier is retired here rather than left to the dispatch that
+		// follows — arm (n) below can decline for reasons of its own (a
+		// collapse-only gap, a mark that raced this pass), and the escalation is
+		// over either way. Only that record: the same latch carries a spent
+		// budget's GapBudgetExhausted, raised by a leg this one knows nothing
+		// about, and clearing it here would flap it on every pass.
+		if e.issues.standingAs(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur) {
+			e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+		}
+	}
+
 	// The re-arm (arm (n)): the operator verb's teeth, not a second general
 	// dispatch leg. Everything above has established the state lane-1's
 	// dispatchGap fires on — registered, enabled, open, violating, an entityKey
@@ -793,20 +899,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	// time-varying inputs that a concurrent close can move between the two
 	// calls. The gap would then dispatch a candidate the collapse-only refusal
 	// was never applied to: the exact re-arm this arm exists to withhold.
-	pl, actionRef, esc, escalate, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, resolvedRef)
-	if escalate {
-		// The gap has no derivable plan and the target escalates that: an
-		// escalation is an episode of its own, so it goes to the seam that owns
-		// one rather than being fired from here as the re-arm's dispatch. This
-		// leg holds no mark — that is what makes it the markless re-arm — and the
-		// count document it read this pass is the pacing the seam tests against.
-		if dec := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
-			row, rowEntry.Revision, nil, 0, false, count, entry.Revision); dec != substrate.Ack {
-			e.logger.Warn("weaver sweep: gap escalation from the count leg did not complete cleanly; will retry",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-		}
-		return
-	}
+	pl, actionRef, _, _, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, resolvedRef)
 	if pl == nil {
 		// planGap already surfaced whatever it was (an unresolved reference, a
 		// playbook config error) on its own issue keys, or declined for
@@ -821,7 +914,8 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		"action", actionRef, "reason", sweepReasonBudgetReArm)
 	// An ORDINARY episode, always: the plan is pinned to a ref resolvedLegAction
 	// just resolved out of this gap's own catalog, so it names a real leg of the
-	// chain and the escalation route above is unreachable from here. It is
+	// chain and can never come back unplannable (that verdict needs an unpinned
+	// synthesis), which is why the seam is not consulted here. It is
 	// dispatched as the fresh attempt it is — booked against the budget the
 	// operator re-armed and into the leg's own confidence window — and it
 	// displaces no leg, because it IS one.
@@ -923,7 +1017,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 	ga, ok := target.Gaps[gapColumn]
-	if !ok {
+	if !ok && !(rec.Escalation == escalateUnplannable && escalatesTrigger(target, escalateUnplannable)) {
 		if !s.warmedUp() {
 			// Same warm-up gate: mid-replay the loaded definition may be an
 			// intermediate revision that does not yet name this gap.
@@ -935,6 +1029,16 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		}
 		return
 	}
+	// A column the playbook does not name, held by an `unplannable` escalation
+	// the target's policy still escalates, is not an orphan at all: it is the
+	// no-entry door's own standing episode, whose whole premise is that no entry
+	// exists. Deleting it would leave the gap markless, and the next delivery
+	// would mint a fresh escalation — the unpaced re-fire per delivery this
+	// design removes. It falls through instead: the surface check reads false on
+	// the zero GapAction, the entityKey guard and the single count read below
+	// apply to it like any other mark, and the class branch gives it the paced
+	// disposition every escalation gets. With the policy gone it is stranded
+	// again, and the arm above deletes it as it always has.
 	if surfaceOnlyGap(ga) {
 		// The playbook now says this column only surfaces, so the mark under this
 		// key is stranded state from the action the package replaced
@@ -952,6 +1056,19 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// definition reading `surface` is not evidence to destroy the bookkeeping
 		// of a real running episode on. That is the orphan-column arm's rule, and
 		// the reason its own delete is gated by warmedUp.
+		//
+		// An ESCALATION's mark is the exception, and it is released rather than
+		// left: a column the playbook now says only SURFACES has an answer for
+		// the dead end that produced the escalation, and lane 1 cannot notice —
+		// its surface arm returns above the mark read, which is what keeps a
+		// column of many open rows from paying one per delivery. This leg already
+		// holds the mark, so the release costs nothing extra, and what it ends is
+		// a record saying the gap is on the reasoning tier when the playbook has
+		// stopped asking anyone to remediate it at all.
+		if rec.Escalation != "" {
+			e.releaseEscalation(ctx, targetID, entityID, gapColumn, markRev)
+			return
+		}
 		e.logger.Debug("weaver sweep: reclaim skipped for a surface gap; its mark is stranded state, not an episode to re-dispatch",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "markAction", rec.Action)
 		return
@@ -1003,25 +1120,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// carries its displaced leg on the escalation's own mark, so its boundary
 	// stays testable from this leg too.
 	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, legOf(ga, rec, count), row, markRev, countRev) {
-		pl, actionRef, esc, escalate, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, "")
-		if escalate {
-			// The advanced chain has no derivable next leg and the target
-			// escalates that: the seam owns the episode. The release deleted the
-			// mark and the budget, so nothing here names either for it.
-			if fired := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
-				row, rowRevision, nil, 0, false, dispatchCount{}, 0); fired != substrate.Ack {
-				e.logger.Warn("weaver sweep: leg-advance escalation did not complete cleanly; will retry",
-					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-			}
-			return
-		}
-		if pl == nil {
-			e.logger.Warn("weaver sweep: leg-advance plan failed; the gap stays markless until the next row delivery",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
-			return
-		}
-		if fired, _ := e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false,
-			"", ga.Goal != nil, ""); fired != substrate.Ack {
+		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
 			// its op publish failed (the mark exists; the lease/reclaim
@@ -1069,6 +1168,47 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 			}
 		}
 		return
+	}
+
+	// The class release (design §4.3, Rule 2) and, failing it, the escalation's
+	// own paced re-fire. It sits BELOW the leg boundary above (Rule 1 always
+	// wins, and displacedLeg is what that ordering is tested with: a PLAN leg is
+	// a goal gap's, while legOf would read every other shape's own dispatch
+	// action back off the count document as a pin whose boundary nothing can
+	// test) and the two gates, and ABOVE the collapse-only classification —
+	// which is what keeps an escalation mark out of collapseOnlyReclaim
+	// entirely: that classifier decides a gap's class from its resolved dispatch
+	// SHAPE, and an escalation's action is a dispatch class no catalog resolves.
+	//
+	// A released gap is a markless open gap and this leg dispatches NOTHING for
+	// it. The two seams that already own that state carry the collapse-only
+	// refusal this leg would otherwise have to re-implement: a lane-1 delivery,
+	// and the count leg's arm (n) for a row that has gone quiet. It is the same
+	// disposition an escalation mark already had once its TTL expired, made
+	// prompt — and prompt matters, because the mark is what stands between the
+	// gap and its own remediation.
+	//
+	// Not released, the seam paces the re-fire on the count document: no `mark
+	// reclaimed` Warn, no re-arm booking, and no reclaim ladder — an escalation
+	// is not the gap's episode, so the ladder that paces the gap's own re-arms
+	// is not what paces it.
+	if rec.Escalation != "" {
+		if displacedLeg(ga, rec, count) == "" &&
+			e.escalationCanRelease(ctx, target, targetID, entityID, gapColumn, rec.Escalation, ga, ok, row) {
+			e.releaseEscalation(ctx, targetID, entityID, gapColumn, markRev)
+			return
+		}
+		if esc, escalates := augurEscalation(e.source, target, rec.Escalation, targetID, entityID, entityKey, gapColumn); escalates {
+			if dec := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, rec.Escalation,
+				row, rowRevision, rec, markRev, true, count, countRev); dec != substrate.Ack {
+				e.logger.Warn("weaver sweep: escalation re-fire did not complete cleanly; will retry",
+					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			}
+			return
+		}
+		// The policy no longer escalates this mark's class: nothing routes it,
+		// and the reclaim below treats it as the pin it carries — a dispatch
+		// class no catalog holds, which is the config error planGap alerts.
 	}
 
 	// confirmedConcluded mirrors fireEpisode's staleMark (evaluator.go): true
@@ -1191,18 +1331,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// episode, never a fresh one, so a planned-mode candidates gap must reuse
 	// the mark's recorded pick rather than re-ranking it (design §2 — a
 	// reclaim never replans mid-episode).
-	pl, resolvedAction, esc, escalate, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, rec.Action)
-	if escalate {
-		// The pin resolves to no plan for this row and the target escalates
-		// that: the seam owns the episode, and it is handed the mark snapshot
-		// and the pacing document this pass already read.
-		if fired := e.escalateGap(ctx, target, targetID, entityID, entityKey, gapColumn, esc, escalateUnplannable,
-			row, rowRevision, rec, markRev, true, count, countRev); fired != substrate.Ack {
-			e.logger.Warn("weaver sweep: reclaim escalation did not complete cleanly; will retry",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-		}
-		return
-	}
+	pl, resolvedAction, _, _, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowRevision, rec.Action)
 	if pl == nil {
 		e.logger.Warn("weaver sweep: reclaim plan failed; leaving expired mark for the next sweep",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
@@ -1249,8 +1378,19 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// episode — a fresh lease, not a new dispatch decision — so both are the
 	// mark's own values, and dropping either would take the gap's leg boundary
 	// dark and leave the re-armed mark unable to declare itself an escalation.
+	//
+	// They are carried only while the re-dispatch is still the dispatch they
+	// describe. A mark whose class the policy no longer escalates falls through
+	// the class branch above and is re-armed as the gap's OWN remediation
+	// instead: a different action, a different episode, and a pair that would
+	// otherwise leave it declaring an escalation that no longer exists — which
+	// the class routes would then act on if the policy were re-added.
+	escalatedFrom, escalation := "", ""
+	if resolvedAction == rec.Action {
+		escalatedFrom, escalation = rec.EscalatedFrom, rec.Escalation
+	}
 	newRev, conflict, err := e.marks.replace(ctx, targetID, entityID, gapColumn, entityKey, resolvedAction,
-		rec.EscalatedFrom, rec.Escalation, claimID, markRev, markTTL)
+		escalatedFrom, escalation, claimID, markRev, markTTL)
 	if err != nil {
 		e.logger.Warn("weaver sweep: reclaim re-arm failed; leaving expired mark for the next sweep",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)

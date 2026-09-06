@@ -730,11 +730,14 @@ func TestSweep_ReclaimReleasesEscalatedLeg(t *testing.T) {
 // changes", which is the unbounded loop the level test exists to avoid — a
 // bgcheck lapsing changes the row without any leg making progress.
 //
-// The uncapped half reaches the same "nothing moves" by a different route, and
+// The uncapped half reaches the same "the leg holds" by a different route, and
 // that is the job the fixture rule gives it: with no maxretries_<g> the gap
-// never exhausts, so the delivery goes to the ordinary dispatch leg instead —
-// where the standing escalation's mark takes the anti-storm drop, and an
-// unfinished leg still releases nothing.
+// never exhausts, so the delivery goes to the ordinary dispatch leg instead,
+// where the mark's own declared class routes it to the same episode seam. The
+// unfinished leg releases nothing there either — an escalation over a leg
+// releases at that leg's boundary and nowhere else — so what the seam does is
+// what it does for every standing escalation: re-fire the episode, paced on the
+// document, booking neither tally.
 func TestEscalateExhaustedGap_EffectsNotHolding_StillEscalates(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -744,7 +747,7 @@ func TestEscalateExhaustedGap_EffectsNotHolding_StillEscalates(t *testing.T) {
 		name          string
 		budget        int
 		wantEscalated bool
-	}{{"capped", 2, true}, {"uncapped", 0, false}} {
+	}{{"capped", 2, true}, {"uncapped", 0, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1000,11 +1003,11 @@ func TestEscalateExhaustedGap_BooksNeitherCountNorEffect(t *testing.T) {
 // re-fire is an op the Processor rejects create-only. So it waits the same
 // exponential every other re-arm of an open episode waits, level-tested against
 // the last fire rather than against the mark it may have lost.
-// The uncapped half is where the re-fire arm is unreachable at all — an
-// uncapped gap never exhausts, so its delivery goes to the ordinary dispatch leg
-// and the standing escalation's mark takes the anti-storm drop there. Nothing
-// fires and nothing is booked on either delivery, which is the pacing question
-// dissolving rather than being answered differently.
+// The uncapped half reaches the identical arm down the other route: an uncapped
+// gap never exhausts, so its delivery goes to the ordinary dispatch leg, where
+// the mark's declared class routes it to the same seam and the same level test
+// against the same document. The cadence is a property of the episode, not of
+// which door derived it.
 func TestEscalateExhaustedGap_RefireIsPacedByReclaims(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1014,7 +1017,7 @@ func TestEscalateExhaustedGap_RefireIsPacedByReclaims(t *testing.T) {
 		name       string
 		budget     int
 		wantRefire bool
-	}{{"capped", 2, true}, {"uncapped", 0, false}} {
+	}{{"capped", 2, true}, {"uncapped", 0, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1413,9 +1416,19 @@ func TestSweep_GoalLegReclaim_DirectOpLegIsAnAttempt(t *testing.T) {
 //
 // Writing legA's own effect (aDone) makes the same catalog plannable again,
 // because legB's precondition is exactly that: one fixture drives both the
-// escalation and the leg boundary that ends it.
-func goalLegBlockedSpec(targetID string) map[string]any {
-	spec := goalLegSpec(targetID, actionDirectOp, false)
+// escalation and the leg boundary that ends it. Setting `ready` makes legA
+// itself applicable again — the row change a released escalation's gap acts on.
+//
+// legAAction selects legA's dispatch contract type, defaulting to the directOp
+// that books and concludes on its own; a vector that needs the displaced leg to
+// have an OPEN artifact — a task on a human's queue, which is what makes the leg
+// boundary the only safe release — passes actionAssignTask.
+func goalLegBlockedSpec(targetID string, legAAction ...string) map[string]any {
+	action := actionDirectOp
+	if len(legAAction) == 1 {
+		action = legAAction[0]
+	}
+	spec := goalLegSpec(targetID, action, false)
 	spec["augur"] = map[string]any{"escalate": []any{escalateUnplannable}}
 	gaps, _ := spec["gaps"].(map[string]any)
 	gap, _ := gaps[goalLegGap].(map[string]any)
@@ -1541,21 +1554,24 @@ func TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing(t *testing.T)
 	}
 }
 
-// TestSweep_ReclaimOfEscalationPreservesDisplacedLeg pins what the sweep does
-// with an expired escalation mark whose pin is the reasoning op's dispatch
-// class, and what survives the pass.
+// TestSweep_ReclaimOfEscalationPreservesDisplacedLeg pins the sweep's
+// disposition for an expired escalation mark that stands over a plan leg, and
+// what survives the pass.
 //
-// The pin names no entry in the goal's catalog, and a pin the catalog does not
-// hold is a CONFIG error: only a re-author fixes it, and re-running the same row
-// changes nothing. So the reclaim plans nothing, dispatches nothing, alerts
-// PlaybookConfigError at `warning` and leaves the expired mark exactly where it
-// found it — which is what keeps the escalation's own record intact: the leg it
-// displaced and the class it declares are still on the mark for the boundary
-// test that follows, and the gap's budget is untouched.
+// The mark declares its class, so the sweep routes it as the ESCALATION it is,
+// before anything tries to resolve its pin: the leg it displaced has not
+// finished (Rule 1 is the only release available to it), so the episode stands
+// and the seam re-fires it paced on the document — booking neither the gap's
+// budget nor an `__effect` window, and carrying the displaced leg and the class
+// onto the fresh mark. Without that thread the boundary below could never be
+// tested and the gap would sit on the reasoning tier forever.
 //
-// The boundary is the payoff: legA's effect lands and the pin — read off the
-// mark the reclaim left — releases and advances the chain, whether the mark
-// declares its class or is an old-shape one written before the field existed.
+// The old-shape vector is the migration row: a mark written before the class
+// field existed declares nothing, so nothing can route it by class. Its pin
+// names no entry in the goal's catalog, which is a config error — a re-authored
+// playbook is the only other way to reach that state — so the reclaim plans
+// nothing, alerts PlaybookConfigError at `warning` and leaves the expired mark,
+// whose own TTL bounds it.
 //
 // The cap is orthogonal: the reclaim reads the count document for its own pacing
 // whether or not one is declared, so both halves run identically.
@@ -1585,36 +1601,56 @@ func TestSweep_ReclaimOfEscalationPreservesDisplacedLeg(t *testing.T) {
 			entityID := testNanoID(t)
 			key := markKey(targetID, entityID, goalLegGap)
 
-			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap),
-				dispatchCount{Count: 2, Leg: "legA"})
+			// Paced out: the last fire is older than the first backoff step, so
+			// the re-fire is due rather than waiting.
+			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap), dispatchCount{
+				Count: 2, Leg: "legA",
+				EscalatedAt: substrate.FormatTimestamp(time.Now().Add(-2 * time.Hour)),
+			})
 			putStateValue(t, ctx, h.conn, key, escalationMark(targetID, entityID, "legA", tc.declares, pastLease()))
 			before, _ := h.readMark(t, ctx, key)
 			h.putRow(t, ctx, targetID, entityID, goalLegRow(entityID, tc.budget, nil))
 
 			h.pass(ctx)
 
-			h.requireNoOp(t)
-			rec, _ := h.readMark(t, ctx, key)
-			if rec != before {
-				t.Fatalf("mark after the pass = %+v, want it left exactly as found (%+v): a pin the catalog no "+
-					"longer holds is a config error, and re-arming it would rewrite the record the boundary "+
-					"test reads", rec, before)
-			}
-			if is, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, goalLegGap)); !ok ||
-				is.Code != "PlaybookConfigError" || is.Severity != "warning" {
-				t.Fatalf("issue at the gap's config key = %+v (present=%v), want a warning PlaybookConfigError",
-					is, ok)
-			}
-			doc := readCount(t, ctx, h.conn, targetID, entityID, goalLegGap)
-			if doc.Count != 2 || doc.Leg != "legA" {
-				t.Fatalf("count document = %+v, want {2 legA} untouched: nothing dispatched, so nothing books", doc)
+			if tc.declares == "" {
+				h.requireNoOp(t)
+				rec, _ := h.readMark(t, ctx, key)
+				if rec != before {
+					t.Fatalf("mark after the pass = %+v, want it left exactly as found (%+v): a pin the catalog "+
+						"does not hold is a config error, and re-arming it would rewrite the record the "+
+						"boundary test reads", rec, before)
+				}
+				if is, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, goalLegGap)); !ok ||
+					is.Code != "PlaybookConfigError" || is.Severity != "warning" {
+					t.Fatalf("issue at the gap's config key = %+v (present=%v), want a warning PlaybookConfigError",
+						is, ok)
+				}
+			} else {
+				if op := h.nextOp(t); op["operationType"] != defaultAugurOp {
+					t.Fatalf("operationType = %v, want the reasoning op re-fired by the seam", op["operationType"])
+				}
+				rec, _ := h.readMark(t, ctx, key)
+				if rec.Action != actionDirectOp || rec.EscalatedFrom != "legA" || rec.Escalation != escalateUnplannable {
+					t.Fatalf("re-fired mark = %+v, want the escalation still standing over legA and still "+
+						"declaring its class", rec)
+				}
+				doc := readCount(t, ctx, h.conn, targetID, entityID, goalLegGap)
+				if doc.Count != 2 || doc.Leg != "legA" {
+					t.Fatalf("count document = %+v, want {2 legA} untouched: a re-fired escalation books no more "+
+						"than the first one did", doc)
+				}
+				if doc.Reclaims != 1 || doc.EscalatedAt == before.ClaimedAt {
+					t.Fatalf("count document = %+v, want the re-fire's own instant and re-arm tally: the next "+
+						"wait is level-tested against them", doc)
+				}
 			}
 			if _, _, present, err := readEffectStats(ctx, h.engine.marks, targetID, goalLegGap, actionDirectOp); err != nil || present {
 				t.Fatalf("a confidence window opened at the escalation's dispatch class "+
 					"(present=%v err=%v) — nothing can ever close it", present, err)
 			}
 
-			// The boundary, tested off the mark the reclaim left alone.
+			// The boundary, tested off whatever mark the pass left behind.
 			h.putRow(t, ctx, targetID, entityID, goalLegRow(entityID, tc.budget, map[string]any{"aDone": true}))
 			h.reexpireMark(t, ctx, key)
 			h.pass(ctx)
