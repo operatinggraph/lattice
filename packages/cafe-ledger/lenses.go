@@ -24,8 +24,9 @@ const LeaseAccountsBucket = "cafe-lease-accounts"
 // per posted transaction, flattening the .entry aspect + the account/lease
 // it posted to into a query-optimized read-model row — the FE derives a
 // running balance client-side by summing amountCents, positive for debit,
-// negative for credit, over rows for a given leaseAppKey/accountKey; the
-// ledger itself never stores a mutable running total) and
+// negative for credit, over rows for a given leaseAppKey/accountKey — this
+// independent sum is the DISPLAY source of truth, never the account's own
+// .balance authorization cache, which no lens reads) and
 // cafeLeaseAccounts (the lease -> account key lookup, since the account key
 // is no longer derivable). Prefixed like the package's DDLs (ddls.go): a
 // Lens canonicalName is global across every installed package, and

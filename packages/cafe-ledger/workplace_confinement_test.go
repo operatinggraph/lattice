@@ -135,6 +135,12 @@ func tombstoneWorksAt(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 // the outcome. authContextTarget is the raw client-supplied hint; the harness
 // never validates it, which is exactly the forgery vector one vector below
 // exercises.
+//
+// Every account it is pointed at must already owe at least the 1850 it pays:
+// post_entry caps a payment at the account's own outstanding balance, so a
+// credit against a never-charged account is refused whatever the workplace
+// says, and an "accepted" vector on one would prove nothing about confinement.
+// seedChargedAccount below is how each vector gets there.
 func creditAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
 	cons jetstream.Consumer, label, actorKey, acctKey, authContextTarget string, want processor.MessageOutcome) {
 	t.Helper()
@@ -146,18 +152,26 @@ func creditAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"House tab payment"}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{acctKey},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
-			},
-		},
+		ContextHint:   staffCreditHint(actorKey, acctKey),
 	}
 	if authContextTarget != "" {
 		env.AuthContext = &processor.AuthContext{Target: authContextTarget}
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// seedChargedAccount opens the account for leaseKey and posts one operator
+// charge of amountCents to it, so a confinement vector's payment has a balance
+// to pay down. The charge goes in as the operator, which DebitAccount grants at
+// scope=any and never confines — the workplace question under test is the
+// PAYMENT's, not the charge's.
+func seedChargedAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, acctLabel, debitLabel, leaseKey string, amountCents int) string {
+	t.Helper()
+	acctKey := createAccount(t, ctx, conn, cp, cons, acctLabel, leaseKey)
+	postDebit(t, ctx, conn, cp, cons, debitLabel, acctKey, amountCents, "Settled tab")
+	return acctKey
 }
 
 // TestCreditWorkplace_StaffConfinedToWorkplace is the pair that matters: the
@@ -170,8 +184,8 @@ func TestCreditWorkplace_StaffConfinedToWorkplace(t *testing.T) {
 	cp, cons := newLedgerPipeline(t, ctx, conn, "creditworkplace")
 
 	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
-	acctA := createAccount(t, ctx, conn, cp, cons, "cafewcacctaaaa000001", leaseA)
-	acctB := createAccount(t, ctx, conn, cp, cons, "cafewcacctbbbb000001", leaseB)
+	acctA := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcacctaaaa000001", "cafewcdebitaaaa00001", leaseA, 1850)
+	acctB := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcacctbbbb000001", "cafewcdebitbbbb00001", leaseB, 1850)
 	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
 
 	creditAs(t, ctx, conn, cp, cons, "cafewccreditathome01",
@@ -212,7 +226,8 @@ func TestCreditWorkplace_CoversDeeperContainment(t *testing.T) {
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.leaseapp."+deepLeaseID+".appliesToUnit.unit."+deepUnitID,
 		"appliesToUnit", deepLease, deepUnitKey)
-	deepAcct := createAccount(t, ctx, conn, cp, cons, "cafewcdeepacct000001", deepLease)
+	// 3700 charged: this vector spends two 1850 payments against one account.
+	deepAcct := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcdeepacct000001", "cafewcdeepdebit00001", deepLease, 3700)
 	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
 
 	// Two levels up: unit → floor → building, where the worksAt link lives.
@@ -241,8 +256,8 @@ func TestCreditWorkplace_OperatorUnconfined(t *testing.T) {
 	cp, cons := newLedgerPipeline(t, ctx, conn, "creditoperator")
 
 	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
-	acctA := createAccount(t, ctx, conn, cp, cons, "cafewcopacctaaa00001", leaseA)
-	acctB := createAccount(t, ctx, conn, cp, cons, "cafewcopacctbbb00001", leaseB)
+	acctA := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcopacctaaa00001", "cafewcopdebitaaa0001", leaseA, 1850)
+	acctB := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcopacctbbb00001", "cafewcopdebitbbb0001", leaseB, 1850)
 
 	creditAs(t, ctx, conn, cp, cons, "cafewcopcreditaaa001",
 		ledgerActorKey, acctA, "", processor.OutcomeAccepted)
@@ -260,7 +275,7 @@ func TestCreditWorkplace_ForgedAuthContextTargetStaysConfined(t *testing.T) {
 	cp, cons := newLedgerPipeline(t, ctx, conn, "creditforged")
 
 	_, leaseB := seedWorkplaceTopology(t, ctx, conn)
-	acctB := createAccount(t, ctx, conn, cp, cons, "cafewcfgacctbbb00001", leaseB)
+	acctB := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcfgacctbbb00001", "cafewcfgdebitbbb0001", leaseB, 1850)
 	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
 
 	creditAs(t, ctx, conn, cp, cons, "cafewcforgedtarget01",
@@ -277,8 +292,8 @@ func TestCreditWorkplace_UnwiredStaffDeniedNotWidened(t *testing.T) {
 	cp, cons := newLedgerPipeline(t, ctx, conn, "creditunwired")
 
 	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
-	acctA := createAccount(t, ctx, conn, cp, cons, "cafewcuwacctaaa00001", leaseA)
-	acctB := createAccount(t, ctx, conn, cp, cons, "cafewcuwacctbbb00001", leaseB)
+	acctA := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcuwacctaaa00001", "cafewcuwdebitaaa0001", leaseA, 1850)
+	acctB := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcuwacctbbb00001", "cafewcuwdebitbbb0001", leaseB, 1850)
 	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
 	tombstoneWorksAt(t, ctx, conn)
 
@@ -363,7 +378,7 @@ func TestCreditWorkplace_UnlocatableAccountIsOperatorOnly(t *testing.T) {
 
 	seedWorkplaceTopology(t, ctx, conn)
 	orphanLease := seedLease(t, ctx, conn, "BBCAFELWCRPHANLEASEZ")
-	orphanAcct := createAccount(t, ctx, conn, cp, cons, "cafewcorphanacct0001", orphanLease)
+	orphanAcct := seedChargedAccount(t, ctx, conn, cp, cons, "cafewcorphanacct0001", "cafewcorphandebit001", orphanLease, 1850)
 	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
 
 	creditAs(t, ctx, conn, cp, cons, "cafewcorphanstaff001",

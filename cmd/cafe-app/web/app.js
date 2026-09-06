@@ -1545,15 +1545,20 @@ async function renderResident() {
         "</ul>" +
         (selfMode ? "" : '<div id="refund-form-host"></div>')
       : '<p class="meta">No posted café charges yet.</p>') +
-    // Front desk records a payment handed over at the counter (staff form,
-    // unconfined by amount — cash/card is witnessed in person). A resident
+    // Front desk records a payment handed over at the counter; a resident
     // instead pays down their OWN balance self-service (self-scoped
-    // CreditCafeAccount — packages/cafe-ledger's consumer scope=self grant):
-    // ownership + the amount cap are proven server-side against the
-    // account's own heldFor→leaseapp→applicationFor topology and postedTo
-    // history, so a forged accountKey or an over-balance amount only fails
-    // closed — nothing here needs to be trusted client-side. Neither form
-    // needs the account to exist first; that only matters for what to pay.
+    // CreditCafeAccount — packages/cafe-ledger's consumer scope=self grant).
+    // Both legs are bounded server-side and identically: packages/cafe-ledger
+    // caps a payment at the account's own maintained .balance whoever
+    // submitted it, and proves the self leg's ownership against the account's
+    // own heldFor→leaseapp→applicationFor topology — so a forged accountKey
+    // or an over-balance amount only fails closed, from either form, and
+    // nothing here needs to be trusted client-side. Both forms therefore
+    // render on the same condition — an account that exists AND owes
+    // something — prefilled with what is owed and capped there by `max`. That
+    // cap is a courtesy on the typing, never the enforcement; what it buys is
+    // that neither a resident nor a staffer is offered a payment field on a
+    // settled tab, where every submit would be refused.
     (selfMode
       ? ledger.accountKey && (ledger.balanceCents || 0) > 0
         ? '<form id="self-pay-form" class="field-row" style="margin-top:14px;">' +
@@ -1564,11 +1569,15 @@ async function renderResident() {
           "</form>"
         : ""
       : ledger.accountKey
-        ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
-          '<input id="record-payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment ($)" required />' +
-          '<input id="record-payment-memo" type="text" placeholder="Memo (optional — shown to the resident)" />' +
-          '<button id="record-payment-submit" type="submit">Record Payment</button>' +
-          "</form>"
+        ? (ledger.balanceCents || 0) > 0
+          ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
+            '<input id="record-payment-amount" type="number" step="0.01" min="0.01" max="' +
+            (ledger.balanceCents / 100).toFixed(2) +
+            '" placeholder="Payment ($)" value="' + (ledger.balanceCents / 100).toFixed(2) + '" required />' +
+            '<input id="record-payment-memo" type="text" placeholder="Memo (optional — shown to the resident)" />' +
+            '<button id="record-payment-submit" type="submit">Record Payment</button>' +
+            "</form>"
+          : '<p class="meta" style="margin-top:14px;">Nothing owed on this tab — no payment to record.</p>'
         : '<p class="meta" style="margin-top:14px;">No café account for this lease yet — nothing to credit.</p>') +
     "</div>"
   );

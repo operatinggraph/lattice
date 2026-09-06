@@ -106,6 +106,53 @@ func nanoIDFromRequestID(requestID string) string {
 	return processor.DeterministicNanoID(pcg, substrate.NanoIDLength)
 }
 
+// debitHint is the contextHint a DebitAccount submission carries, mirroring
+// cafe-domain's cafeTabSettlement missing_charge dispatch (targets.go): the
+// account (plus any extra vertex the payload names, e.g. tabRef) and the
+// account's absence-tolerant .balance aspect. No postedTo walk — a charge never
+// backfills a legacy account's balance, only a payment does.
+//
+// .balance is declared, not incidental: the declaration is what auto-conditions
+// the update post_entry emits for it on the revision it hydrated at
+// (Contract #3 §3.2). The script's own derive_reads(op) declares the same key
+// whatever a submitter sends, so these fixtures mirror the dispatchers rather
+// than supply the guarantee.
+func debitHint(acctKey string, extraReads ...string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads:         append([]string{acctKey}, extraReads...),
+		OptionalReads: []string{acctKey + ".balance"},
+	}
+}
+
+// staffCreditHint is the contextHint a scope=any CreditCafeAccount submission
+// carries — debitHint's reads plus the holdsRole walk workplace_exempt's
+// operator short-circuit runs and the bounded postedTo walk that backfills
+// .balance on a legacy account's first payment, exactly as the descriptor
+// declares them (opmetas.go).
+func staffCreditHint(actorKey, acctKey string) *processor.ContextHint {
+	h := debitHint(acctKey)
+	h.Enumerations = []processor.EnumerationHint{
+		{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+		{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+	}
+	return h
+}
+
+// selfCreditHint is the contextHint a resident's scope=self CreditCafeAccount
+// submission carries. No holdsRole walk: workplace_exempt short-circuits on
+// op.authTargetValidated, so the operator probe never runs on this path. The
+// legacy-backfill postedTo walk stays — a resident's payment reaches it on the
+// same terms a staffer's does.
+func selfCreditHint(acctKey string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads:         []string{acctKey},
+		OptionalReads: []string{acctKey + ".balance"},
+		Enumerations: []processor.EnumerationHint{
+			{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+		},
+	}
+}
+
 func seedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string, data map[string]any) {
 	t.Helper()
 	if data == nil {
@@ -314,7 +361,7 @@ func TestDebitCreditCafeAccount_PostEntries(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"Settled tab - table 4"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   debitHint(acctKey),
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -359,12 +406,7 @@ func TestDebitCreditCafeAccount_PostEntries(t *testing.T) {
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"House tab payment"}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{acctKey},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
-			},
-		},
+		ContextHint:   staffCreditHint(ledgerActorKey, acctKey),
 	}
 	testutil.PublishOp(t, conn, creditEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -391,7 +433,7 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"vtx.cafeaccount.BBABSENTACCTHJKMNPQR","amountCents":1000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.cafeaccount.BBABSENTACCTHJKMNPQR"}},
+		ContextHint:   debitHint("vtx.cafeaccount.BBABSENTACCTHJKMNPQR"),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -420,7 +462,7 @@ func TestDebitAccount_TabRefWritesSettlesLink(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":950,"tabRef":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, tabKey}},
+		ContextHint:   debitHint(acctKey, tabKey),
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -449,7 +491,7 @@ func TestDebitAccount_UnknownTabRefRejected(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":950,"tabRef":"vtx.tab.BBABSENTTABHJKMNPQR"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.tab.BBABSENTTABHJKMNPQR"}},
+		ContextHint:   debitHint(acctKey, "vtx.tab.BBABSENTTABHJKMNPQR"),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -472,7 +514,7 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":0}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   debitHint(acctKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -497,7 +539,7 @@ func postDebit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 		Class:         "cafetransaction",
 		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
 			strconv.Itoa(amountCents) + `,"memo":"` + memo + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint: debitHint(acctKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -522,7 +564,8 @@ func refundEnv(label, actorKey, acctKey, reversesRef string, amountCents int,
 		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","reversesRef":"` + reversesRef +
 			`","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"Wrong item charged"}`),
 		ContextHint: &processor.ContextHint{
-			Reads: []string{acctKey, reversesRef, reversesRef + ".entry"},
+			Reads:         []string{acctKey, reversesRef, reversesRef + ".entry"},
+			OptionalReads: []string{acctKey + ".balance"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
 				{Hub: reversesRef, Relation: "postedTo", Direction: "out"},
@@ -803,10 +846,16 @@ func driveConcurrently(t *testing.T, ctx context.Context, cp *processor.CommitPa
 // TestRefundCafeCharge_ConcurrentRefundsCannotJointlyExceedTheCharge is the
 // race the ceiling exists to survive: two full refunds of the same charge,
 // each legal on its own, hydrated together and committed together. Exactly one
-// may win. Which one, and by which refusal, is not fixed — the loser is turned
-// away either by the compare-and-set on the tally it read (if the hydrations
-// overlapped) or by the tally itself (if they did not) — but the outcome is:
-// one refund posted, the charge's tally equal to that one refund, never both.
+// may win.
+//
+// The loser does not simply conflict out. The account carries a .balance aspect
+// and both refunds update it, an update the Processor auto-conditions on the
+// revision it hydrated at, so the losing commit re-hydrates and RE-EXECUTES the
+// whole operation — and reversed_charge then refuses the retry on the fresh
+// refundedCents it re-reads (the charge is already fully given back). Which of
+// the two mechanisms turns the loser away is not fixed and does not matter; the
+// outcome is: one refund posted, the charge's tally equal to that one refund,
+// never both.
 func TestRefundCafeCharge_ConcurrentRefundsCannotJointlyExceedTheCharge(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "refundrace")
@@ -915,9 +964,11 @@ func TestCreditCafeAccount_ReversesRefRejected(t *testing.T) {
 			Class:         "cafetransaction",
 			Payload:       json.RawMessage(payload),
 			ContextHint: &processor.ContextHint{
-				Reads: []string{acctKey, chargeKey, chargeKey + ".entry"},
+				Reads:         []string{acctKey, chargeKey, chargeKey + ".entry"},
+				OptionalReads: []string{acctKey + ".balance"},
 				Enumerations: []processor.EnumerationHint{
 					{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
+					{Hub: acctKey, Relation: "postedTo", Direction: "in"},
 				},
 			},
 		}
@@ -965,7 +1016,8 @@ func TestRefundCafeCharge_TabRefRejected(t *testing.T) {
 		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","reversesRef":"` + chargeKey +
 			`","amountCents":100,"tabRef":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads: []string{acctKey, chargeKey, chargeKey + ".entry", tabKey},
+			Reads:         []string{acctKey, chargeKey, chargeKey + ".entry", tabKey},
+			OptionalReads: []string{acctKey + ".balance"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
 				{Hub: chargeKey, Relation: "postedTo", Direction: "out"},
@@ -1132,7 +1184,7 @@ func TestCreditCafeAccount_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"Settled tab"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   debitHint(acctKey),
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1146,7 +1198,7 @@ func TestCreditCafeAccount_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   selfCreditHint(acctKey),
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1156,14 +1208,20 @@ func TestCreditCafeAccount_ConsumerSelfScope_Allowed(t *testing.T) {
 	}
 }
 
-// TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance proves the
-// self-credit amount is bounded by what the account actually owes — a
-// resident cannot self-forgive debt by naming an amount larger than any
-// front-desk-recorded charge (scripts.go recomputes the balance from the
-// account's own postedTo history; nothing on this platform verifies a
-// self-submitted payment actually happened, so the amount itself is the
-// attack surface, not just which account it targets).
-func TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
+// TestCreditCafeAccount_SelfLegCapped proves the self-credit amount is bounded
+// by what the account actually owes — a resident cannot self-forgive debt by
+// naming an amount larger than any front-desk-recorded charge. Nothing on this
+// platform verifies a self-submitted payment actually happened, so the amount
+// itself is the attack surface, not just which account it targets.
+//
+// It is a test in its own right because the cap does NOT live inside the
+// resident branch: post_entry's authContextTarget branch proves ownership and
+// nothing else, and the cap is applied afterwards to the payment leg whoever
+// submitted it. A staff-only cap test would leave that relocation unwitnessed
+// on the leg it was written for. The refusal is read from the reply, not the
+// outcome: every denial in this script collapses to "rejected", and the
+// ownership proof one line above produces one too.
+func TestCreditCafeAccount_SelfLegCapped(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
 	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfoverbal")
@@ -1180,7 +1238,7 @@ func TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T08:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"Settled tab"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   debitHint(acctKey),
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1196,14 +1254,11 @@ func TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   selfCreditHint(acctKey),
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
-	testutil.PublishOp(t, conn, env)
-	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
-	if outcome != processor.OutcomeRejected {
-		t.Fatalf("over-balance self-credit outcome = %v, want Rejected (AuthDenied)", outcome)
-	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"AuthDenied: a payment of $18500.00 exceeds the outstanding balance of $18.50")
 }
 
 // TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance proves a
@@ -1227,14 +1282,11 @@ func TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   selfCreditHint(acctKey),
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
-	testutil.PublishOp(t, conn, env)
-	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
-	if outcome != processor.OutcomeRejected {
-		t.Fatalf("self-credit on a never-charged account outcome = %v, want Rejected (AuthDenied)", outcome)
-	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"AuthDenied: this account has no outstanding balance to pay")
 }
 
 // TestCreditCafeAccount_ConsumerSelfScope_RejectedForOthersAccount proves a
@@ -1261,14 +1313,74 @@ func TestCreditCafeAccount_ConsumerSelfScope_RejectedForOthersAccount(t *testing
 		SubmittedAt:   "2026-07-08T09:05:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   selfCreditHint(acctKey),
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
-	testutil.PublishOp(t, conn, env)
-	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
-	if outcome != processor.OutcomeRejected {
-		t.Fatalf("self-service CreditCafeAccount on another's account outcome = %v, want Rejected (AuthDenied)", outcome)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"AuthDenied: a resident may only pay down their own lease's account")
+}
+
+// TestCreditCafeAccount_StrangersAccountDeniedBeforeAnyReplay pins the ORDER of
+// post_entry's checks, which is a security property and not a stylistic one.
+// The balance read and the bounded history replay behind it are the most
+// expensive work the script does — hundreds of Core KV round trips on a legacy
+// account — and anyone holding the ordinary scope=self payment grant can name
+// any account key they like. If that work ran before the ownership proof, a
+// resident could spend the whole replay budget against a stranger's account,
+// repeatedly, and be denied only afterwards.
+//
+// The stranger's account is deliberately over-budget, which is what makes the
+// ordering visible rather than merely believed: run the replay first and the
+// refusal is the budget's ("could not backfill…"); prove ownership first and it
+// is this one. A same-shaped account under the budget would refuse identically
+// either way and prove nothing.
+func TestCreditCafeAccount_StrangersAccountDeniedBeforeAnyReplay(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfamplify")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	otherApplicantID := "BBCAFEAMPLAPPLCTHJKM"
+	seedIdentity(t, ctx, conn, otherApplicantID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEAMPLLEASEHJKMN", otherApplicantID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEAMPLACCTHJKMNP", leaseKey)
+	for i := 0; i < 501; i++ {
+		seedLegacyEntry(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100)
 	}
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditamplifypay0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:05:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
+		ContextHint:   selfCreditHint(acctKey),
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"AuthDenied: a resident may only pay down their own lease's account")
+}
+
+// TestAccountBalance_WrongClassRefused: the script is the sole writer of a
+// .balance aspect and writes exactly cafeAccountBalance, so a document of any
+// other class under that key is a fault, not a number to measure a payment cap
+// against. Reading balanceCents off whatever happened to be there would let an
+// unrelated aspect's field decide how much a resident may pay.
+func TestAccountBalance_WrongClassRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancewrongclass")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALWRCLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafebalwrongclsacct1", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafebalwrongclsdebit", acctKey, 1000, "Settled tab")
+	seedAspect(t, ctx, conn, acctKey, "balance", "transactionEntry",
+		map[string]any{"balanceCents": 900000})
+
+	env, _ := creditEnvFor("cafebalwrongclspay01", ledgerActorKey, acctKey, 5000)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"InvalidState: this account's balance aspect is not a cafeAccountBalance")
 }
 
 // TestCreditCafeAccount_ConsumerSelfScope_DebitStaysStaffOnly proves the
@@ -1294,12 +1406,580 @@ func TestCreditCafeAccount_ConsumerSelfScope_DebitStaysStaffOnly(t *testing.T) {
 		SubmittedAt:   "2026-07-08T09:10:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":500}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint:   debitHint(acctKey),
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-scoped DebitAccount outcome = %v, want Rejected (no matching grant)", outcome)
+	}
+}
+
+// --- The account's maintained .balance running total ----------------------
+
+// balanceCents reads back the account's own .balance aspect — the O(1) running
+// total post_entry keeps in lockstep with every posted entry, and the quantity
+// the payment cap is measured against.
+func balanceCents(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) float64 {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, acctKey+".balance")
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.balance carries no data", acctKey)
+	}
+	got, ok := data["balanceCents"].(float64)
+	if !ok {
+		t.Fatalf("%s.balance carries no balanceCents, got %v", acctKey, data)
+	}
+	return got
+}
+
+// creditEnvFor builds one staff-voice CreditCafeAccount of amountCents against
+// acctKey, declaring exactly what the descriptor declares (staffCreditHint).
+func creditEnvFor(label, actorKey, acctKey string, amountCents int) (*processor.OperationEnvelope, string) {
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-20T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+			strconv.Itoa(amountCents) + `,"memo":"House tab payment"}`),
+		ContextHint: staffCreditHint(actorKey, acctKey),
+	}
+	return env, "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+// creditAmount submits one CreditCafeAccount of amountCents against acctKey as
+// the given actor and asserts the outcome.
+func creditAmount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, actorKey, acctKey string, amountCents int, want processor.MessageOutcome) string {
+	t.Helper()
+	env, txKey := creditEnvFor(label, actorKey, acctKey, amountCents)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return txKey
+}
+
+// assertRejectedBecause drives env and asserts it was rejected FOR THE STATED
+// REASON. MessageOutcome collapses every refusal into "rejected", so an
+// outcome-only assertion on a payment cap passes just as well against a guard
+// that denied the actor, the account or the payload — which is the whole
+// question when the cap has just been moved out of one branch and made to bind
+// the operation.
+func assertRejectedBecause(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, env *processor.OperationEnvelope, wantMessage string) {
+	t.Helper()
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, wantMessage) {
+		t.Fatalf("rejected with %+v, want a refusal containing %q", reply.Error, wantMessage)
+	}
+}
+
+// TestCreditCafeAccount_StaffOverBalanceRefused is the staff half of the amount
+// cap. A front-desk payment is keyed by hand from a card terminal or a till, and
+// no payment rail on this platform witnesses the number that gets typed — so an
+// uncapped staff credit posts whatever was mis-keyed, taking the account
+// negative and off the arrears grid with no op that undoes it. The exact-balance
+// payment runs alongside it: the cap is `>`, not `>=`, and a rejection-only test
+// would pass just as well against a guard that refused every payment.
+func TestCreditCafeAccount_StaffOverBalanceRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditstaffoverbal")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFESTFQVRLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafestaffoveracct001", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafestaffoverdebit01", acctKey, 1425, "Settled tab")
+
+	// $14.25 owed; the staffer keys $50.00. The refusal names both amounts as
+	// money, because it is toasted verbatim at the counter.
+	overEnv, _ := creditEnvFor("cafestaffoverpay0001", ledgerActorKey, acctKey, 5000)
+	assertRejectedBecause(t, ctx, conn, cp, cons, overEnv,
+		"AuthDenied: a payment of $50.00 exceeds the outstanding balance of $14.25")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
+		t.Fatalf("balance after the refused payment = %v, want the untouched 1425", got)
+	}
+
+	// Exactly what is owed is fine.
+	creditAmount(t, ctx, conn, cp, cons, "cafestaffexactpay001",
+		ledgerActorKey, acctKey, 1425, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying in full = %v, want 0", got)
+	}
+}
+
+// TestCreditCafeAccount_StaffNoBalanceRefused: a staff payment against an
+// account that owes nothing has nothing to pay down, and posting one would put
+// the resident into a credit balance the arrears grid stops showing. The
+// accepted payment after a charge is posted proves the refusal is the empty
+// balance and not the actor or the account.
+func TestCreditCafeAccount_StaffNoBalanceRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditstaffnobal")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFESTFNQBALEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafestaffnobalacct01", leaseKey)
+
+	noBalanceEnv, _ := creditEnvFor("cafestaffnobalpay001", ledgerActorKey, acctKey, 100)
+	assertRejectedBecause(t, ctx, conn, cp, cons, noBalanceEnv,
+		"AuthDenied: this account has no outstanding balance to pay")
+
+	postDebit(t, ctx, conn, cp, cons, "cafestaffnobaldebit1", acctKey, 100, "Settled tab")
+	creditAmount(t, ctx, conn, cp, cons, "cafestaffnobalpay002",
+		ledgerActorKey, acctKey, 100, processor.OutcomeAccepted)
+}
+
+// TestAccountBalance_AccumulatesAcrossEntries pins the cache itself rather than
+// the cap that reads it: CreateAccount mints .balance at zero, and each of the
+// three posting ops moves it by its own signed amount. A refund is in the
+// sequence deliberately — it takes the third branch of post_entry and is the
+// one entry the cap never examines, so a refund that forgot to maintain the
+// total would leave every later payment measured against a stale number while
+// every existing refund test stayed green.
+func TestAccountBalance_AccumulatesAcrossEntries(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balanceaccum")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALACCLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafebalaccumacct0001", leaseKey)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("a freshly opened account's balance = %v, want 0", got)
+	}
+
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafebalaccumdebit001", acctKey, 4000, "Settled tab")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 4000 {
+		t.Fatalf("balance after a 4000 charge = %v, want 4000", got)
+	}
+
+	creditAmount(t, ctx, conn, cp, cons, "cafebalaccumpay00001",
+		ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 3000 {
+		t.Fatalf("balance after a 1000 payment = %v, want 3000", got)
+	}
+
+	refundAs(t, ctx, conn, cp, cons, "cafebalaccumrefund01",
+		ledgerActorKey, acctKey, chargeKey, 500, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 2500 {
+		t.Fatalf("balance after a 500 refund = %v, want 2500 — a refund is a posted credit and moves the total like any other", got)
+	}
+}
+
+// seedAspect writes one aspect document directly, in the shape the platform
+// stores (vertexKey/localName carried alongside class/isDeleted/data) — the
+// legacy-account fixture below needs entries and topology that exist WITHOUT a
+// .balance aspect, which no op can produce any more.
+func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vtxKey, localName, class string, data map[string]any) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"vertexKey": vtxKey, "localName": localName, "data": data,
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, vtxKey+"."+localName, b); err != nil {
+		t.Fatalf("seed aspect %s.%s: %v", vtxKey, localName, err)
+	}
+}
+
+// seedTombstonedAspect writes one aspect document as a TOMBSTONE — present,
+// isDeleted true, exactly what kv.Read hands a script for a soft-deleted key
+// (step4_hydrate routes only ErrKeyNotFound to knownAbsent). No café op
+// tombstones a .balance, so this shape has to be planted; the write path must
+// still handle it, because a create against a tombstone is refused outright
+// (Contract #3 §3.3) and an account stuck that way would take no more entries.
+func seedTombstonedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vtxKey, localName, class string, data map[string]any) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": true,
+		"vertexKey": vtxKey, "localName": localName, "data": data,
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, vtxKey+"."+localName, b); err != nil {
+		t.Fatalf("seed tombstoned aspect %s.%s: %v", vtxKey, localName, err)
+	}
+}
+
+// seedLegacyEntry seeds one already-posted transaction on acctKey — the vertex,
+// its .entry aspect and the postedTo link back — with no effect on any .balance
+// aspect, exactly as an entry posted before that aspect existed sits today.
+func seedLegacyEntry(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	acctKey, txID, entryType string, amountCents int) {
+	t.Helper()
+	txKey := "vtx.cafetransaction." + txID
+	acctID := acctKey[len("vtx.cafeaccount."):]
+	seedVertex(t, ctx, conn, txKey, "cafetransaction", map[string]any{})
+	seedAspect(t, ctx, conn, txKey, "entry", "transactionEntry", map[string]any{
+		"type": entryType, "amountCents": amountCents, "postedAt": "2026-06-01T08:00:00Z",
+	})
+	seedLink(t, ctx, conn,
+		"lnk.cafetransaction."+txID+".postedTo.cafeaccount."+acctID,
+		txKey, acctKey, "postedTo", "postedTo")
+}
+
+// seedLegacyAccount seeds a café account in the shape one minted under
+// cafe-ledger < 0.4.0 sits in today: the vertex and its heldFor lease, and NO
+// .balance aspect — a shape no op produces.
+func seedLegacyAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, acctID, leaseKey string) string {
+	t.Helper()
+	acctKey := "vtx.cafeaccount." + acctID
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+	seedVertex(t, ctx, conn, acctKey, "cafeaccount", map[string]any{})
+	seedLink(t, ctx, conn,
+		"lnk.cafeaccount."+acctID+".heldFor.leaseapp."+leaseID,
+		acctKey, leaseKey, "heldFor", "heldFor")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("the fixture must start with NO .balance aspect — that is the legacy shape under test")
+	}
+	return acctKey
+}
+
+// TestAccountBalance_LegacyAccountSelfHealsOnFirstPayment covers the accounts
+// that already exist. One minted under cafe-ledger < 0.4.0 carries no such
+// aspect, which is why every dispatcher declares the key optionalReads
+// rather than reads — a required read would HydrationMiss-reject every entry
+// against it. A PAYMENT against such an account replays its postedTo history
+// once, bounded, to get the number its own cap needs, and mints the total from
+// that; every touch afterwards is O(1). The seeded history is a debit AND a
+// credit so a replay that summed only charges (or got the sign wrong) lands on a
+// different number than one that nets them.
+func TestAccountBalance_LegacyAccountSelfHealsOnFirstPayment(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancelegacy")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALLEGLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEBALLEGACCTHJKM", leaseKey)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEBALLEGTXAHJKMN", "debit", 3000)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEBALLEGTXBHJKMN", "credit", 500)
+
+	// The cap already measures against the replayed number, before any
+	// .balance exists: 2500 is owed (3000 charged − 500 paid), so 2501 is not
+	// payable — and a refused payment commits nothing, so the account is still
+	// legacy afterwards.
+	creditAmount(t, ctx, conn, cp, cons, "cafebalegacyover0001",
+		ledgerActorKey, acctKey, 2501, processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("a REFUSED payment seeded .balance — nothing about a rejected op may commit")
+	}
+
+	// The first accepted payment mints the aspect from the replayed total.
+	creditAmount(t, ctx, conn, cp, cons, "cafebalegacypay00001",
+		ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1500 {
+		t.Fatalf("backfilled balance = %v, want 1500 (3000 charged − 500 paid − this 1000 payment)", got)
+	}
+
+	// And every touch after that is the O(1) path off the aspect itself.
+	creditAmount(t, ctx, conn, cp, cons, "cafebalegacyexact001",
+		ledgerActorKey, acctKey, 1500, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying the backfilled total = %v, want 0", got)
+	}
+}
+
+// TestAccountBalance_LegacyAccountDebitDoesNotSeed pins which leg pays for the
+// replay, and it is only the payment. A charge (and a refund) against a legacy
+// account posts normally and writes NO .balance: seeding the cache from that one
+// entry would record a total that never counted the history behind it, and every
+// later payment would be capped against that wrong number. The account stays
+// legacy until a payment first touches it — and that payment's replay sums the
+// whole history, the charges posted meanwhile included.
+//
+// The wedge this avoids is the reason: the Weaver's cafeTabSettlement
+// missing_charge dispatch is the ONLY writer of a settlement charge, it runs
+// unattended, and an account whose history outgrew the replay budget would
+// refuse every one of those dispatches forever with no repair path.
+func TestAccountBalance_LegacyAccountDebitDoesNotSeed(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancelegacydebit")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALLGDLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEBALLGDACCTHJKM", leaseKey)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEBALLGDTXAHJKMN", "debit", 3000)
+
+	postDebit(t, ctx, conn, cp, cons, "cafebalgdebit000001", acctKey, 1000, "Settled tab")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("a charge against a legacy account seeded .balance — only a payment may, and only from the whole history")
+	}
+
+	// The later payment's replay counts that charge: 4000 is owed, not 3000.
+	creditAmount(t, ctx, conn, cp, cons, "cafebalgdover000001",
+		ledgerActorKey, acctKey, 4001, processor.OutcomeRejected)
+	creditAmount(t, ctx, conn, cp, cons, "cafebalgdpay0000001",
+		ledgerActorKey, acctKey, 4000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying off a legacy account = %v, want 0 (3000 seeded + 1000 charged − 4000 paid)", got)
+	}
+}
+
+// TestAccountBalance_LegacyFirstTouchRace is the two-payment race on the FIRST
+// touch of a legacy account, where neither submission has a .balance revision to
+// be conditioned on — both see the key absent and both emit a create. The create
+// carries that declared absence as its assertion, so the loser is not rejected:
+// commit_path.go re-probes it (materializedAbsentKeys), re-hydrates, and
+// re-executes against the winner's freshly minted total.
+//
+// The two halves are sized so that a correct retry accepts BOTH (1500 + 1500
+// against 3000 owed, the second measured against the winner's 1500). That is
+// what makes the assertion sharp: a hard RevisionConflict, or a create that
+// clobbered the winner, shows up as a rejection or a wrong total rather than
+// hiding behind an outcome the cap could also have produced.
+func TestAccountBalance_LegacyFirstTouchRace(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancelegacyrace")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALLGRLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEBALLGRACCTHJKM", leaseKey)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEBALLGRTXAHJKMN", "debit", 3000)
+
+	envA, _ := creditEnvFor("cafebalgracefirst001", ledgerActorKey, acctKey, 1500)
+	envB, _ := creditEnvFor("cafebalgracesecond01", ledgerActorKey, acctKey, 1500)
+	testutil.PublishOp(t, conn, envA)
+	testutil.PublishOp(t, conn, envB)
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted: the loser of a first-touch race re-hydrates against the winner's minted .balance and re-runs, never conflicts out", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after two concurrent 1500 payments on a 3000 legacy tab = %v, want 0", got)
+	}
+}
+
+// TestAccountBalance_TombstonedBalanceRevivesByUpdate is the shape a create
+// cannot serve. Contract #3 §3.3 refuses a create against a tombstone, so the
+// absence a legacy account presents and the absence a TOMBSTONED .balance
+// presents are not the same absence: the first is minted, the second is revived
+// by the update verb, auto-conditioned on the tombstone's own hydrated revision.
+// Collapsing the two would reject every entry against such an account.
+func TestAccountBalance_TombstonedBalanceRevivesByUpdate(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancetombstone")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALTMBLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEBALTMBACCTHJKM", leaseKey)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEBALTMBTXAHJKMN", "debit", 3000)
+	seedTombstonedAspect(t, ctx, conn, acctKey, "balance", "cafeAccountBalance",
+		map[string]any{"balanceCents": 0})
+
+	creditAmount(t, ctx, conn, cp, cons, "cafebaltombpay000001",
+		ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+
+	doc := readDoc(t, ctx, conn, acctKey+".balance")
+	if deleted, _ := doc["isDeleted"].(bool); deleted {
+		t.Fatalf("%s.balance is still tombstoned after an accepted payment", acctKey)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 2000 {
+		t.Fatalf("revived balance = %v, want 2000 (3000 replayed − 1000 paid) — the tombstoned document's own stale zero must not be read", got)
+	}
+}
+
+// TestAccountBalance_UndeclaredSubmitterStillConditioned is the guarantee
+// derive_reads exists for. contextHint is submitter-supplied and nothing
+// enforces it, and a bare update is auto-conditioned only on a key the operation
+// DECLARED (Contract #3 §3.2) — so a submitter that simply omits
+// `<accountKey>.balance` would, without the script's own class-(g) derivation,
+// get a live read and an unconditioned update, and K concurrent entries would
+// each write their own total over the others.
+//
+// These two envelopes declare nothing about .balance at all. Both must still
+// post, and the total must be their SUM: a lost update lands on one of the two
+// amounts instead.
+//
+// Two assertions carry it, and they fail at different depths. Deleting the
+// derivation makes the read LIVE and undeclared, which the read-drift guard
+// (armed on every CapabilityPipeline) reports deterministically — that is the
+// mechanism-level proof. Whether the lost update itself then materialises
+// depends on how far the two live reads actually overlap, so the sum below is
+// the outcome-level residual, not the primary signal.
+func TestAccountBalance_UndeclaredSubmitterStillConditioned(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balanceundeclared")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALUNDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafebalundeclacct001", leaseKey)
+
+	undeclaredDebit := func(label string, amountCents int) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "DebitAccount",
+			Actor:         ledgerActorKey,
+			SubmittedAt:   "2026-07-22T08:00:00Z",
+			Class:         "cafetransaction",
+			Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+				strconv.Itoa(amountCents) + `,"memo":"Settled tab"}`),
+			// The account alone. No optionalReads, no .balance — the shape a
+			// client that never read the descriptor sends.
+			ContextHint: &processor.ContextHint{Reads: []string{acctKey}},
+		}
+	}
+	testutil.PublishOp(t, conn, undeclaredDebit("cafebalundecfirst001", 700))
+	testutil.PublishOp(t, conn, undeclaredDebit("cafebalundecsecond01", 300))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("balance after two concurrent undeclared charges = %v, want 1000 — a submitter that declares nothing must not be able to turn the OCC condition off", got)
+	}
+}
+
+// budgetTxID encodes i as a valid 20-char NanoID (Contract #1's alphabet — no
+// I/O/l/0), so the budget fixture below can plant several hundred distinct
+// transactions without hand-writing an id per entry.
+func budgetTxID(i int) string {
+	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+	n := len(safe)
+	return "BBCAFEBUDGETTXAHJ" + string([]byte{safe[i/(n*n)%n], safe[(i/n)%n], safe[i%n]})
+}
+
+// TestCreditCafeAccount_BackfillBudgetExhausted is the fail-closed end of the
+// replay. The budget is 10 pages of 50, so an account carrying more than 500
+// postedTo entries cannot be summed in one operation — and the script refuses
+// the payment rather than seeding .balance from the partial sum it did reach,
+// which would silently under-state the debt for the life of the account.
+//
+// The refusal names no key: it is toasted verbatim at whoever tried to pay.
+func TestCreditCafeAccount_BackfillBudgetExhausted(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancebudget")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALBUDLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEBALBUDACCTHJKM", leaseKey)
+	for i := 0; i < 501; i++ {
+		seedLegacyEntry(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100)
+	}
+
+	env, _ := creditEnvFor("cafebalbudgetpay0001", ledgerActorKey, acctKey, 100)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"AuthDenied: could not backfill this account's balance (too much transaction history for one op)")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("the refused payment seeded .balance from a partial replay — the whole point is that it must not")
+	}
+}
+
+// TestDeriveReads_BalanceKey pins the class-(g) derivation as TEXT, because its
+// effect is otherwise invisible on the happy path: declared or not, the script
+// reads .balance through kv.Read and an undeclared read falls through to a live
+// Core KV GET that returns the same number. Only the concurrent test above shows
+// the difference behaviourally, and only this shows the derivation still covers
+// all three ops rather than the one that test happens to drive.
+func TestDeriveReads_BalanceKey(t *testing.T) {
+	var script string
+	for _, d := range cafeledger.DDLs() {
+		if d.CanonicalName == "cafetransaction" {
+			script = d.Script
+		}
+	}
+	if script == "" {
+		t.Fatal("no `cafetransaction` DDL script found")
+	}
+	deriveIdx := strings.Index(script, "def derive_reads(op):")
+	executeIdx := strings.Index(script, "\ndef execute(state, op):")
+	if deriveIdx < 0 || executeIdx <= deriveIdx {
+		t.Fatalf("cannot locate derive_reads in the cafetransaction script (derive=%d execute=%d)", deriveIdx, executeIdx)
+	}
+	derive := script[deriveIdx:executeIdx]
+	for _, want := range []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge"} {
+		if !strings.Contains(derive, want) {
+			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
+		}
+	}
+	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance"]}`) {
+		t.Fatalf("derive_reads no longer returns the account's .balance under optionalReads:\n%s", derive)
+	}
+	// optionalReads, never reads: a legacy account carries no .balance, and a
+	// required read's absence is a HydrationMiss on the very branch the replay
+	// exists for.
+	if strings.Contains(derive, `"reads"`) {
+		t.Fatalf("derive_reads returns a hard `reads` entry — every legacy account would HydrationMiss:\n%s", derive)
+	}
+}
+
+// TestRefundCafeCharge_NotBalanceCapped is the boundary of the payment cap. A
+// refund is a credit too, and capping it at the outstanding balance would make
+// the one case a refund exists for — a charge the resident has ALREADY paid,
+// wrongly posted — the one case that could not be given back. Its ceiling is
+// the reversed charge's own un-refunded remainder, so the balance legitimately
+// goes negative: the café owes money out.
+func TestRefundCafeCharge_NotBalanceCapped(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundnotcapped")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFNCPLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefnotcapacct001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefnotcapdebit01", acctKey, 900, "Settled tab")
+	creditAmount(t, ctx, conn, cp, cons, "caferefnotcappay0001",
+		ledgerActorKey, acctKey, 900, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying the charge in full = %v, want 0", got)
+	}
+
+	// A plain payment on this account is now refused — nothing is owed. The
+	// refund of the same size is not, and that contrast is the whole test.
+	creditAmount(t, ctx, conn, cp, cons, "caferefnotcappay0002",
+		ledgerActorKey, acctKey, 900, processor.OutcomeRejected)
+	refundAs(t, ctx, conn, cp, cons, "caferefnotcaprefund1",
+		ledgerActorKey, acctKey, chargeKey, 900, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -900 {
+		t.Fatalf("balance after refunding a paid-in-full charge = %v, want -900 (the café owes it back)", got)
+	}
+}
+
+// TestAccountBalance_ConcurrentEntriesBothPost is why the .balance update
+// carries NO expectedRevision of its own. Two charges against one account,
+// hydrated together and committed together, both read the same revision of
+// .balance — one of them necessarily loses the compare-and-set. Because the
+// condition was DEFAULTED by the Processor (a declared read, Contract #3 §3.2)
+// rather than asserted by the script, that loser is re-hydrated, re-executed
+// against the winner's total and re-committed, so both entries post and the
+// total is their sum. An explicit expectedRevision on the same update would be
+// read as a caller's compensating assertion, excluded from that retry, and the
+// loser would be rejected outright — a charge the café made and never billed.
+//
+// Serial driving cannot show this: DriveOne finishes the first entry before the
+// second hydrates, so the second reads the already-updated revision and never
+// races at all.
+func TestAccountBalance_ConcurrentEntriesBothPost(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancerace")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEBALRACELEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafebalraceacct00001", leaseKey)
+
+	debitEnv := func(label string, amountCents int) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "DebitAccount",
+			Actor:         ledgerActorKey,
+			SubmittedAt:   "2026-07-21T08:00:00Z",
+			Class:         "cafetransaction",
+			Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+				strconv.Itoa(amountCents) + `,"memo":"Settled tab"}`),
+			ContextHint: debitHint(acctKey),
+		}
+	}
+	testutil.PublishOp(t, conn, debitEnv("cafebalracefirst0001", 700))
+	testutil.PublishOp(t, conn, debitEnv("cafebalracesecond001", 300))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted: a lost race on the account's own .balance must re-hydrate and retry, not reject a charge the café made", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("balance after two concurrent charges = %v, want 1000 — neither may be dropped", got)
 	}
 }

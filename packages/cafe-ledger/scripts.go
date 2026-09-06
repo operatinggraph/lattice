@@ -10,8 +10,13 @@ package cafeledger
 // key. The local name is vertical-prefixed (not the bare "ledgerAccount"
 // loftspace-ledger already uses on this same leaseapp) so the two ledgers'
 // guard aspects never collide on one vertex. Root data stays {} on the
-// account (D5): the balance is derived by the cafeLedgerHistory lens, never
-// stored here.
+// account (D5): the cafeLedgerHistory lens derives the DISPLAYED balance by
+// summing transactions and remains the display source of truth. The account
+// also carries a maintained .balance aspect ({balanceCents}) — an O(1)
+// authorization cache post_entry (transactionDDLScript) keeps in lockstep with
+// every posted entry, so the payment cap never replays a house tab's whole
+// history to answer "how much is owed" (see transactionDDLScript's own comment
+// for the OCC shape that keeps it race-free under concurrent writers).
 const accountDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -97,12 +102,16 @@ def execute(state, op):
         # "this café account is held for this lease."
         held_for_lnk = "lnk.cafeaccount." + acct_id + ".heldFor.leaseapp." + lease_id
 
-        # Root data minimal (D5): {} on root. The balance is derived by the
-        # cafeLedgerHistory lens summing linked transactions, never stored
-        # here.
+        # Root data minimal (D5): {} on root. The .balance aspect starts at
+        # zero and is the only thing post_entry mutates on the account from
+        # creation onward — this create is unconditioned (brand-new account,
+        # nothing to race). The cafeLedgerHistory lens still derives the
+        # displayed balance by summing linked transactions, independently of
+        # this cache.
         mutations = [
             make_vtx(acct_key, "cafeaccount", {}),
             make_aspect(lease_key, "cafeLedgerAccount", "cafeLedgerAccountGuard", {"accountKey": acct_key}),
+            make_aspect(acct_key, "balance", "cafeAccountBalance", {"balanceCents": 0}),
             make_link(held_for_lnk, acct_key, lease_key, "heldFor", "heldFor", {}),
         ]
         events = [{"class": "account.created",
@@ -117,16 +126,48 @@ def execute(state, op):
 // RefundCafeCharge. Each mints a fresh transaction vertex + a .entry aspect +
 // the postedTo link to the account; a refund adds a reverses link to the charge
 // it gives back, which is the only thing distinguishing it from a payment.
-// Balances stay append-only — nothing on the ACCOUNT is read or mutated, so
-// concurrent debits and credits against it never race a read-modify-write, and
-// the balance is derived by the cafeLedgerHistory lens summing entries.
+// A posted entry's own money fields (type, amountCents, memo, postedAt) are
+// never rewritten, so the cafeLedgerHistory lens derives the displayed balance
+// by summing entries independently of anything below, and remains the display
+// source of truth.
 //
-// The one maintained tally is refundedCents on the REVERSED CHARGE's own
+// A posted entry against an account that CARRIES a .balance aspect
+// (accountDDLScript mints one at CreateAccount) ALSO moves that aspect by the
+// signed amount, via a BARE update — deliberately no expectedRevision of its
+// own. This script's own derive_reads(op) declares <accountKey>.balance in
+// optionalReads for every op it handles (Contract #2 §2.5 class (g)), so the
+// key is hydrated — or recorded known-absent — whatever the submitter declared,
+// and commit_path.go's applyHydratedRevisions (Contract #3 §3.2) conditions the
+// update on the step-4 hydrated revision FOR us and marks it retry-eligible: on
+// a lost race the Processor re-hydrates and retries the whole op before a
+// terminal RevisionConflict, so two concurrent entries against one account
+// serialize instead of silently dropping an update. (An update supplying its own
+// expectedRevision would be treated as an explicit-caller compensating assertion
+// instead — excluded from that retry — which is why make_aspect_update takes no
+// revision parameter.) That cache is what lets a payment's cap answer "how much
+// is owed" in O(1), a single read of .balance, instead of replaying the
+// account's whole postedTo history on every submit.
+//
+// An account minted under cafe-ledger < 0.4.0 carries no .balance at all, and
+// that legacy set is CLOSED: CreateAccount mints the aspect, so no account opened
+// today joins it.
+// Only a PAYMENT pays the one-time bounded replay that computes such an
+// account's balance, because a payment is the only leg whose cap needs the
+// number. DebitAccount and RefundCafeCharge against a legacy account neither
+// replay nor write .balance — the account stays legacy until a payment first
+// touches it, and that payment's replay sums the whole history (those later
+// debits included), so the cache is never seeded from a partial sum.
+//
+// The other maintained tally is refundedCents on the REVERSED CHARGE's own
 // .entry aspect: the refund ceiling, upserted under a CAS pinned to the
-// revision that aspect was hydrated at. Two refunds racing the same charge
-// therefore serialize — the loser's commit is refused on the stale revision
-// rather than admitted alongside the winner, which a ceiling recomputed by
-// enumerating prior reversals could never guarantee.
+// revision that aspect was hydrated at. Two refunds racing the same charge can
+// never jointly overrun it, by one of two routes. On an account carrying
+// .balance, the loser's own .balance update is auto-conditioned as well, so the
+// conflict re-hydrates and RE-EXECUTES the whole op, and reversed_charge then
+// refuses the retry on the fresh refundedCents it re-reads. On a legacy account
+// (nothing conditioned but the CAS itself) the loser's commit is simply refused
+// on the stale revision. Either way exactly one refund posts, which a ceiling
+// recomputed by enumerating prior reversals could never guarantee.
 const transactionDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -143,6 +184,31 @@ def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
                       "vertexKey": vtx_key, "localName": local_name, "data": data}}
     m["expectedRevision"] = expected_revision
     return m
+
+def make_aspect_update(vtx_key, local_name, cls, data):
+    # Deliberately NO expectedRevision here — leaving it unset is what makes
+    # this update RETRY-eligible, not less safe. Contract #3 §3.2 in
+    # commit_path.go's applyHydratedRevisions auto-conditions any bare update
+    # on a key the op declared in reads/optionalReads (so still safe, still
+    # OCC-guarded) using the step-4 hydrated revision, and marks it
+    # defaulted — the retry-eligible set. An update that supplies its OWN
+    # expectedRevision instead is treated as an explicit-caller compensating
+    # assertion and is EXCLUDED from that retry ("never overridden") — it
+    # hard-conflicts instead of serializing, which is the opposite of what a
+    # maintained counter two ops can race on needs. That is the difference
+    # from make_aspect_upsert_occ above, which pins a revision precisely
+    # because a refund's ceiling may only be advanced from the exact tally it
+    # was computed against: reapplying a total derived from a stale read to
+    # whatever the charge now holds is the one outcome that ceiling forbids.
+    #
+    # It is also the reviving verb for a TOMBSTONED aspect. A create against a
+    # tombstone is refused (Contract #3 §3.3), so post_entry's .balance write
+    # only mints fresh where step 4 saw the key genuinely ABSENT and comes here
+    # otherwise — the auto-conditioning above then pins the tombstone's own
+    # revision, so the revival races nothing.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -186,6 +252,25 @@ def require_cents(p, name):
     if v != int(v):
         fail("InvalidArgument: " + name + ": required whole cents, got " + str(v))
     return int(v)
+
+def dollars(cents):
+    # Cents rendered the way the counter and the statement show money. The
+    # refusals below are toasted VERBATIM at a staffer or a resident, and
+    # "exceeds 1425" reads as a different number than the $14.25 tab it is
+    # talking about. The sign is carried explicitly so a negative total (an
+    # account owed money back by a refund) never renders as "$-14.25".
+    negative = cents < 0
+    whole = cents
+    if negative:
+        whole = -cents
+    minor = whole % 100
+    minor_text = str(minor)
+    if minor < 10:
+        minor_text = "0" + minor_text
+    sign = ""
+    if negative:
+        sign = "-"
+    return sign + "$" + str(whole // 100) + "." + minor_text
 
 def parts_of(key, name, want_type):
     parts = key.split(".")
@@ -451,12 +536,59 @@ def account_unit(acct_key):
         return None
     return unit
 
-# Self-credit balance-verification budget (post_entry's authContextTarget
-# branch): 10 pages of 50 postedTo entries covers many years of a house-tab
-# history; an account that exceeds it fails the self-credit closed rather
-# than trust a partial sum.
-SELF_CREDIT_PAGE_LIMIT = 50
-SELF_CREDIT_MAX_PAGES = 10
+# Legacy-account .balance backfill budget (backfill_balance below, reached
+# only by a PAYMENT against an account minted under cafe-ledger < 0.4.0): 10
+# pages of 50 postedTo entries covers many years of a house-tab history; an
+# account that exceeds it fails closed rather than seed a partial sum. The
+# payment that pays this cost writes the aspect, so that account is O(1)
+# forever after — this runs at most once per legacy account.
+BALANCE_BACKFILL_PAGE_LIMIT = 50
+BALANCE_BACKFILL_MAX_PAGES = 10
+
+def backfill_balance(acct_key):
+    # The starting balance of an account that carries no .balance aspect,
+    # replayed once from its own postedTo history under the budget above.
+    #
+    # Reached ONLY from the payment leg, and only after the caller's standing
+    # to act on this account has already been proven (post_entry runs the
+    # confinement walk and the resident-ownership proof first). That ordering
+    # is what keeps the replay from being an amplification primitive: a caller
+    # who cannot post to the account cannot make it walk the account's history
+    # either.
+    #
+    # Sign convention is the cafeLedgerHistory lens's own: a debit is what is
+    # owed, a credit (payment or refund alike) pays it down.
+    balance_cents = 0
+    cursor = None
+    budget_exhausted = True
+    for _page in range(BALANCE_BACKFILL_MAX_PAGES):
+        # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+        # page budget; exhausting it below fails closed.
+        page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, BALANCE_BACKFILL_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above -- each transaction's own .entry aspect,
+            # data-derived and unknowable client-side.
+            tx_entry = kv.Read(lk.sourceVertex + ".entry")
+            if tx_entry == None or tx_entry.isDeleted:
+                continue
+            tx_amount = tx_entry.data.get("amountCents")
+            if tx_amount == None:
+                continue
+            if tx_entry.data.get("type") == "debit":
+                balance_cents += tx_amount
+            elif tx_entry.data.get("type") == "credit":
+                balance_cents -= tx_amount
+        if cursor == None:
+            budget_exhausted = False
+            break
+    if budget_exhausted:
+        # No account key in the text: this is toasted verbatim at whoever tried
+        # to pay, and a raw vtx key tells them nothing they can act on.
+        fail("AuthDenied: could not backfill this account's balance (too much transaction history for one op)")
+    return balance_cents
 
 def reversed_charge(state, p, acct_key, amount_cents):
     # Resolves payload.reversesRef into (the bare id of the charge this refund
@@ -487,9 +619,14 @@ def reversed_charge(state, p, acct_key, amount_cents):
     # is written back to that same aspect under a CAS pinned to the revision it
     # was hydrated at, which is what makes check 4 a real cap rather than an
     # advisory one: two refunds that both read refundedCents=0 cannot both
-    # commit, because the second's expectedRevision no longer matches. Every
-    # other field of the entry is carried across verbatim — the tally is an
-    # addition to the charge, not a rewrite of it.
+    # commit, because the second's expectedRevision no longer matches. What the
+    # loser then MEETS is not always this refusal — on an account carrying
+    # .balance its own update of that aspect is auto-conditioned too, so the
+    # conflict re-hydrates and re-executes the whole op, and check 4 turns it
+    # away on the fresh tally it re-reads instead. The cap is the same number
+    # either way; only which of the two refuses varies. Every other field of the
+    # entry is carried across verbatim — the tally is an addition to the charge,
+    # not a rewrite of it.
     reverses_key = required_string(p, "reversesRef")
     _, reverses_id = parts_of(reverses_key, "reversesRef", "cafetransaction")
     # An undeclared key and a tombstoned one are different faults and get
@@ -575,23 +712,24 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
 
-    # Resident-self ownership + amount trust (CreditCafeAccount only —
-    # permissions.go grants no self-scope DebitAccount): op.authTargetValidated
-    # (workplace_exempt(), already checked above) only proves the caller's
-    # target names THEMSELVES (the platform's own scope=self match); it says
-    # nothing about whether the ACCOUNT being credited is theirs, so that
-    # ownership proof is this branch's job, mirroring loftspace-ledger's
-    # CreditAccount / clinic-ledger's ClinicCreditAccount. The mere PRESENCE
-    # of authContextTarget selects this branch, same idiom as cafe-domain's
+    # Resident-self ownership (CreditCafeAccount only — permissions.go grants
+    # no self-scope DebitAccount): op.authTargetValidated (workplace_exempt(),
+    # already checked above) only proves the caller's target names THEMSELVES
+    # (the platform's own scope=self match); it says nothing about whether the
+    # ACCOUNT being credited is theirs, so that ownership proof is this
+    # branch's job, mirroring loftspace-ledger's CreditAccount /
+    # clinic-ledger's ClinicCreditAccount. Ownership is ALL this branch
+    # proves: the amount cap is not resident-specific and binds the payment leg
+    # whoever submitted it, below. The mere PRESENCE of
+    # authContextTarget selects this branch, same idiom as cafe-domain's
     # Charge/Settle — it does not change what grant actually authorized the
     # op (a scope=any operator/frontOfHouse submit never attaches a target),
     # it only ever narrows behavior.
     # authcontext-target: (selector) a branch selector, not a confinement
     # exemption -- so it reads the raw target (did the caller declare a self
     # target at all) rather than authTargetValidated. Safe because presence
-    # only pushes the caller onto the STRICTER branch below (the ownership +
-    # amount proofs), never grants anything a scope=any submit would not
-    # already.
+    # only pushes the caller onto the STRICTER branch below (the ownership
+    # proof), never grants anything a scope=any submit would not already.
     if op.authContextTarget != "":
         if entry_type != "credit":
             fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
@@ -617,47 +755,92 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         if application_for == None or application_for.isDeleted:
             fail("AuthDenied: a resident may only pay down their own lease's account")
 
-        # Amount trust: nothing on this platform verifies a self-submitted
-        # payment actually happened (no payment-rail integration — out of
-        # scope for a reference vertical), so an unbounded self-credit would
-        # let a resident forgive their own debt for free. The outstanding
-        # balance is recomputed from the account's OWN postedTo transaction
-        # history (never trusted from the payload), paginated + bounded: an
-        # account whose history exhausts the page budget fails closed
-        # (denies) rather than trusts a partial sum. A self-credit may never
-        # exceed what is actually owed.
-        owed_cents = 0
-        cursor = None
-        budget_exhausted = True
-        for _page in range(SELF_CREDIT_MAX_PAGES):
-            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
-            # page budget; exhausting it below fails closed.
-            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
-            for lk in page:
-                if lk.isDeleted:
-                    continue
-                # read-posture: (e) per-candidate follow-up read off the
-                # enumeration above -- each transaction's own .entry aspect,
-                # data-derived and unknowable client-side.
-                tx_entry = kv.Read(lk.sourceVertex + ".entry")
-                if tx_entry == None or tx_entry.isDeleted:
-                    continue
-                tx_amount = tx_entry.data.get("amountCents")
-                if tx_amount == None:
-                    continue
-                if tx_entry.data.get("type") == "debit":
-                    owed_cents += tx_amount
-                elif tx_entry.data.get("type") == "credit":
-                    owed_cents -= tx_amount
-            if cursor == None:
-                budget_exhausted = False
-                break
-        if budget_exhausted:
-            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+    # Everything above this line is the caller's standing and the payload's
+    # shape; everything below it touches the ACCOUNT's own money. The order is
+    # deliberate: the .balance read and — on a legacy account — the bounded
+    # history replay behind it are the most expensive work this script does, so
+    # they sit after the confinement walk and the resident-ownership proof.
+    # Hoisting them above those checks would hand anyone holding the scope=self
+    # grant a way to name a stranger's account key and spend the whole replay
+    # budget before being denied.
+    #
+    # is_payment: a CreditCafeAccount that is not a refund. It is the one leg
+    # the amount cap binds, and the one leg that ever pays for a legacy
+    # account's backfill.
+    is_payment = entry_type == "credit" and not allow_reverses_ref
+
+    # .balance is a declared OPTIONALREADS key — this script's own
+    # derive_reads(op) declares it for every op it handles, so the key is
+    # hydrated or recorded known-absent whatever the submitter sent, and every
+    # dispatcher declares it statically besides (opmetas.go for the two
+    # descriptor-driven ops, cafe-domain's targets.go for the Weaver-dispatched
+    # charge). Absence-tolerant, because an account minted under cafe-ledger
+    # < 0.4.0 carries no .balance and a required read would reject every entry
+    # against such an account.
+    balance_key = acct_key + ".balance"
+    # read-posture: (d) optionalReads — derived server-side by this script's own
+    # derive_reads(op) for DebitAccount/CreditCafeAccount/RefundCafeCharge
+    # (Contract #2 §2.5 class (g)), and declared statically by opmetas.go's
+    # OpDispatchSpec.OptionalReads + cafe-domain's targets.go
+    # GapActionSpec.OptionalReads (FE descriptor and Weaver directOp alike).
+    balance_doc = kv.Read(balance_key)
+    # Two questions, not one. balance_absent decides the WRITE verb: a create
+    # is refused against a tombstone (Contract #3 §3.3), so only a genuinely
+    # absent key may be minted and a tombstoned one is revived by the update.
+    # needs_backfill decides whether there is a number to read at all.
+    balance_absent = balance_doc == None
+    needs_backfill = balance_absent or balance_doc.isDeleted
+
+    # balance_cents stays None on a legacy account this op does not backfill —
+    # a charge or a refund. Such an account keeps NO cache rather than a wrong
+    # one: seeding it from this entry alone would record a total that never
+    # counted the history behind it, and every later payment would be measured
+    # against that. The account stays legacy until a payment first touches it,
+    # and that payment's replay sums the whole history, this entry included.
+    balance_cents = None
+    if not needs_backfill:
+        # The CLASS, not just the key — the same doctrine reversed_charge
+        # applies to the charge's own .entry: this script is the sole writer of
+        # a .balance aspect and writes exactly that class, so a document of any
+        # other class under this key is a fault to refuse, never a number to
+        # spend a payment cap on.
+        if not hasattr(balance_doc, "class") or getattr(balance_doc, "class") != "cafeAccountBalance":
+            fail("InvalidState: this account's balance aspect is not a cafeAccountBalance")
+        balance_cents = balance_doc.data.get("balanceCents")
+        if balance_cents == None:
+            balance_cents = 0
+    elif is_payment:
+        balance_cents = backfill_balance(acct_key)
+
+    # Amount trust, on EVERY CreditCafeAccount leg — the resident's own
+    # scope=self submit and the operator/frontOfHouse scope=any submit alike.
+    # Nothing on this platform verifies that a payment actually happened (no
+    # payment-rail integration — out of scope for a reference vertical), and
+    # that is as true of an amount a staffer keys at the counter as of one a
+    # resident types: a mis-keyed $50 against a $14.25 tab posts an account to
+    # -$35.75, off the arrears grid, with no op that undoes it. So the cap
+    # binds the op, not the caller. The outstanding balance comes from the
+    # account's OWN maintained .balance aspect (read above, O(1) — never the
+    # payload), which post_entry itself keeps in lockstep with every posted
+    # entry. A payment may never exceed what is owed.
+    #
+    # RefundCafeCharge is deliberately NOT capped here (allow_reverses_ref
+    # selects it): its ceiling is the reversed charge's own un-refunded
+    # remainder, enforced by reversed_charge under a CAS. A refund of a charge
+    # the resident already paid legitimately takes the account negative — that
+    # is money going back, not debt being forgiven.
+    #
+    # Neither refusal names the account: both are toasted verbatim, at a
+    # staffer or at the resident, and a raw vtx key is not something either can
+    # act on. The amounts are the actionable half, so they are spelled as
+    # money.
+    if is_payment:
+        owed_cents = balance_cents
         if owed_cents <= 0:
-            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+            fail("AuthDenied: this account has no outstanding balance to pay")
         if amount_cents > owed_cents:
-            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+            fail("AuthDenied: a payment of " + dollars(amount_cents) +
+                 " exceeds the outstanding balance of " + dollars(owed_cents))
 
     # tabRef (DebitAccount only — the cafe-domain Settle consumer): the tab
     # this charge settles. A tab-settlement playbook dispatch (cafe-domain's
@@ -701,12 +884,44 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
     posted_to_lnk = "lnk.cafetransaction." + tx_id + ".postedTo.cafeaccount." + acct_id
 
     # Root data minimal (D5): {} on root. The charge/payment fact is the
-    # .entry aspect; the account itself is untouched (append-only ledger).
+    # .entry aspect; the only thing this DDL ever mutates on the ACCOUNT is
+    # its .balance cache, appended just below.
     mutations = [
         make_vtx(tx_key, "cafetransaction", {}),
         make_aspect(tx_key, "entry", "transactionEntry", entry_data),
         make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
     ]
+
+    # The cache moves only where there is a cache to move: balance_cents is
+    # None exactly on a legacy account this op does not backfill, and such an
+    # account is left untouched rather than seeded from one entry.
+    #
+    # The sign convention is the cafeLedgerHistory lens's own sum (a debit
+    # increases what is owed, a credit — payment or refund alike — decreases
+    # it). A refund is not bounded by owed_cents (only the payment cap above
+    # enforces that), so this legitimately goes negative when a paid-in-full
+    # charge is given back.
+    #
+    # Which verb: a key step 4 saw genuinely ABSENT is minted by a create, and
+    # because that absence was declared (optionalReads) the create carries it as
+    # its assertion, so a lost two-way race on that first touch is itself
+    # retry-eligible (absentConditionedCreates, commit_path.go). A key that is
+    # PRESENT — live or tombstoned — takes the bare-update path instead:
+    # auto-conditioned on the step-4 hydrated revision, so it serializes AND
+    # retries under a concurrent writer, and revives a tombstone that a create
+    # would only collide with (make_aspect_update's own comment).
+    if balance_cents != None:
+        if entry_type == "debit":
+            new_balance_cents = balance_cents + amount_cents
+        else:
+            new_balance_cents = balance_cents - amount_cents
+        if balance_absent:
+            mutations.append(make_aspect(acct_key, "balance", "cafeAccountBalance",
+                                         {"balanceCents": new_balance_cents}))
+        else:
+            mutations.append(make_aspect_update(acct_key, "balance", "cafeAccountBalance",
+                                                {"balanceCents": new_balance_cents}))
+
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
 
@@ -735,6 +950,67 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
 
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
+
+NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+
+def is_cafeaccount_key(key):
+    # Contract #1's whole vertex grammar for a cafeaccount, not a prefix test.
+    # derive_reads returns keys the Processor validates against that grammar,
+    # answering a malformed one with a DeriveReadsInvalid hydration fault raised
+    # BEFORE the operation's own validation runs. Deriving straight off an
+    # unvalidated payload would therefore turn post_entry's clean
+    # "InvalidArgument: accountKey" into an opaque hydration failure. A
+    # derivation never fails, and never widens what the operation itself
+    # rejects.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "cafeaccount":
+        return False
+    if len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
+    # and merges the result into the declared read set, so the account's
+    # .balance aspect is hydrated — or recorded known-absent — on EVERY
+    # dispatch of these three ops, whatever the submitter happened to declare.
+    #
+    # That guarantee is the point, not the saved round trip. .balance is the
+    # quantity the payment cap is measured against AND a key every posted entry
+    # updates, and a bare update is auto-conditioned on the step-4 hydrated
+    # revision only for a key the operation declared (Contract #3 §3.2). A
+    # submitter that omitted the declaration would get a live read and an
+    # UNCONDITIONED update, so K concurrent payments could each pass the cap
+    # against the same balance and credit K times it. A guard a caller can
+    # switch off by not mentioning it is not a guard, and contextHint is
+    # caller-supplied and never enforced — hence this, the channel the platform
+    # owns. The dispatchers' own static declarations (opmetas.go,
+    # cafe-domain's targets.go) stay: they document the read set, this
+    # guarantees it.
+    #
+    # optionalReads, never reads: an account minted under cafe-ledger < 0.4.0
+    # carries no .balance, and a required read's absence is a HydrationMiss that
+    # would block every entry against such an account rather than let a payment
+    # backfill it.
+    #
+    # The op argument is a struct -- op.operationType, op.actor, op.payload
+    # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
+    # pass, and a derivation that reads state is a read, not a derivation.
+    ot = op.operationType
+    if ot != "DebitAccount" and ot != "CreditCafeAccount" and ot != "RefundCafeCharge":
+        return {}
+    # optional_string, never required_string: a missing or malformed accountKey
+    # derives nothing rather than faulting the pre-pass -- post_entry's own
+    # required_string/parts_of still raise the real InvalidArgument.
+    acct_key = optional_string(op.payload, "accountKey")
+    if not is_cafeaccount_key(acct_key):
+        return {}
+    return {"optionalReads": [acct_key + ".balance"]}
 
 def execute(state, op):
     ot = op.operationType
@@ -769,10 +1045,13 @@ def execute(state, op):
         # probing for a resident path that does not exist. Refusing here rather
         # than falling through matters because post_entry's own
         # authContextTarget branch is written for CreditCafeAccount: it treats a
-        # credit whose target owns the account's lease as a resident paying
-        # their own tab, capped by what they owe. A resident reaching that
-        # branch through THIS op would be minting credits against their own
-        # charges — giving themselves money back for coffee they drank.
+        # credit whose target owns the account's lease as a resident paying down
+        # their own tab. The amount cap that bounds an ordinary payment does not
+        # bind a refund at all — a refund's ceiling is the reversed charge's
+        # un-refunded remainder, and it may legitimately take the balance
+        # negative — so a resident reaching that branch through THIS op would be
+        # minting credits against their own charges, giving themselves money
+        # back for coffee they drank.
         # authcontext-target: (selector) selects the refusal branch and only
         # that -- presence never grants anything here, it is the whole reason
         # the submission stops.
