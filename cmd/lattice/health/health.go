@@ -227,6 +227,45 @@ func issueSeverities(doc map[string]any) []string {
 	return out
 }
 
+// numOrDash renders a JSON number as a fixed-point string, or "-" when the
+// value is absent or JSON null (Contract #5 §5.4: an unmeasured metric
+// reports null, never a fabricated number).
+func numOrDash(v any) string {
+	f, ok := v.(float64)
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", f)
+}
+
+// processorLatencyDetails renders the step3-latency/step5-latency ring
+// summary: the four latency figures always present in the doc, plus
+// timeoutsTotal/meanLiveReads/meanListings when the doc carries them (step5
+// only).
+func processorLatencyDetails(doc map[string]any) string {
+	count, _ := doc["count"].(float64)
+	meanNs, _ := doc["meanNs"].(float64)
+	p95Ns, _ := doc["p95Ns"].(float64)
+	p99Ns, _ := doc["p99Ns"].(float64)
+	parts := []string{
+		fmt.Sprintf("mean=%.1fms", meanNs/1e6),
+		fmt.Sprintf("p95=%.1fms", p95Ns/1e6),
+		fmt.Sprintf("p99=%.1fms", p99Ns/1e6),
+		fmt.Sprintf("n=%.0f", count),
+	}
+	if _, present := doc["timeoutsTotal"]; present {
+		timeouts, _ := doc["timeoutsTotal"].(float64)
+		parts = append(parts, fmt.Sprintf("timeouts=%.0f", timeouts))
+	}
+	if v, present := doc["meanLiveReads"]; present {
+		parts = append(parts, "meanLiveReads="+numOrDash(v))
+	}
+	if v, present := doc["meanListings"]; present {
+		parts = append(parts, "meanListings="+numOrDash(v))
+	}
+	return strings.Join(parts, " ")
+}
+
 // heartbeatDetails renders a short metrics summary for a Weaver/Loom heartbeat
 // row. It surfaces whichever of the common counters are present.
 func heartbeatDetails(doc map[string]any) string {
@@ -395,6 +434,34 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 				}
 			}
 			row.Details = heartbeatDetails(doc)
+			overall = worstOf(overall, row.level)
+			rows = append(rows, row)
+
+		case "processor-event":
+			// Every other processor-event key (malformed-operation.*,
+			// claim-attempts.*, commit-conflicts, auth-trace.*) stays exactly
+			// as today — invisible to the summary. Only the two latency
+			// signals render a row.
+			if !strings.HasSuffix(k, ".step3-latency") && !strings.HasSuffix(k, ".step5-latency") {
+				continue
+			}
+			row := componentRow{Component: k}
+			if ts, ok := parseTimestamp(doc, "observedAt"); ok {
+				age := time.Since(ts).Round(time.Second)
+				row.Freshness = freshnessStr(ts)
+				if age > staleThreshold {
+					row.Status = "stale"
+					row.level = rollupYellow
+				} else {
+					row.Status = "green"
+					row.level = rollupGreen
+				}
+			} else {
+				row.Status = "unknown"
+				row.Freshness = "-"
+				row.level = rollupYellow
+			}
+			row.Details = processorLatencyDetails(doc)
 			overall = worstOf(overall, row.level)
 			rows = append(rows, row)
 
