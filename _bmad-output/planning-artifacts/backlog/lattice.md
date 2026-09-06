@@ -147,6 +147,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-06 · `686998b` · [CI] two wall-clock fixture flakes root-caused — edge/sync gate deadline (ea16770), substrate marker re-arm slack; main green on both re-runs
 - 2026-09-06 · `d01086e` · [Weaver] one escalation episode, three doors SHIPPED — escalateGap seam, class-declaring mark, release when the gap can act ([design](../../implementation-artifacts/weaver-escalation-episode-three-doors-design.md))
 - 2026-09-06 · `7f6354f` · [CI] main un-reddened — the disarm-callback barrier test pins the epoch against the parked verdict's own epoch (a load-stall reopen had moved it before the verdict), full CI green (run 34035232472)
 - 2026-09-06 · `9dd4f45` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
@@ -171,9 +172,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-03 · `3017eac3` · [Refractor] a lens Output edit re-activates the lens in place — ownership-tested purge, refusal by construction, scoped health clear; live round trip on cafeStaleTabSettlement
 - 2026-09-03 · `cf897d71` · [Refractor] personal-lens derivation licence SHIPPED — edges, cap-read closure, licence + single-instance gate, multi-walk union; edgeCatalog 3/min→25 msg/s
 - 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff 📐 filed
-- 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `8a2cee97`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `27250d12`)*
