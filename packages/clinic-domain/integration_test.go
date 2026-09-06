@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ const (
 
 // clinicOps are the ops the staff actor needs.
 var clinicOps = []string{
-	"CreatePatient", "TombstonePatient", "BackfillPatientRegistration",
+	"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
@@ -261,6 +262,35 @@ func clMissing(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 	t.Helper()
 	_, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
 	return err != nil
+}
+
+// clAlive reports whether key holds a document that is present and NOT
+// tombstoned — the distinction clMissing cannot draw, and the one the
+// bind/unbind pair turns on (a Lattice tombstone is soft, so a released link is
+// present-and-dead, never absent).
+func clAlive(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) bool {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		return false
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	del, _ := doc["isDeleted"].(bool)
+	return !del
+}
+
+// clAssertTombstoned fails unless key is present AND tombstoned. Present is half
+// the assertion: a key that was never written would satisfy "not alive" while
+// proving nothing about the mutation under test.
+func clAssertTombstoned(t *testing.T, ctx context.Context, conn *substrate.Conn, key, what string) {
+	t.Helper()
+	doc := clReadDoc(t, ctx, conn, key)
+	if del, _ := doc["isDeleted"].(bool); !del {
+		t.Fatalf("%s (%s) should be tombstoned, got isDeleted=%v", what, key, del)
+	}
 }
 
 // clSlotCellCode derives the deterministic slot-claim localName suffix for a
@@ -1677,7 +1707,7 @@ func TestClinic_RejectsWrongClass(t *testing.T) {
 
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0004", "Dr. Wu", "Oncology")
 	// A patient-shaped key that is alive but class=identity (not patient).
-	fakePatient := "vtx.patient.CLfakepatHJKMNPQRST"
+	fakePatient := "vtx.patient.CLfakepatHJKMNPQRSTU"
 	clSeedVertex(t, ctx, conn, fakePatient, "identity", false)
 
 	apptID := clSubmit(t, ctx, conn, cp, cons, "wrongcls0001", "CreateAppointment", "appointment",
@@ -1697,7 +1727,7 @@ func TestClinic_RejectsDeadEndpoint(t *testing.T) {
 	cp, cons := newClinicPipeline(t, ctx, conn, "dead-endpoint")
 
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0005", "Dr. Ng", "Neurology")
-	absentPatient := "vtx.patient.CLabsentptHJKMNPQRS"
+	absentPatient := "vtx.patient.CLabsentptHJKMNPQRSU"
 
 	apptID := clSubmit(t, ctx, conn, cp, cons, "dead0001", "CreateAppointment", "appointment",
 		`{"patient":"`+absentPatient+`","provider":"`+providerKey+`","startsAt":"2026-07-05T09:00:00Z","endsAt":"2026-07-05T09:30:00Z"}`,
@@ -1917,6 +1947,822 @@ func TestClinic_CreatePatientRejectsWrongClassIdentity(t *testing.T) {
 
 	if !clMissing(t, ctx, conn, "vtx.patient."+id) {
 		t.Fatalf("a patient was committed against a wrong-class identityKey")
+	}
+}
+
+// clBindReads returns the Reads/OptionalReads pair BindPatientIdentity's
+// dispatcher declares (app.js submitConnectLogin): both endpoints, the
+// identity's .state (the unclaimed-identity confinement the front-desk grant
+// rests on) and the patient's .demographics are REQUIRED — the name being moved
+// is read from it, and declaring it is what conditions the rewrite on the
+// revision the script read — while the two exclusivity guards are
+// absence-tolerant.
+func clBindReads(patientKey, identityKey string) (reads, optionalReads []string) {
+	return []string{patientKey, identityKey, identityKey + ".state", patientKey + ".demographics"},
+		[]string{identityKey + ".patientClaim", patientKey + ".identityClaim"}
+}
+
+// clUnbindReads returns UnbindPatientIdentity's declared pair (opmetas.go). The
+// identifiedBy link is OPTIONAL on purpose — an unbound pair is the caller error
+// the op must NAME, and a required declaration would fault at hydration instead.
+func clUnbindReads(patientKey, identityKey string) (reads, optionalReads []string) {
+	pid := patientKey[len("vtx.patient."):]
+	iid := identityKey[len("vtx.identity."):]
+	return []string{patientKey, identityKey, identityKey + ".state", identityKey + ".name", patientKey + ".demographics"},
+		[]string{
+			"lnk.patient." + pid + ".identifiedBy.identity." + iid,
+			identityKey + ".patientClaim",
+			patientKey + ".identityClaim",
+		}
+}
+
+// clSeedIdentity seeds an identity vertex plus the .state aspect
+// CreateUnclaimedIdentity writes alongside it ({value: unclaimed|claimed|merged}
+// — identity-domain ddls.go). Both patient binds READ that aspect, so an identity
+// seeded as a bare vertex is one no bind would accept; every bind fixture goes
+// through here so the fixture carries the shape the live mint produces.
+func clSeedIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey, identityState string) {
+	t.Helper()
+	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
+	clSeedAspect(t, ctx, conn, identityKey, "state", "state", map[string]any{"value": identityState})
+}
+
+// clBindReason submits a patient-class op as the staff actor and returns the
+// script's own failure text. Which refusal came back is the assertion in several
+// of these vectors: the outcome collapses every rejection into "rejected", and
+// two different guards refusing the same fixture would look identical.
+func clBindReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, payload string, reads, optionalReads []string) string {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "patient",
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+	}
+	if reply.Error == nil {
+		t.Fatalf("%s: rejected reply carries no error", label)
+	}
+	return reply.Error.Message
+}
+
+// clSeedDemographics seeds a patient plus a .demographics aspect carrying
+// exactly the fields given — for the two shapes CreatePatient itself never mints
+// (no fullName; no registeredAt), reachable only by seeding.
+func clSeedDemographics(t *testing.T, ctx context.Context, conn *substrate.Conn, patientKey string, demo map[string]any) {
+	t.Helper()
+	clSeedVertex(t, ctx, conn, patientKey, "patient", false)
+	doc := map[string]any{"class": "patientDemographics", "isDeleted": false, "data": demo}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, patientKey+".demographics", b); err != nil {
+		t.Fatalf("seed demographics: %v", err)
+	}
+}
+
+// clSeedAspect writes one aspect document directly, for a precondition an op
+// cannot itself produce in the shape a test needs.
+func clSeedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexKey, localName, class string, data map[string]any) {
+	t.Helper()
+	doc := map[string]any{"class": class, "isDeleted": false,
+		"vertexKey": vertexKey, "localName": localName, "data": data}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, vertexKey+"."+localName, b); err != nil {
+		t.Fatalf("seed aspect %s.%s: %v", vertexKey, localName, err)
+	}
+}
+
+// TestClinic_BindPatientIdentity proves the registration ceremony's second half:
+// a patient registered with a name ALONE is connected to a login afterwards, and
+// in the SAME batch its name MOVES from the clinic's own plaintext .demographics
+// aspect onto the identity's sensitive .name aspect — which is what brings the
+// name inside the shred's reach. Without this op that patient could never be
+// connected to anything, and the name sat outside the erasure plane forever.
+func TestClinic_BindPatientIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-patient-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "bindpat0001", "Nadia Osei")
+	pid := patientKey[len("vtx.patient."):]
+
+	// Precondition: the name is plaintext on the clinic's own aspect and the
+	// patient carries no identity claim — the exact live shape this op targets.
+	demo0 := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd0, _ := demo0["data"].(map[string]any)
+	if dd0["fullName"] != "Nadia Osei" {
+		t.Fatalf("precondition: a name-only patient must carry fullName on .demographics, got %v", dd0["fullName"])
+	}
+	registeredAt, _ := dd0["registeredAt"].(string)
+	if registeredAt == "" {
+		t.Fatalf("precondition: .demographics must carry registeredAt, got %v", dd0["registeredAt"])
+	}
+	if !clMissing(t, ctx, conn, patientKey+".identityClaim") {
+		t.Fatalf("precondition: a name-only patient must carry no identityClaim")
+	}
+
+	identityKey := "vtx.identity.CLbindidentHJKMNPQRS"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindpat0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeAccepted)
+
+	// The link is the SAME key CreatePatient's identityKey branch mints, so every
+	// reader sees one shape whichever path the patient took.
+	linkKey := "lnk.patient." + pid + ".identifiedBy.identity.CLbindidentHJKMNPQRS"
+	ldoc := clReadDoc(t, ctx, conn, linkKey)
+	if ldoc["class"] != "identifiedBy" {
+		t.Fatalf("identifiedBy link class = %v, want identifiedBy", ldoc["class"])
+	}
+	if ldoc["sourceVertex"] != patientKey || ldoc["targetVertex"] != identityKey {
+		t.Fatalf("identifiedBy link source/target = %v/%v, want %v/%v (patient identifiedBy identity)",
+			ldoc["sourceVertex"], ldoc["targetVertex"], patientKey, identityKey)
+	}
+
+	// Both exclusivity guards, both sides.
+	idClaim := clReadDoc(t, ctx, conn, identityKey+".patientClaim")
+	if idClaim["class"] != "identityPatientClaim" {
+		t.Fatalf("patientClaim aspect class = %v, want identityPatientClaim", idClaim["class"])
+	}
+	patClaim := clReadDoc(t, ctx, conn, patientKey+".identityClaim")
+	if patClaim["class"] != "patientIdentityClaim" {
+		t.Fatalf("identityClaim aspect class = %v, want patientIdentityClaim", patClaim["class"])
+	}
+
+	// The name's new home — ENCRYPTED under the identity's own DEK, so
+	// ShredIdentityKey reaches it.
+	nameKey := identityKey + ".name"
+	nameDoc := clReadDoc(t, ctx, conn, nameKey)
+	if cls, _ := nameDoc["class"].(string); cls != "name" {
+		t.Fatalf("%s class = %q, want name", nameKey, cls)
+	}
+	nameData, _ := nameDoc["data"].(map[string]any)
+	if _, plaintext := nameData["value"].(string); plaintext {
+		t.Fatalf("%s stored the name in plaintext; a sensitive aspect must commit as a ciphertext envelope", nameKey)
+	}
+	if decrypted := clDecryptAspect(t, ctx, conn, identityKey, nameKey); decrypted["value"] != "Nadia Osei" {
+		t.Fatalf("decrypted %s = %v, want Nadia Osei", nameKey, decrypted["value"])
+	}
+
+	// And it is GONE from .demographics — otherwise the roster's "name and
+	// unlinked_name are disjoint" premise (cmd/clinic-app/patients.go) breaks and
+	// the shred leaves a plaintext copy behind. registeredAt is carried FORWARD,
+	// never restamped: it is the fact of the registration, not of this bind.
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if _, hasName := dd["fullName"]; hasName {
+		t.Fatalf("a bound patient's demographics must not carry fullName; got %v", dd["fullName"])
+	}
+	if dd["registeredAt"] != registeredAt {
+		t.Fatalf("registeredAt = %v, want the original %v carried forward", dd["registeredAt"], registeredAt)
+	}
+}
+
+// TestClinic_CreatePatientStampsPatientIdentityClaim proves CreatePatient's
+// identity branch claims the PATIENT side of the pairing too, not just the
+// identity side. That stamp is the whole reason a later bind can refuse a patient
+// that already has a login: the identifiedBy link key is
+// (patient, identity)-composite and so would never collide with a SECOND
+// identity's link, while this aspect, keyed on the patient alone, does.
+func TestClinic_CreatePatientStampsPatientIdentityClaim(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "create-stamps-patient-claim")
+
+	identityKey := "vtx.identity.CLbindfirstHJKMNPQRS"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	id := clSubmitOpt(t, ctx, conn, cp, cons, "bindown0001", "CreatePatient", "patient",
+		`{"fullName":"Already Bound","identityKey":"`+identityKey+`"}`,
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
+
+	claim := clReadDoc(t, ctx, conn, "vtx.patient."+id+".identityClaim")
+	if claim["class"] != "patientIdentityClaim" {
+		t.Fatalf("identityClaim aspect class = %v, want patientIdentityClaim", claim["class"])
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsAlreadyIdentifiedPatient proves the
+// PATIENT-keyed guard refuses a second bind. The fixture is SEEDED rather than
+// built with CreatePatient's identity branch, and deliberately keeps a fullName
+// on .demographics: a patient created WITH an identity has no fullName left to
+// move, so a bind on one is refused NothingToBind whether or not the claim guard
+// exists — which would make this a test that passes for the wrong reason. Here
+// the only thing standing between the caller and a committed second bind is the
+// claim, and the claim runs before the name is ever read.
+func TestClinic_BindPatientIdentityRejectsAlreadyIdentifiedPatient(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-already-identified")
+
+	patientKey := "vtx.patient.CLbindboundHJKMNPQRS"
+	clSeedDemographics(t, ctx, conn, patientKey,
+		map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Already Bound"})
+	clSeedAspect(t, ctx, conn, patientKey, "identityClaim", "patientIdentityClaim", map[string]any{})
+
+	secondIdentity := "vtx.identity.CLbindsecondHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, secondIdentity, "unclaimed")
+	reads, optionalReads := clBindReads(patientKey, secondIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindown0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+secondIdentity+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient.CLbindboundHJKMNPQRS.identifiedBy.identity.CLbindsecondHJKMNPQR") {
+		t.Fatalf("a second identifiedBy link was committed against an already-identified patient")
+	}
+	if !clMissing(t, ctx, conn, secondIdentity+".patientClaim") {
+		t.Fatalf("the second identity was claimed despite the rejected bind")
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Already Bound" {
+		t.Fatalf("a rejected bind must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityCarriesRegisteredAtForward proves the rewrite
+// preserves the REGISTRATION's own timestamp rather than restamping it with the
+// bind's submittedAt. It seeds a registeredAt distinct from the suite's fixed
+// submittedAt anchor — with the two equal (which they are for any patient this
+// suite creates through CreatePatient) a restamp would be invisible.
+func TestClinic_BindPatientIdentityCarriesRegisteredAtForward(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-carries-registeredat")
+
+	const registeredAt = "2025-11-04T08:15:00Z" // deliberately != clSubmittedAnchor
+	patientKey := "vtx.patient.CLbindregatHJKMNPQRS"
+	clSeedDemographics(t, ctx, conn, patientKey,
+		map[string]any{"registeredAt": registeredAt, "fullName": "Older Registration"})
+	identityKey := "vtx.identity.CLbindregatidHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindra0001", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeAccepted)
+
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["registeredAt"] != registeredAt {
+		t.Fatalf("registeredAt = %v, want the registration's own %v carried forward, not the bind's submittedAt",
+			dd["registeredAt"], registeredAt)
+	}
+	if _, hasName := dd["fullName"]; hasName {
+		t.Fatalf("the bind must drop fullName; got %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsClaimedIdentity proves the IDENTITY-keyed
+// guard still holds on the bind path: an identity another patient already claimed
+// cannot be bound to a second one, or two roster rows would decrypt and display
+// the same person's contact.
+func TestClinic_BindPatientIdentityRejectsClaimedIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-claimed-identity")
+
+	identityKey := "vtx.identity.CLbindtakenHJKMNPQRS"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindclm0001", "CreatePatient", "patient",
+		`{"fullName":"First Claimant","identityKey":"`+identityKey+`"}`,
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
+
+	walkIn := createPatient(t, ctx, conn, cp, cons, "bindclm0002", "Walk In")
+	walkInID := walkIn[len("vtx.patient."):]
+	reads, optionalReads := clBindReads(walkIn, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindclm0003", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+walkIn+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+walkInID+".identifiedBy.identity.CLbindtakenHJKMNPQRS") {
+		t.Fatalf("an identifiedBy link was committed against an already-claimed identity")
+	}
+	// The whole batch fails closed: the name must NOT have moved off the
+	// walk-in's own .demographics.
+	demo := clReadDoc(t, ctx, conn, walkIn+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Walk In" {
+		t.Fatalf("a rejected bind must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsDeadIdentity proves an absent identityKey
+// is never wired — the require_live_typed pair, mirroring CreatePatient's own
+// endpoint validation.
+func TestClinic_BindPatientIdentityRejectsDeadIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-dead-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "binddead0001", "No Login Yet")
+	pid := patientKey[len("vtx.patient."):]
+	absentIdentity := "vtx.identity.CLbindabsentHJKMNPQR"
+
+	reads, optionalReads := clBindReads(patientKey, absentIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "binddead0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+absentIdentity+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindabsentHJKMNPQR") {
+		t.Fatalf("an identifiedBy link was committed against an absent identity")
+	}
+	if !clMissing(t, ctx, conn, patientKey+".identityClaim") {
+		t.Fatalf("the patient was claimed despite the rejected bind")
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsWrongClassIdentity proves a live but
+// wrong-class identityKey (another entity's key at an identity-shaped address) is
+// never wired.
+func TestClinic_BindPatientIdentityRejectsWrongClassIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-wrongclass-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "bindwc0001", "No Login Yet")
+	pid := patientKey[len("vtx.patient."):]
+	fakeIdentity := "vtx.identity.CLbindfakeidHJKMNPQR"
+	clSeedVertex(t, ctx, conn, fakeIdentity, "patient", false)
+
+	reads, optionalReads := clBindReads(patientKey, fakeIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindwc0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+fakeIdentity+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindfakeidHJKMNPQR") {
+		t.Fatalf("an identifiedBy link was committed against a wrong-class identityKey")
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsDeadPatient proves the patient endpoint is
+// validated the same way — a tombstoned patient is never bound.
+func TestClinic_BindPatientIdentityRejectsDeadPatient(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-dead-patient")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "binddp0001", "Departed")
+	pid := patientKey[len("vtx.patient."):]
+	clSubmit(t, ctx, conn, cp, cons, "binddp0002", "TombstonePatient", "patient",
+		`{"patientKey":"`+patientKey+`"}`, []string{patientKey}, processor.OutcomeAccepted)
+
+	identityKey := "vtx.identity.CLbinddeadptHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "binddp0003", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbinddeadptHJKMNPQR") {
+		t.Fatalf("an identifiedBy link was committed against a tombstoned patient")
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsNamelessPatient proves the op refuses when
+// there is nothing to move: a .demographics with no fullName. Without the check
+// the bind would upsert the identity's sensitive .name aspect with an empty value
+// — destroying the name CreateUnclaimedIdentity wrote there a moment earlier.
+func TestClinic_BindPatientIdentityRejectsNamelessPatient(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-nameless-patient")
+
+	patientKey := "vtx.patient.CLbindanonHJKMNPQRST"
+	clSeedDemographics(t, ctx, conn, patientKey, map[string]any{"registeredAt": "2026-06-01T09:00:00Z"})
+	identityKey := "vtx.identity.CLbindnonameHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindnn0001", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient.CLbindanonHJKMNPQRST.identifiedBy.identity.CLbindnonameHJKMNPQR") {
+		t.Fatalf("an identifiedBy link was committed for a patient with no name to move")
+	}
+	if !clMissing(t, ctx, conn, identityKey+".name") {
+		t.Fatalf("the identity's name aspect was written by a rejected bind")
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsUnregisteredPatient proves the op refuses a
+// patient whose .demographics carries no registeredAt (a pre-2026-08-08 mint).
+// Rewriting that aspect without it would leave {} — and every roster lens filters
+// on registeredAt being present, so the patient would vanish from the read model
+// permanently. BackfillPatientRegistration is that repair, and the refusal names it.
+func TestClinic_BindPatientIdentityRejectsUnregisteredPatient(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-unregistered-patient")
+
+	patientKey := "vtx.patient.CLbindnoregHJKMNPQRS"
+	clSeedDemographics(t, ctx, conn, patientKey, map[string]any{"fullName": "Priya Chandra"})
+	identityKey := "vtx.identity.CLbindnoregidHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "bindnr0001", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		reads, optionalReads, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient.CLbindnoregHJKMNPQRS.identifiedBy.identity.CLbindnoregidHJKMNPQ") {
+		t.Fatalf("an identifiedBy link was committed for a patient carrying no registeredAt")
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Priya Chandra" {
+		t.Fatalf("a rejected bind must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityUndeclaredReadsFailClosed pins what an EMPTY
+// contextHint does. Hydration builds `state` from the DECLARED reads alone, so a
+// submitter declaring nothing hands the script an empty state: the very first
+// endpoint check (require_live_typed on patientKey) sees an absent vertex and the
+// op is REJECTED. Nothing commits.
+//
+// That is the property that matters, and it is why the .demographics read is
+// declared rather than done live: an undeclared read can never degrade silently
+// into "no name found, write an empty one" — it fails closed before the rewrite
+// is reached at all.
+func TestClinic_BindPatientIdentityUndeclaredReadsFailClosed(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-undeclared-reads")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "bindud0001", "Undeclared Reader")
+	pid := patientKey[len("vtx.patient."):]
+	identityKey := "vtx.identity.CLbindundecHJKMNPQRS"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+
+	clSubmit(t, ctx, conn, cp, cons, "bindud0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		nil, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindundecHJKMNPQRS") {
+		t.Fatalf("an identifiedBy link was committed by an op that declared no reads")
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Undeclared Reader" {
+		t.Fatalf("an undeclared-read submission must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsClaimedIdentity_State proves the
+// confinement on the standing front-desk grant: an identity somebody has already
+// SIGNED IN to is refused. Without it, a frontOfHouse actor holding this op at
+// scope=any (no workplace to confine against, since a patient is practice-wide)
+// could bind any patient's chart to a login THEY hold and then read that
+// patient's protected rows — patientIdentityReadGrants hands the linked identity
+// the patient's own anchor, and RLS honours it.
+//
+// The fixture's identity is state=claimed but carries NO clinic patientClaim, so
+// the older IdentityAlreadyClaimed guard cannot be what refuses it; the message
+// is asserted for exactly that reason.
+func TestClinic_BindPatientIdentityRejectsClaimedIdentity_State(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-claimed-state")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "bindst0001", "Someone Elses Chart")
+	pid := patientKey[len("vtx.patient."):]
+	identityKey := "vtx.identity.CLbindstateCHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, identityKey, "claimed")
+
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	msg := clBindReason(t, ctx, conn, cp, cons, "bindst0002", "BindPatientIdentity",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, reads, optionalReads)
+	if !strings.Contains(msg, "IdentityNotUnclaimed") {
+		t.Fatalf("rejection = %q, want IdentityNotUnclaimed — a claimed login must be refused by the state gate, not by some other guard", msg)
+	}
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindstateCHJKMNPQR") {
+		t.Fatalf("a patient was bound to a login someone had already claimed")
+	}
+	if !clMissing(t, ctx, conn, identityKey+".patientClaim") {
+		t.Fatalf("the claimed identity was claimed by the clinic despite the rejected bind")
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Someone Elses Chart" {
+		t.Fatalf("a rejected bind must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsMergedIdentity closes the OTHER
+// not-unclaimed state. A MergeIdentity loser stays ALIVE and class=identity, so
+// require_live_typed passes it happily; its actor is redirected to the winner,
+// so binding a chart to it hands that chart to whoever holds the winner. The
+// state gate is the only thing between the two.
+func TestClinic_BindPatientIdentityRejectsMergedIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-merged-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "bindmg0001", "Merged Target")
+	pid := patientKey[len("vtx.patient."):]
+	identityKey := "vtx.identity.CLbindmergedHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, identityKey, "merged")
+
+	reads, optionalReads := clBindReads(patientKey, identityKey)
+	msg := clBindReason(t, ctx, conn, cp, cons, "bindmg0002", "BindPatientIdentity",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, reads, optionalReads)
+	if !strings.Contains(msg, "IdentityNotUnclaimed") {
+		t.Fatalf("rejection = %q, want IdentityNotUnclaimed for a merged loser identity", msg)
+	}
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindmergedHJKMNPQR") {
+		t.Fatalf("a patient was bound to a merged loser identity")
+	}
+}
+
+// TestClinic_BindPatientIdentityRejectsPatientCreatedWithIdentity runs the
+// already-identified refusal through the REAL path rather than a seeded claim: a
+// patient CreatePatient registered WITH an identity, then a bind at a second,
+// perfectly good unclaimed one.
+//
+// Which refusal comes back is the whole point, and it is version-dependent. This
+// patient carries the .identityClaim marker CreatePatient now stamps, so
+// PatientAlreadyIdentified refuses it before the name is ever read. A patient
+// identified BEFORE that marker existed carries none and never will (no
+// backfill); what refuses that population is NothingToBind, because
+// CreatePatient's identityKey branch already moved its name onto the identity.
+// Both are refused — by different mechanisms — which is what the guard comments
+// in ddls.go say and what this test pins.
+func TestClinic_BindPatientIdentityRejectsPatientCreatedWithIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "bind-created-with-identity")
+
+	firstIdentity := "vtx.identity.CLbindcwiFirstHJKMNP"
+	clSeedIdentity(t, ctx, conn, firstIdentity, "unclaimed")
+	pid := clSubmitOpt(t, ctx, conn, cp, cons, "bindcwi0001", "CreatePatient", "patient",
+		`{"fullName":"Born Connected","identityKey":"`+firstIdentity+`"}`,
+		[]string{firstIdentity}, []string{firstIdentity + ".patientClaim"}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + pid
+
+	secondIdentity := "vtx.identity.CLbindcwiSecondHJKMN"
+	clSeedIdentity(t, ctx, conn, secondIdentity, "unclaimed")
+	reads, optionalReads := clBindReads(patientKey, secondIdentity)
+	msg := clBindReason(t, ctx, conn, cp, cons, "bindcwi0002", "BindPatientIdentity",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+secondIdentity+`"}`, reads, optionalReads)
+	if !strings.Contains(msg, "PatientAlreadyIdentified") {
+		t.Fatalf("rejection = %q, want PatientAlreadyIdentified — the marker CreatePatient stamps is what refuses a post-marker patient", msg)
+	}
+
+	if !clMissing(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLbindcwiSecondHJKMN") {
+		t.Fatalf("a second identifiedBy link was committed against a patient registered with a login")
+	}
+	if !clMissing(t, ctx, conn, secondIdentity+".patientClaim") {
+		t.Fatalf("the second identity was claimed despite the rejected bind")
+	}
+}
+
+// TestClinic_UnbindPatientIdentity proves the repair for a chart connected to the
+// WRONG login, and that it restores the PRE-BIND shape exactly: the link and both
+// exclusivity guards released, and the name moved back off the identity onto
+// .demographics with the registration's own timestamp intact. Without it
+// BindPatientIdentity is a one-way door — a desk that picked the wrong patient
+// row left that patient attached to a stranger's login permanently.
+func TestClinic_UnbindPatientIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "unbind-patient-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "unbind0001", "Wrongly Connected")
+	pid := patientKey[len("vtx.patient."):]
+	demo0 := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd0, _ := demo0["data"].(map[string]any)
+	registeredAt, _ := dd0["registeredAt"].(string)
+
+	identityKey := "vtx.identity.CLunbindidentHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	bindReads, bindOptional := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "unbind0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		bindReads, bindOptional, processor.OutcomeAccepted)
+
+	linkKey := "lnk.patient." + pid + ".identifiedBy.identity.CLunbindidentHJKMNPQ"
+	if !clAlive(t, ctx, conn, linkKey) {
+		t.Fatalf("precondition: the bind must have wired %s", linkKey)
+	}
+
+	unbindReads, unbindOptional := clUnbindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "unbind0003", "UnbindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`,
+		unbindReads, unbindOptional, processor.OutcomeAccepted)
+
+	// The name is BACK on the clinic's own aspect, decrypted out of the
+	// identity's sensitive .name envelope by hydration and rewritten in plaintext
+	// — the pre-bind shape, so the roster's unlinked_name column feeds again.
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Wrongly Connected" {
+		t.Fatalf("the unbind must move the name back onto .demographics; fullName = %v", dd["fullName"])
+	}
+	if dd["registeredAt"] != registeredAt {
+		t.Fatalf("registeredAt = %v, want the registration's own %v carried through both moves", dd["registeredAt"], registeredAt)
+	}
+
+	// Link and BOTH guards released, or the patient could never be connected to
+	// the right login and the identity could never be claimed by its real owner.
+	clAssertTombstoned(t, ctx, conn, linkKey, "identifiedBy link")
+	clAssertTombstoned(t, ctx, conn, identityKey+".patientClaim", "identity patientClaim guard")
+	clAssertTombstoned(t, ctx, conn, patientKey+".identityClaim", "patient identityClaim guard")
+}
+
+// TestClinic_UnbindPatientIdentityThenRebind is the reason the claim writers
+// revive rather than create: a Lattice tombstone is soft, so a plain create on a
+// released guard would RevisionConflict forever and the repair would leave the
+// patient no better off — unbound, and permanently unbindable.
+func TestClinic_UnbindPatientIdentityThenRebind(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "unbind-then-rebind")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "rebind0001", "Second Chance")
+	pid := patientKey[len("vtx.patient."):]
+
+	wrongIdentity := "vtx.identity.CLrebindWrongHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, wrongIdentity, "unclaimed")
+	r, o := clBindReads(patientKey, wrongIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "rebind0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+wrongIdentity+`"}`, r, o, processor.OutcomeAccepted)
+
+	ur, uo := clUnbindReads(patientKey, wrongIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "rebind0003", "UnbindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+wrongIdentity+`"}`, ur, uo, processor.OutcomeAccepted)
+
+	// The right login this time. The patient's own identityClaim is tombstoned,
+	// so this bind exercises the REVIVE arm.
+	rightIdentity := "vtx.identity.CLrebindRightHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, rightIdentity, "unclaimed")
+	r2, o2 := clBindReads(patientKey, rightIdentity)
+	clSubmitOpt(t, ctx, conn, cp, cons, "rebind0004", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+rightIdentity+`"}`, r2, o2, processor.OutcomeAccepted)
+
+	if !clAlive(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLrebindRightHJKMNPQ") {
+		t.Fatalf("the re-bind did not wire the right identity")
+	}
+	claim := clReadDoc(t, ctx, conn, patientKey+".identityClaim")
+	if del, _ := claim["isDeleted"].(bool); del {
+		t.Fatalf("the patient's identityClaim must be REVIVED by the re-bind, not left tombstoned")
+	}
+	if claim["class"] != "patientIdentityClaim" {
+		t.Fatalf("revived identityClaim class = %v, want patientIdentityClaim", claim["class"])
+	}
+	if decrypted := clDecryptAspect(t, ctx, conn, rightIdentity, rightIdentity+".name"); decrypted["value"] != "Second Chance" {
+		t.Fatalf("decrypted %s = %v, want Second Chance", rightIdentity+".name", decrypted["value"])
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if _, hasName := dd["fullName"]; hasName {
+		t.Fatalf("the re-bind must move the name off .demographics again; got %v", dd["fullName"])
+	}
+}
+
+// TestClinic_UnbindPatientIdentityRejectsUnboundPair proves the op will not
+// release the guards of a pairing that does not exist. Both endpoints are alive
+// and the identity is unclaimed, so nothing but the link check stands between the
+// caller and tombstoning an unrelated identity's patientClaim.
+func TestClinic_UnbindPatientIdentityRejectsUnboundPair(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "unbind-not-bound")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "unbnb0001", "Never Connected")
+	identityKey := "vtx.identity.CLunbindfreeHJKMNPQR"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	// A claim on the identity that belongs to a DIFFERENT pairing — the thing a
+	// bogus unbind would destroy.
+	clSeedAspect(t, ctx, conn, identityKey, "patientClaim", "identityPatientClaim", map[string]any{})
+
+	reads, optionalReads := clUnbindReads(patientKey, identityKey)
+	msg := clBindReason(t, ctx, conn, cp, cons, "unbnb0002", "UnbindPatientIdentity",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, reads, optionalReads)
+	if !strings.Contains(msg, "NotBound") {
+		t.Fatalf("rejection = %q, want NotBound", msg)
+	}
+	claim := clReadDoc(t, ctx, conn, identityKey+".patientClaim")
+	if del, _ := claim["isDeleted"].(bool); del {
+		t.Fatalf("a rejected unbind released a claim belonging to another pairing")
+	}
+	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Never Connected" {
+		t.Fatalf("a rejected unbind must leave .demographics untouched; fullName = %v", dd["fullName"])
+	}
+}
+
+// TestClinic_UnbindPatientIdentityRejectsClaimedIdentity proves the repair stops
+// at the moment a person actually signs in. Unbinding then would move the name
+// off a live login and free it to be re-bound to somebody else's chart, so the
+// window for this repair closes exactly when the identity stops being the desk's
+// to hand out. The pair IS bound here — only the state has moved.
+func TestClinic_UnbindPatientIdentityRejectsClaimedIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "unbind-claimed-identity")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "unbcl0001", "Signed In Already")
+	pid := patientKey[len("vtx.patient."):]
+	identityKey := "vtx.identity.CLunbindstateHJKMNPQ"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	r, o := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "unbcl0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, r, o, processor.OutcomeAccepted)
+
+	// The person claims the login (identity-domain's ClaimIdentity moves .state
+	// unclaimed -> claimed; this suite installs no identity-domain, so the
+	// transition is seeded).
+	clSeedAspect(t, ctx, conn, identityKey, "state", "state", map[string]any{"value": "claimed"})
+
+	reads, optionalReads := clUnbindReads(patientKey, identityKey)
+	msg := clBindReason(t, ctx, conn, cp, cons, "unbcl0003", "UnbindPatientIdentity",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, reads, optionalReads)
+	if !strings.Contains(msg, "IdentityClaimed") {
+		t.Fatalf("rejection = %q, want IdentityClaimed", msg)
+	}
+	if !clAlive(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLunbindstateHJKMNPQ") {
+		t.Fatalf("a rejected unbind released the identifiedBy link of a claimed login")
+	}
+	if !clAlive(t, ctx, conn, identityKey+".patientClaim") {
+		t.Fatalf("a rejected unbind released the identity's patientClaim")
+	}
+}
+
+// TestClinic_UnbindPatientIdentityFrontOfHouseDenied proves the repair is not
+// desk work. The front-desk capability doc is DERIVED from the package's own
+// Permissions() — every op whose GrantsTo names frontOfHouse and nothing else —
+// so adding frontOfHouse to UnbindPatientIdentity's grant would make this actor
+// hold it and the op ACCEPTED, failing here rather than passing quietly.
+//
+// It matters because the desk already holds BindPatientIdentity: one grantee
+// holding both verbs could unbind and re-bind at will, which makes the bind's
+// unclaimed-identity confinement re-runnable instead of one-shot.
+func TestClinic_UnbindPatientIdentityFrontOfHouseDenied(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "unbind-frontdesk-denied")
+
+	const fdID = "CLunbindDeskHJKMNPQR"
+	fdKey := "vtx.identity." + fdID
+	fdPerms := []processor.PlatformPermission{}
+	for _, perm := range clinicdomain.Permissions() {
+		if slices.Contains(perm.GrantsTo, "frontOfHouse") {
+			fdPerms = append(fdPerms, processor.PlatformPermission{OperationType: perm.OperationType, Scope: perm.Scope})
+		}
+	}
+	if len(fdPerms) == 0 {
+		t.Fatalf("no frontOfHouse grants found — the derived capability doc would prove nothing")
+	}
+	now := time.Now().UTC()
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + fdID,
+		Actor:                  fdKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{fdKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions:    fdPerms,
+		ServiceAccess:          []processor.ServiceAccessEntry{},
+		EphemeralGrants:        []processor.EphemeralGrant{},
+		Roles:                  []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")},
+	})
+
+	// A real, live binding, so the ONLY thing that can refuse this submission is
+	// the missing grant — every in-script guard would pass.
+	patientKey := createPatient(t, ctx, conn, cp, cons, "unbfd0001", "Desk Cannot Undo")
+	pid := patientKey[len("vtx.patient."):]
+	identityKey := "vtx.identity.CLunbinddeskidHJKMNP"
+	clSeedIdentity(t, ctx, conn, identityKey, "unclaimed")
+	r, o := clBindReads(patientKey, identityKey)
+	clSubmitOpt(t, ctx, conn, cp, cons, "unbfd0002", "BindPatientIdentity", "patient",
+		`{"patientKey":"`+patientKey+`","identityKey":"`+identityKey+`"}`, r, o, processor.OutcomeAccepted)
+
+	reads, optionalReads := clUnbindReads(patientKey, identityKey)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("unbfd0003"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UnbindPatientIdentity",
+		Actor:         fdKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "patient",
+		Payload:       json.RawMessage(`{"patientKey":"` + patientKey + `","identityKey":"` + identityKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if !clAlive(t, ctx, conn, "lnk.patient."+pid+".identifiedBy.identity.CLunbinddeskidHJKMNP") {
+		t.Fatalf("front-desk released a binding it holds no grant for")
 	}
 }
 

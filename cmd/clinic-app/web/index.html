@@ -16,6 +16,7 @@
       <span id="patient-self-name" class="readonly" hidden></span>
       <button id="new-patient" class="ghost">＋ New patient</button>
       <span id="patient-contact" class="patient-contact" aria-live="polite"></span>
+      <button id="connect-login" class="ghost" hidden>Connect a login</button>
       <span id="signed-in-as" class="patient-contact" aria-live="polite"></span>
       <button id="sign-out" class="ghost" hidden>Sign out</button>
     </div>
@@ -344,6 +345,32 @@
         <div class="modal-actions">
           <button type="button" id="patient-cancel" class="ghost">Cancel</button>
           <button type="submit" id="patient-submit">Create patient</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Connect a login modal -->
+  <div id="connect-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+      <h2 id="connect-title">Connect a login</h2>
+      <p class="lead">Give this patient a sign-in of their own. At least one of phone or email is required.</p>
+      <form id="connect-form">
+        <div class="field">
+          <label for="cn-name">Full name</label>
+          <input type="text" id="cn-name" readonly aria-readonly="true" />
+        </div>
+        <div class="field">
+          <label for="cn-phone">Phone</label>
+          <input type="text" id="cn-phone" placeholder="555-0100" />
+        </div>
+        <div class="field">
+          <label for="cn-email">Email</label>
+          <input type="email" id="cn-email" placeholder="alice@example.com" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="connect-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="connect-submit">Connect login</button>
         </div>
       </form>
     </div>

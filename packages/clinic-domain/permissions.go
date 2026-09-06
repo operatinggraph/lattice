@@ -26,9 +26,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // those staff hold today: the shipped clinic FE submits as `operator`, which
 // is root-equivalent. `frontOfHouse` holds no kernel platform grants and no
 // all-access read anchor, so a front-desk actor reaches exactly these ops and
-// the rows their workplace grants open. Booking (CreateAppointment) and the
-// clinical/roster surface (RecordEncounter, CreatePatient, provider
-// administration) deliberately stay operator-only.
+// the rows their workplace grants open. The registration pair (CreatePatient
+// and its second half BindPatientIdentity) is front-desk work too — the desk is
+// who meets a new patient — while the clinical surface (RecordEncounter),
+// provider administration, and every repair verb (TombstonePatient,
+// BackfillPatientRegistration, UnbindPatientIdentity) stay operator-only.
 //
 // BindProviderIdentity grants `operator` alone at scope=any — the bind
 // ceremony that establishes a provider's login (mints the provider's
@@ -79,6 +81,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to register a patient. Unconfined: a patient vertex is practice-wide (no building), so there is no location to workplace-confine to — front-desk registration mirrors the operator grant and identity-domain's own frontOfHouse CreateUnclaimedIdentity.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "BindPatientIdentity",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to connect an existing patient to a login identity — the SAME grantee set as CreatePatient, because this is the second half of that op's own registration ceremony (a patient the desk typed in with a name alone, given contact details afterwards). It mints no role, unlike BindProviderIdentity, which is why front-desk holds it and does not hold that one. What a bind DOES confer is real: patientIdentityReadGrants gives the linked identity the patient's own anchor, so whoever holds that login reads that patient's protected rows. The grant is standing and scope=any with no workplace to confine against (a patient is practice-wide, and this package's enforce_workplace_confined keys on a PROVIDER's practicesAt sites, which a patient has no analogue of), so the confinement is domain-shaped instead: the script takes only an UNCLAIMED identity — a login nobody holds yet — mirroring identity-domain's own standing front/back-of-house write over an unclaimed identity. RESIDUAL, recorded rather than papered over: the desk minted that identity a moment earlier and still holds its claim secret, so a staffer who wanted a patient's chart could claim the login afterwards and read it. That is the same ceremony trust the desk already exercises at registration, now reaching a chart that already exists rather than one it just made. Closing it means taking the mint out of the desk's hands, which is a product call, not a guard this op can add. Site posture mirrors CreatePatient's: unconfined.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "UnbindPatientIdentity",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to disconnect a patient from a login connected in error — a repair for a mis-connected chart, never desk work. Front-desk is deliberately absent: the desk's own mistake is what this fixes, and an unbind moves a person's name back off their login and releases both exclusivity guards, so the patient can then be bound to a DIFFERENT identity. Handing that pair of verbs to one standing grantee would make the bind's unclaimed-identity confinement re-runnable at will. The script refuses an identity anyone has already claimed, so even the operator cannot detach a login somebody signed in with.",
+			GrantsTo:      []string{"operator"},
 		},
 		mk("TombstonePatient"),
 		{

@@ -50,6 +50,7 @@ const (
 	patientSlotClaimAspectDDL  = "patientSlotClaim"
 
 	identityPatientClaimAspectDDL  = "identityPatientClaim"
+	patientIdentityClaimAspectDDL  = "patientIdentityClaim"
 	providerIdentityClaimAspectDDL = "providerIdentityClaim"
 	identityProviderClaimAspectDDL = "identityProviderClaim"
 
@@ -90,11 +91,16 @@ const (
 // caller (the FE) mints the identity carrying the sensitive contact first via
 // identity-domain's CreateUnclaimedIdentity, mirroring loftspace-app's
 // applicant flow (clinic-domain-design.md: "vtx.identity + an identifiedBy
-// link — not a rework"). A CreateOnly identityPatientClaim aspect on the
-// identity globally guards it: the identifiedBy link key alone is
-// (patient, identity)-composite, so it cannot stop two DIFFERENT patients
-// both wiring the same identityKey; the claim aspect, keyed solely on the
-// identity, is what makes the second claim collide. No backfill for
+// link — not a rework"). Two CreateOnly guard aspects make the pairing
+// mutually exclusive, because the identifiedBy link key is
+// (patient, identity)-composite and so stops neither direction on its own:
+// identityPatientClaim, keyed solely on the identity, makes a SECOND patient
+// claiming that identity collide, and patientIdentityClaim, keyed solely on
+// the patient, makes a second identity binding that patient collide.
+// BindPatientIdentity is the same wiring applied AFTER the fact — the second
+// half of the registration ceremony for a patient typed in with a name alone
+// — and it moves the name off .demographics onto the identity's sensitive
+// .name aspect so the shred reaches it. No backfill for
 // pre-existing patients (Vault's full-stack-reset delivery boundary covers
 // the migration). Display of the linked contact rides a later Secure-Lens
 // protected model (Fire 5 of the Vault crypto-shredding design); only the
@@ -118,6 +124,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		documentationAspectTypeDDL(),
 		siteAssignmentAspectTypeDDL(),
 		identityPatientClaimAspectTypeDDL(),
+		patientIdentityClaimAspectTypeDDL(),
 		clinicSiteProfileAspectTypeDDL(),
 		providerIdentityClaimAspectTypeDDL(),
 		identityProviderClaimAspectTypeDDL(),
@@ -128,7 +135,7 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     patientVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"},
+		PermittedCommands: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		Description: "Clinic patient DDL. Vertex shape: vtx.patient.<NanoID>, class=patient, root data = {} " +
 			"(minimal, D5 — the data lives in the .demographics aspect + the optional identifiedBy link). " +
 			"CreatePatient mints the patient + writes the .demographics aspect {fullName (required)} atomically; " +
@@ -147,22 +154,38 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 			"lives on the linked identity, the Vault plane's unit. BackfillPatientRegistration is an operator-only, " +
 			"manual repair for a patient whose .demographics aspect carries no registeredAt (the roster lenses' " +
 			"presence filter hides such a patient from every actor): it upserts registeredAt onto that aspect, " +
-			"preserving fullName, and no-ops cleanly if registeredAt is already set.",
+			"preserving fullName, and no-ops cleanly if registeredAt is already set. BindPatientIdentity is the " +
+			"second half of the registration ceremony for a patient registered with a NAME ALONE: given that " +
+			"patient and a pre-minted identity (both validated alive + class), it wires the same identifiedBy link " +
+			"CreatePatient's identityKey branch wires, claims both exclusivity guards (patientClaim on the identity, " +
+			"identityClaim on the patient), and MOVES the name — off the plaintext .demographics fullName and onto " +
+			"the identity's sensitive .name aspect, so the shred that destroys the person's email and phone reaches " +
+			"their name too. The identity must be UNCLAIMED: a login somebody already signed in to (state=claimed) " +
+			"or one a merge retired (state=merged) is refused IdentityNotUnclaimed, which is what keeps front-desk's " +
+			"standing grant from attaching a patient's chart to a login the desk itself holds. It further refuses a " +
+			"patient that already carries an identity (PatientAlreadyIdentified), an identity another patient already " +
+			"claimed (IdentityAlreadyClaimed), and a patient whose .demographics carries no fullName to move " +
+			"(NothingToBind). UnbindPatientIdentity is the operator-only repair for a chart connected to the WRONG " +
+			"login, and the exact inverse: it requires that live identifiedBy pair (NotBound otherwise) and an " +
+			"identity nobody has claimed yet (IdentityClaimed otherwise — unbinding a claimed login would strand the " +
+			"person who signed in with it), then tombstones the link and both guard aspects and moves the name BACK " +
+			"onto .demographics from the identity's .name, restoring the pre-bind shape so the patient can be " +
+			"connected to the right login instead.",
 		Script: patientDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string","description":"The patient's full name (CreatePatient; required)."},` +
-			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's sensitive contact (CreatePatient; optional, validated alive + class=identity; wires the identifiedBy link)."},` +
+			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's sensitive contact (CreatePatient; optional — BindPatientIdentity / UnbindPatientIdentity; required. Validated alive + class=identity; wires or releases the identifiedBy link)."},` +
 			`"patientId":{"type":"string","description":"Optional bare NanoID for the new patient vertex (CreatePatient); absent → minted."},` +
-			`"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (TombstonePatient; required, validated alive)."},` +
+			`"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (TombstonePatient, BindPatientIdentity, UnbindPatientIdentity; required, validated alive)."},` +
 			`"patient":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (BackfillPatientRegistration; required, validated alive)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.patient.<NanoID> the operation wrote."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.patient.<NanoID> the operation wrote — or, for BindPatientIdentity / UnbindPatientIdentity, the lnk.patient.<id>.identifiedBy.identity.<id> key it minted or released."}}}`,
 		FieldDescription: map[string]string{
 			"fullName":    "The patient's full name. Stored on the .demographics aspect (CreatePatient; required).",
-			"identityKey": "Full vtx.identity.<NanoID> key of a pre-minted identity to link (CreatePatient; optional). Must be alive + class=identity; wires the identifiedBy link and claims a CreateOnly patientClaim guard aspect on the identity (rejected if another patient already claimed it). Absent → the patient has no linked identity.",
+			"identityKey": "Full vtx.identity.<NanoID> key of a pre-minted identity to link (CreatePatient; optional — BindPatientIdentity / UnbindPatientIdentity; required). Must be alive + class=identity; the bind wires the identifiedBy link and claims a patientClaim guard aspect on the identity (rejected if another patient already claimed it, or if the identity is not still unclaimed), the unbind releases both. Absent on CreatePatient → the patient has no linked identity.",
 			"patientId":   "Optional bare NanoID (no dots / key segments) for the new patient vertex (vtx.patient.<patientId>). Absent → minted with nanoid.new().",
-			"patientKey":  "Full vtx.patient.<NanoID> key of an existing patient vertex to tombstone (TombstonePatient).",
+			"patientKey":  "Full vtx.patient.<NanoID> key of an existing patient vertex — to tombstone (TombstonePatient), to connect to a login identity (BindPatientIdentity; validated alive + class=patient, rejected if it already carries a live identityClaim), or to disconnect from one (UnbindPatientIdentity; the identifiedBy link to the named identity must be live).",
 			"patient":     "Full vtx.patient.<NanoID> key of an existing patient vertex to backfill (BackfillPatientRegistration; required, validated alive).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -193,6 +216,24 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Upserts .demographics with registeredAt set (preserving fullName if present); " +
 					"no-ops if registeredAt is already set. Operator-only.",
 			},
+			{
+				Name:    "BindPatientIdentity — connect a name-only patient to a login",
+				Payload: map[string]any{"patientKey": "vtx.patient.<NanoID>", "identityKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Mints lnk.patient.<id>.identifiedBy.identity.<identityId> (returned as primaryKey), " +
+					"a patientClaim on the identity and an identityClaim on the patient, and MOVES " +
+					"the name: .demographics is rewritten without fullName and the identity's sensitive .name aspect " +
+					"is upserted with it. Rejects an identity that is not still unclaimed, a patient already carrying " +
+					"an identity, an identity another patient already claimed, an absent/tombstoned/wrong-class " +
+					"endpoint, and a patient with no fullName to move.",
+			},
+			{
+				Name:    "UnbindPatientIdentity — repair a chart connected to the wrong login",
+				Payload: map[string]any{"patientKey": "vtx.patient.<NanoID>", "identityKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Tombstones lnk.patient.<id>.identifiedBy.identity.<identityId> (returned as primaryKey) " +
+					"and both guard aspects, and moves the name BACK: .demographics is rewritten {registeredAt, fullName} " +
+					"from the identity's .name. Operator-only. Rejects a pair with no live identifiedBy link (NotBound) " +
+					"and an identity somebody has already claimed (IdentityClaimed).",
+			},
 		},
 	}
 }
@@ -213,13 +254,15 @@ func identityPatientClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     identityPatientClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreatePatient"},
+		PermittedCommands: []string{"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"},
 		Description: "Identity patient-claim guard aspect (clinic-domain, attached onto an identity-domain vertex). " +
 			"Stored as vtx.identity.<NanoID>.patientClaim (class identityPatientClaim) = {} — a pure existence marker, " +
-			"no relationship field. CreatePatient writes ONE per claimed identityKey, CreateOnly: the key ITSELF " +
-			"(identical regardless of WHICH patient is claiming) is the lock — a second, different patient passing the " +
-			"same identityKey collides at commit (RevisionConflict), never a silent double-claim. Declaration-only: no " +
-			"op handler (CreatePatient's script, owned by the patient vertexType DDL, writes it).",
+			"no relationship field. CreatePatient (identityKey branch) and BindPatientIdentity each write ONE per " +
+			"claimed identityKey: the key ITSELF (identical regardless of WHICH patient is claiming) is " +
+			"the lock — a second, different patient passing the same identityKey collides at commit " +
+			"(RevisionConflict), never a silent double-claim. Created when absent, OCC-revived when " +
+			"present-but-tombstoned, so an identity UnbindPatientIdentity released can be claimed again. " +
+			"Declaration-only: no op handler (the patient vertexType DDL's own script writes it).",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -230,7 +273,60 @@ func identityPatientClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "identity patient-claim guard aspect",
 				Payload:         map[string]any{},
-				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.patientClaim; claimed once by CreatePatient's identityKey wiring. A second, different patient claiming the same identity is rejected.",
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.patientClaim; claimed by CreatePatient's identityKey wiring or by BindPatientIdentity, tombstoned by UnbindPatientIdentity and OCC-revived by the next claim. A second, different patient claiming the same identity while the claim is live is rejected.",
+			},
+		},
+	}
+}
+
+// patientIdentityClaimAspectTypeDDL declares the .identityClaim guard aspect on
+// the PATIENT side of a patient↔identity pair — the entity-keyed half of the
+// pairing's mutual exclusivity, of which identityPatientClaimAspectTypeDDL above
+// is the identity-keyed half. Stored as vtx.patient.<NanoID>.identityClaim
+// (class patientIdentityClaim) = {} — a pure existence marker, mirroring
+// providerIdentityClaim's shape on the provider side.
+//
+// TWO ops write it: CreatePatient stamps it when the registration supplies an
+// identityKey, and BindPatientIdentity stamps it when a name-only patient is
+// connected to a login afterwards. A patient reaches exactly one of those paths,
+// so the deterministic key never has two live writers racing for it — and if one
+// ever did, a create on a key at revision 0 commits exactly once.
+//
+// The marker is not what refuses a bind on EVERY already-identified patient, only
+// on the ones carrying it. A patient CreatePatient identified before this aspect
+// existed has no marker and never gets one (there is no backfill); what refuses a
+// bind on that population is NothingToBind — CreatePatient's identityKey branch
+// already moved the name onto the identity, leaving .demographics with no fullName
+// for the bind to move. Both populations are refused, by different mechanisms, and
+// only the marker-carrying one is refused before the name is ever read.
+//
+// UnbindPatientIdentity tombstones the marker, so its writers create it only when
+// absent and OCC-revive it when it is present-but-tombstoned: a repaired patient
+// must be re-connectable, and a plain create against a key that has EVER been
+// minted conflicts forever.
+func patientIdentityClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     patientIdentityClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"},
+		Description: "Patient identity-claim guard aspect. Stored as vtx.patient.<NanoID>.identityClaim " +
+			"(class patientIdentityClaim) = {} — a pure existence marker, no relationship field. " +
+			"CreatePatient (identityKey branch) and BindPatientIdentity each write ONE per claimed patientKey: " +
+			"the key ITSELF is the lock — a second, different identity binding the SAME patient collides at " +
+			"commit (RevisionConflict), never a silent double-bind. Created when absent, OCC-revived when " +
+			"present-but-tombstoned, so a patient UnbindPatientIdentity repaired can be connected again. " +
+			"Declaration-only: no op handler (the patient vertexType DDL's own script writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the patient), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "patient identity-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.identityClaim; claimed by CreatePatient's identityKey wiring or by BindPatientIdentity, tombstoned by UnbindPatientIdentity and OCC-revived by the next bind. A second identity binding the same patient while the claim is live is rejected.",
 			},
 		},
 	}
@@ -707,7 +803,7 @@ func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     demographicsAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreatePatient", "BackfillPatientRegistration"},
+		PermittedCommands: []string{"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		Description: "Patient demographics aspect (clinic). Stored as vtx.patient.<NanoID>.demographics (class " +
 			"patientDemographics) = {registeredAt, fullName?}. NON-sensitive (it attaches to a patient, not an " +
 			"identity) and carries no contact PII — that lives on the identity CreatePatient's optional identityKey " +
@@ -718,9 +814,14 @@ func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 			"patient with no identity has no key to shred, so no erasure promise their plaintext name could " +
 			"defeat. registeredAt is always present and identifies nobody, which is why the clinicPatients / " +
 			"clinicPatientsRead ghost-vertex filters test it rather than the name. Written by CreatePatient " +
-			"(whose patient vertexType DDL owns the script), and upserted by BackfillPatientRegistration for a " +
-			"patient minted before registeredAt became always-present (2026-08-08, 7eb4c72f); this aspect-type " +
-			"DDL is the step-6 write gate. Declaration-only: no op handler.",
+			"(whose patient vertexType DDL owns the script), upserted by BackfillPatientRegistration for a " +
+			"patient minted before registeredAt became always-present (2026-08-08, 7eb4c72f), rewritten " +
+			"WITHOUT fullName by BindPatientIdentity, which moves the name onto the identity it connects, and " +
+			"rewritten WITH it again by UnbindPatientIdentity, which moves the name back off a login connected in " +
+			"error (both rewrites carry registeredAt forward unchanged — it is the fact of the registration, not " +
+			"of the bind — and both are conditioned on the revision the script read the aspect at, so a concurrent " +
+			"writer loses rather than being silently overwritten); this aspect-type DDL is the step-6 write gate. " +
+			"Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"registeredAt":{"type":"string","description":"When the patient was registered (RFC3339, canonical UTC, = op.submittedAt). Always present; identifies nobody; the lenses' presence filter reads it."},` +
@@ -1150,10 +1251,28 @@ func siteAssignmentAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// patientDDLScript handles CreatePatient + TombstonePatient. Known-key reads only.
+// patientDDLScript handles CreatePatient + TombstonePatient +
+// BackfillPatientRegistration + BindPatientIdentity + UnbindPatientIdentity.
+// Known-key reads only, plus CreatePatient's one bounded worksAt enumeration.
 // CreatePatient mints the patient vertex + the .demographics aspect atomically
 // (CreateOnly, so a crash-retry with the same patientId collapses on the Contract
 // #4 tracker). Root data stays {} (D5).
+//
+// BindPatientIdentity wires the identifiedBy link CreatePatient's identityKey
+// branch would have wired, claims the same two exclusivity guards, and moves the
+// name from .demographics onto the identity's sensitive .name aspect — one batch,
+// so no commit ever has the patient identified while the plaintext copy survives.
+// UnbindPatientIdentity is its inverse, operator-only: it releases the link and
+// both guards and moves the name back, restoring the pre-bind shape exactly, so a
+// chart connected to the wrong login is repairable rather than permanent.
+//
+// Both binds take an identity only while it is UNCLAIMED — nobody has signed in
+// with it yet. That is the whole confinement on the standing front-desk grant: a
+// claimed login belongs to a person, and connecting a stranger's chart to it (or
+// taking one away from it) would hand its holder that chart's protected rows
+// through patientIdentityReadGrants. It mirrors identity-domain's own standing
+// front/back-of-house writes, which are confined the same way and for the same
+// reason — the domain-shaped boundary is the state machine.
 const patientDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -1171,6 +1290,32 @@ def make_aspect_upsert(vtx_key, local_name, cls, data):
     return {"op": "update", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_aspect_update_occ(vtx_key, local_name, cls, data, expected_revision):
+    # An update PINNED to the revision the script read the aspect at. A batch is
+    # atomic within itself, which says nothing about a DIFFERENT op writing the
+    # same key between this script's hydration and its commit -- the .demographics
+    # rewrites read the aspect's CONTENT to decide what to write, so an
+    # unconditioned update would silently swallow whatever landed in that window
+    # (a BackfillPatientRegistration's registeredAt, say). The revision comes from
+    # the DECLARED read: a caller that omits the declaration gets no hydrated
+    # document and the branch faults before it can write.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data},
+            "expectedRevision": expected_revision}
+
+def make_aspect_revive_occ(vtx_key, local_name, cls, data, expected_revision):
+    # Re-claim of a TOMBSTONED aspect: an update keyed on the tombstone's own
+    # revision, never a create. A Lattice tombstone is soft -- the key still
+    # occupies its subject -- so make_aspect's create asserts revision 0 and
+    # conflicts forever against any key that has EVER been minted. The guard
+    # aspects UnbindPatientIdentity releases must be re-claimable, or a repaired
+    # patient could never be connected again. Mirrors revive_link's OCC shape.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data},
+            "expectedRevision": expected_revision}
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -1269,22 +1414,108 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def read_identity_state(state, identity_key):
+    # identity-domain's own .state aspect {value: unclaimed|claimed|merged}, read
+    # from the hydrated snapshot. Absent reads as None, which every caller treats
+    # as "not unclaimed" -- an undeclared read is indistinguishable from a missing
+    # aspect, so the only safe reading of silence is refusal.
+    aspect_key = identity_key + ".state"
+    if aspect_key not in state:
+        return None
+    doc = state[aspect_key]
+    if doc == None or (hasattr(doc, "isDeleted") and doc.isDeleted):
+        return None
+    if doc.data == None:
+        return None
+    return doc.data.get("value")
+
+def require_unclaimed_identity(state, identity_key, code):
+    # The confinement on the patient↔login binds. Front-of-house holds these
+    # grants STANDING and scope=any, with no workplace to confine against (a
+    # patient is practice-wide), so without this any desk actor could point a
+    # patient's chart at a login THEY hold and read that patient's protected rows
+    # through patientIdentityReadGrants + RLS. Restricting the target to an
+    # identity in state=unclaimed is the domain-shaped boundary -- the same one
+    # identity-domain draws around its own standing front/back-of-house write
+    # (RecordIdentityPII): a login nobody has claimed yet is by construction one
+    # the walk-in ceremony just minted, and the moment a person signs in with it
+    # the desk's reach over it ends. It also closes the merge case for free: a
+    # MergeIdentity loser is state=merged, alive, and its actor is redirected to
+    # the winner, so binding one would attach a chart to a login the winner reads.
+    #
+    # The desk still holds the claim secret it minted a moment earlier, which is
+    # the residual this does NOT close -- see permissions.go's note.
+    #
+    # read-posture: (a) declared in contextHint.reads by both binds' dispatchers.
+    # A correctness read, not a probe: an absent declaration hydrates nothing,
+    # this reads None, and the op is refused rather than proceeding unguarded.
+    identity_state = read_identity_state(state, identity_key)
+    if identity_state != "unclaimed":
+        fail(code + ": " + identity_key + " is " + str(identity_state) +
+             "; only a freshly minted, unclaimed identity can be connected to a patient")
+
 def claim_identity(identity_key):
     # Global exclusivity guard (Capability-KV §06 — pure existence-uniqueness, no
-    # list needed): at most one patient may ever claim a given identity (nothing
-    # releases the claim, so it is never tombstoned). kv.Read here is LAZY (§2.5
-    # idiom, same as the appointment DDL's claim_cell) — it only picks the error
-    # message; the safety property is the atomic batch's CreateOnly conditioning at
-    # commit: two DIFFERENT patients passing the same identityKey both read it
-    # absent and both emit op:create for the IDENTICAL key, but CreateOnly on a key
-    # at revision 0 commits exactly once — the loser's whole batch RevisionConflicts
-    # (fail closed, never a silent double-claim).
+    # list needed): at most one patient may claim a given identity at a time.
+    # kv.Read here is LAZY (§2.5 idiom, same as the appointment DDL's claim_cell)
+    # for the LIVE case — it only picks the error message; the safety property is
+    # the atomic batch's create-only conditioning at commit: two DIFFERENT patients
+    # passing the same identityKey both read it absent and both emit op:create for
+    # the IDENTICAL key, but a create on a key at revision 0 commits exactly once —
+    # the loser's whole batch RevisionConflicts (fail closed, never a silent
+    # double-claim).
+    #
+    # The read is load-bearing for the TOMBSTONED case: UnbindPatientIdentity
+    # releases this claim, and a create can never land on a key that has been
+    # minted before, so a released identity is re-claimed by an OCC-conditioned
+    # revive keyed on the tombstone's own revision.
     # read-posture: (d) declared in contextHint.optionalReads by CreatePatient's
-    # dispatcher (cmd/clinic-app/web/app.js)
+    # and BindPatientIdentity's dispatchers (cmd/clinic-app/web/app.js)
     existing = kv.Read(identity_key + ".patientClaim")
-    if existing != None:
+    if existing != None and not existing.isDeleted:
         fail("IdentityAlreadyClaimed: " + identity_key + " is already linked to another patient")
+    if existing != None:
+        return make_aspect_revive_occ(identity_key, "patientClaim", "identityPatientClaim", {}, existing.revision)
     return make_aspect(identity_key, "patientClaim", "identityPatientClaim", {})
+
+def make_patient_identity_claim(pkey):
+    # Entity-keyed guard, the mirror of claim_identity above: at most one identity
+    # may bind THIS patient at a time -- the provider side's
+    # claim_provider_identity idiom, keyed on the PATIENT. The identifiedBy link
+    # key is (patient, identity)-composite and therefore cannot stop a second
+    # identity being wired to a patient that already has one; this key, which
+    # names only the patient, is what collides.
+    #
+    # The read-free create form, for CreatePatient only: it mints the patient in
+    # this same batch (op:create on the root, which a pre-existing patient key
+    # would itself collide on), so the aspect provably has no prior value -- not
+    # even a tombstone -- and there is nothing to read. A create regardless of
+    # racing: on a key at revision 0 a create commits exactly once, so a racing
+    # second claimant's whole batch RevisionConflicts (fail closed).
+    return make_aspect(pkey, "identityClaim", "patientIdentityClaim", {})
+
+def claim_patient_identity(pkey):
+    # The read-checking form, for a bind onto a patient that ALREADY EXISTS, whose
+    # claim may be live (refuse), tombstoned by a prior UnbindPatientIdentity
+    # (revive, so a repaired chart can be connected to the right login), or absent
+    # (create).
+    # ABSENT is the common first-bind case -- and, for one population, it is NOT
+    # the same as "not yet identified". A patient CreatePatient identified before
+    # this marker existed carries none and never will (no backfill), so it reaches
+    # this branch and is refused further down instead, by NothingToBind: that
+    # branch already moved its name onto the identity, leaving .demographics with
+    # nothing for a bind to give a second login. Both populations are refused; only
+    # the marker-carrying one is refused here, before the name is read.
+    #
+    # read-posture: (d) declared in contextHint.optionalReads by
+    # BindPatientIdentity's dispatcher (cmd/clinic-app/web/app.js's
+    # Connect-a-login ceremony).
+    existing = kv.Read(pkey + ".identityClaim")
+    if existing != None and not existing.isDeleted:
+        fail("PatientAlreadyIdentified: " + pkey + " is already linked to an identity")
+    if existing != None:
+        return make_aspect_revive_occ(pkey, "identityClaim", "patientIdentityClaim", {}, existing.revision)
+    return make_patient_identity_claim(pkey)
 
 REGISTRATION_SITE_PAGE_LIMIT = 20
 
@@ -1360,10 +1591,13 @@ def execute(state, op):
             require_live_typed(state, identity_key, "identityKey", "identity")
             identified_by_lnk = "lnk.patient." + pid + ".identifiedBy.identity." + identity_id
             mutations.append(make_link(identified_by_lnk, pkey, identity_key, "identifiedBy", "identifiedBy", {}))
-            # Global claim guard: at most one patient may ever wire the SAME
-            # identity (else two roster rows would decrypt/display the same
-            # person's contact). See claim_identity.
+            # Mutual exclusivity, both sides: at most one patient may ever wire
+            # the SAME identity (else two roster rows would decrypt/display the
+            # same person's contact), and at most one identity may ever bind THIS
+            # patient -- which is also what makes a later BindPatientIdentity
+            # refuse a patient that was registered with a login already.
             mutations.append(claim_identity(identity_key))
+            mutations.append(make_patient_identity_claim(pkey))
             # The NAME goes on the person, not on the clinic's record of them
             # (retention-class-key-custody-design.md §8.7, fork F3(b)). A name
             # left plaintext on .demographics outlives the ShredIdentityKey that
@@ -1452,6 +1686,182 @@ def execute(state, op):
         events = [{"class": "clinic.patientRegistrationBackfilled", "data": {"patientKey": pkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": pkey}}
+
+    if ot == "BindPatientIdentity":
+        pkey = required_string(p, "patientKey")
+        _, pid = parts_of(pkey, "patientKey", "patient")
+        require_live_typed(state, pkey, "patientKey", "patient")
+
+        identity_key = required_string(p, "identityKey")
+        _, identity_id = parts_of(identity_key, "identityKey", "identity")
+        require_live_typed(state, identity_key, "identityKey", "identity")
+        require_unclaimed_identity(state, identity_key, "IdentityNotUnclaimed")
+
+        # patient identifiedBy identity (Contract #1 §1.1: the later-arriving
+        # patient is the source, the pre-existing identity is the target).
+        # Sentence: "patient identifiedBy identity". The SAME key CreatePatient's
+        # identityKey branch mints, so a bound patient is indistinguishable from
+        # one registered with a login -- every reader (clinicPatientsRead's
+        # identifiedBy walk, patientIdentityReadGrants, the appointment DDL's
+        # self-scope check) sees one shape, not two.
+        identified_by_lnk = "lnk.patient." + pid + ".identifiedBy.identity." + identity_id
+        mutations = [make_link(identified_by_lnk, pkey, identity_key, "identifiedBy", "identifiedBy", {})]
+
+        # Mutual exclusivity, both sides: at most one patient ever claims THIS
+        # identity, and at most one identity ever binds THIS patient. The second
+        # of the pair is what refuses a patient that already has a login.
+        mutations.append(claim_identity(identity_key))
+        mutations.append(claim_patient_identity(pkey))
+
+        # MOVE the name onto the person. A patient registered with a name alone
+        # carries it plaintext on .demographics, outside the Vault plane: the
+        # ShredIdentityKey that destroys this person's email and phone would never
+        # reach it, so their retained clinical record would stay identified
+        # (retention-class-key-custody-design.md §8.7, fork F3(b)). Connecting the
+        # login is the moment that gap closes, so the name moves in the same batch
+        # as the link -- there is never a commit where the patient is identified
+        # AND still carries the plaintext copy.
+        #
+        # read-posture: (a) declared in contextHint.reads by this op's dispatcher
+        # (cmd/clinic-app/web/app.js's Connect-a-login ceremony). This read decides
+        # WHAT is written, and the rewrite is conditioned on the revision it was
+        # read at, so declaring it is what makes a concurrent .demographics write
+        # lose rather than be silently overwritten.
+        demo_key = pkey + ".demographics"
+        if demo_key not in state:
+            fail("MissingDemographics: " + pkey + " has no .demographics aspect to read the name from")
+        demo = state[demo_key]
+        if demo == None or (hasattr(demo, "isDeleted") and demo.isDeleted):
+            fail("MissingDemographics: " + pkey + " has no .demographics aspect to read the name from")
+        full_name = demo.data.get("fullName")
+        if full_name == None or type(full_name) != type("") or len(full_name.strip()) == 0:
+            fail("NothingToBind: " + pkey + " carries no .demographics fullName to move onto the identity")
+        full_name = full_name.strip()
+        registered_at = demo.data.get("registeredAt")
+        if registered_at == None:
+            # Rebuilding without it would leave {} -- and every roster lens filters
+            # on registeredAt being present, so the patient would vanish from the
+            # read model for good. BackfillPatientRegistration is the repair; run
+            # it first, then bind.
+            fail("MissingRegistration: " + pkey + " has no .demographics registeredAt; run BackfillPatientRegistration first")
+
+        # Rebuilt from the two fields .demographics can ever carry (the same
+        # literal construction CreatePatient and BackfillPatientRegistration use),
+        # minus fullName. registeredAt is carried FORWARD, never restamped: it is
+        # the time fact of the registration, not of this bind. Pinned to the
+        # revision the read above saw, so a BackfillPatientRegistration landing in
+        # the hydration window conflicts instead of being overwritten.
+        mutations.append(make_aspect_update_occ(pkey, "demographics", "patientDemographics",
+                                                {"registeredAt": registered_at}, demo.revision))
+        # The name's new home, written exactly as CreatePatient's identity branch
+        # writes it: identity-domain's name aspect is SENSITIVE and stores
+        # {value}, so this commits as a ciphertext envelope under the identity's
+        # own DEK. An UPSERT, not a create -- the FE mints the identity carrying
+        # this same name a moment earlier, so the aspect normally already exists.
+        # It is deliberately NOT declared as a read: a declared sensitive read is
+        # decrypted before the script runs, and the write needs no prior value.
+        mutations.append(make_aspect_upsert(identity_key, "name", "name", {"value": full_name}))
+
+        events = [{"class": "clinic.patientIdentityBound",
+                   "data": {"patientKey": pkey, "identityKey": identity_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": identified_by_lnk}}
+
+    if ot == "UnbindPatientIdentity":
+        # The repair for a chart connected to the WRONG login. BindPatientIdentity
+        # is otherwise a one-way door: it moves the name out of the clinic's own
+        # aspect and stamps two guards that refuse every subsequent bind, so a desk
+        # that picked the wrong patient row left that patient permanently attached
+        # to a stranger's login, with no verb anywhere in the platform to undo it.
+        # Operator-only (permissions.go): it is a repair, not desk work.
+        pkey = required_string(p, "patientKey")
+        _, pid = parts_of(pkey, "patientKey", "patient")
+        require_live_typed(state, pkey, "patientKey", "patient")
+
+        identity_key = required_string(p, "identityKey")
+        _, identity_id = parts_of(identity_key, "identityKey", "identity")
+        require_live_typed(state, identity_key, "identityKey", "identity")
+
+        # The pair must ACTUALLY be bound. The op names both endpoints, so nothing
+        # but this read establishes that the identity being released is the one the
+        # patient is attached to -- without it a caller could tombstone the guards
+        # of an unrelated pairing and free an identity somebody else holds.
+        #
+        # read-posture: (d) declared in contextHint.optionalReads by this op's
+        # dispatcher, deliberately rather than (a): a never-minted link declared
+        # REQUIRED faults at hydration with an opaque miss, while an optional
+        # declaration makes absence a script-visible branch and lets the operator
+        # read the actual answer -- this pair is not bound. The safety direction is
+        # unchanged either way, because absence REFUSES: a caller that declares
+        # nothing reads nothing here and gets NotBound, never a silent unbind.
+        # Tombstoned reaches the same refusal (a pair already unbound once).
+        identified_by_lnk = "lnk.patient." + pid + ".identifiedBy.identity." + identity_id
+        if not vertex_alive(state, identified_by_lnk):
+            fail("NotBound: " + pkey + " is not linked to " + identity_key)
+
+        # An identity someone has already SIGNED IN to is not repairable this way.
+        # Unbinding it would tombstone the .patientClaim and move the name off the
+        # login its holder authenticates with, leaving a live person's account
+        # nameless and re-claimable by the next bind. The wrong-login mistake this
+        # op repairs is caught at the desk, long before the person claims anything;
+        # once claimed, the fix is a conversation, not a mutation.
+        require_unclaimed_identity(state, identity_key, "IdentityClaimed")
+
+        # The name comes BACK. .name is SENSITIVE, so a declared read is decrypted
+        # at hydration under the identity's own DEK -- which succeeds precisely
+        # because the guard above proved the identity alive and unclaimed. (A
+        # shredded key would fault the hydration and reject the op: fail closed,
+        # and the right answer, since there would be no name left to give back.)
+        # read-posture: (a) declared in contextHint.reads by this op's dispatcher.
+        name_key = identity_key + ".name"
+        if not vertex_alive(state, name_key):
+            fail("MissingIdentityName: " + identity_key + " carries no .name to move back onto " + pkey)
+        name_doc = state[name_key]
+        full_name = name_doc.data.get("value") if name_doc.data != None else None
+        if full_name == None or type(full_name) != type("") or len(full_name.strip()) == 0:
+            fail("MissingIdentityName: " + identity_key + " carries no .name to move back onto " + pkey)
+        full_name = full_name.strip()
+
+        # registeredAt still comes off .demographics -- the bind carried it forward
+        # rather than dropping it, so the unbind can rebuild the exact pre-bind
+        # shape {registeredAt, fullName} instead of inventing a registration time.
+        # read-posture: (a) declared in contextHint.reads by this op's dispatcher.
+        demo_key = pkey + ".demographics"
+        if not vertex_alive(state, demo_key):
+            fail("MissingDemographics: " + pkey + " has no .demographics aspect to move the name back onto")
+        demo = state[demo_key]
+        registered_at = demo.data.get("registeredAt") if demo.data != None else None
+        if registered_at == None:
+            fail("MissingRegistration: " + pkey + " has no .demographics registeredAt; run BackfillPatientRegistration first")
+
+        mutations = [
+            make_tombstone(identified_by_lnk),
+            make_aspect_update_occ(pkey, "demographics", "patientDemographics",
+                                   {"registeredAt": registered_at, "fullName": full_name}, demo.revision),
+        ]
+
+        # Release both guards, so the patient can be connected to the RIGHT login
+        # and the identity can be claimed by the patient it actually belongs to.
+        # Each is tombstoned only where one is live: the identityClaim is absent on
+        # a patient CreatePatient identified before that marker existed, and
+        # tombstoning a key that carries no live document is not a repair, it is a
+        # write against a document that is not there.
+        # read-posture: (d) declared in contextHint.optionalReads by this op's
+        # dispatcher -- a pre-marker patient legitimately has no identityClaim.
+        if vertex_alive(state, identity_key + ".patientClaim"):
+            mutations.append(make_tombstone(identity_key + ".patientClaim"))
+        if vertex_alive(state, pkey + ".identityClaim"):
+            mutations.append(make_tombstone(pkey + ".identityClaim"))
+
+        # The identity keeps its own .name: it is the login's own display name,
+        # written by CreateUnclaimedIdentity before this clinic ever touched it,
+        # and blanking it would damage a vertex this op is only detaching from.
+        # The patient's plaintext copy is restored above, which is what the roster
+        # reads; the identity's copy stays inside the shred's reach either way.
+        events = [{"class": "clinic.patientIdentityUnbound",
+                   "data": {"patientKey": pkey, "identityKey": identity_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": identified_by_lnk}}
 
     fail("patient DDL: unknown operationType: " + ot)
 `

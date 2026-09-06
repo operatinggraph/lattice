@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.34.23
+version: 0.34.24
 depends:
   - location-domain
 description: |
@@ -144,6 +144,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: identityPatientClaim
       class: meta.ddl.aspectType
+    - canonicalName: patientIdentityClaim
+      class: meta.ddl.aspectType
     - canonicalName: clinicSiteProfile
       class: meta.ddl.aspectType
     - canonicalName: providerIdentityClaim
@@ -206,6 +208,12 @@ declares:
     - operationType: CreatePatient
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: BindPatientIdentity
+      scope: any
+      grantsTo: [operator, frontOfHouse]
+    - operationType: UnbindPatientIdentity
+      scope: any
+      grantsTo: [operator]
     - operationType: TombstonePatient
       scope: any
       grantsTo: [operator]
@@ -288,6 +296,8 @@ declares:
     - operationType: RecordEncounter
     - operationType: SetAppointmentSite
     - operationType: CreatePatient
+    - operationType: BindPatientIdentity
+    - operationType: UnbindPatientIdentity
     - operationType: CreateProvider
     - operationType: SetProviderProfile
     - operationType: SetSiteProfile

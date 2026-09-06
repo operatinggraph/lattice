@@ -51,6 +51,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // read it declares — absence-tolerant on both counts, since the field itself is
 // optional and the patientClaim guard it probes is absent on every first bind.
 //
+// BindPatientIdentity is the same registration ceremony's second half, for a
+// patient typed in with a name alone — so it DOES name a TargetField
+// (patientKey, an existing vertex) and its identityKey is required rather than
+// optional, which is what lets it declare the aspect-suffix reads CreatePatient
+// cannot: the identity .state its confinement rests on, the .demographics it
+// moves the name off, and both exclusivity guards.
+//
+// UnbindPatientIdentity is that bind's operator-only inverse, and the only
+// descriptor in this package with NO cmd/<app> submitter — it is console
+// tooling, submitted from Loupe or the CLI rather than the clinic FE, which is
+// exactly the case a descriptor exists to serve. Being granted to `operator` by
+// this package does NOT make it callable from cmd/loupe: the console runs as the
+// scoped consoleOperator whose grants live in the console-operator package
+// (docs/components/_packages.md). No Loupe handler submits it today, so nothing
+// is dead — but a handler that ever does needs that cross-package grant first.
+//
 // CreateProvider / SetProviderProfile / SetSiteProfile / AssignProviderSite /
 // RemoveProviderSite are all operator-only (permissions.go's mk() helper —
 // scope=any, GrantsTo: [operator], no consumer/provider/frontOfHouse row), so
@@ -496,6 +512,106 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// resolves server-side.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "worksAt", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "BindPatientIdentity",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Connect a login",
+				Description: "Connect an existing patient to a sign-in identity carrying their contact details.",
+				Icon:        "link",
+				Tone:        "primary",
+				SubmitLabel: "Connect",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"patientKey":{"type":"string","title":"Patient","x-entityRef":"patient","description":"vtx.patient.<NanoID> of the patient being connected — auto-filled from the patient being viewed."},` +
+				`"identityKey":{"type":"string","title":"Identity to link","x-entityRef":"identity","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's contact details."}},` +
+				`"required":["patientKey","identityKey"]}`,
+			FieldDescriptions: map[string]string{
+				"patientKey":  "The patient being connected — auto-filled by the client from the patient being viewed (dispatch.targetField), not user-entered. Must currently have no linked identity.",
+				"identityKey": "An existing sign-in identity to connect this patient to, so their contact details follow them and their name moves onto the identity. Must be a freshly minted login nobody has claimed yet, and an identity can back at most one patient.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "patient",
+				AuthContext: "standing",
+				TargetField: "patientKey",
+				TargetType:  "patient",
+				// Both endpoints are validated alive + class; .state is the
+				// confinement on this standing front-desk grant (only an
+				// UNCLAIMED identity may be connected, so the desk cannot point
+				// a chart at a login somebody holds); and .demographics is where
+				// the name being MOVED is read from — each a correctness read
+				// whose absence is a refusal, and declaring .demographics is
+				// what pins the rewrite to the revision it was read at. Unlike
+				// CreatePatient's OPTIONAL identityKey, both fields here are
+				// REQUIRED, so an aspect-suffix template always substitutes a
+				// real key rather than a bare suffix.
+				Reads: []string{
+					"{payload.patientKey}",
+					"{payload.identityKey}",
+					"{payload.identityKey}.state",
+					"{payload.patientKey}.demographics",
+				},
+				// The two exclusivity guards, read lazily in-script (ddls.go
+				// claim_identity / claim_patient_identity) to pick the error
+				// message and to supply the revision a tombstoned claim is
+				// revived at. Absence is the common first-bind case, so they are
+				// optionalReads, never reads.
+				OptionalReads: []string{
+					"{payload.identityKey}.patientClaim",
+					"{payload.patientKey}.identityClaim",
+				},
+			},
+		},
+		{
+			OperationType: "UnbindPatientIdentity",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Disconnect a login",
+				Description: "Repair a patient connected to the wrong login: release the link and move their name back onto the chart.",
+				Icon:        "unlink",
+				Tone:        "danger",
+				SubmitLabel: "Disconnect",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"patientKey":{"type":"string","title":"Patient","x-entityRef":"patient","description":"vtx.patient.<NanoID> of the patient to disconnect."},` +
+				`"identityKey":{"type":"string","title":"Identity to release","x-entityRef":"identity","description":"vtx.identity.<NanoID> the patient is currently linked to."}},` +
+				`"required":["patientKey","identityKey"]}`,
+			FieldDescriptions: map[string]string{
+				"patientKey":  "The patient whose login is being released. The identifiedBy link to the named identity must currently be live.",
+				"identityKey": "The identity to release. It must still be unclaimed — once a person has signed in with it, disconnecting would strand their login, and the operation refuses.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "patient",
+				AuthContext: "standing",
+				TargetField: "patientKey",
+				TargetType:  "patient",
+				// .state gates the repair (a claimed login is never detached);
+				// .name is the SENSITIVE aspect the name is moved back FROM,
+				// decrypted at hydration under the identity's own DEK — legal
+				// precisely because the .state gate proves that identity alive
+				// and unclaimed, so its key is present; and .demographics is
+				// pinned so the rewrite conditions on the revision it was read
+				// at rather than clobbering a concurrent write.
+				Reads: []string{
+					"{payload.patientKey}",
+					"{payload.identityKey}",
+					"{payload.identityKey}.state",
+					"{payload.identityKey}.name",
+					"{payload.patientKey}.demographics",
+				},
+				// The link is OPTIONAL deliberately: a pair that was never bound
+				// is exactly the caller error this op must NAME (NotBound), and
+				// a required declaration would fault at hydration with an opaque
+				// miss instead. Absence refuses either way, so the fail-closed
+				// direction does not rest on the declaration. The two guard
+				// aspects are optional because the identityClaim is legitimately
+				// absent on a patient CreatePatient identified before that
+				// marker existed.
+				OptionalReads: []string{
+					"lnk.patient.{payload.patientKey:id}.identifiedBy.identity.{payload.identityKey:id}",
+					"{payload.identityKey}.patientClaim",
+					"{payload.patientKey}.identityClaim",
 				},
 			},
 		},

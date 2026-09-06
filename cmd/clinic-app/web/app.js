@@ -686,6 +686,7 @@ function nameForPatient(key) {
 // linked identity yet, a linked identity missing that field, or a shredded one.
 function renderPatientContact() {
   const el = $("#patient-contact");
+  renderConnectLogin();
   if (!el) return;
   const m = state.patients.find((p) => p.patientKey === state.patient);
   if (!m) {
@@ -694,6 +695,27 @@ function renderPatientContact() {
   }
   const parts = [m.email, m.phone].filter(Boolean);
   el.textContent = parts.length ? parts.join(" · ") : "No contact on file";
+}
+
+// selectedPatientRow is the roster row for the patient currently in context, or
+// null. identityKey on that row (null for a patient with no identifiedBy link)
+// is the single signal the connect ceremony is gated on — the same column the
+// self-service booking path already reads.
+function selectedPatientRow() {
+  return state.patients.find((p) => p.patientKey === state.patient) || null;
+}
+
+// renderConnectLogin offers the connect ceremony only where it can actually
+// succeed: a front-desk session (the hat that holds the grant), on a patient
+// whose row carries NO identityKey, and whose displayed name is the plaintext
+// .demographics fullName the bind moves onto the identity. A blank name means
+// there is nothing to move and BindPatientIdentity would reject NothingToBind,
+// so the button stays hidden rather than offering a guaranteed rejection.
+function renderConnectLogin() {
+  const btn = $("#connect-login");
+  if (!btn) return;
+  const m = selectedPatientRow();
+  btn.hidden = !(isFrontDesk() && m && !m.identityKey && !!m.name);
 }
 
 function restorePatient() {
@@ -959,6 +981,163 @@ async function submitNewPatient(ev) {
     revealCeremonySecret(reveal, idReply);
   } catch (e) {
     toast("Could not create patient: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// ---- Connect a login (the registration ceremony's second half) ----
+//
+// A patient the desk typed in with a name alone has no identity: no contact to
+// display, no login to sign in with, and — the reason this is not merely a
+// convenience — their name sits plaintext on the clinic's own .demographics
+// aspect, outside the Vault plane a crypto-shred can reach. This ceremony is
+// the same two-step the New-patient form runs when contact IS supplied (mint an
+// unclaimed identity carrying the contact, then wire it), only aimed at a
+// patient that already exists: CreateUnclaimedIdentity, then a patient-class op
+// that wires identifiedBy and MOVES the name onto the identity.
+//
+// ORDER AND THE SECRET. The mint commits before the bind, so the two can land
+// apart. If the mint is rejected there is nothing to reveal — no identity, no
+// secret worth anything. If the mint lands and the BIND is rejected, the
+// identity exists and is armed with this secret's hash: it is unconnected, but
+// it is real, and the desk holding its plaintext is the only thing that makes
+// it usable. So the secret IS revealed, with the rejection AND the identity's
+// own key named alongside it — the same call the New-patient form makes when
+// CreatePatient rejects after its own mint landed, plus the key, because unlike
+// that form's case there is no patient row this orphan hangs off for anyone to
+// find it by. Withholding either would strand an armed identity nobody can ever
+// claim.
+//
+// A CONFIRM, not a nicety. The bind moves the name off the chart and stamps two
+// exclusivity guards; the only way back is an operator running
+// UnbindPatientIdentity from the console. The failure mode is picking the wrong
+// patient row, so the confirmation names the patient rather than asking "are you
+// sure" — the desk should be reading a name it recognizes, not clicking through.
+
+function openConnectLogin() {
+  const m = selectedPatientRow();
+  if (!m) return;
+  $("#connect-form").reset();
+  // .value, never innerHTML — the name is never interpolated into markup, so
+  // no escaping question arises for it anywhere on this path.
+  $("#cn-name").value = m.name || "";
+  $("#connect-overlay").hidden = false;
+  $("#cn-phone").focus();
+}
+
+function closeConnectLogin() {
+  $("#connect-overlay").hidden = true;
+}
+
+async function submitConnectLogin(ev) {
+  ev.preventDefault();
+  const m = selectedPatientRow();
+  if (!m) {
+    toast("Select a patient first.", "err");
+    return;
+  }
+  const name = (m.name || "").trim();
+  if (!name) {
+    toast("This patient has no name on file to move onto a login.", "err");
+    return;
+  }
+  const email = $("#cn-email").value.trim();
+  const phone = $("#cn-phone").value.trim();
+  if (!email && !phone) {
+    toast("A phone or an email is required — the login exists to carry their contact.", "err");
+    return;
+  }
+
+  // The last stop before anything is written, and the desk's only chance to
+  // catch the commonest mistake there is: the wrong patient in context. The
+  // bind MOVES the name off this chart, and undoing that needs an operator
+  // running UnbindPatientIdentity from the console — not something the desk can
+  // fix itself — so the patient is named back at whoever is about to do it.
+  if (!confirm("Connect a login for " + name + "? This moves their name onto the new login and cannot be undone from the desk.")) {
+    return;
+  }
+
+  const submit = $("#connect-submit");
+  submit.disabled = true;
+  try {
+    // Both readied before anything is written: a secret nobody can be shown
+    // must never be minted, so a module load failure aborts here rather than
+    // after the identity is already armed (submitNewPatient's own rule).
+    await loadDescriptorform();
+    await loadOpCatalogQuiet();
+    const claimSecret = mintClaimSecret();
+    const claimKeyHash = await sha256Hex(claimSecret);
+    const idPayload = { name, claimKeyHash };
+    if (email) idPayload.email = email;
+    if (phone) idPayload.phone = phone;
+    // No optionalReads: the dedup identityindex probes are class-(g) keys
+    // identity-domain's own derive_reads computes from this payload.
+    const idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
+    const idMsg = rejectionMessage(idReply);
+    if (idMsg) {
+      toast("Could not create the login — " + idMsg, "err");
+      return;
+    }
+    const identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
+    if (!identityKey) {
+      toast("The login was created but its key did not come back — connect it from the console.", "err");
+      return;
+    }
+    const ceremony = (state.opCatalog && state.opCatalog.CreateUnclaimedIdentity && state.opCatalog.CreateUnclaimedIdentity.ceremony) || {};
+    const reveal = {
+      title: ceremony.revealTitle || "Their claim secret — shown once",
+      help:
+        ceremony.revealHelp ||
+        "Give this to them now. Lattice stored only its hash, so this screen is the one and only " +
+          "time the secret exists; if it is lost, the identity needs a fresh one issued.",
+      plaintext: claimSecret,
+    };
+
+    // reads (a): both endpoints are validated alive + class; the identity's
+    // .state is what the script's unclaimed-identity confinement rests on (an
+    // undeclared .state reads as absent and the bind is REFUSED, which is the
+    // fail-closed direction); and .demographics is where the name being moved
+    // is read from — its absence is a correctness error, and declaring it is
+    // what conditions the rewrite on the revision the script read
+    // (script-read-posture-design.md §13).
+    // optionalReads (d): the two exclusivity guards, probed lazily in-script to
+    // pick the rejection message and to supply the revision a released claim is
+    // revived at; absent on every first bind.
+    const reply = await submitOp(
+      "BindPatientIdentity",
+      "patient",
+      { patientKey: m.patientKey, identityKey },
+      [m.patientKey, identityKey, identityKey + ".state", m.patientKey + ".demographics"],
+      { optionalReads: [identityKey + ".patientClaim", m.patientKey + ".identityClaim"] },
+    );
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      // The mint LANDED and the bind did not, so an armed, unconnected identity
+      // now exists that nothing on this screen points at. Name its key next to
+      // the secret: those two together are everything an operator needs to
+      // finish the connection from the console, and without the key the desk
+      // would be holding a secret for a login it can no longer find.
+      toast(
+        "The login was created but not connected — " +
+          msg +
+          ". Their claim secret still works; finish from the console with identity " +
+          identityKey +
+          ".",
+        "err",
+      );
+      revealCeremonySecret(reveal, idReply);
+      return;
+    }
+    closeConnectLogin();
+    toast("Login connected.", "ok");
+    // The lens may take a moment to reproject the roster row (name moves to the
+    // identity, identityKey appears), so reload on the same beat the new-patient
+    // ceremony uses.
+    setTimeout(loadPatients, 700);
+    revealCeremonySecret(reveal, idReply);
+  } catch (e) {
+    toast("Could not connect a login: " + e.message, "err");
   } finally {
     submit.disabled = false;
   }
@@ -5019,6 +5198,9 @@ function applyHatGating() {
   }
   const np = $("#new-patient");
   if (np) np.hidden = !fd;
+  // The connect ceremony rides the same hat as New-patient, but also needs the
+  // selected row's own state — renderConnectLogin owns both conditions.
+  renderConnectLogin();
   const chargeBtn = $("#ledger-charge");
   if (chargeBtn) chargeBtn.hidden = !fd;
   const waiveBtn = $("#ledger-waive");
@@ -5107,6 +5289,13 @@ function init() {
     if (e.target === $("#patient-overlay")) closeNewPatient();
   });
   $("#patient-form").addEventListener("submit", submitNewPatient);
+
+  $("#connect-login").addEventListener("click", openConnectLogin);
+  $("#connect-cancel").addEventListener("click", closeConnectLogin);
+  $("#connect-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#connect-overlay")) closeConnectLogin();
+  });
+  $("#connect-form").addEventListener("submit", submitConnectLogin);
 
   $("#reschedule-cancel").addEventListener("click", closeReschedule);
   $("#reschedule-overlay").addEventListener("click", (e) => {

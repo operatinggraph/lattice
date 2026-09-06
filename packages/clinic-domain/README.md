@@ -18,9 +18,9 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (3) | `patient`, `provider`, `appointment` |
-| **Aspect types** (12) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter`, `identityPatientClaim` (guard, on the linked identity), `providerIdentityClaim` (guard, on the provider), `identityProviderClaim` (guard, on the linked identity) |
+| **Aspect types** (13) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter`, `identityPatientClaim` (guard, on the linked identity), `patientIdentityClaim` (guard, on the patient), `providerIdentityClaim` (guard, on the provider), `identityProviderClaim` (guard, on the linked identity) |
 | **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient/provider → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
-| **Operations** (13) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `BindProviderIdentity` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
+| **Operations** (15) | `CreatePatient` · `TombstonePatient` · `BindPatientIdentity` · `UnbindPatientIdentity` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `BindProviderIdentity` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
 | **Projection lenses** (7) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` / `clinicIdentitiesRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard / identity-self) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability
@@ -78,6 +78,33 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   itself, and claims a `CreateOnly` `.patientClaim` guard aspect (class `identityPatientClaim`) on the
   linked identity — a global existence marker rejecting a **second, different** patient from ever
   claiming the same identity. Returns `primaryKey`.
+- **`BindPatientIdentity`** — `{patientKey, identityKey}`. The registration ceremony's **second half**,
+  for a patient registered with a name alone (no email, no phone, so no identity was ever minted). Both
+  endpoints validated alive + typed, it mints the same `identifiedBy` link `CreatePatient`'s
+  `identityKey` branch mints, claims a `CreateOnly` guard on **each** side (`.patientClaim` — class
+  `identityPatientClaim` — on the identity; `.identityClaim` — class `patientIdentityClaim` — on the
+  patient) so the pairing is mutually exclusive in both directions, and **moves the name**: the
+  patient's `.demographics` is rewritten without `fullName` (`registeredAt` carried forward unchanged)
+  and the identity's sensitive `.name` aspect is upserted with it — one atomic batch, so no commit ever
+  leaves the patient identified while a plaintext copy of the name survives outside the shred's reach.
+  The identity must still be **unclaimed** (`IdentityNotUnclaimed` otherwise) — that is the confinement
+  on front-desk's standing, unconfined grant: the desk connects a chart only to a login nobody holds
+  yet, never to one a person has signed in with, and the same clause refuses a `merged` identity.
+  It further rejects an already-identified patient (`PatientAlreadyIdentified`), an already-claimed
+  identity (`IdentityAlreadyClaimed`), a patient with no `fullName` to move (`NothingToBind`), and one
+  whose `.demographics` carries no `registeredAt` (`MissingRegistration` — run
+  `BackfillPatientRegistration` first; rewriting without it would drop the patient out of every roster
+  lens). Granted to `operator` + `frontOfHouse`, the same set as `CreatePatient` — it mints no role,
+  unlike `BindProviderIdentity`. Returns `primaryKey` (the `identifiedBy` link key).
+- **`UnbindPatientIdentity`** — `{patientKey, identityKey}`. The **operator-only** repair for a chart
+  connected to the wrong login, and the bind's exact inverse: it requires that pair's `identifiedBy`
+  link to be live (`NotBound` otherwise) and the identity to still be unclaimed (`IdentityClaimed`
+  otherwise — detaching a login somebody signed in with would strand them), then tombstones the link
+  and **both** guard aspects and moves the name **back**, rewriting `.demographics` as
+  `{registeredAt, fullName}` from the identity's sensitive `.name`. Both claim writers create when the
+  guard is absent and OCC-revive it when it is tombstoned, so a repaired patient can be connected to
+  the right login afterwards. Emits `clinic.patientIdentityUnbound`. Returns `primaryKey` (the released
+  link key).
 - **`TombstonePatient`** — `{patientKey}`. Soft-deletes the patient **root only** (no cascade — see
   *Tombstone semantics*).
 

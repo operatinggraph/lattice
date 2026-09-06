@@ -491,6 +491,35 @@ func TestClinicPatientsRead_ProjectsContactEnvelopesWhole(t *testing.T) {
 	require.Nil(t, v["phone"], "a missing sensitive aspect projects null, not a dropped row")
 }
 
+// TestClinicPatientsRead_BoundPatientReadsItsNameFromTheIdentity is the roster
+// half of BindPatientIdentity: once the bind has moved the name, the row's
+// secure `name` column is fed by the identity's .name envelope and
+// `unlinked_name` is NULL. That disjointness is the premise
+// cmd/clinic-app/patients.go's COALESCE(name, unlinked_name) rests on — if
+// the bind left fullName behind on .demographics, both columns would populate
+// and the "disjoint by construction" claim in protectedPatientRow's doc would
+// be false, with a plaintext copy of the name surviving every shred besides.
+func TestClinicPatientsRead_BoundPatientReadsItsNameFromTheIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "aliceId", "identity")
+	// The post-bind shape: registeredAt carried forward, fullName gone.
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z"})
+	nameEnv := map[string]any{"ct": "b64-name-ct", "nonce": "b64-nonce-n", "keyId": "alice-key"}
+	f.aspect(t, "aliceId", "name", "name", nameEnv)
+	f.edge(t, "identifiedBy", "alice", "aliceId")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "moving the name must not drop the roster row — registeredAt still satisfies the presence filter")
+	v := rows[0].Values
+	require.Equal(t, nameEnv, v["name"], "name carries the identity's ciphertext envelope whole, decrypted only at projection")
+	require.Nil(t, v["unlinked_name"], "the plaintext column must be empty once the bind has moved the name")
+	require.Equal(t, "vtx.identity."+f.ids["aliceId"], v["identity_key"])
+}
+
 // TestClinicPatientsRead_NoIdentityLinkStillProjects — a patient with no
 // identifiedBy link (never given contact, or created before Fire 5b-iii's
 // re-model) still projects its roster row: identity_key/email/phone all null,

@@ -239,7 +239,16 @@ var appOpCeilings = map[string]int{
 	// hardcodes SetAppointmentSite — the same site-picker ceremony serving a
 	// second op, not a new descriptor-catalog gap. verticals.md "A staffer
 	// can't tell or set which clinic site a recurring visit series is seen at".
-	"cmd/clinic-app": 16,
+	// 17: BindPatientIdentity is the second half of the new-patient ceremony
+	// (submitNewPatient, which this ceiling already counts for CreatePatient and
+	// CreateUnclaimedIdentity), aimed at a patient that already exists: mint an
+	// unclaimed identity, then wire it. Both its fields are machine-derived —
+	// the patient key from the row in context, the identity key from the mint
+	// reply one line earlier — so a descriptor-rendered form would draw no input
+	// a person fills, while the secret-reveal ordering ACROSS the two
+	// submissions is precisely the hand-built ceremony already counted here. A
+	// second op on that ceremony, not a new descriptor-catalog gap.
+	"cmd/clinic-app": 17,
 	// 18: AttachObject/DetachObject moved off this app's own hardcoded
 	// literals onto internal/descriptorform/attachments.mjs (design §22) —
 	// the shared ceremony module lives outside this gate's cmd/*-app scan

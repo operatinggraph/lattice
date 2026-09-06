@@ -6,7 +6,9 @@
 // Connects to a running Lattice NATS instance and checks that the clinic-domain
 // package has been correctly installed. Asserts:
 //
-//	5 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
+//	5 vertexType DDLs: patient (CreatePatient + TombstonePatient +
+//	  BackfillPatientRegistration + BindPatientIdentity + UnbindPatientIdentity),
+//	  provider
 //	  (CreateProvider + TombstoneProvider + SetProviderProfile + SetProviderHours +
 //	  SetProviderTimeOff + BindProviderIdentity), appointment (CreateAppointment +
 //	  RescheduleAppointment + SetAppointmentStatus + CorrectAppointmentStatus +
@@ -14,16 +16,19 @@
 //	  (AssignProviderSite + RemoveProviderSite — the provider→building
 //	  practicesAt link, mirroring loftspace-domain's loftspaceOwnership), each
 //	  with its self-description.
-//	12 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
+//	14 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
 //	  appointmentStatus, providerHours, providerTimeOff, providerSlotClaim,
 //	  patientSlotClaim, appointmentEncounter, clinicSiteProfile (the .site aspect
 //	  a location-domain building carries), providerIdentityClaim /
 //	  identityProviderClaim (BindProviderIdentity's mutual-exclusivity guard
-//	  pair, persona-worlds-design.md Fire W0) — their step-6 write gates.
+//	  pair, persona-worlds-design.md Fire W0), identityPatientClaim /
+//	  patientIdentityClaim (the patient↔identity pairing's own guard pair,
+//	  written by CreatePatient's identityKey branch and by BindPatientIdentity,
+//	  released by UnbindPatientIdentity) — their step-6 write gates.
 //	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
 //	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
 //	replaced the scalar OCC epoch + hasBooking-link enumeration).
-//	20 permission vertices: one per (operationType, scope) pair (Contract #8
+//	22 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1 — a permission's identity IS that pair, so a widened grantee set
 //	  lands on the SAME vertex, never a second one): most ops carry a single
 //	  scope=any vertex granted to operator; CreateAppointment/
@@ -35,7 +40,12 @@
 //	  appointments); CorrectAppointmentStatus carries its own scope=any vertex
 //	  granted to operator/frontOfHouse/provider, no scope=self (staff-only
 //	  correction); BindProviderIdentity carries its own scope=any vertex
-//	  granted to operator only (the role-minting bind ceremony is operator-only).
+//	  granted to operator only (the role-minting bind ceremony is operator-only),
+//	  while BindPatientIdentity carries its own scope=any vertex granted to
+//	  operator AND frontOfHouse (it mints no role — it is CreatePatient's own
+//	  registration ceremony completed later, so it matches that grantee set) and
+//	  its inverse UnbindPatientIdentity carries a scope=any vertex granted to
+//	  operator only (a repair for a mis-connected chart, never desk work).
 //	1 package vertex + manifest aspect (name=clinic-domain).
 //
 // Run via: go run ./scripts/verify-package-clinic-domain.go
@@ -62,7 +72,7 @@ const (
 )
 
 var clinicExpectedOps = []string{
-	"CreatePatient", "TombstonePatient",
+	"CreatePatient", "TombstonePatient", "BindPatientIdentity", "UnbindPatientIdentity",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
@@ -82,7 +92,9 @@ var clinicExpectedOps = []string{
 // bound provider's own availability). BindProviderIdentity (the role-minting
 // bind ceremony) carries its own scope=any vertex, operator only — it mints
 // the provider role and confers cross-building access, so it is not delegated
-// to front-desk (matching operator-only CreateProvider). The pins below assert
+// to front-desk (matching operator-only CreateProvider); BindPatientIdentity,
+// which mints no role, matches CreatePatient's operator+frontOfHouse set
+// instead. The pins below assert
 // exactly the declared (scope, role) pairs per op; no role is added implicitly.
 type permGrant struct {
 	scope   string
@@ -91,6 +103,8 @@ type permGrant struct {
 
 var clinicOpGrants = map[string][]permGrant{
 	"CreatePatient":            {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"BindPatientIdentity":      {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"UnbindPatientIdentity":    {{"any", "operator"}},
 	"TombstonePatient":         {{"any", "operator"}},
 	"CreateProvider":           {{"any", "operator"}},
 	"TombstoneProvider":        {{"any", "operator"}},
@@ -181,10 +195,10 @@ func main() {
 	fmt.Printf("verify-package-clinic-domain: scanning %d Core KV keys...\n", len(allKeys))
 
 	ddlChecks := []ddlCheck{
-		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"}},
+		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"}},
 		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
-		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BackfillPatientRegistration"}},
+		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
 		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"}},
@@ -198,6 +212,8 @@ func main() {
 		{canonical: "clinicSite", class: "meta.ddl.vertexType", ops: []string{"SetSiteProfile"}},
 		{canonical: "clinicSiteAssignment", class: "meta.ddl.vertexType", ops: []string{"AssignProviderSite", "RemoveProviderSite"}},
 		{canonical: "clinicSiteProfile", class: "meta.ddl.aspectType", ops: []string{"SetSiteProfile"}},
+		{canonical: "identityPatientClaim", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"}},
+		{canonical: "patientIdentityClaim", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"}},
 	}
 
 	// The retired scalar-epoch DDLs must NOT exist — the write-path slot-claim

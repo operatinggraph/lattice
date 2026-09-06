@@ -38,8 +38,8 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // see TestPackage_EncounterAspectIsSensitiveAndCustodied — the one deliberate
 // exception this loop excludes and tests separately.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 20 {
-		t.Fatalf("expected 20 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 21 {
+		t.Fatalf("expected 21 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -48,7 +48,7 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	vertexCmds := map[string][]string{
-		"patient":              {"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"},
+		"patient":              {"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
 		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
@@ -80,7 +80,7 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	aspectWriters := map[string][]string{
-		"patientDemographics":       {"CreatePatient", "BackfillPatientRegistration"},
+		"patientDemographics":       {"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
@@ -90,7 +90,8 @@ func TestPackage_DDLs(t *testing.T) {
 		"patientSlotClaim":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		"appointmentDocumentation":  {"RecordEncounter"},
 		"appointmentSiteAssignment": {"SetAppointmentSite"},
-		"identityPatientClaim":      {"CreatePatient"},
+		"identityPatientClaim":      {"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"},
+		"patientIdentityClaim":      {"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"},
 		"clinicSiteProfile":         {"SetSiteProfile"},
 		"providerIdentityClaim":     {"BindProviderIdentity"},
 		"identityProviderClaim":     {"BindProviderIdentity"},
@@ -247,7 +248,17 @@ func TestPackage_Permissions(t *testing.T) {
 	operatorOnly := func() []*wantGrant { return op("operator") }
 	wantPerms := map[string][]*wantGrant{
 		"CreatePatient": op("operator", "frontOfHouse"), "TombstonePatient": operatorOnly(),
-		"CreateProvider": operatorOnly(), "TombstoneProvider": operatorOnly(),
+		// The registration ceremony's second half — the SAME grantee set as
+		// CreatePatient, because it is the same front-desk workflow completed
+		// later. It mints no role (unlike BindProviderIdentity), and its script
+		// confines the standing desk grant to an UNCLAIMED identity, so front-desk
+		// reaches no login a person already holds.
+		"BindPatientIdentity": op("operator", "frontOfHouse"),
+		// Its inverse is operator-only: releasing a bind frees the patient to be
+		// bound elsewhere, so holding both verbs would make the bind's
+		// unclaimed-identity confinement re-runnable at will by one grantee.
+		"UnbindPatientIdentity": operatorOnly(),
+		"CreateProvider":        operatorOnly(), "TombstoneProvider": operatorOnly(),
 		"SetProviderProfile": operatorOnly(),
 		// A permission's identity is its (operationType, scope) pair (Contract
 		// #8 §8.1) — the provider widening lands on the SAME row as operator's,
@@ -453,8 +464,8 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.WeaverTargets); got != 1 {
 		t.Fatalf("expected 1 weaverTarget, got %d", got)
 	}
-	if got := len(Package.OpMetas); got != 14 {
-		t.Errorf("OpMetas: got %d, want 14", got)
+	if got := len(Package.OpMetas); got != 16 {
+		t.Errorf("OpMetas: got %d, want 16", got)
 	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
@@ -579,6 +590,36 @@ func TestPackage_ScriptGuards(t *testing.T) {
 	for name, spec := range map[string]string{"clinicAppointmentsSpec": clinicAppointmentsSpec, "clinicPatientsSpec": clinicPatientsSpec} {
 		if strings.Contains(spec, "p.demographics.data.fullName AS") {
 			t.Errorf("open lens %s must NOT project the patient name (PHI); it belongs only in the Protected clinicPatientsRead", name)
+		}
+	}
+
+	// The patient script owns BindPatientIdentity — the registration ceremony's
+	// second half — and CreatePatient's own patient-side claim stamp, which is
+	// the only thing that makes the bind's PatientAlreadyIdentified refusal
+	// reachable for a patient registered WITH a login.
+	for _, want := range []string{
+		`BindPatientIdentity`,                     // bind op handler
+		`UnbindPatientIdentity`,                   // the operator-only repair
+		`.identifiedBy.identity.`,                 // patient identifiedBy identity link shape
+		`PatientAlreadyIdentified`,                // patient-keyed exclusivity guard
+		`IdentityAlreadyClaimed`,                  // identity-keyed exclusivity guard
+		`IdentityNotUnclaimed`,                    // the bind's confinement on the standing desk grant
+		`IdentityClaimed`,                         // the unbind refuses a login somebody signed in with
+		`NotBound`,                                // the unbind needs THIS pair's live link
+		`NothingToBind`,                           // no fullName to move
+		`MissingRegistration`,                     // rewriting without registeredAt would hide the row
+		`def read_identity_state(state,`,          // identity-domain's .state, read from hydration
+		`def require_unclaimed_identity(state,`,   // the shared confinement both binds run
+		`def make_aspect_revive_occ(`,             // a released claim is re-claimable
+		`def make_aspect_update_occ(`,             // the .demographics rewrites pin their read's revision
+		`def make_patient_identity_claim(pkey)`,   // the read-free claim CreatePatient stamps on a vertex it mints
+		`def claim_patient_identity(pkey)`,        // the read-checking claim the bind stamps
+		`make_aspect_upsert(identity_key, "name"`, // the name's new home, on the identity
+		`clinic.patientIdentityBound`,             // event
+		`clinic.patientIdentityUnbound`,           // the repair's event
+	} {
+		if !strings.Contains(patientDDLScript, want) {
+			t.Errorf("patient script must reference %q", want)
 		}
 	}
 
