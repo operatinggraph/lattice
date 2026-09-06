@@ -37,6 +37,15 @@ const (
 	// RetractionTransportDiffRetractionPrefix is the same diff scoped to the
 	// lens's own key prefix in a target it shares (T2-prefix).
 	RetractionTransportDiffRetractionPrefix = "diffRetraction-prefix"
+
+	// RetractionTransportDiffRetractionPartition is the diff scoped to the
+	// ANCHORS an evaluation covered (T2-partition), on a lens whose rows
+	// partition by their anchor. The neighbour event narrows to the anchors the
+	// scan-root walk derives, each is re-evaluated and diffs its own partition,
+	// and every other anchor's rows are never listed. It is the transport a
+	// lens carries INSTEAD of the whole diff, not in addition to it — and only
+	// when activation armed it (SetPartitionRetraction).
+	RetractionTransportDiffRetractionPartition = "diffRetraction-partition"
 )
 
 // PlainRetractionVerdict is one plain lens's neighbour-retraction posture:
@@ -109,9 +118,20 @@ func (p *Pipeline) PlainRetractionTransport(authPlane bool) PlainRetractionVerdi
 
 	switch {
 	case p.diffRetraction:
-		v.Transport = RetractionTransportDiffRetraction
-		if p.diffRetractionPrefix != "" {
+		// The partition arm is read FIRST because it is the transport that
+		// actually runs on an armed lens: its seeded and licensed-neighbour
+		// events diff their own anchors' partitions, and the whole listing
+		// (scoped or not) is reached only by an unlicensed neighbour event. A
+		// verdict naming the whole diff would describe the fallback rather than
+		// the mechanism, and the census that pins it would then pin the wrong
+		// posture for the five lenses this design moves.
+		switch {
+		case p.partitionArmed(rs):
+			v.Transport = RetractionTransportDiffRetractionPartition
+		case p.diffRetractionPrefix != "":
 			v.Transport = RetractionTransportDiffRetractionPrefix
+		default:
+			v.Transport = RetractionTransportDiffRetraction
 		}
 	case authPlane:
 		// The derivation licence refuses this plane outright — an auth-plane row
@@ -135,6 +155,25 @@ func (p *Pipeline) PlainRetractionTransport(authPlane bool) PlainRetractionVerdi
 		switch {
 		case !eligible:
 			v.Refusal = refusal
+		case !fullCR.ProjectsOneRowPerAnchor():
+			// The narrowing licence and the RETRACTION are two different
+			// questions, and this arm is the second one. The licence admits any
+			// rule whose rows partition by anchor, because that is what makes a
+			// per-anchor evaluation exact. But T1 delivers a retraction through
+			// evaluateForEntryRaw's read-free presence check, which needs the
+			// row's KEY derivable from the anchor alone — so on a lens that
+			// partitions WITHOUT closing, the derived path re-evaluates every
+			// affected anchor and emits no Delete for the row a neighbour just
+			// dropped.
+			//
+			// A partition-only lens's retraction is the partition-scoped diff,
+			// and that is reached through the p.diffRetraction case above.
+			// Reaching HERE means the lens declares none, so it narrows
+			// correctly and retracts nothing, and reporting T1 for it would name
+			// a transport that cannot carry a row off the target.
+			v.Refusal = "its rows partition by anchor but its key is not derivable from the anchor alone, so the derived " +
+				"path's read-free presence check can never emit the Delete a dropped row needs — declare target-diff " +
+				"retraction on a target it owns, which scopes itself to the same partitions"
 		case !auditArmed:
 			// The kill switch voids every T1 transport corpus-wide: the
 			// licence's first conjunct is an ENROLLED auditor, and

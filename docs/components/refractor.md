@@ -892,28 +892,54 @@ composite lens whose presence check structurally falls through (above) can opt i
 `DiffRetraction` (a lens-definition flag, `pkgmgr.LensSpec.DiffRetraction` →
 `lens.IntoConfig.DiffRetraction` → `pipeline.SetDiffRetraction`, threaded like every
 other per-lens component — never canonical-name-keyed): when the presence check's
-`ok` comes back false, the pipeline instead reads the target's **full live key set**
-via `adapter.KeyLister.ListKeys` and diffs it against the re-execute's **full**
-freshly-computed row set, emitting a Delete for every key the target still carries but
-the fresh computation no longer produces. This is exact — not an approximation scoped
-to whichever vertex happened to trigger the event — because a `DiffRetraction` lens's
-query is **unanchored** (no `{key: $actorKey}` anywhere): the re-execute already
-recomputes the complete current truth on every trigger regardless of which vertex fired
-it, so comparing full-target-state to full-fresh-state is correct by construction, and
-sidesteps the ambiguity a per-vertex-scoped diff would hit (an `identity` endpoint can be
-either the applicant or the managing landlord role in `read_landlord_lease_applications`,
-with no single stable id to scope a prefix-list by).
+`ok` comes back false, the pipeline diffs the re-execute's freshly-computed row set
+against the keys the target already holds and emits a Delete for every key the target
+still carries but the fresh computation no longer produces. **The diff has two scopes,
+and which one runs is decided by what the evaluation's row set IS.**
+
+*The whole-target scope (the default).* The pipeline reads the target's **full live key
+set** via `adapter.KeyLister.ListKeys` — or `ListKeysPrefix` of the lens's own key prefix
+in a bucket it shares — and diffs it against the **full** freshly-computed row set. This
+is exact — not an approximation scoped to whichever vertex happened to trigger the event —
+because a `DiffRetraction` lens's query is **unanchored** (no `{key: $actorKey}` anywhere):
+the re-execute already recomputes the complete current truth on every trigger regardless of
+which vertex fired it, so comparing full-target-state to full-fresh-state is correct by
+construction, and sidesteps the ambiguity a per-vertex-scoped diff would hit (an `identity`
+endpoint can be either the applicant or the managing landlord role in
+`read_landlord_lease_applications`, with no single stable id to scope a prefix-list by).
 `(*full.CompiledRule).ValidateUnanchoredForDiffRetraction` is the activation-time
 backstop: a lens that references `$actorKey` anywhere fails to activate rather than
 mass-retracting every other live anchor's rows on its first event — the diff's
-soundness rests entirely on that invariant. `read_landlord_lease_applications`
-(`(app_id, landlord_id)`, D1.3 Increment 2, Vault 5b's manages-unassign consumer) is the
-reference `DiffRetraction` lens; eight more declare it today (`grep -rn "DiffRetraction: true"
+soundness rests entirely on that invariant.
+
+*The partition scope (`SetPartitionRetraction`, armed per lens).* When the rule's rows
+**partition by their anchor** — one key column identifies the anchor
+(`PartitionsByAnchor`), the others may bind neighbours the walk reached — the lens is
+allowed to SEED on its anchor's events and narrow on its neighbours' like any other plain
+lens, and the diff is scoped to the anchors that evaluation covered:
+`adapter.PartitionKeyLister.ListKeysWhere` lists exactly one anchor's rows and every other
+anchor's are never listed and so can never be retracted. **That is not the objection above
+answered differently — it is a different scope.** The objection is about scoping by the
+TRIGGERING vertex, whose pattern role really is ambiguous; this scopes by the ANCHOR: an
+anchor-typed event names its own partition, a neighbour event names the anchors the
+scan-root walk derives (each its own partition), and the identity's role never enters the
+predicate. A licensed neighbour event's outer frame runs **no** diff at all, because its
+row set is the union of K partitions and a whole listing must never be compared against one.
+Arming requires all of: the declaration, a partition-**only** rule, the business plane, and
+a target that can both list a partition and read a row back — so the three auth-plane grant
+tables (whose whole diff on every event is the only shrink path an un-truncatable target has
+on a rebuild) and the closed `DiffRetraction` lenses keep the whole scope. An unlicensed
+neighbour event on an armed lens keeps it too: that evaluation really is whole.
+
+`read_landlord_lease_applications` (`(app_id, landlord_id)`, D1.3 Increment 2, Vault 5b's
+manages-unassign consumer) is the reference `DiffRetraction` lens and the reference
+partition-armed one; eleven more declare the flag today (`grep -rn "DiffRetraction: true"
 packages/*/lenses.go`); a lens whose key resolves to its anchor — through a `WITH` or
 not — needs none of it for the retraction and takes the anchor Delete; a Secure plain lens
 keeps the declaration as a continuous per-event healer the detect-only audit does not offer
-(`clinicPatientsRead`). A convergence
-(`violating`-flag) lens never opts in, so its never-retract contract is untouched.
+(`clinicPatientsRead`), and is excluded from the partition scope for exactly that reason.
+A convergence (`violating`-flag) lens never opts in, so its never-retract contract is
+untouched.
 
 **Neighbour-driven retraction (the plain arm's anchor derivation).** The other transport for a
 drop-out no event names — a neighbour vertex tombstoned, a link two hops out removed, a
@@ -925,8 +951,12 @@ cannot: an upsert-only rescan names no key that dropped out, and the filter-retr
 presence check derives its key from the EVENT vertex, which on a neighbour event is not an
 anchor. The licence is fail-closed and read per event, never snapshotted: not the auth plane,
 an enrolled and unsuppressed divergence auditor whose last verdict is recent, a full-engine
-rule, a target that can read a row back, no `$now` / `$projectedAt`, and per-anchor closure
-(`ProjectsOneRowPerAnchor`).
+rule, a target that can read a row back, no `$now` / `$projectedAt`, and per-anchor
+PARTITIONING (`PartitionsByAnchor` — every row belongs to exactly one anchor and is computed
+from that anchor's own bindings, which is what makes a seeded evaluation exact; whether the
+row's KEY is additionally derivable read-free from the anchor is `ProjectsOneRowPerAnchor`'s
+narrower question, and it decides which transport carries the Delete, not whether the
+evaluation may narrow).
 
 **A Secure Lens is licensed on exactly those conjuncts** — the decryptor is not one of them.
 What makes that sound is a wiring invariant rather than a predicate: the re-entrant evaluation

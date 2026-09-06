@@ -297,6 +297,11 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	reentrant := isPlainDerivedAnchorReentry(ctx)
 	var results []ruleengine.EvalResult
 	var err error
+	// acted is true only when the derivation SUBSTITUTED per-anchor re-entries
+	// for this frame's evaluation. It is what the tail below needs to know that
+	// `results` is the union of K anchors' row sets, each of which already
+	// diffed its OWN partition — see the retraction block's case (a).
+	var acted bool
 	switch {
 	case seed == "" && plain && !reentrant:
 		// A plain lens's neighbour event: seedAnchorFor found no seed because
@@ -308,7 +313,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// derivation-mode switch: it returns exactly that re-scan except in
 		// `act` mode on a lens the narrowing licence admits, where it
 		// substitutes one seeded evaluation per derived anchor.
-		results, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
+		results, acted, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
 	case seed != "" && plain && !reentrant && p.seedMultiPosition(rs, entry.NodeLabel):
 		// Increment 4b (§4.4): entry's own type IS the lens's anchor pattern,
 		// but that same label ALSO binds a second pattern position — the
@@ -322,7 +327,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// whole-corpus rescan above — so `off` mode or an unlicensed lens
 		// pays exactly today's cost, and only a licensed `act` lens gets the
 		// correction.
-		results, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
+		results, acted, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
 	default:
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
 	}
@@ -352,8 +357,42 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			// arrived): AnchorProjectionKey could not derive a single
 			// anchor-keyed row, so this lens's own opt-in target-diff picks
 			// up what Fire 2 structurally cannot reach.
+			//
+			// WHICH diff runs is decided by what this frame's `results` IS,
+			// and the three answers are not interchangeable
+			// (anchor-partitioned-plain-lens-retraction-design.md §3.3):
+			//
+			//	(a) an ACTED frame — the derivation substituted per-anchor
+			//	    re-entries, so `results` is the union of K anchors' rows and
+			//	    each re-entry has ALREADY diffed its own partition. No diff
+			//	    runs here: a whole listing compared against K partitions'
+			//	    rows would tombstone every OTHER anchor's rows, and a
+			//	    partition listing has no single anchor to scope to.
+			//	(b) a SEEDED frame on a partition-armed lens — `results` is one
+			//	    anchor's complete row set, so the exact comparison is
+			//	    against that anchor's partition and nothing wider.
+			//	(c) everything else — the evaluation was whole, so the whole
+			//	    target listing is what it is exact against. That is today's
+			//	    behaviour, and it stays for every unarmed lens and for a
+			//	    partition-armed lens's UNLICENSED neighbour event.
+			if acted && !p.partitionArmed(rs) {
+				// Unreachable: the derivation index refuses an unarmed
+				// diffRetraction lens before any re-entry is substituted. It is
+				// still an error rather than a fall-through, because the one
+				// thing this design forbids is a whole diff over a partial row
+				// set — failing the event redelivers it, and a wrong whole diff
+				// tombstones every anchor the frame did not cover.
+				return nil, nil, ScopeAll(), fmt.Errorf(
+					"pipeline: rule %q substituted per-anchor evaluations without the partition-scoped diff armed; refusing to diff a partial row set against the whole target", p.ruleID)
+			}
 			var derr error
-			results, derr = p.applyDiffRetraction(ctx, results)
+			switch {
+			case acted:
+			case seed != "" && p.partitionArmed(rs):
+				results, derr = p.applyPartitionDiffRetraction(ctx, rs, []string{seed}, results)
+			default:
+				results, derr = p.applyDiffRetraction(ctx, results)
+			}
 			if derr != nil {
 				return nil, nil, ScopeAll(), derr
 			}
@@ -1517,6 +1556,106 @@ func (p *Pipeline) applyDiffRetraction(ctx context.Context, results []ruleengine
 		results = append(results, ruleengine.EvalResult{Delete: true, Keys: exKeys})
 	}
 	return results, nil
+}
+
+// applyPartitionDiffRetraction is applyDiffRetraction scoped to the anchors this
+// evaluation actually covered: for each one it resolves the anchor's partition
+// predicate, lists exactly that partition, and tombstones every listed key the
+// fresh row set no longer carries
+// (anchor-partitioned-plain-lens-retraction-design.md §3.2). Every other
+// anchor's rows are never listed and so can never be retracted by this event.
+//
+// It is multiEntryRetractions with the partition predicate in place of the
+// actor's key prefix, and all three of that function's properties are carried
+// rather than re-argued:
+//
+//   - FailClosed on every tombstone, so a transient failure on exactly the
+//     tombstone write aborts the whole batch and the event is redelivered,
+//     rather than the sibling upserts landing past a row that should be gone.
+//   - Tombstones ahead of the fresh rows, so writeResults' sequential dispatch
+//     lands every retraction before any upsert.
+//   - A listed key already carrying a tombstone is skipped without a rewrite —
+//     its stored watermark already outranks this replay, so re-stamping it is
+//     churn rather than correctness.
+//
+// What it does NOT carry is that function's ownership argument, because the two
+// scope differently: multiEntryRetractions is confined by a key PREFIX, and this
+// by a predicate over key COLUMNS. The scope here is the adapter's to honour
+// (adapter.PartitionKeyLister: nothing outside the lens's ownership scope is
+// ever returned) and the predicate's to name — which is why an anchor whose
+// predicate cannot be evaluated fails the WHOLE EVENT rather than falling back
+// to a wider listing. A predicate that cannot answer is not a licence to diff
+// everything; it is a reason to let the event come back.
+func (p *Pipeline) applyPartitionDiffRetraction(ctx context.Context, rs ruleState, anchors []string, results []ruleengine.EvalResult) ([]ruleengine.EvalResult, error) {
+	adpt := p.currentAdapter()
+	lister, ok := adpt.(adapter.PartitionKeyLister)
+	if !ok {
+		return nil, fmt.Errorf("pipeline: partition retraction: adapter %T does not implement adapter.PartitionKeyLister — activation armed a lens whose target cannot scope a listing to one anchor", adpt)
+	}
+	reader, ok := adpt.(adapter.RowReader)
+	if !ok {
+		return nil, fmt.Errorf("pipeline: partition retraction: adapter %T cannot read a row back — tombstone-skip cannot be decided", adpt)
+	}
+
+	var tombstones []ruleengine.EvalResult
+	for _, anchorKey := range anchors {
+		anchorType, _, parsed := substrate.ParseVertexKey(anchorKey)
+		if !parsed {
+			return nil, fmt.Errorf("pipeline: partition retraction: %q is not a vertex key, so it names no partition", anchorKey)
+		}
+		fixed, ok := rs.engine.PartitionPredicate(rs.cr, anchorKey, anchorType)
+		if !ok {
+			return nil, fmt.Errorf("pipeline: partition retraction: the partition predicate could not be resolved for anchor %q; failing the event rather than diffing a wider set", anchorKey)
+		}
+		if err := matchesInstalledPartition(fixed, rs.partition.identifying); err != nil {
+			return nil, fmt.Errorf("pipeline: partition retraction: anchor %q: %w", anchorKey, err)
+		}
+		existing, err := lister.ListKeysWhere(ctx, fixed, p.diffRetractionPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: partition retraction: list partition %v: %w", fixed, err)
+		}
+		for _, exKeys := range existing {
+			if resultsContainKeys(results, exKeys) {
+				continue
+			}
+			_, live, rerr := reader.GetRow(ctx, exKeys)
+			if rerr != nil {
+				return nil, fmt.Errorf("pipeline: partition retraction: get %v: %w", exKeys, rerr)
+			}
+			if !live {
+				continue
+			}
+			tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: exKeys, FailClosed: true})
+		}
+	}
+	if len(tombstones) == 0 {
+		return results, nil
+	}
+	return append(tombstones, results...), nil
+}
+
+// matchesInstalledPartition holds the per-event predicate to the columns the
+// INSTALL admitted (ruleState.partition.identifying) — the same rule read
+// through two entry points, so a disagreement is a defect in one of them rather
+// than a fact about this event.
+//
+// The check is cheap and it is on the scope of a Delete, which is why it is
+// here rather than argued away. The install derives its answer from
+// PartitionsByAnchor and the per-event half from PartitionPredicate; they share
+// a resolver body today, and the day one of them gains a conjunct the other
+// lacks, this fails the event instead of listing a partition the arming never
+// approved.
+func matchesInstalledPartition(fixed map[string]any, identifying []string) error {
+	if len(fixed) != len(identifying) {
+		return fmt.Errorf("the predicate fixed %d key column(s) but the installed rule admitted %d (%v) — the scope this Delete would run in is not the one activation armed",
+			len(fixed), len(identifying), identifying)
+	}
+	for _, col := range identifying {
+		if _, present := fixed[col]; !present {
+			return fmt.Errorf("the predicate did not fix %q, which the installed rule admitted as identifying — the scope this Delete would run in is not the one activation armed", col)
+		}
+	}
+	return nil
 }
 
 // diffRetractionListing enumerates the live keys the diff above compares

@@ -16,6 +16,7 @@ import (
 var _ Adapter = (*PostgresAdapter)(nil)
 var _ Truncater = (*PostgresAdapter)(nil)
 var _ KeyLister = (*PostgresAdapter)(nil)
+var _ PartitionKeyLister = (*PostgresAdapter)(nil)
 var _ SeqGuarded = (*PostgresAdapter)(nil)
 var _ OutcomeUpserter = (*PostgresAdapter)(nil)
 var _ OutcomeDeleter = (*PostgresAdapter)(nil)
@@ -395,6 +396,110 @@ func (a *PostgresAdapter) ListKeys(ctx context.Context) ([]map[string]any, error
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres list keys: %w", err)
+	}
+	return out, nil
+}
+
+// buildListKeysWhereSQL constructs the partition-scoped key-only SELECT: the
+// same projection and the same live-rows condition buildListKeysSQL emits, plus
+// one `<column> = $n` per fixed key column.
+//
+// The values are BOUND PARAMETERS, never rendered — the placeholders are what
+// this returns and the caller passes the values beside them, exactly as
+// buildGetRowSQL already does for the key it reads one row by. Column names are
+// quoted identifiers drawn from a.keyOrder, which the caller has already checked
+// each fixed column is a member of, so no caller-supplied text ever reaches the
+// statement.
+//
+// cols is returned in a.keyOrder order rather than in the caller's map order, so
+// one partition always compiles to one statement text — a prepared-statement
+// cache sees a single entry per fixed-column set instead of one per iteration
+// order of a Go map.
+func (a *PostgresAdapter) buildListKeysWhereSQL(fixed map[string]any) (string, []string) {
+	var cols []string
+	for _, k := range a.keyOrder {
+		if _, isFixed := fixed[k]; isFixed {
+			cols = append(cols, k)
+		}
+	}
+	sqlStr := a.buildListKeysSQL()
+	joiner := " WHERE "
+	if strings.Contains(sqlStr, " WHERE ") {
+		joiner = " AND "
+	}
+	clauses := make([]string, len(cols))
+	for i, k := range cols {
+		clauses[i] = fmt.Sprintf("%s = $%d", quoteIdent(k), i+1)
+	}
+	return sqlStr + joiner + strings.Join(clauses, " AND "), cols
+}
+
+// ListKeysWhere returns the live keys of the rows whose key columns match every
+// entry of fixed (adapter.PartitionKeyLister) — the partition-scoped listing the
+// per-anchor target diff retracts within.
+//
+// The soft tombstone is excluded on exactly the same condition ListKeys excludes
+// it on, because the two answer the same question about the same rows: a
+// tombstoned row is not live, and a diff that saw one would re-tombstone it on
+// every event.
+//
+// A Postgres table is one lens's own, so it carries no key prefix and a
+// non-empty one is refused rather than dropped: the caller asked for a scoped
+// listing on the strength of a prefix this adapter cannot honour, and answering
+// with the table-wide one is the failure worth being loud about. An empty fixed
+// is refused for the reason PartitionKeyLister's doc gives, and a column that is
+// not a key column of this table is refused rather than dropped — silently
+// widening a partition is how a scoped Delete becomes an unscoped one.
+func (a *PostgresAdapter) ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error) {
+	if prefix != "" {
+		return nil, fmt.Errorf("postgres list keys where: a postgres target carries no key prefix, but the caller scoped the listing to %q — the lens does not own the scope it asked for", prefix)
+	}
+	if len(fixed) == 0 {
+		return nil, fmt.Errorf("postgres list keys where: fixed must name at least one key column — an unscoped listing is what the caller asked to avoid")
+	}
+	known := make(map[string]struct{}, len(a.keyOrder))
+	for _, k := range a.keyOrder {
+		known[k] = struct{}{}
+	}
+	for k := range fixed {
+		if _, ok := known[k]; !ok {
+			return nil, fmt.Errorf("postgres list keys where: %q is not a key column of %q — the partition it names does not exist on this table", k, a.table)
+		}
+	}
+
+	ctx, cancel := a.withTimeout(ctx)
+	defer cancel()
+
+	sqlStr, cols := a.buildListKeysWhereSQL(fixed)
+	args := make([]any, len(cols))
+	for i, k := range cols {
+		args[i] = coerceForPgx(fixed[k])
+	}
+
+	rows, err := a.pool.Query(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres list keys where: %w", err)
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(a.keyOrder))
+		ptrs := make([]any, len(vals))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, fmt.Errorf("postgres list keys where: scan: %w", err)
+		}
+		m := make(map[string]any, len(a.keyOrder))
+		for i, k := range a.keyOrder {
+			m[k] = vals[i]
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres list keys where: %w", err)
 	}
 	return out, nil
 }

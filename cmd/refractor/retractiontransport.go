@@ -154,6 +154,36 @@ func admitRetractionTransport(
 			"lensId", r.ID, "bucket", r.Into.Bucket, "prefix", prefix)
 	}
 
+	// The partition-scoped target diff
+	// (anchor-partitioned-plain-lens-retraction-design.md §3.3). A lens whose
+	// rows PARTITION by their anchor — one key column identifying it, the others
+	// bound to neighbours the walk reached — may seed on its anchor's events and
+	// diff within that anchor's partition, instead of rescanning the corpus and
+	// listing the whole target on every event.
+	//
+	// It is armed HERE, after the scoping above, because the NATS-KV partition
+	// listing runs under the diff's own prefix: arming first would arm a listing
+	// wider than the one it inherits. The plane comes from
+	// projection.IsAuthPlane, the one canonical derivation, rather than off the
+	// pipeline — installLensPlane records it several stages later, and a
+	// conjunct that depends on whether an earlier stage ran reads as satisfied
+	// for a lens it must refuse.
+	//
+	// A refusal is a partition-only BUSINESS lens whose target cannot scope a
+	// listing to one anchor: it would seed per anchor with nothing able to scope
+	// its diff. The disposition is the DiffRetraction guard's — the lens does
+	// not activate — for the same reason: dark is the safe end of half-armed.
+	// Every other lens is simply not armed, keeps today's whole diff, and
+	// returns no error.
+	if err := p.SetPartitionRetraction(projection.IsAuthPlane(r)); err != nil {
+		refuseLens(ctx, logger, reporter, r, "partition-scoped diff retraction", err.Error())
+		return false
+	}
+	if p.PartitionRetraction() {
+		logger.Info("diff retraction scoped to the anchors an evaluation covers",
+			"lensId", r.ID, "canonicalName", r.CanonicalName)
+	}
+
 	// The business plane's retraction-transport gate
 	// (secure-plain-lens-retraction-and-audit-design.md §4.4). A plain lens whose
 	// row EXISTENCE depends on a required neighbour can be orphaned by an event

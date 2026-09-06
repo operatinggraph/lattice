@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"sort"
@@ -782,7 +783,24 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 		}
 		keys, ok := rs.engine.AnchorDeleteResult(rs.cr, key, label, props)
 		if !ok {
-			t.noteUnverified(auditReasonUndrivableKey)
+			// A partition-armed lens has no read-free row key — its key carries
+			// a neighbour-bound column — but it does have a partition, and the
+			// tombstone's retraction was supposed to empty it. Listing it is
+			// the same question asked of the scope the CDC path actually
+			// retracts within.
+			retained, listed, lerr := a.partitionHoldsAnyLiveKey(ctx, rs, reader, key, label)
+			if lerr != nil {
+				t.noteUnverified("partition listing failed: " + lerr.Error())
+				return
+			}
+			if !listed {
+				t.noteUnverified(auditReasonUndrivableKey)
+				return
+			}
+			if retained {
+				classes = append(classes, AuditClassRetained)
+			}
+			a.commit(t, classes)
 			return
 		}
 		_, present, rerr := reader.GetRow(ctx, keys)
@@ -836,24 +854,125 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 		}
 	}
 
-	// Should-not-exist: the row this anchor OWNS, when the recomputation no
-	// longer produces it. The derivation is the same read-free one the CDC
-	// filter-retraction check uses, and when it declines (a neighbor-keyed or
-	// multi-row lens) the anchor is simply not checked in this direction —
-	// exactly as the CDC path is not — which is why the class counts travel
-	// per-class rather than as one number.
-	if owned, ok := rs.engine.AnchorProjectionKey(rs.cr, key, label, props); ok &&
-		!resultsContainKeys(results, owned) {
-		_, present, rerr := reader.GetRow(ctx, owned)
-		if rerr != nil {
-			t.noteUnverified("target row read failed: " + rerr.Error())
-			return
+	// Should-not-exist: the rows this anchor OWNS, when the recomputation no
+	// longer produces them. Two derivations, and which one applies is the same
+	// question the CDC retraction path asks of the same lens.
+	//
+	// The read-free one (AnchorProjectionKey) names the single row a closed lens
+	// owns. When it declines — a neighbour-keyed or multi-row lens — a
+	// partition-armed lens has its PARTITION listed instead, and a key in it the
+	// recompute did not produce books `retained`. That is the one direction a
+	// per-anchor seeded evaluation can go wrong in: it can produce FEWER rows
+	// than the whole one, and only this listing names the rows left behind. A
+	// lens that is neither closed nor armed is not checked in this direction at
+	// all, which is why the class counts travel per-class rather than as one
+	// number: an absent `retained` on one of them reads as "not detected here",
+	// never as "clean".
+	if owned, ok := rs.engine.AnchorProjectionKey(rs.cr, key, label, props); ok {
+		if !resultsContainKeys(results, owned) {
+			_, present, rerr := reader.GetRow(ctx, owned)
+			if rerr != nil {
+				t.noteUnverified("target row read failed: " + rerr.Error())
+				return
+			}
+			if present {
+				classes = append(classes, AuditClassRetained)
+			}
 		}
-		if present {
-			classes = append(classes, AuditClassRetained)
-		}
+	} else if extra, listed, lerr := a.partitionHoldsUnproducedKey(ctx, rs, reader, key, label, results); lerr != nil {
+		t.noteUnverified("partition listing failed: " + lerr.Error())
+		return
+	} else if listed && extra {
+		classes = append(classes, AuditClassRetained)
 	}
 	a.commit(t, classes)
+}
+
+// partitionHoldsAnyLiveKey reports whether a TOMBSTONED anchor's partition still
+// holds a live key — the retraction its own tombstone should have produced,
+// lost. listed is false when this lens is not partition-armed or the predicate
+// declines, which leaves the anchor unchecked in this direction — the same
+// disposition the CDC path takes for a key it cannot derive.
+func (a *Auditor) partitionHoldsAnyLiveKey(ctx context.Context, rs ruleState, reader adapter.RowReader, key, label string) (retained, listed bool, err error) {
+	existing, listed, err := a.listAnchorPartition(ctx, rs, key, label)
+	if err != nil || !listed {
+		return false, listed, err
+	}
+	for _, keys := range existing {
+		live, rerr := rowIsLive(ctx, reader, keys)
+		if rerr != nil {
+			return false, false, rerr
+		}
+		if live {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}
+
+// partitionHoldsUnproducedKey reports whether a LIVE anchor's partition holds a
+// key the seeded recomputation did not produce — an under-produced evaluation's
+// leftovers, which is the failure mode the partition-scoped seeding could
+// introduce and which nothing else would name (§3.5).
+func (a *Auditor) partitionHoldsUnproducedKey(ctx context.Context, rs ruleState, reader adapter.RowReader, key, label string, results []ruleengine.EvalResult) (extra, listed bool, err error) {
+	existing, listed, err := a.listAnchorPartition(ctx, rs, key, label)
+	if err != nil || !listed {
+		return false, listed, err
+	}
+	for _, keys := range existing {
+		if resultsContainKeys(results, keys) {
+			continue
+		}
+		live, rerr := rowIsLive(ctx, reader, keys)
+		if rerr != nil {
+			return false, false, rerr
+		}
+		if live {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}
+
+// rowIsLive reads one listed key back, so a key a listing still carries but the
+// target has already tombstoned is not booked as a retained row. It is the same
+// probe the partition retraction runs before it tombstones a listed key, asked
+// here for the same reason: the listing says a key exists, only the read says it
+// is live.
+func rowIsLive(ctx context.Context, reader adapter.RowReader, keys map[string]any) (bool, error) {
+	_, present, err := reader.GetRow(ctx, keys)
+	if err != nil {
+		return false, fmt.Errorf("target row read failed: %w", err)
+	}
+	return present, nil
+}
+
+// listAnchorPartition lists the live keys of one anchor's partition, through the
+// SAME predicate and the SAME lister the CDC retraction scopes itself by — so
+// the audit speaks about the scope the retraction acts on rather than a second
+// derivation of it.
+//
+// listed is false, with no error, for every lens this direction does not apply
+// to: one that is not partition-armed, a target that cannot list a partition, or
+// an anchor whose predicate declines. Those are the "not checked in this
+// direction" cases the caller books as undrivable rather than as clean.
+func (a *Auditor) listAnchorPartition(ctx context.Context, rs ruleState, key, label string) (existing []map[string]any, listed bool, err error) {
+	if !a.p.partitionArmed(rs) {
+		return nil, false, nil
+	}
+	lister, ok := a.p.currentAdapter().(adapter.PartitionKeyLister)
+	if !ok {
+		return nil, false, nil
+	}
+	fixed, ok := rs.engine.PartitionPredicate(rs.cr, key, label)
+	if !ok {
+		return nil, false, nil
+	}
+	existing, err = lister.ListKeysWhere(ctx, fixed, a.p.diffRetractionPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	return existing, true, nil
 }
 
 // commit books a fully-checked anchor: one audited anchor, plus whatever
@@ -1045,16 +1164,24 @@ func auditEnrolment(p *Pipeline, rs ruleState, adpt adapter.Adapter, authPlane b
 	}
 	// DiffRetraction declares a target-diff retraction transport, not an
 	// evaluation shape: executeFullForAudit (auditAnchor's own call) never
-	// calls applyDiffRetraction — that function's only caller is
-	// evaluateForEntryRaw's plain arm, which the audit does not run — so a
-	// DiffRetraction lens's seeded evaluation is read exactly like any other
-	// plain lens's. What DOES follow from DiffRetraction is a narrower
-	// should-not-exist direction: AnchorProjectionKey (the read-free
-	// presence-check derivation auditAnchor's own `retained` class depends on,
-	// below) declines for most of this corpus's DiffRetraction lenses, so
-	// those enrol with `missing`/`stale` only and never `retained` — an absent
-	// `retained` on one of them reads as "not detected in this direction",
-	// never as "clean", the same as the CDC filter-retraction path it mirrors.
+	// calls applyDiffRetraction or applyPartitionDiffRetraction — their only
+	// caller is evaluateForEntryRaw's plain arm, which the audit does not run —
+	// so a DiffRetraction lens's seeded evaluation is read exactly like any
+	// other plain lens's.
+	//
+	// What the declaration decides is which SHOULD-NOT-EXIST direction the
+	// anchor is checked in, and there are three (auditAnchor, below).
+	// AnchorProjectionKey — the read-free presence-check derivation — declines
+	// for most of this corpus's DiffRetraction lenses, because their key carries
+	// a neighbour-bound column. For a PARTITION-ARMED lens the anchor's own
+	// partition is listed instead, so a tombstoned anchor with a live key in it,
+	// or a live anchor whose partition holds a key the recompute did not
+	// produce, books `retained` — which is the standing detector for an
+	// under-producing seeded evaluation, shipped in the same increment as the
+	// seeding that could cause one. For a DiffRetraction lens that is NOT armed
+	// the anchor is still unchecked in this direction, and enrols with
+	// `missing`/`stale` only: an absent `retained` there reads as "not detected
+	// in this direction", never as "clean", the same as the CDC path it mirrors.
 	//
 	// Without read-back there is nothing to compare against, and an audit that
 	// cannot compare would report clean.

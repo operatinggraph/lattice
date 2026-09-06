@@ -342,11 +342,16 @@ func Lenses() []pkgmgr.LensSpec {
 			// already-projected plaintext row scrubs to null even though the
 			// identity is not this lens's anchor (pinned by
 			// TestSecureLens_NeighborShredReprojectsAnchoredRows).
-			// DiffRetraction (Fire 3): landlord_id is resolved by walking the
+			// DiffRetraction: landlord_id is resolved by walking the
 			// `manages` link off the matched unit, not off the leaseapp anchor —
-			// Fire 2's AnchorProjectionKey can never derive this composite key
+			// AnchorProjectionKey can never derive this composite key
 			// read-free (exprReferencesOnlyVariable rejects it structurally), so
 			// a manages-unassign (or any other drop) needs the target-diff path.
+			// The rows nonetheless PARTITION by the anchor — app_id identifies
+			// the leaseapp, landlord_id binds the neighbour — so the lens seeds
+			// on its own anchor's events, narrows on its neighbours', and diffs
+			// within one leaseapp's partition rather than against the whole
+			// table (PartitionsByAnchor, adapter.PartitionKeyLister).
 			// The `qualified` WITH clause below does not touch this posture:
 			// ValidateUnanchoredForDiffRetraction walks a lens's WITH/RETURN only
 			// for `$actorKey` references, and this WITH references no parameter at

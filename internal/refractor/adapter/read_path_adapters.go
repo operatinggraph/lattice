@@ -259,13 +259,14 @@ type ProtectedAdapter struct {
 }
 
 var (
-	_ Adapter         = (*ProtectedAdapter)(nil)
-	_ Truncater       = (*ProtectedAdapter)(nil)
-	_ KeyLister       = (*ProtectedAdapter)(nil)
-	_ SeqGuarded      = (*ProtectedAdapter)(nil)
-	_ RowReader       = (*ProtectedAdapter)(nil)
-	_ OutcomeUpserter = (*ProtectedAdapter)(nil)
-	_ OutcomeDeleter  = (*ProtectedAdapter)(nil)
+	_ Adapter            = (*ProtectedAdapter)(nil)
+	_ Truncater          = (*ProtectedAdapter)(nil)
+	_ KeyLister          = (*ProtectedAdapter)(nil)
+	_ PartitionKeyLister = (*ProtectedAdapter)(nil)
+	_ SeqGuarded         = (*ProtectedAdapter)(nil)
+	_ RowReader          = (*ProtectedAdapter)(nil)
+	_ OutcomeUpserter    = (*ProtectedAdapter)(nil)
+	_ OutcomeDeleter     = (*ProtectedAdapter)(nil)
 )
 
 // NewProtectedAdapter wraps a non-nil PostgresAdapter. arrayCols names the row
@@ -422,6 +423,22 @@ func (p *ProtectedAdapter) Truncate(ctx context.Context) error { return p.inner.
 // landlordUnitsRead and landlordLeaseApplicationsRead.
 func (p *ProtectedAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) {
 	return p.inner.ListKeys(ctx)
+}
+
+// ListKeysWhere delegates the partition-scoped listing (adapter.PartitionKeyLister)
+// to the base adapter, which applies the same live-rows condition its whole
+// listing applies.
+//
+// Re-declaring it is what makes it reachable, for the reason ListKeys above
+// gives: the pipeline reaches the partition-scoped diff through a
+// PartitionKeyLister type assertion, and a wrapper satisfies only the optional
+// interfaces it re-declares. Every lens this mechanism arms is Protected —
+// landlordLeaseApplicationsRead, landlordUnitsRead and
+// objectIdentityAttachmentsRead all activate through this wrapper — so without
+// this method the activation gate would refuse to arm the very lenses the
+// partition transport exists for.
+func (p *ProtectedAdapter) ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error) {
+	return p.inner.ListKeysWhere(ctx, fixed, prefix)
 }
 
 // GetRow delegates to the base adapter's read-back (adapter.RowReader). No

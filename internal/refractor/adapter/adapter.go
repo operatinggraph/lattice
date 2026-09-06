@@ -78,6 +78,41 @@ type PrefixKeyLister interface {
 	ListKeysPrefix(ctx context.Context, prefix string) ([]map[string]any, error)
 }
 
+// PartitionKeyLister lists the live keys of this lens's OWN rows whose key
+// columns match every entry of fixed — a subset of keyOrder. The listing is
+// exactly the partition inside the lens's ownership scope: nothing outside
+// that scope is ever returned, nothing outside the partition is ever diffed.
+//
+// It is what lets a lens whose rows PARTITION by their anchor — a composite key
+// with one column identifying the anchor and the others bound to neighbours the
+// walk reached — retract within one anchor's partition instead of diffing the
+// whole target on every event
+// (anchor-partitioned-plain-lens-retraction-design.md §3.2). Implemented by the
+// adapters a partition-armed lens can activate against; a target whose listing
+// cannot be scoped this way simply does not implement it, and the activation
+// gate then refuses to arm the lens rather than letting it seed with nothing
+// able to scope its diff.
+//
+// prefix carries the SAME scoping the whole-target diff runs under, because the
+// partition listing is that listing filtered: empty means the lens owns its
+// target outright and the whole listing is already its own rows; non-empty is
+// the lens's own key prefix in a target it shares, and the implementation must
+// run the prefix listing rather than the whole one. An implementation with no
+// key-prefix notion (a Postgres table, which one lens owns) refuses a non-empty
+// prefix instead of ignoring it: a caller that asked to scope and was quietly
+// given a wider listing is the failure PrefixKeyLister's own doc already names.
+//
+// An EMPTY fixed is refused for the same reason. The caller asked for a
+// partition; answering with the whole target would hand a partition-scoped
+// retraction every other anchor's rows.
+//
+// The context bound is ListKeys's: the implementation applies its own query
+// timeout on top of ctx exactly as the whole listing does, so a partition
+// listing can never outlive the deadline the unscoped one would have had.
+type PartitionKeyLister interface {
+	ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error)
+}
+
 // SeqGuarded is an optional interface reporting whether an adapter's writes are
 // ordered by the projectionSeq token (Contract #6 §6.2). It exists for the one
 // caller that must decide BEFORE writing — reconciliation, which reports back

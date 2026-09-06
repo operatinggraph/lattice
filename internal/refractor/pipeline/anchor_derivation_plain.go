@@ -11,8 +11,9 @@
 // the decrypt wrapper the re-entry already runs inside — once per derived
 // anchor instead of running the unseeded evaluation.
 //
-// The narrowing LICENCE (§5: per-anchor closure, an Auditor that is enrolled,
-// unsuppressed and not stale, no $now/$projectedAt, the auth-plane exclusion)
+// The narrowing LICENCE (§5: per-anchor PARTITIONING, an Auditor that is
+// enrolled, unsuppressed and not stale, no $now/$projectedAt, the auth-plane
+// exclusion)
 // lives here too, as plainDerivationLicence, and
 // plainDerivationIndexForAct is what consults it: in `act` mode a derived
 // anchor set decides a plain lens's neighbour event only on a lens the licence
@@ -88,7 +89,7 @@ func (p *Pipeline) plainDerivedAnchorCap() int {
 // Eligible and Armed answer two different questions, and an operator needs
 // both. Eligible is the STATIC half — act mode, plus plainDerivationIndex's
 // own AST-derived conjuncts (single branch, a complete resolved rootHops, no
-// diffRetraction) — and says nothing about whether a derived set may be ACTED
+// unarmed diffRetraction) — and says nothing about whether a derived set may be ACTED
 // on: it is the property a fixed lens shape carries, independent of the
 // licence's live auditor-health conjuncts. Armed is Eligible AND
 // plainDerivationLicence: the WHOLE gate, so a lens the licence turns back —
@@ -127,7 +128,7 @@ type PlainDerivationStatus struct {
 // The licence is the dearer read — TWO independent auditor status snapshots
 // (Status() for enrolment/suppression, and a second inside Stale() for the
 // verdict clock) and THREE compiled-rule walks (ReferencesParam for "now" and
-// for "projectedAt", plus ProjectsOneRowPerAnchor) — so it is paid only once
+// for "projectedAt", plus PartitionsByAnchor) — so it is paid only once
 // Eligible has already held, and only once per lens per beat, the same order
 // as the health-entry read the caller already makes for every lens.
 //
@@ -184,10 +185,13 @@ func (p *Pipeline) PlainDerivationStatus() PlainDerivationStatus {
 //     opposite of what deriving was for. No corpus lens has a `*`-sigil anchor
 //     today (hopindex.go's Expanded/LabelExpand pair), so this refuses a shape
 //     nothing shipped yet relies on;
-//   - !p.diffRetraction — a per-anchor seeded row set would read to
-//     applyDiffRetraction as "every OTHER anchor's rows are gone" (§3's
-//     grounding ledger; the same conjunct seedAnchorFor already enforces at
-//     pipeline.go's seedAnchorFor, inherited here rather than re-derived).
+//   - no UNARMED target-diff retraction — a per-anchor seeded row set would
+//     read to applyDiffRetraction's whole listing as "every OTHER anchor's rows
+//     are gone". A lens whose partition-scoped diff IS armed
+//     (Pipeline.partitionArmed) diffs within the anchors an evaluation covered
+//     instead, so the same row set is exact and the conjunct does not refuse it.
+//     It is the same conjunct seedAnchorFor already enforces (pipeline.go),
+//     inherited here rather than re-derived.
 //
 // There is no "anchor label == enumerator's actor type" conjunct to carry
 // from derivationIndex: the terminus's OWN label IS the anchor label the
@@ -220,10 +224,32 @@ func (p *Pipeline) plainDerivationIndexRefusal(rs ruleState) string {
 	if rs.rootHops.AnchorIsExpanding() {
 		return "its anchor position carries the taxonomy-expansion sigil, so a derived anchor's re-entry would miss its own seed"
 	}
-	if p.diffRetraction {
-		return "it uses target-diff retraction, whose whole-key-set semantics a per-anchor seeded row set would misread"
+	if p.diffRetraction && !p.partitionArmed(rs) {
+		return p.unarmedDiffRetractionRefusal(rs)
 	}
 	return ""
+}
+
+// unarmedDiffRetractionRefusal names WHICH condition leaves a target-diff lens
+// unable to act on a derived anchor set.
+//
+// The declaration alone does not say: a lens whose rows partition by its anchor
+// CAN be narrowed, and what refuses one is then the plane it projects onto or
+// the target it writes to. A single sentence about whole-key-set semantics would
+// send an operator to the cypher for a lens whose semantics are per-partition,
+// which is the one place the answer is not.
+//
+// The conjuncts are asked in the order they can be acted on: the rule's own
+// shape first (an authoring answer), then the activation-bound half (a
+// deployment answer).
+func (p *Pipeline) unarmedDiffRetractionRefusal(rs ruleState) string {
+	if !rs.partition.only {
+		return "it uses target-diff retraction, whose whole-key-set semantics a per-anchor seeded row set would misread, " +
+			"and its rows do not partition by anchor into a scope a narrower diff could be confined to"
+	}
+	return "its rows partition by anchor but the partition-scoped diff is not armed for it — it projects onto the auth plane, " +
+		"or its target cannot list one partition and read a row back, so the only diff available to it is the whole one a " +
+		"per-anchor seeded row set would misread"
 }
 
 // seedMultiPosition reports whether a plain lens's anchor label — the type a
@@ -410,24 +436,38 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 //     after it presumes. In act mode plainDerivationIndexForAct has already
 //     asked it, so it never fires from inside the licence — the gate is the
 //     caller that needs it asked here.
+//
 //   - a full-engine compiled rule, without which neither closure nor the
 //     parameter walk can be asked at all.
+//
 //   - a target that can read a row back (adapter.RowReader). Required twice
 //     over: the Auditor's own enrolment needs it, and so does the zero-row
 //     Delete probe the derived retraction class rests on.
+//
 //   - exactly one derivable seed anchor label — the audit's own conjunct,
 //     carried here rather than left implicit in the auditor's enrolment. A
 //     licence reached through an enrolled audit inherits it; the GATE has no
 //     auditor to inherit it from, and a lens whose anchor pattern expands to
 //     several concrete types has no single seed a per-anchor evaluation could
 //     narrow to.
+//
 //   - no $now / $projectedAt. Both are reproduced differently by a per-anchor
 //     evaluation than by the whole-corpus rescan it replaces. A non-exhaustive
 //     walk is a REFUSAL, never a pass.
-//   - per-anchor closure, full.CompiledRule.ProjectsOneRowPerAnchor. Asked LAST
-//     because it is a fixed property of the query: reporting "not keyed by its
-//     anchor alone" only for a lens that is otherwise fully eligible is the
-//     reading an operator can act on.
+//
+//   - per-anchor PARTITIONING, full.CompiledRule.PartitionsByAnchor. Asked LAST
+//     because it is a fixed property of the query: reporting "its rows do not
+//     partition by anchor" only for a lens that is otherwise fully eligible is
+//     the reading an operator can act on.
+//
+//     It is the weaker of the two shape predicates deliberately. What a
+//     per-anchor evaluation depends on is that every row belongs to exactly one
+//     anchor and is computed from that anchor's own bindings — which is what
+//     partitioning says. Whether the row's KEY can additionally be derived
+//     read-free from the anchor is a different question, answered by
+//     ProjectsOneRowPerAnchor for the retraction transports that need a key
+//     without a walk, and a lens that partitions without closing retracts
+//     through its partition instead (§3.1).
 func (p *Pipeline) plainDerivationStaticallyEligible(rs ruleState) (eligible bool, refusal string) {
 	if reason := p.plainDerivationIndexRefusal(rs); reason != "" {
 		return false, reason
@@ -455,8 +495,8 @@ func (p *Pipeline) plainDerivationStaticallyEligible(rs ruleState) (eligible boo
 			return false, "it returns $" + param + ", which a per-anchor evaluation reproduces differently from the whole-corpus rescan it replaces"
 		}
 	}
-	if !fullCR.ProjectsOneRowPerAnchor() {
-		return false, "its rows do not partition by anchor (no key column both resolves from the anchor alone and identifies it), so a per-anchor evaluation would compute a truncated row"
+	if _, partitions := fullCR.PartitionsByAnchor(); !partitions {
+		return false, "its rows do not partition by anchor (no key column identifies the anchor, or one is an aggregate or a traversal over the row set), so a per-anchor evaluation would compute a truncated row"
 	}
 	return true, ""
 }
@@ -746,7 +786,7 @@ func (p *Pipeline) recordPlainProbeUnreadable() {
 // Increment 1 existed at all. See plainDerivationDecide for the shared
 // three-way mode switch + §4.2/§5 gate both this and
 // evaluateSeededMultiPosition run through.
-func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, bool, error) {
 	unseeded := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
 	}
@@ -778,7 +818,7 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 // vertex genuinely at the far position has no row of its own to begin with,
 // so the Delete lands on an already-absent or already-tombstoned key), but
 // worth stating rather than leaving implicit.
-func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, bool, error) {
 	narrowSeed := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, entry.CoreKVKey)
 	}
@@ -802,27 +842,31 @@ func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState
 // K-seeded evaluation — is identical and shared here so the two cannot
 // silently drift apart.
 func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry,
-	declined func() ([]ruleengine.EvalResult, error)) ([]ruleengine.EvalResult, error) {
+	declined func() ([]ruleengine.EvalResult, error)) ([]ruleengine.EvalResult, bool, error) {
 	derive := func() ([]string, bool, error) {
 		return p.deriveAnchorsForPlainVertex(ctx, rs, entry.CoreKVKey, entry.NodeLabel)
+	}
+	decline := func() ([]ruleengine.EvalResult, bool, error) {
+		results, err := declined()
+		return results, false, err
 	}
 
 	switch p.derivationMode() {
 	case DerivationModeOff:
-		return declined()
+		return decline()
 	case DerivationModeShadow:
 		results, err := declined()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		p.shadowPlainDerivation(rs, derive)
-		return results, nil
+		return results, false, nil
 	case DerivationModeAct:
 		// fall through to the act path below
 	default:
 		slog.Warn("pipeline: unknown anchor-derivation mode; using today's declined evaluation",
 			"ruleId", p.ruleID, "mode", int(p.derivationMode()))
-		return declined()
+		return decline()
 	}
 
 	idx, ready, licenceRefusal := p.plainDerivationIndexForAct(rs)
@@ -832,7 +876,7 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		// event, and counting it every event would drown the ratio the tally
 		// exists to report — the per-event walk failures and cap overflows.
 		p.noteStaticPlainDerivationRefusal(rs, licenceRefusal)
-		return declined()
+		return decline()
 	}
 	anchorLabel := idx.Labels[idx.Anchor]
 	anchors, ok, err := derive()
@@ -844,11 +888,11 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		slog.Warn("pipeline: plain anchor derivation failed; falling back to today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "err", err)
 		p.recordDerivationFellBack(p.walkIsScoped(rs))
-		return declined()
+		return decline()
 	}
 	if !ok {
 		p.recordDerivationFellBack(p.walkIsScoped(rs))
-		return declined()
+		return decline()
 	}
 	if cap := p.plainDerivedAnchorCap(); len(anchors) > cap {
 		// A fallback, not a truncation (§4.2's caps, plural): the derived set
@@ -857,10 +901,14 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 		slog.Warn("pipeline: plain anchor derivation exceeded the derived-anchor cap; using today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "derivedCount", len(anchors), "cap", cap)
 		p.recordDerivationOverCap(len(anchors), p.walkIsScoped(rs))
-		return declined()
+		return decline()
 	}
 	p.recordDerivationActed(len(anchors), p.walkIsScoped(rs))
-	return p.evaluatePlainDerivedAnchors(ctx, rs, anchors, anchorLabel)
+	results, aerr := p.evaluatePlainDerivedAnchors(ctx, rs, anchors, anchorLabel)
+	if aerr != nil {
+		return nil, false, aerr
+	}
+	return results, true, nil
 }
 
 // shadowPlainDerivation runs derive on a sampled fraction of events (the SAME
@@ -1022,8 +1070,8 @@ func (p *Pipeline) noteStaticPlainDerivationRefusal(rs ruleState, licenceRefusal
 			rs.rootHops.UnresolvedExpansionPosition())
 	case rs.rootHops.AnchorIsExpanding():
 		reason = "the anchor pattern position carries the `*` taxonomy-expansion sigil — a derived anchor's re-entry would be seeded by the AST label rather than its own resolved type, and would miss its seed and fall through to a whole-corpus rescan"
-	case p.diffRetraction:
-		reason = "it uses target-diff retraction, which would read a per-anchor row set as every OTHER anchor's rows being gone"
+	case p.diffRetraction && !p.partitionArmed(rs):
+		reason = p.unarmedDiffRetractionRefusal(rs)
 	case licenceRefusal != "":
 		reason = licenceRefusal
 	default:
