@@ -92,6 +92,15 @@
           <button type="submit">Report an issue</button>
         </form>
       </div>
+      <div id="applicants-tenants" hidden>
+        <h3 class="search-group-title">Applicants &amp; tenants</h3>
+        <div class="panel-controls">
+          <span id="identities-summary" class="summary" aria-live="polite"></span>
+        </div>
+        <p id="identities-rotate-unavailable" class="hint" hidden>Re-issuing secrets isn't available here — try Loupe.</p>
+        <div id="identities-list" class="grid grid-wide"></div>
+        <div id="identities-empty" class="empty" hidden></div>
+      </div>
       <div class="panel-controls">
         <button id="reload-tasks" class="ghost">Refresh</button>
         <span id="tasks-summary" class="summary"></span>

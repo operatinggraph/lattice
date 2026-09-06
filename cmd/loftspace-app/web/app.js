@@ -860,6 +860,207 @@ async function loadIdentities() {
     state.identities = [];
   }
   renderSignedInAs();
+  renderApplicantsTenants();
+}
+
+// ---- Applicants & tenants (staff-only, within Tasks) ----
+//
+// A staff session (isStaff()) sees the whole RLS-scoped roster loadIdentities
+// already reads — this panel is the first FE surface over it beyond nameFor's
+// silent lookups. It exists to close the "can never sign in" gap: an
+// unclaimed identity's one-time claim secret (showClaimSecret) is shown once,
+// at creation, and never again — if it's lost before the person claims their
+// account, the only recovery is RotateClaimKey, which had no FE anywhere.
+
+// rotateOfferable is the pure predicate behind the "Re-issue secret" button.
+// `rotateWorks` is the caller's own answer to "does the catalog carry a
+// RotateClaimKey descriptor the shared module can actually render" — the same
+// two-part rule canCompleteOp applies to a task's Complete button — so this
+// function itself touches neither state.opCatalog nor the descriptorform
+// module and can be pinned by a standalone test.
+function rotateOfferable(identity, rotateWorks) {
+  return !!identity && identity.state === "unclaimed" && !!rotateWorks;
+}
+
+// identityStateKnown is the closed set of states identity-domain's own lens
+// ever projects (unclaimed/claimed/merged — style.css's badge.unclaimed,
+// badge.claimed, badge.merged are the only state-named badge rules it
+// carries). identityStateClass maps any other value — a state this build
+// predates, or malformed roster data — to "unknown" before it reaches an
+// element's class list, rather than letting an arbitrary string sit there.
+const identityStateKnown = new Set(["unclaimed", "claimed", "merged"]);
+function identityStateClass(rawState) {
+  return identityStateKnown.has(rawState) ? rawState : "unknown";
+}
+
+// rotatingIdentities holds the identity keys with an in-flight RotateClaimKey
+// ceremony — openRotateClaimKey adds a key before its first await and removes
+// it once the ceremony settles either way. Consulted by renderIdentityRow so
+// a repaint that lands mid-flight (openRotateClaimKey's own success path
+// calls loadIdentities, and loadTasks repaints this panel independently) does
+// not hand back a fresh, enabled button for a row already mid-submit; the
+// click handler's own synchronous button.disabled covers the narrower gap
+// before any repaint has a chance to run at all.
+const rotatingIdentities = new Set();
+
+// renderApplicantsTenants paints the panel: name + state badge for every
+// roster row, sorted by name, with a "Re-issue secret" button on the rows
+// rotateOfferable allows. Hidden entirely for a non-staff session — the same
+// isStaff() gate applyHatGating already applies to the Report-an-issue panel
+// beside it.
+function renderApplicantsTenants() {
+  const panel = $("#applicants-tenants");
+  if (!panel) return;
+  const staff = isStaff();
+  panel.hidden = !staff;
+  if (!staff) return;
+
+  const list = $("#identities-list");
+  const empty = $("#identities-empty");
+  const unavailable = $("#identities-rotate-unavailable");
+  list.innerHTML = "";
+  const rotateDesc = descriptorFor("RotateClaimKey");
+  const rotateWorks = !!rotateDesc && canRenderCatalogRow(rotateDesc);
+  unavailable.hidden = rotateWorks;
+  const sorted = [...(state.identities || [])].sort((a, b) =>
+    (a.name || "").localeCompare(b.name || ""));
+  if (sorted.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No applicants or tenants in your buildings yet.";
+    $("#identities-summary").textContent = "";
+    return;
+  }
+  empty.hidden = true;
+  for (const identity of sorted) list.append(renderIdentityRow(identity, rotateWorks));
+  const n = sorted.length;
+  $("#identities-summary").textContent = `${n} ${n === 1 ? "person" : "people"}`;
+}
+
+// renderIdentityRow builds one roster card. The name is Secure-Lens PII
+// (staff_identities.go) — set via textContent, never interpolated into
+// markup, so a name containing quote/angle-bracket characters can't break out
+// of an attribute.
+function renderIdentityRow(identity, rotateWorks) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const name = document.createElement("div");
+  name.className = "addr";
+  name.textContent = identity.name || shortKey(identity.identityKey);
+
+  const badge = document.createElement("span");
+  badge.className = "badge " + identityStateClass(identity.state);
+  badge.textContent = identity.state || "unknown";
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  actions.append(badge);
+
+  if (rotateOfferable(identity, rotateWorks)) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ghost";
+    btn.textContent = "Re-issue secret";
+    btn.disabled = rotatingIdentities.has(identity.identityKey);
+    btn.addEventListener("click", () => openRotateClaimKey(identity, btn));
+    actions.append(btn);
+  }
+
+  card.append(name, actions);
+  return card;
+}
+
+// openRotateClaimKey re-issues RotateClaimKey's one-time secret for a still-
+// unclaimed identity. It runs the shared descriptorform ceremony — the same
+// reviewed mint-and-reveal path task completion uses (submitCatalogComplete)
+// — never showClaimSecret's own hand-built overlay, which stays the
+// CreateUnclaimedIdentity mint flow's alone.
+//
+// context.row supplies the synthetic `unclaimed` column the op's own
+// dispatch.visibleWhen reads (packages/identity-domain/opmetas.go): the
+// roster this panel renders from projects `state`, not `unclaimed`, so the
+// column is reconstructed here rather than waiting on the identity-entity
+// lens the op-meta's own comment names as its eventual source. No `me` in the
+// context: RotateClaimKey's declared reads are payload-keyed only (the
+// target and its own aspects), so nothing here needs the signed-in staffer's
+// own key.
+async function openRotateClaimKey(identity, btn) {
+  const desc = descriptorFor("RotateClaimKey");
+  if (!desc) {
+    toast("This action can't be completed here — try Loupe.", "err");
+    return;
+  }
+  if (rotatingIdentities.has(identity.identityKey)) return;
+  const label = identity.name || shortKey(identity.identityKey);
+  if (!confirm("Re-issue the claim secret for " + label + "? The old one stops working.")) return;
+
+  // The guard covers only the risky window a double-click can reach — from
+  // here through submitOp settling, the stretch that can mint a second
+  // secret. It is released the instant that window closes (including on
+  // every early return inside it) rather than held through revealCeremonySecret
+  // and loadIdentities below: those run after the write's outcome is already
+  // known, so a released, freshly-clickable button never races them, and
+  // holding the guard through loadIdentities' own repaint of this row would
+  // leave the NEW button element stuck disabled — this function's `btn`
+  // reference points at the old one loadIdentities just replaced.
+  rotatingIdentities.add(identity.identityKey);
+  if (btn) btn.disabled = true;
+  const release = () => {
+    rotatingIdentities.delete(identity.identityKey);
+    if (btn) btn.disabled = false;
+  };
+
+  let handle;
+  try {
+    const { renderOpForm } = await loadDescriptorform();
+    handle = renderOpForm(
+      desc,
+      { target: identity.identityKey, row: { unclaimed: identity.state === "unclaimed" } },
+      document.createElement("div")
+    );
+  } catch (e) {
+    release();
+    toast("Could not re-issue: " + e.message, "err");
+    return;
+  }
+  if (!handle) {
+    release();
+    toast("This action can't be completed here — try Loupe.", "err");
+    return;
+  }
+
+  let envelope, reveal;
+  try {
+    ({ envelope, reveal } = await handle.submit());
+  } catch (e) {
+    release();
+    toast(e.message || String(e), "err");
+    return;
+  }
+
+  let reply;
+  try {
+    reply = await submitOp(envelope);
+  } catch (e) {
+    // submitOp threw rather than replying with a status: the request may
+    // never have reached the Processor, or it may have committed and the
+    // failure happened on the way back (a Gateway 5xx, a dropped
+    // connection) — the old secret can already be dead with the new one
+    // never shown. Say so in revealCeremonySecret's own "withheld"
+    // vocabulary rather than asserting the write did not land.
+    release();
+    toast("Could not confirm the re-issue reached the server — it may have landed, in which case the old secret is already dead and the new one was never shown. Check the roster, and issue a fresh one if it did.", "err");
+    return;
+  }
+  release();
+
+  if (reply && reply.status === "rejected") {
+    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+    toast("Could not re-issue — " + msg, "err");
+    return;
+  }
+  revealCeremonySecret(reveal, reply);
+  await loadIdentities();
 }
 
 // renderSignedInAs shows who the session belongs to, resolved to a name once the
@@ -926,11 +1127,18 @@ function applyHatGating() {
   if (toggle) toggle.hidden = !landlord;
   const modeBar = document.querySelector(".mode-toggle");
   if (modeBar) modeBar.hidden = !landlord;
+  // The New-applicant mint submits an identity-domain op whose standing grant
+  // goes to the front/back-of-house and operator roles, never to a landlord
+  // holding only `manages` (packages/identity-domain/permissions.go). The
+  // button follows the grant: it is offered to the staff hat (a `worksAt`
+  // anchor, the same predicate the Report-an-issue panel uses), so no session
+  // is handed a form whose only outcome is a server refusal.
   const np = $("#new-applicant");
-  if (np) np.hidden = !landlord;
+  if (np) np.hidden = !isStaff();
   if (!landlord && state.mode === "landlord") state.mode = "applicant";
   const reportIssuePanel = $("#report-issue");
   if (reportIssuePanel) reportIssuePanel.hidden = !isStaff();
+  renderApplicantsTenants();
   renderSignedInAs();
   applyMode();
 }
@@ -1988,6 +2196,11 @@ async function loadTasks() {
   // loaded too: renderTaskCard joins t.scopedTo against them to discriminate
   // two same-op tasks (e.g. two "Sign lease" tasks for different units).
   await Promise.all([loadOpCatalogQuiet(), loadDescriptorformQuiet(), loadApplicationsQuiet()]);
+  // The Applicants & tenants panel's "Re-issue secret" offer depends on the
+  // same catalog + module load as the task cards' own Complete button — it
+  // is repainted here rather than only from loadIdentities so it picks up a
+  // catalog/module that was still loading when the roster first rendered.
+  renderApplicantsTenants();
   try {
     await loadTasksQuiet();
   } catch (e) {

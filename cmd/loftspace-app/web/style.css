@@ -156,6 +156,9 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .badge.complete { color: var(--green); border-color: var(--green); }
 .badge.cancelled { color: var(--text-dim); border-color: var(--border); }
 .badge.expired { color: var(--red); border-color: var(--red); }
+.badge.unclaimed { color: var(--yellow); border-color: var(--yellow); }
+.badge.claimed { color: var(--green); border-color: var(--green); }
+.badge.merged { color: var(--text-dim); border-color: var(--border); }
 
 .empty {
   color: var(--text-dim);
