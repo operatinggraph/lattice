@@ -153,6 +153,68 @@ func TestDeriveStatement_CreditsAgeOffTheOldestDebitFirst(t *testing.T) {
 	}
 }
 
+// TestDeriveStatement_PrepaidCreditCarriesForward pins the live Riley Chen
+// shape: a credit posted before any debit exists has nothing to offset yet,
+// so it must carry forward and prepay the next debit rather than vanishing —
+// the debit it prepays must not become an aged, overdue balance later.
+func TestDeriveStatement_PrepaidCreditCarriesForward(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "credit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 1425, PostedAt: "2026-08-28T23:50:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1425, now)
+	if due != "2026-09-12T23:50:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-12T23:50:00Z (aged from the Aug 28 debit, not the prepaid Aug 2 one)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0 (the Aug 1 credit prepaid the Aug 2 debit), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_OverpaymentPrepaysLaterCharges proves a credit that
+// outruns the open-debit queue carries its unapplied surplus forward to
+// prepay whichever debits arrive next, in order — not just a credit that
+// arrives with no debit open yet.
+func TestDeriveStatement_OverpaymentPrepaysLaterCharges(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1425, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "credit", AmountCents: 5000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 3000, PostedAt: "2026-08-03T00:00:00Z"},
+		{Type: "debit", AmountCents: 2000, PostedAt: "2026-08-28T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1425, now)
+	if due != "2026-09-12T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-12T00:00:00Z (the Aug 3 debit fully prepaid, 575 of the Aug 28 debit prepaid, oldest open debit is Aug 28)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_PartialPrepayThenLaterCreditFIFO proves a surplus
+// carried from an early credit and a later credit clearing an old debit's
+// remainder compose correctly — the FIFO queue still ages off the true
+// oldest open debit after both.
+func TestDeriveStatement_PartialPrepayThenLaterCreditFIFO(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "credit", AmountCents: 500, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 700, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 500, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 700, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (aged from Aug 20, the Aug 2 remainder cleared by the Aug 21 credit)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0, got overdue=%v days=%d", overdue, days)
+	}
+}
+
 func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
 	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "not-a-date"}}
 	due, overdue, days := deriveStatement(rows, 4750, time.Now())

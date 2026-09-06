@@ -201,9 +201,13 @@ func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
 // OLDEST still-open debit first (FIFO aging, mirroring how a real statement
 // ages a balance), so the survivor at the front of the queue is the charge
 // that has actually been sitting unpaid the longest — not just the most
-// recent charge. A zero/credit balance has nothing to age and returns no due
-// date. A malformed postedAt on the oldest open debit fails closed (no due
-// date) rather than guessing.
+// recent charge. A credit posted ahead of any open debit, or one that
+// outruns the whole open-debit queue, carries its unapplied remainder
+// forward as surplus and prepays whichever debits arrive next, in order —
+// so a charge that was already paid for by an earlier credit never ages as
+// if it were the oldest open balance. A zero/credit balance has nothing to
+// age and returns no due date. A malformed postedAt on the oldest open
+// debit fails closed (no due date) rather than guessing.
 func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (dueDate string, isOverdue bool, daysOverdue int) {
 	if balanceCents <= 0 {
 		return "", false, 0
@@ -213,10 +217,18 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 		remaining int64
 	}
 	var open []openDebit
+	var surplus int64
 	for _, r := range rows {
 		switch r.Type {
 		case "debit":
-			open = append(open, openDebit{postedAt: r.PostedAt, remaining: r.AmountCents})
+			amount := r.AmountCents
+			if surplus >= amount {
+				surplus -= amount
+				continue
+			}
+			amount -= surplus
+			surplus = 0
+			open = append(open, openDebit{postedAt: r.PostedAt, remaining: amount})
 		case "credit":
 			remaining := r.AmountCents
 			for remaining > 0 && len(open) > 0 {
@@ -228,6 +240,7 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 					open = open[1:]
 				}
 			}
+			surplus += remaining
 		}
 	}
 	if len(open) == 0 {
