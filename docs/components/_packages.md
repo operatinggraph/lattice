@@ -512,7 +512,10 @@ mechanizes it (name the gate, strike the entry).
   revision only for keys a DISPATCHER declared, and step 8's own prior-document read happens *after* the
   script filtered the array, so it closes the window it measures rather than the one that matters. Both
   ops now pin, each proven by dropping the pin and watching the racing write be accepted instead of
-  conflicting. **Mechanize on the next sighting.**
+  conflicting. **Mechanize on the next sighting.** Third sighting (café `RefundCafeCharge`, 2026-09-05):
+  a refund ceiling computed from a paged `reverses` enumeration let two concurrent refunds jointly exceed the
+  charge — closed by keeping the tally as a field on the reversed charge's own declared `.entry` read and
+  pinning the upsert to that read's revision; the enumeration-shaped cap is the tell.
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -552,6 +555,13 @@ mechanizes it (name the gate, strike the entry).
   on the SUCCESS path, so a denial is visible instead of swallowed.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
 
+- **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
+  `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
+  label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
+  `lint-lens-anchors` or the app tests notices. Minted: café `cafeLedgerHistory` refund columns (2026-09-05) — CI
+  reddened on three pins after a green local run of every package gate. Check: any edit to a lens `Spec` runs
+  `go test ./internal/refractor/ -run 'TestCorpus|Census' -count=1` before merge and re-pins deliberately, stating
+  in the commit why each verdict moved.
 
 ## Related contracts
 
