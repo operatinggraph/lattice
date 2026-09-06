@@ -21,16 +21,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // operator-only Charge grant existed to cover.
 //
 // OpenTab, Charge, Settle, and the menu catalog (CreateMenuItem /
-// RetireMenuItem) additionally grant `frontOfHouse` at scope=any — the POS
-// beat the package doc above already describes as the trusted-tool app's
-// job, and running the catalog is the same front-desk beat (the shipped
-// Manage Menu tab). Naming the role makes that posture honest: the shipped
-// café FE submits as `operator` (root-equivalent) today, and `frontOfHouse`
-// reaches exactly the six ops below and nothing else. The catalog grant is
-// workplace-confined in the script (menuItemDDLScript, mirrors tabDDLScript's
-// require_workplace idiom) — a location's OWN staff manage its menu, not
-// staff at another building; the self-service Charge derivation still trusts
-// a live menuItem's .price regardless of who created it.
+// RetireMenuItem / SetMenuItemLocation / UpdateMenuItem) additionally grant
+// `frontOfHouse` at scope=any — the POS beat the package doc above already
+// describes as the trusted-tool app's job, and running the catalog is the
+// same front-desk beat (the shipped Manage Menu tab). Naming the role makes
+// that posture honest: the shipped café FE submits as `operator`
+// (root-equivalent) today, and `frontOfHouse` reaches exactly the ops below
+// and nothing else. The catalog grant is workplace-confined in the script
+// (menuItemDDLScript, mirrors tabDDLScript's require_workplace idiom) — a
+// location's OWN staff manage its menu, not staff at another building; the
+// self-service Charge derivation still trusts a live menuItem's .price
+// regardless of who created it.
 //
 // VoidCharge (corrects a mis-tapped charge) grants ONLY `operator` +
 // `frontOfHouse`, at scope=any — no `consumer` grant, unlike its three
@@ -111,6 +112,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "SetMenuItemLocation",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to relocate a menu item to a new place, confined to the NEW workplace (the item's own served-at link may already be dead — this op's repair case).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "UpdateMenuItem",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to rename and/or reprice a catalog item, confined to the item's own served-at workplace — a rename and a reprice are the same act on the same .price aspect, so one op covers both.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 	}

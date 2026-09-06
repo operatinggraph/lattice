@@ -1,6 +1,7 @@
 // Package cafeledger is the Café house-tab payment ledger: a per-lease
-// financial account that records café charges (settled tabs) and payments as
-// an append-only transaction history, never a mutable running total.
+// financial account that records café charges (settled tabs), payments and
+// refunds as a transaction history no posted entry's money fields are ever
+// rewritten in.
 //
 // It declares:
 //
@@ -22,16 +23,42 @@
 //     unlike loftspace-ledger/clinic-ledger which anchor different ones.
 //
 //   - The `cafetransaction` vertex type (DDL `cafetransaction`) —
-//     DebitAccount (a charge: a settled café tab) and CreditCafeAccount (a
-//     payment received) each mint vtx.cafetransaction.<NanoID> (root data {}
-//     per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
-//     linked to the account via postedTo. The ledger is append-only: a
-//     balance is derived by summing entries (the cafeLedgerHistory lens),
-//     never stored as a mutable aspect — so concurrent debits/credits never
-//     race a read-modify-write.
+//     DebitAccount (a charge: a settled café tab), CreditCafeAccount (a
+//     payment received) and RefundCafeCharge (a charge given back) each mint
+//     vtx.cafetransaction.<NanoID> (root data {} per D5) with a .entry aspect
+//     {type, amountCents, memo?, postedAt}, linked to the account via
+//     postedTo. The DISPLAYED balance is derived by summing entries (the
+//     cafeLedgerHistory lens) and stays the display source of truth. That is
+//     also why a refund is an ordinary credit entry plus a `reverses` link to
+//     the charge it gives back, rather than a third entry type: the link
+//     carries the correction's identity, so every balance consumer keeps
+//     summing two kinds of entry and none of them has to learn a third. Two
+//     tallies are maintained: `refundedCents` on a charge's own .entry aspect
+//     — the refund ceiling, upserted under a compare-and-set on the revision
+//     that aspect was hydrated at, so two refunds racing the same charge
+//     serialize instead of jointly overrunning it — and the account's own
+//     .balance aspect below.
 //
-//   - The `cafeLedgerHistory` lens (one row per transaction) the house-tab
-//     history FE reads (P5).
+//   - The `cafeAccountBalance` aspect type (DDL `cafeAccountBalance`) —
+//     vtx.cafeaccount.<NanoID>.balance = {balanceCents}, minted at zero by
+//     CreateAccount and moved by the signed amount by every posted entry, via
+//     a bare update the Processor auto-conditions on the revision it hydrated
+//     at, so concurrent entries serialize and retry rather than dropping one.
+//     That conditioning depends on the key being declared, and the transaction
+//     DDL's own `derive_reads` declares it on every dispatch rather than
+//     trusting the submitter to (every dispatcher declares it in optionalReads
+//     as well). It exists so CreditCafeAccount can cap a payment at what the
+//     account actually owes without replaying a long house tab — the cap binds
+//     every leg, resident scope=self and staff scope=any alike, since no
+//     payment rail witnesses either. RefundCafeCharge maintains it but is not
+//     bounded by it: its ceiling is the reversed charge's un-refunded
+//     remainder, so giving back an already-paid charge takes the balance
+//     negative. An account minted under 0.4.0's predecessors carries none until
+//     a payment computes it from the account's own history; a charge or refund
+//     against such an account posts and leaves it alone.
+//
+//   - The `cafeLedgerHistory` lens (one row per transaction, carrying the
+//     reverses and settles hops) the house-tab history FE reads (P5).
 //
 //   - The `cafeLeaseAccounts` lens (one row per lease, accountKey null until
 //     one is opened) — the FE's only way to resolve a lease's café account
@@ -59,13 +86,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.3.10",
+	Version: "0.4.0",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
-		"(DebitAccount/CreditCafeAccount, append-only entries linked to the account via postedTo) + the " +
-		"cafeLedgerHistory read-model lens (one row per transaction) + the cafeLeaseAccounts lens (lease -> account " +
-		"key lookup). CreditCafeAccount ALSO grants a resident scope=self (pay down their own house tab), ownership " +
-		"+ amount proven server-side. Depends lease-signing.",
+		"(DebitAccount/CreditCafeAccount/RefundCafeCharge, entries linked to the account via postedTo, each " +
+		"keeping the account's .balance running-total aspect in lockstep) " +
+		"+ the cafeLedgerHistory read-model lens (one row per transaction, carrying the reverses and settles hops) " +
+		"+ the cafeLeaseAccounts lens (lease -> account key lookup). CreditCafeAccount ALSO grants a resident " +
+		"scope=self (pay down their own house tab), ownership proven server-side and the amount capped at the " +
+		"account's outstanding balance on every leg. RefundCafeCharge gives " +
+		"back a posted charge as a credit anchored on that charge by a reverses link, bounded by a CAS-pinned " +
+		"refundedCents tally on that charge's own entry rather than by the balance, staff-only at every scope. " +
+		"Depends lease-signing.",
 	Depends:     []string{"lease-signing"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

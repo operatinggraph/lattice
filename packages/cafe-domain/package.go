@@ -91,7 +91,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.11.32",
+	Version: "0.12.1",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle/" +
 		"SettleStaleTab/BackfillTabStaleAt, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
 		"actorAggregate convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching " +
@@ -101,7 +101,8 @@ var Package = pkgmgr.Definition{
 		"directOp(SettleStaleTab); missing_staleat, backfills staleAt on a tab opened before that field shipped, " +
 		"orchestration-internal directOp(BackfillTabStaleAt)) + " +
 		"edge-manifest descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) so the two self-scope ops are " +
-		"Facet-renderable + the menuItem catalog (CreateMenuItem/RetireMenuItem/SetMenuItemLocation, the " +
+		"Facet-renderable + the menuItem catalog (CreateMenuItem/RetireMenuItem/SetMenuItemLocation/" +
+		"UpdateMenuItem, the " +
 		"menuCatalog lens) a " +
 		"Charge — self-service OR staff POS alike — can bind against by naming menuItemKey, deriving " +
 		"amountCents from a catalog entry rather than trusting a caller-supplied number; a staff Charge with " +

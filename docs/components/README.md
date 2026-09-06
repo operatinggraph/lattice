@@ -85,6 +85,8 @@ choices live HERE. Per-package capability definitions live under
 
 **Experience layer**
 
+- [Vertical apps](./vertical-apps.md) — the four reference-vertical front-ends (`cmd/<x>-app`): P5 lens reads,
+  descriptor-driven staff forms, per-workplace confinement; carries the FE "Review keeps catching" dossier.
 - [Loupe](./loupe.md) — the internal view-and-control console: browse Core KV, drive
   the component control planes, submit DDL-driven ops, install packages, upload blobs;
   a trusted single-identity, loopback-bound, auth-less inspector (the one application

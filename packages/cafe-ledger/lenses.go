@@ -24,8 +24,9 @@ const LeaseAccountsBucket = "cafe-lease-accounts"
 // per posted transaction, flattening the .entry aspect + the account/lease
 // it posted to into a query-optimized read-model row — the FE derives a
 // running balance client-side by summing amountCents, positive for debit,
-// negative for credit, over rows for a given leaseAppKey/accountKey; the
-// ledger itself never stores a mutable running total) and
+// negative for credit, over rows for a given leaseAppKey/accountKey — this
+// independent sum is the DISPLAY source of truth, never the account's own
+// .balance authorization cache, which no lens reads) and
 // cafeLeaseAccounts (the lease -> account key lookup, since the account key
 // is no longer derivable). Prefixed like the package's DDLs (ddls.go): a
 // Lens canonicalName is global across every installed package, and
@@ -54,16 +55,31 @@ func Lenses() []pkgmgr.LensSpec {
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to
 // the account and heldFor to the leaseapp so the FE can filter/group by
-// leaseAppKey with no extra hop. Every MATCH is REQUIRED (not OPTIONAL): a
+// leaseAppKey with no extra hop. Those hops are REQUIRED (not OPTIONAL): a
 // transaction projects a row only when it is genuinely posted to a live
 // account held for a live lease (the normal shape every
-// DebitAccount/CreditCafeAccount commit produces). The per-row key is the
-// transaction key (the IntoKey default), so the read model is keyed by
-// vtx.cafetransaction.<id>; transactionKey repeats it in the body for the
-// reader.
+// DebitAccount/CreditCafeAccount/RefundCafeCharge commit produces). The
+// per-row key is the transaction key (the IntoKey default), so the read model
+// is keyed by vtx.cafetransaction.<id>; transactionKey repeats it in the body
+// for the reader.
+//
+// The last two hops ARE optional, and both are anchor-rooted out-hops (no new
+// anchor, still partitionable by the transaction):
+//
+//   - reverses, present only on a refund, names the charge being given back.
+//     It is what lets a statement say "this line is a correction of that one"
+//     instead of rendering a refund identically to cash the resident handed
+//     over — the entry itself is an ordinary credit, deliberately, so every
+//     balance consumer sums it unchanged.
+//   - settles, present only on a charge posted by the cafeTabSettlement
+//     playbook, names the tab it settled. It is what tells a reader which
+//     debits are refundable café charges at all: a hand-posted debit with no
+//     tab behind it has no counter transaction to correct.
 const ledgerHistorySpec = `MATCH (t:cafetransaction)
 MATCH (t)-[:postedTo]->(a:cafeaccount)
 MATCH (a)-[:heldFor]->(l:leaseapp)
+OPTIONAL MATCH (t)-[:reverses]->(rt:cafetransaction)
+OPTIONAL MATCH (t)-[:settles]->(tb:tab)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -72,7 +88,9 @@ RETURN
   t.entry.data.type AS type,
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
-  t.entry.data.postedAt AS postedAt`
+  t.entry.data.postedAt AS postedAt,
+  rt.key AS reversesKey,
+  tb.key AS tabKey`
 
 // leaseAccountsSpec projects one row per lease — the anchor is the lease
 // (not the account), so a lease with no café account yet still gets a row

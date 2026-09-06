@@ -151,6 +151,19 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .badge.open { color: var(--accent); border-color: var(--accent); }
 .badge.settled { color: var(--yellow); border-color: var(--yellow); }
 .badge.posted { color: var(--green); border-color: var(--green); }
+.badge-refund {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+  font-family: system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
 
 .empty {
   color: var(--text-dim);
@@ -180,6 +193,17 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-entry { font-size: 12px; font-family: var(--mono); }
 .ledger-entry.debit { color: var(--red); }
 .ledger-entry.credit { color: var(--green); }
+/* A refund is a credit in the arithmetic but not in the reading: it is the
+   café giving money back, not the resident handing money over. It keeps the
+   credit colour so the sign still reads at a glance, and adds the refund
+   badge + the line naming the charge it reverses to say which. */
+.ledger-entry.refund .refund-of { color: var(--text-dim); font-style: normal; }
+/* How much of a charge has already been given back, annotating the CHARGE's
+   own line — dimmed, because it qualifies the amount beside it rather than
+   restating it. */
+.ledger-entry .refund-note { color: var(--text-dim); }
+.ledger-entry-actions { margin-left: 8px; }
+.ledger-entry-actions button { font-size: 11px; padding: 2px 8px; }
 
 .arrears-row { cursor: default; padding: 4px 6px; border-radius: 4px; }
 .arrears-row .arrears-overdue { color: var(--red); font-weight: 600; }

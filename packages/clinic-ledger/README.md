@@ -1,6 +1,6 @@
 # clinic-ledger
 
-The Clinic patient payment ledger (v0.1.0) — a per-patient financial account that records charges
+The Clinic patient payment ledger (v0.3.0) — a per-patient financial account that records charges
 (copays, invoice lines) and payments as an **append-only** transaction history. The account also
 carries a maintained `.balance` aspect (`{balanceCents}`) — an O(1) authorization cache kept in
 lockstep with every posted entry via an auto-conditioned, retry-eligible update (no explicit
@@ -72,6 +72,44 @@ race a silent read-modify-write. This is what lets a self-scoped `ClinicCreditAc
 owed" in O(1) instead of replaying the account's full transaction history — a heavy self-pay account
 was blowing the Starlark wall budget on that replay before this cache existed.
 
+Being a *declared* read is the whole basis of that conditioning, and `contextHint` is
+submitter-supplied and never enforced — a client that simply omitted the key would get a live read
+and an **unconditioned** update, and two concurrent entries would each write their own total over the
+other. So the transaction DDL declares the key itself: `derive_reads(op)` (Contract #2 §2.5 class
+(g)) returns `<accountKey>.balance` under `optionalReads` at the head of step 4 for every dispatch of
+both ops. The dispatchers' own static declarations (`opmetas.go`, `targets.go`) document the read
+set; `derive_reads` guarantees it.
+
+### The amount cap, and who it binds
+
+A **self-scoped** (patient) `ClinicCreditAccount` may never exceed the account's outstanding
+`.balance`, and is refused outright when nothing is owed — nothing on this platform witnesses that a
+self-submitted payment actually happened, so the amount is as much the attack surface as the account
+named. Both refusals spell the amounts as dollars and carry no entity key: they are toasted verbatim
+at the patient. A **staff** credit or waiver is not capped — it records a decision the clinic made,
+and the reversal `clinicNoShowSettlement` dispatches gives back a charge that may already have been
+paid, so both may legitimately take the balance negative.
+
+The ownership proof runs before the balance is read, which is what keeps a scope=self holder from
+naming a stranger's account and making the server walk that account's history.
+
+### Accounts opened before `.balance` existed
+
+`ClinicCreateAccount` mints the aspect, so the legacy set is closed. An account in it carries no
+`.balance` at all — hence `optionalReads` rather than `reads`, since a required read would
+HydrationMiss-reject every entry against it. Only a **self-pay** pays the one-time bounded replay
+(10 pages of 50 `postedTo` entries) that computes such an account's balance, because a self-pay is
+the only leg whose cap needs the number; exceeding that budget refuses the payment rather than
+seeding a partial sum. A charge, a staff payment and a waiver against a legacy account post normally
+and write no `.balance`, so the account stays legacy until a self-pay first touches it — and that
+replay sums the whole history, those later entries included. That also keeps the unattended
+`clinicNoShowSettlement` dispatches off the replay path entirely.
+
+A *tombstoned* `.balance` is a different absence from a missing one: a create against a tombstone is
+refused (Contract #3 §3.3), so only a genuinely absent key is minted and a tombstoned one is revived
+by the update. A document of any other class under that key is refused (`InvalidState`) rather than
+read as a number.
+
 ## Payer dimension (billing, not a claims pipeline)
 
 A `ClinicDebitAccount` charge optionally carries `billedTo` (`self` | `insurance`, defaults to `self`
@@ -93,6 +131,6 @@ only way the FE resolves a patient's account key, since it is no longer derivabl
 - **The `.balance` aspect as a display/query surface** — it is `post_entry`'s own internal
   authorization cache, never read outside this package; the FE and any auditor use
   `clinicLedgerHistory`, which stays the independently-derived source of truth.
-- **Refunds / voids as a distinct operation** — model as an offsetting
-  `ClinicCreditAccount`/`ClinicDebitAccount` entry with an explanatory `memo` today; a dedicated
-  reversal op is not yet needed.
+- **A standalone refund op** — a reversal is an ordinary `ClinicCreditAccount` carrying `reversesRef`
+  (the `reverses` link names the charge it gives back), or a `reason: "waiver"` credit when the debt is
+  forgiven rather than repaid; `clinicNoShowSettlement`'s `missing_reversal` gap posts the former itself.

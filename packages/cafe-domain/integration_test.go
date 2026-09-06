@@ -91,6 +91,8 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "BackfillTabStaleAt", Scope: "any"},
 			{OperationType: "CreateMenuItem", Scope: "any"},
 			{OperationType: "RetireMenuItem", Scope: "any"},
+			{OperationType: "SetMenuItemLocation", Scope: "any"},
+			{OperationType: "UpdateMenuItem", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -1998,6 +2000,156 @@ func TestRetireMenuItem_Tombstones(t *testing.T) {
 	if keyExists(t, ctx, conn, itemKey) {
 		t.Fatalf("RetireMenuItem must tombstone the item: %s", itemKey)
 	}
+}
+
+// TestSetMenuItemLocation_MovesServedAtLink proves SetMenuItemLocation tombstones
+// the item's CURRENT servedAt link and creates the new one, and that the op's
+// response names the NEW link key as primaryKey rather than the item vertex
+// (ddls.go's SetMenuItemLocation branch: this op never mutates the item vertex
+// or an aspect rooted on it, only its servedAt link — so the Processor's
+// write-footprint reply constraint would reject Accepted here if primaryKey
+// named anything else). There is no direct accessor for the response payload
+// in this harness, so Accepted is itself the proof (the objects-base
+// TestObject_ReattachAlreadyAlive_IsAcceptedNoOp precedent).
+func TestSetMenuItemLocation_MovesServedAtLink(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "setmenuitemloc")
+
+	locA := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJF")
+	locB := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJG")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdsetmenuitemlocsu01", "Croissant", 350, locA)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdsetmenuitemloc0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetMenuItemLocation",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-18T12:05:30Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","newLocation":"` + locB + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, locB},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	itemID := strings.TrimPrefix(itemKey, "vtx.menuitem.")
+	oldLnk := "lnk.menuitem." + itemID + ".servedAt.unit." + strings.TrimPrefix(locA, "vtx.unit.")
+	newLnk := "lnk.menuitem." + itemID + ".servedAt.unit." + strings.TrimPrefix(locB, "vtx.unit.")
+
+	oldDoc := readDoc(t, ctx, conn, oldLnk)
+	if del, _ := oldDoc["isDeleted"].(bool); !del {
+		t.Fatalf("old servedAt link must be tombstoned: %s", oldLnk)
+	}
+	if !keyExists(t, ctx, conn, newLnk) {
+		t.Fatalf("new servedAt link must exist live: %s", newLnk)
+	}
+	newDoc := readDoc(t, ctx, conn, newLnk)
+	if got, _ := newDoc["sourceVertex"].(string); got != itemKey {
+		t.Fatalf("new servedAt sourceVertex = %q, want the item %q", got, itemKey)
+	}
+	if got, _ := newDoc["targetVertex"].(string); got != locB {
+		t.Fatalf("new servedAt targetVertex = %q, want the new location %q", got, locB)
+	}
+}
+
+// TestUpdateMenuItem_RewritesNameAndPrice proves UpdateMenuItem rewrites the
+// item's .price aspect in one OCC'd upsert — a rename and a reprice are the
+// same act on the same aspect, so both fields land in a single call.
+func TestUpdateMenuItem_RewritesNameAndPrice(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "updatemenuitem")
+
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJC")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdupdatemenuitemsu01", "Croissant", 350, locKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdupdatemenuitem0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UpdateMenuItem",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-18T12:06:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Almond croissant","priceCents":425}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	priceDoc := readDoc(t, ctx, conn, itemKey+".price")
+	priceData, _ := priceDoc["data"].(map[string]any)
+	if got, _ := priceData["name"].(string); got != "Almond croissant" {
+		t.Fatalf("price.name = %q, want Almond croissant", got)
+	}
+	if got, _ := priceData["priceCents"].(float64); got != 425 {
+		t.Fatalf("price.priceCents = %v, want 425", got)
+	}
+}
+
+// TestUpdateMenuItem_RejectsNonPositivePrice supplies a LIVE item so the only
+// thing wrong with the submission is the price — otherwise the rejection
+// would prove nothing about the price check (mirrors
+// TestCreateMenuItem_RejectsNonPositivePrice's own posture).
+func TestUpdateMenuItem_RejectsNonPositivePrice(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "updatemenuitembad")
+
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJD")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdupdatemenuitembd01", "Latte", 450, locKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdupdatemenuitembad1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UpdateMenuItem",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-18T12:07:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Latte","priceCents":0}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestUpdateMenuItem_UnknownItemRejected covers an absent menuItemKey — the
+// declared .price read never hydrates, so the script's vertex_alive check
+// fails closed with UnknownMenuItem rather than reading it live.
+func TestUpdateMenuItem_UnknownItemRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "updatemenuitemunk")
+
+	itemKey := "vtx.menuitem.BBCAFEDMNMENUGHSTHJC"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdupdatemenuitemunk1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UpdateMenuItem",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-18T12:08:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Latte","priceCents":450}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
 // TestCharge_SelfOrder_DerivesAmountFromMenuItem proves a resident's

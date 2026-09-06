@@ -198,13 +198,14 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
 // loadOpCatalog.
 //
 // KNOWN_CATALOG_OPS lists every operationType this app ever reads off
-// opCatalogCache (grep for `opCatalogCache\.` / `opCatalogCache\[` — keep
-// this in sync when a new descriptor-driven form is added) — passed as
-// `?types=` so the server point-reads just these rows instead of the whole
-// cross-vertical bucket (~100 ops from every installed package, unrelated to
-// café). A name missing here simply never appears in the cache, the same
-// "not offered" outcome as a package that hasn't declared the op yet.
-const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount"];
+// opCatalogCache — passed as `?types=` so the server point-reads just these
+// rows instead of the whole cross-vertical bucket (~100 ops from every
+// installed package, unrelated to café). A name missing here simply never
+// appears in the cache, the same "not offered" outcome as a package that
+// hasn't declared the op yet — a silent failure, so
+// TestKnownCatalogOpsCoversEveryCacheRead (op_catalog_test.go) reads this
+// file and fails the build when an `opCatalogCache.<Op>` read has no entry.
+const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount", "RefundCafeCharge"];
 let opCatalogPromise = null;
 let opCatalogCache = null;
 async function loadOpCatalog() {
@@ -883,7 +884,7 @@ function renderOpenTabCard(tab, items) {
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
         '<select id="pos-catalog-item">' +
         catalog
-          .map((it) => '<option value="' + it.menuItemKey + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
+          .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
           .join("") +
         "</select>" +
         '<button id="pos-catalog-submit" type="submit">Ring Up</button>' +
@@ -1220,15 +1221,39 @@ function menuItemCard(it) {
     ? '<button type="button" data-relocate="' + escapeHtml(it.menuItemKey) + '">Relocate here</button>'
     : "";
   return (
-    '<div class="card">' +
+    '<div class="card" data-item="' + escapeHtml(it.menuItemKey) + '">' +
     badge +
-    '<div class="who">' + escapeHtml(it.name) + "</div>" +
-    '<div class="amount">' + money(it.priceCents) + "</div>" +
-    '<div class="card-actions">' + relocate +
+    '<div class="who" data-field="who">' + escapeHtml(it.name) + "</div>" +
+    '<div class="amount" data-field="amount">' + money(it.priceCents) + "</div>" +
+    '<div class="card-actions" data-field="actions">' + relocate +
+    '<button type="button" data-edit="' + escapeHtml(it.menuItemKey) +
+    '" data-name="' + escapeHtml(it.name) + '" data-price-cents="' + (it.priceCents || 0) + '">Edit</button>' +
     '<button type="button" class="danger" data-retire="' +
     escapeHtml(it.menuItemKey) +
     '">Retire</button></div>' +
     "</div>"
+  );
+}
+
+// editMenuItemForm renders the inline rename/reprice form that swaps into a
+// Manage Menu card when its Edit button is clicked — the name/price inputs
+// prefill from the card's own current row (data-name/data-price-cents),
+// mirroring the add-item form's own field-row/panel-actions layout so the
+// swapped-in card reads as the same UI, not a different surface.
+function editMenuItemForm(currentName, currentPriceCents) {
+  return (
+    '<form class="edit-menu-item-form">' +
+    '<div class="field-row">' +
+    '<div class="field"><label>Name</label><input type="text" class="edit-name" value="' +
+    escapeHtml(currentName) + '" /></div>' +
+    '<div class="field"><label>Price</label><input type="text" class="edit-price" inputmode="decimal" value="' +
+    ((currentPriceCents || 0) / 100).toFixed(2) + '" /></div>' +
+    "</div>" +
+    '<div class="panel-actions">' +
+    '<button type="submit">Save</button>' +
+    '<button type="button" class="ghost edit-cancel">Cancel</button>' +
+    "</div>" +
+    "</form>"
   );
 }
 
@@ -1268,6 +1293,40 @@ async function loadManageMenu() {
         toast(e.message, false);
         btn.disabled = false;
       }
+    });
+  });
+  body.querySelectorAll("[data-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const menuItemKey = btn.dataset.edit;
+      const card = btn.closest(".card");
+      const currentName = btn.dataset.name;
+      const currentPriceCents = Number(btn.dataset.priceCents) || 0;
+      card.innerHTML = editMenuItemForm(currentName, currentPriceCents);
+      card.querySelector(".edit-cancel").addEventListener("click", () => loadManageMenu());
+      card.querySelector("form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const name = card.querySelector(".edit-name").value.trim();
+        const cents = parseDollars(card.querySelector(".edit-price").value);
+        if (!name) { toast("Enter a name for the item.", false); return; }
+        if (cents === null) { toast("Enter a price greater than $0.", false); return; }
+        const submitBtn = card.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        try {
+          await opOrThrow(
+            {
+              operationType: "UpdateMenuItem", class: "menuitem",
+              reads: [menuItemKey, menuItemKey + ".price"],
+              payload: { menuItemKey, name, priceCents: cents },
+            },
+            "save the item"
+          );
+          toast("Saved " + name + ".", true);
+          setTimeout(loadManageMenu, 700);
+        } catch (e) {
+          toast(e.message, false);
+          submitBtn.disabled = false;
+        }
+      });
     });
   });
   body.querySelectorAll("[data-relocate]").forEach((btn) => {
@@ -1384,7 +1443,7 @@ async function renderResident() {
           ? '<form id="self-order-form" class="field-row">' +
             '<select id="self-order-item">' +
             items
-              .map((it) => '<option value="' + it.menuItemKey + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
+              .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
               .join("") +
             "</select>" +
             '<button id="self-order-submit" type="submit">Add to Tab</button>' +
@@ -1410,6 +1469,30 @@ async function renderResident() {
     );
   }
   const rows = ledger.transactions || [];
+  // A refund's own row names the charge it gives back (reversesKey — the
+  // reverses link cafe-ledger writes, projected by cafeLedgerHistory), so the
+  // statement can say WHICH charge rather than showing a credit that reads
+  // exactly like cash the resident handed over. The reversed charge is on the
+  // same account, so it is in this very list; a row whose reversesKey does not
+  // resolve here (a projection still catching up) degrades to the generic
+  // phrasing rather than printing a raw transaction key at the resident.
+  const rowByKey = {};
+  rows.forEach((r) => { rowByKey[r.transactionKey] = r; });
+  // How much of each charge has already been given back, summed from the
+  // refunds themselves — the same arithmetic the script's own ceiling uses
+  // (the charge's amountCents minus what reverses it), read off rows this view
+  // already holds rather than a column the lens would have to project. Every
+  // refund of a charge is postedTo that charge's own account, so this list is
+  // the whole population: a partial refund cannot be hiding on another
+  // statement. A refund the projection has not caught up with yet simply is
+  // not counted, which leaves the button offering MORE than the script will
+  // accept — the submit is refused (RefundExceedsCharge) rather than
+  // over-refunding, so the lag costs a retry, never money.
+  const refundedByCharge = {};
+  rows.forEach((r) => {
+    if (!r.reversesKey) return;
+    refundedByCharge[r.reversesKey] = (refundedByCharge[r.reversesKey] || 0) + (r.amountCents || 0);
+  });
   parts.push(
     '<div class="panel" style="max-width:640px;">' +
     "<h2>Café ledger</h2>" +
@@ -1418,25 +1501,64 @@ async function renderResident() {
     (rows.length
       ? '<ul class="ledger-list">' +
         rows
-          .map(
-            (r) =>
-              '<li class="ledger-entry ' + r.type + '">' +
+          .map((r) => {
+            const reversed = r.reversesKey ? rowByKey[r.reversesKey] : null;
+            const refunded = refundedByCharge[r.transactionKey] || 0;
+            const remaining = (r.amountCents || 0) - refunded;
+            // Only a charge the tab-settlement playbook posted carries a
+            // tabKey, and only such a charge is a café purchase there is
+            // anything to give back for — a hand-posted debit has no counter
+            // transaction behind it. Staff-only: RefundCafeCharge is granted
+            // to operator/frontOfHouse and to no consumer at any scope. A
+            // charge already given back in full is not offered again: the
+            // remaining amount is what the script will accept, so an
+            // exhausted charge has no refund left to start.
+            const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
+            return (
+              '<li class="ledger-entry ' + r.type + (r.reversesKey ? " refund" : "") + '">' +
+              (r.reversesKey ? '<span class="badge-refund">Refund</span>' : "") +
               (r.type === "debit" ? "+" : "−") + money(r.amountCents) +
               (r.memo ? " — " + escapeHtml(customerMemo(r.memo)) : "") +
-              " (" + r.postedAt + ")</li>"
-          )
+              " (" + r.postedAt + ")" +
+              (r.reversesKey
+                ? ' <span class="refund-of">reverses the charge of ' +
+                  (reversed ? escapeHtml(reversed.postedAt) : "an earlier charge") +
+                  "</span>"
+                : "") +
+              (refunded > 0
+                ? ' <span class="refund-note">' +
+                  (remaining > 0
+                    ? "refunded " + money(refunded) + " of " + money(r.amountCents)
+                    : "fully refunded") +
+                  "</span>"
+                : "") +
+              (refundable
+                ? '<span class="ledger-entry-actions"><button type="button" class="refund-charge-btn" data-tx="' +
+                  escapeHtml(r.transactionKey) + '" data-amount="' + remaining +
+                  '" data-posted="' + escapeHtml(r.postedAt || "") +
+                  '" data-memo="' + escapeHtml(r.memo || "") + '">Refund</button></span>'
+                : "") +
+              "</li>"
+            );
+          })
           .join("") +
-        "</ul>"
+        "</ul>" +
+        (selfMode ? "" : '<div id="refund-form-host"></div>')
       : '<p class="meta">No posted café charges yet.</p>') +
-    // Front desk records a payment handed over at the counter (staff form,
-    // unconfined by amount — cash/card is witnessed in person). A resident
+    // Front desk records a payment handed over at the counter; a resident
     // instead pays down their OWN balance self-service (self-scoped
-    // CreditCafeAccount — packages/cafe-ledger's consumer scope=self grant):
-    // ownership + the amount cap are proven server-side against the
-    // account's own heldFor→leaseapp→applicationFor topology and postedTo
-    // history, so a forged accountKey or an over-balance amount only fails
-    // closed — nothing here needs to be trusted client-side. Neither form
-    // needs the account to exist first; that only matters for what to pay.
+    // CreditCafeAccount — packages/cafe-ledger's consumer scope=self grant).
+    // Both legs are bounded server-side and identically: packages/cafe-ledger
+    // caps a payment at the account's own maintained .balance whoever
+    // submitted it, and proves the self leg's ownership against the account's
+    // own heldFor→leaseapp→applicationFor topology — so a forged accountKey
+    // or an over-balance amount only fails closed, from either form, and
+    // nothing here needs to be trusted client-side. Both forms therefore
+    // render on the same condition — an account that exists AND owes
+    // something — prefilled with what is owed and capped there by `max`. That
+    // cap is a courtesy on the typing, never the enforcement; what it buys is
+    // that neither a resident nor a staffer is offered a payment field on a
+    // settled tab, where every submit would be refused.
     (selfMode
       ? ledger.accountKey && (ledger.balanceCents || 0) > 0
         ? '<form id="self-pay-form" class="field-row" style="margin-top:14px;">' +
@@ -1447,15 +1569,20 @@ async function renderResident() {
           "</form>"
         : ""
       : ledger.accountKey
-        ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
-          '<input id="record-payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment ($)" required />' +
-          '<input id="record-payment-memo" type="text" placeholder="Memo (optional — shown to the resident)" />' +
-          '<button id="record-payment-submit" type="submit">Record Payment</button>' +
-          "</form>"
+        ? (ledger.balanceCents || 0) > 0
+          ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
+            '<input id="record-payment-amount" type="number" step="0.01" min="0.01" max="' +
+            (ledger.balanceCents / 100).toFixed(2) +
+            '" placeholder="Payment ($)" value="' + (ledger.balanceCents / 100).toFixed(2) + '" required />' +
+            '<input id="record-payment-memo" type="text" placeholder="Memo (optional — shown to the resident)" />' +
+            '<button id="record-payment-submit" type="submit">Record Payment</button>' +
+            "</form>"
+          : '<p class="meta" style="margin-top:14px;">Nothing owed on this tab — no payment to record.</p>'
         : '<p class="meta" style="margin-top:14px;">No café account for this lease yet — nothing to credit.</p>') +
     "</div>"
   );
   body.innerHTML = parts.join("");
+  wireRefundCharge(ledger.accountKey, renderResident);
   // CreditCafeAccount is dual-grant (operator/frontOfHouse scope=any PLUS
   // resident scope=self — packages/cafe-ledger's own doc comment) and
   // carries ONE descriptor written in the SELF voice — but that does NOT
@@ -1468,14 +1595,18 @@ async function renderResident() {
   // shape: selfVoice is always false here (this form only renders when
   // !selfMode, i.e., definitively staff — café has no shared self/staff
   // panel the way clinic's single patient-context view does, so there is no
-  // per-click actingAsSelf() to compute the way clinic's does). context.me
-  // is left unset: buildAuthContext ignores it whenever selfVoice is false,
-  // and the only other thing it feeds is form.mjs's own targetField/me
-  // read-fallback — harmless to skip since CreditCafeAccount declares no
-  // OptionalReads probe that would need it
-  // (packages/cafe-ledger/opmetas.go: Reads is {payload.accountKey} alone),
-  // unlike clinic's patientIdentityKey(), café has no already-loaded,
-  // cheap way to resolve "the lease's own resident identity" from this view.
+  // per-click actingAsSelf() to compute the way clinic's does).
+  //
+  // context.me is still set on this staff leg, and buildAuthContext is not
+  // why: with selfVoice false it ignores context.me entirely and attaches no
+  // authContext at all, exactly as a staff submission must. What needs it is
+  // the descriptor's ENUMERATION declaration — CreditCafeAccount declares
+  // `{actor} holdsRole out` (packages/cafe-ledger/opmetas.go), the walk the
+  // script's workplace_exempt short-circuit actually runs, and form.mjs's
+  // substituteEnumerations resolves `{actor}` off context.me and drops the
+  // entry outright when it is empty. An unset me therefore ships an envelope
+  // declaring no enumerations while the script walks anyway — an undeclared
+  // read (Contract #2 §2.5), invisible from this side.
   const paymentForm = document.getElementById("record-payment-form");
   if (paymentForm) {
     paymentForm.addEventListener("submit", async (ev) => {
@@ -1494,6 +1625,7 @@ async function renderResident() {
         if (!row) throw new Error("this action is unavailable");
         const context = {
           target: ledger.accountKey,
+          me: identityKey(),
           selfVoice: false,
           prefill: { amountCents: cents, memo: memo || undefined },
         };
@@ -1641,10 +1773,139 @@ async function renderResident() {
   }
 }
 
+// wireRefundCharge wires the front desk's per-row "Refund" buttons on the café
+// statement. Clicking one opens RefundCafeCharge's descriptor form in the
+// visible #refund-form-host mount beneath the ledger list, prefilled with the
+// charge being reversed and its full amount.
+//
+// A VISIBLE mount, unlike the payment form's detached one, because there is
+// nothing already typed for a detached mount to assemble from: a refund is
+// often only part of a charge, and its memo is written for the resident to
+// read on their own statement, so both are the staffer's to set. That makes
+// this the wireVoidChargeForm shape rather than the record-payment-form one,
+// including its inline failure rendering — this runs on every renderResident,
+// the 700ms re-render after a successful submit included, so a toast on a
+// catalog outage would stomp the green success toast still on screen.
+//
+// RefundCafeCharge is staff-standing: packages/cafe-ledger grants it to
+// operator/frontOfHouse at scope=any and to nobody at scope=self, and its
+// dispatch declares AuthContext "standing", so buildAuthContext sends no
+// authContext object at all. Hence no context.me / selfVoice wiring here —
+// and the script refuses outright any submit that does carry a target, so a
+// resident cannot reach this op even by hand.
+//
+// Nothing here is trusted: the reversed charge must be a live DEBIT posted to
+// this same account, and the amount may not exceed what that charge still has
+// un-refunded, both proven server-side against the charge's own aspects and
+// links. An edited reversesRef or an inflated amount only fails closed.
+async function wireRefundCharge(accountKey, onDone) {
+  const host = document.getElementById("refund-form-host");
+  if (!host) return;
+  const buttons = Array.prototype.slice.call(document.querySelectorAll(".refund-charge-btn"));
+  if (!buttons.length) return;
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    host.innerHTML = '<p class="meta">Refund form unavailable — ' + escapeHtml(e.message) + "</p>";
+    return;
+  }
+  const catalogRow = opCatalogCache && opCatalogCache.RefundCafeCharge;
+  if (!catalogRow) {
+    host.innerHTML = '<p class="meta">The refund form is unavailable.</p>';
+    return;
+  }
+  // The signed-in staffer's own vertex key, which is what the descriptor's
+  // `{actor}` holdsRole enumeration resolves against: form.mjs's
+  // substituteTemplate reads `{actor}` (and `{me}`) straight off context.me,
+  // and substituteEnumerations DROPS any entry whose hub does not resolve to a
+  // whole key. Leaving it unset therefore does not fall back to anything — it
+  // sends an envelope declaring no enumerations at all, and the script's
+  // actor_holds_operator kv.Links then runs as an UNDECLARED walk (Contract #2
+  // §2.5). The value is the full vtx.identity.<NanoID>, the same form the
+  // self-pay leg below and the descriptor's hub template both expect.
+  let me;
+  try {
+    me = identityKey();
+  } catch (e) {
+    host.innerHTML = '<p class="meta">Refund form unavailable — ' + escapeHtml(e.message) + "</p>";
+    return;
+  }
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      host.innerHTML =
+        '<form id="refund-form" style="margin-top:12px;">' +
+        '<p class="meta">Refunding the charge of ' + escapeHtml(btn.getAttribute("data-posted")) + ".</p>" +
+        '<div id="refund-fields"></div>' +
+        '<div class="panel-actions">' +
+        '<button id="refund-submit" type="submit">Refund</button>' +
+        '<button id="refund-cancel" type="button">Cancel</button>' +
+        "</div></form>";
+      const mount = document.getElementById("refund-fields");
+      const submitBtn = document.getElementById("refund-submit");
+      // The charge's own memo carries forward as the refund's default reason,
+      // so the credit line lands beside the charge saying what it was for
+      // rather than an unlabelled sum. The staffer overwrites it when the real
+      // reason is something else.
+      const handle = renderOpForm(
+        catalogRow,
+        {
+          target: accountKey,
+          me: me,
+          selfVoice: false,
+          prefill: {
+            reversesRef: btn.getAttribute("data-tx"),
+            amountCents: parseInt(btn.getAttribute("data-amount"), 10),
+            memo: btn.getAttribute("data-memo") || undefined,
+          },
+        },
+        mount
+      );
+      if (!handle) {
+        host.innerHTML = '<p class="meta">The refund form is unavailable.</p>';
+        return;
+      }
+      submitBtn.textContent = handle.descriptor.submitLabel;
+      document.getElementById("refund-cancel").addEventListener("click", () => { host.innerHTML = ""; });
+      document.getElementById("refund-form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        // Left disabled on success rather than re-enabled in a finally, the
+        // same reason wireVoidChargeForm leaves its own: the amount lives
+        // inside the descriptor-owned mount this function does not clear, so a
+        // re-enabled button would let a double-click inside the 700ms
+        // re-render window post a SECOND refund for the same amount. The
+        // cumulative cap catches the ones that would overshoot the charge, but
+        // a half-refund submitted twice is exactly at the cap and would land.
+        submitBtn.disabled = true;
+        try {
+          const { envelope, reveal } = await handle.submit();
+          const amountCents = envelope.payload && envelope.payload.amountCents;
+          const reply = await submitCatalogOp(envelope, "refund the charge");
+          revealCeremonySecret(reveal, reply);
+          toast("Refunded" + (amountCents ? " " + money(amountCents) : "") + ".", true);
+          setTimeout(onDone, 700);
+        } catch (e) {
+          toast(e.message, false);
+          submitBtn.disabled = false;
+        }
+      });
+    });
+  });
+}
+
+// escapeHtml renders one untrusted string safe at BOTH interpolation sites
+// this file uses: element text, and a quoted attribute value (every
+// `data-…="…"` built by string concatenation above). The quote characters
+// carry that second site: free text reaches this DOM from menu item names and
+// off-menu charge descriptions a person types, so a memo containing `"` must
+// not be able to close the attribute it sits in and open a new one. Escaping
+// all five is safe for text content too — a browser renders the entities back
+// to the literal characters — so there is one helper, not two.
 function escapeHtml(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
+  const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  const str = s === null || s === undefined ? "" : String(s);
+  return str.replace(/[&<>"']/g, (c) => map[c]);
 }
 
 // ---- init --------------------------------------------------------

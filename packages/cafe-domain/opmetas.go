@@ -5,11 +5,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for every cafe-domain op a person may trigger —
 // the tab lifecycle (OpenTab, Charge, VoidCharge, Settle) plus the menu
-// catalog (CreateMenuItem, RetireMenuItem) — mirroring clinic-domain's and
-// wellness-domain's adoption. CreateMenuItem/RetireMenuItem are staff-standing
-// like VoidCharge (no self-scope grant), so each carries one AuthContext
-// "standing" descriptor and no ownership probe — workplace confinement
-// (ddls.go) is their only guard.
+// catalog (CreateMenuItem, RetireMenuItem, SetMenuItemLocation,
+// UpdateMenuItem) — mirroring clinic-domain's and wellness-domain's adoption.
+// The four catalog ops are staff-standing like VoidCharge (no self-scope
+// grant), so each carries one AuthContext "standing" descriptor and no
+// ownership probe — workplace confinement (ddls.go) is their only guard.
 //
 // Three of the four are consumer-invocable (scope=self); VoidCharge is
 // staff-standing. Charge is BOTH: permissions.go grants it scope=any to
@@ -317,6 +317,38 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "menuItemKey",
 				TargetType:  "menuitem",
 				Reads:       []string{"{payload.menuItemKey}", "{payload.newLocation}"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "UpdateMenuItem",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Edit a catalog item",
+				Description: "Rename or reprice a self-order menu item.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Save item",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the item to edit — auto-filled from the item being viewed."},` +
+				`"name":{"type":"string","description":"Menu item display name."},` +
+				`"priceCents":{"type":"integer","minimum":1,"description":"Price in whole cents; must be positive."}},` +
+				`"required":["menuItemKey","name","priceCents"]}`,
+			FieldDescriptions: map[string]string{
+				"menuItemKey": "The catalog item being edited — auto-filled by the client from the item being viewed (dispatch.targetField), not user-entered.",
+				"name":        "The item's display name.",
+				"priceCents":  "The item's price, entered in dollars — e.g. 4.50.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "menuitem",
+				AuthContext: "standing",
+				TargetField: "menuItemKey",
+				TargetType:  "menuitem",
+				Reads:       []string{"{payload.menuItemKey}", "{payload.menuItemKey}.price"},
 				// The operator-role confinement probe (ddls.go
 				// actor_holds_operator, reached through require_workplace).
 				Enumerations: []pkgmgr.EnumerationSpec{

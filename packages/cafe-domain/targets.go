@@ -19,7 +19,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - missing_charge → directOp(DebitAccount) (cafe-ledger) over the now-real
 //     account, posting the tab's total (+ its itemsMemo as the ledger entry's
 //     memo, lenses.go) with the tabRef back-link so the lens's settles
-//     OPTIONAL MATCH converges the gap.
+//     OPTIONAL MATCH converges the gap. It declares the account's .balance
+//     aspect in optionalReads — cafe-ledger keeps that running total in
+//     lockstep with every entry posted to an account that carries one, and this
+//     dispatch's own update of it is conditioned on the revision it was read at.
 //   - missing_settle → directOp(SettleStaleTab) (this package), auto-closing
 //     a tab whose own staleAt deadline passed with no staff Settle. Routes
 //     only entityKey + its own .status aspect — SettleStaleTab is a
@@ -58,6 +61,17 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Class:  "cafetransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.totalCents", "memo": "row.itemsMemo", "tabRef": "row.tabKey"},
 					Reads:  []string{"row.accountKey", "row.tabKey"},
+					// OptionalReads: the account's own .balance aspect cafe-ledger's
+					// post_entry maintains — resolveReadKey's row.<col>.<aspect>
+					// derived-aspect form (strategist.go). It states this dispatch's
+					// read set truthfully; what GUARANTEES the key is hydrated (and so
+					// that the charge's own .balance update is auto-conditioned on the
+					// revision it was read at, Contract #3 §3.2) is cafe-ledger's own
+					// derive_reads, which returns it whatever a dispatcher declares.
+					// Absence-tolerant (not Reads) because an account minted under
+					// cafe-ledger < 0.4.0 carries no .balance and a charge against one
+					// posts without writing it — only a payment ever backfills.
+					OptionalReads: []string{"row.accountKey.balance"},
 				},
 			},
 		},

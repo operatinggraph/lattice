@@ -19,6 +19,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // also granting staff): a staff FE hardcodes its own dispatch (clinic-app's
 // front-desk billing form), while a descriptor-driven client cannot infer
 // the self path, so the self path is what the descriptor must name.
+//
+// .balance sits in OptionalReads rather than Reads on both transaction ops. It
+// is the account's maintained running total, the O(1) quantity a self-scoped
+// ClinicCreditAccount's amount cap is measured against and the one thing on the
+// account a posted entry updates — but an account minted under clinic-ledger
+// < 0.3.0 does not carry it, and a required read would HydrationMiss-reject
+// every entry against such an account instead of letting a self-pay backfill it.
+//
+// The declaration DOCUMENTS that read set; derive_reads GUARANTEES it. The
+// transaction DDL's own derive_reads(op) (scripts.go, Contract #2 §2.5 class
+// (g)) returns the same key at the head of step 4 for every dispatch of these
+// ops — a descriptor is a hint a client may ignore, and this key is what
+// auto-conditions the update the script emits for it (Contract #3 §3.2), so a
+// submitter that omitted it would otherwise get an unconditioned update and lose
+// one of two concurrent entries.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -64,17 +79,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"memo":        "Optional free text describing the charge — e.g. \"Office visit copay\".",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:         "clinictransaction",
-				AuthContext:   "standing",
-				TargetField:   "accountKey",
-				TargetType:    "clinicaccount",
-				Reads:         []string{"{payload.accountKey}"},
+				Class:       "clinictransaction",
+				AuthContext: "standing",
+				TargetField: "accountKey",
+				TargetType:  "clinicaccount",
+				Reads:       []string{"{payload.accountKey}"},
+				// The account's own .balance aspect post_entry maintains.
+				// Absence-tolerant (not Reads) so a charge against an account
+				// minted under clinic-ledger < 0.3.0 posts instead of
+				// HydrationMiss-rejecting. Such a charge leaves that account
+				// legacy rather than seeding .balance from itself alone, so this
+				// op never runs the postedTo replay and declares no enumeration
+				// for it — only a self-scoped ClinicCreditAccount does.
 				OptionalReads: []string{"{payload.accountKey}.balance"},
-				// A legacy account (no .balance aspect yet) makes post_entry
-				// walk its postedTo history once to backfill — bounded,
-				// declared here per Contract #2 §2.5 the same as any other
-				// enumeration, even though most dispatches never exercise it.
-				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
 			},
 		},
 		{
@@ -105,10 +122,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:    "clinicaccount",
 				Reads:         []string{"{payload.accountKey}"},
 				OptionalReads: []string{"{payload.accountKey}.balance"},
-				// A legacy account (no .balance aspect yet) makes post_entry
-				// walk its postedTo history once to backfill — bounded,
-				// declared here per Contract #2 §2.5 the same as any other
-				// enumeration, even though most dispatches never exercise it.
+				// A legacy account (no .balance aspect yet) makes a SELF-SCOPED
+				// payment walk its postedTo history once to backfill the number
+				// its own cap needs — bounded, and declared here per Contract #2
+				// §2.5 even though most dispatches never exercise it. The self
+				// leg is the only one that replays, which is why this op declares
+				// the walk and ClinicDebitAccount does not.
 				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
 			},
 		},

@@ -512,7 +512,10 @@ mechanizes it (name the gate, strike the entry).
   revision only for keys a DISPATCHER declared, and step 8's own prior-document read happens *after* the
   script filtered the array, so it closes the window it measures rather than the one that matters. Both
   ops now pin, each proven by dropping the pin and watching the racing write be accepted instead of
-  conflicting. **Mechanize on the next sighting.**
+  conflicting. **Mechanize on the next sighting.** Third sighting (café `RefundCafeCharge`, 2026-09-05):
+  a refund ceiling computed from a paged `reverses` enumeration let two concurrent refunds jointly exceed the
+  charge — closed by keeping the tally as a field on the reversed charge's own declared `.entry` read and
+  pinning the upsert to that read's revision; the enumeration-shaped cap is the tell.
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -552,7 +555,27 @@ mechanizes it (name the gate, strike the entry).
   on the SUCCESS path, so a denial is visible instead of swallowed.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
 
+- **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
+  `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
+  label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
+  `lint-lens-anchors` or the app tests notices. Minted: café `cafeLedgerHistory` refund columns (2026-09-05) — CI
+  reddened on three pins after a green local run of every package gate. Check: any edit to a lens `Spec` runs
+  `go test ./internal/refractor/ -run 'TestCorpus|Census' -count=1` before merge and re-pins deliberately, stating
+  in the commit why each verdict moved.
 
+- **A guard's OCC rests on whoever writes its read declaration.** `contextHint` is submitter-supplied and never
+  enforced, so a cap that reads a maintained aspect declared only in a descriptor's `optionalReads` is hydrated —
+  and its bare update revision-conditioned — only for callers who repeat the declaration; a caller that omits it
+  gets a live read and a last-write-wins update under concurrency. Minted: café `CreditCafeAccount`'s `.balance`
+  cap (2026-09-05), caught cold; clinic-ledger carried the identical shape from the precedent it mirrored. Check:
+  any key a script's correctness depends on being HYDRATED (an OCC-conditioned update, a read-before-create) is
+  returned by the script's own `derive_reads`, and one test submits with an empty `contextHint`.
+- **An amount cap written for the self-service leg leaves the staff leg unbounded, and a bounded replay hoisted
+  above the ownership proof is an amplification primitive.** The trust argument ("no rail verifies the payment")
+  is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the
+  caller may name the account lets any grant-holder bill ~500 live reads to a stranger's key. Minted: café
+  `CreditCafeAccount` (2026-09-05). Check: ask which leg the guard is NOT on, and what runs before the proof that
+  names the target.
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

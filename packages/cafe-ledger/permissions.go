@@ -6,9 +6,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // and DebitAccount are orchestrator-submitted (the operator-grant idiom every
 // ledger package uses): CreateAccount when a resident opens a house tab for the
 // first time, DebitAccount when the cafeTabSettlement playbook posts a settled
-// tab. CreditCafeAccount is the one a human runs — a payment handed over at the
-// counter — so it also grants frontOfHouse, bound by the workplace confinement
-// in transactionDDLScript to the buildings that staffer actually works at.
+// tab. CreditCafeAccount and RefundCafeCharge are the two a human runs — a
+// payment handed over at the counter, and a charge the café decides was wrong —
+// so both also grant frontOfHouse, bound by the workplace confinement in
+// transactionDDLScript to the buildings that staffer actually works at.
 //
 // The vertical prefix on CreditCafeAccount is load-bearing, not decoration —
 // do not "tidy" it back to CreditAccount. A standing grant is matched by
@@ -32,16 +33,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // CreditCafeAccount's scope=self grant (a resident paying down their own house
 // tab) mirrors loftspace-ledger's CreditAccount / clinic-ledger's
-// ClinicCreditAccount consumer scope=self grants: nothing on this platform
-// verifies a self-submitted payment actually happened (no payment-rail
-// integration — out of scope for a reference vertical), so the amount itself
-// is the attack surface, not just which account it targets. scripts.go's
-// post_entry therefore proves BOTH ownership (the account's own
-// heldFor->leaseapp->applicationFor topology, never the payload) and amount
-// (a self-credit may never exceed the account's own recomputed outstanding
-// balance, paginated + bounded, failing closed if the history is too large to
-// verify). DebitAccount gets no matching self-scope grant — a resident pays
-// down a balance, never charges one.
+// ClinicCreditAccount consumer scope=self grants. What that grant needs beyond
+// the platform's own target==actor match is an OWNERSHIP proof, and scripts.go's
+// post_entry supplies it: the account's own heldFor->leaseapp->applicationFor
+// topology must resolve to the caller, never the payload.
+//
+// The AMOUNT is a separate question and is not a property of this grant at all.
+// Nothing on this platform verifies that a payment actually happened (no
+// payment-rail integration — out of scope for a reference vertical), and that is
+// as true of an amount a front-desk staffer keys under the scope=any grant as of
+// one a resident types under scope=self. So post_entry caps a payment at the
+// account's own maintained .balance on EVERY leg — an unbounded credit either
+// way writes off debt the café is owed, and a mis-keyed one hides the resident
+// from collections behind a balance that reads as paid ahead. DebitAccount gets
+// no matching self-scope grant — a resident pays down a balance, never charges
+// one.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -67,6 +73,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "self",
 			Note:          "Grants a resident the right to credit (pay down) THEIR OWN house-tab account — the account's heldFor lease's applicationFor link must resolve to the caller's identity (scripts.go). No matching DebitAccount grant: a resident pays down a balance, never charges one.",
 			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "RefundCafeCharge",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit RefundCafeCharge (gives back a charge already posted, anchored on that charge by a reverses link). A staffer is confined to accounts whose lease sits at a location they worksAt; the operator is unconfined. There is deliberately NO consumer grant at any scope: deciding a charge was wrong is the café's call, not the person who owes it, and a resident who could refund their own charges would simply erase what they drank.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 	}
 }
