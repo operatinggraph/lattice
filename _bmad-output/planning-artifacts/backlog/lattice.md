@@ -148,6 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-06 · `7f6354f` · [CI] main un-reddened — the disarm-callback barrier test pins the epoch against the parked verdict's own epoch (a load-stall reopen had moved it before the verdict), full CI green (run 34035232472)
 - 2026-09-06 · `9dd4f45` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
 - 2026-09-06 · `5495fdc` · [Refractor] anchor-partitioned plain lens retraction SHIPPED — 5 business lenses seed on the anchor and diff its partition ([design](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md))
 - 2026-09-06 · `ffb5208` · [Processor/Loom] egress declaration admitted only from a platform engine; Loom declares one only via the externalTask constructor ([design](../../implementation-artifacts/egress-read-declaration-authority-design.md))
@@ -172,9 +173,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff 📐 filed
 - 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
 - 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
-- 2026-09-01 · `1fca25cf` · [Refractor] pattern-scoped actor walk + Postgres `GetRow` + idle-aware periodic loops + rebuild registration race — 8 stuck personal lenses drain at 10–25 msg/s
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest 2026-09-01 (triage))*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `1fca25cf`)*
