@@ -515,7 +515,9 @@ mechanizes it (name the gate, strike the entry).
   conflicting. **Mechanize on the next sighting.** Third sighting (café `RefundCafeCharge`, 2026-09-05):
   a refund ceiling computed from a paged `reverses` enumeration let two concurrent refunds jointly exceed the
   charge — closed by keeping the tally as a field on the reversed charge's own declared `.entry` read and
-  pinning the upsert to that read's revision; the enumeration-shaped cap is the tell.
+  pinning the upsert to that read's revision; the enumeration-shaped cap is the tell. Fourth sighting (clinic `BindPatientIdentity`,
+  2026-09-06): the `.demographics` rewrite used the unconditioned upsert while its own comment claimed a pin —
+  caught in the fix round; `make_aspect_update_occ` now carries `demo.revision`.
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -537,13 +539,12 @@ mechanizes it (name the gate, strike the entry).
   one arm's ceiling are still progress. Minted: the erasure residue caps (2026-08-24) were derived from a
   single arm and under-sized 2× and 3×. Check: count the sweep's `collect_*` call sites, and pin the
   constant against the script's own page constants rather than asserting it equals itself.
-- **A column's ABSENCE and its declared FALSE value are different inputs wherever a reader tests
-  declaredness** — `boolColumn` reads both to `false`, but a reader doing `if _, declared := row[col]`
-  branches on the key's presence, so dropping a constant-`false` projection is a behaviour change, not a
-  cleanup. Minted: retiring the erasure lens's `inflight_<g>` markers (2026-08-24) flipped `staleMark` for
-  three gaps; the design cited `boolColumn` and missed two consumers, one of them in the other dispatch
-  leg. Check: before dropping a projected column, grep every reader for a presence test on that key, not
-  just a value read.
+- **A standing `scope=any` write on an entity with no workplace must confine by the target's STATE MACHINE, not by
+  liveness** — a bind that accepts any live identity lets a front-desk actor attach a stranger's record to their own
+  claimed login and inherit its read grants; identity-domain already confines its front/back-of-house writes to
+  `unclaimed` for exactly this reason. Minted: clinic `BindPatientIdentity` (2026-09-06), caught cold as BLOCKING.
+  Check: for every op granted to a staff role that names an identity (or any actor-bearing vertex) by key, ask
+  which `.state` values the script refuses and whether the caller could name themselves.
 - **A new op granted to `operator` by its OWN package is not thereby callable from the console** —
   `cmd/loupe` runs as the scoped `consoleOperator` (mechanism B, "never root"), whose grants live in a
   DIFFERENT package (`console-operator`), and there is no wildcard: an op absent from that list is denied

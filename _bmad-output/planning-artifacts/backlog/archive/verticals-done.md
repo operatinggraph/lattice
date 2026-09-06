@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-05 · (re-measure at head) · Café staff `Charge` 20/20, 0 timeouts, median 86.5 ms, max 193 (resident 41 ms; staff `VoidCharge` ×30 median 55) — §9 PASS, thinnest margin of the three.
 - 2026-09-05 · (re-measure at head) · Clinic front desk `CreateAppointment` 7/7 + `SetAppointmentStatus` 8/8, 0 timeouts, medians 30/33 ms — §9 PASS.
 - 2026-09-05 · (not reproducible at head) · Café picker duplicates — both pickers already fetch the lease-confined, deduped `/api/menu?leaseAppKey=` (`0653c57a`): census 45 leases → 2 items, 10 → 0 (`missingLocation`), none doubled.
 - 2026-09-05 · `a2a449c1` · A registered patient is visible to their desk at once (`registeredAtSite` links + roster anchor) and a visit series on a tombstoned patient stops advancing (`visitSeriesDue` requires `forPatient`).
