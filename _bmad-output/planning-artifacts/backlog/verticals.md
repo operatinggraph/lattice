@@ -77,7 +77,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-09-05 · `2e73d122` · A resident who paid ahead is no longer chased for charges the credit already covered — `deriveStatement` carries the unapplied surplus forward and prepays later debits in order; the six never-in-credit live debtors read unchanged.
+- 2026-09-05 · `2e73d122` · A resident who paid ahead is no longer chased for charges the credit covered — `deriveStatement` carries the surplus forward and prepays later debits in order; six never-in-credit live debtors unchanged.
 - 2026-09-05 · `84298db5` · A settled café charge can be refunded — `RefundCafeCharge` posts a credit that `reverses` the charge (same account, debit only, CAS-pinned cap, never self-scoped); statement badge + desk Refund button; proven live.
 - 2026-09-05 · `e9cffe9e` · A voided café item drops off the permanent statement — `itemsMemo` is derived from the tab's live non-voided lines at Charge/Void/Settle; live: 3 croissants, line 1 voided, posted `Croissant, Croissant` for $7.00.
 - 2026-09-05 · `42c8eae8` · The desk is shown the claim secret it mints for a new patient (clinic) or guest (wellness) — the shared ceremony overlay on an accepted `CreateUnclaimedIdentity` reply; proven in-browser.
