@@ -147,7 +147,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-06 · `d01086e` · [Weaver] one escalation episode, three doors SHIPPED — escalateGap seam, class-declaring mark, release when the gap can act again ([design](../../implementation-artifacts/weaver-escalation-episode-three-doors-design.md))
+- 2026-09-06 · `d01086e` · [Weaver] one escalation episode, three doors SHIPPED — escalateGap seam, class-declaring mark, release when the gap can act ([design](../../implementation-artifacts/weaver-escalation-episode-three-doors-design.md))
 - 2026-09-06 · `7f6354f` · [CI] main un-reddened — the disarm-callback barrier test pins the epoch against the parked verdict's own epoch (a load-stall reopen had moved it before the verdict), full CI green (run 34035232472)
 - 2026-09-06 · `9dd4f45` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
 - 2026-09-06 · `5495fdc` · [Refractor] anchor-partitioned plain lens retraction SHIPPED — 5 business lenses seed on the anchor and diff its partition ([design](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md))
