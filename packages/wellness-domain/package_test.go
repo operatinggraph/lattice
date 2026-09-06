@@ -44,10 +44,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 20; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 8; got != want {
+	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 18; got != want {
+	if got, want := len(Package.Permissions), 19; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 12; got != want {
@@ -56,14 +56,17 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 1; got != want {
+	if got, want := len(Package.WeaverTargets), 2; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Depends), 0; got != want {
-		t.Errorf("Depends: got %d, want %d — wellness stands alone", got, want)
+	if got, want := len(Package.Depends), 1; got != want {
+		t.Errorf("Depends: got %d, want %d", got, want)
+	}
+	if len(Package.Depends) > 0 && Package.Depends[0] != "orchestration-base" {
+		t.Errorf("Depends[0]: got %q, want orchestration-base — its MarkExpired is what closes the waitlist-promotion gap on a class that has started", Package.Depends[0])
 	}
 
 	wantDDLs := []struct{ name, class string }{
@@ -97,7 +100,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessBookers", "wellnessIdentitiesRead", "wellnessOrphanedBookingSettlement"} {
+	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessBookers", "wellnessIdentitiesRead", "wellnessOrphanedBookingSettlement", "wellnessWaitlistPromotion"} {
 		if i >= len(Package.Lenses) {
 			break
 		}
@@ -129,6 +132,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"SetInstructorProfile", "any", []string{"operator", "provider"}},
 		{"BindInstructorIdentity", "any", operatorOnly},
 		{"ReleaseOrphanedBooking", "any", operatorOnly},
+		{"PromoteWaitlistedBookings", "any", operatorOnly},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Errorf("Permissions: got %d, want %d", got, len(wantPerms))

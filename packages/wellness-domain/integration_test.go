@@ -87,6 +87,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CancelBooking", Scope: "any"},
 			{OperationType: "SetBookingAttendance", Scope: "any"},
 			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
+			{OperationType: "PromoteWaitlistedBookings", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

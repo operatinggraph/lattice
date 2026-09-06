@@ -104,6 +104,21 @@ read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 # internal/refractor's own E2E fixture (real-op multiactor race) under-declares
 # the same shape identity-domain's fixtures already fix; internal/refractor is
 # off-limits for this sweep.
+# PromoteWaitlistedBookings walks the session seat dimension to find the cells
+# a waitlist can be seated into (claim_free_seats, wellness-domain/ddls.go). A
+# seat index is derived from the session's own .schedule.capacity, not from any
+# column of the lens row that dispatches the gap, so the weaver target
+# (wellness-domain/targets.go) has nothing to template a declaration off — the
+# only declarable form would enumerate all MAX_SESSION_CAPACITY=200 keys on
+# every dispatch, which is one hydration KVGet per listed key whatever the
+# class's real capacity. The read is bounded by that same ceiling and stops as
+# soon as it has one free cell per waiting candidate. It cannot be dropped in
+# favour of a blind create either: a cell a cancellation left TOMBSTONED needs
+# its revision to OCC-revive, which only the read supplies. One row per index
+# the suite actually exercises.
+read	PromoteWaitlistedBookings	vtx.session.<id>.seat1
+read	PromoteWaitlistedBookings	vtx.session.<id>.seat2
+read	PromoteWaitlistedBookings	vtx.session.<id>.seat3
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
 read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
 read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
@@ -218,6 +233,13 @@ walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
 walk	PauseVisitSeries	vtx.provider.<id> practicesAt out
 walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
+# The operator-role walk PromoteWaitlistedBookings runs to enforce its
+# Weaver-only posture (actor_holds_operator, wellness-domain/ddls.go) — the
+# identical shape ReleaseOrphanedBooking's row below records. Its hub is the
+# SUBMITTING ACTOR, not a payload or row value, so no dispatching channel names
+# it: the gap spec templates off the violation row, which carries the session,
+# never the actor Weaver happens to submit under.
+walk	PromoteWaitlistedBookings	vtx.identity.<id> holdsRole out
 walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out

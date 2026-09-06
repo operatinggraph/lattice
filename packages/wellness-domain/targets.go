@@ -2,11 +2,13 @@ package wellnessdomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): a single missing_release → directOp(ReleaseOrphanedBooking)
-// gap, mirroring clinic-ledger/targets.go's shape but self-contained inside
-// wellness-domain — it already owns both the booking DDL and the session
-// DDL, so no cross-package dependency is needed.
+// WeaverTargets returns the package's two meta.weaverTarget playbooks
+// (Contract #10 §10.8): missing_release → directOp(ReleaseOrphanedBooking)
+// over a booking whose class was called off, and missing_promotion →
+// directOp(PromoteWaitlistedBookings) over a class holding both a free seat
+// and a live waitlist. Both mirror clinic-ledger/targets.go's shape but stay
+// self-contained inside wellness-domain — it already owns both the booking
+// DDL and the session DDL, so no cross-package dependency is needed.
 //
 // Class pins the "booking" DDL: ReleaseOrphanedBooking is unique to this
 // package today, but an unpinned directOp fails closed (MissingClass)
@@ -73,6 +75,62 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 						{Hub: "row.bookingKey", Relation: "settles", Direction: "in"},
 						{Hub: "row.bookingKey", Relation: "settlesClassPrice", Direction: "in"},
 					},
+				},
+			},
+		},
+		waitlistPromotionTarget(),
+	}
+}
+
+// waitlistPromotionTarget returns the §10.8 playbook for the waitlist-promotion
+// convergence: the single missing_promotion gap →
+// directOp(PromoteWaitlistedBookings) over the SESSION, which is where the
+// condition lives — "this class has a free seat and someone still waiting" is
+// a fact about the class, not about any one booking (lenses.go).
+//
+// Class pins the "booking" DDL, which is the DDL that admits the op (its
+// PermittedCommands list, ddls.go) even though the row is anchored on a
+// session: an unpinned directOp fails closed (MissingClass) forever the moment
+// any other installed package claims the same operationType, so it is pinned
+// regardless, the same defensive shape missing_release already uses.
+//
+// Params carries only `session` — the op takes no candidate, because it is the
+// op's job to find EVERY promotable one. That is a dispatch-economics decision,
+// not a convenience: a mark holds the gap for the lease (30m default) and a
+// still-open gap does not re-dispatch until reclaim, so a per-booking op would
+// seat one member per lease window on a class that just gained four seats.
+//
+// Reads declares both keys the script hard-requires: the session vertex itself
+// (vertex_alive's UnknownSession check) and its .schedule aspect (the capacity
+// and the SessionInPast guard), via the row.<column>.<literalSuffix> template.
+// Neither is ever null on a violating row — the lens is anchored on the
+// session, and a row with no readable .schedule.capacity cannot violate.
+//
+// Enumerations puts the ONE walk the script runs on the envelope: the
+// session's forSession-in bookings, the candidate set collect_waitlist_candidates
+// pages over (ddls.go), hub-templated off the same row column the payload
+// carries. Its per-candidate .status follow-up reads are class-(e) reads off
+// that enumeration — data-derived keys no dispatcher can name. The seat-cell
+// reads claim_free_seats runs are neither: their keys are derived from the
+// session's own capacity, not from the row, so they stay bounded lazy live
+// reads inside the ≤MAX_SESSION_CAPACITY loop (the op's doc comment states the
+// bound).
+func waitlistPromotionTarget() pkgmgr.WeaverTargetSpec {
+	return pkgmgr.WeaverTargetSpec{
+		TargetID: WaitlistPromotionTarget,
+		Description: "No member waits for a seat the class already has. When a class has room — a booking " +
+			"cancelled, or its capacity raised — the people on its waitlist are given those seats, " +
+			"earliest on the list first, until the room runs out.",
+		LensRef: WaitlistPromotionTarget,
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_promotion": {
+				Action:    "directOp",
+				Operation: "PromoteWaitlistedBookings",
+				Class:     "booking",
+				Params:    map[string]string{"session": "row.sessionKey"},
+				Reads:     []string{"row.sessionKey", "row.sessionKey.schedule"},
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "row.sessionKey", Relation: "forSession", Direction: "in"},
 				},
 			},
 		},

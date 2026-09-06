@@ -136,6 +136,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"wellnessRefundSettlement":          {"g1/o1!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 1},
 	"wellnessSessions":                  {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessStudios":                   {"g0/o0!no-aggregating-item", 0, 0},
+	"wellnessWaitlistPromotion":         {"g1/o1[b] g0/o0!no-aggregating-item", 1, 1},
 }
 
 // decomposingCorpusLenses is the population whose sibling branches the executor
@@ -171,6 +172,7 @@ var decomposingCorpusLenses = []string{
 	"objectAttachments",
 	"opCatalog",
 	"renewalComplete",
+	"wellnessWaitlistPromotion",
 }
 
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
@@ -274,4 +276,5 @@ var footprintValidationVerdicts = map[string]bool{
 	"wellnessNoShowSettlement":          true,
 	"wellnessOrphanedBookingSettlement": true,
 	"wellnessRefundSettlement":          true,
+	"wellnessWaitlistPromotion":         true,
 }

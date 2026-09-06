@@ -52,11 +52,17 @@ const WellnessBookersBucket = "wellness-bookers"
 // binding Weaver reads (targets.go).
 const OrphanedBookingSettlementTarget = "wellnessOrphanedBookingSettlement"
 
+// WaitlistPromotionTarget is the §10.8 TargetID ==
+// wellnessWaitlistPromotion's OutputKeyPattern prefix — the §10.2↔§10.8
+// binding Weaver reads (targets.go).
+const WaitlistPromotionTarget = "wellnessWaitlistPromotion"
+
 // Lenses returns the package's six flat projection lenses,
 // wellnessIdentitiesRead (the one protected Postgres/RLS layer this package
-// carries), and wellnessOrphanedBookingSettlement (the missing_release
-// convergence lens targets.go's WeaverTargets dispatches
-// ReleaseOrphanedBooking over). No aggregation (no WITH) on the six flat
+// carries), and two convergence lenses targets.go's WeaverTargets dispatches
+// over: wellnessOrphanedBookingSettlement (missing_release →
+// ReleaseOrphanedBooking) and wellnessWaitlistPromotion (missing_promotion →
+// PromoteWaitlistedBookings). No aggregation (no WITH) on the six flat
 // ones, so OPTIONAL-matched neighbour bindings are live directly in RETURN —
 // the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 func Lenses() []pkgmgr.LensSpec {
@@ -167,6 +173,23 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "booking",
 				OutputKeyPattern: OrphanedBookingSettlementTarget + ".{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_release", "entityKey", "bookingKey", "sessionKey", "status", "maxretries_release"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			CanonicalName:  WaitlistPromotionTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           waitlistPromotionSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "session",
+				OutputKeyPattern: WaitlistPromotionTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_promotion", "entityKey", "sessionKey", "startsAt", "capacity", "seatedCount", "waitlistedCount", "freshUntil", "maxretries_promotion"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -517,6 +540,84 @@ RETURN
   (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (liveSessionKey = null)) AS violating,
   %d AS maxretries_release
 `, maxReleaseRetries)
+
+// waitlistPromotionSpec is the one-row-per-SESSION waitlist-promotion
+// convergence cypher: a class that has both a live waitlist and an unclaimed
+// seat is a stranded member, and the gap it opens dispatches
+// PromoteWaitlistedBookings (targets.go).
+//
+// ANCHORED ON THE SESSION, not the booking, because the condition is a
+// property of the CLASS — "are there more seats than seat-holders, with
+// someone still waiting" — and neither half is visible from one booking. The
+// seat count is an aggregate over the session's whole forSession-in booking
+// set, so this is the package's one lens that needs an AGGREGATING WITH
+// (lease-signing's leaseApplicationCompleteSpec
+// `count(DISTINCT CASE WHEN … END)` shape). Tombstoned bookings never reach
+// the aggregate: Contract #1 isDeleted read-filtering drops them from the
+// walk, so a cancelled seat frees capacity the moment its booking dies.
+//
+// THE CAPACITY COMPARISON IS THE GAP. seatedCount < capacity is the same
+// question claim_free_seats asks by enumeration (ddls.go), asked in
+// aggregate: CreateBooking claims seat cells 1..capacity, and CancelBooking's
+// own promotion walk hands a freed seat straight to the earliest waitlisted
+// booking, so the only way a seat goes free while someone waits is a path
+// that frees capacity WITHOUT freeing a seat cell — ReassignSession raising
+// `capacity` on a full class (the live case: capacity 1→5 with a
+// waitlistSlot 1 booking left untouched), or a session whose seats were
+// released by a path that never looked at the waitlist.
+//
+// BOTH COUNTS ARE OF CELL-HOLDERS, not of a status word, because a cell is
+// what the op contends for. seatedCount counts bookings carrying a
+// .status.seat: a class that ran and was then rescheduled forward carries
+// attended and noShow bookings that STILL hold their seat cells (nothing
+// releases them, and ReassignSession has no started-class guard), so counting
+// `value = 'booked'` would read those seats as free and dispatch an op that
+// then finds every cell claimed. waitlistedCount counts bookings carrying a
+// .status.waitlistSlot — exactly the population collect_waitlist_candidates
+// acts on, which skips a waitlisted status with no slot recorded.
+//
+// NO CLOCK. Following pastDueBookings (wellness-reminders) and Andrew's
+// 2026-09-01 rule that a time fact is recorded on the entity, the lens never
+// reads $now: freshUntil binds DIRECTLY to the session's own
+// .schedule.startsAt, and the gate reads the lapse the fired MarkExpired
+// records under THIS target's key on the SESSION (the row's entityKey). So a
+// class that has started is closed out by a stored fact — the timer this row
+// armed fired at startsAt, recorded byTarget.wellnessWaitlistPromotion, and
+// every later projection reads the gap shut — rather than by a clock read the
+// projection would have to re-evaluate. compareAny answers false when either
+// operand is nil, so a session no timer has fired on, and one carrying no
+// schedule at all, both read not-lapsed.
+//
+// freshUntil arms on waitlistedCount > 0 ALONE, not on the gap: a class that
+// is full today is exactly the one whose waitlist matters tomorrow, so the
+// timer must already be armed when a later cancellation or capacity raise
+// opens the seat. A session with no waitlist projects freshUntil null, which
+// cancels nothing already armed (weaver.md) — harmless, since a waitlist can
+// never appear after the class starts (JoinWaitlist's own SessionInPast
+// guard, prepare_booking_common) and the lapse the armed timer records is
+// what shuts the row anyway.
+var waitlistPromotionSpec = fmt.Sprintf(`MATCH (se:session {key: $actorKey})
+OPTIONAL MATCH (se)<-[:forSession]-(b:booking)
+WITH
+  se.key AS entityKey,
+  se.schedule.data.startsAt AS startsAt,
+  se.schedule.data.capacity AS capacity,
+  se.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
+  count(DISTINCT CASE WHEN NOT (b.status.data.seat = null) THEN b.key ELSE null END) AS seatedCount,
+  count(DISTINCT CASE WHEN NOT (b.status.data.waitlistSlot = null) THEN b.key ELSE null END) AS waitlistedCount
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS sessionKey,
+  startsAt,
+  capacity,
+  seatedCount,
+  waitlistedCount,
+  CASE WHEN (waitlistedCount > 0) AND NOT (lapsedAt >= startsAt) THEN startsAt ELSE null END AS freshUntil,
+  ((waitlistedCount > 0) AND (seatedCount < capacity) AND NOT (lapsedAt >= startsAt)) AS missing_promotion,
+  ((waitlistedCount > 0) AND (seatedCount < capacity) AND NOT (lapsedAt >= startsAt)) AS violating,
+  %[2]d AS maxretries_promotion
+`, WaitlistPromotionTarget, maxPromotionRetries)
 
 // wellnessIdentitiesReadSpec projects one row per NAMED identity — the
 // roster wellness-app resolves the signed-in actor's own name against. The

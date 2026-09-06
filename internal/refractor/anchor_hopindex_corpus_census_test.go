@@ -155,6 +155,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"wellnessClassPriceSettlement":      hopIndexed,
 	"wellnessNoShowSettlement":          hopIndexed,
 	"wellnessOrphanedBookingSettlement": hopIndexed,
+	"wellnessWaitlistPromotion":         hopIndexed,
 	"wellnessRefundSettlement":          hopIndexed,
 }
 

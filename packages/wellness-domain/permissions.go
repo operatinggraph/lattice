@@ -183,5 +183,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator alone the right to release a booking orphaned by a called-off class. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessOrphanedBookingSettlement directOp dispatch (targets.go) needs; no consumer/front-of-house path exists because the op carries no caller-supplied session to bind a self- or workplace-scope guard to.",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "PromoteWaitlistedBookings",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to seat a class's waitlist into the seats that class already has free. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessWaitlistPromotion directOp dispatch (targets.go) needs. No consumer path exists and none should: a member choosing WHICH waitlisted booking gets a seat is the queue-jumping this op exists to prevent, and the op takes no booking key to bind a self-scope guard to. No front-of-house path either — the desk already has CreateBooking for seating someone directly.",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }

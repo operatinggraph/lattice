@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.22.22
+version: 0.23.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -89,6 +89,7 @@ description: |
   and forfeits the class price only, adding no separate no-show fee.
 depends:
   - lease-signing
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: studio
@@ -163,6 +164,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: wellnessWaitlistPromotion
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: CreateStudio
       scope: any
@@ -218,9 +223,14 @@ declares:
     - operationType: ReleaseOrphanedBooking
       scope: any
       grantsTo: [operator]
+    - operationType: PromoteWaitlistedBookings
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: wellnessOrphanedBookingSettlement
       lensRef: wellnessOrphanedBookingSettlement
+    - targetId: wellnessWaitlistPromotion
+      lensRef: wellnessWaitlistPromotion
   opMetas:
     - operationType: CreateBooking
     - operationType: JoinWaitlist

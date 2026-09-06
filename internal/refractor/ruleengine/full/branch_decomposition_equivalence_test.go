@@ -209,6 +209,10 @@ type branchCorpus struct {
 	// clinicNoShowApptKey anchors clinicNoShowSettlement on an appointment
 	// already corrected off noShow with its charge already reversed.
 	clinicNoShowApptKey string
+
+	// waitlistSessionKey anchors wellnessWaitlistPromotion on a session that
+	// holds both a live waitlist and an unclaimed seat.
+	waitlistSessionKey string
 }
 
 // seedBranchCorpus writes one corpus of shape s. Every logical name is
@@ -686,6 +690,33 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	})
 	putEdge(t, reg, adjKV, "reverses", noShowCredit, noShowTx)
 
+	// wellnessWaitlistPromotion anchors on ONE session carrying both halves of
+	// its gap: a seat already held and a member still waiting, under a capacity
+	// that leaves room for them. Its single OPTIONAL branch is aggregated (two
+	// count(DISTINCT CASE …) columns over the same forSession-in walk), which is
+	// what makes it decompose — so the differential needs the branch to bind
+	// BOTH statuses, not merely to be non-empty: a corpus with only the booked
+	// booking would leave waitlistedCount 0 in both execution orders and the
+	// comparison would prove nothing about the fold. Always seeded, whatever
+	// the random shape drew, like the two blocks above.
+	wlSession := name("wlsession")
+	putVertex(t, reg, coreKV, wlSession, "session", nil)
+	putAspect(t, reg, coreKV, wlSession, "schedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": future, "endsAt": future, "capacity": 3.0,
+	})
+	wlSeated := name("wlseated")
+	putVertex(t, reg, coreKV, wlSeated, "booking", nil)
+	putAspect(t, reg, coreKV, wlSeated, "status", map[string]any{
+		"value": "booked", "rate": "standard", "seat": 1.0, "session": vtxKey(reg, wlSession),
+	})
+	putEdge(t, reg, adjKV, "forSession", wlSeated, wlSession)
+	wlWaiting := name("wlwaiting")
+	putVertex(t, reg, coreKV, wlWaiting, "booking", nil)
+	putAspect(t, reg, coreKV, wlWaiting, "status", map[string]any{
+		"value": "waitlisted", "rate": "standard", "waitlistSlot": 1.0, "session": vtxKey(reg, wlSession),
+	})
+	putEdge(t, reg, adjKV, "forSession", wlWaiting, wlSession)
+
 	return branchCorpus{
 		actorKey:            vtxKey(reg, actor),
 		leaseAppKey:         vtxKey(reg, app),
@@ -694,6 +725,7 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 		objectKey:           vtxKey(reg, obj),
 		onboardingActorKey:  vtxKey(reg, onbActor),
 		clinicNoShowApptKey: vtxKey(reg, noShowAppt),
+		waitlistSessionKey:  vtxKey(reg, wlSession),
 	}
 }
 
@@ -784,6 +816,22 @@ func listLen(row map[string]any, col string, idFields ...string) int {
 		}
 	}
 	return n
+}
+
+// intCol reads a projected integer column. The engine returns a count() as
+// int64 and a numeric literal via the parser's ParseInt path, so int/int64/
+// float64 are all accepted — the VALUE is what the evidence turns on.
+func intCol(row map[string]any, col string) int {
+	switch n := row[col].(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 // branchDifferentialSpecs are the §2 lenses this differential covers.
@@ -977,6 +1025,21 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				return n
 			}},
 
+		// wellnessWaitlistPromotion's deferred subtree is the single
+		// forSession-in booking walk, read twice by two count(DISTINCT CASE …)
+		// aggregates. Each count is its own witness — a fold that dropped the
+		// branch would zero both — and missing_promotion is the composed
+		// verdict the gap actually dispatches on, so all three are asserted.
+		{name: "wellnessWaitlistPromotion", spec: corpusSpec(t, "wellnessWaitlistPromotion"), anchor: c.waitlistSessionKey, rows: 1,
+			evidence: func(t *testing.T, row map[string]any) {
+				require.Positivef(t, intCol(row, "seatedCount"), "the seat-holding half of the forSession branch folded empty")
+				require.Positivef(t, intCol(row, "waitlistedCount"), "the waitlisted half of the forSession branch folded empty")
+				boolEvidence(t, row, "missing_promotion", true, "forSession booking")
+			},
+			content: func(row map[string]any) int {
+				return intCol(row, "seatedCount") + intCol(row, "waitlistedCount")
+			}},
+
 		// The UNANCHORED read lenses: they bind every vertex of their head's type
 		// in the KV rather than one, which is the multi-base-row shape the
 		// anchored lenses above cannot reach.
@@ -1144,7 +1207,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 		"edgeManifestStaffReadGrants", "identityAnchors", "identityErasureResidue",
 		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",
 		"leaseExpiry", "leaseRentSettlement", "myTasks", "objectAttachments", "opCatalog",
-		"renewalComplete",
+		"renewalComplete", "wellnessWaitlistPromotion",
 	} {
 		require.Truef(t, covered[name],
 			"%s decomposes in the shipped corpus but no differential in this package executes it "+

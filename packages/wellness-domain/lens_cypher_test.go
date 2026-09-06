@@ -1142,3 +1142,250 @@ func TestWellnessOrphanedBookingSettlement_NoAnchorSessionTombstoned_MissingRele
 	require.Equal(t, true, v["violating"])
 	requireIntColumn(t, v, "maxretries_release", maxReleaseRetries)
 }
+
+// projectWaitlistPromotionAt runs the anchored wellnessWaitlistPromotion spec
+// for one session, mirroring projectOrphanBookingAt's shape on the other
+// convergence lens's anchor type.
+func (f *wdFixture) projectWaitlistPromotionAt(t *testing.T, sessionName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(waitlistPromotionSpec)
+	require.NoError(t, err, "wellnessWaitlistPromotion cypher must parse on the full engine")
+	sessionKey := "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    sessionKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// promoSessionStartsAt is the schedule start every waitlist-promotion vector
+// seeds, and the deadline freshUntil binds to.
+const promoSessionStartsAt = "2026-07-08T09:00:00Z"
+
+// mkPromotionSession seeds a session vtx + its .schedule aspect. capacity < 0
+// leaves the field OFF the aspect entirely — the never-written shape, which is
+// what the capacity-null vector needs (a stored 0 is a different fact).
+func (f *wdFixture) mkPromotionSession(t *testing.T, name string, capacity int) {
+	t.Helper()
+	f.vtx(t, name, "session")
+	sched := map[string]any{"startsAt": promoSessionStartsAt, "endsAt": "2026-07-08T10:00:00Z", "name": "Vinyasa Flow"}
+	if capacity >= 0 {
+		sched["capacity"] = capacity
+	}
+	f.aspect(t, name, "schedule", "sessionSchedule", sched)
+}
+
+// mkPromotionBooking seeds a booking vtx + .status aspect + the forSession
+// edge to its session — the booking-side shape CreateBooking / JoinWaitlist
+// write, which is what the lens aggregates over. cell is the index the booking
+// holds on the session hub: it lands on .status.seat for every seat-holding
+// status (booked, attended, noShow — attendance releases no cell) and on
+// .status.waitlistSlot for a waitlisted one, which is exactly the distinction
+// the lens's two counts read.
+func (f *wdFixture) mkPromotionBooking(t *testing.T, name, status, sessionName string, cell int) {
+	t.Helper()
+	f.vtx(t, name, "booking")
+	data := map[string]any{
+		"value":   status,
+		"session": "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName],
+	}
+	if status == "waitlisted" {
+		data["waitlistSlot"] = cell
+	} else {
+		data["seat"] = cell
+	}
+	f.aspect(t, name, "status", "bookingStatus", data)
+	f.edge(t, "forSession", name, sessionName)
+}
+
+// recordPromotionLapse writes the freshnessExpiry marker MarkExpired commits
+// when the @at this row armed fires — under THIS target's byTarget key, on the
+// SESSION (the row's entityKey), the packages/orchestration-base shape.
+func (f *wdFixture) recordPromotionLapse(t *testing.T, sessionName, at string) {
+	t.Helper()
+	f.aspect(t, sessionName, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": at,
+		"byTarget":  map[string]any{WaitlistPromotionTarget: at},
+	})
+}
+
+// TestWellnessWaitlistPromotion_FullSessionWithWaitlist_NotViolatingButArmed
+// is the common case and the positive vector for freshUntil: a class with no
+// free seat strands nobody, so the gap stays shut — but the @at is armed
+// anyway, because that class's waitlist is exactly the one a later
+// cancellation or capacity raise has to be able to seat.
+func TestWellnessWaitlistPromotion_FullSessionWithWaitlist_NotViolatingButArmed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "fullsess", 1)
+	f.mkPromotionBooking(t, "seated", "booked", "fullsess", 1)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "fullsess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "fullsess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 1)
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, false, v["missing_promotion"], "every seat is claimed — nobody can be promoted")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, promoSessionStartsAt, v["freshUntil"], "the timer arms on a live waitlist alone, not on the gap")
+	requireIntColumn(t, v, "maxretries_promotion", maxPromotionRetries)
+}
+
+// TestWellnessWaitlistPromotion_FreeSeatWithWaitlist_MissingPromotion is the
+// gap the fire exists to close — the live shape a ReassignSession capacity
+// raise leaves behind: seats free, a member still waitlisted, and no
+// cancellation coming to run CancelBooking's own promotion walk.
+func TestWellnessWaitlistPromotion_FreeSeatWithWaitlist_MissingPromotion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "roomysess", 5)
+	f.mkPromotionBooking(t, "seated", "booked", "roomysess", 1)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "roomysess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "roomysess")[0].Values
+	require.Equal(t, "vtx.session."+f.ids["roomysess"], v["sessionKey"])
+	require.Equal(t, "vtx.session."+f.ids["roomysess"], v["entityKey"])
+	requireIntColumn(t, v, "capacity", 5)
+	requireIntColumn(t, v, "seatedCount", 1)
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, promoSessionStartsAt, v["startsAt"])
+	require.Equal(t, true, v["missing_promotion"], "four seats free and someone waiting")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, promoSessionStartsAt, v["freshUntil"])
+}
+
+// TestWellnessWaitlistPromotion_LapseRecorded_ClosesTheGap proves the class
+// STARTING is what shuts this row, and that it does so from a stored fact —
+// the lapse the armed @at recorded under this target's own byTarget key — not
+// from a clock the lens reads. Same inputs as the violating vector above.
+func TestWellnessWaitlistPromotion_LapseRecorded_ClosesTheGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "startedsess", 5)
+	f.mkPromotionBooking(t, "seated", "booked", "startedsess", 1)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "startedsess", 1)
+	f.recordPromotionLapse(t, "startedsess", promoSessionStartsAt)
+
+	v := f.projectWaitlistPromotionAt(t, "startedsess")[0].Values
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, false, v["missing_promotion"], "the class has begun — a seat freed now belongs to nobody on the waitlist")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"], "the deadline already fired; re-arming it would loop")
+}
+
+// TestWellnessWaitlistPromotion_NoWaitlist_NotViolating proves an empty
+// waitlist neither opens the gap nor arms the timer — the population that is
+// most of the schedule, and the vector that keeps the free-seat half of the
+// predicate from firing on its own.
+func TestWellnessWaitlistPromotion_NoWaitlist_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "quietsess", 5)
+	f.mkPromotionBooking(t, "seated", "booked", "quietsess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "quietsess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 1)
+	requireIntColumn(t, v, "waitlistedCount", 0)
+	require.Equal(t, false, v["missing_promotion"], "seats free, but nobody is waiting for one")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"], "no waitlist, nothing to arm a deadline for")
+}
+
+// TestWellnessWaitlistPromotion_TombstonedBookingNotCounted proves a cancelled
+// seat frees capacity the moment its booking dies: the tombstoned sibling
+// drops out of the aggregate (Contract #1 isDeleted read-filtering), so the
+// count is of LIVE bookings. Without this the gap would stay shut on a class
+// whose whole roster had cancelled.
+func TestWellnessWaitlistPromotion_TombstonedBookingNotCounted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "churnsess", 2)
+	f.mkPromotionBooking(t, "seated", "booked", "churnsess", 1)
+	f.mkPromotionBooking(t, "cancelled", "booked", "churnsess", 2)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "churnsess", 1)
+	f.tombstoneVtx(t, "cancelled")
+
+	v := f.projectWaitlistPromotionAt(t, "churnsess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 1)
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, true, v["missing_promotion"], "the tombstoned booking holds no seat")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessWaitlistPromotion_NoCapacity_NotViolating proves a session
+// carrying no capacity fact never violates: compareAny answers false when
+// either operand is nil, so the gap fails CLOSED rather than promoting into a
+// class whose seat count nothing states.
+func TestWellnessWaitlistPromotion_NoCapacity_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "uncappedsess", -1)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "uncappedsess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "uncappedsess")[0].Values
+	require.Nil(t, v["capacity"], "the schedule carries no capacity")
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, false, v["missing_promotion"], "no stated capacity means no provable free seat")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, promoSessionStartsAt, v["freshUntil"], "a waitlist still arms the deadline")
+}
+
+// TestWellnessWaitlistPromotion_AttendedBookingHoldsItsSeat is the vector that
+// separates the count from the status word. A class that ran and was then
+// rescheduled forward carries bookings marked attended (or noShow) that still
+// hold their seat cells — SetBookingAttendance releases nothing, and
+// ReassignSession has no started-class guard to stop the move — so counting
+// `value = 'booked'` would read those seats as free, open the gap, and dispatch
+// an op that then finds every cell claimed and declines. The count is of
+// seat-cell holders, so the class reads full.
+func TestWellnessWaitlistPromotion_AttendedBookingHoldsItsSeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "rerunsess", 2)
+	f.mkPromotionBooking(t, "seated", "booked", "rerunsess", 1)
+	f.mkPromotionBooking(t, "attendedlastrun", "attended", "rerunsess", 2)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "rerunsess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "rerunsess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 2)
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, false, v["missing_promotion"], "both cells are claimed — there is no seat to promote into")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, promoSessionStartsAt, v["freshUntil"], "the timer still arms on the live waitlist")
+}
+
+// TestWellnessWaitlistPromotion_NoBookings_NotViolating is the population every
+// freshly-created class starts in: the OPTIONAL branch binds nothing, so both
+// counts fold to 0 rather than to null, and an empty waitlist neither opens the
+// gap nor arms a deadline.
+func TestWellnessWaitlistPromotion_NoBookings_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "emptysess", 5)
+
+	v := f.projectWaitlistPromotionAt(t, "emptysess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 0)
+	requireIntColumn(t, v, "waitlistedCount", 0)
+	require.Equal(t, false, v["missing_promotion"], "an empty class strands nobody")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"], "no waitlist, nothing to arm a deadline for")
+}
