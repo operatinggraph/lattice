@@ -323,7 +323,12 @@ RETURN
 //
 // The walk is `forSession -> atLocation -> containedIn*0..7`, the same one
 // wellnessIdentitiesReadSpec's booking fan-out runs. `atLocation` is the
-// SESSION's location relation (ddls.go); a studio's own is `locatedAt`. The
+// SESSION's location relation (ddls.go); a studio's own is `locatedAt`. It is
+// the only location term here — there is no studio leg to fall back to — which
+// is exactly why the write side re-snapshots it on a studio move
+// (ReassignSession, ddls.go): a class that moved rooms is a class whose guests
+// the NEW room's desk has to settle. It survives the studio's own tombstoning
+// for the same reason (TombstoneStudio does not cascade). The
 // `*0..7` bound matches wellnessMembersSpec's for the same reason: zero-hop is
 // load-bearing (a staffer wired to the exact room matches) and the upper bound
 // is WORKPLACE_MAX_DEPTH - 1, since `*0..N` admits depths 0..N inclusive while
@@ -390,8 +395,40 @@ RETURN
 // the studio's own `locatedAt` location plus each of that location's
 // `containedIn` ancestors. A staff read boundary intersects it with the
 // caller's `worksAt` keys, which is exactly what the write side's
-// `worksAt_covers` computes by walking up from the location (ddls.go). The
-// zero-hop lower bound is load-bearing: the depth-0 entry is the studio's own
+// `worksAt_covers` computes by walking up from the location (ddls.go).
+//
+// It is TWO comprehensions concatenated, and the second one's WHERE is what
+// makes them a fallback rather than a union. TombstoneStudio soft-deletes the
+// studio without cascading onto atStudio, so `s` goes null and the studio walk
+// goes empty for a class whose room was retired — leaving the desk unable to
+// reach a roster it is the only party that can repair. The session's own
+// `atLocation` links name those locations independently of the studio's status:
+// CreateSession/CreateSessionSeries snapshot them from the studio's then-live
+// `locatedAt` targets and ReassignSession re-takes the snapshot from the NEW
+// studio's on every move (ddls.go), so they name the rooms of the studio the
+// class LAST sat at. The second comprehension therefore recovers exactly the
+// confinement the first one lost.
+//
+// `s.key = null` gates it so the two comprehensions read as the write side's
+// if/else rather than a union. A union would admit any atLocation link that
+// disagrees with the live studio's own locations — a class moved before the
+// re-snapshot existed still carries the room it was created in — and hand that
+// room's staff a roster `require_workplace` would refuse them.
+//
+// The write side's `session_locations` (ddls.go) branches one step earlier: it
+// falls back whenever the studio walk yields NOTHING, which includes a LIVE
+// studio wired to no location, where this gate holds the fallback closed. The
+// two agree anyway, by reachability rather than by shape. CreateStudio is the
+// only writer of a `locatedAt` link and nothing ever tombstones one, so a
+// studio's location set only grows; every atLocation snapshot is taken from
+// that same set at the moment the session was minted or last moved. A studio
+// with no `locatedAt` link today therefore had none at every earlier moment
+// too, so the session snapshotted no atLocation link and the write side's
+// fallback returns empty as well. The read side is never WIDER than the write
+// side, which is the direction that would matter.
+//
+// Both walks share the same bounds. The zero-hop lower bound is load-bearing:
+// the depth-0 entry is the studio's own
 // location, so a staffer wired to the exact room matches. The list-comprehension
 // form is lease-signing's authz_anchors idiom (lease-signing/lenses.go), which
 // keeps the row one-per-session — an OPTIONAL MATCH on a multi-location studio
@@ -427,7 +464,7 @@ RETURN
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
   ss.key AS seriesKey,
-  [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations,
+  [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] + [(se)-[:atLocation]->(apl)-[:containedIn*0..7]->(ac) WHERE s.key = null | ac.key] AS coveringLocations,
   (s.key = null) AS missingStudio,
   (i.key = null) AS missingInstructor`
 

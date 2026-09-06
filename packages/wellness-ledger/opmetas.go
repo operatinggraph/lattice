@@ -16,6 +16,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // through this descriptor) to open a member's OWN account at self-service
 // booking time; no descriptor-driven client exists for wellness yet, so a
 // second self-scope OpMeta variant isn't added here until one does.
+//
+// The WellnessDebitAccount descriptor exposes no bookingRef/priceBookingRef —
+// those refs are Weaver's, minted by a settlement target (targets.go), never
+// typed by a person — so every submission this descriptor drives is a MANUAL
+// charge, the one shape post_entry (scripts.go) requires a non-blank memo for.
+// Its schema therefore lists memo as required: a descriptor that let the field
+// go empty would render a form whose submission the op refuses.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -45,7 +52,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "WellnessDebitAccount",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Record a charge",
-				Description: "Charge a member's wellness ledger — a no-show fee or a front-desk-recorded fee.",
+				Description: "Charge a member's wellness ledger — a no-show fee or a front-desk-recorded fee. The charge needs a note saying what it is for.",
 				Icon:        "receipt",
 				Tone:        "primary",
 				SubmitLabel: "Record charge",
@@ -53,12 +60,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> of the account being charged — auto-filled from the account being viewed."},` +
 				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Charge amount, in whole cents."},` +
-				`"memo":{"type":"string","title":"Note","description":"Optional note describing the charge."}},` +
-				`"required":["accountKey","amountCents"]}`,
+				`"memo":{"type":"string","title":"Note","description":"What the charge is for — required, since this descriptor submits a manual charge."}},` +
+				`"required":["accountKey","amountCents","memo"]}`,
 			FieldDescriptions: map[string]string{
 				"accountKey":  "The account being charged — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered.",
 				"amountCents": "How much to charge, entered in dollars — e.g. 25.00. Must be more than zero; a charge increases what the member owes.",
-				"memo":        "Optional free text describing the charge — e.g. \"No-show fee — Vinyasa Flow\".",
+				"memo":        "Free text saying what the charge is for — e.g. \"No-show fee — Vinyasa Flow\". Required: this descriptor carries no bookingRef/priceBookingRef, so every submission it drives is a manual charge, and the ledger is append-only (ddls.go, scripts.go post_entry).",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "wellnesstransaction",

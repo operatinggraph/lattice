@@ -100,7 +100,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.20",
+	Version: "0.2.21",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +

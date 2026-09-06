@@ -486,6 +486,8 @@ func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
 	}
 
 	// A plain WellnessDebitAccount (no bookingRef) writes no settles link at all.
+	// It carries a memo because a manual charge — a debit with neither booking
+	// ref — requires one (scripts.go).
 	plainReqID := testutil.GenReqID("debitbkr0000000002")
 	plainEnv := &processor.OperationEnvelope{
 		RequestID:     plainReqID,
@@ -494,7 +496,7 @@ func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "wellnesstransaction",
-		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000,"memo":"Mat rental"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
 	}
 	testutil.PublishOp(t, conn, plainEnv)
@@ -571,6 +573,8 @@ func TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink(t *testing.T) {
 	}
 
 	// A plain WellnessDebitAccount (no priceBookingRef) writes no settlesClassPrice link at all.
+	// It carries a memo because a manual charge — a debit with neither booking
+	// ref — requires one (scripts.go).
 	plainReqID := testutil.GenReqID("debitpbr0000000002")
 	plainEnv := &processor.OperationEnvelope{
 		RequestID:     plainReqID,
@@ -579,7 +583,7 @@ func TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink(t *testing.T) {
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "wellnesstransaction",
-		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000,"memo":"Mat rental"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
 	}
 	testutil.PublishOp(t, conn, plainEnv)
@@ -651,6 +655,90 @@ func TestDebitAccount_UnknownPriceBookingRefRejected(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestDebitAccount_ManualChargeNeedsMemo pins the manual-charge memo rule
+// (scripts.go post_entry). A debit carrying neither bookingRef nor
+// priceBookingRef is a manual, staff-typed charge: the ledger is append-only,
+// so it must say what it is for or it never can. A settlement debit — one
+// carrying either booking ref — stays memo-optional, which is what keeps the
+// Weaver-dispatched no-show and class-price charges submittable when their
+// memo Param hydrates to null (targets.go).
+func TestDebitAccount_ManualChargeNeedsMemo(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "manualchargememo")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLMK23456789ABCDT9AB")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctmemo0001", identityKey)
+
+	// A manual charge with no memo at all is refused.
+	absentEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitmemoabsent0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, absentEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	// A whitespace-only memo is refused too — optional_string trims.
+	blankEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitmemoblank00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:01:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"memo":"   "}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, blankEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	// The positive vector: the same charge with a memo commits, and the memo
+	// reaches the entry aspect.
+	okReqID := testutil.GenReqID("debitmemook00000001")
+	okEnv := &processor.OperationEnvelope{
+		RequestID:     okReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:02:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"memo":"Mat rental"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, okEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	okEntry := readDoc(t, ctx, conn, "vtx.wellnesstransaction."+nanoIDFromRequestID(okReqID)+".entry")
+	okData, _ := okEntry["data"].(map[string]any)
+	if got, _ := okData["memo"].(string); got != "Mat rental" {
+		t.Fatalf("entry.memo = %q, want %q", got, "Mat rental")
+	}
+
+	// A settlement debit (bookingRef) with no memo is still accepted — the
+	// exemption Weaver's dispatches depend on.
+	studioKey := createStudio(t, ctx, conn, cp, cons, "mkstudiomemo000001", "Sunrise Yoga Room")
+	sessionKey := createSession(t, ctx, conn, cp, cons, "mksessmemo0000001", studioKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
+	bookingKey := createBooking(t, ctx, conn, cp, cons, "mkbkgmemo0000001", sessionKey, identityKey)
+
+	settlementEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitmemosettle0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:03:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"bookingRef":"` + bookingKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, bookingKey}},
+	}
+	testutil.PublishOp(t, conn, settlementEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
 
 // seedRefund directly seeds a bare wellnessrefund vertex (root {}) — the

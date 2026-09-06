@@ -616,6 +616,117 @@ func TestWellnessSessions_NoStudioEmptyCovering(t *testing.T) {
 		"a session with no studio is covered by nothing, not by every studio's location")
 }
 
+// TestWellnessSessions_RetiredStudioFallsBackToAtLocationSnapshot proves the
+// covering set survives its studio. TombstoneStudio soft-deletes the studio
+// without cascading onto atStudio, so the studio walk goes empty — and an
+// empty covering set denies, which would leave the front desk unable to reach
+// the roster of a class it is the only party that can repair. The session's
+// own atLocation snapshot (taken at CreateSession from the studio's then-live
+// locatedAt targets, and re-taken by ReassignSession on a move) covers it
+// instead, ancestors and all, exactly as the write side's session_locations
+// fallback does.
+func TestWellnessSessions_RetiredStudioFallsBackToAtLocationSnapshot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	roomKey := f.vtx(t, "room3", "location")
+	campusKey := f.vtx(t, "campus", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+	f.edge(t, "locatedAt", "sunrise", "room3")
+	f.edge(t, "containedIn", "room3", "campus")
+	// The snapshot CreateSession wrote alongside atStudio.
+	f.edge(t, "atLocation", "flow", "room3")
+	f.tombstoneVtx(t, "sunrise")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1, "the second comprehension must not fan the session into extra rows")
+	require.Equal(t, true, rows[0].Values["missingStudio"],
+		"the tombstoned studio is exactly the state the fallback exists for")
+	require.ElementsMatch(t, []any{roomKey, campusKey}, rows[0].Values["coveringLocations"],
+		"the session's own atLocation snapshot, ancestors and all, covers a class whose studio was retired")
+}
+
+// TestWellnessSessions_RetiredStudioAfterMoveFallsBackToTheLastRoom is the
+// composition of the fallback with a studio move. ReassignSession tombstones
+// the atLocation links naming rooms the class no longer meets in and writes
+// one per room it now does (ddls.go), so the fallback resolves a class whose
+// CURRENT studio was later retired to the room it last met in — not the one it
+// was created in, which is the only room a mint-time-only snapshot could name.
+// That distinction is the whole point: the desk that has to repair the class is
+// the desk of the building it actually runs in.
+func TestWellnessSessions_RetiredStudioAfterMoveFallsBackToTheLastRoom(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	f.vtx(t, "sunset", "studio")
+	originalRoomKey := f.vtx(t, "room3", "location")
+	currentRoomKey := f.vtx(t, "room9", "location")
+	campusKey := f.vtx(t, "campus", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "locatedAt", "sunrise", "room3")
+	f.edge(t, "locatedAt", "sunset", "room9")
+	f.edge(t, "containedIn", "room3", "campus")
+	f.edge(t, "containedIn", "room9", "campus")
+	// The state a studio move leaves: atStudio and the atLocation snapshot both
+	// name the studio the class was moved TO. The room-3 link the move
+	// tombstoned is gone from the graph, which is why it is not seeded.
+	f.edge(t, "atStudio", "flow", "sunset")
+	f.edge(t, "atLocation", "flow", "room9")
+	f.tombstoneVtx(t, "sunset")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{currentRoomKey, campusKey}, rows[0].Values["coveringLocations"],
+		"the fallback names the room the class LAST met in")
+	require.NotContains(t, rows[0].Values["coveringLocations"], originalRoomKey,
+		"the room the class was created in is not where it runs, so its desk must not reach this roster")
+}
+
+// TestWellnessSessions_LiveStudioIgnoresStaleAtLocation proves the atLocation
+// comprehension is a FALLBACK, not a union: a live studio answers alone, and an
+// atLocation link naming any other room is ignored while it does. The write
+// side (session_locations, ddls.go) answers with the studio's own locations
+// whenever it has any, so a union here would hand the other room's staff a
+// roster `require_workplace` would refuse them. ReassignSession re-snapshots
+// atLocation on a studio move, so the disagreement this pins is one only a
+// class moved before that existed still carries — the gate is what keeps the
+// two sides from drifting apart again.
+func TestWellnessSessions_LiveStudioIgnoresStaleAtLocation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunset", "studio")
+	newRoomKey := f.vtx(t, "room9", "location")
+	staleRoomKey := f.vtx(t, "room3", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	// The session sits at one studio while an atLocation link names a room that
+	// studio does not sit at.
+	f.edge(t, "atStudio", "flow", "sunset")
+	f.edge(t, "locatedAt", "sunset", "room9")
+	f.edge(t, "atLocation", "flow", "room3")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{newRoomKey}, rows[0].Values["coveringLocations"],
+		"a live studio answers alone; the stale snapshot must not widen the boundary")
+	require.NotContains(t, rows[0].Values["coveringLocations"], staleRoomKey)
+}
+
 // TestWellnessSessions_HopBoundMatchesTheWriteSide pins the exact depth the
 // covering set reaches. The write side walks `range(WORKPLACE_MAX_DEPTH)` = 8
 // iterations testing depths 0..7, so the read side must admit depths 0..7 and

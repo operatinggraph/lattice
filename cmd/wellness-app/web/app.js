@@ -344,17 +344,28 @@ function signOut() {
     .finally(() => location.replace("/login"));
 }
 
-// applyHatGating hides the tabs a session has no hat for — Roster needs staff
-// or an instructor binding, Studios needs staff (CreateSession grants
-// frontOfHouse, packages/wellness-domain/permissions.go) or the operator
-// role alone (an operator with no workplace still needs somewhere to reach
-// New instructor) — and bounces the active view if it just became
-// disallowed. The New-instructor toggle/form stay hidden from a staff-only
-// session that reached the Studios tab on isStaff(): CreateInstructor and
-// the instructor identity bind grant only operator, so only isOperatorHat() opens
-// them. Idempotent; re-run whenever whoami resolves.
+// applyHatGating hides the tabs a session has no hat for — Roster needs staff,
+// an instructor binding, or the operator role; Studios needs staff
+// (CreateSession grants frontOfHouse, packages/wellness-domain/permissions.go)
+// or the operator role alone (an operator with no workplace still needs
+// somewhere to reach New instructor) — and bounces the active view if it just
+// became disallowed. The New-instructor toggle/form stay hidden from a
+// staff-only session that reached the Studios tab on isStaff():
+// CreateInstructor and the instructor identity bind grant only operator, so
+// only isOperatorHat() opens them.
+//
+// The operator's Roster reach is the one hat that can repair a class whose
+// studio was retired (renderReassignControl's studio picker, ReassignSession's
+// operator-only newStudio branch), and both server reads already admit them
+// unconditionally — mayReadRoster (cmd/wellness-app/bookings.go) and
+// handleRosterSessions (sessions.go) each answer an operator before asking
+// about a workplace or a ledBy binding. So this gate is the affordance over
+// those server rules, never the authority: an operator holding neither worksAt
+// nor frontOfHouse would otherwise be told, by a note on a roster they cannot
+// open, that only they can fix the class.
+// Idempotent; re-run whenever whoami resolves.
 function applyHatGating() {
-  document.getElementById("tab-roster").hidden = !(isStaff() || instructorKey());
+  document.getElementById("tab-roster").hidden = !(isStaff() || isOperatorHat() || instructorKey());
   document.getElementById("tab-studios").hidden = !(isStaff() || isOperatorHat());
   const instructorNewToggle = document.getElementById("instructor-new-toggle");
   const instructorNewForm = document.getElementById("instructor-new-form");
@@ -747,13 +758,26 @@ async function submitCatalogOp(envelope, what) {
   return reply || {};
 }
 
-// ownLeaseAppKey is the signed-in member's own lease, CreateBooking's
-// optional resident-rate hint. The server answers only for the caller
-// (GET /api/my-residency), so there is nobody else's to pick. An approved
-// lease wins over a merely-applied one; absence just means the standard rate,
-// which is why a failed lookup is cached as "none" rather than thrown.
+// ownResidency is the signed-in member's own lease, CreateBooking's optional
+// resident-rate hint, plus whether that lease is APPROVED. The server answers
+// only for the caller (GET /api/my-residency), so there is nobody else's to
+// pick. An approved lease wins over a merely-applied one; absence just means
+// the standard rate, which is why a failed lookup answers "none" rather than
+// throwing.
+//
+// `approved` is what the schedule card prices on, and it is a faithful
+// client-side reading of the op's own resident-rate rule
+// (prepare_booking_common, packages/wellness-domain/ddls.go), conjunct by
+// conjunct: the op requires the leaseapp alive — a tombstoned one drops out of
+// the leaseApplicationComplete projection these rows come from; it requires the
+// leaseapp's `.tenancy` aspect, stamped create-only on the FIRST landlord
+// approve (packages/lease-signing), which is exactly what `approved` reports;
+// and it requires a live applicationFor link from the leaseapp to the booker,
+// which is the term the handler already scoped these rows by. A merely-applied
+// or declined lease keeps its applicationFor link and so must NOT price as
+// resident — the reason the card reads `approved` rather than mere presence.
 let residencyCache = null;
-async function ownLeaseAppKey() {
+async function ownResidency() {
   if (residencyCache === null) {
     // A FAILED lookup is deliberately not cached: absence just means the
     // standard rate, so a transient error must not silently cost the member
@@ -762,11 +786,11 @@ async function ownLeaseAppKey() {
       const body = await appGet("/api/my-residency");
       residencyCache = (body && body.leases) || [];
     } catch (_) {
-      return "";
+      return { leaseAppKey: "", approved: false };
     }
   }
   const chosen = residencyCache.find((l) => l.approved) || residencyCache[0];
-  return chosen ? chosen.leaseAppKey : "";
+  return { leaseAppKey: chosen ? chosen.leaseAppKey : "", approved: !!(chosen && chosen.approved) };
 }
 
 // ---- Schedule view ------------------------------------------------
@@ -814,7 +838,8 @@ async function renderSchedule() {
     grid.innerHTML = '<div class="empty">No upcoming sessions.</div>';
     return;
   }
-  const leaseAppKey = await ownLeaseAppKey();
+  const residency = await ownResidency();
+  const leaseAppKey = residency.leaseAppKey;
   // The signed-in member's own live bookings, keyed by status — CreateBooking
   // / JoinWaitlist's shared DoubleBooked guard (ddls.go) stays keyed alive
   // until CancelBooking releases it, and a tombstoned booking drops out of
@@ -829,7 +854,7 @@ async function renderSchedule() {
     // Affordance only — worst case the button offers a class CreateBooking /
     // JoinWaitlist will still correctly refuse.
   }
-  grid.innerHTML = scheduleGroups(sessions, myStatusBySession);
+  grid.innerHTML = scheduleGroups(sessions, myStatusBySession, residency.approved);
   sessions.forEach((se) => {
     const btn = document.getElementById("book-" + domId(se.sessionKey));
     if (!btn) return;
@@ -922,8 +947,10 @@ function seriesCountKey(se) {
 
 // scheduleGroups breaks the (already day-sorted) upcoming sessions into local
 // calendar-day sections, a header per day, so the grid reads as a schedule
-// rather than one flat pile of cards.
-function scheduleGroups(sessions, myStatusBySession) {
+// rather than one flat pile of cards. hasApprovedLease is the viewer's own
+// residency, passed down so every card prices at the rate this viewer will be
+// charged.
+function scheduleGroups(sessions, myStatusBySession, hasApprovedLease) {
   const seriesCounts = upcomingSeriesCounts(sessions);
   let html = "";
   let lastDay = null;
@@ -933,9 +960,32 @@ function scheduleGroups(sessions, myStatusBySession) {
       html += '<div class="day-header">' + esc(fmtDay(se.startsAt)) + "</div>";
       lastDay = day;
     }
-    html += scheduleCard(se, myStatusBySession, seriesCounts);
+    html += scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease);
   }
   return html;
+}
+
+// cardPriceCents is what THIS viewer will be charged for this class, mirroring
+// the settlement's own CASE (packages/wellness-ledger's class-price lens) and
+// My Classes' already-resolved rate (cmd/wellness-app/bookings.go): a
+// resident-rate booking is charged residentPriceCents when the class declares
+// one, and falls back to the walk-in price when it does not. hasApprovedLease
+// is the client-side reading of the rate the booking op will actually stamp —
+// see ownResidency for the conjunct-by-conjunct diff against that rule.
+// Sessions carry residentPriceCents only when the class declares an override,
+// so an absent field means "residents pay the walk-in price", never "free".
+function cardPriceCents(se, hasApprovedLease) {
+  if (hasApprovedLease && typeof se.residentPriceCents === "number") return se.residentPriceCents;
+  return se.priceCents;
+}
+
+// cardPriceLabel renders that price, saying WHY it differs when it does — a
+// resident reading "Free" beside a class the board advertises at $15 has no
+// way to tell a perk from a bug.
+function cardPriceLabel(se, hasApprovedLease) {
+  const cents = cardPriceCents(se, hasApprovedLease);
+  if (cents === se.priceCents) return priceLabel(cents);
+  return priceLabel(cents) + " · resident rate";
 }
 
 // scheduleCard renders one class on the resident-facing Schedule grid. The
@@ -946,7 +996,10 @@ function scheduleGroups(sessions, myStatusBySession) {
 // class with no existing claim offers "Join waitlist" instead of a dead-end
 // disabled "Full" — the seat freed by any cancellation promotes the lowest
 // waitlistSlot automatically (CancelBooking, ddls.go), never first-come.
-function scheduleCard(se, myStatusBySession, seriesCounts) {
+// The price is the one THIS viewer will be charged (cardPriceLabel), not the
+// walk-in sticker: an approved-lease member books at the resident rate, and a
+// card quoting the walk-in price to them is a promise the seat then breaks.
+function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
   const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
@@ -982,7 +1035,7 @@ function scheduleCard(se, myStatusBySession, seriesCounts) {
     led +
     series +
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
-    '<div class="meta">' + esc(priceLabel(se.priceCents)) + "</div>" +
+    '<div class="meta">' + esc(cardPriceLabel(se, hasApprovedLease)) + "</div>" +
     '<div class="field-row">' +
     '<button id="book-' + id + '" data-action="' + action + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
     "</div>" +
@@ -1275,6 +1328,44 @@ function myClassCard(b) {
 // (workplace-confined, resolved off the session's own atStudio link — never
 // a caller-supplied studio), so the control appears for either.
 
+// rosterSessionIsPast answers whether a class is over — the class has ENDED,
+// not merely begun, since attendance is marked from this same picker while a
+// class is running. A session with no dates at all counts as still to run: an
+// undated row is a projection this page cannot place in time, and burying it
+// under "Past classes" would hide the one class most likely to need a look.
+function rosterSessionIsPast(se, nowMs) {
+  const boundary = se.endsAt || se.startsAt;
+  if (!boundary) return false;
+  const ms = new Date(boundary).getTime();
+  return isFinite(ms) && ms <= nowMs;
+}
+
+// rosterSessionOrder splits the desk's classes into the ones still to run and
+// the ones already over, each in the order the desk reaches for them: upcoming
+// soonest-first, so tonight's class is the first thing in the picker; past
+// most-recent-first, so the class that ended an hour ago — the one whose
+// attendance is still being marked — sits at the top of its group rather than
+// behind every class the studio ever ran. Pure: it copies before sorting, so
+// the cached session list keeps its own order.
+function rosterSessionOrder(sessions, nowMs) {
+  const startMs = (se) => {
+    const ms = new Date(se.startsAt || se.endsAt || "").getTime();
+    // A row this page cannot place in time sorts last among the classes still
+    // to run, rather than at the epoch: it must not displace the class that
+    // actually runs next.
+    return isFinite(ms) ? ms : Number.MAX_SAFE_INTEGER;
+  };
+  return {
+    upcoming: sessions.filter((se) => !rosterSessionIsPast(se, nowMs)).sort((a, b) => startMs(a) - startMs(b)),
+    past: sessions.filter((se) => rosterSessionIsPast(se, nowMs)).sort((a, b) => startMs(b) - startMs(a)),
+  };
+}
+
+// rosterOptionLabel is one picker entry's text.
+function rosterOptionLabel(se) {
+  return (se.missingInstructor ? "[no instructor] " : "") + (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
+}
+
 async function loadRoster() {
   const select = document.getElementById("roster-session");
   if (!select.dataset.loaded) {
@@ -1293,12 +1384,25 @@ async function loadRoster() {
     if (!sessions.length) {
       select.innerHTML = '<option value="">(no sessions)</option>';
     } else {
-      for (const se of sessions) {
+      // Past classes stay in the picker, grouped rather than dropped: a class
+      // that ended an hour ago is exactly the one whose attendance the desk is
+      // still marking, and its roster is the only place to mark it.
+      const { upcoming, past } = rosterSessionOrder(sessions, Date.now());
+      const addOption = (parent, se) => {
         const opt = document.createElement("option");
         opt.value = se.sessionKey;
-        opt.textContent =
-          (se.missingInstructor ? "[no instructor] " : "") + (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
-        select.appendChild(opt);
+        opt.textContent = rosterOptionLabel(se);
+        parent.appendChild(opt);
+      };
+      for (const se of upcoming) addOption(select, se);
+      if (past.length) {
+        const group = document.createElement("optgroup");
+        // A label is an attribute; setting the property (not markup) is what
+        // keeps a class name out of quoted attribute text — esc() here is a
+        // text-node escaper and would not make one safe.
+        group.label = "Past classes";
+        for (const se of past) addOption(group, se);
+        select.appendChild(group);
       }
       if (prev && sessions.some((se) => se.sessionKey === prev)) select.value = prev;
     }
@@ -2004,11 +2108,39 @@ async function cancelSeries(se) {
 // and the Starlark guard (ddls.go's ReassignSession) re-derives it again at
 // submit — this is the affordance, not the authority.
 //
+// An operator holding no workplace is admitted alongside staff: the studio
+// move below is theirs alone, and mayReadRoster (cmd/wellness-app/bookings.go)
+// already answers them true before it asks about a workplace, so isStaff()
+// alone would hide the repair from the only hat that can make it.
+//
 // `generation` is renderRoster's own render token (see renderBookMember for
 // the same guard): this awaits a fetch, so a stale render must not append a
 // control for a class the staffer has already navigated away from.
 async function renderReassignControl(se, generation) {
-  if (!se || !isStaff()) return;
+  if (!se || !(isStaff() || isOperatorHat())) return;
+  // Moving a class to a different studio is operator-only regardless of hat
+  // (packages/wellness-domain/ddls.go), so only an operator gets the studio
+  // picker; every other staffer keeps the instructor, time, name, capacity and
+  // price edits, which are theirs to make.
+  const mayMoveStudio = isOperatorHat();
+  // A class whose studio was retired is a special case of that: the whole form
+  // is out of reach for anyone but an operator, because the projection carries
+  // no live studio key to confirm and the server requires either that key or
+  // an operator's studio move. Say so plainly rather than render controls
+  // whose only possible answer is a refusal — the roster itself, its bookings
+  // and its attendance controls are all still workable above.
+  if (se.missingStudio && !mayMoveStudio) {
+    if (generation !== rosterGeneration) return;
+    const note = document.createElement("div");
+    note.className = "card-actions";
+    const line = document.createElement("div");
+    line.className = "meta";
+    line.textContent =
+      "This class's studio was retired, so its time, instructor and price cannot be edited until an operator moves it to a live studio. Its bookings and attendance are unaffected.";
+    note.appendChild(line);
+    document.getElementById("roster-body").appendChild(note);
+    return;
+  }
   let instructors = [];
   let studios = [];
   try {
@@ -2017,22 +2149,31 @@ async function renderReassignControl(se, generation) {
     // Falls back to an instructor-less form (clear/time-move still work)
     // rather than hiding the whole control over a picker-only failure.
   }
-  try {
-    studios = await loadStudios();
-  } catch (e) {
-    // Falls back to a studio-less form (every other edit still works) —
-    // same reasoning as the instructor picker above.
+  if (mayMoveStudio) {
+    try {
+      studios = await loadStudios();
+    } catch (e) {
+      // Falls back to a studio-less form (every other edit still works) —
+      // same reasoning as the instructor picker above.
+    }
   }
   if (generation !== rosterGeneration) return;
 
   // The studio field is the newStudio repair path's only FE caller
-  // (ReassignSession, packages/wellness-domain/ddls.go): the op is
-  // operator-only regardless of hat, same as the instructor/time edits
-  // above, so this is offered to every staffer and the server is the real
-  // gate — the affordance, not the authority. A missingStudio session (its
-  // atStudio link already tombstoned by TombstoneStudio) starts on no
-  // selection and needs one picked before Save; a live session starts on
-  // its current studio and only submits newStudio when the pick changes.
+  // (ReassignSession, packages/wellness-domain/ddls.go). The op refuses a
+  // studio move to anyone but an operator, so the field is rendered for an
+  // operator alone — unlike the instructor/time edits beside it, which every
+  // staffer covering the class may make. A missingStudio session (its studio
+  // already tombstoned by TombstoneStudio) starts on no selection and needs
+  // one picked before Save; a live session starts on its current studio and
+  // only submits newStudio when the pick changes.
+  const studioField = mayMoveStudio
+    ? '<div class="field"><label>' + (se.missingStudio ? "Repair studio" : "Studio") + "</label>" +
+      '<select id="reassign-studio">' +
+      (se.missingStudio ? '<option value="">(pick a studio)</option>' : '<option value="">(no change)</option>') +
+      studios.map((s) => '<option value="' + esc(s.studioKey) + '">' + esc(s.name) + "</option>").join("") +
+      "</select></div>"
+    : "";
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
   wrap.innerHTML =
@@ -2043,11 +2184,7 @@ async function renderReassignControl(se, generation) {
     '<option value="__clear__">(remove instructor)</option>' +
     instructors.map((i) => '<option value="' + esc(i.instructorKey) + '">' + esc(i.displayName) + "</option>").join("") +
     "</select></div>" +
-    '<div class="field"><label>' + (se.missingStudio ? "Repair studio" : "Studio") + "</label>" +
-    '<select id="reassign-studio">' +
-    (se.missingStudio ? '<option value="">(pick a studio)</option>' : '<option value="">(no change)</option>') +
-    studios.map((s) => '<option value="' + esc(s.studioKey) + '">' + esc(s.name) + "</option>").join("") +
-    "</select></div>" +
+    studioField +
     '<div class="field"><label>New start</label><input type="datetime-local" id="reassign-starts" step="900" /></div>' +
     '<div class="field"><label>New end</label><input type="datetime-local" id="reassign-ends" step="900" /></div>' +
     '<div class="field"><label>Name</label><input type="text" id="reassign-name" /></div>' +
@@ -2061,7 +2198,7 @@ async function renderReassignControl(se, generation) {
   const select = document.getElementById("reassign-instructor");
   if (se.instructorKey) select.value = se.instructorKey;
   const studioSelect = document.getElementById("reassign-studio");
-  if (!se.missingStudio && se.studioKey) studioSelect.value = se.studioKey;
+  if (studioSelect && !se.missingStudio && se.studioKey) studioSelect.value = se.studioKey;
   document.getElementById("reassign-name").value = se.name || "";
   document.getElementById("reassign-capacity").value = se.capacity || "";
   document.getElementById("reassign-price").value = se.priceCents ? (se.priceCents / 100).toFixed(2) : "";
@@ -2108,8 +2245,11 @@ async function reassignSession(se) {
   const capacityInput = document.getElementById("reassign-capacity").value;
   const priceInput = document.getElementById("reassign-price").value;
   const residentPriceInput = document.getElementById("reassign-resident-price").value;
+  // The studio picker is rendered for an operator alone
+  // (renderReassignControl), so for anyone else there is no pick to read and
+  // the payload below carries the session's own confirmed studio alone.
   const studioSelect = document.getElementById("reassign-studio");
-  const studioPicked = studioSelect.value;
+  const studioPicked = studioSelect ? studioSelect.value : "";
 
   const payload = { sessionKey: se.sessionKey };
   // studio/newStudio: a missingStudio session (its atStudio link already
@@ -2233,8 +2373,22 @@ async function reassignSession(se) {
     throw new Error("Pick a new instructor, a new studio, a new time, or edit the name/capacity/price.");
   }
 
+  // A studio move re-snapshots the session's atLocation links from the new
+  // studio's own locations (ddls.go), which is two bounded class-(e) walks —
+  // both declarable, since both hubs are in the payload. Enumerations are
+  // metadata (Contract #2 §2.5.1): declaring the walk does not hydrate it, it
+  // says which bounded live enumeration this submission expects. Nothing else
+  // this op does walks either relation, so they are declared only on the move.
+  const enumerations = [];
+  if (payload.newStudio) {
+    enumerations.push(
+      { hub: payload.sessionKey, relation: "atLocation", direction: "out" },
+      { hub: payload.newStudio, relation: "locatedAt", direction: "out" },
+    );
+  }
+
   await opOrThrow(
-    { operationType: "ReassignSession", class: "session", reads, optionalReads, payload },
+    { operationType: "ReassignSession", class: "session", reads, optionalReads, enumerations, payload },
     "reassign the class",
     false,
   );
@@ -2495,6 +2649,17 @@ async function submitBillingEntry(opType, what, reason) {
   }
   const cents = Math.round(dollars * 100);
   const memo = memoInput.value.trim();
+  // A manual charge must say what it is for, the way the amount already must.
+  // The ledger is append-only — nothing can annotate the entry afterwards — so
+  // the note is checked here, alongside the amount, rather than left to come
+  // back as a bare rejection. The write side enforces the same rule on a debit
+  // carrying no settlement back-reference (packages/wellness-ledger). Payments
+  // and waivers keep it optional: each already reads off the balance it moves.
+  if (opType === "WellnessDebitAccount" && !memo) {
+    toast("Enter a note describing the charge.", false);
+    memoInput.focus();
+    return;
+  }
   const chargeBtn = document.getElementById("billing-charge");
   const paymentBtn = document.getElementById("billing-payment");
   const waiveBtn = document.getElementById("billing-waive");

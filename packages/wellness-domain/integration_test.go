@@ -1585,6 +1585,19 @@ func reassignSessionEnv(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		optionalReads = append(optionalReads, wdSlotClaimKeys(t, finalInstructor, finalStarts, finalEnds)...)
 	}
 
+	// A studio move re-snapshots the session's atLocation links from the new
+	// studio's own locations (ddls.go). Both walks are payload-hubbed, so a
+	// dispatcher declares them — the same pair app.js's reassignSession sends.
+	// DeclaredEnumerations resolves only `{actor}`-templated hubs off the
+	// op-meta, so a payload-hubbed walk is named here the way the reads above
+	// already are.
+	enumerations := testutil.DeclaredEnumerations("ReassignSession", actorKey, wellnessdomain.OpMetas())
+	if newStudio != "" {
+		enumerations = append(enumerations,
+			processor.EnumerationHint{Hub: sessionKey, Relation: "atLocation", Direction: "out"},
+			processor.EnumerationHint{Hub: newStudio, Relation: "locatedAt", Direction: "out"})
+	}
+
 	payloadBytes, _ := json.Marshal(payload)
 	return &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -1594,7 +1607,7 @@ func reassignSessionEnv(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   submittedAt,
 		Class:         "session",
 		Payload:       payloadBytes,
-		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", actorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: enumerations, Reads: reads, OptionalReads: optionalReads},
 	}
 }
 
@@ -1730,6 +1743,116 @@ func TestReassignSession_OperatorMovesToNewStudio(t *testing.T) {
 	}
 }
 
+// atLocationLnkKey is the deterministic key of a session's location-snapshot
+// link — CreateSession/CreateSessionSeries write one per location the studio
+// sits at, and ReassignSession re-snapshots them on a studio move.
+func atLocationLnkKey(t *testing.T, sessionKey, locationKey string) string {
+	t.Helper()
+	_, sessID, _ := substrate.ParseVertexKey(sessionKey)
+	locType, locID, _ := substrate.ParseVertexKey(locationKey)
+	return "lnk.session." + sessID + ".atLocation." + locType + "." + locID
+}
+
+// TestReassignSession_ReSnapshotsAtLocationOnStudioMove proves a studio move
+// carries the session's WHERE-IT-MEETS snapshot with it. atLocation is the
+// only location term two read paths have: wellnessBookersSpec confines a
+// class's guest bookers by it alone (lenses.go), and wellnessSessionsSpec falls
+// back to it once the studio is tombstoned. Left pointing at the room the class
+// was created in, a moved class's guests would be reachable only from the old
+// room's desk, and retiring the new studio would strand the class back at its
+// original room — the exact confinement the write side's own session_locations
+// would refuse.
+//
+// The move BACK is the second half: a Lattice tombstone is soft, so the
+// room-A link this test just killed still occupies its key, and coming back to
+// studio A must revive it rather than CreateOnly-collide.
+func TestReassignSession_ReSnapshotsAtLocationOnStudioMove(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignatloc")
+
+	roomA := "vtx.building.BBWELLRSATLCRMAHJKMN"
+	roomB := "vtx.building.BBWELLRSATLCRMBHJKMN"
+	seedVertex(t, ctx, conn, roomA, "building", nil)
+	seedVertex(t, ctx, conn, roomB, "building", nil)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdrsalstudioa000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdrsalstudiob000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, roomA, "BBWELLRSATLCRMAHJKMN")
+	wfSeedStudioAt(t, ctx, conn, studioB, roomB, "BBWELLRSATLCRMBHJKMN")
+
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdrsalsession0000001",
+		studioA, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
+	}
+	// The positive baseline: without this, the assertions after the move
+	// would pass on a session that never carried a snapshot at all.
+	if !keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, roomA)) {
+		t.Fatalf("CreateSession did not snapshot studio A's room onto the session")
+	}
+
+	env := reassignSessionEnv(t, ctx, conn, "wdrsalmove00000001", sessionKey, studioA, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioA, "newStudio": studioB},
+		"2026-07-08T08:00:00Z")
+	if got, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newStudio = %v, reply = %+v, want Accepted", got, reply)
+	}
+	if keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, roomA)) {
+		t.Errorf("the OLD room's atLocation link must be tombstoned after the move — "+
+			"%s still resolves the class to a room it no longer meets in", atLocationLnkKey(t, sessionKey, roomA))
+	}
+	if !keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, roomB)) {
+		t.Errorf("the NEW room's atLocation link must be live after the move")
+	}
+
+	backEnv := reassignSessionEnv(t, ctx, conn, "wdrsalmoveback00001", sessionKey, studioB, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioB, "newStudio": studioA},
+		"2026-07-08T08:01:00Z")
+	if got, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, backEnv); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession back to studio A = %v, reply = %+v, want Accepted "+
+			"(a blind create on the already-tombstoned room-A link would RevisionConflict here)", got, reply)
+	}
+	if !keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, roomA)) {
+		t.Errorf("the room-A atLocation link must be REVIVED after moving back")
+	}
+	if keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, roomB)) {
+		t.Errorf("the room-B atLocation link must be tombstoned after moving back")
+	}
+}
+
+// TestReassignSession_LeavesSharedAtLocationLinkAlone proves the re-snapshot is
+// a set difference, not a blind rewrite: two studios in the SAME building leave
+// the session's one atLocation link untouched across a move, rather than
+// tombstoning and reviving a single key inside one mutation batch.
+func TestReassignSession_LeavesSharedAtLocationLinkAlone(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignatlocshared")
+
+	room := "vtx.building.BBWELLRSSHAREDRMHJKM"
+	seedVertex(t, ctx, conn, room, "building", nil)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdrsshstudioa000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdrsshstudiob000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, room, "BBWELLRSSHAREDRMHJKM")
+	wfSeedStudioAt(t, ctx, conn, studioB, room, "BBWELLRSSHAREDRMHJKM")
+
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdrsshsession0000001",
+		studioA, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, ctx, conn, "wdrsshmove00000001", sessionKey, studioA, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioA, "newStudio": studioB},
+		"2026-07-08T08:00:00Z")
+	if got, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession within one building = %v, reply = %+v, want Accepted", got, reply)
+	}
+	if !keyExists(t, ctx, conn, atLocationLnkKey(t, sessionKey, room)) {
+		t.Errorf("the shared room's atLocation link must stay live across a move between two studios in it")
+	}
+}
+
 // TestReassignSession_NonOperatorCannotMoveStudio proves newStudio is
 // operator-only regardless of hat: a front-of-house caller who otherwise
 // holds a full ReassignSession grant (and correctly names the session's
@@ -1839,7 +1962,14 @@ func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T
 		RequestID: testutil.GenReqID("wdrsfxrepair0000001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:05:00Z", Class: "session",
 		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","newStudio":"` + liveStudio + `"}`),
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReassignSession", domainActorKey, wellnessdomain.OpMetas()),
+		ContextHint: &processor.ContextHint{
+			// The atLocation re-snapshot's own two walks, on top of the
+			// op-meta's actor-hubbed one: the session's current snapshot and
+			// the new studio's locations (ddls.go), both payload-hubbed and so
+			// both declarable by whoever dispatches the move.
+			Enumerations: append(testutil.DeclaredEnumerations("ReassignSession", domainActorKey, wellnessdomain.OpMetas()),
+				processor.EnumerationHint{Hub: sessionKey, Relation: "atLocation", Direction: "out"},
+				processor.EnumerationHint{Hub: liveStudio, Relation: "locatedAt", Direction: "out"}),
 			Reads: []string{sessionKey, sessionKey + ".schedule", liveStudio},
 			// session_atstudio_link's own walk-returned link (the CURRENT,
 			// tombstoned studio — known here since the session was created

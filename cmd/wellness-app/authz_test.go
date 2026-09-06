@@ -1046,6 +1046,37 @@ func TestHandleBookings_Roster_RowWithoutCoveringLocationsDenies(t *testing.T) {
 	}
 }
 
+// A class whose studio was retired projects no studioKey and no studioName —
+// its covering set comes from the session's own atLocation snapshot instead
+// (wellness-domain's wellnessSessions lens). The front desk that studio sat in
+// must still reach the roster: the desk is the only party that can work the
+// class's bookings and attendance, and the studio repair itself is an
+// operator's job, so a 403 here strands both the class and its members.
+func TestHandleBookings_Roster_StudioLessSessionCoveredBySnapshot(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	putJSON(t, s.conn, wellnessdomain.WellnessSessionsBucket, ledSessionKey, map[string]any{
+		"sessionKey": ledSessionKey,
+		"name":       "Class whose studio was retired",
+		"startsAt":   "2026-08-01T10:00:00Z",
+		"endsAt":     "2026-08-01T11:00:00Z",
+		"capacity":   12.0,
+		// No studioKey/studioName: the studio is gone, so the covering set is
+		// the session's own snapshot alone.
+		"missingStudio":     true,
+		"coveringLocations": []string{staffWorkplace},
+	})
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a studio-less class the desk's own workplace covers; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if rows := decodeBookings(t, rec); len(rows) != 1 {
+		t.Fatalf("read %d roster rows off a studio-less class, want 1", len(rows))
+	}
+}
+
 // ---- /api/members: the front desk's picker, scoped to where they work ----
 
 // seedMember seeds one wellnessMembers row for bookerSubject (a bare id),

@@ -127,7 +127,10 @@ def execute(state, op):
 // wellnessLedgerHistory lens summing entries. Unlike clinic-ledger's
 // transaction DDL, there is no billedTo/insurance payer dimension — wellness
 // billing has no insurance concept, so a debit entry stays the plain
-// {type, amountCents, memo?, postedAt} shape. A credit entry additionally
+// {type, amountCents, memo?, postedAt} shape — memo optional except on a
+// MANUAL charge (a debit carrying neither booking ref), where it is required
+// non-blank because the entry is append-only and nothing can annotate it
+// later. A credit entry additionally
 // carries reason (payment|waiver|refund, default payment) — a waiver forgives
 // debt (e.g. a waived no-show fee) and a refund returns money already
 // collected (a settled class price or no-show fee reversed by
@@ -254,6 +257,19 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # A manual charge -- a debit carrying no settlement back-reference -- must
+    # say what it is for. The ledger is append-only, so a memo-less charge can
+    # never be explained afterwards: the .entry aspect is written once, here,
+    # and nothing mutates it.
+    # Weaver-dispatched settlements are exempt: each carries bookingRef (the
+    # no-show fee) or priceBookingRef (the class price), which the
+    # wellnessLedgerHistory lens resolves to the class name on its own, and
+    # their memo Param may hydrate to null (targets.go passes row.memo /
+    # row.sessionName). refundRef rides a credit, never a debit (targets.go),
+    # so a debit is manual exactly when both booking refs are absent.
+    if entry_type == "debit" and memo == None and booking_key == None and price_booking_key == None:
+        fail("InvalidArgument: a manual charge needs a memo describing it")
 
     # reason distinguishes a credit that is cash actually collected from one
     # that forgives debt (a waived no-show fee) or that returns money already

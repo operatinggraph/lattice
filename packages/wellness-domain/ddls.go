@@ -184,8 +184,10 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"(minimal, D5). CreateSession validates the studio is alive + class=studio, then atomically mints the " +
 			"session + the .schedule aspect {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?} + the atStudio link " +
 			"(session→studio, Contract #1 §1.1 later-arriving source) + one atLocation link (session→location) per " +
-			"location the studio sits at right now, per its locatedAt link(s) — a write-time snapshot session_locations " +
-			"falls back to once the studio is later tombstoned (TombstoneStudio soft-deletes with no cascade onto " +
+			"location the studio sits at right now, per its locatedAt link(s) — a snapshot of where the class MEETS, " +
+			"re-taken from the new studio's locatedAt links whenever ReassignSession moves the class, so it always " +
+			"names the room the class most recently sat in. session_locations falls back to it once the studio is " +
+			"tombstoned (TombstoneStudio soft-deletes with no cascade onto " +
 			"locatedAt), mirroring clinic-domain's atSite fallback for a tombstoned provider. The studio's booking grid is a mandatory " +
 			"15-minute cadence (mirrors clinic-domain's appointment grid exactly): CreateSession discretizes " +
 			"[startsAt,endsAt) into its covered 15-minute cells and CLAIMS a deterministic studioSlotClaim aspect " +
@@ -233,7 +235,12 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"(ddls.go). A studio move (newStudio, operator-only regardless of hat) tombstones the CURRENT atStudio " +
 			"link and writes a new one the same way, releasing every cell the OLD studio held for the session's " +
 			"span and claiming every cell the NEW studio needs for it — a hub change, not a delta, so no " +
-			"symmetric-difference optimization applies. A time move on an UNCHANGED studio instead computes the " +
+			"symmetric-difference optimization applies. It also RE-SNAPSHOTS the session's atLocation links from " +
+			"the new studio's locatedAt targets — tombstoning the links naming rooms the class no longer meets in " +
+			"and writing (or reviving, for a room it has sat in before) one per room it now does — so the " +
+			"where-does-this-class-meet fact the booker read model and the retired-studio fallback both rely on " +
+			"follows the class instead of naming the room it was created in. A location the old and new studio " +
+			"share keeps its live link untouched. A time move on an UNCHANGED studio instead computes the " +
 			"OLD and NEW covered cell sets and mutates only the symmetric difference — cells the new span still " +
 			"covers are left untouched (no release+reclaim round-trip against itself), cells only the old span " +
 			"covered are released, and cells only the new span covers are claimed via the same CreateOnly " +
@@ -256,7 +263,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link — on ReassignSession only, omittable when an operator supplies newStudio, in which case it is derived server-side instead)."},` +
-			`"newStudio":{"type":"string","description":"vtx.studio.<NanoID> to move the session to (ReassignSession; operator-only regardless of hat; validated alive + class=studio). Releases every cell the old studio held for the session's span and claims every cell the new one needs; StudioConflict on collision."},` +
+			`"newStudio":{"type":"string","description":"vtx.studio.<NanoID> to move the session to (ReassignSession; operator-only regardless of hat; validated alive + class=studio). Releases every cell the old studio held for the session's span and claims every cell the new one needs (StudioConflict on collision), and re-snapshots the session's atLocation links from the new studio's locations so the class's where-it-meets fact follows the move."},` +
 			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged)."},` +
 			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with endsAt). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
 			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with startsAt). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
@@ -273,7 +280,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"vtx.session.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
 			"studio":             "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession/ReassignSession also require it (the session's actual studio, validated via the atStudio link) — TombstoneSession to release the held cells, ReassignSession to workplace-confine a front-of-house caller and to claim/release cells on a time move. On ReassignSession only, an operator supplying newStudio may omit it — the script derives the current studio off the session's atStudio link instead, the repair path for a session whose own studio was already tombstoned.",
-			"newStudio":          "Full vtx.studio.<NanoID> key to move the session to (ReassignSession; operator-only regardless of hat, validated alive + class=studio). Tombstones the current atStudio link and writes a new one; releases every cell the old studio held for the session's span and claims every cell the new one needs (StudioConflict on collision with another session).",
+			"newStudio":          "Full vtx.studio.<NanoID> key to move the session to (ReassignSession; operator-only regardless of hat, validated alive + class=studio). Tombstones the current atStudio link and writes a new one; releases every cell the old studio held for the session's span and claims every cell the new one needs (StudioConflict on collision with another session); and re-snapshots the session's atLocation links from the new studio's own locatedAt targets, so the class's guest bookers and the retired-studio fallback both resolve to the room it now meets in rather than the one it was created in.",
 			"name":               "The session's display name (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged).",
 			"startsAt":           "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — moves the class, must be paired with endsAt). Must align to the 15-minute grid (SlotGridViolation).",
 			"endsAt":             "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — must be paired with startsAt). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
@@ -399,7 +406,8 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "newStudio": "vtx.studio.<NanoID>"},
 				ExpectedOutcome: "Operator-only. Validates the new studio is alive + class=studio, tombstones the CURRENT " +
 					"atStudio link and writes a new one, releases every cell the OLD studio held for the session's span, " +
-					"and claims every cell the NEW studio needs for it (StudioConflict on collision). Instructor, time, " +
+					"and claims every cell the NEW studio needs for it (StudioConflict on collision). The session's " +
+					"atLocation links are re-snapshotted from the new studio's locations. Instructor, time, " +
 					"bookings and other schedule fields are untouched. Returns primaryKey.",
 			},
 			{
@@ -2408,6 +2416,24 @@ def session_atstudio_link(sess_key):
             return lk.key, lk.targetVertex
     return None, None
 
+def session_atlocation_links(sess_key):
+    # Every atLocation link the session carries, live AND tombstoned, keyed by
+    # link key. ReassignSession re-snapshots this set on a studio move, and a
+    # Lattice tombstone is soft -- the key still occupies its subject -- so a
+    # move BACK to a room the class already sat in must revive the dead link
+    # rather than CreateOnly-collide on it. Carrying each link's revision out
+    # of this one enumeration is what lets that revive happen with no
+    # per-location point read behind it.
+    # read-posture: (e) relation=atLocation epoch=none -- a session snapshots
+    # at most one link per location its studio sits at, a handful at most, off
+    # the session key the caller has already proved alive; never a keyspace
+    # scan.
+    page, _ = kv.Links(sess_key, "atLocation", "out")
+    out = {}
+    for lk in page:
+        out[lk.key] = lk
+    return out
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). CreateSession/CreateSessionSeries's
     # studioSlotClaim/instructorSlotClaim cells are entirely a function of the
@@ -3179,6 +3205,38 @@ def execute(state, op):
             # reject on a key that already exists dead.
             mutations.append(make_link_create_or_revive("lnk.session." + sess_id + ".atStudio.studio." + new_studio_id,
                                                           sess_key, new_studio, "atStudio", "atStudio"))
+            # The session's atLocation snapshot names the room the class MEETS
+            # in, so a move re-takes it from the NEW studio's live locatedAt
+            # targets -- the same set CreateSession snapshots at mint time.
+            # Left pointed at the old room, it would confine the moved class's
+            # guest bookers to the desk of a room the class no longer uses
+            # (wellnessBookersSpec walks atLocation alone, lenses.go), and it
+            # would make the retired-studio fallback (session_locations here,
+            # wellnessSessionsSpec on the read side) resolve a later-tombstoned
+            # studio back to the ORIGINAL room instead of the one the class was
+            # last moved to.
+            #
+            # A location the old and new studio share keeps its live link
+            # untouched: re-writing it would be a tombstone and a revive of one
+            # key in a single batch for no change. A room the class has sat in
+            # before comes back through the revive branch, since its link key
+            # already exists dead. A new studio wired to no location writes no
+            # atLocation link, exactly as CreateSession confers none.
+            new_locs = studio_locations(new_studio)
+            prior_atloc = session_atlocation_links(sess_key)
+            wanted_atloc = {}
+            for loc in new_locs:
+                ltype, lid = parts_of(loc, "newStudio location", "")
+                wanted_atloc["lnk.session." + sess_id + ".atLocation." + ltype + "." + lid] = loc
+            for lkey in prior_atloc:
+                if lkey not in wanted_atloc and not prior_atloc[lkey].isDeleted:
+                    mutations.append(make_tombstone(lkey))
+            for lkey in wanted_atloc:
+                prior = prior_atloc.get(lkey)
+                if prior == None:
+                    mutations.append(make_link(lkey, sess_key, wanted_atloc[lkey], "atLocation", "atLocation", {}))
+                elif prior.isDeleted:
+                    mutations.append(make_link_revive_occ(lkey, sess_key, wanted_atloc[lkey], "atLocation", "atLocation", prior.revision))
         elif reschedule:
             for c in old_cells:
                 if c not in new_cells:
@@ -3846,16 +3904,18 @@ def session_locations(session_key):
     # stranding front-of-house staff who need to manage a session (and its
     # outstanding bookings) that predates the tombstone. Fall back to the
     # session's own atLocation link(s): CreateSession snapshots the studio's
-    # then-live locatedAt target(s) at write time, so they name real locations
-    # independent of the studio's current status, never caller-forged. Mirrors
-    # clinic-domain's appointment_sites fallback to atSite for a tombstoned
-    # provider. A session created before this fallback existed, or whose
-    # studio carried no location at CreateSession time, has no atLocation link
-    # and stays denied here -- exactly as it was before the studio died.
-    # read-posture: (e) relation=atLocation epoch=none -- CreateSession writes
-    # at most one atLocation link per location the studio then sat at, a
-    # single bounded enumeration off the session key already proven alive by
-    # the caller, never a keyspace scan.
+    # then-live locatedAt target(s) at write time and ReassignSession re-takes
+    # that snapshot on every studio move, so they name the room the class LAST
+    # met in, independent of that studio's current status and never
+    # caller-forged. Mirrors clinic-domain's appointment_sites fallback to
+    # atSite for a tombstoned provider. A session whose studio carried no
+    # location when the snapshot was last taken has no atLocation link and is
+    # denied here, the same way a studio with no location confers no workplace
+    # to begin with.
+    # read-posture: (e) relation=atLocation epoch=none -- the snapshot holds at
+    # most one link per location the session's studio sits at, a single bounded
+    # enumeration off the session key already proven alive by the caller, never
+    # a keyspace scan.
     apage, _ = kv.Links(session_key, "atLocation", "out")
     out = []
     for lk in apage:
