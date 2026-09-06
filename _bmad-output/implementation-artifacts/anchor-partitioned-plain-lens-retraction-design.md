@@ -978,6 +978,9 @@ tell is two calls to the same arming predicate in one handler, mechanized for th
 lifted refusal re-arms, not only the flag's readers) is a sighting of the standing *"re-derive the boundary
 from the CONSUMERS the refusal was protecting"* entry and is noted there.
 
-**Shipped.** Increment 1 + close on `main` (the fire's merge commit; Done-log entry on the lane). Verticals'
+**Shipped.** Increment 1 + close on `main` as three code commits — `f25635b` (the build), `0d9f54d` (the
+three-review fix round), `5495fdc` (the closing pass's once-per-frame arming) — plus this note (`c7582c9`);
+the fire's merge commit was linearised by the push-time rebase, so this section is the narrative of record.
+Done-log entry on the lane. Verticals'
 landlord-visibility row (`verticals.md`, blocked-on this) is unblocked from the platform side: the lens seeds on
 its own leaseapp's events and diffs its partition at the next Refractor cycle, no package edit needed.
