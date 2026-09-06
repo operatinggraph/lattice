@@ -547,6 +547,185 @@ func TestHealthSummary_Rollup_UnenumeratedComponent(t *testing.T) {
 	})
 }
 
+// TestHealthSummary_Rollup_ProcessorLatency pins the processor-event arm: a
+// fresh step3-latency or step5-latency doc renders a green row (observedAt
+// drives freshness, not heartbeatAt, which these docs don't even carry), a
+// stale one renders yellow, a step5 doc's timeouts figure reaches Details, a
+// null meanLiveReads renders without panicking, and every other
+// processor-event key (malformed-operation.*, etc.) still renders no row at
+// all.
+func TestHealthSummary_Rollup_ProcessorLatency(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := now.Add(-5 * time.Second).Format(time.RFC3339)
+	stale := now.Add(-120 * time.Second).Format(time.RFC3339)
+	bootstrapDoc := map[string]any{"status": "complete", "completedAt": fresh}
+
+	t.Run("FreshStep5Green", func(t *testing.T) {
+		key := "health.processor.proc-01.step5-latency"
+		docs := map[string]map[string]any{
+			key: {
+				"key":           key,
+				"component":     "processor",
+				"instance":      "proc-01",
+				"observedAt":    fresh,
+				"count":         float64(128),
+				"meanNs":        float64(2_000_000),
+				"p95Ns":         float64(5_000_000),
+				"p99Ns":         float64(9_000_000),
+				"timeoutsTotal": float64(3),
+				"meanLiveReads": float64(2.5),
+				"meanListings":  float64(1.0),
+			},
+			"health.bootstrap.complete": bootstrapDoc,
+		}
+		allKeys := []string{key, "health.bootstrap.complete"}
+		readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+		rollup, level := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
+		if level != rollupGreen {
+			t.Errorf("overall = %v, want GREEN", level)
+		}
+		found := false
+		for _, row := range rollup.Components {
+			if row.Component != key {
+				continue
+			}
+			found = true
+			if row.Status != "green" {
+				t.Errorf("status = %q, want \"green\"", row.Status)
+			}
+			if !strings.Contains(row.Details, "n=128") {
+				t.Errorf("details = %q, want it to contain the sample count", row.Details)
+			}
+			if !strings.Contains(row.Details, "timeouts=3") {
+				t.Errorf("details = %q, want it to contain the timeouts figure", row.Details)
+			}
+		}
+		if !found {
+			t.Fatal("step5-latency row not found in rollup components")
+		}
+	})
+
+	t.Run("StaleStep5Yellow", func(t *testing.T) {
+		key := "health.processor.proc-02.step5-latency"
+		docs := map[string]map[string]any{
+			key: {
+				"key":           key,
+				"observedAt":    stale,
+				"count":         float64(4),
+				"meanNs":        float64(1_000_000),
+				"p95Ns":         float64(1_000_000),
+				"p99Ns":         float64(1_000_000),
+				"timeoutsTotal": float64(0),
+			},
+			"health.bootstrap.complete": bootstrapDoc,
+		}
+		allKeys := []string{key, "health.bootstrap.complete"}
+		readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+		rollup, level := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
+		if level != rollupYellow {
+			t.Errorf("overall = %v, want YELLOW (stale observedAt)", level)
+		}
+		found := false
+		for _, row := range rollup.Components {
+			if row.Component == key {
+				found = true
+				if row.Status != "stale" {
+					t.Errorf("status = %q, want \"stale\"", row.Status)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("step5-latency row not found in rollup components")
+		}
+	})
+
+	t.Run("FreshStep3Green", func(t *testing.T) {
+		key := "health.processor.proc-03.step3-latency"
+		docs := map[string]map[string]any{
+			key: {
+				"key":        key,
+				"observedAt": fresh,
+				"count":      float64(64),
+				"meanNs":     float64(500_000),
+				"p95Ns":      float64(900_000),
+				"p99Ns":      float64(1_200_000),
+			},
+			"health.bootstrap.complete": bootstrapDoc,
+		}
+		allKeys := []string{key, "health.bootstrap.complete"}
+		readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+		rollup, level := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
+		if level != rollupGreen {
+			t.Errorf("overall = %v, want GREEN", level)
+		}
+		found := false
+		for _, row := range rollup.Components {
+			if row.Component == key {
+				found = true
+				if row.Status != "green" {
+					t.Errorf("status = %q, want \"green\"", row.Status)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("step3-latency row not found in rollup components")
+		}
+	})
+
+	t.Run("OtherProcessorEventNoRow", func(t *testing.T) {
+		key := "health.processor.proc-04.malformed-operation.abc123"
+		docs := map[string]map[string]any{
+			key: {
+				"key":        key,
+				"observedAt": fresh,
+				"count":      float64(1),
+			},
+			"health.bootstrap.complete": bootstrapDoc,
+		}
+		allKeys := []string{key, "health.bootstrap.complete"}
+		readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+		rollup, _ := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
+		for _, row := range rollup.Components {
+			if row.Component == key {
+				t.Errorf("malformed-operation row %+v present in rollup, want no row for a non-latency processor-event key", row)
+			}
+		}
+	})
+
+	t.Run("NullMeanLiveReadsNoPanic", func(t *testing.T) {
+		key := "health.processor.proc-05.step5-latency"
+		docs := map[string]map[string]any{
+			key: {
+				"key":           key,
+				"observedAt":    fresh,
+				"count":         float64(0),
+				"meanNs":        float64(0),
+				"p95Ns":         float64(0),
+				"p99Ns":         float64(0),
+				"timeoutsTotal": float64(0),
+				"meanLiveReads": nil,
+				"meanListings":  nil,
+			},
+			"health.bootstrap.complete": bootstrapDoc,
+		}
+		allKeys := []string{key, "health.bootstrap.complete"}
+		readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+		rollup, _ := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
+		found := false
+		for _, row := range rollup.Components {
+			if row.Component == key {
+				found = true
+				if !strings.Contains(row.Details, "meanLiveReads=-") {
+					t.Errorf("details = %q, want meanLiveReads rendered as \"-\" for null", row.Details)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("step5-latency row not found in rollup components")
+		}
+	})
+}
+
 func rollupOf(t *testing.T, docs map[string]map[string]any) rollupLevel {
 	t.Helper()
 	allKeys := make([]string, 0, len(docs))
