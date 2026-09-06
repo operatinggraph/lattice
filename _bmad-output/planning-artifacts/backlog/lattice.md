@@ -148,7 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-06 · `72b6b26` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
+- 2026-09-06 · `9dd4f45` · [Processor/clinic-domain] step-5 wall telemetry SHIPPED — wall/read counts, `step5-latency` + summary arm, clinic withProvider dedup ([design](../../implementation-artifacts/authority-walk-wall-unit-cost-design.md))
 - 2026-09-06 · `5495fdc` · [Refractor] anchor-partitioned plain lens retraction SHIPPED — 5 business lenses seed on the anchor and diff its partition ([design](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md))
 - 2026-09-06 · `ffb5208` · [Processor/Loom] egress declaration admitted only from a platform engine; Loom declares one only via the externalTask constructor ([design](../../implementation-artifacts/egress-read-declaration-authority-design.md))
 - 2026-09-05 · `94275eb` · [Refractor] perEntry unchanged-entry withholding SHIPPED — the CDC loop withholds an entry the target already holds ([design](../../implementation-artifacts/perentry-unchanged-entry-withholding-design.md))

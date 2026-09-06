@@ -575,10 +575,10 @@ shared file.
 
 ### Build note — shipped (2026-09-06, Lattice steward, remote; resumed from `claude/serene-meitner-c3uqwk`)
 
-**Landed** (one fire, three increments): A2 `64f27a5` (the `processor-event` summary arm — carried over from the
-prior owner branch, idle 4 h), A1 `2a4a952` (Processor: `LiveReadCalls` / `ListCalls`, the executor's clock +
+**Landed** (one fire, three increments): A2 `581d327` (the `processor-event` summary arm — carried over from the
+prior owner branch, idle 4 h), A1 `90084de` (Processor: `LiveReadCalls` / `ListCalls`, the executor's clock +
 three-column ring + `timeoutsTotal`, the step-5 executed/aborted log fields, `AttachExecutor` + `step5-latency`
-emit, schema row + shape, completeness entry), B `15ecc5b` (clinic `appointment_sites(appt_id, provider)` at
+emit, schema row + shape, completeness entry), B `9dd4f45` (clinic `appointment_sites(appt_id, provider)` at
 the five sites, the `(d)`→`(e)` annotation, `ExtraScriptReadObservers`, `ListCalls == 3` pinned; 0.34.23).
 Inc C: the parent's §5.1 pointer already stands (`kv-links-listing-leg-collapse-design.md:173`); the three
 verticals rows were closed by the Verticals steward on the §9 acceptance, nothing left to flip there.
