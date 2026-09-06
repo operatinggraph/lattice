@@ -14,7 +14,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"cafeIdentitiesRead":             {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeLeaseAccounts":              {"g1/o1!no-aggregating-item", 0, 1},
 	"cafeLeaseWorkplaces":            {"g1/o1!no-aggregating-item", 0, 1},
-	"cafeLedgerHistory":              {"g0/o0!no-aggregating-item", 0, 0},
+	"cafeLedgerHistory":              {"g2/o2!no-aggregating-item", 0, 2},
 	"cafeStaleTabSettlement":         {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeTabSettlement":              {"g3/o3!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 3},
 	"capability":                     {"g0/o0!no-aggregating-item", 0, 0},
@@ -180,6 +180,7 @@ var decomposingCorpusLenses = []string{
 var siblingBranchGroupLenses = []string{
 	"applicantOnboarding",
 	"appointmentReminders",
+	"cafeLedgerHistory",
 	"cafeTabSettlement",
 	"capabilityEphemeral",
 	"clauseSatisfaction",
