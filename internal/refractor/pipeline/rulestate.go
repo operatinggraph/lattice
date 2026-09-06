@@ -113,6 +113,34 @@ type ruleState struct {
 	// cannot change until the body does, and the conjunct that reads it is
 	// asked on every CDC event of every personal lens.
 	expandsLabelSigil bool
+	// partition is what this compiled rule says about how its output rows group
+	// by anchor — see rulePartition.
+	//
+	// Derived at every install from the compiled rule alone, for the reason
+	// seedAnchorLabels and personalClockRefusal are: a reload must never leave a
+	// previous body's verdict standing, and the answer cannot change until the
+	// body does. It is the RULE half of the partition arming; the adapter and
+	// plane half is p.partitionRetraction, bound once before Run.
+	partition rulePartition
+}
+
+// rulePartition is the compiled rule's answer to "do this lens's output rows
+// partition by its anchor, and which key columns say which anchor a row is for"
+// (anchor-partitioned-plain-lens-retraction-design.md §3.1, §4).
+//
+// only is PartitionsByAnchor ∧ ¬ProjectsOneRowPerAnchor — the PARTITION-ONLY
+// set, which is the set this mechanism acts on. A closed lens already retracts
+// through the read-free presence check and needs no partition listing; a lens
+// that does not partition at all must keep its whole diff. Both read as
+// `only == false` and neither is armed, which is why one field carries the
+// answer rather than two.
+//
+// Its zero value — not partitioned, no identifying columns — is the REFUSING
+// answer under every consumer, which is what makes the field safe to publish
+// through a hand-maintained round trip.
+type rulePartition struct {
+	only        bool
+	identifying []string
 }
 
 // ruleState returns the pipeline's current compiled rule as one snapshot.
@@ -170,6 +198,7 @@ func (p *Pipeline) ruleState() ruleState {
 		// Pipeline field.
 		personalClockRefusal: p.personalClockRefusal,
 		expandsLabelSigil:    p.expandsLabelSigil,
+		partition:            p.partition,
 	}
 }
 
@@ -216,6 +245,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainNarrowingBlocked = rs.narrowingBlocked
 	p.personalClockRefusal = rs.personalClockRefusal
 	p.expandsLabelSigil = rs.expandsLabelSigil
+	p.partition = rs.partition
 }
 
 // The publication-scope eligibility vocabulary — the reason a CDC event's rows
@@ -382,11 +412,18 @@ func ruleExpandsALabelSigil(cr ruleengine.CompiledRule) bool {
 //     is already scoped to one actor, and its "anchor" is that actor, not the
 //     event vertex; seeding it with an event key would evaluate the wrong
 //     entity.
-//   - DiffRetraction off — that retraction diffs the target's FULL live key
-//     set against the evaluation's row set, so a single-anchor row set would
-//     read as "every other anchor's rows are gone" and retract them all. This
-//     conjunct is what makes applyDiffRetraction unreachable from a seeded
-//     evaluation.
+//   - DiffRetraction off, UNLESS the lens is partition-armed. The whole-target
+//     diff compares the evaluation's row set against the target's FULL live key
+//     set, so a single-anchor row set would read as "every other anchor's rows
+//     are gone" and retract them all — that is what this conjunct keeps
+//     unreachable from a seeded evaluation. A partition-armed lens diffs against
+//     ITS ANCHOR'S PARTITION instead (applyPartitionDiffRetraction), which a
+//     single-anchor row set is exactly the truth about, so the same evaluation
+//     that would have been unsound against a whole listing is exact against a
+//     scoped one. Arming is the whole conjunct set of SetPartitionRetraction
+//     (a partition-only rule, a business-plane lens, an adapter that can list a
+//     partition and read a row back), re-checked here against the live rule so
+//     a MATCH reload that stops partitioning disarms seeding on the next event.
 func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) string {
 	if eventKey == "" {
 		return ""
@@ -397,7 +434,7 @@ func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) stri
 	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
 		return ""
 	}
-	if p.diffRetraction {
+	if p.diffRetraction && !p.partitionArmed(rs) {
 		return ""
 	}
 	return eventKey

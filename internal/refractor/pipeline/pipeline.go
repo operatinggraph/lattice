@@ -374,6 +374,25 @@ type Pipeline struct {
 	// which OTHER lens targets this bucket — and never re-derived per event.
 	diffRetractionPrefix string
 
+	// partitionRetraction is the ADAPTER-AND-PLANE half of the partition-scoped
+	// target diff (anchor-partitioned-plain-lens-retraction-design.md §3.3):
+	// this lens declares DiffRetraction, its target can list one partition and
+	// read a row back, and it projects onto the business plane. Bound before Run
+	// by SetPartitionRetraction, from inputs a running pipeline cannot change.
+	//
+	// It is never read alone. Every consumer asks partitionArmed, which conjoins
+	// it with the RULE half (ruleState.partition.only) off the live snapshot, so
+	// a MATCH hot-reload that stops the rule partitioning disarms the mechanism
+	// on the next event with no reload refusal to write.
+	//
+	// False by default, which is today's whole-target diff — the posture every
+	// unarmed DiffRetraction lens keeps.
+	partitionRetraction bool
+
+	// partition is the published rule half of the same arming — see
+	// ruleState.partition, which this is the Pipeline-side home of.
+	partition rulePartition
+
 	// actorEnumerator enables cross-vertex fan-out. When non-nil and
 	// engineKind == Full, evaluateForEntry expands every CDC event on a
 	// non-actor vertex into the set of affected actors and re-executes
@@ -1187,6 +1206,74 @@ func (p *Pipeline) SetDiffRetraction(enabled bool) error {
 	}
 	p.diffRetraction = enabled
 	return nil
+}
+
+// SetPartitionRetraction arms the partition-scoped target diff for this lens —
+// the transport that lets a lens whose rows partition by anchor seed on its
+// anchor's events and retract within one anchor's partition, instead of
+// rescanning the corpus and diffing the whole target on every event
+// (anchor-partitioned-plain-lens-retraction-design.md §3.3). Must be called
+// before Run, and after SetDiffRetraction and the shared-target scoping: the
+// NATS-KV partition listing runs under the diff's own prefix, so a prefix bound
+// afterwards would arm a listing wider than the one it inherits.
+//
+// authPlane is passed in rather than read off p.authPlane for the reason
+// InstallAudit and PlainRetractionTransport take it the same way:
+// projection.IsAuthPlane is the one canonical derivation, and the activation
+// gate runs BEFORE installLensPlane records it — a conjunct that depends on
+// whether an earlier stage happened to run reads as satisfied for a lens it must
+// refuse. The auth plane is excluded because its grant tables' whole diff on
+// every event is the only shrink path an un-truncatable target has on a taxonomy
+// rebuild (cmd/refractor's rebuild-truncate argument), which a partition-scoped
+// diff would remove.
+//
+// The three dispositions, and the difference between them is the point:
+//
+//   - a partition-only business lens whose adapter can list a partition and read
+//     a row back is ARMED (nil error; PartitionRetraction then reports true);
+//   - a partition-only BUSINESS lens whose adapter can do neither is REFUSED
+//     with an error, mirroring SetDiffRetraction's own KeyLister refusal: it
+//     would seed per anchor with nothing able to scope its diff, and the caller
+//     must fail the activation rather than run it half-armed;
+//   - anything else — a closed lens, a lens that does not partition, an
+//     auth-plane lens — is simply NOT armed, with no error. Those are not
+//     defects; they are lenses this transport does not apply to, and each keeps
+//     exactly today's whole diff.
+func (p *Pipeline) SetPartitionRetraction(authPlane bool) error {
+	p.partitionRetraction = false
+	if !p.diffRetraction || !p.ruleState().partition.only {
+		return nil
+	}
+	if authPlane {
+		return nil
+	}
+	adpt := p.currentAdapter()
+	if _, ok := adpt.(adapter.PartitionKeyLister); !ok {
+		return fmt.Errorf("pipeline: partition retraction requires an adapter implementing adapter.PartitionKeyLister; %T does not — the lens's rows partition by anchor, so it would seed per anchor with nothing able to scope its diff", adpt)
+	}
+	if _, ok := adpt.(adapter.RowReader); !ok {
+		return fmt.Errorf("pipeline: partition retraction requires an adapter implementing adapter.RowReader; %T does not — a listed key already carrying a tombstone could not be told from a live one, so every event would rewrite it", adpt)
+	}
+	p.partitionRetraction = true
+	return nil
+}
+
+// PartitionRetraction reports whether this pipeline's target diff is scoped to
+// the anchors an evaluation covered — the adapter-and-plane half alone, as
+// activation bound it. The whole answer for one event is partitionArmed, which
+// conjoins this with the live rule's own verdict.
+func (p *Pipeline) PartitionRetraction() bool { return p.partitionRetraction }
+
+// partitionArmed is the WHOLE arming question, asked of one rule snapshot: the
+// activation half (adapter, plane, declaration) and the rule half (this body's
+// rows partition by anchor and are not already closed) together.
+//
+// Every consumer reads it rather than p.partitionRetraction, so the two halves
+// can never be asked separately — a reload that swaps in a body whose rows no
+// longer partition disarms seeding, the derivation index and the transport on
+// the next event, in one place, with no reload refusal to keep in step.
+func (p *Pipeline) partitionArmed(rs ruleState) bool {
+	return p.partitionRetraction && rs.partition.only
 }
 
 // SetDiffRetractionPrefix scopes the target-diff listing to prefix — the lens's

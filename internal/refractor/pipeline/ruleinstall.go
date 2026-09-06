@@ -484,8 +484,40 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// reload can never leave a previous rule body's scope armed.
 	next.walkScope, next.walkScopeRefusal = deriveWalkScope(next.engineKind, all, expandedLabels)
 
+	// Whether this body's output rows partition by its anchor, and which key
+	// columns identify which anchor a row is for (§3.1 of
+	// anchor-partitioned-plain-lens-retraction-design.md). Derived
+	// unconditionally, like the anchor label and the clock refusal above and for
+	// the same reason: a reload must never leave a previous body's verdict
+	// standing, and this one authorises a per-anchor seeded evaluation whose
+	// retraction Deletes rows inside the partition it names.
+	next.partition = deriveRulePartition(next.cr)
+
 	p.publishRuleState(next)
 	return nil
+}
+
+// deriveRulePartition answers the partition question for one compiled rule.
+//
+// It reports PARTITION-ONLY: the rule's rows partition by its anchor
+// (full.CompiledRule.PartitionsByAnchor) and are not already keyed on the anchor
+// alone (ProjectsOneRowPerAnchor). A closed lens is deliberately excluded rather
+// than admitted as a degenerate partition — its retraction is the read-free
+// presence check, and clinicPatientsRead's whole diff is a ratified continuous
+// healer of the lost-anchor-event channel that only a whole listing can be.
+//
+// A non-full-engine rule, and a nil one, carry the zero value: not partitioned,
+// which refuses under every consumer.
+func deriveRulePartition(cr ruleengine.CompiledRule) rulePartition {
+	fullCR, isFull := cr.(*full.CompiledRule)
+	if !isFull || fullCR == nil {
+		return rulePartition{}
+	}
+	identifying, partitions := fullCR.PartitionsByAnchor()
+	if !partitions || fullCR.ProjectsOneRowPerAnchor() {
+		return rulePartition{}
+	}
+	return rulePartition{only: true, identifying: identifying}
 }
 
 // sortedLabelList returns labels' keys sorted, for a deterministic error

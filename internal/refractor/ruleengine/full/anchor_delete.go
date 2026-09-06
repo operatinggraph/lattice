@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // AnchorDeleteResult reports the projection (delete) key that a now-tombstoned
@@ -76,24 +78,7 @@ func (*Engine) AnchorProjectionKey(
 	if !structural {
 		return nil, false
 	}
-
-	// The anchor's label discriminates an anchor tombstone (retract) from a
-	// secondary-node tombstone (re-execute): a provider/appointment tombstone
-	// is the anchor; a patient tombstone reaching the appointment lens via
-	// forPatient is a secondary node.
-	//
-	// When the anchor pattern carries the `*` taxonomy-expansion sigil, the
-	// discriminator is set membership against the resolved downward closure
-	// instead of string equality — §5.1 site 3, anchor retraction, the most
-	// dangerous of the four: left as equality, an abstract-anchored lens
-	// whose anchor tombstones as a leaf type never matches anchorLabel, so
-	// the retraction never fires and the row goes stale — a grant that never
-	// revokes, on a grant-producing lens.
-	if shape.anchorExpand {
-		if _, hit := shape.expandedSet[eventType]; !hit {
-			return nil, false
-		}
-	} else if eventType != shape.anchorLabel {
+	if !shape.anchorEventMatches(eventType) {
 		return nil, false
 	}
 
@@ -168,9 +153,75 @@ type anchorProjectionShape struct {
 	keyExprs map[string]Expr
 }
 
+// anchorEventMatches reports whether an event vertex of type eventType IS this
+// shape's anchor — the discriminator that separates an anchor tombstone
+// (retract) from a secondary-node tombstone (re-execute): a provider/appointment
+// tombstone is the anchor; a patient tombstone reaching the appointment lens via
+// forPatient is a secondary node.
+//
+// When the anchor pattern carries the `*` taxonomy-expansion sigil, the
+// discriminator is set membership against the resolved downward closure instead
+// of string equality — §5.1 site 3, anchor retraction, the most dangerous of the
+// four: left as equality, an abstract-anchored lens whose anchor tombstones as a
+// leaf type never matches anchorLabel, so the retraction never fires and the row
+// goes stale — a grant that never revokes, on a grant-producing lens.
+func (s anchorProjectionShape) anchorEventMatches(eventType string) bool {
+	if s.anchorExpand {
+		_, hit := s.expandedSet[eventType]
+		return hit
+	}
+	return eventType == s.anchorLabel
+}
+
+// keyColumnReference is the test a resolved key-column expression's VARIABLE
+// references must pass, and the single axis on which the closure shape and the
+// partition shape differ. anchorVar is the anchor pattern's own variable.
+//
+// Everything else the shape resolver enforces — no aggregate anywhere in the
+// resolved expression, no pattern form, no unmodelled node, an alias whose
+// provenance the WITH resolver cannot answer — is shared, so the two predicates
+// can never disagree about a column's provenance.
+type keyColumnReference func(resolved Expr, anchorVar string) bool
+
+// anchorOnlyReference is the CLOSURE reading: a key column may reference the
+// anchor's binding and nothing else, which is what makes the column derivable
+// read-free from the anchor alone.
+func anchorOnlyReference(resolved Expr, anchorVar string) bool {
+	return exprReferencesOnlyVariable(resolved, anchorVar)
+}
+
+// anyPatternVariableReference is the PARTITION reading: a key column may
+// reference any pattern variable — a neighbour bound by the walk
+// (landlordLeaseApplicationsRead's `landlord`), or a relationship variable a
+// function reads (objectIdentityAttachmentsRead's `type(r)`) — because the
+// partition does not need the column derived from the anchor, only computed
+// within the anchor's own bindings. Aggregates, pattern forms and unmodelled
+// nodes are refused exactly as they are for the closure reading.
+func anyPatternVariableReference(resolved Expr, _ string) bool {
+	return exprReferencesOnlyPatternVariables(resolved)
+}
+
 // anchorProjectionShape resolves the structural half of the ok contract, or
 // reports false when the rule cannot satisfy it under ANY event.
 func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
+	return cr.keyColumnShape(anchorOnlyReference)
+}
+
+// partitionShape is anchorProjectionShape's partition reading — the SAME
+// resolver body, admitting a key column over any pattern variable rather than
+// the anchor's alone. It carries the same anchor descriptors and the same
+// resolved key-column expressions on, so PartitionPredicate evaluates exactly
+// what PartitionsByAnchor admitted.
+func (cr *CompiledRule) partitionShape() (anchorProjectionShape, bool) {
+	return cr.keyColumnShape(anyPatternVariableReference)
+}
+
+// keyColumnShape is the shared resolver body: it proves the rule has a labeled
+// anchor pattern, resolves every key column back through the query's WITH
+// boundaries to the pattern variables underneath it, and holds each resolved
+// expression to admits. It reports false when the rule cannot satisfy that
+// under ANY event.
+func (cr *CompiledRule) keyColumnShape(admits keyColumnReference) (anchorProjectionShape, bool) {
 	if cr == nil || cr.Query == nil {
 		return anchorProjectionShape{}, false
 	}
@@ -247,12 +298,12 @@ func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
 		if !resolvable {
 			return anchorProjectionShape{}, false
 		}
-		if !exprReferencesOnlyVariable(resolved, anchorVar) {
-			// A key column bound to a NON-anchor variable (a neighbor-keyed /
-			// multi-row lens, e.g. landlord_id off a manages walk) is not
-			// derivable from the anchor alone. The evaluator would silently
-			// resolve the unbound variable to nil (the OPTIONAL-MATCH
-			// contract) and yield a WRONG partial key, so reject
+		if !admits(resolved, anchorVar) {
+			// Under the closure reading, a key column bound to a NON-anchor
+			// variable (a neighbor-keyed / multi-row lens, e.g. landlord_id off
+			// a manages walk) is not derivable from the anchor alone. The
+			// evaluator would silently resolve the unbound variable to nil (the
+			// OPTIONAL-MATCH contract) and yield a WRONG partial key, so reject
 			// structurally before evaluating.
 			//
 			// An aggregate anywhere in the resolved expression is refused here
@@ -336,12 +387,165 @@ func (cr *CompiledRule) ProjectsOneRowPerAnchor() bool {
 	if !ok {
 		return false
 	}
+	return len(identifyingKeyColumns(shape)) > 0
+}
+
+// PartitionsByAnchor reports whether this rule's output rows PARTITION by
+// anchor without being KEYED on the anchor alone: every output row belongs to
+// exactly one anchor and is computed from that anchor's own bindings, but the
+// key may carry columns bound to neighbours the walk reached
+// (landlordLeaseApplicationsRead's `landlord_id` off a `manages` hop,
+// objectIdentityAttachmentsRead's `type(r)` over the attachment link).
+// identifying names the key columns that say WHICH anchor a row is for.
+//
+// It is ProjectsOneRowPerAnchor's own argument minus one conjunct, over the
+// same resolver body (keyColumnShape): every key column is a non-aggregating
+// expression over pattern variables — no aggregator anywhere in the resolved
+// chain, no pattern form, no unmodelled node — and at least one of them
+// IDENTIFIES the anchor (exprIdentifiesVariable). The closure predicate is the
+// special case where the set of non-anchor key columns is empty, so
+// PartitionsByAnchor admits every rule ProjectsOneRowPerAnchor admits.
+//
+// What the identifying conjunct buys is what a per-anchor evaluation depends
+// on: the executor groups a projection by its non-aggregating items
+// (projectItems), an admitted column resolves through non-aggregating items
+// only, and a value unique per anchor is therefore part of the grouping key at
+// every boundary the column crosses — so a group is confined to ONE root
+// binding and no aggregate inside a row spans two anchors. An evaluation seeded
+// at one anchor computes exactly the rows that anchor owns, no more and no
+// fewer.
+//
+// What it does NOT give is a key derivable read-free from the anchor: a
+// neighbour-bound column still needs the walk, so AnchorProjectionKey keeps
+// answering ok=false for these rules and the read-free presence check and
+// root-tombstone shortcut keep declining. The partition is READ instead
+// (adapter.PartitionKeyLister), scoped by PartitionPredicate below.
+func (cr *CompiledRule) PartitionsByAnchor() (identifying []string, ok bool) {
+	shape, structural := cr.partitionShape()
+	if !structural {
+		return nil, false
+	}
+	identifying = identifyingKeyColumns(shape)
+	if len(identifying) == 0 {
+		return nil, false
+	}
+	return identifying, true
+}
+
+// identifyingKeyColumns returns the shape's key columns that identify the
+// anchor, in this rule's own key-column order — the anchor's Contract #1 key or
+// nanoIdFromKey over it. Shared by both predicates so neither can recognize an
+// identifier the other does not.
+func identifyingKeyColumns(shape anchorProjectionShape) []string {
+	var out []string
 	for _, col := range shape.cols {
 		if exprIdentifiesVariable(shape.keyExprs[col], shape.anchorVar) {
-			return true
+			out = append(out, col)
 		}
 	}
+	return out
+}
+
+// PartitionPredicate resolves the fixed key-column values that name one
+// anchor's PARTITION of this lens's rows — the scope
+// adapter.PartitionKeyLister.ListKeysWhere lists and the pipeline's
+// partition-scoped diff retracts within.
+//
+// It is AnchorProjectionKey's derivation narrowed to the identifying columns:
+// the same anchor-label discrimination (set membership against the resolved
+// downward closure when the anchor pattern carries the `*` sigil, string
+// equality otherwise), and the same read-free executor binding — except that
+// the binding carries the anchor's KEY and no body at all. An identifying
+// column is a `.key` form or nanoIdFromKey over one by construction
+// (exprIdentifiesVariable), so no stored property is ever on the path, which is
+// what lets a root-tombstoned anchor still name its own partition.
+//
+//	ok == false → the event vertex is not this rule's anchor, the rule does not
+//	              partition by its anchor, or a column resolved to something no
+//	              key value may be. The caller must fail the event rather than
+//	              diff a wider set: a partition predicate that cannot be
+//	              evaluated is not a licence to list everything.
+//
+// The value check is the last of those and the one that is about the TARGET
+// rather than the rule. A fixed value travels into a NATS-KV listing filter and
+// a bound SQL parameter, and `nanoIdFromKey` output or a whole `vtx.<type>.<id>`
+// key are the only two shapes an identifying column can produce — so anything
+// else, and any value carrying a character outside the platform key alphabet (a
+// `*` or a `>` above all), is refused here rather than trusted to whichever
+// renderer it reaches.
+func (*Engine) PartitionPredicate(
+	cr ruleengine.CompiledRule, eventKey, eventType string,
+) (fixed map[string]any, ok bool) {
+	compiled, isFull := cr.(*CompiledRule)
+	if !isFull {
+		return nil, false
+	}
+	shape, structural := compiled.partitionShape()
+	if !structural {
+		return nil, false
+	}
+	if !shape.anchorEventMatches(eventType) {
+		return nil, false
+	}
+	identifying := identifyingKeyColumns(shape)
+	if len(identifying) == 0 {
+		return nil, false
+	}
+
+	ex := &executor{ctx: context.Background()}
+	b := binding{shape.anchorVar: &nodeRef{key: eventKey}}
+
+	out := make(map[string]any, len(identifying))
+	for _, col := range identifying {
+		v, err := ex.evalExpr(b, shape.keyExprs[col])
+		if err != nil {
+			return nil, false
+		}
+		if _, isNode := v.(*nodeRef); isNode {
+			return nil, false
+		}
+		if v == nil {
+			return nil, false
+		}
+		s, isString := v.(string)
+		if !isString || !isPartitionKeyValue(s) {
+			return nil, false
+		}
+		out[col] = s
+	}
+	return out, true
+}
+
+// isPartitionKeyValue reports whether s is a value a partition predicate may
+// carry: a bare identifier over the platform key alphabet (nanoIdFromKey's
+// output), or a whole `vtx.<type>.<id>` key whose id is over that alphabet.
+//
+// The alphabet is the bound, not the length: a 20-character NanoID and a
+// shorter platform-minted identifier are both fine, and neither can contain the
+// `.`, `*` or `>` that would let a value widen a subject filter or escape a
+// listing's scope.
+func isPartitionKeyValue(s string) bool {
+	if overKeyAlphabet(s) {
+		return true
+	}
+	if _, id, parsed := substrate.ParseVertexKey(s); parsed {
+		return overKeyAlphabet(id)
+	}
 	return false
+}
+
+// overKeyAlphabet reports whether s is non-empty and drawn entirely from the
+// Contract #1 NanoID alphabet.
+func overKeyAlphabet(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !strings.ContainsRune(keys.Alphabet, rune(s[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // exprIdentifiesVariable reports whether e resolves to a value unique to the
@@ -376,6 +580,27 @@ func exprIdentifiesVariable(e Expr, v string) bool {
 // never anchor-only. Conservative by construction: an unrecognized future
 // node type reports false (fall through to linger, never a wrong Delete).
 func exprReferencesOnlyVariable(e Expr, allowed string) bool {
+	return exprVariablesAdmitted(e, func(name string) bool { return name == allowed })
+}
+
+// exprReferencesOnlyPatternVariables reports whether an expression is a
+// non-aggregating expression over pattern variables — ANY of them, node or
+// relationship — with no pattern form and no node the walk does not model.
+//
+// It is the partition reading of the same structural question
+// exprReferencesOnlyVariable asks: a key column may be computed from a
+// neighbour the walk bound, so long as it is computed from the row's own
+// bindings rather than from an aggregate over a grouped row set. Both read the
+// SAME walk, so a shape one refuses for a reason other than which variable it
+// names is refused by both.
+func exprReferencesOnlyPatternVariables(e Expr) bool {
+	return exprVariablesAdmitted(e, func(string) bool { return true })
+}
+
+// exprVariablesAdmitted is the one walk both readings above run: every variable
+// the expression references must satisfy admit, no aggregator may appear
+// anywhere in it, and every node the walk does not model refuses.
+func exprVariablesAdmitted(e Expr, admit func(name string) bool) bool {
 	switch x := e.(type) {
 	case nil:
 		return true
@@ -387,59 +612,61 @@ func exprReferencesOnlyVariable(e Expr, allowed string) bool {
 		// surfaces MissingParameterError and the caller falls through.
 		return true
 	case *VariableRef:
-		return x.Name == allowed
+		return admit(x.Name)
 	case *PropertyAccess:
-		return exprReferencesOnlyVariable(x.Target, allowed)
+		return exprVariablesAdmitted(x.Target, admit)
 	case *BinaryOp:
-		return exprReferencesOnlyVariable(x.Left, allowed) && exprReferencesOnlyVariable(x.Right, allowed)
+		return exprVariablesAdmitted(x.Left, admit) && exprVariablesAdmitted(x.Right, admit)
 	case *AndOr:
 		for _, op := range x.Operands {
-			if !exprReferencesOnlyVariable(op, allowed) {
+			if !exprVariablesAdmitted(op, admit) {
 				return false
 			}
 		}
 		return true
 	case *Not:
-		return exprReferencesOnlyVariable(x.Operand, allowed)
+		return exprVariablesAdmitted(x.Operand, admit)
 	case *FunctionCall:
 		switch strings.ToLower(x.Name) {
-		case "collect", "count", "max", "min":
+		case aggNameCollect, aggNameCount, aggNameMax, aggNameMin:
 			// An aggregator's value depends on the grouped row set, which the
 			// read-free single-anchor binding fabricates (collect → [v],
 			// count → 1) — the one-row-per-anchor premise cannot hold for an
-			// aggregate key. Never derivable.
+			// aggregate key, and a partition's grouping argument rests on every
+			// boundary an admitted column crosses being grouped by it. Never
+			// derivable under either reading.
 			return false
 		}
 		for _, a := range x.Args {
-			if !exprReferencesOnlyVariable(a, allowed) {
+			if !exprVariablesAdmitted(a, admit) {
 				return false
 			}
 		}
 		return true
 	case *MapLiteral:
 		for _, v := range x.Values {
-			if !exprReferencesOnlyVariable(v, allowed) {
+			if !exprVariablesAdmitted(v, admit) {
 				return false
 			}
 		}
 		return true
 	case *ListLiteral:
 		for _, el := range x.Elements {
-			if !exprReferencesOnlyVariable(el, allowed) {
+			if !exprVariablesAdmitted(el, admit) {
 				return false
 			}
 		}
 		return true
 	case *CaseExpr:
 		for _, alt := range x.Alternatives {
-			if !exprReferencesOnlyVariable(alt.When, allowed) || !exprReferencesOnlyVariable(alt.Then, allowed) {
+			if !exprVariablesAdmitted(alt.When, admit) || !exprVariablesAdmitted(alt.Then, admit) {
 				return false
 			}
 		}
-		return exprReferencesOnlyVariable(x.Else, allowed)
+		return exprVariablesAdmitted(x.Else, admit)
 	default:
 		// PatternExpr, PatternComprehension, and any future node: traversal-
-		// dependent or unknown — not derivable from the anchor binding.
+		// dependent or unknown — not derivable from a row's own bindings.
 		return false
 	}
 }

@@ -266,13 +266,16 @@ type pipelineEntry struct {
 	//   - The lens declares DiffRetraction. The shared grant table implements
 	//     no adapter.Truncater at all, so the truncate is declined with a log
 	//     line and the retraction rides the transport the lens already declares
-	//     (§6.4): a diffRetraction lens never seeds its evaluation, so every
-	//     replayed event recomputes the lens's complete row set, and
+	//     (§6.4): an un-truncatable diffRetraction target is never
+	//     partition-armed — SetPartitionRetraction refuses the auth plane and
+	//     the grant writer implements no adapter.PartitionKeyLister — so its
+	//     replay recomputes the lens's COMPLETE row set on every event, and
 	//     Pipeline.applyDiffRetraction deletes every key the target still
-	//     carries that the fresh set no longer produces — scoped to the lens's
-	//     own grant_source. It needs one delivered event to run on: a rebuild
-	//     whose narrowed filter admits no live subject retracts nothing until
-	//     the next event the lens reacts to.
+	//     carries that the fresh set no longer produces, scoped to the lens's
+	//     own grant_source. That whole diff IS the shrink path here, which is
+	//     why the exclusion is a reason rather than a posture. It needs one
+	//     delivered event to run on: a rebuild whose narrowed filter admits no
+	//     live subject retracts nothing until the next event the lens reacts to.
 	//
 	// Two shapes retract NOTHING on a shrink, and the flag is deliberately NOT
 	// set for either — a truncate that cannot be confined does more damage than

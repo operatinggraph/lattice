@@ -21,6 +21,7 @@ var _ Truncater = (*NatsKVAdapter)(nil)
 var _ OutcomeTruncater = (*NatsKVAdapter)(nil)
 var _ KeyLister = (*NatsKVAdapter)(nil)
 var _ PrefixKeyLister = (*NatsKVAdapter)(nil)
+var _ PartitionKeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
 var _ SeqGuarded = (*NatsKVAdapter)(nil)
 var _ OutcomeUpserter = (*NatsKVAdapter)(nil)
@@ -716,6 +717,91 @@ func (a *NatsKVAdapter) ListKeysPrefix(ctx context.Context, prefix string) ([]ma
 		return nil, fmt.Errorf("natskv list keys by prefix %q: %w", prefix, err)
 	}
 	return a.mapKeys(keys), nil
+}
+
+// ListKeysWhere returns the live keys whose key columns match every entry of
+// fixed (adapter.PartitionKeyLister) — one anchor's partition of this lens's
+// rows.
+//
+// IT RUNS THE SAME LISTING THE WHOLE DIFF RUNS and filters the mapped rows in
+// Go: the whole-bucket ListKeys when the lens owns its target outright, and
+// ListKeysPrefix(prefix) when it shares one, with prefix carrying exactly the
+// scoping the whole diff was activated with. The pipeline hands it down per call
+// rather than the adapter holding a second copy, so the scoped listing and the
+// whole one can never be scoped differently.
+//
+// The filter is in Go rather than in a subject, and that is the load-bearing
+// choice (§3.2). Two things it buys:
+//
+//   - The OWNERSHIP proof is inherited rather than re-derived. The whole arm's
+//     scope rests on the activation-time sharing check turning "these keys carry
+//     my prefix" into "these keys are mine" (the pipeline's own
+//     diffRetractionListing states it). Running that listing and narrowing what
+//     it returned keeps that proof intact; building a fresh subject filter would
+//     restate it.
+//   - No VALUE ever becomes a subject token. buildKey renders key field values
+//     unescaped, so a `*` or a `>` inside one would WIDEN a subject filter built
+//     from it — the delete scope growing on the strength of a value. Here the
+//     value is only ever compared, never rendered into anything.
+//
+// The cost is today's listing, which is what the whole diff already pays; the
+// win the partition buys is the EVALUATION, not the listing.
+//
+// A key whose segment count does not match keyOrder is already skipped by
+// mapKeys — it belongs to another lens sharing the bucket — so a sibling's key
+// can neither match a fixed column nor be returned here.
+func (a *NatsKVAdapter) ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error) {
+	if len(fixed) == 0 {
+		return nil, fmt.Errorf("natskv list keys where: fixed must name at least one key column — an unscoped listing is what the caller asked to avoid")
+	}
+	known := make(map[string]struct{}, len(a.keyOrder))
+	for _, k := range a.keyOrder {
+		known[k] = struct{}{}
+	}
+	for k := range fixed {
+		if _, ok := known[k]; !ok {
+			return nil, fmt.Errorf("natskv list keys where: %q is not a key column of this lens — the partition it names does not exist", k)
+		}
+	}
+
+	var existing []map[string]any
+	var err error
+	if prefix != "" {
+		existing, err = a.ListKeysPrefix(ctx, prefix)
+	} else {
+		existing, err = a.ListKeys(ctx)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("natskv list keys where: %w", err)
+	}
+
+	var out []map[string]any
+	for _, keys := range existing {
+		if partitionMatches(keys, fixed) {
+			out = append(out, keys)
+		}
+	}
+	return out, nil
+}
+
+// partitionMatches reports whether a listed key's columns carry every fixed
+// value. Both sides are compared as their rendered strings, which is exactly
+// what a listed key holds: mapKeys splits a stored key back into its segments,
+// so a listed column is always the string buildKey wrote, and a fixed value is
+// the string the partition predicate resolved. A column the listing does not
+// carry never matches, so a malformed listing narrows the partition rather than
+// widening it.
+func partitionMatches(keys, fixed map[string]any) bool {
+	for col, want := range fixed {
+		have, present := keys[col]
+		if !present {
+			return false
+		}
+		if fmt.Sprintf("%v", have) != fmt.Sprintf("%v", want) {
+			return false
+		}
+	}
+	return true
 }
 
 // mapKeys renders raw target keys as the keyOrder field-name maps ListKeys and

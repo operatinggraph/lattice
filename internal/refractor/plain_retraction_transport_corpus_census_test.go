@@ -63,9 +63,10 @@ type retractionVerdict struct {
 	// answer: can a NEIGHBOUR event drop this lens's row.
 	dependsOnNeighbour bool
 	// transport is one of the pipeline.RetractionTransport* constants —
-	// "" (none), "derivation", "diffRetraction", "diffRetraction-prefix". The
-	// audit-disarmed spelling cannot appear here: this census runs with the
-	// audit armed, which is the deployment default.
+	// "" (none), "derivation", "diffRetraction", "diffRetraction-prefix",
+	// "diffRetraction-partition". The audit-disarmed spelling cannot appear
+	// here: this census runs with the audit armed, which is the deployment
+	// default.
 	transport string
 }
 
@@ -131,7 +132,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"clinicSites":                    {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"consoleOperatorReadGrants":      {plane: planeAuth, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
 	"demoOperatorReadGrants":         {plane: planeAuth, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
-	"duplicateCandidates":            {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
+	"duplicateCandidates":            {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"frontDeskBookingHistory":        {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"frontDeskBookings":              {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"frontDeskLeaseDetails":          {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
@@ -139,13 +140,13 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"identityCredentialBindingsRead": {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"identityCredentialsRead":        {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"identityIndexHint":              {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
-	"landlordLeaseApplicationsRead":  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
-	"landlordUnitsRead":              {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
+	"landlordLeaseApplicationsRead":  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
+	"landlordUnitsRead":              {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"leaseAccounts":                  {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"leaseApplicationsRead":          {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"ledgerHistory":                  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"menuCatalog":                    {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
-	"objectIdentityAttachmentsRead":  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
+	"objectIdentityAttachmentsRead":  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"oneBillCafeEntries":             {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"oneBillClinicEntries":           {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"oneBillRentEntries":             {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
@@ -155,7 +156,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"piiKeyEnvelope":                 {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"providerAppointmentsRead":       {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"providerIdentityReadGrants":     {plane: planeAuth, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
-	"providerSites":                  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
+	"providerSites":                  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"renewalsRead":                   {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"retentionKeyStatus":             {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"shredStatus":                    {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
@@ -218,6 +219,13 @@ func deriveRetractionVerdict(t *testing.T, eng *full.Engine, name, spec string, 
 			require.NoErrorf(t, p.SetDiffRetractionPrefix(prefix), "%s", name)
 		}
 	}
+	// The partition arming, installed the way activation installs it
+	// (cmd/refractor's admitRetractionTransport): after the shared-target
+	// scoping, on every lens, with the plane passed in. Without this step the
+	// diffRetraction-partition transport would be unreachable from this census
+	// — it would report every armed lens's diff as the whole one, which is a
+	// verdict about a deployment nobody runs.
+	require.NoErrorf(t, p.SetPartitionRetraction(projection.IsAuthPlane(rule)), "%s", name)
 
 	plane := planeBusiness
 	if projection.IsAuthPlane(rule) {
@@ -360,6 +368,7 @@ func TestPlainRetractionTransportCensus_Partition(t *testing.T) {
 		pipeline.RetractionTransportDerivation,
 		pipeline.RetractionTransportDiffRetraction,
 		pipeline.RetractionTransportDiffRetractionPrefix,
+		pipeline.RetractionTransportDiffRetractionPartition,
 	} {
 		label := transport
 		if label == pipeline.RetractionTransportNone {
