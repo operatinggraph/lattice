@@ -209,6 +209,39 @@ func TestHandleLedger_StaffReadsCoveredMemberLedger(t *testing.T) {
 	}
 }
 
+// A GUEST — billed for a class, holding no lease — is reachable through the
+// booking that billed them. This is the money surface the gap left unsettleable:
+// the charge posts, and no hat can open the ledger it posted to.
+func TestHandleLedger_StaffReadsCoveredGuestLedger(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedBooker(t, s.conn, guestBookingHere, memberB)
+	identityB := "vtx.identity." + memberB
+	seedLedgerAccount(t, s, identityB, "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb")
+	seedLedgerTransaction(t, s, "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb", identityB, "debit", 1500)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?identityKey="+identityB, cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — the class they booked is at this staffer's building; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// The discriminating half of the guest read: a guest whose only booking is at
+// another building stays invisible, so the booking widens the directory by
+// exactly one person's own class, never platform-wide.
+func TestHandleLedger_StaffCannotReadGuestBookedElsewhere(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedBooker(t, s.conn, guestBookingElsewhere, memberB, otherWorkplace)
+	identityB := "vtx.identity." + memberB
+	seedLedgerAccount(t, s, identityB, "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb")
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?identityKey="+identityB, cookieFor(staffSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — this staffer's workplace covers no class of theirs; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // A staffer whose workplace does NOT cover the member is refused — the same
 // confinement /api/members enforces for its picker, not a fresh open filter.
 func TestHandleLedger_StaffCannotReadUncoveredMemberLedger(t *testing.T) {
@@ -379,6 +412,53 @@ func TestHandleFrontDeskArrears_OverdueOmitPaidAndConfinement(t *testing.T) {
 	}
 	if row.DaysOverdue < 1 {
 		t.Fatalf("daysOverdue = %d, want >= 1", row.DaysOverdue)
+	}
+}
+
+// TestHandleFrontDeskArrears_IncludesGuestDebtors proves the grid counts a
+// debtor reached by BOOKING as well as one reached by lease, and still refuses
+// a guest whose class is at another building — the same discriminating pair
+// the picker's own tests use. A guest missing from this grid is money the desk
+// is never shown.
+func TestHandleFrontDeskArrears_IncludesGuestDebtors(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+
+	seedMember(t, s.conn, leaseHere, memberA)
+	identityA := "vtx.identity." + memberA
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "memo": "Class package", "postedAt": old,
+	})
+
+	// A guest with no lease, owing on a class at THIS staffer's building.
+	seedBooker(t, s.conn, guestBookingHere, memberB)
+	identityB := "vtx.identity." + memberB
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", "accountKey": "vtx.wellnessaccount.bbbbbbbbbbbbbbbbbbbb",
+		"identityKey": identityB, "type": "debit", "amountCents": 1500.0, "memo": "Vinyasa Flow", "postedAt": old,
+	})
+
+	// A guest owing on a class at another building — never this desk's.
+	otherGuest := "kkkkkkkkkkkkkkkkkkkk"
+	seedBooker(t, s.conn, guestBookingElsewhere, otherGuest, otherWorkplace)
+	identityC := "vtx.identity." + otherGuest
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.dddddddddddddddddddd", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.dddddddddddddddddddd", "accountKey": "vtx.wellnessaccount.dddddddddddddddddddd",
+		"identityKey": identityC, "type": "debit", "amountCents": 9900.0, "memo": "Class package", "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rows := decodeArrears(t, rec)
+	got := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		got[r.IdentityKey] = true
+	}
+	if len(rows) != 2 || !got[identityA] || !got[identityB] {
+		t.Fatalf("arrears = %+v, want the covered member AND the covered guest, and only those", rows)
 	}
 }
 

@@ -186,6 +186,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"shredStatus":                {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"visitSeriesRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessBookers":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessBookings":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// The licence admits a Secure lens; it is derivation-acted on — see
 	// cafeIdentitiesRead.

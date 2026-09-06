@@ -12,7 +12,6 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
-	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
 
@@ -272,20 +271,19 @@ func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
 	return values, nil
 }
 
-// memberVisibleToHats reports whether targetIdentityKey is a member hats'
-// workplace covers — reuses the exact wellnessMembers-lens confinement
-// /api/members' picker uses (computeCoveredMembers, residents.go) as the
-// ledger's staff-read gate, rather than standing up a second confinement
+// memberVisibleToHats reports whether targetIdentityKey is somebody hats reach
+// — reuses the exact directory /api/members' picker is served from
+// (coveredMembers, residents.go: the lease rows and the guest rows alike) as
+// the ledger's staff-read gate, rather than standing up a second confinement
 // mechanism for the same fact. Fails CLOSED throughout that helper: an
-// operator sees every member, a staffer sees only the ones their `worksAt`
-// location covers, and a caller with no workplace covers nothing.
+// operator sees everyone, a staffer sees only the people their `worksAt`
+// location covers, and a caller with no workplace covers nobody.
 func (s *server) memberVisibleToHats(ctx context.Context, hats subjectHats, targetIdentityKey string) (bool, error) {
-	bucket := wellnessdomain.WellnessMembersBucket
-	keys, err := s.conn.KVListKeys(ctx, bucket)
+	rows, err := s.coveredMembers(ctx, s.conn, hats)
 	if err != nil {
 		return false, err
 	}
-	for _, row := range computeCoveredMembers(keys, s.kvGetter(ctx, bucket), hats) {
+	for _, row := range rows {
 		if row.BookerKey == targetIdentityKey {
 			return true, nil
 		}
@@ -399,13 +397,13 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 // covered member's balance/due-date/overdue statement for the front desk's
 // billing panel, served from the wellnessLedgerHistory lens (P5,
 // computeLedgerBalances above). Staff-only and workplace-confined, same gate
-// handleMembers uses (computeCoveredMembers, residents.go) — this handler
-// adds no new authority, only a new affordance over members already visible
-// to this caller's picker.
+// handleMembers uses (coveredMembers, residents.go) — this handler adds no new
+// authority, only a new affordance over the people already visible to this
+// caller's picker.
 //
-// Unlike handleMembers, a missing WellnessMembersBucket here is still a real
-// 502 (it is the confinement source, residents.go's own reasoning) — but
-// unlike café's front-desk joins, wellness-ledger is a core wellness package
+// A missing directory bucket is a real 502 (it is the confinement source,
+// residents.go's own reasoning) — and unlike café's front-desk joins,
+// wellness-ledger is a core wellness package
 // always installed alongside wellness-domain, not an optional cross-vertical
 // join, so a missing LedgerHistoryBucket is also a 502, not a best-effort
 // empty answer.
@@ -439,15 +437,13 @@ func (s *server) handleFrontDeskArrears(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	membersBucket := wellnessdomain.WellnessMembersBucket
-	memberKeys, err := conn.KVListKeys(ctx, membersBucket)
+	members, err := s.coveredMembers(ctx, conn, hats)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+membersBucket+": "+err.Error()+" (is wellness-domain installed and the Refractor projecting?)")
+		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	covered := make(map[string]bool)
-	for _, m := range computeCoveredMembers(memberKeys, s.kvGetter(ctx, membersBucket), hats) {
+	covered := make(map[string]bool, len(members))
+	for _, m := range members {
 		covered[m.BookerKey] = true
 	}
 

@@ -131,6 +131,7 @@ var withAliasClosureBuckets = map[string]string{
 	"shredStatus":                closureA,
 	"staffReadGrants":            closureB,
 	"visitSeriesRead":            closureA,
+	"wellnessBookers":            closureA,
 	"wellnessBookings":           closureA,
 	"wellnessIdentitiesRead":     closureA,
 	"wellnessInstructors":        closureA,

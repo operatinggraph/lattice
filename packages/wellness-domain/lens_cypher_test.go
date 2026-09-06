@@ -143,14 +143,28 @@ func (f *wdFixture) projectOrphanBookingAt(t *testing.T, bookingName string) []r
 }
 
 // mkOrphanBooking seeds a booking vtx + .status aspect (value, session anchor)
-// and, when session is non-empty, forSession + a live session vertex — the
-// booking-side shape CreateBooking's ddls.go writes.
+// and, when session is non-empty, the forSession edge to it — the booking-side
+// shape CreateBooking's ddls.go writes.
 func (f *wdFixture) mkOrphanBooking(t *testing.T, name, status, sessionName string) {
+	t.Helper()
+	f.mkOrphanBookingAnchored(t, name, status, sessionName, true)
+}
+
+// mkOrphanBookingAnchored is mkOrphanBooking with the .status.session anchor
+// under the caller's control: with anchor false the forSession edge is still
+// written and the aspect carries only `value` — the at-rest shape of a booking
+// minted before CreateBooking stamped the anchor. The link is the invariant
+// (CreateBooking/JoinWaitlist write it atomically with the vertex and the
+// status); the anchor is the hydration convenience, so the two are separate
+// inputs and each needs its own vector.
+func (f *wdFixture) mkOrphanBookingAnchored(t *testing.T, name, status, sessionName string, anchor bool) {
 	t.Helper()
 	f.vtx(t, name, "booking")
 	statusData := map[string]any{"value": status}
 	if sessionName != "" {
-		statusData["session"] = "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName]
+		if anchor {
+			statusData["session"] = "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName]
+		}
 		f.edge(t, "forSession", name, sessionName)
 	}
 	f.aspect(t, name, "status", "bookingStatus", statusData)
@@ -682,6 +696,156 @@ func TestWellnessMembers_DepthBoundMatchesWriteSide(t *testing.T) {
 		"depths 0..7 cover the member and depth 8 does not — the write side's own reach")
 }
 
+// TestWellnessBookers_JoinsBookerAndCoveringLocations proves the guest half of
+// the front desk's directory: one row per live booking, naming the person who
+// made it and the building chain of the class they booked, with no lease
+// anywhere in the graph — the whole point, since a lease is exactly what a
+// guest does not have.
+func TestWellnessBookers_JoinsBookerAndCoveringLocations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	bookingKey := f.vtx(t, "guestbooking", "booking")
+	guestKey := f.vtx(t, "guest", "identity")
+	f.vtx(t, "flow", "session")
+	roomKey := f.vtx(t, "room3", "location")
+	buildingKey := f.vtx(t, "building", "location")
+	f.aspect(t, "guestbooking", "status", "bookingStatus", map[string]any{"value": "booked"})
+	f.edge(t, "bookedBy", "guestbooking", "guest")
+	f.edge(t, "forSession", "guestbooking", "flow")
+	f.edge(t, "atLocation", "flow", "room3")
+	f.edge(t, "containedIn", "room3", "building")
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Len(t, rows, 1, "the comprehension must not fan the booking into one row per ancestor")
+	row := wdRowByKey(rows, bookingKey)
+	require.Equal(t, bookingKey, row["bookingKey"])
+	require.Equal(t, guestKey, row["bookerKey"], "a desk has to name a person, not only a booking")
+	require.Equal(t, "booked", row["status"])
+	require.ElementsMatch(t, []any{roomKey, buildingKey}, row["coveringLocations"],
+		"the class's own room at depth 0 and its containedIn ancestor both cover the booker")
+}
+
+// TestWellnessBookers_TombstonedSessionEmptyCovering proves a booking whose
+// class was called off projects an EMPTY covering set rather than dropping the
+// row: TombstoneSession leaves the booking alive, the walk finds no live
+// session to reach a location through, and an empty set is what every workplace
+// intersection reads as "no desk reaches this booker".
+func TestWellnessBookers_TombstonedSessionEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "guestbooking", "booking")
+	f.vtx(t, "guest", "identity")
+	f.vtx(t, "deadsess", "session")
+	f.vtx(t, "room3", "location")
+	f.aspect(t, "guestbooking", "status", "bookingStatus", map[string]any{"value": "booked"})
+	f.edge(t, "bookedBy", "guestbooking", "guest")
+	f.edge(t, "forSession", "guestbooking", "deadsess")
+	f.edge(t, "atLocation", "deadsess", "room3")
+	f.tombstoneVtx(t, "deadsess")
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Len(t, rows, 1, "the row must project so an uncovered booker DENIES rather than going missing")
+	// Contains before Empty: require.Empty passes identically on an ABSENT map
+	// key, so on its own it could not tell "projected empty" from "not
+	// projected at all".
+	require.Contains(t, rows[0].Values, "coveringLocations",
+		"the column must project even when the set is empty")
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"a called-off class covers nobody; the reader must not read that as unrestricted")
+}
+
+// TestWellnessBookers_NoBookerDropsRow proves the bookedBy match is REQUIRED,
+// not optional: a booking naming no person is not a row any desk could bill.
+// This is the one column where absence drops the row rather than denying on
+// it — coveringLocations must still project empty (the test above).
+func TestWellnessBookers_NoBookerDropsRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "orphanbooking", "booking")
+	f.vtx(t, "flow", "session")
+	f.aspect(t, "orphanbooking", "status", "bookingStatus", map[string]any{"value": "booked"})
+	f.edge(t, "forSession", "orphanbooking", "flow")
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Empty(t, rows, "a booking naming no booker is not a person the desk can settle with")
+}
+
+// TestWellnessBookers_DepthBoundMatchesWriteSide pins the containment reach to
+// the write side's own, WORKPLACE_MAX_DEPTH - 1, exactly as wellnessMembers'
+// walk does: a staffer nine levels above the class's room must not be offered
+// the guest who booked it.
+func TestWellnessBookers_DepthBoundMatchesWriteSide(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "guestbooking", "booking")
+	f.vtx(t, "guest", "identity")
+	f.vtx(t, "flow", "session")
+	roomKey := f.vtx(t, "room3", "location")
+	f.aspect(t, "guestbooking", "status", "bookingStatus", map[string]any{"value": "booked"})
+	f.edge(t, "bookedBy", "guestbooking", "guest")
+	f.edge(t, "forSession", "guestbooking", "flow")
+	f.edge(t, "atLocation", "flow", "room3")
+
+	// room3(0) -> a1(1) -> ... -> a8(8): one level deeper than either side reaches.
+	want := []any{roomKey}
+	prev := "room3"
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("a%d", i)
+		key := f.vtx(t, name, "location")
+		f.edge(t, "containedIn", prev, name)
+		if i <= 7 {
+			want = append(want, key)
+		}
+		prev = name
+	}
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
+		"depths 0..7 cover the booker and depth 8 does not — the write side's own reach")
+}
+
+// TestWellnessBookers_OneRowPerBooking proves the key column is the BOOKING,
+// not the booker: one person's two bookings must project two rows that do not
+// collide on a single output key, since the read model partitions on that key
+// and a collision would let one booking's coverage overwrite the other's.
+func TestWellnessBookers_OneRowPerBooking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "guest", "identity")
+	firstKey := f.vtx(t, "firstbooking", "booking")
+	secondKey := f.vtx(t, "secondbooking", "booking")
+	f.vtx(t, "morning", "session")
+	f.vtx(t, "evening", "session")
+	roomKey := f.vtx(t, "room3", "location")
+	otherRoomKey := f.vtx(t, "room4", "location")
+	f.aspect(t, "firstbooking", "status", "bookingStatus", map[string]any{"value": "booked"})
+	f.aspect(t, "secondbooking", "status", "bookingStatus", map[string]any{"value": "waitlisted"})
+	f.edge(t, "bookedBy", "firstbooking", "guest")
+	f.edge(t, "bookedBy", "secondbooking", "guest")
+	f.edge(t, "forSession", "firstbooking", "morning")
+	f.edge(t, "forSession", "secondbooking", "evening")
+	f.edge(t, "atLocation", "morning", "room3")
+	f.edge(t, "atLocation", "evening", "room4")
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Len(t, rows, 2, "two bookings by one person are two rows")
+	require.ElementsMatch(t, []any{roomKey}, wdRowByKey(rows, firstKey)["coveringLocations"])
+	require.ElementsMatch(t, []any{otherRoomKey}, wdRowByKey(rows, secondKey)["coveringLocations"])
+	require.Equal(t, "waitlisted", wdRowByKey(rows, secondKey)["status"],
+		"any live status projects; the desk owes money on a waitlist forfeit too")
+}
+
 // TestWellnessMembers_ProjectsTheLandlordDecision proves the column the read
 // boundary drops a refused applicant on. It is projected, not filtered in the
 // cypher, because it is three-state: an application still awaiting a landlord
@@ -936,20 +1100,45 @@ func TestWellnessOrphanedBookingSettlement_AttendedSessionTombstoned_NotViolatin
 	require.Equal(t, false, v["violating"])
 }
 
-// TestWellnessOrphanedBookingSettlement_NoSessionAnchor_NotViolating proves
-// the null-guard on sessionKey: a legacy booking created before CreateBooking
-// stamped .status.session (or any malformed row missing the anchor) never
-// violates rather than crashing ReleaseOrphanedBooking on a nil session.
-func TestWellnessOrphanedBookingSettlement_NoSessionAnchor_NotViolating(t *testing.T) {
+// TestWellnessOrphanedBookingSettlement_NoAnchorLiveSession_NotViolating is the
+// negative half of the anchor-free pair: a booking whose .status carries no
+// session anchor but whose forSession target is still LIVE must not violate.
+// Without it the anchor-free positive below could pass on a lens that fired for
+// every anchor-less booking rather than for a dead session.
+func TestWellnessOrphanedBookingSettlement_NoAnchorLiveSession_NotViolating(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newWdFixture(t)
-	f.mkOrphanBooking(t, "legacybooking", "booked", "")
+	f.vtx(t, "livesess", "session")
+	f.mkOrphanBookingAnchored(t, "legacybooking", "booked", "livesess", false)
 
 	v := f.projectOrphanBookingAt(t, "legacybooking")[0].Values
 	require.Equal(t, "booked", v["status"])
-	require.Nil(t, v["sessionKey"], "no session anchor stamped")
-	require.Equal(t, false, v["missing_release"], "no anchor to release against")
+	require.Nil(t, v["sessionKey"], "no session anchor stamped on the aspect")
+	require.Equal(t, false, v["missing_release"], "the class is still on — nothing to release")
 	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessOrphanedBookingSettlement_NoAnchorSessionTombstoned_MissingRelease
+// proves the population the front desk sees as a permanent "Class cancelled"
+// card: a booking carrying only its forSession link, whose session was called
+// off. The link is what every booking has by construction, so the dead session
+// alone decides the gap; `sessionKey` projects null and targets.go's optional
+// session reads drop, leaving ReleaseOrphanedBooking to enumerate the link.
+func TestWellnessOrphanedBookingSettlement_NoAnchorSessionTombstoned_MissingRelease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "deadsess", "session")
+	f.mkOrphanBookingAnchored(t, "legacybooking", "noShow", "deadsess", false)
+	f.tombstoneVtx(t, "deadsess")
+
+	v := f.projectOrphanBookingAt(t, "legacybooking")[0].Values
+	require.Equal(t, "noShow", v["status"])
+	require.Nil(t, v["sessionKey"], "no session anchor stamped on the aspect")
+	require.Equal(t, true, v["missing_release"], "the session is dead; the link, not the anchor, is what makes this releasable")
+	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_release", maxReleaseRetries)
 }

@@ -38,16 +38,25 @@ const WellnessInstructorsBucket = "wellness-instructors"
 // bucket, never Core KV. The Refractor auto-creates the bucket on lens load.
 const WellnessMembersBucket = "wellness-members"
 
+// WellnessBookersBucket is the NATS-KV read model the wellnessBookers lens
+// projects into — the **P5 query surface** for the guest half of the question
+// WellnessMembersBucket answers for tenants: "does this staffer's workplace
+// reach this booker". One row per live booking, carrying the person who made
+// it and the set of locations that COVER the class they booked; the wellness
+// app reads THIS bucket, never Core KV. The Refractor auto-creates the bucket
+// on lens load.
+const WellnessBookersBucket = "wellness-bookers"
+
 // OrphanedBookingSettlementTarget is the §10.8 TargetID ==
 // wellnessOrphanedBookingSettlement's OutputKeyPattern prefix — the §10.2↔§10.8
 // binding Weaver reads (targets.go).
 const OrphanedBookingSettlementTarget = "wellnessOrphanedBookingSettlement"
 
-// Lenses returns the package's five flat projection lenses,
+// Lenses returns the package's six flat projection lenses,
 // wellnessIdentitiesRead (the one protected Postgres/RLS layer this package
 // carries), and wellnessOrphanedBookingSettlement (the missing_release
 // convergence lens targets.go's WeaverTargets dispatches
-// ReleaseOrphanedBooking over). No aggregation (no WITH) on the five flat
+// ReleaseOrphanedBooking over). No aggregation (no WITH) on the six flat
 // ones, so OPTIONAL-matched neighbour bindings are live directly in RETURN —
 // the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 func Lenses() []pkgmgr.LensSpec {
@@ -91,6 +100,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        WellnessMembersBucket,
 			Engine:        "full",
 			Spec:          wellnessMembersSpec,
+		},
+		{
+			CanonicalName: "wellnessBookers",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        WellnessBookersBucket,
+			Engine:        "full",
+			Spec:          wellnessBookersSpec,
 		},
 		{
 			// wellnessIdentitiesRead — the protected Postgres identity-name
@@ -255,6 +272,48 @@ RETURN
   l.decision.data.value AS landlordDecision,
   [(l)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
+// wellnessBookersSpec projects one row per LIVE booking, in any status,
+// carrying the person who made it and the locations that cover the class they
+// booked. It is the guest half of the front desk's money surfaces: every one of
+// them (the billing picker, the arrears grid, the ledger's own visibility
+// check) confines through a member directory, and wellnessMembersSpec above is
+// lease-anchored by construction — so a booker who walked in without a lease is
+// billed for their class and then invisible to the desk that has to settle it.
+// A booking is the standing relationship a guest DOES have, so it anchors this
+// one, and their coverage is the building of the class they booked: the same
+// reach the staffer's own worksAt grant already gives them over that booking.
+//
+// Anchored on `bk:booking` and keyed on `bk.key`, never on `id.key` — the row
+// key is what the read model partitions on, and keying a booking-anchored row
+// on the booker would make two bookings by one person collide on a single
+// output key, each rewriting the other's coverage. One person with two bookings
+// is deliberately two rows, the same one-row-per-anchor posture wellnessMembers
+// keeps for a member holding two leases; the reader dedupes by bookerKey.
+//
+// `bookedBy` is a REQUIRED match, wellnessMembers' applicationFor idiom: every
+// booking writes that link atomically at CreateBooking/JoinWaitlist (ddls.go),
+// and a row naming no person is not one a desk could offer or bill. The
+// coverage comprehension is OPTIONAL by shape and must project EMPTY rather
+// than drop the row — a booking whose session was called off (TombstoneSession
+// leaves the booking alive, package.go's no-cascade doctrine) walks to nothing,
+// and an empty set is the denial every workplace intersection here reads.
+//
+// The walk is `forSession -> atLocation -> containedIn*0..7`, the same one
+// wellnessIdentitiesReadSpec's booking fan-out runs. `atLocation` is the
+// SESSION's location relation (ddls.go); a studio's own is `locatedAt`. The
+// `*0..7` bound matches wellnessMembersSpec's for the same reason: zero-hop is
+// load-bearing (a staffer wired to the exact room matches) and the upper bound
+// is WORKPLACE_MAX_DEPTH - 1, since `*0..N` admits depths 0..N inclusive while
+// the Starlark walk tests 0..7.
+const wellnessBookersSpec = `MATCH (bk:booking)
+MATCH (bk)-[:bookedBy]->(id:identity)
+RETURN
+  bk.key AS key,
+  bk.key AS bookingKey,
+  id.key AS bookerKey,
+  bk.status.data.value AS status,
+  [(bk)-[:forSession]->(se:session)-[:atLocation]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
+
 // wellnessSessionsSpec projects one row per session, walking atStudio and
 // ledBy (each 0..1, so the row stays one-per-anchor — the §10.2 shape,
 // mirroring clinicAppointmentsSpec's forPatient/withProvider walk).
@@ -365,17 +424,35 @@ RETURN
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence
 // cypher: TombstoneSession deliberately does not cascade (package.go), so a
 // called-off class otherwise leaves its live bookings, claimed seat cells and
-// double-book guards stranded forever. `sessionKey` is read off the
-// booking's OWN .status aspect (the single-anchor idiom CreateBooking now
-// stamps there, ddls.go), not walked via forSession — the walk is exactly
-// what CAN'T answer this question, since a tombstoned target vertex simply
-// drops the OPTIONAL MATCH edge (se null), leaving no way to tell "session
-// legitimately absent" apart from "session tombstoned"; the aspect field
-// survives the session's own tombstone because it lives on the booking, not
-// the session.
+// double-book guards stranded forever.
 //
-//   - `missing_release` — the booking is still in `booked` OR `waitlisted`
-//     status, carries a session anchor, and that session is no longer LIVE
+// The violation predicate is `liveSessionKey = null` alone: the OPTIONAL
+// MATCH over forSession binds nothing once the session vertex is tombstoned,
+// because a lens walk cannot see a link whose target is dead (the rule
+// engine's traversal drops the neighbour, so neither the node nor the
+// relationship variable binds — internal/refractor/ruleengine/full).
+// `sessionKey` — the anchor CreateBooking stamps on the booking's OWN .status
+// aspect (ddls.go), which survives the session's tombstone because it lives on
+// the booking — is PROJECTED but is not part of the predicate: it is the
+// hydration convenience targets.go templates the session's optional reads off,
+// so Weaver hands ReleaseOrphanedBooking a pre-read session document when the
+// column is there and drops those reads when it is null.
+//
+// Every live booking carries exactly one forSession link by construction —
+// CreateBooking and JoinWaitlist are its only minters (ddls.go), each writing
+// the booking vertex, its .status aspect and the link in one atomic batch — so
+// for a booking still in `booked`/`waitlisted`/`noShow`, `liveSessionKey = null`
+// says the session is tombstoned whether or not the aspect names it, and a row
+// carrying no anchor is released off its link instead (ReleaseOrphanedBooking's
+// own forSession enumeration, ddls.go).
+//
+// Transient adjacency is the script's problem either way: a booking whose
+// forSession edge is not yet indexed also reads `se` null, and the script's
+// SessionStillLive re-check is the backstop that keeps such a row from
+// releasing anything — the lens row is a candidate, not a trusted command.
+//
+//   - `missing_release` — the booking is still in `booked`, `waitlisted` OR
+//     `noShow` status and its session is no longer LIVE
 //     (`se` null via the OPTIONAL MATCH — the forSession link itself is
 //     untouched by TombstoneSession, only the session vertex is gone).
 //     Weaver dispatches ReleaseOrphanedBooking{bookingKey} (targets.go),
@@ -385,26 +462,25 @@ RETURN
 //     booking itself is tombstoned, so the anchor row (`b:booking`) stops
 //     existing and the gap converges by the row disappearing, the same
 //     EmptyBehavior:"delete" shape every actorAggregate target here uses.
-//     `waitlisted` joined this condition alongside `booked` (ddls.go) — a
-//     waitlisted booking whose class was called off out from under it is
-//     exactly as orphaned as a booked one; without it a JoinWaitlist entry on
-//     a tombstoned session would hold its .wl<n> slot and double-book guard
-//     forever, invisible to this convergence lens. `noShow` joined the same
-//     condition (verticals.md, 2026-09-02): the auto-no-show sweep
-//     (wellness-reminders' pastDueBookings) and TombstoneSession race
-//     independently — a booking can reach `noShow` before its class is
-//     called off, and from the member's own FE (`cancelled = !b.sessionName`,
-//     app.js) a dead session reads "the studio called off this class"
-//     regardless of which fired first. Without `noShow` here, that ordering
-//     accident permanently strands the booking: My Classes renders an
-//     un-cancellable "Class cancelled" card, and any no-show fee already
-//     posted for it is unreachable by any other convergence (2 of 26 live).
+//     All three live statuses belong to the condition, because each one holds
+//     bookkeeping a called-off class strands. A `waitlisted` booking is as
+//     orphaned as a `booked` one: its .wl<n> slot and double-book guard
+//     (JoinWaitlist, ddls.go) stay held until something releases them, and no
+//     other path can see them. `noShow` belongs because the auto-no-show
+//     sweep (wellness-reminders' pastDueBookings) and TombstoneSession race
+//     independently — a booking reaches `noShow` before its class is called
+//     off as readily as after, and from the member's own FE
+//     (`cancelled = !b.sessionName`, app.js) a dead session reads "the studio
+//     called off this class" whichever fired first. Excluding it makes that
+//     ordering accident permanent: My Classes renders an un-cancellable
+//     "Class cancelled" card, and any no-show fee posted for the booking is
+//     reachable by no other convergence.
 //
 // A booking already attended, or one whose session is still live, never
 // violates — SetBookingAttendance's attended value and CancelBooking are the
 // paths that own those; this lens only ever answers for a class that was
 // called off out from under a still-`booked`/`waitlisted`/`noShow` seat or
-// slot. Deliberately NOT widened to `attended`: unlike the three states
+// slot. `attended` is deliberately excluded: unlike the three states
 // above, an attended booking is a member's genuine participation record —
 // wellness-app's My Classes reads it as history, so tombstoning it once its
 // session is later archived would trade real history away, not just release
@@ -437,8 +513,8 @@ RETURN
   entityKey AS bookingKey,
   sessionKey,
   status,
-  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
-  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
+  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (liveSessionKey = null)) AS missing_release,
+  (((status = 'booked') OR (status = 'waitlisted') OR (status = 'noShow')) AND (liveSessionKey = null)) AS violating,
   %d AS maxretries_release
 `, maxReleaseRetries)
 

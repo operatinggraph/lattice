@@ -1354,8 +1354,12 @@ async function renderBookMember(se, bookings, generation) {
       const opt = document.createElement("option");
       // The value carries BOTH keys: the lease is what CreateBooking checks
       // for the resident rate, and a member holding two leases is two rows.
+      // A blank lease is a GUEST — somebody the desk reaches through a class
+      // they booked rather than a tenancy, whom CreateBooking books at the
+      // standard rate.
       opt.value = m.bookerKey + "|" + m.leaseAppKey;
-      opt.textContent = nameForIdentity(idOf(m.bookerKey)) + " — lease " + shortKey(m.leaseAppKey);
+      opt.textContent = nameForIdentity(idOf(m.bookerKey)) +
+        (m.leaseAppKey ? " — lease " + shortKey(m.leaseAppKey) : " — guest");
       select.appendChild(opt);
     }
   }
@@ -2155,9 +2159,10 @@ async function loadRosterBilling() {
     if (!members.length) {
       select.innerHTML = '<option value="">(no members at your building)</option>';
     } else {
-      // The ledger is per-IDENTITY, not per-lease, but loadMembers projects
-      // one row per lease — a member holding two leases would otherwise
-      // appear twice in a picker that means to offer one option per person.
+      // The ledger is per-IDENTITY, but loadMembers projects one row per
+      // lease alongside the lease-less guest rows — a member holding two
+      // leases would otherwise appear twice in a picker that means to offer
+      // one option per person.
       const seen = new Set();
       for (const m of members) {
         if (seen.has(m.bookerKey)) continue;
