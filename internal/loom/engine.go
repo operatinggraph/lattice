@@ -930,13 +930,14 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 	// instance. A step that declares nothing stays read-free, which is what the
 	// event-only lifecycle ops are.
 	//
-	// egressReads stays nil: a systemOp's bound op is an internal-plane op, and
-	// the external plane's declared egress belongs to the externalTask arm,
-	// which infers it from the step's params (inferExternalTaskReads).
+	// A systemOp's bound op is an internal-plane op and buildOutbox has no
+	// parameter through which it could declare an egress read: that belongs to
+	// the externalTask arm, which infers it from the step's params via the
+	// dedicated buildExternalTaskOutbox constructor (inferExternalTaskReads).
 	reads := systemOpReads(step.Reads, inst.SubjectKey)
 	optionalReads := systemOpReads(step.OptionalReads, inst.SubjectKey)
 	enumerations := systemOpEnumerations(step.Enumerations, inst.SubjectKey)
-	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, optionalReads, enumerations, nil)
+	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, optionalReads, enumerations)
 	if err != nil {
 		return err
 	}
@@ -1079,7 +1080,7 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 	// un-deduped 3-key set, not Loom's deduped 2-key set.
 	reads := userTaskReads(inst.SubjectKey, forOperation)
 	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey, reads,
-		userTaskOptionalReads(taskKey, inst.SubjectKey), nil, nil)
+		userTaskOptionalReads(taskKey, inst.SubjectKey), nil)
 	if err != nil {
 		return err
 	}
@@ -1151,11 +1152,7 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 	// The instanceOp is the pattern's step string — the engine names no concrete op
 	// or type. The read-set is cross-checked against the owning package's DDL script
 	// by the package's drift-guard test.
-	reads, egressReads, err := inferExternalTaskReads(inst.SubjectKey, step.Params)
-	if err != nil {
-		return err
-	}
-	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, nil, nil, egressReads)
+	ob, err := buildExternalTaskOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, inst.SubjectKey, step.Params)
 	if err != nil {
 		return err
 	}
@@ -1186,7 +1183,7 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	requestID := deriveRequestID(inst.InstanceID, lifecycleCursor)
 	// CompletePattern is event-only (no mutations, no reads) — read-free envelope.
 	ob, err := buildOutbox(requestID, opCompletePattern,
-		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil, nil)
+		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1221,7 +1218,7 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 		payload["reason"] = reason
 	}
 	// FailPattern is event-only (no mutations, no reads) — read-free envelope.
-	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil, nil)
+	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil)
 	if err != nil {
 		return err
 	}

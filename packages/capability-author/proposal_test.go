@@ -435,13 +435,20 @@ const (
 	capHandleDispatchMissing = "CAHNDMissVendorRefHK"
 )
 
-// TestCapAuthor_ClaimByNonLoomOperator_Denied: the primordial actor guard.
-// capStaffActorKey holds the operator role AND a Scope:"any"
-// CreateAuthoringClaim grant, so step 3 authorizes it; only the script's
-// `op.actor != primordialActor["loom"]` check stops it from having an arbitrary
-// proposal's .request contents resolved into params and shipped to the
-// capabilityAuthor vendor. Identical to the claim the passing tests commit,
+// TestCapAuthor_ClaimByNonLoomOperator_Denied: the two refusals that stand
+// between a non-Loom operator and the capabilityAuthor vendor. capStaffActorKey
+// holds the operator role AND a Scope:"any" CreateAuthoringClaim grant, so
+// step 3 authorizes it. Identical to the claim the passing tests commit,
 // differing in the actor alone.
+//
+// Arm 1 — the envelope as Loom builds it, egress declaration included: the
+// Processor refuses the declaration at the step-4 head (Contract #2 §2.5
+// class (f) — only a platform engine may declare an egress read), so the
+// proposal's .request is never resolved into a $sensitiveRef for anyone else.
+// Arm 2 — the same envelope with no egress declaration: hydration admits it and
+// the script's own `op.actor != primordialActor["loom"]` guard denies the whole
+// branch before its first read. The pin guards more than egress, so it must
+// still fire when the earlier refusal has no subject.
 func TestCapAuthor_ClaimByNonLoomOperator_Denied(t *testing.T) {
 	ctx, conn := setupCapAuthorEnv(t)
 	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-forged-claim")
@@ -451,26 +458,53 @@ func TestCapAuthor_ClaimByNonLoomOperator_Denied(t *testing.T) {
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	claim := claimEnv(testutil.GenReqID("CAClaimForge"), capHandleForgedClaim, proposalKey)
-	claim.Actor = capStaffActorKey
-	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
-	if outcome != processor.OutcomeRejected {
-		t.Fatalf("a non-Loom operator's claim: outcome = %v, want Rejected", outcome)
+	assertNothingMinted := func(t *testing.T) {
+		t.Helper()
+		// No claim vertex, and the proposal keeps no .claim aspect: a denied
+		// instanceOp leaves the escalation entirely undispatched.
+		if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.capabilityauthorclaim."+capHandleForgedClaim); err == nil {
+			t.Fatalf("a denied claim op must mint NO claim vertex")
+		}
+		if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey+".claim"); err == nil {
+			t.Fatalf("a denied claim op must write NO .claim aspect on the proposal")
+		}
 	}
-	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
-		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
-	}
-	if !strings.Contains(reply.Error.Message, "Loom's relay actor") {
-		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
-	}
-	// No claim vertex, and the proposal keeps no .claim aspect: a denied
-	// instanceOp leaves the escalation entirely undispatched.
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.capabilityauthorclaim."+capHandleForgedClaim); err == nil {
-		t.Fatalf("a denied claim op must mint NO claim vertex")
-	}
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey+".claim"); err == nil {
-		t.Fatalf("a denied claim op must write NO .claim aspect on the proposal")
-	}
+
+	t.Run("an egress declaration from a non-engine actor is refused before hydration", func(t *testing.T) {
+		claim := claimEnv(testutil.GenReqID("CAClaimForge"), capHandleForgedClaim, proposalKey)
+		claim.Actor = capStaffActorKey
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("a non-Loom operator's claim: outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || reply.Error.Code != processor.ErrCodeHydrationFailed {
+			t.Fatalf("want the step-4 egress-declaration refusal, got %+v", reply.Error)
+		}
+		if reply.Error.Details["code"] != "EgressDeclarationUnauthorized" {
+			t.Fatalf("details.code = %v, want EgressDeclarationUnauthorized", reply.Error.Details["code"])
+		}
+		if strings.Contains(reply.Error.Message, proposalKey) {
+			t.Fatalf("the refusal must not echo the declared key: %q", reply.Error.Message)
+		}
+		assertNothingMinted(t)
+	})
+
+	t.Run("without an egress declaration the script's actor pin denies the branch", func(t *testing.T) {
+		claim := claimEnv(testutil.GenReqID("CAClaimForgeB"), capHandleForgedClaim, proposalKey)
+		claim.Actor = capStaffActorKey
+		claim.ContextHint = &processor.ContextHint{Reads: []string{proposalKey}}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("a non-Loom operator's claim: outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+			t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+		}
+		if !strings.Contains(reply.Error.Message, "Loom's relay actor") {
+			t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+		}
+		assertNothingMinted(t)
+	})
 }
 
 // TestCapAuthor_ValidLens_Pending: a well-formed, deterministically-validated

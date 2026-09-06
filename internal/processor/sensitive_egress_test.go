@@ -46,7 +46,10 @@ func newEgressTestHydrator(t *testing.T, ctx context.Context, conn *substrate.Co
 	}
 	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
 	h.Vault = vaultBackend
-	return h
+	// An egress declaration is admitted only on an engine-submitted operation,
+	// so the hydrator every egress test builds carries the admitted set the
+	// Processor's own wiring carries.
+	return withPrimordialActors(h)
 }
 
 // seedCiphertextAspect writes an aspect document whose data is an opaque
@@ -72,7 +75,7 @@ func TestEgressReads_SensitiveKey_HydratesAsRef(t *testing.T) {
 	aspectKey := "vtx.identity." + testNanoID2 + ".ssn"
 	seedCiphertextAspect(t, ctx, conn, aspectKey, "ssn")
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -119,7 +122,7 @@ func TestEgressReads_NonSensitiveKey_HydratesPlain(t *testing.T) {
 		t.Fatalf("seed nickname aspect: %v", err)
 	}
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -143,7 +146,7 @@ func TestEgressReads_MissingKey_HydrationMiss(t *testing.T) {
 	h := newEgressTestHydrator(t, ctx, conn, nil)
 
 	missingKey := "vtx.identity." + testNanoID2 + ".ssn"
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{missingKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -225,7 +228,7 @@ def execute(state, op):
 
 	// egressReads (ref disposition): the SAME key, SAME live Vault — still a
 	// ref, never plaintext.
-	egressEnv := newTestEnvelope(testNanoID2)
+	egressEnv := asPrimordialEngine(newTestEnvelope(testNanoID2))
 	egressEnv.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	state2, err := h.Hydrate(ctx, egressEnv)
 	if err != nil {
@@ -413,7 +416,7 @@ func TestEgressReads_NoVault_MarkerCarriesNoMAC(t *testing.T) {
 	aspectKey := "vtx.identity." + testNanoID2 + ".ssn"
 	seedCiphertextAspect(t, ctx, conn, aspectKey, "ssn")
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -453,7 +456,7 @@ func TestEgressReads_WithVault_MarkerCarriesValidMAC(t *testing.T) {
 	aspectKey := identityKey + ".ssn"
 	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -569,7 +572,7 @@ func TestEgressReads_MarkerMAC_JSONRoundTripsToRawBytes(t *testing.T) {
 	aspectKey := identityKey + ".ssn"
 	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	state, err := h.Hydrate(ctx, env)
 	if err != nil {
@@ -640,7 +643,7 @@ func TestEgressReads_MACMintFailure_HydrationFailsClosed(t *testing.T) {
 	aspectKey := identityKey + ".ssn"
 	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	if _, err := h.Hydrate(ctx, env); err == nil {
@@ -672,7 +675,7 @@ func TestEgressReads_DeletedSensitiveKey_HydrationFailsClosed(t *testing.T) {
 	aspectKey := "vtx.identity." + testNanoID2 + ".ssn"
 	seedDeletedCiphertextAspect(t, ctx, conn, aspectKey, "ssn")
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 
 	if _, err := h.Hydrate(ctx, env); err == nil {

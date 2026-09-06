@@ -269,8 +269,11 @@ may make one — and no Loom call site should be *able* to make one by accident.
 
 ### 3.1 Increment 1 — the admission predicate (Processor, step-4 head)
 
-At the head of step 4's declaration block, immediately after `declaredReadsFromEnvelope` and **before**
-`applyDescriptorFloor` resolves (`step4_hydrate.go:196-212`):
+At the head of step 4 — **as built (2026-09-06), the first statement of `Hydrate`**, before the class and DDL
+resolution and so before the first Core KV GET, which is earlier than the "immediately after
+`declaredReadsFromEnvelope`" this section first named: the predicate depends on the envelope alone, and placing it
+after DDL resolution let an unknown-class probe answer `NoDDLForClass` and pay two GETs before the refusal. Every
+property below holds at either position; the earlier one holds them by construction —
 
 ```
 if len(env.ContextHint.EgressReads) > 0 && !primordialEngineActor(env.Actor, h.PrimordialActors) {
@@ -324,7 +327,10 @@ of which only the externalTask arm at `:1115` passes a non-`nil` list, plus one 
 **Drop the `egressReads` parameter from `buildOutbox`.** The externalTask arm gets a dedicated constructor
 taking `(subjectKey, params)` that calls `inferExternalTaskReads` itself, so the derivation and the outbox
 construction become one thing that cannot be separated. Every other producer then *cannot* express an
-egress declaration — not "does not", **cannot**.
+egress declaration — not "does not", **cannot** — through the constructor surface: no parameter remains to pass
+one. *(Build note, 2026-09-06: the record's `EgressReads` field is still assignable by any code in package `loom`
+holding an `*outboxRecord` — the dedicated constructor itself sets it that way — so the guarantee is held by the
+constructor surface plus the structural test `TestBuildOutbox_NeverCarriesEgressReads`, not by the type system.)*
 
 A structural fail-closed rather than a lint, which is the preferred direction when one is available (a lint
 would be the fallback if the parameter had a second legitimate supplier; it does not). It is a net
@@ -406,7 +412,7 @@ check the claim rather than assume it.
 | 3 | `egressReads` non-empty, actor ∈ `PrimordialActors` | admit | the platform speaking to itself; every live consumer is here |
 | 4 | `egressReads` non-empty, actor ∉ `PrimordialActors` | **refuse, terminal, no key echoed** | the harm |
 | 5 | `egressReads` non-empty, `PrimordialActors` nil/unset | **refuse** | the field's own documented fail-closed direction (`script_context.go:111-117`); a pipeline driving an egress op must wire it, exactly as one driving a primordial-pinned op already must |
-| 6 | `egressReads` non-empty **and** the op is NFR-S6 | refuse — **this predicate's refusal, and it is the one that fires** | §3.1 places the new predicate before `applyDescriptorFloor` (`step4_hydrate.go:196-212`) while `refuseUndeclaredContextHint` runs at `:229`, so the new predicate runs first and wins, and the existing wholesale refusal never runs for a non-primordial NFR-S6 submission — every NFR-S6 op is Gateway-submitted under a raw credential (`nfr_s6_wire_shape.go:32-35`), so no primordial engine submits one. **The wire outcome is nevertheless unchanged, for a reason worth stating:** the NFR-S6 collapse is keyed on `operationType`, not on the error code (`nfr_s6_wire_shape.go:14-19`), and is applied at the reply seam (`commit_path.go:1109-1127`), so either refusal replies `ErrCodeClaimKeyInvalid` with `claimRejectionMessage` and nil details, and lands in the same Health-KV claim-attempts bucket (`:1114`, `claimOutcomePlatformRefused`). **Increment 1 pins this** (§6.5). |
+| 6 | `egressReads` non-empty **and** the op is NFR-S6 | refuse — **this predicate's refusal, and it is the one that fires** | §3.1 places the new predicate before `applyDescriptorFloor` (`step4_hydrate.go:196-212`) while `refuseUndeclaredContextHint` runs at `:229`, so the new predicate runs first and wins, and the existing wholesale refusal never runs for a non-primordial NFR-S6 submission — every NFR-S6 op is Gateway-submitted under a raw credential (`nfr_s6_wire_shape.go:32-35`), so no primordial engine submits one. **The wire outcome is nevertheless unchanged, for a reason worth stating:** the NFR-S6 collapse is keyed on `operationType`, not on the error code (`nfr_s6_wire_shape.go:14-19`), and is applied at the reply seam (`commit_path.go:1109-1127`), so either refusal replies `ErrCodeClaimKeyInvalid` with `claimRejectionMessage` and nil details, and lands in the same Health-KV claim-attempts bucket — **`claimOutcomeInternalFault`**, the word `handleStubFailure` (`commit_path.go:1031-1043`) records for every step-4 fault that is not a script-minted `ClaimKeyInvalid`; the displaced refusal has always landed there too. *(Corrected at build, 2026-09-06: this row had named `claimOutcomePlatformRefused`, which is only the word `replyRejection` substitutes for a **blank** outcome, and a step-4 fault never reaches it blank.)* **Increment 1 pins this** (§6.5) — by asserting the two refusals record the **same** word through the real pipeline, not a named constant. |
 | 7 | `egressReads` non-empty, actor is an engine, key names a **non-sensitive** aspect | admit | unchanged — a non-sensitive egress key hydrates like a plain read (`sensitive_decrypt.go:154-157`); no disposition changes |
 | 8 | OCC retry of an admitted envelope | admit, identically | a pure function of the envelope and a process-lifetime map — no re-derivation, no drift across attempts |
 | 9 | Loom relay redelivers the same instanceOp envelope | admit, identically | same inputs; the predicate holds no per-request state |
@@ -424,23 +430,35 @@ Each ships as the command that derives it. **Phase 0 re-runs all four, briefed t
 ### 6.1 Producers of a populated `egressReads` — expect exactly one
 
 ```sh
-grep -rn "EgressReads:" --include='*.go' internal/ cmd/ packages/ scripts/ | grep -v '_test\.go'
+grep -rnE "EgressReads[[:space:]]*[:=]" --include='*.go' internal/ cmd/ packages/ scripts/ | grep -v '_test\.go'
 ```
-Expected: `internal/loom/actuator.go` (the outbox record + the relay envelope) and
-`internal/processor/derive_reads.go` (pass-through of what the envelope carried). **Nothing else.** A third
-hit means Increment 2's structural removal has a second supplier and §3.2 must be re-derived before build.
+Expected: `internal/loom/actuator.go` twice — the relay envelope built from the record, and the assignment inside
+`buildExternalTaskOutbox`, the record's one producer (it sets the field on the record rather than in a composite
+literal, which is why the grep matches `=` as well as `:` — a literal-only grep would miss a second producer
+written the same way; corrected at build, 2026-09-06) — `internal/processor/derive_reads.go` (pass-through of
+what the envelope carried), and `internal/testutil/read_census.go` (the read-census harness copying the hint into
+its report line — a reader, not a producer). **Nothing else.** A further hit means the structural removal of §3.2
+has a second supplier and §3.2 must be re-derived before build.
 
-### 6.2 Live consumers — expect both to be Loom instanceOps at `Scope:"any"`
+### 6.2 Live consumers — expect every one to be a Loom instanceOp at `Scope:"any"`
 
 ```sh
 grep -rn "egressReads" packages/ --include='*.go' | grep -v '_test\.go'
+grep -rnE 'subject\.[A-Za-z]+\.data\.' packages/*/patterns.go     # read the hits under a step's Params: map only
 grep -rn 'if op\.actor != primordialActor\[' packages/ --include='*.go'
 ```
 Expected consumers: `orchestration-base/external_params.go` (the shared resolver + its
-`# read-posture: (f)` annotation) and `lease-signing/{leasedoc_scripts,scripts,patterns,lenses}.go`. Both
-consuming ops (`CreateLeaseDocInstance`, `CreateLeaseServiceInstance`) are the `InstanceOp` of an
-externalTask step (`lease-signing/patterns.go:38-60`), submitted with Loom's actor
-(`loom/engine.go:1115`). Expected guard corpus: **seven** ops — three pinned to `primordialActor["loom"]`
+`# read-posture: (f)` annotation) and `lease-signing/{leasedoc_scripts,scripts,patterns,lenses}.go` by the word
+grep — **which under-reports the consuming ops**: a package that reaches the plane only through
+`orchestration-base`'s `resolve_subject_params` never spells `egressReads` itself. The complete set is the
+externalTask steps whose `Params` use the subject-templated `subject.<aspect>.data.<field>` form (the second
+grep — the same grammar also appears in step guards and target effects, which declare nothing; only a hit under an
+externalTask step's `Params:` counts): **two** ops — `CreateLeaseServiceInstance` (the `backgroundCheck` step,
+`lease-signing/patterns.go:44-52`; its `payment` step and `CreateLeaseDocInstance`'s `docGen` step carry a bare
+`family` and declare no egress read — `leasedoc_scripts.go:23` says so, that op link-discovers instead) and
+`CreateAuthoringClaim` (`capability-author/patterns.go:22-39`; found at build 2026-09-06 as the one test casualty,
+§"Build deviations"). Both are the `InstanceOp` of an externalTask step, submitted with Loom's actor
+(`loom/engine.go:1155`), so strict shrink holds over the complete set. Expected guard corpus: **seven** ops — three pinned to `primordialActor["loom"]`
 (`CreateLeaseServiceInstance`, `CreateLeaseDocInstance`, `CreateAuthoringClaim`) and four to
 `primordialActor["weaver"]` (`CreateAugurReasoningClaim`, `RecordAppointmentReminder`,
 `RecordFollowUpReminder`, `RecordBookingReminder`). **A consumer that is not a Loom instanceOp falsifies
@@ -488,7 +506,8 @@ vacuously, which is exactly how a prior fire's negative test passed for the wron
 **And a third, because the new predicate displaces an existing refusal (§5.2 row 6): the NFR-S6 masking
 pin.** An NFR-S6 operation carrying a non-empty `egressReads` must still reply `ErrCodeClaimKeyInvalid` with
 `claimRejectionMessage` and **nil** details, and must still record a claim attempt in the same Health-KV
-bucket (`commit_path.go:1114`, `claimOutcomePlatformRefused`) — asserted on the *reply and the counter*,
+bucket as the refusal it displaces (`claimOutcomeInternalFault`, per `handleStubFailure` — corrected at build,
+2026-09-06, from the `claimOutcomePlatformRefused` this section had named) — asserted on the *reply and the counter*,
 not on the internal code, since the collapse is keyed on `operationType` and the internal code is exactly
 what the caller must not learn. Without this pin, moving the refusal one step earlier could change an
 anti-enumeration wire shape with nothing failing.
@@ -636,7 +655,8 @@ posture-changing** (a commit-path security predicate) and sets the fire's review
   weakened, and §10.3 says why the temptation is at every one of the 24 sites.
 - **Pins:** §6.5's negative test **and its positive vector**; **the NFR-S6 masking pin** (§5.2 row 6 — an
   NFR-S6 op carrying `egressReads` still replies `ClaimKeyInvalid` with nil details and still lands the
-  `claimOutcomePlatformRefused` claim-attempts bucket, now via the new refusal rather than the old one).
+  same claim-attempts bucket as the closed-set refusal it runs ahead of — `claimOutcomeInternalFault`, the
+  step-4 fault word; corrected at build 2026-09-06 from `claimOutcomePlatformRefused`).
 - **The build-tagged harness this reaches is mandatory and `go test ./...` never compiles it.**
   `internal/leaseconvergence/sensitive_param_egress_test.go` is `//go:build leaseshortwindow` — the one
   place the Loom→Processor→bridge path executes whole, so a predicate that breaks the live egress path would
@@ -868,7 +888,9 @@ wraps it exactly as the externalTask arm does today.
   test (processor dossier, seventh sighting).
 
 **5. In-scope gotchas.** Censuses §6.1–§6.3 re-run 2026-09-06 and hold: producers = `loom/actuator.go` (×2) +
-`processor/derive_reads.go:79`; 7 `actor-guard:` annotations, all `(primordial)`, zero `(caller-guarded)`; all 7
+`processor/derive_reads.go:79`; 7 `actor-guard:` annotations, all `(primordial)`, zero `(caller-guarded)` (the grep
+returns an 8th line, `lease-signing/scripts.go:1484` — a bare `# actor-guard:` prose note on the inverse guard that
+refuses platform engines from an operator maintenance op, not a shape-token annotation; not drift); all 7
 external emitters granted `Scope:"any"`; zero `egressReads` in JS/TS. §6.4: 17 test files / 24 sites — the
 in-package processor list above is the part the predicate reaches. The design cites the `leaseshortwindow`
 harness as mandatory (`Makefile:1908`, the three `TestLeaseConvergence_SensitiveParamEgress_*` tests match its
@@ -892,3 +914,28 @@ position (For Andrew (iv)), the seven package actor pins stay (§3.4).
 **Scope-diff gate:** every touch above traces to the scope sentence; the brief narrows nothing and substitutes
 nothing. Declared dependency re-verified both ways: Inc 1's test migration lands against Inc 2's reduced surface
 (Loom is the sole producer either way), and Inc 2 does not depend on Inc 1.
+
+**Build deviations (2026-09-06).**
+- The NFR-S6 claim-attempts word is `claimOutcomeInternalFault`, not `claimOutcomePlatformRefused` as parts 2
+  and 4 above (and the body's §5.2 row 6 / §6.5, since corrected in place) said: `handleStubFailure` stamps
+  every step-4 fault that is not a script-minted `ClaimKeyInvalid` with it, and the displaced closed-set refusal
+  has always landed there. The masking pin asserts the two refusals record the **same** word through the real
+  pipeline (`TestEgressDeclaration_NFRS6Operation_CollapsesToTheGenericReply`) rather than a constant.
+- `packages/capability-author`'s `TestCapAuthor_ClaimByNonLoomOperator_Denied` was the one out-of-package
+  casualty: its non-Loom claim carries Loom's egress declaration, so the predicate refuses it a step before the
+  script's actor pin it existed to prove. It now has two arms — the Loom-shaped envelope is refused at the step-4
+  head (`EgressDeclarationUnauthorized`, §3.3 row 2), and the same envelope with no egress declaration reaches
+  the script and is denied by the pin (§3.4: the seven pins guard the whole branch, not only egress). A test-only
+  edit; no package version bump owed (`lint-package-version` excludes `_test.go`).
+- Inc 2's structural test gained the positive vector §6.5's discipline asks of every negative
+  (`TestBuildExternalTaskOutbox_DerivesEgressFromParams` beside `TestBuildOutbox_NeverCarriesEgressReads`).
+- Close-pass fix round (three cold reviews, no blocking finding): the predicate moved to the first statement of
+  `Hydrate` (§3.1, amended in place); "refused before the mint" is pinned by declaring a TOMBSTONED sensitive
+  aspect, whose hydration would answer a different refusal, instead of by inspecting state on the error return
+  (which is the zero value whatever ran); `primordialEngineActor` keeps one load-bearing empty-string guard
+  instead of a dead conjunct behind an early return; `cmd/processor` pins the admitted set's two members so a
+  widening is test-visible (§10.2's width stays Andrew's). Two readings recorded rather than changed: the
+  operator Warn for this refusal carries the declared COUNT where the displaced closed-set refusal logged the
+  key (§3.1's ratified shape; the caller-facing channels are identical, which the masking pin measures), and
+  `ParseEnvelope`'s pre-existing disjointness refusal (`egressReads` ∩ `reads`) still echoes the offending key
+  as `EnvelopeMalformed` — a parse-time shape error on the submitter's own input, not this admission rule.

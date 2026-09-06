@@ -136,10 +136,10 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 // reads, e.g. CreateTask's dedup key), nil/empty when the op reads none;
 // enumerations is its ContextHint.Enumerations (§2.5 class (e) — the kv.Links
 // walks it runs, hubs already resolved to concrete keys), nil/empty when the
-// op walks nothing; egressReads is its ContextHint.EgressReads (§2.5 class (f)
-// — declared external-egress reads, e.g. an externalTask's subject-templated
-// aspect keys), nil/empty when the op declares none.
-func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads, optionalReads []string, enumerations []Enumeration, egressReads []string) (*outboxRecord, error) {
+// op walks nothing. The returned record's EgressReads is always nil: buildOutbox
+// has no parameter through which an egress declaration (§2.5 class (f)) could
+// pass — buildExternalTaskOutbox is the only constructor that sets it.
+func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads, optionalReads []string, enumerations []Enumeration) (*outboxRecord, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("loom: marshal op payload: %w", err)
@@ -154,6 +154,27 @@ func buildOutbox(requestID, operation string, payload map[string]any, target, la
 		Reads:         reads,
 		OptionalReads: optionalReads,
 		Enumerations:  enumerations,
-		EgressReads:   egressReads,
 	}, nil
+}
+
+// buildExternalTaskOutbox is the one outbox constructor that may carry an
+// egress declaration. It derives the instanceOp's ContextHint.Reads and
+// ContextHint.EgressReads itself, from the step's subject-rooted params
+// templates (inferExternalTaskReads), and sets EgressReads on the record it
+// returns — no other outbox constructor takes a parameter an egress list
+// could travel through, so the derivation and the record cannot be
+// separated. subjectKey is the running instance's subject; params is the
+// externalTask step's opaque pass-through params (Contract #10 §10.5
+// subject-templated params).
+func buildExternalTaskOutbox(requestID, operation string, payload map[string]any, target, lane, actor, subjectKey string, params json.RawMessage) (*outboxRecord, error) {
+	reads, egressReads, err := inferExternalTaskReads(subjectKey, params)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := buildOutbox(requestID, operation, payload, target, lane, actor, reads, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	rec.EgressReads = egressReads
+	return rec, nil
 }

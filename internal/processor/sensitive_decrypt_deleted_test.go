@@ -318,7 +318,7 @@ func TestHydrate_DeletedSensitiveRead_ScrubbedIntoState(t *testing.T) {
 	cache, v, aspectKey, body, ctB64 := deletedSensitiveFixture(t, ctx, conn)
 	seedTombstonedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", "vtx.identity."+testNanoID2, body)
 
-	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+	h := withPrimordialActors(NewHydratorWithCache(conn, testCoreBucket, cache, testLogger()))
 	h.Vault = v
 
 	readEnv := newTestEnvelope(testNanoID1)
@@ -342,9 +342,10 @@ func TestHydrate_DeletedSensitiveRead_ScrubbedIntoState(t *testing.T) {
 		t.Fatalf("a scrubbed doc must not be recorded as carrying plaintext")
 	}
 
-	// The SAME seeded key under the egress disposition, so the two arms differ
-	// in nothing but the declaration.
-	egressEnv := newTestEnvelope(testNanoID2)
+	// The SAME seeded key under the egress disposition. The egress arm carries
+	// an engine actor because a class-(f) declaration is admitted from nobody
+	// else; the disposition is still the only thing under test.
+	egressEnv := asPrimordialEngine(newTestEnvelope(testNanoID2))
 	egressEnv.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	_, err = h.Hydrate(ctx, egressEnv)
 	if err == nil {

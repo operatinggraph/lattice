@@ -800,6 +800,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   report shape, now in force: a builder's report lists EVERY guard / branch / conjunct the increment introduces
   beside the test that reds when it is reverted; a mechanism with no such line is a report defect before it is a
   review finding (the two fix rounds that followed each shipped their own reverting pins — the shape working).
+  **EIGHTH sighting** (egress-declaration admission predicate, 2026-09-06), the "nothing happened" form: the
+  negative asserted an empty hydrated state on the ERROR return, which is the zero value whatever ran before it,
+  so a predicate moved past every hydration loop, the decrypt and the MAC left the file green. Check: a
+  refused-before-work claim is pinned by giving the refused path a subject whose processing answers a DIFFERENT
+  code (a tombstoned sensitive aspect under the egress disposition) — never by inspecting state beside an error.
 - **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
   declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
   `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it

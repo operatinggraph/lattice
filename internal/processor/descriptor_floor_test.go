@@ -188,11 +188,11 @@ func TestHydrate_FlooredEgressAbsenceIsKnownNotRequired(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+	h := withPrimordialActors(NewHydratorWithCache(conn, testCoreBucket, cache, testLogger()))
 
 	absent := "vtx.identity." + instID
 	egressKey := absent + ".ssn"
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.OperationType = "CreateIdentity"
 	env.Payload = []byte(`{"targetIdentityKey":"` + absent + `"}`)
 	env.ContextHint = &ContextHint{EgressReads: []string{egressKey}}
@@ -222,7 +222,7 @@ func TestHydrate_FlooredEgressAbsenceIsKnownNotRequired(t *testing.T) {
 	// The control: the same envelope against an operation with NO descriptor.
 	// Both readers answer the other way, which is what shows the two answers
 	// above are the floor's doing rather than the shape of the mutation.
-	unfloored := newTestEnvelope(testNanoID1)
+	unfloored := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	unfloored.OperationType = "UndescribedOp"
 	unfloored.Payload = env.Payload
 	unfloored.ContextHint = &ContextHint{EgressReads: []string{egressKey}}
@@ -1131,36 +1131,47 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 	}
 
 	refused := []struct {
-		name string
-		op   string
-		hint *ContextHint
+		name     string
+		op       string
+		hint     *ContextHint
+		wantCode string
 	}{
 		{"an extra optionalReads key on the claim", "ClaimIdentity",
-			&ContextHint{OptionalReads: append(append([]string{}, admitted["ClaimIdentity"].OptionalReads...), probe)}},
+			&ContextHint{OptionalReads: append(append([]string{}, admitted["ClaimIdentity"].OptionalReads...), probe)},
+			"UndeclaredContextHintKey"},
 		{"an extra reads key on the claim", "ClaimIdentity",
-			&ContextHint{Reads: []string{probe}, OptionalReads: admitted["ClaimIdentity"].OptionalReads}},
+			&ContextHint{Reads: []string{probe}, OptionalReads: admitted["ClaimIdentity"].OptionalReads},
+			"UndeclaredContextHintKey"},
 		{"an extra optionalReads key on the credential link", "CompleteCredentialLink",
-			&ContextHint{OptionalReads: append(append([]string{}, admitted["CompleteCredentialLink"].OptionalReads...), probe)}},
-		// The egress row carries the closure's second reason on its own:
-		// decryptSensitiveDoc refuses a TOMBSTONED sensitive aspect under the
-		// egress disposition while serving a live one, so an admitted egressReads
-		// key would put a refusal whose reachability depends on the target's state
-		// back inside these two operations.
+			&ContextHint{OptionalReads: append(append([]string{}, admitted["CompleteCredentialLink"].OptionalReads...), probe)},
+			"UndeclaredContextHintKey"},
+		// The egress row is refused a step EARLIER than its siblings, and by a
+		// different rule: every NFR-S6 operation is submitted under a raw
+		// credential rather than by a platform engine, so the egress admission
+		// predicate (step-4 head, ahead of the closure) is what this envelope
+		// meets first. The closure would refuse it too, for its own second
+		// reason — decryptSensitiveDoc refuses a TOMBSTONED sensitive aspect
+		// under the egress disposition while serving a live one, so an admitted
+		// egressReads key would put a refusal whose reachability depends on the
+		// target's state back inside these two operations — and the wire shape
+		// is identical either way (TestEgressDeclaration_NFRS6Operation_CollapsesToTheGenericReply).
 		{"an egressReads key", "ClaimIdentity",
-			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads, EgressReads: []string{target + ".ssn"}}},
+			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads, EgressReads: []string{target + ".ssn"}},
+			"EgressDeclarationUnauthorized"},
 		{"an enumeration", "ClaimIdentity",
 			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads,
-				Enumerations: []EnumerationHint{{Hub: target, Relation: "holdsRole", Direction: "out"}}}},
+				Enumerations: []EnumerationHint{{Hub: target, Relation: "holdsRole", Direction: "out"}}},
+			"UndeclaredContextHintKey"},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name+" is refused", func(t *testing.T) {
 			_, err := h.Hydrate(ctx, envFor(tc.op, tc.hint))
 			var hErr *HydrationError
-			if !errors.As(err, &hErr) || hErr.Code != "UndeclaredContextHintKey" {
-				t.Fatalf("Hydrate = %v, want the closed-set refusal — an admitted extra key is work nothing "+
+			if !errors.As(err, &hErr) || hErr.Code != tc.wantCode {
+				t.Fatalf("Hydrate = %v, want %s — an admitted extra key is work nothing "+
 					"equalized, and what its hydration costs turns on whether it exists, whether it is sensitive "+
 					"and whether it is tombstoned: exactly the facts the equalization takes out of the "+
-					"descriptor-named set", err)
+					"descriptor-named set", err, tc.wantCode)
 			}
 			if hErr.MissingKey != "" {
 				t.Fatalf("MissingKey = %q, want empty", hErr.MissingKey)

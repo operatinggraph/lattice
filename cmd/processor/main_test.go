@@ -76,3 +76,50 @@ func TestBuildAuthWiring_RefusesAnUnloadedTable(t *testing.T) {
 		t.Errorf("err = %q, want it to name the identifier that was empty", err)
 	}
 }
+
+// TestBuildAuthWiring_PrimordialActorsAreExactlyTheTwoEngines pins the
+// MEMBERSHIP of the admitted set, not just that the map is populated.
+//
+// The set is load-bearing twice over. It is the `primordialActor` global the
+// seven package-authored actor pins compare against, and it is the admitted set
+// of the Processor's egress admission predicate
+// (processor.HydratorImpl.PrimordialActors): an operation may declare a
+// class-(f) egress read only if its actor is a member, so a member is a party
+// the platform will carry data outside the platform on behalf of.
+//
+// Nothing else stands in front of this literal. verify-kernel checks
+// bootstrap.PrimordialVertexKeys() — the kernel's KV keys — not this map, and
+// no lint reads it, so without this test adding a third engine is a one-line
+// edit with no signal at all. The test does not decide how wide the set should
+// be; it makes changing the width a deliberate, visible edit.
+func TestBuildAuthWiring_PrimordialActorsAreExactlyTheTwoEngines(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+
+	wiring, err := buildAuthWiring([]string{"vtx.identity." + bootstrap.BootstrapIdentityID})
+	if err != nil {
+		t.Fatalf("buildAuthWiring: %v", err)
+	}
+
+	want := map[string]string{
+		"loom":   bootstrap.LoomIdentityKey,
+		"weaver": bootstrap.WeaverIdentityKey,
+	}
+	if len(wiring.PrimordialActors) != len(want) {
+		t.Fatalf("PrimordialActors = %v, want exactly %d members (%v) — widening the admitted set widens who may declare an egress read",
+			wiring.PrimordialActors, len(want), want)
+	}
+	for name, key := range want {
+		// Non-empty first: an unloaded key would wire "" for the name, and the
+		// equality below would then pass by agreeing on nothing.
+		if strings.TrimSpace(key) == "" {
+			t.Fatalf("bootstrap key for %q is empty — the table did not load, so this assertion would compare two blanks", name)
+		}
+		got, ok := wiring.PrimordialActors[name]
+		if !ok {
+			t.Fatalf("PrimordialActors = %v, want a %q entry", wiring.PrimordialActors, name)
+		}
+		if got != key {
+			t.Errorf("PrimordialActors[%q] = %q, want the bootstrap-derived %q", name, got, key)
+		}
+	}
+}

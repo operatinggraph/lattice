@@ -54,7 +54,7 @@ func hydrateWithDerivation(t *testing.T, deriveBody string, env *OperationEnvelo
 	t.Helper()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	seedDeriveDDL(t, ctx, conn, deriveBody)
-	h := NewHydrator(conn, testCoreBucket, testLogger())
+	h := withPrimordialActors(NewHydrator(conn, testCoreBucket, testLogger()))
 	return h.Hydrate(ctx, env)
 }
 
@@ -267,7 +267,7 @@ def derive_reads(op):
 // surfacing (if at all) as an opaque step-6 rejection.
 func TestDeriveReads_EgressCollisionFaultsAtStep4(t *testing.T) {
 	t.Parallel()
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{EgressReads: []string{deriveTestKeyA}}
 
 	_, err := hydrateWithDerivation(t, `

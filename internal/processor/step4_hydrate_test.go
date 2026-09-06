@@ -374,7 +374,7 @@ func TestDistinctKeys(t *testing.T) {
 func TestHydrate_RepeatedKeyResolvesOnce(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
-	h := NewHydrator(conn, testCoreBucket, testLogger())
+	h := withPrimordialActors(NewHydrator(conn, testCoreBucket, testLogger()))
 
 	presentKey := "vtx.identity." + testNanoID2
 	if _, err := conn.KVPut(ctx, testCoreBucket, presentKey,
@@ -393,7 +393,7 @@ func TestHydrate_RepeatedKeyResolvesOnce(t *testing.T) {
 		return out
 	}
 
-	env := newTestEnvelope(testNanoID1)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID1))
 	env.ContextHint = &ContextHint{
 		Reads:         append(repeat(presentKey, 8), repeat(absentReadKey, 8)...),
 		OptionalReads: repeat(absentOptionalKey, 8),

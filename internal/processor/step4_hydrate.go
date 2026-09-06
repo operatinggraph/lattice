@@ -49,11 +49,15 @@ type HydratorImpl struct {
 	// (MakePipeline) always sets it.
 	Vault vault.Vault
 	// PrimordialActors are the trusted platform engines' bootstrap-seeded
-	// identity keys, keyed by engine name ("loom"). Carried verbatim onto every
-	// ScriptContext this Hydrator builds, where they become the script's
-	// `primordialActor` global (see primordialActorToStarlark). Production
-	// wiring (MakePipeline, from AuthWiring) always sets it; unset binds the
-	// empty string per name, which fails an actor comparison closed.
+	// identity keys, keyed by engine name ("loom"). Two consumers read it.
+	// It is carried verbatim onto every ScriptContext this Hydrator builds,
+	// where it becomes the script's `primordialActor` global (see
+	// primordialActorToStarlark); and it is the admitted set of the egress
+	// admission predicate (refuseEgressDeclarationFromNonEngine), which refuses
+	// an envelope declaring a class-(f) egress read unless the envelope's actor
+	// is one of these keys. Production wiring (MakePipeline, from AuthWiring)
+	// always sets it; unset binds the empty string per name, which fails an
+	// actor comparison closed — and admits no egress declaration at all.
 	PrimordialActors map[string]string
 }
 
@@ -92,9 +96,92 @@ func (h *HydratorImpl) deriveBudget() starlarksandbox.Budget {
 	return b
 }
 
+// refuseEgressDeclarationFromNonEngine refuses an operation whose envelope
+// declares a class-(f) egress read (Contract #2 §2.5) unless the submitter is
+// one of the platform's own orchestration engines.
+//
+// # Why this class alone
+//
+// Class (f) is the only declared-read class whose data the platform will carry
+// OUTSIDE the platform: an egress key hydrates a sensitive aspect as the
+// `$sensitiveRef` the bridge unwraps at the external boundary, so naming one
+// asks the platform to hand a subject's record to a third party. Every other
+// class delivers its data to a script running inside the sandbox. "Who may name
+// a key here" is therefore a narrower question than "who may read one", and the
+// answer is the platform speaking to itself.
+//
+// # What the admitted set is
+//
+// primordialActors is the Hydrator's own PrimordialActors: a map the Processor's
+// wiring populates from the deployment's bootstrap-derived engine identity keys.
+// No envelope field reaches its derivation, so nothing a submitter writes can
+// add a member. An unset or empty map admits NOBODY — the field's documented
+// fail-closed direction, where an absent trust root refuses rather than opens.
+//
+// # What reaches the caller
+//
+// A terminal *HydrationError carrying a BLANK MissingKey, mirroring
+// refuseUndeclaredContextHint: the refused key is the submitter's own probe, so
+// echoing it into the reply would answer an existence question over someone
+// else's graph. classifyStepError copies MissingKey unconditionally, so the
+// reply carries `"missingKey": ""` — a field that names nothing. The Warn is the
+// operator's only copy and names no key either: the actor and the size of the
+// refused declaration are what attributes the refusal.
+func refuseEgressDeclarationFromNonEngine(env *OperationEnvelope, primordialActors map[string]string, logger *slog.Logger) error {
+	hint := env.ContextHint
+	if hint == nil || len(hint.EgressReads) == 0 {
+		return nil
+	}
+	if primordialEngineActor(env.Actor, primordialActors) {
+		return nil
+	}
+	logger.Warn("step4: contextHint declares an egress read on an operation no platform engine submitted; the operation is refused",
+		"operationType", env.OperationType, "requestId", env.RequestID,
+		"actor", env.Actor, "declaredCount", len(hint.EgressReads))
+	return &HydrationError{
+		Code: "EgressDeclarationUnauthorized", OperationRequestID: env.RequestID,
+		Cause: errors.New("contextHint declares an egress read, and an egress declaration is admitted only on an operation submitted by one of the platform's own orchestration engines"),
+	}
+}
+
+// primordialEngineActor reports whether actor is one of the trusted platform
+// engines' bootstrap-seeded identity keys.
+//
+// Membership is over the map's VALUES — the identity keys — because an
+// envelope's actor carries a key, not an engine name.
+//
+// The blank exclusion is what makes the empty string a non-member on both
+// sides at once: an engine name a deployment left unwired binds "", and an
+// envelope can carry an empty actor, so a bare equality would let those two
+// meet and admit an actorless envelope on an unwired deployment. Excluding the
+// blank VALUE settles both, since an empty actor can only be matched by an
+// empty value.
+func primordialEngineActor(actor string, primordialActors map[string]string) bool {
+	for _, key := range primordialActors {
+		if key != "" && key == actor {
+			return true
+		}
+	}
+	return false
+}
+
 // Hydrate implements Hydrator.
 func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (HydratedState, error) {
 	rid := env.RequestID
+
+	// Who may declare a class-(f) egress read. It sits at the very top of the
+	// step because the envelope is its whole subject — the actor and
+	// contextHint.egressReads, both read straight off the message — so nothing
+	// this step resolves is an input to it, and everything this step resolves
+	// is work a refused operation must not pay for. Ahead of class resolution
+	// it also keeps the refusal from being preceded by a NoDDLForClass that
+	// would echo the class name; ahead of the descriptor floor and derive_reads
+	// it is the complete subject, since the floor's egress arm only marks
+	// absence-tolerance and adds no key, and a derivation cannot produce an
+	// egressReads key at all (Contract #2 §2.5 class (g)).
+	if err := refuseEgressDeclarationFromNonEngine(env, h.PrimordialActors, h.Logger); err != nil {
+		return HydratedState{}, err
+	}
 
 	// 1. Resolve class.
 	class, err := resolveClass(env, h.DDLs)

@@ -155,7 +155,7 @@ func TestEgressReads_ClassHeldRecord_RefusedAtMint(t *testing.T) {
 	aspectKey := "vtx.appointment." + encounterAnchorID + ".ssn"
 	sealUnderHolder(t, ctx, conn, v, holderKey, aspectKey, "ssn", `{"value":"chart note"}`)
 
-	env := newTestEnvelope(testNanoID2)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID2))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	_, err := h.Hydrate(ctx, env)
 	if err == nil {
@@ -178,7 +178,7 @@ func TestEgressReads_IdentityHeldRecord_StillAuthorsARef(t *testing.T) {
 	aspectKey := identityKey + ".ssn"
 	sealUnderHolder(t, ctx, conn, v, identityKey, aspectKey, "ssn", `{"value":"123-45-6789"}`)
 
-	env := newTestEnvelope(testNanoID2)
+	env := asPrimordialEngine(newTestEnvelope(testNanoID2))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	state, err := h.Hydrate(ctx, env)
 	if err != nil {
