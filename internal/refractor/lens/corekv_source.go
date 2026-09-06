@@ -221,6 +221,11 @@ type CoreKVSource struct {
 	// produced, armed or discarded alike — see recordTaxonomyDrainedVerdict
 	// for the two states it separates.
 	taxonomyDrainedVerdicts int
+	// taxonomyLastVerdictEpoch is the taxonomyEpoch the most recent drained
+	// verdict was measured under — the value armTaxonomy compares against
+	// the live epoch, exposed so a test can pin "nothing has moved the epoch
+	// since this verdict" without assuming what the epoch was before it.
+	taxonomyLastVerdictEpoch uint64
 	// taxonomyLiveness is set by SetTaxonomyLivenessCallbacks.
 	taxonomyLiveness TaxonomyLiveness
 	// armCh carries a caught-up verdict from watchTaxonomyLiveness to

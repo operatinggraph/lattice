@@ -627,12 +627,19 @@ func TestCoreKVSource_TaxonomyBarrier_VerdictAppliedBeforeTheDisarmCallbackIsDis
 	// measured under.
 	require.False(t, rig.conn.Connected(),
 		"precondition: the connection must read as down while the disarm callback is still held")
+	// Compared against the epoch the parked verdict was measured under, not
+	// against a literal: an iterator stall healed by a reopen BEFORE the
+	// verdict existed has already moved the epoch once (a slow replay under
+	// load can outlast the pull iterator's missed-heartbeat window), and that
+	// earlier move is not the lag under test — the verdict was measured after
+	// it. The claim is that nothing has moved the epoch SINCE the verdict.
 	rig.src.taxLiveMu.Lock()
 	epochWhileHeld := rig.src.taxonomyEpoch
+	verdictEpoch := rig.src.taxonomyLastVerdictEpoch
 	rig.src.taxLiveMu.Unlock()
-	require.Zero(t, epochWhileHeld,
-		"precondition: the epoch must NOT have moved yet — that lag is the window under test, and a test "+
-			"that lets it close first proves only what the epoch comparison already proved")
+	require.Equal(t, verdictEpoch, epochWhileHeld,
+		"precondition: the epoch must NOT have moved since the parked verdict was measured — that lag is the "+
+			"window under test, and a test that lets it close first proves only what the epoch comparison already proved")
 
 	close(release)
 	require.Never(t, func() bool {

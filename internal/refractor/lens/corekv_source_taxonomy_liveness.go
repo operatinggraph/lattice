@@ -205,7 +205,7 @@ func (s *CoreKVSource) watchTaxonomyLiveness(ctx context.Context, durable string
 		if !caughtUp {
 			continue
 		}
-		s.recordTaxonomyDrainedVerdict()
+		s.recordTaxonomyDrainedVerdict(epoch)
 		select {
 		case s.armCh <- taxonomyVerdict{epoch: epoch, connGeneration: connGeneration}:
 		case <-s.taxonomyDeadCh:
@@ -426,9 +426,10 @@ func (s *CoreKVSource) recordTaxonomyProbeFailures(n int) {
 // discarding the verdict" (a connection flapping faster than the dispatch
 // goroutine can accept one). The first is a stuck feed, the second is a stuck
 // PROCESS, and they are fixed by different things.
-func (s *CoreKVSource) recordTaxonomyDrainedVerdict() {
+func (s *CoreKVSource) recordTaxonomyDrainedVerdict(epoch uint64) {
 	s.taxLiveMu.Lock()
 	s.taxonomyDrainedVerdicts++
+	s.taxonomyLastVerdictEpoch = epoch
 	s.taxLiveMu.Unlock()
 }
 
