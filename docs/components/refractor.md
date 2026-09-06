@@ -1995,7 +1995,11 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   found by a cold reviewer's sweep, not by the design). The refuted reason had been standing in for a
   correct one. Check: when you lift a refusal, do not stop at falsifying its stated reason — re-derive the
   boundary from the CONSUMERS the refusal was protecting, and expect the true limit to sit somewhere inside
-  the old one. Corollary from the same fire: a refuted reason lives in more documents than the one you are
+  the old one. **Sighted again (anchor-partitioned retraction, 2026-09-06), at the RESULT rather than the
+  flag:** lifting `plainDerivationIndexRefusal`'s `diffRetraction` conjunct re-armed every downstream consumer
+  of the state that path produces — the tail's diff over `results` would have listed the whole target against
+  K partitions' rows — so enumerate the consumers of the RESULT a lifted refusal re-arms, not only the readers
+  of the flag. Corollary from the same fire: a refuted reason lives in more documents than the one you are
   building, so grep it — this one was normative text in three sibling designs, one of them the parent.
   **Fifth sighting (Secure plain lens retraction+audit, 2026-09-05): a conjunct's stated reason can name a code
   path the conjunct's own consumer never takes.** Two refusals cited "plaintext" against an evaluation path
@@ -2064,7 +2068,16 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   an async rebuild while the gate it describes is published before it, so an A→B→A sequence takes the
   "unchanged" fast path against a baseline that never matched the gate. Minted: dynamic-type-taxonomy inc 4
   (found at the item's close, not at the increment's). Check: for any "has this changed?" comparison, prove the
-  compared baseline and the acted-on state share a commit point.
+  compared baseline and the acted-on state share a commit point. **Second sighting (anchor-partitioned
+  retraction, 2026-09-06), one level down — a PREDICATE read twice in one handler:** the partition arming
+  gained a live conjunct (the audit's enrolment/suppression) while the rule state is one snapshot per event,
+  and one frame asked `partitionArmed` at the seed decision, in a producer and at the retraction tail; an
+  auditor tick between the first and last read turned a one-anchor row set into a whole-target diff — the exact
+  outcome the design forbade, reproduced by the closing reviewer. "Unreachable" had been argued over an input
+  that is not part of the event snapshot. Check: a predicate that gates a narrowed `Delete` is resolved ONCE
+  per event beside the rule snapshot and threaded; the tell is two calls to the same arming predicate in one
+  handler. Mechanized for this predicate by the AST pin `TestPartitionRetraction_FrameAsksTheArmingOnce`
+  (counts `partitionArmed` calls per function); the general shape is a `lint-*` candidate on a second predicate.
 - **An authoring gate and its runtime resolver must agree, or the gate is advisory.** A parse-time refusal
   named the projectable surface of a relationship binding while `resolveProperty`'s arm resolved *whatever
   reached it*, so any shape the parse walk did not model served the value anyway: `WITH coalesce(r, r) AS rr`

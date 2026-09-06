@@ -140,10 +140,10 @@ go test ./internal/refractor/ -run TestScratchPartitionCensus -count=1 -v
 
 | Bucket | Count | Names |
 |---|---|---|
-| `ProjectsOneRowPerAnchor` **and** partitioned (unchanged: the predicate is a superset) | 54 | the with-alias census's 51 bucket-A lenses + its 3 bucket-F lenses |
+| `ProjectsOneRowPerAnchor` **and** partitioned (unchanged: the predicate is a superset) | 54 *(amended 2026-09-06 at build: **55** — one closed lens landed after this snapshot; §15)* | the with-alias census's 51 bucket-A lenses + its 3 bucket-F lenses |
 | **refused today, partitioned** — the payoff set | **8** | `landlordLeaseApplicationsRead` (app_id ∣ landlord_id), `landlordUnitsRead` (unit_id ∣ landlord_id), `objectIdentityAttachmentsRead` (oid_id ∣ owner_id, link_name), `providerSites` (provider_id ∣ site_id), `duplicateCandidates` (secondaryId ∣ primaryId), `providerIdentityReadGrants` (actor_id ∣ anchor_id), `staffReadGrants` (actor_id ∣ anchor_id), `patientIdentityReadGrants` (anchor_id ∣ actor_id) |
 | refused today, **still** refused | 3 | `wellnessMemberAccounts` (anchor `bk:booking`, key `id.key` — rows partition by *identity*, not by the anchor), `capabilityRoleIndex` (key `operationType` binds `perm`, no column identifies `role`), `opCatalog` (key is the anchor's root field, not its key) |
-| | **65** | TOTAL, the same floor the with-alias census pins |
+| | **65** *(amended 2026-09-06 at build: **66**; both censuses now floor at 66 — §15)* | TOTAL, the same floor the with-alias census pins |
 
 Three facts the table asserts and the build's census (§5) must pin: **all 8 admitted lenses are exactly
 the `DiffRetraction: true` lenses whose closure is refused**; **no lens the shipped conjunct admits is
@@ -357,6 +357,13 @@ redelivered, rather than the sibling upserts landing past a row that should be g
 
 ### 3.3 Where the decisions change
 
+> *Amended 2026-09-06 at build (§15): the arming has THREE halves, not two — the activation half below, the rule
+> half, and an AUDIT half (the same enrolled/unsuppressed auditor conjunct the derivation licence's act path asks,
+> with the kill switch up). With the audit half down the lens seeds nothing, diffs whole and publishes
+> `diffRetraction`. Case (a) below is a K-partition diff over the derived anchors, not "no diff"; the declined
+> multi-position path on an armed lens is the whole rescan; a keyed anchor pattern and a multi-branch body are
+> never armed; and the gate skips `SetPartitionRetraction` for the auth plane outright.*
+
 **One armed flag, bound at activation, re-checked against the live rule.** `p.partitionRetraction` is set
 by `SetPartitionRetraction` **only** when all of: `p.diffRetraction`; the target adapter implements
 `PartitionKeyLister` and `RowReader`; the lens is **business plane** (`projection.IsAuthPlane(r)` false,
@@ -460,7 +467,7 @@ activation.
 | created | every rule install / MATCH hot-reload, from the compiled rule (no event, no adapter) | activation, after `SetDiffRetraction` and the shared-target scoping, before `Run` |
 | reset | unconditionally on the next install — a reload must never leave a previous body's verdict standing (as `seedAnchorLabels`, `personalClockRefusal`) | never while running — like `diffRetraction`, an edit that would change its inputs is refused or re-activates |
 | carried | in the copy-on-write `ruleState` snapshot every predicate reads; `TestRuleState_RoundTripCarriesEveryField` discovers the field and fails the build until it is carried | a pipeline field read under the same discipline as `diffRetraction` |
-| ordered | a pure function of the rule; the seed and the tail read the **same** snapshot for one event | — |
+| ordered | a pure function of the rule; the seed and the tail read the **same** snapshot for one event — *and, since the audit half of the arming is LIVE (amended 2026-09-06, §15), the arming answer itself is resolved once per frame beside the snapshot and threaded; a frame never asks it twice* | — |
 | crash / replay / rebuild | nothing persisted; a rebuild's replay seeds every anchor event and diffs its partition against a table `Truncate` emptied (`RebuildTruncateIsScoped` true for an owned target, §2.9), converging like the closed lenses' replay | — |
 
 **The retraction state table** (the outcome column is what the target holds after the event; "armed" =
@@ -881,3 +888,96 @@ this fire except verticals.md's landlord-visibility row, which stays on its own 
 **Delegation.** Inc 1 is posture-changing (a new enforcement point that authorises `Delete`s on RLS tables):
 `opus` builder, then a full 3-layer cold adversarial review (`opus`, never the implementer), fix round back to
 the implementer, then Winston admits.
+## 15. Build note (2026-09-06, Increment 1 shipped — amendments to the body, dated)
+
+**Body amendments (the ratification-banner-rewrites-body rule, applied at build time).**
+
+- **§2.1 / §5.1 — the census numbers.** The live corpus at the merge base is **66** plain lenses, not 65, and **55**
+  close-and-identify, not 54: one closed lens (`8731eac`, the wellness fire) landed after the design's `34ce301c`
+  snapshot; the with-alias census's floor had lagged it by one. The 8 partition-only names and the 3 refusals are
+  exactly §2.1's. `TestPlainPartitionCensus` pins 55 / 8 / 3 at floor **66**, and the with-alias census's floor is
+  raised to 66 in the same commit.
+- **§3.3 — the arming conjunct set gains the AUDIT half.** `partitionArmed(rs)` = the activation half
+  (declaration ∧ `PartitionKeyLister` ∧ `RowReader` ∧ business plane, bound before `Run`) ∧ the rule half
+  (`rs.partition.only`, re-derived per install) ∧ **the audit half — the same enrolled/unsuppressed auditor
+  conjunct the derivation licence's act path requires.** Rationale (cold review, Edge-Case Hunter): the licence
+  demanded a watching auditor to merely narrow an evaluation while the transport authorised `Delete`s on RLS
+  tables with none, and `SetAuditEnabled(false)` left the heartbeat publishing `diffRetraction-partition` while
+  nothing watched. With the audit half down the lens seeds nothing, diffs whole, and publishes `diffRetraction`
+  — today's behaviour, which is what actually runs.
+- **§3.3 — case (a) is a K-partition diff, not "no diff".** A derived anchor whose re-entry never ran (vertex
+  missing or `isDeleted` at `plainEntryForVertex`) produced no rows and listed no partition, so "each re-entry
+  already diffed its own partition" was false for exactly the anchor most likely to hold stale rows. The acted
+  frame now diffs the union of the K derived partitions against its union results (exact: every row belongs to
+  one partition) and the re-entrant frames diff nothing. §4's "matched-then-shrunk (licensed)" row reads
+  accordingly; a new row: *a derived anchor tombstoned with its own event lost, neighbour event licensed* →
+  K partition listings, that anchor's rows tombstoned, the others untouched.
+- **§3.3 — the multi-position declined path is the WHOLE rescan on an armed lens.** `duplicateCandidates`
+  binds `identity` at both positions; with the licence declined, `evaluateSeededMultiPosition`'s narrow seed
+  covered only the anchor position and the partition diff only that partition, so far-position rows lingered
+  (Blind Hunter, reproduced). The declined answer on an armed lens is now the unseeded whole rescan + whole
+  diff; the act path is unchanged. `plainDerivationDecide` returns an evaluation SCOPE (whole / seeded /
+  acted + anchors), which the tail switches on.
+- **§3.1 — a keyed anchor pattern is refused by `PartitionsByAnchor`.** `MATCH (a:identity {key: '…'})…`
+  passed the conjunct while the executor's seed cannot bind a keyed node, so the evaluation stayed pinned to the
+  literal and the predicate named the event's partition. The closed predicate is unchanged.
+- **§3.7 — the third exclusion exists in the gate:** `cmd/refractor`'s activation skips
+  `SetPartitionRetraction` for `projection.IsAuthPlane(r)` explicitly, besides passing the plane in.
+- **A new refusal the licence swap made necessary (not in the body):** `PlainRetractionTransport`'s T1 arm
+  refuses a partition-only lens that declares no `DiffRetraction` — T1 delivers through the read-free
+  presence check, which declines for that shape, so the lens would have activated claiming a transport that can
+  never emit a `Delete`. No corpus verdict moves; a vector pins it.
+- **Multi-branch lenses are not armed** (`len(branches) <= 1` conjunct): `branchmerge` drops the seed for a
+  multi-branch body, so an armed one would evaluate whole and diff one partition.
+- **§3.2 — `ListKeysWhere(ctx, fixed, prefix)`** takes the diff prefix as a parameter (the pipeline passes
+  `p.diffRetractionPrefix`; Postgres refuses a non-empty one) rather than adapter-held state.
+
+**The boundary this fire accepts (record, not a residual).** A licensed partition lens never lists the whole
+target again except on an unlicensed neighbour event. A lost anchor event on one of the five is healed by (i) any
+later neighbour event that derives that anchor (the K-partition diff), and (ii) the audit's should-not-exist
+direction (§3.5), which now names it — never by a whole listing. That is the trade the design made for these
+five (§3.7 kept the whole diff as `clinicPatientsRead`'s healer on purpose); an operator who needs the old
+posture back edits nothing: the audit kill switch disarms the mechanism and restores it.
+
+**Decided and not changed.** An unresolvable predicate stays a redelivered failure (a stalled consumer is the
+loud signal), not a Terminal. An acted frame with an empty derived set diffs nothing (the walk over live
+adjacency is the derivation's exactness claim; a link tombstone's other endpoint heals). A hot reload that
+STARTS partitioning never re-arms (safe direction). `HotReloadInto` not re-asserting the lister is fail-closed
+(per-event error), mirroring `SetDiffRetraction`.
+
+**Review record.** Three cold passes (Blind Hunter, Edge-Case Hunter, Acceptance Auditor) on the checkpoint
+`8c8a7ea`: no blocking; four majors on the retraction seam (above), five acceptance majors (gate exclusion,
+untested conjunct, grant-writer negative, stale lens-author field docs, unreconciled census), nits. Each closed
+in the fix round on this branch; the reviewers' "could not break" lists cover: a tombstone outside the anchor's
+partition, projected-vs-predicate value identity, NATS-KV segment/sibling mapping, Postgres binding, the auth
+plane's exclusions, the whole diff over a partial set, `FailClosed` through `writeResults`, fail-open defaults.
+
+**Increment 2 (close).** Census pins re-run at the merge base; dossier entry appended (`docs/components/refractor.md`);
+the live close pass of §11 is **Mac-only** (a dev stack with the leaseapp corpus) and is recorded here as pending
+on Andrew's next stack cycle — the positive verdict to read is `DerivationArmed=true` and
+`retractionTransport=diffRetraction-partition` on the heartbeat for `landlordLeaseApplicationsRead`, and a
+`Delete` outcome in the log after withdrawing a co-manager's `manages` link.
+
+**Closing pass (cumulative, one cold reviewer over the whole item diff) — one BLOCKING, fixed before merge.**
+`partitionArmed` had gained a LIVE conjunct (the audit half) while `rs` is one snapshot per event, and one frame
+asked it at three points (the seed decision, the multi-position producer, the tail). An auditor tick landing
+between the seed and the tail — `noteSuppressed("rebuild in flight")` and four other ordinary runtime
+suppressions — flipped the second read, and the tail's `scopeSeeded && !armed` else-arm ran the WHOLE diff over
+one anchor's rows: reproduced, an unrelated anchor's row tombstoned. §4 had asserted "the seed and the tail read
+the same snapshot for one event" and the build had not made that true for the audit half. Fix: the arming
+answer is resolved ONCE per frame beside `rs` and threaded into the seed decision, the producers and the tail;
+the tail's seeded-but-unarmed arm is the same fail-the-event refusal the acted arm already had, never a whole
+diff. Pinned by a fixture that flips the kill switch from inside the adapter double mid-frame.
+
+**Dossier entry (appended to `docs/components/refractor.md`, the second sighting of the class §13 named).**
+Folded into the existing *"one latch guarding two states that commit at different times"* entry as its second
+sighting — a predicate that gates a narrowed `Delete` is resolved ONCE per event and threaded like the rule
+snapshot; a live re-read of any conjunct makes "unreachable" a statement about an instant, not an event; the
+tell is two calls to the same arming predicate in one handler, mechanized for this predicate by the AST pin
+`TestPartitionRetraction_FrameAsksTheArmingOnce`. The §13 candidate (enumerate the consumers of the RESULT a
+lifted refusal re-arms, not only the flag's readers) is a sighting of the standing *"re-derive the boundary
+from the CONSUMERS the refusal was protecting"* entry and is noted there.
+
+**Shipped.** Increment 1 + close on `main` (the fire's merge commit; Done-log entry on the lane). Verticals'
+landlord-visibility row (`verticals.md`, blocked-on this) is unblocked from the platform side: the lens seeds on
+its own leaseapp's events and diffs its partition at the next Refractor cycle, no package edit needed.
