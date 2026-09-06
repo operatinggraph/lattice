@@ -771,7 +771,10 @@ func TestResolveSubjectHats_GatewayUnreachable_FailsClosed(t *testing.T) {
 // TestHandleStaffHats_FrontOfHouse_ReportsTrue: a worksAt caller who also
 // holds frontOfHouse (fakeGatewayActor grants it to every subject) sees GET
 // /api/staff-hats report {"frontOfHouse": true} — the bit the FE nav gates
-// the staff-only tabs on (isStaff, cmd/wellness-app/web/app.js).
+// the staff-only tabs on (isStaff, cmd/wellness-app/web/app.js). staffSubj
+// carries no operator role (only rootSubj does, per fakeGatewayActor), so
+// isOperator must come back false — the New-instructor surface stays hidden
+// from a front-desk-only session that would only meet AuthDenied on submit.
 func TestHandleStaffHats_FrontOfHouse_ReportsTrue(t *testing.T) {
 	s, cookieFor := devSessionServer(t)
 	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(staffSubj))
@@ -780,12 +783,39 @@ func TestHandleStaffHats_FrontOfHouse_ReportsTrue(t *testing.T) {
 	}
 	var body struct {
 		FrontOfHouse bool `json:"frontOfHouse"`
+		IsOperator   bool `json:"isOperator"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
 	if !body.FrontOfHouse {
 		t.Error("frontOfHouse = false, want true for a worksAt+frontOfHouse caller")
+	}
+	if body.IsOperator {
+		t.Error("isOperator = true, want false for a front-desk-only caller with no operator role")
+	}
+}
+
+// TestHandleStaffHats_Operator_ReportsTrue: rootSubj holds the primordial
+// operator role and no workplace (fakeGatewayActor). GET /api/staff-hats must
+// report isOperator: true — the bit the FE gates the New-instructor
+// toggle/form on (isOperatorHat, cmd/wellness-app/web/app.js), since
+// CreateInstructor / BindInstructorIdentity grant only operator
+// (packages/wellness-domain/permissions.go), never frontOfHouse.
+func TestHandleStaffHats_Operator_ReportsTrue(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	rec := sessionGET(s, s.handleStaffHats, "/api/staff-hats", cookieFor(rootSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IsOperator bool `json:"isOperator"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.IsOperator {
+		t.Error("isOperator = false, want true for the primordial operator caller")
 	}
 }
 

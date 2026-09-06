@@ -238,15 +238,19 @@ func (s *server) writeAuthError(w http.ResponseWriter, err error) {
 	s.writeError(w, http.StatusBadGateway, "could not confirm your access with the Gateway; try again")
 }
 
-// handleStaffHats implements GET /api/staff-hats: the one FE-visible bit of
-// the caller's server-resolved read-boundary role — whether they hold the
-// frontOfHouse hat resolveSubjectHats already computes. Mirrors cmd/cafe-app's
-// identical handler; see its comment. The nav gates staff-only surfaces on
-// this instead of the raw worksAt anchor alone, so a worksAt-only caller with
-// no frontOfHouse role sees them hidden rather than hitting the same 403 the
-// write side already gives them (isFrontDesk, above). Uses writeAuthError,
-// like every other resolveSubjectHats caller in this app, so a Gateway outage
-// reports 502 rather than signing a valid session out.
+// handleStaffHats implements GET /api/staff-hats: the FE-visible bits of the
+// caller's server-resolved read-boundary role resolveSubjectHats already
+// computes — frontOfHouse, and isOperator (added so the FE can hide the
+// instructor-provisioning surface from a front-desk session that holds no
+// grant on CreateInstructor / BindInstructorIdentity: both are operator-only,
+// so a front-desk caller showing the "New instructor" form only ever meets
+// AuthDenied). Mirrors cmd/clinic-app's identical handler; see its comment.
+// The nav gates staff-only surfaces on this instead of the raw worksAt anchor
+// alone, so a worksAt-only caller with no frontOfHouse role sees them hidden
+// rather than hitting the same 403 the write side already gives them
+// (isFrontDesk, above). Uses writeAuthError, like every other
+// resolveSubjectHats caller in this app, so a Gateway outage reports 502
+// rather than signing a valid session out.
 func (s *server) handleStaffHats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusBadRequest, "GET required")
@@ -257,7 +261,7 @@ func (s *server) handleStaffHats(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]bool{"frontOfHouse": hats.frontOfHouse})
+	s.writeJSON(w, http.StatusOK, map[string]bool{"frontOfHouse": hats.frontOfHouse, "isOperator": hats.isOperator})
 }
 
 // actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to

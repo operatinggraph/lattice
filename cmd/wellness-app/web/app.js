@@ -19,6 +19,7 @@ const state = {
   canSignOut: false, // whether whoami reports a real cookie session
   anchors: [], // the signed-in identity's anchors (whoami hat hints, persona-worlds-design.md §4): `worksAt` marks studio staff, an `identifiedBy` vtx.instructor binding marks an instructor
   frontOfHouse: false, // server-resolved frontOfHouse role (GET /api/staff-hats) — the conjunct isStaff composes with the worksAt anchor above. Fails closed: false until proven true.
+  isOperator: false, // server-resolved operator role (GET /api/staff-hats) — gates the New-instructor surface, which grants only `operator` (never frontOfHouse). Fails closed: false until proven true.
   identities: [], // the protected wellnessIdentitiesRead roster (loadIdentities) — at minimum the signed-in actor's own row, resolved by name
 };
 
@@ -215,6 +216,7 @@ async function loadWhoami() {
         state.canSignOut = false;
         state.anchors = [];
         state.frontOfHouse = false;
+        state.isOperator = false;
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
@@ -222,18 +224,20 @@ async function loadWhoami() {
   }
 }
 
-// loadStaffHats reads the server-resolved frontOfHouse hat (GET
-// /api/staff-hats) — the app-side mirror of resolveSubjectHats
+// loadStaffHats reads the server-resolved frontOfHouse + isOperator hats
+// (GET /api/staff-hats) — the app-side mirror of resolveSubjectHats
 // (cmd/wellness-app/readauth.go), which whoami's opaque anchors/roles cannot
 // express FE-side. Fails CLOSED: any fetch error (network, 401, malformed
-// body) leaves state.frontOfHouse false, hiding the staff-only tabs rather
-// than showing a surface the server would only 403 on every write.
+// body) leaves both false, hiding the staff-only and operator-only surfaces
+// rather than showing one the server would only 403 on every write.
 async function loadStaffHats() {
   try {
     const body = await api("/api/staff-hats", { credentials: "same-origin" });
     state.frontOfHouse = !!(body && body.frontOfHouse);
+    state.isOperator = !!(body && body.isOperator);
   } catch (_) {
     state.frontOfHouse = false;
+    state.isOperator = false;
   }
 }
 
@@ -268,6 +272,18 @@ function anchorKey(relation, keyPrefix) {
 // access needs no front-desk role at all, so it is never conjoined here.
 function isStaff() {
   return anchorKey("worksAt") !== "" && !!state.frontOfHouse;
+}
+
+// isOperatorHat reports whether the caller holds the platform `operator`
+// role — the app-side mirror of resolveSubjectHats' isOperator
+// (cmd/wellness-app/readauth.go). Gates the New-instructor surface:
+// CreateInstructor / BindInstructorIdentity (packages/wellness-domain/permissions.go)
+// grant only `operator`, never `frontOfHouse`, so a front-desk-only session
+// showing that form met AuthDenied on every submit. Also lets an
+// operator-only session (no worksAt anchor) reach the Studios tab at all —
+// isStaff() alone would hide it from a caller with no workplace.
+function isOperatorHat() {
+  return !!state.isOperator;
 }
 
 // instructorKey is the vtx.instructor entity this login is bound to, or "".
@@ -330,12 +346,20 @@ function signOut() {
 
 // applyHatGating hides the tabs a session has no hat for — Roster needs staff
 // or an instructor binding, Studios needs staff (CreateSession grants
-// frontOfHouse, packages/wellness-domain/permissions.go) — and bounces the
-// active view if it just became disallowed. Idempotent; re-run whenever
-// whoami resolves.
+// frontOfHouse, packages/wellness-domain/permissions.go) or the operator
+// role alone (an operator with no workplace still needs somewhere to reach
+// New instructor) — and bounces the active view if it just became
+// disallowed. The New-instructor toggle/form stay hidden from a staff-only
+// session that reached the Studios tab on isStaff(): CreateInstructor /
+// BindInstructorIdentity grant only operator, so only isOperatorHat() opens
+// them. Idempotent; re-run whenever whoami resolves.
 function applyHatGating() {
   document.getElementById("tab-roster").hidden = !(isStaff() || instructorKey());
-  document.getElementById("tab-studios").hidden = !isStaff();
+  document.getElementById("tab-studios").hidden = !(isStaff() || isOperatorHat());
+  const instructorNewToggle = document.getElementById("instructor-new-toggle");
+  const instructorNewForm = document.getElementById("instructor-new-form");
+  if (instructorNewToggle) instructorNewToggle.hidden = !isOperatorHat();
+  if (instructorNewForm && !isOperatorHat()) instructorNewForm.hidden = true;
   refreshMeBar();
   const active = document.querySelector(".tab.active");
   if (active && active.hidden) showView("schedule");
@@ -488,7 +512,7 @@ function toast(msg, ok) {
 
 function showView(view) {
   if (view === "roster" && !(isStaff() || instructorKey())) view = "schedule";
-  if (view === "studios" && !isStaff()) view = "schedule";
+  if (view === "studios" && !(isStaff() || isOperatorHat())) view = "schedule";
   document.querySelectorAll("[role=tabpanel]").forEach((s) => {
     s.hidden = s.id !== "view-" + view;
   });
@@ -2639,14 +2663,14 @@ function wireStudioCard(s) {
 // packages/wellness-domain/permissions.go (no frontOfHouse grant, unlike
 // CreateStudio): every write submits under the signed-in session's OWN
 // token (submitOp, above), so a front-desk-only (frontOfHouse) session gets
-// AuthDenied here by design — this surface reaches the Gateway op the same
-// way CreateStudio does, but only an operator-held session can actually
-// clear it. That mirrors clinic-domain's CreateProvider, which the package
-// header there deliberately keeps operator-only too ("front-desk cannot
-// create the provider entity a bind would target, so the grant would add
-// only attack surface"). No workplace-confinement gate is needed either way:
-// isStaff() decides whether this TAB is reachable, not whether the op
-// succeeds.
+// AuthDenied here by design. That mirrors clinic-domain's CreateProvider,
+// which the package header there deliberately keeps operator-only too
+// ("front-desk cannot create the provider entity a bind would target, so the
+// grant would add only attack surface"). No workplace-confinement gate is
+// needed either way. isStaff() (or isOperatorHat() alone) decides whether
+// the Studios TAB is reachable; applyHatGating additionally gates the
+// New-instructor toggle/form on isOperatorHat(), since that is the only hat
+// the op actually clears.
 
 // renderNewInstructorForm mounts CreateInstructor's descriptor form. The op
 // mints a brand-new instructor — no pre-existing vertex to derive a target
