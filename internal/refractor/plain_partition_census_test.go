@@ -158,7 +158,15 @@ var partitionRefusedLenses = []string{
 // classifier — the same floor the with-alias census pins. It guards the shape an
 // emptied enumeration takes: a census that swept nothing would report every
 // membership below as satisfied.
-const plainPartitionCensusFloor = 65
+//
+// THE LIVE CORPUS IS 66, and the design's §2.1 table says 65 / 54 / 8 / 3. The
+// difference is one plain lens that landed after the design's snapshot at
+// `34ce301c` and closes-and-identifies, so it lands in the bucket the new
+// conjunct does not move: 55 closed rather than 54. The two memberships the
+// design actually asserts — the 8 partition-only names and the 3 refusals — are
+// unmoved, and the superset claim is asserted below BY NAME rather than by a
+// count, so the drift cannot hide a regression in either.
+const plainPartitionCensusFloor = 66
 
 // derivePartitionVerdict is the live classification for one plain lens, run
 // through the SHIPPED predicates rather than a restatement of them.

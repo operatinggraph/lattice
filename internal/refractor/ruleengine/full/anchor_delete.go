@@ -425,11 +425,42 @@ func (cr *CompiledRule) PartitionsByAnchor() (identifying []string, ok bool) {
 	if !structural {
 		return nil, false
 	}
+	if cr.anchorPatternIsKeyed() {
+		return nil, false
+	}
 	identifying = identifyingKeyColumns(shape)
 	if len(identifying) == 0 {
 		return nil, false
 	}
 	return identifying, true
+}
+
+// anchorPatternIsKeyed reports whether the anchor pattern pins its own vertex
+// with a `key` property — `MATCH (a:identity {key: '…'})`.
+//
+// Such a pattern already resolves to a point read of the key it names, and
+// seedAnchorBinds (seed_nodes.go) refuses to displace it: a seeded evaluation of
+// this rule stays pinned to the literal whatever key the event carries. The
+// partition predicate, meanwhile, resolves the EVENT's own partition — so the
+// two would name different anchors, and the evaluation's row set would be
+// diffed against a partition it never computed. That is a per-partition wipe of
+// the wrong scope, so the partition reading refuses the shape outright.
+//
+// It is asked HERE and not inside the shared shape body on purpose: the closure
+// predicate's own consumers do not seed (AnchorProjectionKey resolves a key for
+// a retraction its caller has already scoped to one anchor), so refusing a keyed
+// anchor there would move ProjectsOneRowPerAnchor's verdicts for no soundness
+// gain.
+func (cr *CompiledRule) anchorPatternIsKeyed() bool {
+	if cr == nil || cr.Query == nil {
+		return false
+	}
+	n, found := anchorPattern(cr.Query)
+	if !found {
+		return false
+	}
+	_, keyed := n.Properties["key"]
+	return keyed
 }
 
 // identifyingKeyColumns returns the shape's key columns that identify the
@@ -455,10 +486,17 @@ func identifyingKeyColumns(shape anchorProjectionShape) []string {
 // the same anchor-label discrimination (set membership against the resolved
 // downward closure when the anchor pattern carries the `*` sigil, string
 // equality otherwise), and the same read-free executor binding — except that
-// the binding carries the anchor's KEY and no body at all. An identifying
-// column is a `.key` form or nanoIdFromKey over one by construction
-// (exprIdentifiesVariable), so no stored property is ever on the path, which is
-// what lets a root-tombstoned anchor still name its own partition.
+// the binding carries the anchor's KEY and NO PROPS AT ALL, where
+// AnchorProjectionKey binds the stored root body beside it.
+//
+// Dropping the body is exact rather than a shortcut, and the reason is the
+// narrowing: an identifying column is `anchor.key` or nanoIdFromKey over it by
+// construction (exprIdentifiesVariable admits nothing else), and the evaluator
+// answers a `.key` access from nodeRef.key directly — it never reaches the
+// property lookup that would consult a body first, and never the aspect
+// point-read that a nil coreKV refuses. So a hard-purged or root-tombstoned
+// anchor, whose body the CDC event may not carry at all, still names its own
+// partition (§3.4: one path for the live drop-out and the tombstone).
 //
 //	ok == false → the event vertex is not this rule's anchor, the rule does not
 //	              partition by its anchor, or a column resolved to something no

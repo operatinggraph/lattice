@@ -2505,7 +2505,7 @@ const RetractionTransportAuditDisarmed = "derivation (audit disarmed)"
 // transport carrying one.
 //
 // They are the wire's own spellings, like RetractionTransportAuditDisarmed
-// above, and unlike the four carrying values they mirror no pipeline constant:
+// above, and unlike the five carrying values they mirror no pipeline constant:
 // the pipeline answers a verdict, and turning "depends on a neighbour, carries
 // nothing" into a published token is this contract's decision. cmd/refractor's
 // TestRetractionTransport_VocabularyMatchesThePipeline holds the mapping.

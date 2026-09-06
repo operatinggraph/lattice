@@ -357,10 +357,25 @@ func (a *PostgresAdapter) buildListKeysSQL() string {
 		quotedKeyCols[i] = quoteIdent(k)
 	}
 	sqlStr := fmt.Sprintf(`SELECT %s FROM "%s"`, strings.Join(quotedKeyCols, ", "), a.table)
-	if a.deleteMode == DeleteModeSoft || a.guarded {
+	if a.excludesTombstones() {
 		sqlStr += ` WHERE NOT "is_deleted"`
 	}
 	return sqlStr
+}
+
+// excludesTombstones reports whether a soft tombstone can appear in this table
+// and so must be filtered out of any "currently live" listing — unguarded
+// DeleteModeSoft, or a.guarded (which always soft-tombstones on Delete
+// regardless of the declared deleteMode, see buildDeleteSQL).
+//
+// It is one predicate rather than a repeated condition because the listing
+// builders also have to know whether the statement they are extending ALREADY
+// carries a WHERE. Deciding that by inspecting the rendered SQL would make the
+// clause the two must agree on a string to be parsed rather than a condition to
+// be asked, and a change to either would silently produce a syntax error or, far
+// worse, a listing that includes tombstones.
+func (a *PostgresAdapter) excludesTombstones() bool {
+	return a.deleteMode == DeleteModeSoft || a.guarded
 }
 
 // ListKeys returns every live row's key fields (a.keyOrder), one map per row.
@@ -424,7 +439,7 @@ func (a *PostgresAdapter) buildListKeysWhereSQL(fixed map[string]any) (string, [
 	}
 	sqlStr := a.buildListKeysSQL()
 	joiner := " WHERE "
-	if strings.Contains(sqlStr, " WHERE ") {
+	if a.excludesTombstones() {
 		joiner = " AND "
 	}
 	clauses := make([]string, len(cols))
@@ -518,7 +533,7 @@ func (a *PostgresAdapter) buildGetRowSQL() string {
 		clauses[i] = fmt.Sprintf("%s = $%d", quoteIdent(k), i+1)
 	}
 	sqlStr := fmt.Sprintf(`SELECT * FROM "%s" WHERE %s`, a.table, strings.Join(clauses, " AND "))
-	if a.deleteMode == DeleteModeSoft || a.guarded {
+	if a.excludesTombstones() {
 		sqlStr += ` AND NOT "is_deleted"`
 	}
 	return sqlStr

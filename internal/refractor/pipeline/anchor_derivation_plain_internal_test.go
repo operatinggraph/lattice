@@ -693,9 +693,11 @@ func TestEvaluatePlainNeighbourEvent_AnUnlicensedLensIsModeIndependent(t *testin
 		p.SetAnchorDerivationMode(mode)
 		p.SetAnchorDerivationSampling(1)
 
-		got, acted, gerr := p.evaluatePlainNeighbourEvent(ctx, rs, entry)
+		got, gotScope, gerr := p.evaluatePlainNeighbourEvent(ctx, rs, entry)
 		require.NoError(t, gerr)
-		require.Falsef(t, acted, "mode %v: an unlicensed lens's frame never substitutes per-anchor re-entries", mode)
+		require.Equalf(t, scopeWhole, gotScope.kind,
+			"mode %v: an unlicensed neighbour event's row set is the whole corpus, which is what the whole diff is exact against", mode)
+		require.Emptyf(t, gotScope.anchors, "mode %v: a whole-scope frame names no anchors to scope a diff to", mode)
 		want, werr := p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
 		require.NoError(t, werr)
 

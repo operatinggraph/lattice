@@ -247,6 +247,9 @@ func (p *Pipeline) unarmedDiffRetractionRefusal(rs ruleState) string {
 		return "it uses target-diff retraction, whose whole-key-set semantics a per-anchor seeded row set would misread, " +
 			"and its rows do not partition by anchor into a scope a narrower diff could be confined to"
 	}
+	if refusal := p.auditNarrowingRefusal(); refusal != "" {
+		return "its rows partition by anchor but the partition-scoped diff is not armed for it: " + refusal
+	}
 	return "its rows partition by anchor but the partition-scoped diff is not armed for it — it projects onto the auth plane, " +
 		"or its target cannot list one partition and read a row back, so the only diff available to it is the whole one a " +
 		"per-anchor seeded row set would misread"
@@ -296,6 +299,60 @@ type plainDerivedAnchorReentryKey struct{}
 func isPlainDerivedAnchorReentry(ctx context.Context) bool {
 	v, _ := ctx.Value(plainDerivedAnchorReentryKey{}).(bool)
 	return v
+}
+
+// auditNarrowingRefusal is the AUDIT HALF of every narrowing this component
+// grants, "" when the audit is standing. It is one predicate with two consumers
+// — the derivation licence (plainDerivationLicence, which adds a staleness
+// conjunct of its own on top) and the partition-scoped retraction's arming
+// (Pipeline.partitionArmed) — because both rest on the same claim: something
+// standing will re-test a row a narrowed evaluation left behind. Two copies of
+// that claim would drift, and the direction they drift in is a narrowed write
+// with nothing watching it.
+//
+// The conjuncts, cheapest first:
+//
+//   - the DEPLOYMENT kill switch (SetAuditEnabled). It is read live rather than
+//     inherited through AuditStatus.Enrolled, because Enrolled is the
+//     install-time verdict and never revised: a switch thrown after activation
+//     leaves it true until some later pass re-runs the enrolment conjuncts and
+//     records a suppression. Reading the switch here disarms on the NEXT EVENT,
+//     which is the only timing that makes "detection ships with the mechanism"
+//     true rather than eventually true.
+//   - an auditor at all, and one whose install-time enrolment ADMITTED this
+//     lens. A refused enrolment carries its own reason, interpolated so an
+//     operator reads the cause rather than the absence.
+//   - not currently suppressed. Enrolled alone is fail-open: an operator pause,
+//     a rebuild, or a hot reload that moved the anchor all leave Enrolled true
+//     while nothing is re-testing anything, and Suppression is what the pass
+//     publishes when that holds.
+//
+// What it deliberately does NOT ask is staleness. That conjunct is the
+// derivation licence's alone and stays there: it is a clock read whose answer
+// moves with no state change, and the licence is asked once per neighbour event
+// while this predicate is also asked by seedAnchorFor on every anchor event.
+// The partition transport's own detector — the audit's should-not-exist
+// direction (§3.5) — is armed by enrolment, not by recency.
+func (p *Pipeline) auditNarrowingRefusal() string {
+	if !auditArmed {
+		return "the deployment's divergence-audit kill switch is down, so nothing is re-testing any lens's rows"
+	}
+	auditor := p.Auditor()
+	if auditor == nil {
+		return "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
+	}
+	st := auditor.Status()
+	switch {
+	case !st.Enrolled:
+		reason := "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
+		if st.Refusal != "" {
+			reason += " (" + st.Refusal + ")"
+		}
+		return reason
+	case st.Suppression != "":
+		return "its divergence audit is suppressed (" + st.Suppression + "), so nothing is re-testing its rows while that holds"
+	}
+	return ""
 }
 
 // plainDerivationLicence reports whether this plain lens may let a derived
@@ -374,21 +431,11 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 	if p.authPlane {
 		return false, "it projects onto the auth plane, which narrows only behind a repair-capable healer proven end to end"
 	}
+	if refusal := p.auditNarrowingRefusal(); refusal != "" {
+		return false, refusal
+	}
 	auditor := p.Auditor()
-	if auditor == nil {
-		return false, "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
-	}
 	st := auditor.Status()
-	switch {
-	case !st.Enrolled:
-		reason := "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
-		if st.Refusal != "" {
-			reason += " (" + st.Refusal + ")"
-		}
-		return false, reason
-	case st.Suppression != "":
-		return false, "its divergence audit is suppressed (" + st.Suppression + "), so nothing is re-testing its rows while that holds"
-	}
 	// Every refusal string below is STABLE for as long as the state producing it
 	// holds — no elapsed duration is interpolated into one. The rule is stated for
 	// what follows because the two arms above interpolate the AUDITOR's own
@@ -778,6 +825,42 @@ func (p *Pipeline) recordPlainProbeUnreadable() {
 	p.derivShadow.mu.Unlock()
 }
 
+// evalScopeKind says what an evaluation's row set IS, which is the only thing
+// that decides which target diff may be compared against it
+// (anchor-partitioned-plain-lens-retraction-design.md §3.3).
+//
+// It is a KIND rather than a bare "the derivation acted" flag because acting is
+// not the only thing that varies: the two producers' declined answers are a
+// whole-corpus rescan and a single-anchor seed, and those two want opposite
+// diffs. A caller that reported only whether it acted would leave the tail
+// guessing which of the two the other case was.
+type evalScopeKind int
+
+const (
+	// scopeWhole is the whole-corpus evaluation: the row set IS the lens's
+	// complete current truth, so the exact comparison is the whole target
+	// listing. It is the default for every path that does not narrow.
+	scopeWhole evalScopeKind = iota
+	// scopeSeeded is one anchor's complete row set, produced by an evaluation
+	// seeded at that anchor. The exact comparison is that anchor's partition.
+	scopeSeeded
+	// scopeActed is the union of K anchors' row sets, produced by the
+	// derivation substituting one seeded re-entry per derived anchor. The exact
+	// comparison is those K partitions and nothing wider: partitions are
+	// disjoint, so a listed key of anchor A can only have been produced by A's
+	// own re-entry, and a whole listing would tombstone every anchor the frame
+	// did not cover.
+	scopeActed
+)
+
+// evalScope is the kind plus, for scopeActed, the anchors the frame covered.
+// anchors is empty for the other two kinds: scopeWhole covers everything, and
+// scopeSeeded's single anchor is the seed the caller already holds.
+type evalScope struct {
+	kind    evalScopeKind
+	anchors []string
+}
+
 // evaluatePlainNeighbourEvent decides how to answer a genuine neighbour
 // event — the vertex / aspect-owner / link-endpoint is not the lens's own
 // anchor type, so seedAnchorFor returned "". Its declined answer, at every
@@ -786,43 +869,63 @@ func (p *Pipeline) recordPlainProbeUnreadable() {
 // Increment 1 existed at all. See plainDerivationDecide for the shared
 // three-way mode switch + §4.2/§5 gate both this and
 // evaluateSeededMultiPosition run through.
-func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, bool, error) {
+func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, evalScope, error) {
 	unseeded := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
 	}
-	return p.plainDerivationDecide(ctx, rs, entry, unseeded)
+	return p.plainDerivationDecide(ctx, rs, entry, unseeded, evalScope{kind: scopeWhole})
 }
 
 // evaluateSeededMultiPosition decides how to answer a SEEDED event whose own
 // type ALSO binds a second pattern position (seedMultiPosition, §4.4): a
 // single engine-level seed can only ever narrow to the ANCHOR pattern
 // position, so it silently misses every row where this vertex sits at the
-// OTHER position. Its declined answer is the NARROW single-seed call — NOT
-// the unseeded rescan evaluatePlainNeighbourEvent declines to — because
-// that narrow call IS today's shipped answer for a seeded event (the very
-// thing seedAnchorFor already computes); an operator running `off` mode, or
-// any lens without a fresh licence, must pay exactly what it pays today,
-// never a whole-corpus rescan it never asked for. Only `act` mode on a
-// licensed lens substitutes the derived K-seeded answer, matching
-// evaluatePlainNeighbourEvent's own act path exactly (same
-// plainDerivationDecide call, different declined closure).
+// OTHER position. Only `act` mode on a licensed lens substitutes the derived
+// K-seeded answer, matching evaluatePlainNeighbourEvent's own act path exactly
+// (same plainDerivationDecide call, different declined closure).
+//
+// THE DECLINED ANSWER DEPENDS ON WHETHER THE LENS IS PARTITION-ARMED, and the
+// two answers are not interchangeable.
+//
+//   - NOT armed: the NARROW single-seed call, which IS today's shipped answer
+//     for a seeded event (the very thing seedAnchorFor already computes). An
+//     operator running `off` mode, or any lens without a fresh licence, must pay
+//     exactly what it pays today and never a whole-corpus rescan it never asked
+//     for. Its rows-at-the-other-position gap is pre-existing and unchanged.
+//   - ARMED: the UNSEEDED whole rescan, reported as scopeWhole so the tail runs
+//     the WHOLE diff. Here the narrow call would be a regression rather than
+//     today's cost: an armed lens's tail diffs the seed's partition, so a row
+//     where this vertex sits at the OTHER position would be neither recomputed
+//     (the seed misses it) nor retracted (it is in another anchor's partition) —
+//     it would linger in exactly the states this producer exists for (mode off
+//     or shadow, an audit suppressed, stale or un-enrolled). The whole rescan
+//     and the whole diff cover it, so on the declined path they are what must
+//     run. Only the licensed act path narrows, which is the whole shape of this
+//     design.
 //
 // On EVERY path here, entry.NodeLabel is the lens's own anchor label (that
 // is what made it seed in the first place) — so evaluateForEntryRaw's outer
 // filter-retraction check, which runs unconditionally after this dispatch
-// returns, always finds an AnchorProjectionKey answer and may append its own
-// Delete for entry's own key. That Delete is NOT run through §6's
-// derivedRowIsLive probe (evaluatePlainDerivedAnchors' own zero-row-probe
-// note) — it never has been, for any seeded-typed entry, on the narrow path
-// this branch replaces just as much as on this one. Harmless in practice (a
-// vertex genuinely at the far position has no row of its own to begin with,
-// so the Delete lands on an already-absent or already-tombstoned key), but
-// worth stating rather than leaving implicit.
-func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, bool, error) {
+// returns, always finds an AnchorProjectionKey answer for a CLOSED lens and may
+// append its own Delete for entry's own key. That Delete is NOT run through §6's
+// derivedRowIsLive probe (evaluatePlainDerivedAnchors' own zero-row-probe note),
+// on any path a seeded-typed entry takes. Harmless in practice (a vertex
+// genuinely at the far position has no row of its own to begin with, so the
+// Delete lands on an already-absent or already-tombstoned key), but worth
+// stating rather than leaving implicit. A partition-armed lens never reaches it
+// at all: its key carries a neighbour-bound column, so AnchorProjectionKey
+// declines and the tail takes the diff instead.
+func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, evalScope, error) {
+	if p.partitionArmed(rs) {
+		unseeded := func() ([]ruleengine.EvalResult, error) {
+			return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
+		}
+		return p.plainDerivationDecide(ctx, rs, entry, unseeded, evalScope{kind: scopeWhole})
+	}
 	narrowSeed := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, entry.CoreKVKey)
 	}
-	return p.plainDerivationDecide(ctx, rs, entry, narrowSeed)
+	return p.plainDerivationDecide(ctx, rs, entry, narrowSeed, evalScope{kind: scopeSeeded})
 }
 
 // plainDerivationDecide is the three-way derivation-mode switch shared by
@@ -835,20 +938,20 @@ func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState
 //
 // declined is the caller's OWN "today's shipped answer" — what runs
 // unconditionally under `off`, is measured-but-not-decided-by under
-// `shadow`, and is every `act`-path refusal's fallback. The two callers
-// differ ONLY in what that answer is (a neighbour event's unseeded rescan,
-// a seeded event's narrow single-seed call); every other decision — the
-// mode switch itself, the §4.2/§5 gate, the derived-anchor cap, the
-// K-seeded evaluation — is identical and shared here so the two cannot
-// silently drift apart.
+// `shadow`, and is every `act`-path refusal's fallback. declinedScope says what
+// that answer's row set IS, so the tail can pick the diff that is exact against
+// it; the caller owns both because only the caller knows which call it made.
+// Every other decision — the mode switch itself, the §4.2/§5 gate, the
+// derived-anchor cap, the K-seeded evaluation — is identical and shared here so
+// the two callers cannot silently drift apart.
 func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry,
-	declined func() ([]ruleengine.EvalResult, error)) ([]ruleengine.EvalResult, bool, error) {
+	declined func() ([]ruleengine.EvalResult, error), declinedScope evalScope) ([]ruleengine.EvalResult, evalScope, error) {
 	derive := func() ([]string, bool, error) {
 		return p.deriveAnchorsForPlainVertex(ctx, rs, entry.CoreKVKey, entry.NodeLabel)
 	}
-	decline := func() ([]ruleengine.EvalResult, bool, error) {
+	decline := func() ([]ruleengine.EvalResult, evalScope, error) {
 		results, err := declined()
-		return results, false, err
+		return results, declinedScope, err
 	}
 
 	switch p.derivationMode() {
@@ -857,10 +960,10 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 	case DerivationModeShadow:
 		results, err := declined()
 		if err != nil {
-			return nil, false, err
+			return nil, declinedScope, err
 		}
 		p.shadowPlainDerivation(rs, derive)
-		return results, false, nil
+		return results, declinedScope, nil
 	case DerivationModeAct:
 		// fall through to the act path below
 	default:
@@ -906,9 +1009,9 @@ func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entr
 	p.recordDerivationActed(len(anchors), p.walkIsScoped(rs))
 	results, aerr := p.evaluatePlainDerivedAnchors(ctx, rs, anchors, anchorLabel)
 	if aerr != nil {
-		return nil, false, aerr
+		return nil, declinedScope, aerr
 	}
-	return results, true, nil
+	return results, evalScope{kind: scopeActed, anchors: anchors}, nil
 }
 
 // shadowPlainDerivation runs derive on a sampled fraction of events (the SAME

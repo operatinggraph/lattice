@@ -60,6 +60,11 @@ type partitionCountingAdapter struct {
 	*adapter.NatsKVAdapter
 	wholeListings     int
 	partitionListings int
+	// listedPartitions records the fixed value of every partition listing, so a
+	// test can say WHICH anchors were listed and how many times — the only way
+	// to tell "the outer frame diffed each derived anchor once" apart from
+	// "each re-entry diffed its own", which produce the same total.
+	listedPartitions []string
 	// failDeleteOn, when non-empty, makes a Delete of that rendered key fail —
 	// the transient tombstone failure whose FailClosed abort keeps a sibling
 	// upsert from landing past a row that should be gone.
@@ -78,6 +83,7 @@ func (c *partitionCountingAdapter) ListKeysPrefix(ctx context.Context, prefix st
 
 func (c *partitionCountingAdapter) ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error) {
 	c.partitionListings++
+	c.listedPartitions = append(c.listedPartitions, fmt.Sprintf("%v", fixed))
 	return c.NatsKVAdapter.ListKeysWhere(ctx, fixed, prefix)
 }
 
@@ -133,13 +139,16 @@ type partitionFixture struct {
 // assertion to mean anything.
 func newPartitionFixture(t *testing.T, arm bool) *partitionFixture {
 	t.Helper()
-	return newPartitionFixtureWith(t, landlordShapeSpec, []string{"app_id", "landlord_id"}, arm, false)
+	return newPartitionFixtureWith(t, landlordShapeSpec, []string{"app_id", "landlord_id"}, arm)
 }
 
-// newPartitionFixtureWith is the same fixture over an arbitrary spec and plane —
-// the two hold-out cases the design excludes by a conjunct each need one: a
-// grant table's plane, and a closed lens's shape.
-func newPartitionFixtureWith(t *testing.T, spec string, keyCols []string, arm, authPlane bool) *partitionFixture {
+// newPartitionFixtureWith is the same fixture over an arbitrary spec — the
+// hold-out cases the design excludes by a conjunct each need one: a grant
+// table's plane, a closed lens's shape, a multi-position anchor. arm is
+// deliberately the only knob: a caller that wants a different plane, or wants to
+// arm after seeding its own graph, calls armAudit or SetPartitionRetraction
+// itself, so every such case reads as the deliberate step it is.
+func newPartitionFixtureWith(t *testing.T, spec string, keyCols []string, arm bool) *partitionFixture {
 	t.Helper()
 	coreKV, adjKV, targetKV, healthKV := newAuditKVs(t)
 
@@ -165,18 +174,33 @@ func newPartitionFixtureWith(t *testing.T, spec string, keyCols []string, arm, a
 	f.writeGraph()
 
 	if arm {
-		enrolled, refusal := p.InstallAudit(AuditOptions{})
-		require.Truef(t, enrolled, "the fixture lens must enrol its divergence audit; refusal: %s", refusal)
-		p.SetAuditPlan(AuditPlan{AnchorLabel: "leaseapp", Batch: 10, Interval: time.Hour})
-		p.Auditor().pass(context.Background())
-		require.False(t, p.Auditor().Status().LastPassAt.IsZero(),
-			"the audit must have reached a verdict, or the derivation licence refuses as stale and no neighbour event is ever licensed")
-		p.SetAnchorDerivationMode(DerivationModeAct)
-		require.NoError(t, p.SetPartitionRetraction(authPlane))
-		require.True(t, p.PartitionRetraction(), "the fixture's whole point is a lens activation actually armed")
-		require.True(t, p.partitionArmed(p.ruleState()))
+		f.armAudit(t)
 	}
 	return f
+}
+
+// armAudit walks the whole activation chain a real deployment runs: the audit's
+// own enrolment, one real pass (so the derivation licence's verdict clock is
+// stamped), act mode, and SetPartitionRetraction.
+//
+// It is a separate step because the audit pass must run against a graph that
+// already holds anchors — a pass that compares nothing reaches no verdict and
+// leaves LastPassAt at zero, which the licence reads as stale — so a fixture
+// whose graph is written by the caller arms after it, not before.
+func (f *partitionFixture) armAudit(t *testing.T) {
+	t.Helper()
+	p := f.p
+	enrolled, refusal := p.InstallAudit(AuditOptions{})
+	require.Truef(t, enrolled, "the fixture lens must enrol its divergence audit; refusal: %s", refusal)
+	label, _ := p.ruleState().cr.(*full.CompiledRule).AnchorLabel()
+	p.SetAuditPlan(AuditPlan{AnchorLabel: label, Batch: 10, Interval: time.Hour})
+	p.Auditor().pass(context.Background())
+	require.False(t, p.Auditor().Status().LastPassAt.IsZero(),
+		"the audit must have reached a verdict, or the derivation licence refuses as stale and no neighbour event is ever licensed")
+	p.SetAnchorDerivationMode(DerivationModeAct)
+	require.NoError(t, p.SetPartitionRetraction(false))
+	require.True(t, p.PartitionRetraction(), "the fixture's whole point is a lens activation actually armed")
+	require.True(t, p.partitionArmed(p.ruleState()))
 }
 
 // writeGraph writes the vertices and both adjacency directions of every link in
@@ -195,6 +219,13 @@ func (f *partitionFixture) writeGraph() {
 	buildCollisionEdge(f.t, f.adjKV, "manages", "identity", partLandlordX, "unit", partUnit1)
 	buildCollisionEdge(f.t, f.adjKV, "manages", "identity", partLandlordY, "unit", partUnit1)
 	buildCollisionEdge(f.t, f.adjKV, "manages", "identity", partLandlordX, "unit", partUnit2)
+}
+
+// resetListingCounts zeroes the listing tally, so an assertion speaks about the
+// event a test is about rather than the fixture's own setup.
+func (f *partitionFixture) resetListingCounts() {
+	f.adpt.wholeListings, f.adpt.partitionListings = 0, 0
+	f.adpt.listedPartitions = nil
 }
 
 // nextSeq hands out a fresh, monotonically increasing stream sequence.
@@ -294,7 +325,7 @@ func TestPartitionRetraction_ArmedLens(t *testing.T) {
 		// neighbour type — so it reaches the derivation, which walks the real
 		// adjacency index to app1 and re-enters it as a seeded evaluation.
 		f.unmanage(partLandlordY, partUnit1)
-		f.adpt.wholeListings, f.adpt.partitionListings = 0, 0
+		f.resetListingCounts()
 		f.event("unit", partUnit1)
 
 		f.requireRows(
@@ -372,7 +403,7 @@ func TestPartitionRetraction_ArmedLens(t *testing.T) {
 		require.NotEmpty(t, refusal)
 
 		f.unmanage(partLandlordY, partUnit1)
-		f.adpt.wholeListings, f.adpt.partitionListings = 0, 0
+		f.resetListingCounts()
 		f.event("unit", partUnit1)
 
 		require.Positive(t, f.adpt.wholeListings,
@@ -414,11 +445,18 @@ func TestPartitionRetraction_ActivationRefusals(t *testing.T) {
 		require.NoError(t, fullCR.ValidateKeyColumns())
 		return cr
 	}
+	// The audit is enrolled wherever the target admits it, because
+	// partitionArmed's audit half demands one: without it every case below
+	// would read "not armed" for a reason none of them is about. It is
+	// best-effort rather than required because one case deliberately uses a
+	// target that cannot read a row back, and there the assertion is on
+	// SetPartitionRetraction's own error, which no audit decides.
 	newWith := func(t *testing.T, adpt adapter.Adapter, spec string, keyCols []string) *Pipeline {
 		t.Helper()
 		p, err := New("partition-activation", "nats_kv", "CORE", nil, nil, adpt, nil)
 		require.NoError(t, err)
 		require.NoError(t, p.UseFullEngine(eng, compile(t, spec, keyCols)))
+		p.InstallAudit(AuditOptions{})
 		return p
 	}
 
@@ -543,16 +581,18 @@ func TestPartitionRetraction_ActedFrameIsUnreachableWithoutArming(t *testing.T) 
 		Properties: map[string]any{"lastModifiedAt": "2026-08-01T10:00:00Z"},
 	}
 	rs := f.p.ruleState()
-	_, acted, err := f.p.evaluatePlainNeighbourEvent(context.Background(), rs, entry)
+	_, gotScope, err := f.p.evaluatePlainNeighbourEvent(context.Background(), rs, entry)
 	require.NoError(t, err)
-	require.True(t, acted, "positive vector: an armed lens's licensed neighbour event DOES substitute per-anchor re-entries")
+	require.Equal(t, scopeActed, gotScope.kind,
+		"positive vector: an armed lens's licensed neighbour event DOES substitute per-anchor re-entries")
+	require.NotEmpty(t, gotScope.anchors, "and it names the anchors the outer frame must diff")
 
 	f.p.partitionRetraction = false
 	require.NotEmpty(t, f.p.plainDerivationIndexRefusal(f.p.ruleState()),
 		"with the arming off the derivation index refuses the lens outright")
-	_, acted, err = f.p.evaluatePlainNeighbourEvent(context.Background(), f.p.ruleState(), entry)
+	_, gotScope, err = f.p.evaluatePlainNeighbourEvent(context.Background(), f.p.ruleState(), entry)
 	require.NoError(t, err)
-	require.False(t, acted,
+	require.Equal(t, scopeWhole, gotScope.kind,
 		"so the tail can never see an acted frame it may not diff — the guard beside it is the belt to this brace")
 }
 
@@ -691,7 +731,7 @@ func TestPartitionRetraction_HoldOutsKeepTheWholeDiff(t *testing.T) {
 		// The grant tables' shape: the rule partitions, and three independent
 		// exclusions keep it off this transport. This fixture poses the plane —
 		// the one the activation gate passes in — and asserts the outcome.
-		f := newPartitionFixtureWith(t, landlordShapeSpec, []string{"app_id", "landlord_id"}, false, true)
+		f := newPartitionFixtureWith(t, landlordShapeSpec, []string{"app_id", "landlord_id"}, false)
 		require.NoError(t, f.p.SetPartitionRetraction(true))
 		require.False(t, f.p.PartitionRetraction(),
 			"the whole diff on every event is the only shrink path an un-truncatable grant table has on a rebuild")
@@ -703,8 +743,24 @@ func TestPartitionRetraction_HoldOutsKeepTheWholeDiff(t *testing.T) {
 		require.Zero(t, f.adpt.partitionListings)
 	})
 
+	t.Run("the shared grant writer implements no partition listing", func(t *testing.T) {
+		// §3.7's SECOND exclusion, asserted against the real type rather than
+		// argued: the grant tables are held off this transport by their plane,
+		// by the gate, AND by their target, and each is meant to hold on its
+		// own. A GrantWriterAdapter that quietly acquired the method would
+		// remove one of the three without anything failing.
+		var g any = &adapter.GrantWriterAdapter{}
+		_, ok := g.(adapter.PartitionKeyLister)
+		require.False(t, ok,
+			"the shared grant table's writer must not be able to list a partition — a per-anchor row set met against "+
+				"ListGrantsBySource's whole source is a mass revoke on actor_read_grants")
+		_, ok = g.(adapter.KeyLister)
+		require.True(t, ok,
+			"positive vector: it CAN list its own source-scoped key set, which is the whole diff it keeps")
+	})
+
 	t.Run("a closed DiffRetraction lens", func(t *testing.T) {
-		f := newPartitionFixtureWith(t, closedDiffRetractionSpec, []string{"app_id"}, false, false)
+		f := newPartitionFixtureWith(t, closedDiffRetractionSpec, []string{"app_id"}, false)
 		require.NoError(t, f.p.SetPartitionRetraction(false))
 		require.False(t, f.p.PartitionRetraction(),
 			"the partition-ONLY conjunct excludes a lens that already closes; its retraction is the read-free presence check")
@@ -717,4 +773,316 @@ func TestPartitionRetraction_HoldOutsKeepTheWholeDiff(t *testing.T) {
 			"a closed lens never lists a partition: its own key resolves read-free, so the presence check is what "+
 				"retracts it and the diff is only reached where that derivation declines")
 	})
+}
+
+// dupCandidatesShapeSpec is identity-hygiene's duplicateCandidates shape: ONE
+// label bound at BOTH pattern positions, keyed on the pair, with the identifying
+// column naming the anchor `b`.
+//
+// Only this shape can carry the under-coverage below: an
+// event on an `identity` seeds (its type IS the anchor label) AND
+// seedMultiPosition reports true (the same label binds `a`), so the event routes
+// through evaluateSeededMultiPosition rather than the plain seeded call.
+const dupCandidatesShapeSpec = `
+MATCH (b:identity)-[:duplicateOf]->(a:identity)
+WHERE b.state.data.value = 'claimed' AND a.state.data.value = 'claimed'
+RETURN nanoIdFromKey(b.key) AS secondaryId, nanoIdFromKey(a.key) AS primaryId
+`
+
+// The pair fixture's three identities. X is the interesting one: it is the
+// SECONDARY of a row keyed (X,P) — where X sits at the anchor position — and the
+// PRIMARY of a row keyed (Q,X), where it sits at the OTHER position.
+const (
+	pairIdentityX = "DUPidentityXAAAAAAAA"
+	pairIdentityP = "DUPidentityPAAAAAAAA"
+	pairIdentityQ = "DUPidentityQAAAAAAAA"
+)
+
+// newPairFixture stands the duplicateCandidates shape up over embedded NATS,
+// armed or not, with both rows already projected.
+func newPairFixture(t *testing.T, arm bool) *partitionFixture {
+	t.Helper()
+	f := newPartitionFixtureWith(t, dupCandidatesShapeSpec, []string{"secondaryId", "primaryId"}, false)
+
+	claimed := map[string]any{"data": map[string]any{"value": "claimed"}}
+	for _, id := range []string{pairIdentityX, pairIdentityP, pairIdentityQ} {
+		key := "vtx.identity." + id
+		seedVertexBody(t, f.coreKV, key, "identity", nil)
+		putBody(t, f.coreKV, key+".state", aspectBody(key, "state", claimed["data"].(map[string]any), false))
+	}
+	buildCollisionEdge(t, f.adjKV, "duplicateOf", "identity", pairIdentityX, "identity", pairIdentityP)
+	buildCollisionEdge(t, f.adjKV, "duplicateOf", "identity", pairIdentityQ, "identity", pairIdentityX)
+
+	if arm {
+		f.armAudit(t)
+	}
+	// Both rows, written by the lens's own write path.
+	f.event("identity", pairIdentityX)
+	f.event("identity", pairIdentityQ)
+	f.requireRows(
+		partRowKey(pairIdentityX, pairIdentityP),
+		partRowKey(pairIdentityQ, pairIdentityX),
+	)
+	f.resetListingCounts()
+	return f
+}
+
+// unclaim flips an identity's state aspect so the WHERE stops matching every row
+// that binds it — at EITHER pattern position.
+func (f *partitionFixture) unclaim(id string) {
+	f.t.Helper()
+	key := "vtx.identity." + id
+	putBody(f.t, f.coreKV, key+".state", aspectBody(key, "state", map[string]any{"value": "merged"}, false))
+}
+
+// TestPartitionRetraction_MultiPositionAnchorIsNotUnderCovered pins that a
+// partition-armed lens whose anchor label binds a SECOND pattern position
+// covers the rows at that position on every path.
+//
+// `duplicateCandidates` binds `identity` at BOTH pattern positions, so an
+// anchor-typed event on it routes through evaluateSeededMultiPosition. The
+// narrow single-position seed that producer declines to on an UNARMED lens
+// misses every row where the vertex sits at the other position — and on an ARMED
+// one the tail would then diff only that one anchor's partition, so such a row
+// would be neither recomputed nor retracted. The whole rescan and whole diff
+// cover it, and on an armed lens's declined path they are what must run.
+//
+// The declined state driven here is DERIVATION MODE OFF, and it has to be a mode
+// rather than an audit fault: the arming's own audit half means a suppressed or
+// un-enrolled audit disarms the lens outright, and an unarmed lens never seeds,
+// so it reaches this producer at all only while it is armed. Mode off (and
+// shadow) is exactly that: armed, seeding, and declining to act.
+func TestPartitionRetraction_MultiPositionAnchorIsNotUnderCovered(t *testing.T) {
+	t.Run("declined: the whole rescan and whole diff still cover the other position", func(t *testing.T) {
+		f := newPairFixture(t, true)
+		require.True(t, f.p.seedMultiPosition(f.p.ruleState(), "identity"),
+			"precondition: this lens's anchor label binds a second pattern position, which is what routes the event here")
+		require.True(t, f.p.partitionArmed(f.p.ruleState()),
+			"precondition: armed, so the event seeds and reaches evaluateSeededMultiPosition rather than the neighbour path")
+
+		// The operator has the derivation switched off, so the producer answers
+		// with its DECLINED evaluation.
+		f.p.SetAnchorDerivationMode(DerivationModeOff)
+
+		// P stops being claimed. P is bound at the OTHER position of the (X,P)
+		// row — a seed at P narrows to P-as-anchor, which produces nothing and
+		// says nothing about the row X anchors; and (X,P) is in X's partition,
+		// not P's, so a partition diff scoped to the seed would never list it.
+		f.unclaim(pairIdentityP)
+		f.event("identity", pairIdentityP)
+
+		f.requireRows(partRowKey(pairIdentityQ, pairIdentityX))
+		require.GreaterOrEqual(t, f.adpt.wholeListings, 1,
+			"the declined answer on an armed lens must be the WHOLE rescan and the WHOLE diff — a partition diff over the "+
+				"narrow seed's row set would leave the row this event dropped, in exactly the state an operator runs in")
+	})
+
+	t.Run("licensed: the same drop is retracted with no whole listing", func(t *testing.T) {
+		f := newPairFixture(t, true)
+		f.unclaim(pairIdentityP)
+		f.event("identity", pairIdentityP)
+
+		f.requireRows(partRowKey(pairIdentityQ, pairIdentityX))
+		require.Zero(t, f.adpt.wholeListings,
+			"only the licensed act path improves: the derivation names the anchors P reaches and each diffs its own partition")
+		require.Positive(t, f.adpt.partitionListings)
+	})
+
+	t.Run("an UNARMED multi-position lens keeps the narrow seed", func(t *testing.T) {
+		// The pre-existing posture, unchanged: a lens with no partition arming
+		// pays exactly what it paid before, including its own pre-existing
+		// other-position gap.
+		f := newPairFixture(t, false)
+		require.False(t, f.p.partitionArmed(f.p.ruleState()))
+
+		rs := f.p.ruleState()
+		entry := ruleengine.NodeEntry{
+			CoreKVKey: "vtx.identity." + pairIdentityP, NodeLabel: "identity",
+			Properties: map[string]any{"lastModifiedAt": "2026-08-01T10:00:00Z"},
+		}
+		f.p.SetAnchorDerivationMode(DerivationModeOff)
+		_, gotScope, err := f.p.evaluateSeededMultiPosition(context.Background(), rs, entry)
+		require.NoError(t, err)
+		require.Equal(t, scopeSeeded, gotScope.kind,
+			"an unarmed lens's declined answer is the narrow single-seed call — today's shipped cost, never a rescan it never asked for")
+	})
+}
+
+// TestPartitionRetraction_DerivedAnchorWithNoReentryIsStillDiffed pins that a
+// derived anchor is diffed even when its own re-entry produces nothing.
+//
+// evaluatePlainDerivedAnchors re-enters through plainEntryForVertex, which
+// returns NOTHING for a derived anchor whose vertex is missing or tombstoned. If
+// each re-entry owned its own diff, that anchor's partition would be listed by
+// nobody — and the outer frame is forbidden from listing the whole target — so
+// its rows would linger with no event left to name them.
+//
+// The scenario is a lost anchor event: an application is tombstoned but its own
+// CDC event never arrives (a purge, a filter that dropped it, a consumer gap).
+// Any later NEIGHBOUR event that derives that anchor must heal it.
+func TestPartitionRetraction_DerivedAnchorWithNoReentryIsStillDiffed(t *testing.T) {
+	heal := func(t *testing.T, arm bool) *partitionFixture {
+		t.Helper()
+		f := newPartitionFixture(t, arm)
+		f.projectAll()
+
+		// app1 is tombstoned in Core KV and its own event is LOST — nothing is
+		// delivered for it, so its rows are still on the target.
+		putBody(t, f.coreKV, "vtx.leaseapp."+partApp1, map[string]any{
+			"key": "vtx.leaseapp." + partApp1, "class": "leaseapp", "isDeleted": true,
+			"createdAt": "2026-08-01T10:00:00Z", "lastModifiedAt": "2026-08-01T10:00:00Z",
+			"data": map[string]any{},
+		})
+		f.requireRows(
+			partRowKey(partApp1, partLandlordX),
+			partRowKey(partApp1, partLandlordY),
+			partRowKey(partApp2, partLandlordX),
+		)
+		f.resetListingCounts()
+
+		// A neighbour event that derives app1: the unit it applies to.
+		f.event("unit", partUnit1)
+		return f
+	}
+
+	t.Run("armed: the outer frame diffs the derived partitions and heals it", func(t *testing.T) {
+		f := heal(t, true)
+		f.requireRows(partRowKey(partApp2, partLandlordX))
+		require.Positive(t, f.adpt.partitionListings,
+			"the outer frame lists the K derived partitions — the re-entry that produced no results still had its partition listed")
+		require.Zero(t, f.adpt.wholeListings,
+			"and it does so without the whole listing the finding-1 assertion forbids")
+	})
+
+	t.Run("unarmed: the whole diff heals it, as it always did", func(t *testing.T) {
+		f := heal(t, false)
+		f.requireRows(partRowKey(partApp2, partLandlordX))
+		require.Positive(t, f.adpt.wholeListings)
+	})
+}
+
+// TestPartitionRetraction_ReentrantFrameRunsNoDiff states, where it is decided
+// rather than inferred from the outcome above, that the diff is the OUTER
+// frame's — once, over every derived anchor.
+//
+// Without it the K partitions would each be listed twice — once by their own
+// re-entry and once by the outer frame — which is not merely waste: it is the
+// shape in which a derived anchor that produced no re-entry results at all gets
+// no listing from anyone.
+func TestPartitionRetraction_ReentrantFrameRunsNoDiff(t *testing.T) {
+	f := newPartitionFixture(t, true)
+	f.projectAll()
+	f.unmanage(partLandlordY, partUnit1)
+	f.resetListingCounts()
+
+	rs := f.p.ruleState()
+	anchors, ok, err := f.p.deriveAnchorsForPlainVertex(context.Background(), rs,
+		"vtx.unit."+partUnit1, "unit")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	f.event("unit", partUnit1)
+
+	// EACH derived anchor listed EXACTLY ONCE. A bare count cannot tell the two
+	// implementations apart — K re-entries each diffing their own partition and
+	// one outer frame diffing all K both total K — so the assertion is the
+	// multiset: a re-entry that also diffed would list its own anchor twice.
+	require.Len(t, f.adpt.listedPartitions, len(anchors),
+		"the diff is the outer frame's, once per derived anchor; a re-entrant frame that diffed too would double a listing")
+	seen := map[string]int{}
+	for _, fixed := range f.adpt.listedPartitions {
+		seen[fixed]++
+	}
+	for fixed, n := range seen {
+		require.Equalf(t, 1, n, "partition %s was listed %d times", fixed, n)
+	}
+	f.requireRows(
+		partRowKey(partApp1, partLandlordX),
+		partRowKey(partApp2, partLandlordX),
+	)
+}
+
+// TestPartitionRetraction_AuditHalfDisarms pins the arming's audit half. The
+// transport authorises Deletes on RLS-protected tables from a SEEDED evaluation,
+// and the standing detector for a seeded evaluation that under-produces is the
+// divergence audit's own should-not-exist direction. Without that audit the
+// mechanism has no observer, so it does not arm.
+func TestPartitionRetraction_AuditHalfDisarms(t *testing.T) {
+	t.Run("no auditor installed: not armed, whole diff, transport diffRetraction", func(t *testing.T) {
+		f := newPartitionFixtureWith(t, landlordShapeSpec, []string{"app_id", "landlord_id"}, false)
+		f.p.SetAnchorDerivationMode(DerivationModeAct)
+		require.NoError(t, f.p.SetPartitionRetraction(false))
+		require.True(t, f.p.PartitionRetraction(), "the activation half binds — it does not read the audit")
+		require.True(t, f.p.ruleState().partition.only, "and the rule half holds")
+		require.False(t, f.p.partitionArmed(f.p.ruleState()),
+			"but with nothing standing to re-test a row a seeded evaluation left behind, the whole is not armed")
+
+		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1))
+		require.Equal(t, RetractionTransportDiffRetraction, f.p.PlainRetractionTransport(false).Transport,
+			"and the operator is told what actually runs, not what the adapter would allow")
+
+		f.projectAll()
+		require.Positive(t, f.adpt.wholeListings)
+		require.Zero(t, f.adpt.partitionListings)
+	})
+
+	t.Run("the deployment kill switch disarms on the next event and re-arms", func(t *testing.T) {
+		f := newPartitionFixture(t, true)
+		require.True(t, f.p.partitionArmed(f.p.ruleState()), "positive vector: armed while the switch is up")
+
+		SetAuditEnabled(false)
+		t.Cleanup(func() { SetAuditEnabled(true) })
+		require.False(t, f.p.partitionArmed(f.p.ruleState()),
+			"the switch is read LIVE — AuditStatus.Enrolled is the install-time verdict and would keep this armed until some later pass")
+		require.Equal(t, RetractionTransportDiffRetraction, f.p.PlainRetractionTransport(false).Transport)
+		require.Contains(t, f.p.plainDerivationIndexRefusal(f.p.ruleState()), "kill switch",
+			"and the refusal names the condition that governs rather than the declaration")
+
+		f.projectAll()
+		require.Positive(t, f.adpt.wholeListings, "so the event pays exactly today's cost: whole rescan, whole diff")
+		require.Zero(t, f.adpt.partitionListings)
+
+		SetAuditEnabled(true)
+		require.True(t, f.p.partitionArmed(f.p.ruleState()), "and it re-arms with nothing to re-activate")
+	})
+
+	t.Run("a suppressed audit disarms it", func(t *testing.T) {
+		f := newPartitionFixture(t, true)
+		f.p.Auditor().noteSuppressed("test pause")
+		require.False(t, f.p.partitionArmed(f.p.ruleState()),
+			"Enrolled alone is fail-open — an operator pause leaves it true while nothing is re-testing anything")
+		require.Equal(t, RetractionTransportDiffRetraction, f.p.PlainRetractionTransport(false).Transport)
+	})
+}
+
+// TestPartitionRetraction_MultiWalkLensIsNeverArmed holds the multi-walk
+// exclusion. Branch merging
+// evaluates N independent queries and drops the seed for all of them
+// (evaluateBranches), so a multi-branch lens armed off its head rule would
+// evaluate its WHOLE corpus and diff that row set against ONE anchor's
+// partition — every other anchor's rows in that partition reading as dropped.
+func TestPartitionRetraction_MultiWalkLensIsNeverArmed(t *testing.T) {
+	eng := full.New()
+	compile := func(t *testing.T) ruleengine.CompiledRule {
+		t.Helper()
+		cr, err := eng.Parse(landlordShapeSpec)
+		require.NoError(t, err)
+		fullCR := cr.(*full.CompiledRule)
+		fullCR.KeyColumns = []string{"app_id", "landlord_id"}
+		require.NoError(t, fullCR.ValidateKeyColumns())
+		return cr
+	}
+	p, err := New("partition-multiwalk", "nats_kv", "CORE", nil, nil, &partitionListerAdapter{}, nil)
+	require.NoError(t, err)
+
+	head := compile(t)
+	require.NoError(t, p.UseFullEngine(eng, head))
+	require.True(t, p.ruleState().partition.only, "positive vector: as a SINGLE-walk lens this body partitions")
+
+	branches := []ruleengine.CompiledRule{compile(t), compile(t)}
+	require.NoError(t, p.UseFullEngineBranches(eng, branches[0], branches))
+	require.False(t, p.ruleState().partition.only,
+		"as a multi-walk lens it must not: the merge drops the seed, so the evaluation is whole and only the whole diff is exact against it")
+	require.Empty(t, p.seedAnchorLabels,
+		"which is the same reason seeding itself is refused for a multi-walk lens")
 }

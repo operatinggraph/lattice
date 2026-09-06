@@ -187,10 +187,13 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 // for a lens that declares it.
 //
 // The census adapter is a NATS-KV one for every lens, including the Postgres
-// ones. That over-approximates exactly one conjunct — adapter.RowReader — and
-// it is not a live over-approximation: both adapters a lens can activate
-// against (NatsKVAdapter, PostgresAdapter) implement RowReader, so no corpus
-// lens's verdict turns on the substitution.
+// ones. That over-approximates exactly two conjuncts — adapter.RowReader and
+// adapter.PartitionKeyLister — and neither is a live over-approximation: both
+// adapters a lens can activate against (NatsKVAdapter, and PostgresAdapter
+// through the ProtectedAdapter wrapper every protected lens activates behind)
+// implement both, so no corpus lens's verdict turns on the substitution. The
+// adapter that implements NEITHER is the shared grant writer, and its lenses are
+// held off this transport by their plane before the adapter is ever asked.
 func deriveRetractionVerdict(t *testing.T, eng *full.Engine, name, spec string, rule *lens.Rule) retractionVerdict {
 	t.Helper()
 	cr, err := eng.Parse(spec)
@@ -226,6 +229,16 @@ func deriveRetractionVerdict(t *testing.T, eng *full.Engine, name, spec string, 
 	// — it would report every armed lens's diff as the whole one, which is a
 	// verdict about a deployment nobody runs.
 	require.NoErrorf(t, p.SetPartitionRetraction(projection.IsAuthPlane(rule)), "%s", name)
+
+	// The divergence audit, installed because the transport an OPERATOR reads
+	// is the one the heartbeat publishes — and the heartbeat runs long after
+	// activation's InstallAudit (cmd/refractor's startPipeline installs the
+	// audit several stages past the retraction gate). The partition transport's
+	// arming has an audit half (Pipeline.partitionArmed), so a census that
+	// never enrolled one would report every armed lens as running the whole
+	// diff: a verdict about the first few milliseconds of a process rather than
+	// about the deployment.
+	p.InstallAudit(pipeline.AuditOptions{AuthPlane: projection.IsAuthPlane(rule)})
 
 	plane := planeBusiness
 	if projection.IsAuthPlane(rule) {

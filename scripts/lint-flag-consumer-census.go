@@ -88,6 +88,38 @@ var registry = []flagSpec{{
 		"internal/refractor/pipeline/reproject_personal.go#ReprojectPersonalActor",
 		"internal/refractor/pipeline/reproject.go#rebuildAbandons",
 	},
+}, {
+	// The partition-scoped retraction's arming, gated on its READ SURFACE
+	// rather than on the raw bool. partitionArmed is where the flag's three
+	// halves are conjoined (activation, rule, audit), and every consumer reads
+	// it — so a new reader of the ARMING is a new place authorising a
+	// per-partition Delete, which is exactly what this ledger exists to make
+	// someone re-read the bound for.
+	name:     "Pipeline.partitionRetraction (partitionArmed)",
+	accessor: "partitionArmed",
+	field:    "partitionRetraction",
+	bound:    "internal/refractor/pipeline/pipeline.go, the partitionArmed doc comment (its three halves and what each costs when it is down)",
+	readers: []string{
+		"internal/refractor/pipeline/rulestate.go#seedAnchorFor",
+		"internal/refractor/pipeline/anchor_derivation_plain.go#plainDerivationIndexRefusal",
+		"internal/refractor/pipeline/anchor_derivation_plain.go#evaluateSeededMultiPosition",
+		"internal/refractor/pipeline/anchor_derivation_plain.go#noteStaticPlainDerivationRefusal",
+		"internal/refractor/pipeline/evaluate.go#evaluateForEntryRaw",
+		"internal/refractor/pipeline/retraction_transport.go#PlainRetractionTransport",
+		"internal/refractor/pipeline/audit.go#listAnchorPartition",
+	},
+}, {
+	// The ACTIVATION half alone, published for the gate that binds it. Its one
+	// reader logs the armed verdict; a second reader deciding anything on this
+	// half without the other two would be reading "the adapter and plane allow
+	// it" as "it is on".
+	name:     "Pipeline.partitionRetraction (PartitionRetraction)",
+	accessor: "PartitionRetraction",
+	field:    "partitionRetraction",
+	bound:    "internal/refractor/pipeline/pipeline.go, the partitionRetraction field comment (\"It is never read alone\")",
+	readers: []string{
+		"cmd/refractor/retractiontransport.go#admitRetractionTransport",
+	},
 }}
 
 // scanRoots are the trees a reader can live in. Both, not just the flag's own

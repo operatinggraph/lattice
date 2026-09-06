@@ -297,11 +297,15 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	reentrant := isPlainDerivedAnchorReentry(ctx)
 	var results []ruleengine.EvalResult
 	var err error
-	// acted is true only when the derivation SUBSTITUTED per-anchor re-entries
-	// for this frame's evaluation. It is what the tail below needs to know that
-	// `results` is the union of K anchors' row sets, each of which already
-	// diffed its OWN partition — see the retraction block's case (a).
-	var acted bool
+	// rowScope says what this frame's row set IS — whole, one anchor's, or the
+	// union of K derived anchors' — which is the only thing that decides which
+	// target diff is exact against it (see the retraction block below). The
+	// default arm's own answer is read off the seed: a seeded call computes one
+	// anchor's rows, an unseeded one the whole corpus.
+	rowScope := evalScope{kind: scopeWhole}
+	if seed != "" {
+		rowScope.kind = scopeSeeded
+	}
 	switch {
 	case seed == "" && plain && !reentrant:
 		// A plain lens's neighbour event: seedAnchorFor found no seed because
@@ -313,7 +317,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// derivation-mode switch: it returns exactly that re-scan except in
 		// `act` mode on a lens the narrowing licence admits, where it
 		// substitutes one seeded evaluation per derived anchor.
-		results, acted, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
+		results, rowScope, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
 	case seed != "" && plain && !reentrant && p.seedMultiPosition(rs, entry.NodeLabel):
 		// Increment 4b (§4.4): entry's own type IS the lens's anchor pattern,
 		// but that same label ALSO binds a second pattern position — the
@@ -322,12 +326,15 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// sits at the OTHER position. seedMultiPosition proves the second
 		// position exists; evaluateSeededMultiPosition's own derive() seeds
 		// BOTH (the anchor position as a zero-hop terminus, the other by
-		// walking from it). Its declined answer is the SAME narrow seeded
-		// call the default case below makes — never the neighbour case's
-		// whole-corpus rescan above — so `off` mode or an unlicensed lens
-		// pays exactly today's cost, and only a licensed `act` lens gets the
-		// correction.
-		results, acted, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
+		// walking from it). Its DECLINED answer depends on whether the lens is
+		// partition-armed: the SAME narrow seeded call the default case below
+		// makes when it is not, so `off` mode or an unlicensed lens pays exactly
+		// today's cost; the neighbour case's whole-corpus rescan when it is,
+		// because an armed lens's tail diffs a PARTITION and the narrow call's
+		// row set says nothing about the rows this vertex sits at the other
+		// position of. That producer's own doc carries the argument. Only a
+		// licensed `act` lens gets the correction, either way.
+		results, rowScope, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
 	default:
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
 	}
@@ -352,44 +359,59 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			rs.cr, entry.CoreKVKey, entry.NodeLabel, entry.Properties); ok &&
 			!resultsContainKeys(results, keys) {
 			results = append(results, ruleengine.EvalResult{Delete: true, Keys: keys})
-		} else if !ok && p.diffRetraction {
-			// Fire 3 (build-deferred in the design until a real consumer
-			// arrived): AnchorProjectionKey could not derive a single
-			// anchor-keyed row, so this lens's own opt-in target-diff picks
-			// up what Fire 2 structurally cannot reach.
+		} else if !ok && p.diffRetraction && !reentrant {
+			// AnchorProjectionKey could not derive a single anchor-keyed row, so
+			// this lens's own opt-in target-diff picks up what the read-free
+			// presence check structurally cannot reach.
 			//
-			// WHICH diff runs is decided by what this frame's `results` IS,
-			// and the three answers are not interchangeable
+			// WHICH diff runs is decided by what this frame's row set IS, and
+			// the three answers are not interchangeable
 			// (anchor-partitioned-plain-lens-retraction-design.md §3.3):
 			//
-			//	(a) an ACTED frame — the derivation substituted per-anchor
-			//	    re-entries, so `results` is the union of K anchors' rows and
-			//	    each re-entry has ALREADY diffed its own partition. No diff
-			//	    runs here: a whole listing compared against K partitions'
-			//	    rows would tombstone every OTHER anchor's rows, and a
-			//	    partition listing has no single anchor to scope to.
-			//	(b) a SEEDED frame on a partition-armed lens — `results` is one
-			//	    anchor's complete row set, so the exact comparison is
-			//	    against that anchor's partition and nothing wider.
-			//	(c) everything else — the evaluation was whole, so the whole
-			//	    target listing is what it is exact against. That is today's
-			//	    behaviour, and it stays for every unarmed lens and for a
-			//	    partition-armed lens's UNLICENSED neighbour event.
-			if acted && !p.partitionArmed(rs) {
-				// Unreachable: the derivation index refuses an unarmed
-				// diffRetraction lens before any re-entry is substituted. It is
-				// still an error rather than a fall-through, because the one
-				// thing this design forbids is a whole diff over a partial row
-				// set — failing the event redelivers it, and a wrong whole diff
-				// tombstones every anchor the frame did not cover.
-				return nil, nil, ScopeAll(), fmt.Errorf(
-					"pipeline: rule %q substituted per-anchor evaluations without the partition-scoped diff armed; refusing to diff a partial row set against the whole target", p.ruleID)
-			}
+			//	scopeActed — the derivation substituted one seeded re-entry per
+			//	    derived anchor, so the row set is the union of K anchors'
+			//	    rows. The exact comparison is those K PARTITIONS: partitions
+			//	    are disjoint, so a listed key of anchor A can only have been
+			//	    produced by A's own re-entry, and a key none of them produced
+			//	    is genuinely dropped. A whole listing would instead tombstone
+			//	    every anchor the frame did not cover.
+			//	scopeSeeded — one anchor's complete row set, so the exact
+			//	    comparison is that anchor's partition and nothing wider.
+			//	scopeWhole — the evaluation was whole, so the whole target
+			//	    listing is what it is exact against. That is today's
+			//	    behaviour, and it stays for every unarmed lens, for an armed
+			//	    lens's UNLICENSED neighbour event, and for its declined
+			//	    multi-position event.
+			//
+			// THE DIFF IS THE OUTER FRAME'S, ONCE. A re-entrant frame runs none
+			// (the `!reentrant` conjunct above): its own partition is one of the
+			// K the outer frame diffs, and letting it diff too would list the
+			// same partition K times and, worse, would leave a derived anchor
+			// whose re-entry produced nothing at all — a vertex the walk named
+			// but plainEntryForVertex found missing or tombstoned — never listed
+			// by anyone, so its rows would linger with no event left to name
+			// them.
 			var derr error
-			switch {
-			case acted:
-			case seed != "" && p.partitionArmed(rs):
-				results, derr = p.applyPartitionDiffRetraction(ctx, rs, []string{seed}, results)
+			switch rowScope.kind {
+			case scopeActed:
+				if !p.partitionArmed(rs) {
+					// Unreachable: the derivation index refuses an unarmed
+					// diffRetraction lens before any re-entry is substituted. It
+					// is still an error rather than a fall-through, because the
+					// one thing this design forbids is a whole diff over a
+					// partial row set — failing the event redelivers it, and a
+					// wrong whole diff tombstones every anchor the frame did not
+					// cover.
+					return nil, nil, ScopeAll(), fmt.Errorf(
+						"pipeline: rule %q substituted per-anchor evaluations without the partition-scoped diff armed; refusing to diff a partial row set against the whole target", p.ruleID)
+				}
+				results, derr = p.applyPartitionDiffRetraction(ctx, rs, rowScope.anchors, results)
+			case scopeSeeded:
+				if p.partitionArmed(rs) {
+					results, derr = p.applyPartitionDiffRetraction(ctx, rs, []string{seed}, results)
+				} else {
+					results, derr = p.applyDiffRetraction(ctx, results)
+				}
 			default:
 				results, derr = p.applyDiffRetraction(ctx, results)
 			}
@@ -1564,6 +1586,15 @@ func (p *Pipeline) applyDiffRetraction(ctx context.Context, results []ruleengine
 // fresh row set no longer carries
 // (anchor-partitioned-plain-lens-retraction-design.md §3.2). Every other
 // anchor's rows are never listed and so can never be retracted by this event.
+//
+// anchors is ONE key for a seeded frame and the whole derived set for an acted
+// one, and results is that frame's row set entire. Comparing K partitions
+// against the UNION of K anchors' rows is exact because partitions are disjoint:
+// a key listed in anchor A's partition can only have been produced by A's own
+// evaluation, so a key none of the K produced is genuinely dropped. It also
+// means an anchor whose evaluation produced NOTHING — a derived vertex the walk
+// named but that is missing or tombstoned, so its re-entry returned no rows —
+// still has its partition listed and emptied here; nowhere else would name it.
 //
 // It is multiEntryRetractions with the partition predicate in place of the
 // actor's key prefix, and all three of that function's properties are carried

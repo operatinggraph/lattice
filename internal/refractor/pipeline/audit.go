@@ -772,35 +772,39 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 	var classes []string
 	if !live {
 		// A tombstoned anchor projects nothing, so the only question is whether
-		// the row it owned is still there — the retraction the tombstone should
-		// have produced may have been lost. The key is derived read-free from
-		// the stored body, exactly as the CDC anchor-tombstone shortcut derives
-		// it; without a body (a hard-absent key, i.e. one that left the corpus
-		// between the listing and this read) there is nothing to derive from.
+		// the rows it owned are still there — the retraction the tombstone
+		// should have produced may have been lost.
+		//
+		// THE PARTITION LISTING IS ASKED FIRST, and before the body check,
+		// because it needs only the KEY (§3.4: an identifying key column is a
+		// `.key` form, so PartitionPredicate binds no props). A hard-absent
+		// anchor — one that left the corpus between the listing and this read —
+		// is exactly the case where the CDC path could never have run either, so
+		// it is the one where the standing detector matters most; refusing it
+		// for want of a body the answer does not use would make this direction
+		// blind precisely where nothing else is watching.
+		retained, listed, lerr := a.partitionHoldsAnyLiveKey(ctx, rs, reader, key, label)
+		if lerr != nil {
+			t.noteUnverified("partition listing failed: " + lerr.Error())
+			return
+		}
+		if listed {
+			if retained {
+				classes = append(classes, AuditClassRetained)
+			}
+			a.commit(t, classes)
+			return
+		}
+		// Not partition-armed: the key is derived read-free from the STORED
+		// BODY, exactly as the CDC anchor-tombstone shortcut derives it, and
+		// without a body there is nothing to derive from.
 		if props == nil {
 			t.noteUnverified(auditReasonUndrivableKey)
 			return
 		}
 		keys, ok := rs.engine.AnchorDeleteResult(rs.cr, key, label, props)
 		if !ok {
-			// A partition-armed lens has no read-free row key — its key carries
-			// a neighbour-bound column — but it does have a partition, and the
-			// tombstone's retraction was supposed to empty it. Listing it is
-			// the same question asked of the scope the CDC path actually
-			// retracts within.
-			retained, listed, lerr := a.partitionHoldsAnyLiveKey(ctx, rs, reader, key, label)
-			if lerr != nil {
-				t.noteUnverified("partition listing failed: " + lerr.Error())
-				return
-			}
-			if !listed {
-				t.noteUnverified(auditReasonUndrivableKey)
-				return
-			}
-			if retained {
-				classes = append(classes, AuditClassRetained)
-			}
-			a.commit(t, classes)
+			t.noteUnverified(auditReasonUndrivableKey)
 			return
 		}
 		_, present, rerr := reader.GetRow(ctx, keys)

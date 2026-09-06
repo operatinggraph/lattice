@@ -933,8 +933,8 @@ neighbour event on an armed lens keeps it too: that evaluation really is whole.
 
 `read_landlord_lease_applications` (`(app_id, landlord_id)`, D1.3 Increment 2, Vault 5b's
 manages-unassign consumer) is the reference `DiffRetraction` lens and the reference
-partition-armed one; eleven more declare the flag today (`grep -rn "DiffRetraction: true"
-packages/*/lenses.go`); a lens whose key resolves to its anchor — through a `WITH` or
+partition-armed one; eleven more declare the flag today (`grep -rn "DiffRetraction: *true"
+packages --include=*.go | grep -v _test`); a lens whose key resolves to its anchor — through a `WITH` or
 not — needs none of it for the retraction and takes the anchor Delete; a Secure plain lens
 keeps the declaration as a continuous per-event healer the detect-only audit does not offer
 (`clinicPatientsRead`), and is excluded from the partition scope for exactly that reason.
