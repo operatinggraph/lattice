@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.11.32
+version: 0.12.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt, OCC-conditioned
@@ -14,8 +14,11 @@ description: |
   backfills staleAt on a tab opened before that field shipped, orchestration-
   internal directOp(BackfillTabStaleAt)) + edge-manifest
   descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) + the menuItem
-  catalog (CreateMenuItem/RetireMenuItem/SetMenuItemLocation, the menuCatalog
-  lens — flagging missingLocation for an item whose place is gone) a Charge —
+  catalog (CreateMenuItem/RetireMenuItem/SetMenuItemLocation/UpdateMenuItem,
+  the menuCatalog lens — flagging missingLocation for an item whose place is
+  gone; UpdateMenuItem rewrites the item's .price aspect — name and/or price
+  — in one OCC'd upsert, the only way to correct either after minting) a
+  Charge —
   self-service OR staff POS alike — can bind against by naming menuItemKey,
   deriving amountCents from a catalog entry rather than trusting a
   caller-supplied number; a staff Charge with no menuItemKey still
@@ -118,6 +121,9 @@ declares:
     - operationType: SetMenuItemLocation
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: UpdateMenuItem
+      scope: any
+      grantsTo: [operator, frontOfHouse]
   weaverTargets:
     - targetId: cafeTabSettlement
       lensRef: cafeTabSettlement
@@ -131,3 +137,4 @@ declares:
     - operationType: CreateMenuItem
     - operationType: RetireMenuItem
     - operationType: SetMenuItemLocation
+    - operationType: UpdateMenuItem

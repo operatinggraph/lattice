@@ -221,7 +221,14 @@ var appOpCeilings = map[string]int{
 	// for internal/descriptorform to render: the op-catalog path renders a
 	// descriptor's schema, and this surface has none. A hand-built ceremony
 	// serving a second op, not a new descriptor-catalog gap.
-	"cmd/cafe-app": 7,
+	// 8: UpdateMenuItem is the Manage Menu grid's Edit action — a card swaps
+	// its name/amount for an inline name+price form (editMenuItemForm,
+	// app.js), reusing the Retire/Relocate row-button ceremony this ceiling
+	// already counts, prefilled from that same card's own data attributes
+	// rather than a schema-rendered form. A second field-carrying op serving
+	// the identical zero-navigation editing ceremony, not a new
+	// descriptor-catalog gap.
+	"cmd/cafe-app": 8,
 	// 15: StartVisitSeries moved off this app's own hardcoded literal onto
 	// internal/descriptorform (verticals-designer-triage-2026-08-27.md §2 work-
 	// list item 2) — its intervalDays/startAt/activeUntil now render from the

@@ -340,14 +340,18 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "menuitem",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem", "SetMenuItemLocation"},
+		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem", "SetMenuItemLocation", "UpdateMenuItem"},
 		Description: "Café self-order menu-item catalog DDL. Vertex shape: vtx.menuitem.<NanoID>, class=menuitem, " +
 			"root data = {} (D5 — name/price live on the .price aspect). CreateMenuItem{name, priceCents, locationKey} " +
 			"(operator-only) mints a catalog item + its .price {name, priceCents} aspect + the servedAt link " +
 			"(menuitem→location, the item being the later-arriving vertex), rejecting UnknownLocation / NotALocation " +
 			"if locationKey is absent, tombstoned, or not a location. That link is the item's only reachability: an " +
 			"edge-manifest browse lens walks a resident's residence chain down to the items served where they live, " +
-			"so an unlinked item is one no client can offer. RetireMenuItem{menuItemKey} " +
+			"so an unlinked item is one no client can offer. UpdateMenuItem{menuItemKey, name, priceCents} " +
+			"(staff-standing, confined to the item's own servedAt workplace) rewrites the item's .price aspect in " +
+			"one OCC'd upsert keyed on its own current revision — a rename and a reprice are the same act on the " +
+			"same aspect, so one op covers both; there is no partial form that touches only name or only priceCents. " +
+			"RetireMenuItem{menuItemKey} " +
 			"(operator-only) tombstones a live item, self-OCC'd on its hydrated revision (mirrors service-domain's " +
 			"RetireServiceTemplate). SetMenuItemLocation{menuItemKey, newLocation} (staff-standing, confined to the " +
 			"NEW location — the item's own servedAt may already be tombstoned, so unlike RetireMenuItem's " +
@@ -361,21 +365,21 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			"priceCents rather than trusting a caller-supplied number — the catalog this DDL exists to provide.",
 		Script: menuItemDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem; required, non-empty)."},` +
-			`"priceCents":{"type":"number","description":"Price in integer cents; required, must be > 0 (CreateMenuItem)."},` +
+			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty)."},` +
+			`"priceCents":{"type":"number","description":"Price in integer cents; required, must be > 0 (CreateMenuItem / UpdateMenuItem)."},` +
 			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment)."},` +
 			`"menuItemId":{"type":"string","description":"Optional bare NanoID for the new item (CreateMenuItem); absent → minted."},` +
-			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem / SetMenuItemLocation; required, validated alive)."},` +
+			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem / SetMenuItemLocation / UpdateMenuItem; required, validated alive)."},` +
 			`"newLocation":{"type":"string","description":"vtx.<locationType>.<NanoID> the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.menuitem.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"name":        "Menu item display name (CreateMenuItem; required, non-empty string), stored on the .price aspect.",
-			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem).",
+			"name":        "Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty string), stored on the .price aspect.",
+			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem / UpdateMenuItem).",
 			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
 			"menuItemId":  "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
-			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemLocation; required, validated alive + class=menuitem).",
+			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemLocation / UpdateMenuItem; required, validated alive + class=menuitem).",
 			"newLocation": "Full vtx.<locationType>.<NanoID> key (unit|building|property) the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment). Replaces the item's servedAt link.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -386,6 +390,14 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 					"lnk.menuitem.<NanoID>.servedAt.<locationType>.<NanoID>. " +
 					"Returns primaryKey. Rejects InvalidArgument if name is empty or priceCents <= 0, " +
 					"UnknownLocation / NotALocation if locationKey is absent, tombstoned, or not a location.",
+			},
+			{
+				Name:    "UpdateMenuItem — rename or reprice a catalog item",
+				Payload: map[string]any{"menuItemKey": "vtx.menuitem.<NanoID>", "name": "Almond croissant", "priceCents": 425},
+				ExpectedOutcome: "Rewrites the item's .price aspect to {name: \"Almond croissant\", priceCents: 425}, " +
+					"OCC-conditioned on its own current revision (a concurrent update aborts instead of racing). " +
+					"Returns primaryKey (the item key). Rejects UnknownMenuItem if menuItemKey is absent or " +
+					"tombstoned, InvalidArgument if name is empty or priceCents <= 0.",
 			},
 			{
 				Name:    "RetireMenuItem — remove an item from the catalog",
@@ -413,9 +425,10 @@ func menuItemPriceAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "menuItemPrice",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateMenuItem"},
+		PermittedCommands: []string{"CreateMenuItem", "UpdateMenuItem"},
 		Description: "Menu-item price aspect (café). Stored as vtx.menuitem.<NanoID>.price (class menuItemPrice) = " +
-			"{name, priceCents}. Non-sensitive. Written once by CreateMenuItem, owned by the menuItem vertexType " +
+			"{name, priceCents}. Non-sensitive. Written by CreateMenuItem, rewritten by UpdateMenuItem (an OCC-" +
+			"conditioned upsert keyed on the aspect's own current revision), owned by the menuItem vertexType " +
 			"DDL's own script. Declaration-only: no op handler of its own.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{"name":{"type":"string"},"priceCents":{"type":"number"}}}`,
@@ -1482,19 +1495,23 @@ def execute(state, op):
     fail("tab DDL: unknown operationType: " + ot)
 `
 
-// menuItemDDLScript handles CreateMenuItem, RetireMenuItem. Known-key reads
-// only: RetireMenuItem declares menuItemKey in ContextHint.Reads so the
-// current revision is hydrated for the self-OCC'd tombstone (mirrors
-// service-domain's RetireServiceTemplate). Both ops carry no scope=self grant
-// (permissions.go) — a staff caller that cannot prove root is workplace-
-// confined the same way VoidCharge is in tabDDLScript: the confinement
-// helpers below are that script's require_workplace idiom, mirrored here
-// rather than shared, since each op's Script is its own standalone Starlark
-// unit. CreateMenuItem confines against its own payload locationKey (already
-// a declared read); RetireMenuItem has no payload location, so it resolves
-// the item's own servedAt link instead (menu_item_served_at, the same
-// data-derived kv.Links follow-up tabDDLScript's self-service Charge branch
-// already uses for the identical resolution).
+// menuItemDDLScript handles CreateMenuItem, RetireMenuItem, SetMenuItemLocation,
+// UpdateMenuItem. Known-key reads only: RetireMenuItem declares menuItemKey in
+// ContextHint.Reads so the current revision is hydrated for the self-OCC'd
+// tombstone (mirrors service-domain's RetireServiceTemplate); UpdateMenuItem
+// declares menuItemKey + menuItemKey + ".price" the same way, since every
+// live menuItem carries a .price aspect and its absence is a caller error,
+// not a legitimately-missing aspect (require_menu_item_price's own posture,
+// tabDDLScript). None of these ops carry a scope=self grant (permissions.go)
+// — a staff caller that cannot prove root is workplace-confined the same way
+// VoidCharge is in tabDDLScript: the confinement helpers below are that
+// script's require_workplace idiom, mirrored here rather than shared, since
+// each op's Script is its own standalone Starlark unit. CreateMenuItem
+// confines against its own payload locationKey (already a declared read);
+// RetireMenuItem and UpdateMenuItem have no payload location, so each
+// resolves the item's own servedAt link instead (menu_item_served_at, the
+// same data-derived kv.Links follow-up tabDDLScript's self-service Charge
+// branch already uses for the identical resolution).
 const menuItemDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -1504,6 +1521,18 @@ def make_aspect(vtx_key, local_name, cls, data):
     return {"op": "create", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
+    # Mirrors tabDDLScript's identically-named helper — see that script for
+    # why this is a real OCC-conditioned upsert rather than a plain create:
+    # UpdateMenuItem rewrites a .price aspect CreateMenuItem already wrote,
+    # so a concurrent update must abort rather than race, never silently
+    # overwrite.
+    m = {"op": "update", "key": vtx_key + "." + local_name,
+         "document": {"class": cls, "isDeleted": False,
+                      "vertexKey": vtx_key, "localName": local_name, "data": data}}
+    m["expectedRevision"] = expected_revision
+    return m
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -1788,6 +1817,49 @@ def execute(state, op):
             make_link(served_at_lnk, item_key, location_key, "servedAt", "servedAt", {}),
         ]
         events = [{"class": "menuItem.created", "data": {"menuItemKey": item_key, "name": name, "priceCents": price_cents, "locationKey": location_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": item_key}}
+
+    if ot == "UpdateMenuItem":
+        # Rename and reprice are the same act on the same aspect — a typo'd
+        # name and a mispriced item are both corrected by rewriting .price
+        # whole. Both fields are required: the FE prefills them from the
+        # current row, so there is no partial form that touches only one.
+        item_key = required_string(p, "menuItemKey")
+        parts_of(item_key, "menuItemKey", "menuitem")
+        if not vertex_alive(state, item_key):
+            fail("UnknownMenuItem: " + item_key)
+
+        name = required_string(p, "name")
+        price_cents = require_number(p, "priceCents")
+        if price_cents <= 0:
+            fail("InvalidArgument: priceCents: required positive number")
+
+        # Staff-standing confinement: the location comes from the item's OWN
+        # servedAt link (never the payload, which carries none), same
+        # derivation as RetireMenuItem.
+        # workplace-exempt: (no-validated-path) UpdateMenuItem is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so op.authTargetValidated is never legitimately true
+        # and only the operator escape reaches the exemption.
+        if not op.authTargetValidated:
+            require_workplace([menu_item_served_at(item_key)], "cannot update menu item " + item_key)
+
+        # A declared read (Contract #2 §2.5): every live menuItem carries a
+        # .price aspect (CreateMenuItem writes it atomically with the
+        # vertex), so its absence here means the caller failed to declare it,
+        # not a legitimately-missing aspect — require_menu_item_price's own
+        # posture (tabDDLScript), applied to a write instead of a read.
+        price_key = item_key + ".price"
+        if price_key not in state:
+            fail("InvalidArgument: menuItemKey: caller must declare " + price_key + " in contextHint.reads")
+        price_doc = state[price_key]
+        if price_doc == None or (hasattr(price_doc, "isDeleted") and price_doc.isDeleted):
+            fail("UnknownMenuItem: " + item_key + " carries no price aspect")
+
+        mutations = [make_aspect_upsert_occ(item_key, "price", "menuItemPrice",
+                                             {"name": name, "priceCents": price_cents}, price_doc.revision)]
+        events = [{"class": "menuItem.updated", "data": {"menuItemKey": item_key, "name": name, "priceCents": price_cents}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": item_key}}
 

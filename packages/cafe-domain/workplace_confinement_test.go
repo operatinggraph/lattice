@@ -343,7 +343,8 @@ func wcMenuCapDoc() *processor.CapabilityDoc {
 	doc := wcStaffCapDoc()
 	doc.PlatformPermissions = append(doc.PlatformPermissions,
 		processor.PlatformPermission{OperationType: "CreateMenuItem", Scope: "any"},
-		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"})
+		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"},
+		processor.PlatformPermission{OperationType: "UpdateMenuItem", Scope: "any"})
 	return doc
 }
 
@@ -417,6 +418,31 @@ func wcSubmitRetireMenuItem(t *testing.T, ctx context.Context, conn *substrate.C
 		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{itemKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// wcSubmitUpdateMenuItem submits UpdateMenuItem{menuItemKey, name, priceCents}
+// as an arbitrary actor on the standing path, declaring exactly what a staff
+// caller would.
+func wcSubmitUpdateMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, itemKey, actorKey string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "UpdateMenuItem",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:06:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Latte","priceCents":475}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
 			},
@@ -527,5 +553,27 @@ func TestWorkplace_RetireMenuItemStaffConfinedToWorkplace(t *testing.T) {
 	}
 	if got := wcSubmitRetireMenuItem(t, ctx, conn, cp, cons, "wcrmb00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
 		t.Fatalf("staff RetireMenuItem served at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// TestWorkplace_UpdateMenuItemStaffConfinedToWorkplace proves UpdateMenuItem
+// resolves its confining location from the item's OWN servedAt link (never a
+// payload field, which UpdateMenuItem carries none of) — a staff member may
+// edit an item served at their own building and is denied for one served
+// elsewhere. Mirrors TestWorkplace_RetireMenuItemStaffConfinedToWorkplace.
+func TestWorkplace_UpdateMenuItemStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcupdatemenu")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	itemA := createMenuItem(t, ctx, conn, cp, cons, "wcumiseeda00000000001", "Latte", 450, wcBuildingAKey)
+	itemB := createMenuItem(t, ctx, conn, cp, cons, "wcumiseedb00000000001", "Latte", 450, wcBuildingBKey)
+
+	if got := wcSubmitUpdateMenuItem(t, ctx, conn, cp, cons, "wcuma00000000000001", itemA, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff UpdateMenuItem served at its OWN workplace = %v, want Accepted", got)
+	}
+	if got := wcSubmitUpdateMenuItem(t, ctx, conn, cp, cons, "wcumb00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff UpdateMenuItem served at ANOTHER building = %v, want Rejected", got)
 	}
 }

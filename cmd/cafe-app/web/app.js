@@ -1221,15 +1221,39 @@ function menuItemCard(it) {
     ? '<button type="button" data-relocate="' + escapeHtml(it.menuItemKey) + '">Relocate here</button>'
     : "";
   return (
-    '<div class="card">' +
+    '<div class="card" data-item="' + escapeHtml(it.menuItemKey) + '">' +
     badge +
-    '<div class="who">' + escapeHtml(it.name) + "</div>" +
-    '<div class="amount">' + money(it.priceCents) + "</div>" +
-    '<div class="card-actions">' + relocate +
+    '<div class="who" data-field="who">' + escapeHtml(it.name) + "</div>" +
+    '<div class="amount" data-field="amount">' + money(it.priceCents) + "</div>" +
+    '<div class="card-actions" data-field="actions">' + relocate +
+    '<button type="button" data-edit="' + escapeHtml(it.menuItemKey) +
+    '" data-name="' + escapeHtml(it.name) + '" data-price-cents="' + (it.priceCents || 0) + '">Edit</button>' +
     '<button type="button" class="danger" data-retire="' +
     escapeHtml(it.menuItemKey) +
     '">Retire</button></div>' +
     "</div>"
+  );
+}
+
+// editMenuItemForm renders the inline rename/reprice form that swaps into a
+// Manage Menu card when its Edit button is clicked — the name/price inputs
+// prefill from the card's own current row (data-name/data-price-cents),
+// mirroring the add-item form's own field-row/panel-actions layout so the
+// swapped-in card reads as the same UI, not a different surface.
+function editMenuItemForm(currentName, currentPriceCents) {
+  return (
+    '<form class="edit-menu-item-form">' +
+    '<div class="field-row">' +
+    '<div class="field"><label>Name</label><input type="text" class="edit-name" value="' +
+    escapeHtml(currentName) + '" /></div>' +
+    '<div class="field"><label>Price</label><input type="text" class="edit-price" inputmode="decimal" value="' +
+    ((currentPriceCents || 0) / 100).toFixed(2) + '" /></div>' +
+    "</div>" +
+    '<div class="panel-actions">' +
+    '<button type="submit">Save</button>' +
+    '<button type="button" class="ghost edit-cancel">Cancel</button>' +
+    "</div>" +
+    "</form>"
   );
 }
 
@@ -1269,6 +1293,40 @@ async function loadManageMenu() {
         toast(e.message, false);
         btn.disabled = false;
       }
+    });
+  });
+  body.querySelectorAll("[data-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const menuItemKey = btn.dataset.edit;
+      const card = btn.closest(".card");
+      const currentName = btn.dataset.name;
+      const currentPriceCents = Number(btn.dataset.priceCents) || 0;
+      card.innerHTML = editMenuItemForm(currentName, currentPriceCents);
+      card.querySelector(".edit-cancel").addEventListener("click", () => loadManageMenu());
+      card.querySelector("form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const name = card.querySelector(".edit-name").value.trim();
+        const cents = parseDollars(card.querySelector(".edit-price").value);
+        if (!name) { toast("Enter a name for the item.", false); return; }
+        if (cents === null) { toast("Enter a price greater than $0.", false); return; }
+        const submitBtn = card.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        try {
+          await opOrThrow(
+            {
+              operationType: "UpdateMenuItem", class: "menuitem",
+              reads: [menuItemKey, menuItemKey + ".price"],
+              payload: { menuItemKey, name, priceCents: cents },
+            },
+            "save the item"
+          );
+          toast("Saved " + name + ".", true);
+          setTimeout(loadManageMenu, 700);
+        } catch (e) {
+          toast(e.message, false);
+          submitBtn.disabled = false;
+        }
+      });
     });
   });
   body.querySelectorAll("[data-relocate]").forEach((btn) => {
