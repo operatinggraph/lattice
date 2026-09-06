@@ -80,6 +80,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "TombstoneStudio", Scope: "any"},
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "CreateSessionSeries", Scope: "any"},
+			{OperationType: "TombstoneSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
@@ -3600,5 +3601,378 @@ func TestCancelBooking_ReleasesBookerSlotCells(t *testing.T) {
 	_, outcome2 := createBooking(t, ctx, conn, cp, cons, "wdbkrcxlbookinb0001", sessionB, booker, "")
 	if outcome2 != processor.OutcomeAccepted {
 		t.Fatalf("same booker into a different overlapping session after release outcome = %v, want Accepted", outcome2)
+	}
+}
+
+// ---- TombstoneSessionSeries -----------------------------------------------
+
+// seriesAtStudioLnkKey is the deterministic confirmation link the series
+// call-off reads — require_matching_studio's key one vertex type over
+// (ddls.go), declared as an optionalRead at dispatch.
+func seriesAtStudioLnkKey(t *testing.T, seriesKey, studioKey string) string {
+	t.Helper()
+	_, seriesID, _ := substrate.ParseVertexKey(seriesKey)
+	_, studioID, _ := substrate.ParseVertexKey(studioKey)
+	return "lnk.sessionseries." + seriesID + ".atStudio.studio." + studioID
+}
+
+// createSessionSeriesLed mints occurrenceCount weekly occurrences at studioKey,
+// led by instructorKey when non-empty, and returns the series key plus its
+// occurrence keys in cadence order. CreateSessionSeries answers with the series
+// key ALONE (the occurrence keys ride its event, ddls.go), so the occurrences
+// are recomputed from the request id's own deterministic NanoID stream in the
+// order the script draws them: the series first, then one per occurrence.
+func createSessionSeriesLed(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, studioKey, instructorKey, name, startsAt, endsAt string, capacity, intervalDays, occurrenceCount int) (string, []string, processor.MessageOutcome) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payloadMap := map[string]any{
+		"studio": studioKey, "name": name, "startsAt": startsAt, "endsAt": endsAt,
+		"capacity": capacity, "intervalDays": intervalDays, "occurrenceCount": occurrenceCount,
+	}
+	reads := []string{studioKey}
+	if instructorKey != "" {
+		payloadMap["instructor"] = instructorKey
+		reads = append(reads, instructorKey)
+	}
+	payload, _ := json.Marshal(payloadMap)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSessionSeries",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "sessionseries",
+		Payload:       payload,
+		// Every per-occurrence slot cell is derived server-side by the
+		// script's own derive_reads (ddls.go), so the dispatcher declares none.
+		ContextHint: &processor.ContextHint{
+			Enumerations: testutil.DeclaredEnumerations("CreateSessionSeries", domainActorKey, wellnessdomain.OpMetas()),
+			Reads:        reads,
+		},
+	})
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	ids := nanoIDsFromRequestID(reqID, occurrenceCount+1)
+	sessionKeys := make([]string, occurrenceCount)
+	for i := range sessionKeys {
+		sessionKeys[i] = "vtx.session." + ids[i+1]
+	}
+	return "vtx.sessionseries." + ids[0], sessionKeys, outcome
+}
+
+// tombstoneSeries submits TombstoneSessionSeries with exactly the read posture
+// cancelSeries() declares in cmd/wellness-app/web/app.js: the series vertex is
+// an (a)-declared required read (vertex_alive / class_of answer off hydrated
+// state) and the studio confirmation link is (d)-declared. Nothing
+// per-occurrence is declared — those keys are discovered by the script's own
+// partOf walk (class (e)) and are unknowable to a caller holding only a series
+// key.
+// It returns the outcome AND the script's own failure text, because the two
+// refusals this op can raise (WrongStudio, NoUpcomingOccurrences) are
+// indistinguishable at the outcome level and each is reachable by the other's
+// mechanism failing open — a WrongStudio that stopped rejecting would simply
+// find no occurrence at the named studio and refuse NoUpcomingOccurrences
+// instead, which no outcome assertion could tell apart.
+func tombstoneSeries(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, seriesKey, studioKey, submittedAt string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSessionSeries",
+		Actor:         domainActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "sessionseries",
+		Payload:       json.RawMessage(`{"seriesKey":"` + seriesKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			// DeclaredEnumerations resolves only the {actor}-templated hub;
+			// the op-meta's other declaration is hubbed on {payload.seriesKey},
+			// which a dispatcher supplies from its own payload (the skip is
+			// why DeclaredEnumerationsWithSkips exists).
+			Enumerations: append(
+				testutil.DeclaredEnumerations("TombstoneSessionSeries", domainActorKey, wellnessdomain.OpMetas()),
+				processor.EnumerationHint{Hub: seriesKey, Relation: "partOf", Direction: "in"}),
+			Reads:         []string{seriesKey},
+			OptionalReads: []string{seriesAtStudioLnkKey(t, seriesKey, studioKey)},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return outcome, failure
+}
+
+// mkSeriesInstructor mints an instructor for the series tests (CreateInstructor
+// is operator-only and absent from domainCapDoc's standing set, so the cap doc
+// is widened first, mirroring TestReassignSession_SwapsInstructor).
+func mkSeriesInstructor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, name string) string {
+	t.Helper()
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+	reqID := testutil.GenReqID(label)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+		Payload: json.RawMessage(`{"displayName":"` + name + `"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.instructor." + nanoIDFromRequestID(reqID)
+}
+
+// TestTombstoneSessionSeries_CancelsOnlyUpcomingOccurrences is the row's whole
+// point — one submission calls off the rest of a recurring class — and its
+// sharpest boundary: the two occurrences that have already STARTED at
+// submittedAt are history and must survive untouched, seats and cells and all,
+// because tombstoning one would hand its attended bookings to
+// ReleaseOrphanedBooking, which drains the seat and refunds a class that
+// actually ran. Mirrors TestTombstoneSession_ReleasesStudioSlotCells' cell
+// assertions, per occurrence and on BOTH hubs (studio + instructor).
+func TestTombstoneSessionSeries_CancelsOnlyUpcomingOccurrences(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriestombstone")
+
+	instructorKey := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdseriesinstruct0001", "Sam")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000001", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000001", studioKey, instructorKey, "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 4)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	starts := []string{"2026-07-08T09:00:00Z", "2026-07-15T09:00:00Z", "2026-07-22T09:00:00Z", "2026-07-29T09:00:00Z"}
+	ends := []string{"2026-07-08T09:30:00Z", "2026-07-15T09:30:00Z", "2026-07-22T09:30:00Z", "2026-07-29T09:30:00Z"}
+
+	// Submitted between occurrence 1 and occurrence 2: the first two have
+	// started, the last two have not.
+	if got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0001", seriesKey, studioKey, "2026-07-16T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("TombstoneSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+
+	for i, sessionKey := range sessionKeys {
+		past := i < 2
+		if alive := keyExists(t, ctx, conn, sessionKey); alive != past {
+			t.Fatalf("occurrence %d (starts %s) alive = %v, want %v", i, starts[i], alive, past)
+		}
+		for _, hub := range []string{studioKey, instructorKey} {
+			for _, cellKey := range wdSlotClaimKeys(t, hub, starts[i], ends[i]) {
+				if held := keyExists(t, ctx, conn, cellKey); held != past {
+					t.Fatalf("occurrence %d: slot claim %s held = %v, want %v", i, cellKey, held, past)
+				}
+			}
+		}
+	}
+
+	// The series vertex itself survives: the two occurrences that already ran
+	// stay partOf it, and that parentage is the only record they were one
+	// recurring class rather than a pile of one-offs (ddls.go).
+	if !keyExists(t, ctx, conn, seriesKey) {
+		t.Fatalf("series vertex %s must NOT be tombstoned", seriesKey)
+	}
+
+	// The freed cells are genuinely free — the release is real, not a
+	// bookkeeping tombstone that leaves the double-book lock standing.
+	if _, o := createSession(t, ctx, conn, cp, cons, "wdseriesrebook000001", studioKey, "Power Sculpt", starts[2], ends[2], 20); o != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession on a cancelled occurrence's freed cells outcome = %v, want Accepted", o)
+	}
+}
+
+// TestTombstoneSessionSeries_SkipsAlreadyCancelledOccurrence proves the
+// vertex_live screen on each walked occurrence. An occurrence cancelled
+// individually first has already released its cells — and TombstoneSession
+// does not cascade onto its atStudio link or its .schedule, so nothing else in
+// the walk would stop the series op from "releasing" them a second time. By
+// then those exact cells belong to a DIFFERENT session booked into the freed
+// slot, and a second release would silently unlock it.
+func TestTombstoneSessionSeries_SkipsAlreadyCancelledOccurrence(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesskipdead")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000002", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000002", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+
+	// Cancel the MIDDLE occurrence on its own, the ordinary per-class path.
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdseriesonecancel001"), Lane: processor.LaneDefault,
+		OperationType: "TombstoneSession", Actor: domainActorKey, SubmittedAt: "2026-07-07T12:10:00Z",
+		Class:   "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKeys[1] + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKeys[1], sessionKeys[1] + ".schedule", atStudioLnkKey(t, sessionKeys[1], studioKey),
+		}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// Somebody books the freed slot with an unrelated one-off class, which now
+	// holds the very cells the dead occurrence used to.
+	replacementKey, o := createSession(t, ctx, conn, cp, cons, "wdseriesreplace00001", studioKey,
+		"Power Sculpt", "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z", 20)
+	if o != processor.OutcomeAccepted {
+		t.Fatalf("replacement CreateSession outcome = %v, want Accepted", o)
+	}
+
+	if got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0002", seriesKey, studioKey, "2026-07-07T12:20:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("TombstoneSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+
+	for _, i := range []int{0, 2} {
+		if keyExists(t, ctx, conn, sessionKeys[i]) {
+			t.Fatalf("occurrence %d must be tombstoned by the series call-off", i)
+		}
+	}
+	// The unrelated session that inherited the dead occurrence's slot is
+	// untouched, cells and all — the walk skipped the dead occurrence rather
+	// than releasing a stranger's lock through it.
+	if !keyExists(t, ctx, conn, replacementKey) {
+		t.Fatalf("the replacement session must survive a series call-off it is no part of")
+	}
+	for _, cellKey := range wdSlotClaimKeys(t, studioKey, "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z") {
+		if !keyExists(t, ctx, conn, cellKey) {
+			t.Fatalf("replacement session's slot claim %s must still be held", cellKey)
+		}
+	}
+}
+
+// TestTombstoneSessionSeries_WrongStudioRejected proves the confirmation param
+// is checked against the SERIES' own atStudio link, not merely parsed: a
+// caller naming some other live studio is refused outright (WrongStudio) and
+// nothing is cancelled, rather than the walk quietly finding no occurrence at
+// that studio and reporting an empty run.
+func TestTombstoneSessionSeries_WrongStudioRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "serieswrongstudio")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000003", "Flow Room")
+	otherStudio := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000004", "Sculpt Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000003", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+
+	got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0003", seriesKey, otherStudio, "2026-07-07T12:20:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("TombstoneSessionSeries with the wrong studio outcome = %v, want Rejected", got)
+	}
+	// The code matters: with the series-level confirmation gone, the
+	// per-occurrence studio check alone would still find nothing to cancel and
+	// refuse NoUpcomingOccurrences — the same outcome for the wrong reason, and
+	// a far worse message for a staffer who typed the wrong studio.
+	if !strings.Contains(why, "WrongStudio") {
+		t.Fatalf("the mismatched studio was rejected by something other than the series studio-match guard: %q", why)
+	}
+	for i, sessionKey := range sessionKeys {
+		if !keyExists(t, ctx, conn, sessionKey) {
+			t.Fatalf("occurrence %d must survive a rejected series call-off", i)
+		}
+	}
+}
+
+// TestTombstoneSessionSeries_AllPastRejected proves zero eligible occurrences
+// is a REFUSAL (NoUpcomingOccurrences), not an accepted empty batch: a run
+// that has already finished has nothing to call off, and answering "done"
+// would tell a staffer they had cancelled classes that in fact still stand in
+// every member's history.
+func TestTombstoneSessionSeries_AllPastRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesallpast")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000005", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000004", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+
+	// Submitted well after the last occurrence ended.
+	got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0004", seriesKey, studioKey, "2026-09-01T12:00:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("TombstoneSessionSeries over a finished run outcome = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NoUpcomingOccurrences") {
+		t.Fatalf("the finished run was rejected by something other than the zero-eligible guard: %q", why)
+	}
+	for i, sessionKey := range sessionKeys {
+		if !keyExists(t, ctx, conn, sessionKey) {
+			t.Fatalf("finished occurrence %d must survive the refusal", i)
+		}
+	}
+	if !keyExists(t, ctx, conn, seriesKey) {
+		t.Fatalf("series vertex must survive the refusal")
+	}
+}
+
+// TestTombstoneSessionSeries_SkipsOccurrenceMovedToAnotherStudio pins the
+// per-occurrence studio check. Every occurrence stays individually editable
+// after CreateSessionSeries, so ReassignSession's operator newStudio path can
+// move ONE of them elsewhere — and it tombstones only that occurrence's own
+// atStudio link, leaving its .schedule, its partOf link and the vertex itself
+// alive. Without the per-occurrence check the walk would still reach it and
+// "release" cells on the studio the CALLER confirmed for a span that studio no
+// longer holds for this class — tombstoning whatever other session has since
+// claimed them. The standing this op clears is one studio's; a moved
+// occurrence is cancelled with TombstoneSession, which confirms its own.
+func TestTombstoneSessionSeries_SkipsOccurrenceMovedToAnotherStudio(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmovedocc")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000006", "Flow Room")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000007", "Sculpt Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000005", studioA, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+
+	// Move the MIDDLE occurrence to studio B (operator-only, ddls.go).
+	moveEnv := reassignSessionEnv(t, ctx, conn, "wdseriesmoveocc00001", sessionKeys[1], studioA, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKeys[1], "studio": studioA, "newStudio": studioB},
+		"2026-07-07T12:15:00Z")
+	if moved, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, moveEnv); moved != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newStudio outcome = %v, reply = %+v, want Accepted", moved, reply)
+	}
+
+	// An unrelated class claims studio A's now-free slot for that same span.
+	squatterKey, o := createSession(t, ctx, conn, cp, cons, "wdseriessquatter0001", studioA,
+		"Power Sculpt", "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z", 20)
+	if o != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession on studio A's freed span outcome = %v, want Accepted", o)
+	}
+
+	if got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0005", seriesKey, studioA, "2026-07-07T12:20:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("TombstoneSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+
+	for _, i := range []int{0, 2} {
+		if keyExists(t, ctx, conn, sessionKeys[i]) {
+			t.Fatalf("occurrence %d (still at studio A) must be cancelled", i)
+		}
+	}
+	if !keyExists(t, ctx, conn, sessionKeys[1]) {
+		t.Fatalf("the occurrence moved to studio B must survive a studio-A series call-off")
+	}
+	for _, cellKey := range wdSlotClaimKeys(t, studioB, "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z") {
+		if !keyExists(t, ctx, conn, cellKey) {
+			t.Fatalf("the moved occurrence's own studio-B slot claim %s must still be held", cellKey)
+		}
+	}
+	if !keyExists(t, ctx, conn, squatterKey) {
+		t.Fatalf("the unrelated class holding studio A's freed span must survive")
+	}
+	for _, cellKey := range wdSlotClaimKeys(t, studioA, "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z") {
+		if !keyExists(t, ctx, conn, cellKey) {
+			t.Fatalf("the unrelated class's studio-A slot claim %s must still be held", cellKey)
+		}
 	}
 }

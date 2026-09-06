@@ -890,10 +890,32 @@ function domId(key) {
   return key.replace(/[^a-zA-Z0-9]/g, "");
 }
 
+// upcomingSeriesCounts tallies, per seriesKey, how many of the sessions in a
+// LOADED list are still to come — the number TombstoneSessionSeries would
+// actually cancel, since its own walk applies the same `startsAt is in the
+// future` filter (packages/wellness-domain/ddls.go). It is a count over the
+// rows the caller already holds, not a fetch: wellnessSessions has no
+// aggregate COUNT and the series' own .definition.occurrenceCount is the
+// AUTHORED figure, which says nothing about how many occurrences have already
+// run or been cancelled one at a time. So a list narrowed by studio or by a
+// staffer's workplace counts what that list can see and no more — which is
+// exactly what the caller may act on anyway.
+function upcomingSeriesCounts(sessions) {
+  const counts = new Map();
+  const now = Date.now();
+  for (const se of sessions || []) {
+    if (!se.seriesKey || !se.startsAt) continue;
+    if (!(new Date(se.startsAt).getTime() > now)) continue;
+    counts.set(se.seriesKey, (counts.get(se.seriesKey) || 0) + 1);
+  }
+  return counts;
+}
+
 // scheduleGroups breaks the (already day-sorted) upcoming sessions into local
 // calendar-day sections, a header per day, so the grid reads as a schedule
 // rather than one flat pile of cards.
 function scheduleGroups(sessions, myStatusBySession) {
+  const seriesCounts = upcomingSeriesCounts(sessions);
   let html = "";
   let lastDay = null;
   for (const se of sessions) {
@@ -902,7 +924,7 @@ function scheduleGroups(sessions, myStatusBySession) {
       html += '<div class="day-header">' + esc(fmtDay(se.startsAt)) + "</div>";
       lastDay = day;
     }
-    html += scheduleCard(se, myStatusBySession);
+    html += scheduleCard(se, myStatusBySession, seriesCounts);
   }
   return html;
 }
@@ -915,7 +937,7 @@ function scheduleGroups(sessions, myStatusBySession) {
 // class with no existing claim offers "Join waitlist" instead of a dead-end
 // disabled "Full" — the seat freed by any cancellation promotes the lowest
 // waitlistSlot automatically (CancelBooking, ddls.go), never first-come.
-function scheduleCard(se, myStatusBySession) {
+function scheduleCard(se, myStatusBySession, seriesCounts) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
   const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
@@ -935,12 +957,21 @@ function scheduleCard(se, myStatusBySession) {
     action = "book"; label = "Book"; disabled = false;
   }
   const led = se.instructorName ? '<div class="meta">with ' + esc(se.instructorName) + "</div>" : "";
+  // "Recurring · N upcoming" — the partOf parent wellnessSessions now projects
+  // (seriesKey, lenses.go). A member browsing the grid otherwise sees a weekly
+  // class as N indistinguishable one-offs and cannot tell that booking one is
+  // not booking the run. The count comes from the grid's own rows, so it is
+  // whatever THIS list can see; the whole line is text (esc() is a text-node
+  // escaper — nothing here goes into an attribute).
+  const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(se.seriesKey) || 0 : 0;
+  const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
   return (
     '<div class="card">' +
     '<span class="badge ' + (full ? "settled" : "open") + '">' + se.bookedCount + " / " + se.capacity + " seats</span>" +
     '<div class="who">' + esc(se.name || "?") + "</div>" +
     '<div class="meta">' + esc(se.missingStudio ? "Studio needs reassignment" : se.studioName || shortKey(se.studioKey)) + "</div>" +
     led +
+    series +
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
     '<div class="meta">' + esc(priceLabel(se.priceCents)) + "</div>" +
     '<div class="field-row">' +
@@ -1803,9 +1834,26 @@ function renderCancelClass(sessionKey) {
   const isLeader = !!(mine && se.instructorKey === mine);
   if (!isLeader && !isStaff()) return;
 
+  // The series control is offered only to front-of-house staff, and only when
+  // this class has at least one OTHER upcoming sibling: TombstoneSessionSeries
+  // grants no `provider` (an instructor cancels the class they lead, not a
+  // studio's standing booking — packages/wellness-domain/permissions.go), and
+  // with no sibling left the op cancels exactly what "Call off this class"
+  // already does, so offering both would be two buttons for one act.
+  // `upcoming` is every still-to-come occurrence of the run — this one
+  // included when it has not started — which is precisely the set the op
+  // cancels, so the number on the button is the number that disappears.
+  const seriesCounts = upcomingSeriesCounts(staffSessionsCache);
+  const upcoming = se.seriesKey ? seriesCounts.get(se.seriesKey) || 0 : 0;
+  const offerSeries = !!se.seriesKey && isStaff() && upcoming > 1;
+
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
   wrap.innerHTML = '<button id="cancel-class" class="danger">Call off this class</button>';
+  if (offerSeries) {
+    wrap.innerHTML +=
+      '<button id="cancel-series" class="danger">' + esc("Call off the remaining " + upcoming + " classes in this series") + "</button>";
+  }
   document.getElementById("roster-body").appendChild(wrap);
   document.getElementById("cancel-class").addEventListener("click", async () => {
     const btn = document.getElementById("cancel-class");
@@ -1813,6 +1861,25 @@ function renderCancelClass(sessionKey) {
     try {
       await cancelClass(se, isLeader ? mine : null);
       toast("Class called off.", true);
+      staffSessionsCache = null;
+      document.getElementById("roster-session").dataset.loaded = "";
+      setTimeout(loadRoster, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
+  });
+  if (!offerSeries) return;
+  document.getElementById("cancel-series").addEventListener("click", async () => {
+    const btn = document.getElementById("cancel-series");
+    // This one cancels classes the staffer is not looking at, so it asks
+    // first — the only destructive control in this app whose blast radius is
+    // wider than the row it sits on.
+    if (!window.confirm("Call off the remaining " + upcoming + " classes in this series? Classes that already ran are not affected.")) return;
+    btn.disabled = true;
+    try {
+      await cancelSeries(se);
+      toast("Remaining classes in the series called off.", true);
       staffSessionsCache = null;
       document.getElementById("roster-session").dataset.loaded = "";
       setTimeout(loadRoster, 700);
@@ -1860,6 +1927,42 @@ async function cancelClass(se, leaderInstructorKey) {
       payload,
     },
     "call off the class",
+    false,
+  );
+}
+
+// cancelSeries submits TombstoneSessionSeries — the whole-run counterpart of
+// cancelClass above (packages/wellness-domain/ddls.go). The script walks the
+// series' partOf-in occurrences itself and cancels every one still upcoming at
+// the named studio, so the FE sends only the two keys it can name and never
+// enumerates the occurrences. Like cancelClass it carries NO
+// authContext.target: the grant is scope=any and the script confines it
+// in-script off the series' own studio.
+async function cancelSeries(se) {
+  await opOrThrow(
+    {
+      operationType: "TombstoneSessionSeries",
+      class: "sessionseries",
+      // The series vertex is an (a)-declared required read — vertex_alive /
+      // class_of answer off the hydrated state, so its absence is a
+      // correctness error, not a rejection the script renders.
+      reads: [se.seriesKey],
+      // The studio confirmation probe, (d)-declared: an absent link is the
+      // meaningful WrongStudio rejection, not a correctness error — the same
+      // split cancelClass's own atStudio probe draws. Nothing per-occurrence
+      // is declared: the occurrence keys are discovered by the script's own
+      // partOf walk, so a client cannot name them up front (they are
+      // class-(e) follow-up reads, Contract #2 §2.5).
+      optionalReads: ["lnk.sessionseries." + idOf(se.seriesKey) + ".atStudio.studio." + idOf(se.studioKey)],
+      // The occurrence walk itself IS declarable — its hub is the series key
+      // in the payload — even though every read it resolves off each link is
+      // not. Enumerations are metadata (Contract #2 §2.5.1): declaring the
+      // walk does not hydrate it, it says which bounded live enumeration this
+      // submission expects.
+      enumerations: [{ hub: se.seriesKey, relation: "partOf", direction: "in" }],
+      payload: { seriesKey: se.seriesKey, studio: se.studioKey },
+    },
+    "call off the series",
     false,
   );
 }

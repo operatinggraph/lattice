@@ -252,7 +252,17 @@ var appOpCeilings = map[string]int{
 	// because a name + optional email/phone form is exactly what those two
 	// apps already hand-wire for it, not a new descriptor-catalog gap
 	// (verticals-designer-triage-2026-08-27.md §15).
-	"cmd/wellness-app": 13,
+	// 14: TombstoneSessionSeries is the roster's "call off the remaining N
+	// classes" button, a zero-input row action beside the "Call off this
+	// class" ceremony (renderCancelClass, app.js) this ceiling already counts:
+	// its whole payload is the series key and studio key of the class already
+	// on screen, so there is no field for a person to fill and nothing for
+	// internal/descriptorform to render. Its descriptor exists
+	// (wellness-domain/opmetas.go) and declares TargetType `sessionseries`,
+	// which no entity lens projects — an op-catalog render could not resolve a
+	// target for it even with a form to draw. A second op on an established
+	// hand-built ceremony, not a new descriptor-catalog gap.
+	"cmd/wellness-app": 14,
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every

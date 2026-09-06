@@ -33,6 +33,12 @@ type sessionProjection struct {
 	MissingStudio  bool   `json:"missingStudio"`
 	InstructorKey  string `json:"instructorKey"`
 	InstructorName string `json:"instructorName"`
+	// SeriesKey is the recurring-class parent this session was minted as an
+	// occurrence of (wellnessSessions' partOf hop), empty for a one-off. It is
+	// the only key a caller can hand TombstoneSessionSeries, and the only thing
+	// on the row that tells one occurrence of a weekly class from a standalone
+	// one.
+	SeriesKey string `json:"seriesKey"`
 	// CoveringLocations is the staff read boundary's term: the studio's own
 	// location plus its containedIn ancestors. Consumed by mayReadRoster, not
 	// rendered — sessionRow deliberately does not carry it, so the schedule
@@ -60,7 +66,12 @@ type sessionRow struct {
 	MissingStudio      bool   `json:"missingStudio"`
 	InstructorKey      string `json:"instructorKey"`
 	InstructorName     string `json:"instructorName"`
-	BookedCount        int    `json:"bookedCount"`
+	// SeriesKey is omitted for a one-off class rather than sent empty: the FE
+	// tests for its presence to decide whether a class belongs to a recurring
+	// run at all, and an always-present empty string makes that test read as a
+	// value rather than an absence.
+	SeriesKey   string `json:"seriesKey,omitempty"`
+	BookedCount int    `json:"bookedCount"`
 }
 
 // computeSessions decodes every wellnessSessions row, joins each to its
@@ -105,6 +116,7 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 			MissingStudio:      p.MissingStudio,
 			InstructorKey:      p.InstructorKey,
 			InstructorName:     p.InstructorName,
+			SeriesKey:          p.SeriesKey,
 			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}
@@ -229,6 +241,7 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 			MissingStudio:      p.MissingStudio,
 			InstructorKey:      p.InstructorKey,
 			InstructorName:     p.InstructorName,
+			SeriesKey:          p.SeriesKey,
 			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}

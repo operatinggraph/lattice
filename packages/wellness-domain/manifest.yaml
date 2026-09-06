@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.23.0
+version: 0.24.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -181,6 +181,9 @@ declares:
     - operationType: CreateSessionSeries
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: TombstoneSessionSeries
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: TombstoneSession
       scope: any
       grantsTo: [operator, provider, frontOfHouse]
@@ -240,6 +243,7 @@ declares:
     - operationType: SetBookingAttendance
     - operationType: CreateSession
     - operationType: CreateSessionSeries
+    - operationType: TombstoneSessionSeries
     - operationType: CreateStudio
     - operationType: TombstoneStudio
     - operationType: CreateInstructor

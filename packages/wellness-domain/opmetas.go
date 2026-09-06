@@ -6,10 +6,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
 // three consumer (scope=self) ones, CreateBooking, JoinWaitlist and
 // CancelBooking; the staff standing ones, CreateStudio, CreateSession,
-// CreateSessionSeries, TombstoneStudio and CreateInstructor; and the
+// CreateSessionSeries, TombstoneSessionSeries, TombstoneStudio and
+// CreateInstructor; and the
 // provider-hat standing ones, TombstoneSession, SetBookingAttendance and
 // SetInstructorProfile — mirroring clinic-domain's adoption (Fire 5 Inc 1)
 // and service-domain's original RequestService op-meta.
+//
+// TombstoneSessionSeries declares TargetType `sessionseries`, and no lens
+// projects a sessionseries entity today (edge-manifest's edgeEntitySessions
+// projects the OCCURRENCES, carrying no series column) — so no descriptor
+// client can resolve its target yet, and per OpDispatchSpec.TargetType a
+// client that cannot resolve one "has no business offering the op". The
+// descriptor is still what this package OWES the vocabulary: the day a
+// series-entity row exists the op lights up, whereas a missing descriptor
+// would leave a granted op invisible with nothing naming why. cmd/wellness-app
+// reaches the op through its own hand-built envelope either way.
 //
 // TombstoneStudio and CreateInstructor are granted `operator` alone
 // (permissions.go's mk() helper — entity provisioning stays a trusted-tool
@@ -534,6 +545,64 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// short-circuit walks the actor's own holdsRole links to test
 				// for the operator role (actor_holds_operator).
 				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "TombstoneSessionSeries",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Call off a recurring class",
+				Description: "Cancel every class still to come in this recurring run. Classes that have already happened are left alone.",
+				Icon:        "cancel",
+				Tone:        "destructive",
+				SubmitLabel: "Call off remaining classes",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.sessionseries.<NanoID> of the recurring class to call off — auto-filled from the series being viewed."},` +
+				`"studio":{"type":"string","title":"Studio","description":"vtx.studio.<NanoID> — must be the series' actual studio."}},` +
+				`"required":["seriesKey","studio"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The recurring class being called off — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. Only its still-upcoming occurrences are cancelled; the series record itself, and every class that already ran, survive.",
+				"studio":    "The studio this recurring class runs at — it must be the series' own studio, so a mismatched value is rejected, and only occurrences still held at it are cancelled.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       sessionSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  sessionSeriesVertexDDL,
+				// `{entity.studioKey}` fills the studio off the series row
+				// being viewed, the same auto-fill TombstoneSession takes off
+				// the session row — the one value only the machine knows is
+				// never asked of the staffer.
+				ContextParams: map[string]string{
+					"studio": "{entity.studioKey}",
+				},
+				// The series vertex is hydrated (vertex_alive + class_of read
+				// it from declared state, not live KV), so its absence is a
+				// correctness error, not a rejection the script renders.
+				Reads: []string{"{payload.seriesKey}"},
+				// The studio confirmation probe. Absence is a meaningful
+				// rejection the script renders (WrongStudio), not a
+				// correctness error — the same shape TombstoneSession's own
+				// atStudio probe uses. Every per-occurrence read past this one
+				// is a class-(e) follow-up off the partOf walk: a caller holds
+				// only the series key, so which sessions hang off it is not
+				// declarable up front.
+				OptionalReads: []string{
+					"lnk.sessionseries.{payload.seriesKey:id}.atStudio.studio.{payload.studio:id}",
+				},
+				// Two walks. The series' own partOf-in set is the op's whole
+				// subject and its hub is right there in the payload, so it is
+				// DECLARED rather than left to the read-drift baseline — the
+				// per-occurrence follow-ups off it (each occurrence's atStudio
+				// link, its .schedule, its ledBy walk) are class-(e) and
+				// undeclarable, since no caller can name a key the walk has
+				// not yet resolved. The second is the operator-role
+				// confinement probe: the workplace-exempt short-circuit walks
+				// the actor's own holdsRole links (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.seriesKey}", Relation: "partOf", Direction: "in"},
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},

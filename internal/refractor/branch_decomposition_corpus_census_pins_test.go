@@ -134,9 +134,12 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"wellnessNoShowSettlement":          {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
 	"wellnessOrphanedBookingSettlement": {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"wellnessRefundSettlement":          {"g1/o1!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 1},
-	"wellnessSessions":                  {"g2/o2!no-aggregating-item", 0, 2},
-	"wellnessStudios":                   {"g0/o0!no-aggregating-item", 0, 0},
-	"wellnessWaitlistPromotion":         {"g1/o1[b] g0/o0!no-aggregating-item", 1, 1},
+	// Three sibling OPTIONAL MATCHes off the session anchor now (atStudio,
+	// ledBy, partOf), each 0..1 and none aggregating — g2/o2 -> g3/o3 is the
+	// third branch arriving, not a change in how the two existing ones fold.
+	"wellnessSessions":          {"g3/o3!no-aggregating-item", 0, 3},
+	"wellnessStudios":           {"g0/o0!no-aggregating-item", 0, 0},
+	"wellnessWaitlistPromotion": {"g1/o1[b] g0/o0!no-aggregating-item", 1, 1},
 }
 
 // decomposingCorpusLenses is the population whose sibling branches the executor

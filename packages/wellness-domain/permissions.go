@@ -42,6 +42,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // confined by the script to a session it is ledBy-bound to, exactly like
 // TombstoneSession.
 //
+// TombstoneSessionSeries grants [operator, frontOfHouse] — CreateSessionSeries's
+// grant exactly, since calling a recurring class off a studio's grid is the
+// same front-desk beat as putting it there, and the script applies the same
+// `require_workplace` walk off the series' own studio. `provider` is
+// deliberately absent, the one place this op's grant departs from
+// TombstoneSession's: there is no instructor param to route a bound-instructor
+// caller through, and an instructor's standing is over the classes they lead,
+// not over a studio's whole standing booking — an instructor who wants out of
+// one occurrence still has TombstoneSession for it.
+//
 // TombstoneSession additionally grants `provider` and `frontOfHouse` at
 // scope=any (widening the EXISTING scope=any row's GrantsTo, never a second
 // row — a permission's identity is its (operationType, scope) pair, Contract
@@ -107,6 +117,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CreateSessionSeries",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit CreateSessionSeries (schedules occurrenceCount occurrences of a recurring class on a studio's grid in one atomic op) — the same studio front-desk beat as CreateSession, confined by the same in-script workplace walk.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "TombstoneSessionSeries",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit TombstoneSessionSeries (calls off every still-upcoming occurrence of a recurring class in one act) — the same studio front-desk beat as CreateSessionSeries, confined by the same in-script workplace walk on the series' own studio. Deliberately NOT granted to `provider`, unlike TombstoneSession: a bound instructor cancels the one class they lead, not a studio's whole standing booking, and this op takes no instructor param to bind such a caller with.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{

@@ -337,8 +337,8 @@ RETURN
   bk.status.data.value AS status,
   [(bk)-[:forSession]->(se:session)-[:atLocation]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
-// wellnessSessionsSpec projects one row per session, walking atStudio and
-// ledBy (each 0..1, so the row stays one-per-anchor — the §10.2 shape,
+// wellnessSessionsSpec projects one row per session, walking atStudio, ledBy
+// and partOf (each 0..1, so the row stays one-per-anchor — the §10.2 shape,
 // mirroring clinicAppointmentsSpec's forPatient/withProvider walk).
 // studioName/studioKey are null when the studio link is absent — CreateSession
 // always writes atStudio, so in practice this means the studio was later
@@ -361,6 +361,24 @@ RETURN
 // projected on this OPEN read model deliberately — a class instructor is the
 // analog of clinic's provider directory, which stays public precisely while
 // patient names moved behind the Protected lens.
+//
+// seriesKey names the recurring-class parent CreateSessionSeries linked this
+// occurrence to (`session partOf sessionseries`, ddls.go), and is null for
+// the many sessions CreateSession minted one at a time. Nothing else on this
+// row distinguishes an occurrence from a one-off, which is what left a whole
+// series unaddressable: TombstoneSessionSeries takes a seriesKey, and no
+// reader could name one because the series vertex is reachable only from its
+// occurrences' own links. A consumer additionally derives "how many
+// occurrences are still upcoming" by grouping the rows it already holds on
+// this column — the same client-side aggregation bookedCount uses below,
+// for the same reason (no aggregate COUNT).
+//
+// The series' OWN .definition (name, capacity, cadence, occurrenceCount) is
+// deliberately NOT projected alongside it: every occurrence carries its own
+// .schedule copy of the fields a reader renders, and each stays individually
+// editable by ReassignSession afterward, so re-projecting the parent's
+// original intent would show a reader the series as authored rather than the
+// occurrence as it now stands.
 //
 // bookedCount is DELIBERATELY not projected here — the lens engine has no
 // aggregate COUNT; a consuming FE derives it client-side from
@@ -394,6 +412,7 @@ RETURN
 const wellnessSessionsSpec = `MATCH (se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
 OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
+OPTIONAL MATCH (se)-[:partOf]->(ss:sessionseries)
 RETURN
   se.key AS key,
   se.key AS sessionKey,
@@ -407,6 +426,7 @@ RETURN
   s.profile.data.name AS studioName,
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
+  ss.key AS seriesKey,
   [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations,
   (s.key = null) AS missingStudio,
   (i.key = null) AS missingInstructor`

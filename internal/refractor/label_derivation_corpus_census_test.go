@@ -295,7 +295,11 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"wellnessBookers":        {broad, "booking identity session", modeBroad},
 	"wellnessIdentitiesRead": {broad, "booking identity leaseapp session", modeBroad},
 	"wellnessMembers":        {broad, "identity leaseapp", modeBroad},
-	"wellnessSessions":       {broad, "instructor session studio", modeBroad},
+	// `sessionseries` joins the label set with the partOf hop: the consumer
+	// filter and the fan-out arms both judge events against it, so a series
+	// vertex changing must now wake this lens. Still modeBroad — a fourth
+	// label does not narrow anything.
+	"wellnessSessions": {broad, "instructor session sessionseries studio", modeBroad},
 }
 
 // consumerFilterMode runs a compiled cypher through the SAME

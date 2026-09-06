@@ -47,10 +47,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 19; got != want {
+	if got, want := len(Package.Permissions), 20; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 12; got != want {
+	if got, want := len(Package.OpMetas), 13; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -122,6 +122,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	}{
 		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", operatorOnly},
 		{"CreateSession", "any", staff}, {"CreateSessionSeries", "any", staff},
+		// TombstoneSessionSeries is staff-only where TombstoneSession below is
+		// staff + provider: an instructor cancels the class they lead, never a
+		// studio's whole standing booking (permissions.go).
+		{"TombstoneSessionSeries", "any", staff},
 		{"TombstoneSession", "any", []string{"operator", "provider", "frontOfHouse"}},
 		{"ReassignSession", "any", []string{"operator", "frontOfHouse", "provider"}},
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},

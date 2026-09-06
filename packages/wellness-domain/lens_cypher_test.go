@@ -296,6 +296,46 @@ func TestWellnessSessions_NoResidentPriceCentsNullSafe(t *testing.T) {
 	require.Nil(t, rows[0].Values["residentPriceCents"])
 }
 
+// TestWellnessSessions_JoinsSeries proves the partOf hop: an occurrence
+// CreateSessionSeries minted projects its series parent's key, and a session
+// with no partOf link projects a null one — both in the SAME projection, so
+// the join is proved to discriminate rather than to be uniformly present or
+// uniformly absent. One row per session either way (0..1, no fan-out), the
+// same shape the atStudio join above proves.
+func TestWellnessSessions_JoinsSeries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	occKey := f.vtx(t, "occurrence", "session")
+	seriesKey := f.vtx(t, "eveningflow", "sessionseries")
+	f.aspect(t, "eveningflow", "definition", "sessionSeriesDefinition", map[string]any{
+		"name": "Evening Flow", "capacity": 20.0, "intervalDays": 7.0, "occurrenceCount": 8.0,
+		"firstStartsAt": "2026-07-08T18:00:00Z", "firstEndsAt": "2026-07-08T19:00:00Z",
+	})
+	f.aspect(t, "occurrence", "schedule", "sessionSchedule", map[string]any{
+		"name": "Evening Flow", "startsAt": "2026-07-08T18:00:00Z", "endsAt": "2026-07-08T19:00:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "partOf", "occurrence", "eveningflow")
+
+	// A one-off CreateSession minted alongside it — no partOf link at all.
+	oneOffKey := f.vtx(t, "oneoff", "session")
+	f.aspect(t, "oneoff", "schedule", "sessionSchedule", map[string]any{
+		"name": "Drop-in Sculpt", "startsAt": "2026-07-09T18:00:00Z", "endsAt": "2026-07-09T19:00:00Z", "capacity": 12.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 2, "one row per session; the partOf hop is 0..1 and must not fan out")
+
+	occ := wdRowByKey(rows, occKey)
+	require.NotNil(t, occ)
+	require.Equal(t, seriesKey, occ["seriesKey"], "the occurrence projects its series parent")
+
+	oneOff := wdRowByKey(rows, oneOffKey)
+	require.NotNil(t, oneOff)
+	require.Nil(t, oneOff["seriesKey"], "a session with no partOf link projects a null seriesKey")
+}
+
 // TestWellnessBookings_JoinsSessionAndBooker proves the roster / my-classes
 // join: one row per booking, with both the session neighbour (sessionName,
 // startsAt/endsAt) and booker neighbour (bookerKey) resolved.
