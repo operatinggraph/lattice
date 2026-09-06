@@ -22,11 +22,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // reminder targets use. The bridge's notification send hangs off the op's own
 // transactional outbox, not off a pattern.
 //
-// Params{accountKey: row.entityKey, leaseAppKey: row.leaseAppKey} routes the
-// candidate account and the lease it is held for (already a projected
-// cafeArrearsReminders column — the row's OPTIONAL heldFor walk) into the op's
-// payload; the lease is carried into the notification's params for the adapter's
-// own addressing and nothing the op decides depends on it.
+// Params{accountKey: row.entityKey} routes the candidate account into the
+// op's payload. The lease it is held for is NOT routed through Params: the
+// row's own leaseAppKey column is OPTIONAL (an account with no live heldFor
+// lease still projects a row, with a null leaseAppKey — lenses.go), and the
+// strategist refuses to dispatch any row whose Params reference a null
+// column (internal/weaver/strategist.go), which silently starves the gap
+// forever for exactly the accounts most worth aging. The op instead resolves
+// the lease itself, live, off the account's own heldFor out-link — the same
+// state the row's column merely projects — so evaluation never depends on
+// which shape the row happens to be in. leaseAppKey stays a projected column
+// here purely for operator observability (the weaver-targets read model).
 //
 // Reads[row.entityKey] routes the account ROOT (the liveness guard's hydration).
 // OptionalReads[row.entityKey.arrears] routes the account's own arrears state —
@@ -41,7 +47,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // the head — the walk itself is nameable up front (the hub is the row's own
 // account), the per-transaction .entry reads it discovers are not, which is
 // exactly the class-(e) split CreditCafeAccount's own backfill replay declares
-// itself under (opmetas.go).
+// itself under (opmetas.go). It also declares the heldFor walk lease_for_account
+// runs to resolve the notification's lease live — likewise nameable up front off
+// the same hub, and read-drift-checked exactly like postedTo.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -59,11 +67,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// shape cafe-domain's own directOps use, and the ledger
 					// operationType namespace is global (permissions.go).
 					Class:         "cafeaccount",
-					Params:        map[string]string{"accountKey": "row.entityKey", "leaseAppKey": "row.leaseAppKey"},
+					Params:        map[string]string{"accountKey": "row.entityKey"},
 					Reads:         []string{"row.entityKey"},
 					OptionalReads: []string{"row.entityKey.arrears"},
 					Enumerations: []pkgmgr.EnumerationSpec{
 						{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
 					},
 				},
 			},

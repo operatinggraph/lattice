@@ -46,7 +46,7 @@ func accountDDL() pkgmgr.DDLSpec {
 			"already-existing aspect key. Writes the heldFor link (cafeaccount→leaseapp, the cafeaccount is the " +
 			"later-arriving vertex so it is the source — Contract #1 §1.1). Requires the leaseAppKey be a live " +
 			"leaseapp (no orphan accounts). " +
-			"EvaluateCafeArrears{accountKey, leaseAppKey?} is the second operation on this DDL, dispatched by " +
+			"EvaluateCafeArrears{accountKey} is the second operation on this DDL, dispatched by " +
 			"Weaver's cafeArrearsReminders playbook rather than by a person: it replays the account's own postedTo " +
 			"history under a bounded budget, ages it with the same FIFO the resident's statement runs (credits offset " +
 			"the oldest still-open charge first; an unapplied credit carries forward as surplus), and records the " +
@@ -62,28 +62,32 @@ func accountDDL() pkgmgr.DDLSpec {
 			"refused: the evaluation DEGRADES, recording historyTooLong (carrying dueAt/remindedFor/sentAt as they " +
 			"stood, clearing stale) and sending nothing, which holds the row quiet and visible rather than " +
 			"re-dispatching a doomed evaluation on every window; the next posted entry clears the flag and buys one " +
-			"more attempt. Restricted to Weaver's dispatch actor: the account it names is forwarded into a message a " +
-			"resident actually receives.",
+			"more attempt. The lease the notification addresses is resolved LIVE off the account's own heldFor " +
+			"out-link, never from the payload; an account with no live heldFor lease is still evaluated (the " +
+			"arrears fact is about the account), and the notification's params carry a leaseAppKey only where " +
+			"one resolves. Restricted to Weaver's dispatch actor: the account it names is forwarded into a " +
+			"message a resident actually receives.",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"leaseAppKey":{"type":"string","description":"CreateAccount: vtx.leaseapp.<NanoID> of the resident lease this café account is for (required there, validated alive). The account gets its own independently-minted NanoID; uniqueness (one café account per lease) is enforced via the leaseapp's .cafeLedgerAccount guard aspect, not the account's own id. EvaluateCafeArrears: optional, carried into the notification's params for the adapter's own addressing."},` +
+			`{"leaseAppKey":{"type":"string","description":"CreateAccount only, and required there. vtx.leaseapp.<NanoID> of the resident lease this café account is for (validated alive). The account gets its own independently-minted NanoID; uniqueness (one café account per lease) is enforced via the leaseapp's .cafeLedgerAccount guard aspect, not the account's own id."},` +
 			`"accountKey":{"type":"string","description":"EvaluateCafeArrears only: vtx.cafeaccount.<NanoID> of the account whose arrears are being aged (required there, validated alive)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> — the created account on CreateAccount (the caller must read it from the ACCEPTED reply, since the id can no longer be derived from leaseAppKey), or the evaluated account on EvaluateCafeArrears."}}}`,
 		FieldDescription: map[string]string{
-			"leaseAppKey": "CreateAccount: full vtx.leaseapp.<NanoID> key of the resident lease the café account is opened for — validated alive, then the account is minted under a fresh independent NanoID alongside the leaseapp's .cafeLedgerAccount guard aspect (one café account per lease) and the heldFor link (cafeaccount→leaseapp). EvaluateCafeArrears: optional, the lease the account is held for (the playbook supplies it from the row's own heldFor walk), carried into the notification params only.",
+			"leaseAppKey": "CreateAccount only, and required there. Full vtx.leaseapp.<NanoID> key of the resident lease the café account is opened for — validated alive, then the account is minted under a fresh independent NanoID alongside the leaseapp's .cafeLedgerAccount guard aspect (one café account per lease) and the heldFor link (cafeaccount→leaseapp). EvaluateCafeArrears takes no leaseAppKey field: the lease is resolved live off that same heldFor link, and carried into the notification params only where one resolves.",
 			"accountKey":  "EvaluateCafeArrears only, and required there. Full vtx.cafeaccount.<NanoID> key of the account to age. Validated alive; its postedTo history is replayed under a bounded budget and the FIFO-oldest open charge's due date is recorded on the account's .arrears aspect.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "EvaluateCafeArrears — age a house tab and remind once it is overdue",
-				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>"},
 				ExpectedOutcome: "Validates the account is alive, replays its postedTo history under the evaluation budget and ages it " +
 					"FIFO. Writes vtx.cafeaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?, sentAt?} — {evaluatedAt} " +
 					"alone when nothing is owed. When the oldest open charge's due date has passed it stamps remindedFor = " +
 					"that date, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps sentAt and " +
-					"emits external.notification keyed <accountKey>:<dueAt>. A re-run recomputes the head, finds sentAt " +
+					"emits external.notification keyed <accountKey>:<dueAt>, with a leaseAppKey in its params only where " +
+					"the account's own heldFor link resolves to a live lease. A re-run recomputes the head, finds sentAt " +
 					"already recorded, and sends nothing. A history past the replay budget records historyTooLong instead, " +
 					"carrying what was already recorded and sending nothing. Rejects AuthDenied for any actor but Weaver's " +
 					"dispatch actor and UnknownAccount for an absent or tombstoned account.",

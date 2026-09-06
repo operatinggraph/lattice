@@ -2030,6 +2030,7 @@ func arrearsHint(acctKey string) *processor.ContextHint {
 		OptionalReads: []string{acctKey + ".arrears"},
 		Enumerations: []processor.EnumerationHint{
 			{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+			{Hub: acctKey, Relation: "heldFor", Direction: "out"},
 		},
 	}
 }
@@ -2041,15 +2042,11 @@ func arrearsHint(acctKey string) *processor.ContextHint {
 // Processor's operationType→class reverse index, which resolves to the
 // cafeaccount vertexType handler.
 func evaluateArrears(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
-	cons jetstream.Consumer, label, actor, acctKey, leaseKey, submittedAt string,
+	cons jetstream.Consumer, label, actor, acctKey, submittedAt string,
 	want processor.MessageOutcome) (*processor.OperationReply, string) {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
-	payload := `{"accountKey":"` + acctKey + `"`
-	if leaseKey != "" {
-		payload += `,"leaseAppKey":"` + leaseKey + `"`
-	}
-	payload += `}`
+	payload := `{"accountKey":"` + acctKey + `"}`
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -2317,7 +2314,7 @@ func TestArrears_EvaluateSendsOnceThenNothing(t *testing.T) {
 		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
 
 	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrsendeval00001",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
 
 	data := arrearsData(t, ctx, conn, acctKey)
 	if got, _ := data["dueAt"].(string); got != wantDue {
@@ -2355,7 +2352,7 @@ func TestArrears_EvaluateSendsOnceThenNothing(t *testing.T) {
 		t.Fatalf("params.accountKey = %q, want %q", got, acctKey)
 	}
 	if got, _ := params["leaseAppKey"].(string); got != leaseKey {
-		t.Fatalf("params.leaseAppKey = %q, want %q (the playbook routes it from the row's heldFor walk)", got, leaseKey)
+		t.Fatalf("params.leaseAppKey = %q, want %q (resolved live off the account's own heldFor link, not the payload)", got, leaseKey)
 	}
 	if got, _ := params["reminderType"].(string); got != "cafeArrears" {
 		t.Fatalf("params.reminderType = %q, want cafeArrears", got)
@@ -2367,7 +2364,7 @@ func TestArrears_EvaluateSendsOnceThenNothing(t *testing.T) {
 	// The re-dispatch. Same account, same history, a later instant: the head is
 	// unchanged, remindedFor already names it, and NOTHING goes out.
 	_, reqID2 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrsendeval00002",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
 	if notif := arrearsNotification(t, ctx, conn, reqID2); notif != nil {
 		t.Fatalf("a re-dispatched evaluation must send NOTHING for an episode already reminded for, got %+v", notif)
 	}
@@ -2399,7 +2396,7 @@ func TestArrears_EvaluateRearmsOnACoveredHead(t *testing.T) {
 	}
 
 	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrrearmeval0001",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
 
 	data := arrearsData(t, ctx, conn, acctKey)
 	// The Aug 1 charge was fully paid off, so the head is the Aug 20 one.
@@ -2446,7 +2443,7 @@ func TestArrears_OneNotificationPerEpisodeNotPerHead(t *testing.T) {
 
 	// The first charge falls due and the reminder goes out.
 	_, reqID1 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000001",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-17T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-17T09:00:00Z", processor.OutcomeAccepted)
 	if arrearsNotification(t, ctx, conn, reqID1) == nil {
 		t.Fatal("the first overdue head in an episode must send")
 	}
@@ -2466,7 +2463,7 @@ func TestArrears_OneNotificationPerEpisodeNotPerHead(t *testing.T) {
 	}
 
 	_, reqID2 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000002",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-27T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-27T09:00:00Z", processor.OutcomeAccepted)
 	if notif := arrearsNotification(t, ctx, conn, reqID2); notif != nil {
 		t.Fatalf("the head moved WITHIN one episode — a resident paying their tab down must not be nagged twice: %+v", notif)
 	}
@@ -2500,7 +2497,7 @@ func TestArrears_OneNotificationPerEpisodeNotPerHead(t *testing.T) {
 		t.Fatal("a fresh episode starts with no send record")
 	}
 	_, reqID3 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000003",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-09-14T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-14T09:00:00Z", processor.OutcomeAccepted)
 	if arrearsNotification(t, ctx, conn, reqID3) == nil {
 		t.Fatal("a NEW episode past its term must send — one per episode is not one per account")
 	}
@@ -2522,7 +2519,7 @@ func TestArrears_ForgedSendRefused(t *testing.T) {
 	before := arrearsData(t, ctx, conn, acctKey)
 
 	reply, _ := evaluateArrears(t, ctx, conn, cp, cons, "cafearrfgdeval000001",
-		ledgerActorKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeRejected)
+		ledgerActorKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeRejected)
 	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
 		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
 	}
@@ -2538,32 +2535,74 @@ func TestArrears_ForgedSendRefused(t *testing.T) {
 	}
 }
 
-// TestArrears_MalformedLeaseKeyRefused (g2). leaseAppKey decides nothing this op
-// computes — which is exactly why it is easy to let through unchecked. It is
-// copied VERBATIM into the notification params the bridge's adapter addresses a
-// real message from, so an unvalidated payload field reaching an external send
-// is the same forged-send surface the actor guard closes, one step further
-// along. The positive vector is TestArrears_EvaluateSendsOnceThenNothing, which
-// passes a real lease key through the same field and asserts it lands in params.
-func TestArrears_MalformedLeaseKeyRefused(t *testing.T) {
+// TestArrears_LeaseResolvedFromAccountState (g2a). leaseAppKey never travels
+// through the payload — a Weaver Params reference to a null lens column
+// (an account with no live heldFor lease) would otherwise make the
+// strategist refuse to dispatch the row at all (internal/weaver/strategist.go),
+// silently starving the very accounts most worth aging. The op resolves the
+// lease itself, live, off the account's own heldFor out-link, so it decides
+// this with no payload field to trust or forge. TestArrears_EvaluateSendsOnceThenNothing
+// already asserts the resolved key lands in the notification's params; this is
+// that guarantee's own dedicated positive vector, verifying it comes from
+// state rather than incidentally matching a payload value that no longer
+// exists.
+func TestArrears_LeaseResolvedFromAccountState(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
-	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsbadlease")
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsleasestate")
 
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRBDLLEASEHJK")
-	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrbdlacct000001", leaseKey)
-	debitAt(t, ctx, conn, cp, cons, "cafearrbdldebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRLSSLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrlssacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrlssdebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
 
-	reply, _ := evaluateArrears(t, ctx, conn, cp, cons, "cafearrbdleval000001",
-		bootstrap.WeaverIdentityKey, acctKey, "vtx.identity."+ledgerActorID, "2026-08-22T09:00:00Z",
-		processor.OutcomeRejected)
-	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
-		t.Fatalf("want an InvalidArgument rejection, got %+v", reply.Error)
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrlsseval000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	notif := arrearsNotification(t, ctx, conn, reqID)
+	if notif == nil {
+		t.Fatal("a past-due account must send")
 	}
-	if !strings.Contains(reply.Error.Message, "leaseAppKey") {
-		t.Fatalf("the refusal must name the field it refused, got %q", reply.Error.Message)
+	params, _ := notif["params"].(map[string]any)
+	if got, _ := params["leaseAppKey"].(string); got != leaseKey {
+		t.Fatalf("params.leaseAppKey = %q, want %q — resolved live off the account's own heldFor link", got, leaseKey)
 	}
-	if _, ok := arrearsData(t, ctx, conn, acctKey)["sentAt"]; ok {
-		t.Fatal("a refused evaluation records no send")
+}
+
+// TestArrears_NoHeldForLeaseStillEvaluates (g2b) is the other half: an account
+// that carries no live heldFor lease at all — never bound to one, or bound to
+// one that has since gone dead — is still evaluated, because the arrears fact
+// is about the ACCOUNT, not the lease it happens to be held for. Before the
+// lease moved off Params this shape was UNREACHABLE: Weaver's strategist
+// refuses to dispatch any row whose Params reference a null column, so this
+// account's gap simply never opened. A past-due evaluation on it still sends
+// — with no leaseAppKey in the notification's params, because none resolves.
+func TestArrears_NoHeldForLeaseStillEvaluates(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsnolease")
+
+	acctKey := "vtx.cafeaccount.BBCAFEARRNLSACCTHJKM"
+	seedVertex(t, ctx, conn, acctKey, "cafeaccount", map[string]any{})
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEARRNLSTXNAHJKM", "debit", 1425)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrnolseval00001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	wantDue := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q — a leaseless account ages from its own history same as any other", got, wantDue)
+	}
+	if got, _ := data["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt = %q, want the evaluation's own submittedAt — a leaseless account still gets its one reminder", got)
+	}
+
+	notif := arrearsNotification(t, ctx, conn, reqID)
+	if notif == nil {
+		t.Fatal("a past-due account with no lease must still send")
+	}
+	params, _ := notif["params"].(map[string]any)
+	if _, ok := params["leaseAppKey"]; ok {
+		t.Fatalf("no lease resolved, so params must carry no leaseAppKey: %+v", params)
 	}
 }
 
@@ -2653,7 +2692,7 @@ func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 	})
 
 	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrbgteval000001",
-		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
 
 	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
 		t.Fatalf("an evaluation that could not read the history must send nothing — it does not know the head: %+v", notif)
@@ -2881,7 +2920,7 @@ func TestArrears_FIFOMatchesTheStatement(t *testing.T) {
 		}
 
 		evaluateArrears(t, ctx, conn, cp, cons, "cafearrfifoeval"+strconv.Itoa(100+vi),
-			bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-29T00:00:00Z", processor.OutcomeAccepted)
+			bootstrap.WeaverIdentityKey, acctKey, "2026-08-29T00:00:00Z", processor.OutcomeAccepted)
 
 		got, _ := arrearsData(t, ctx, conn, acctKey)["dueAt"].(string)
 		if got != vec.wantDue {
@@ -2943,9 +2982,10 @@ func TestArrears_UndeclaredSubmitterStillHydratesArrears(t *testing.T) {
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{acctKey},
-			// The walk stays declared — only a read can be derived server-side.
+			// Both walks stay declared — only a read can be derived server-side.
 			Enumerations: []processor.EnumerationHint{
 				{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+				{Hub: acctKey, Relation: "heldFor", Direction: "out"},
 			},
 		},
 	}

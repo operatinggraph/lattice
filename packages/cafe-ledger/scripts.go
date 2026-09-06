@@ -264,6 +264,30 @@ def is_cafeaccount_key(key):
             return False
     return True
 
+def lease_for_account(acct_key):
+    # The lease this cafeaccount is held for, or None where no live heldFor
+    # link exists -- an account created before a lease was bound to it, or
+    # one whose lease has since gone dead, still ages its own history
+    # normally. Mirrors transactionDDLScript's own account_unit heldFor walk,
+    # one hop shorter (that walk continues on to the unit; this one stops at
+    # the lease itself, which is all EvaluateCafeArrears' notification needs).
+    # read-posture: (e) relation=heldFor epoch=none -- a cafeaccount carries
+    # at most one heldFor link, so this is never a keyspace scan.
+    page, _ = kv.Links(acct_key, "heldFor", "out")
+    lease = None
+    for lk in page:
+        if not lk.isDeleted:
+            lease = lk.targetVertex
+    if lease == None:
+        return None
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the lease vertex itself, data-derived and unknowable
+    # client-side.
+    lease_doc = kv.Read(lease)
+    if lease_doc == None or lease_doc.isDeleted:
+        return None
+    return lease
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g), for the same reason transactionDDLScript's own
     # derive_reads exists: the .arrears write below is a bare update
@@ -314,18 +338,16 @@ def execute(state, op):
         if not vertex_alive(state, acct_key):
             fail("UnknownAccount: " + acct_key + " is absent or tombstoned; no arrears evaluated")
 
-        # The lease this account is held for, supplied by the playbook as
-        # Params{leaseAppKey: row.leaseAppKey} (the lens's own heldFor walk).
-        # Optional: it is routed into the notification's params for the
-        # adapter's own addressing, and nothing this op decides depends on it.
-        lease_key = optional_string(p, "leaseAppKey")
-        if lease_key != None:
-            # Held to the grammar even though nothing this op DECIDES depends on
-            # it: the value is copied verbatim into the notification's params,
-            # which the bridge's adapter addresses a real message from. An
-            # unchecked payload field reaching an external send is the same
-            # forged-send surface the actor guard above closes, one step later.
-            parts_of(lease_key, "leaseAppKey", "leaseapp")
+        # The lease this account is held for, resolved LIVE from the account's
+        # own heldFor out-link -- never from the payload, so the lease a
+        # resident is told they owe against cannot be forged by an arbitrary
+        # submitter (the same forged-send surface the actor guard above
+        # closes, one step further along). Optional: an account with no live
+        # heldFor lease is still evaluated -- the arrears fact is about the
+        # ACCOUNT, not the lease it happens to be held for -- and the
+        # resolved lease is routed into the notification's params purely for
+        # the adapter's own addressing; nothing this op decides depends on it.
+        lease_key = lease_for_account(acct_key)
 
         # The op's own timestamp, normalized to canonical UTC so the lexical
         # compare against dueAt below is sound to the second (the lease-signing
