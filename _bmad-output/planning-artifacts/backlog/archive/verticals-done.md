@@ -2,6 +2,14 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-02 · `46268dee` · A corrected clinic no-show now reverses its stranded fee — `clinicNoShowSettlement`'s new `missing_reversal` gap auto-credits it back once `CorrectAppointmentStatus` moves the appointment off `noShow`.
+- 2026-09-02 · `70c73ac1` · A corrected wellness no-show now refunds its fee — `SetBookingAttendance` mints a wellnessrefund marker on a noShow→attended re-mark, mirroring `ReleaseOrphanedBooking`.
+- 2026-09-02 · (observation, no code) · The executed lease document's `AttachObject` grant fix (`2026-08-27` live) converged — Weaver's reclaim sweep has attached all known-affected leases, none failing since; no code change needed.
+- 2026-09-02 · `1b4bff22` · A wellness booking the auto-no-show sweep flipped before its class was called off can finally be released and its $25 fee refunded — `ReleaseOrphanedBooking` now accepts `noShow`.
+- 2026-09-02 · `a03ca337` · The staff Manage Menu grid stops hiding a building-level item behind a same-named unit-level one, and front desk gets a standalone worst-first arrears list — visibility that used to vanish the moment a tab settled.
+- 2026-09-02 · `b569fd2c` · The café stale-tab auto-settle timer finally arms — `cafeStaleTabSettlement`'s BodyColumns now project the `freshUntil` its cypher already computed.
+- 2026-09-02 · `d9d7a4fd` · A staff Settle can finally close another resident's café tab — the chargedTo backfill is confirmed via a live link read, not a declared one keyed on the caller's own (nonexistent, for staff) lease.
+- 2026-09-02 · `c3c91c79` · The clinic auto-no-show sweep no longer blames a patient for a provider's own time off — `MarkPastDueNoShow` no-ops when `.timeOff` covers the visit.
 - 2026-09-02 · `785b446b` · A no-show no longer silently clears the clinic follow-up worklist, and a requested follow-up now always carries a date — `RecordEncounter` requires `followUpDate` whenever `followUpRequested` is true.
 - 2026-09-01 · `e1c1a6a0`+`9d49a3b1` · Front desk can finally correct a wrong terminal appointment status (e.g. a no-show who actually showed) — new `CorrectAppointmentStatus` op.
 - 2026-09-01 · `a0b6264b` · An applicant with N applications now gets one onboarding task, not N — `missing_onboarding` re-anchored onto a new identity-scoped target (lease-signing 0.31.16).
