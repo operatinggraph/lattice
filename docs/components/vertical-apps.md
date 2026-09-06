@@ -58,3 +58,17 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats
   (2026-09-06). Check: run `lint-app-op-descriptors` on every `cmd/<app>` edit, comments included, and name
   an undescribed op by role, never by literal.
+- **A server refusal added to a script leaves the OpMeta descriptor beside it asserting the old rule** — the DDL's
+  InputSchema and the package's OpMeta are two declarations of one op; a descriptor-driven form then renders the
+  field optional and the submit fails with no field-level guidance. Minted: wellness manual-charge memo (2026-09-06),
+  caught cold. Check: for every new `fail(...)` on a param, grep the op's OpMeta InputSchema + FieldDescription and
+  pin `required` in the opmetas test.
+- **A new DOM write inside a generation-guarded async renderer bypasses the guard** — every existing append re-checks
+  `generation !== rosterGeneration`; a note added later did not, so a class switched mid-fetch lands its note under
+  the wrong roster. Minted: wellness studio-retired note (2026-09-06), caught cold. Check: any append after an
+  `await` in a renderer that owns a generation token re-checks it first.
+- **A transport throw after a destructive or secret-minting submit is narrated as "did not land"** — `api()` throws
+  on any non-OK response, including a 5xx after the Processor committed, so a rotate/refund/tombstone toast that
+  says "could not" may be wrong and the only copy of a minted secret is gone. Minted: LoftSpace RotateClaimKey
+  (2026-09-06), caught cold. Check: the throw path of a ceremony or irreversible op says the write may have landed
+  and what to do next, in the `withheld` vocabulary.

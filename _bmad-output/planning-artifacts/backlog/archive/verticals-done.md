@@ -2,6 +2,11 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-05 · (re-measure at head) · Clinic front desk `CreateAppointment` 7/7 + `SetAppointmentStatus` 8/8, 0 timeouts, medians 30/33 ms — §9 PASS.
+- 2026-09-05 · (not reproducible at head) · Café picker duplicates — both pickers already fetch the lease-confined, deduped `/api/menu?leaseAppKey=` (`0653c57a`): census 45 leases → 2 items, 10 → 0 (`missingLocation`), none doubled.
+- 2026-09-05 · `a2a449c1` · A registered patient is visible to their desk at once (`registeredAtSite` links + roster anchor) and a visit series on a tombstoned patient stops advancing (`visitSeriesDue` requires `forPatient`).
+- 2026-09-05 · `45271d83` · An approved lease with no agreed rent is billed — `leaseRentSettlement` raises `missing_terms` → `BackfillLeaseTerms`; Riley Chen's lease backfilled $1,900 live within a minute.
+- 2026-09-05 · `feb800de` · The executed lease is served only once approved (declined/undecided 404) and the managing landlord can download it — landlord lens carries the doc pointers.
 - 2026-09-05 · (live-stack op run) · Orphaned-unit lease `fuW7HyE8At2DkH7xx28t` withdrawn + the 3 remaining stale cluster-A onboarding tasks cancelled, via the admin app session (CLI `op submit` stays classifier-refused unattended).
 - 2026-09-03 · `097aa843` · Café debt stops vanishing when a lease's unit is tombstoned — `cafeLeaseWorkplaces`'s new `missingLocation` flag routes it to every front-desk staffer instead of denying it to all of them.
 - 2026-09-03 · `3a1351cd` · The landlord portfolio card finally shows rent owed — `/api/portfolio-pulse` now folds every occupied lease's ledger balance into a worst-first arrears column, no more pulling leases one at a time.
