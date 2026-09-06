@@ -121,7 +121,7 @@ var plainPartitionCorpusVerdicts = map[string]partitionVerdict{
 	"wellnessIdentitiesRead":         {oneRowPerAnchor: true, partitions: true, identifying: []string{"identity_id"}, diffRetraction: false},
 	"wellnessInstructors":            {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"wellnessLedgerHistory":          {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
-	"wellnessMemberAccounts":         {oneRowPerAnchor: false, partitions: false, identifying: nil, diffRetraction: true},
+	"wellnessMemberAccounts":         {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"wellnessMembers":                {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"wellnessSessions":               {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"wellnessStudios":                {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
@@ -144,14 +144,12 @@ var partitionOnlyLenses = []string{
 
 // partitionRefusedLenses is the set neither predicate admits, and the reason
 // each is refused is a property of its cypher rather than of this mechanism:
-// wellnessMemberAccounts keys on the identity its booking anchor reaches;
 // capabilityRoleIndex keys on an operation type that binds the permission, with
 // no column naming the role; opCatalog keys on the anchor's own root field
 // rather than on its key.
 var partitionRefusedLenses = []string{
 	"capabilityRoleIndex",
 	"opCatalog",
-	"wellnessMemberAccounts",
 }
 
 // plainPartitionCensusFloor is the number of plain lenses that must reach the

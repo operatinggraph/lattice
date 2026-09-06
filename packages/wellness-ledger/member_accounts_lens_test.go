@@ -145,3 +145,76 @@ func memberAccountsSpecWithoutDistinct(t *testing.T) string {
 		"memberAccountsSpec no longer carries the clause this comparison is about")
 	return strings.Replace(memberAccountsSpec, distinct, plain, 1)
 }
+
+// memberAccountsSpecAnchoredOnBooking is memberAccountsSpec with the walk
+// direction reversed, so the anchor pattern (the first MATCH clause's first
+// node, full.CompiledRule.AnchorLabel) is `bk:booking` instead of
+// `id:identity` — the shape anchor-partitioned-plain-lens-retraction-design.md
+// §8 row 2 names as unable to partition, since the row's key (id.key) is then
+// a neighbour's key relative to the anchor, not the anchor's own. It exists
+// only so TestWellnessMemberAccounts_AnchorsOnIdentity's assertions
+// discriminate against a real counter-example rather than holding vacuously
+// for any spec.
+func memberAccountsSpecAnchoredOnBooking(t *testing.T) string {
+	t.Helper()
+	const reanchored, original = "MATCH (id:identity)<-[:bookedBy]-(bk:booking)", "MATCH (bk:booking)-[:bookedBy]->(id:identity)"
+	require.Contains(t, memberAccountsSpec, reanchored,
+		"memberAccountsSpec no longer carries the anchor pattern this comparison is about")
+	return strings.Replace(memberAccountsSpec, reanchored, original, 1)
+}
+
+// TestWellnessMemberAccounts_AnchorsOnIdentity is the anchor-side pin
+// (anchor-partitioned-plain-lens-retraction-design.md §8 row 2): the lens's
+// rows must PARTITION by its anchor, so Refractor can seed and retract this
+// lens per identity instead of rescanning the whole corpus + diffing the
+// whole target bucket on every event.
+//
+// A per-anchor SEEDED evaluation (EventContext.Parameters["actorKey"] pinning
+// a `{key: $actorKey}` position in the pattern, the shape projectAt/
+// projectClassPriceAt/projectRefundAt use above) is not exercisable for this
+// spec: memberAccountsSpec is a PLAIN lens with no such literal position — it
+// is Refractor's own per-anchor partition-seeding machinery
+// (internal/refractor/pipeline, internal/refractor/ruleengine/full's
+// PartitionsByAnchor/ProjectsOneRowPerAnchor) that turns an unparameterized
+// pattern like this one into a per-anchor evaluation, and that machinery is
+// exercised in internal/refractor's own corpus census tests
+// (plain_partition_census_test.go, plain_scanroot_corpus_census_test.go),
+// which this package cannot import without a cycle. What this package CAN
+// pin is the parsed spec's own structural verdict — the same one those
+// census tests read off the identical predicates — the anchor is the
+// identity, and the row's key is that anchor's own key.
+func TestWellnessMemberAccounts_AnchorsOnIdentity(t *testing.T) {
+	eng := full.New()
+
+	cr, err := eng.Parse(memberAccountsSpec)
+	require.NoError(t, err, "memberAccountsSpec must parse on the full engine")
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull, "memberAccountsSpec must compile to the full engine")
+
+	label, ok := fullCR.AnchorLabel()
+	require.True(t, ok, "the anchor pattern must carry a label")
+	require.Equal(t, "identity", label,
+		"the anchor is the first MATCH clause's first node — must be the identity, not the booking")
+
+	require.True(t, fullCR.ProjectsOneRowPerAnchor(),
+		"id.key is now the anchor's OWN key, so the lens's rows partition by anchor — "+
+			"Refractor can seed and retract per identity with no whole-bucket diff")
+
+	// A lens anchored on the booking instead must fail both assertions above:
+	// the label is the wrong vertex type, and id.key is a NEIGHBOUR's key
+	// relative to that anchor, not the anchor's own, so the partition licence
+	// is refused — proving the two assertions above discriminate rather than
+	// holding for any spec.
+	onBooking := memberAccountsSpecAnchoredOnBooking(t)
+	crOnBooking, err := eng.Parse(onBooking)
+	require.NoError(t, err, "the booking-anchored spec must still parse")
+	fullCROnBooking, isFull := crOnBooking.(*full.CompiledRule)
+	require.True(t, isFull)
+
+	labelOnBooking, ok := fullCROnBooking.AnchorLabel()
+	require.True(t, ok)
+	require.Equal(t, "booking", labelOnBooking,
+		"sanity: the alternative spec really does anchor on the booking")
+	require.False(t, fullCROnBooking.ProjectsOneRowPerAnchor(),
+		"a lens anchored on the booking does not partition by anchor — the defect the design's §8 row 2 names")
+}

@@ -193,7 +193,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"wellnessIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessInstructors":    {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessLedgerHistory":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessMemberAccounts": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"wellnessMemberAccounts": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// Acted on — see cafeLeaseWorkplaces.
 	"wellnessMembers": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// Acted on — see cafeLeaseWorkplaces.

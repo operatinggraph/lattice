@@ -79,19 +79,12 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          ledgerHistorySpec,
 		},
 		{
-			// DIFF RETRACTION: like loftspace-domain's landlordUnitsRead, this
-			// walks bookedBy structurally rather than an anchor-key equality —
-			// the output key (id.key) is the identity, not the matched
-			// booking, so Refractor's default anchor-self presence check can
-			// never see a member's LAST booking tombstone and retract their
-			// row. DiffRetraction diffs the target's live key set instead.
-			CanonicalName:  "wellnessMemberAccounts",
-			Class:          "meta.lens",
-			Adapter:        "nats-kv",
-			Bucket:         MemberAccountsBucket,
-			Engine:         "full",
-			Spec:           memberAccountsSpec,
-			DiffRetraction: true,
+			CanonicalName: "wellnessMemberAccounts",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        MemberAccountsBucket,
+			Engine:        "full",
+			Spec:          memberAccountsSpec,
 		},
 		{
 			CanonicalName:  NoShowSettlementTarget,
@@ -407,8 +400,9 @@ RETURN
   coalesce(nsbk.status.data.className, cpbk.status.data.className, rf.detail.data.className) AS className,
   coalesce(nsbk.status.data.classStartsAt, cpbk.status.data.classStartsAt, rf.detail.data.classStartsAt) AS classStartsAt`
 
-// memberAccountsSpec projects one row per identity that has ever BOOKED
-// (walked via booking's bookedBy link, DISTINCT'd — a member with many
+// memberAccountsSpec projects one row per identity that has ever BOOKED —
+// anchored on the identity itself, with the inbound bookedBy walk from
+// booking used only as an existence test (DISTINCT'd — a member with many
 // bookings still gets exactly one row) — not one row per platform identity,
 // which would scan every LoftSpace tenant / Clinic patient / Café resident
 // regardless of whether they ever touched Wellness. A member with no ledger
@@ -416,7 +410,27 @@ RETURN
 // this member opened an account" query the FE needs before its first-ever
 // charge or payment. OPTIONAL MATCH: the heldFor hop legitimately has no
 // match for a member who has never had a charge/payment.
-const memberAccountsSpec = `MATCH (bk:booking)-[:bookedBy]->(id:identity)
+//
+// Anchored on `id:identity`, not `bk:booking`: the row this lens ever emits is
+// keyed on id.key, not on the key of any matched booking, so a lens anchored
+// on booking partitions by nothing the engine can seed on — every event
+// forced a whole-corpus rescan plus a whole-bucket diff (DiffRetraction), and
+// no Refractor conjunct could ever admit a per-anchor retraction
+// (anchor-partitioned-plain-lens-retraction-design.md §8 row 2). Re-anchoring
+// on the identity makes id.key the anchor's OWN key, so the output rows
+// PARTITION by anchor (full.CompiledRule.ProjectsOneRowPerAnchor): the engine
+// seeds per identity on a bookedBy event and retracts a member's row when
+// their last booking's existence test stops matching, with no whole-bucket
+// diff. The required inbound MATCH — walking bookedBy backward from the
+// anchor rather than forward from booking — mirrors rbac-domain's
+// capabilityRoleIndexSpec (`MATCH (role:role)<-[:grantedBy]-(perm:permission)`,
+// lenses.go).
+//
+// The key shape this lens writes is UNCHANGED for its consumer
+// (cmd/wellness-app/ledger.go's KVGet(MemberAccountsBucket, identityKey)):
+// id.key was always the row's key, and still is — only which vertex the
+// engine anchors the evaluation on moved.
+const memberAccountsSpec = `MATCH (id:identity)<-[:bookedBy]-(bk:booking)
 WITH DISTINCT id
 OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
 RETURN

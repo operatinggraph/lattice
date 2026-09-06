@@ -65,10 +65,10 @@ const (
 
 // withAliasClosureBuckets pins every plain lens the installed corpus ships.
 //
-// The two memberships the design asserts and this table has to hold are F —
-// exactly the three lenses whose retraction, licence and audit the alias
-// resolution unblocks — and G, the two whose refusal it must NOT unblock,
-// because their rows really do not partition by anchor.
+// The two memberships this table has to hold are F — the lenses whose
+// retraction, licence and audit the alias resolution unblocks — and G, the
+// lens whose refusal it must NOT unblock, because its rows really do not
+// partition by anchor.
 var withAliasClosureBuckets = map[string]string{
 	"applicantRosterRead":            closureA,
 	"augurProposals":                 closureA,
@@ -136,7 +136,7 @@ var withAliasClosureBuckets = map[string]string{
 	"wellnessIdentitiesRead":     closureA,
 	"wellnessInstructors":        closureA,
 	"wellnessLedgerHistory":      closureA,
-	"wellnessMemberAccounts":     closureG,
+	"wellnessMemberAccounts":     closureF,
 	"wellnessMembers":            closureA,
 	"wellnessSessions":           closureA,
 	"wellnessStudios":            closureA,
@@ -249,11 +249,11 @@ func TestPlainWithAliasClosureCensus(t *testing.T) {
 	}
 	t.Logf("TOTAL: %d", len(got))
 
-	require.Equal(t, []string{"clinicPatientsRead", "leaseApplicationsRead", "renewalsRead"}, byBucket[closureF],
+	require.Equal(t, []string{"clinicPatientsRead", "leaseApplicationsRead", "renewalsRead", "wellnessMemberAccounts"}, byBucket[closureF],
 		"F is the set the alias resolution is responsible for — a lens arriving here gains a retraction, a "+
 			"narrowing licence and an audit direction at once, and a lens leaving it loses all three")
-	require.Equal(t, []string{"landlordLeaseApplicationsRead", "wellnessMemberAccounts"}, byBucket[closureG],
-		"G is the set the resolution must NOT admit: both key on a variable that is not their anchor, so a "+
+	require.Equal(t, []string{"landlordLeaseApplicationsRead"}, byBucket[closureG],
+		"G is the set the resolution must NOT admit: it keys on a variable that is not its anchor, so a "+
 			"per-anchor evaluation would compute a truncated row")
 
 	for name, want := range withAliasClosureBuckets {

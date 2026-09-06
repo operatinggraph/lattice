@@ -246,9 +246,9 @@ func TestPartitionsByAnchor_RefusesWithoutIdentifyingColumn(t *testing.T) {
 }
 
 // TestPartitionsByAnchor_CorpusCyphers runs the four shipped cyphers the design
-// argues from through the real predicate, and the two it must keep refusing.
-// The census pins the whole corpus; these are the named members the design's
-// soundness argument is written about.
+// argues from through the real predicate. The census pins the whole corpus;
+// these are the named members the design's soundness argument is written
+// about.
 func TestPartitionsByAnchor_CorpusCyphers(t *testing.T) {
 	eng := New()
 	cases := []struct {
@@ -284,11 +284,12 @@ func TestPartitionsByAnchor_CorpusCyphers(t *testing.T) {
 			why:         "the anchor is `b`, so secondaryId is what identifies it and primaryId binds the duplicate's target",
 		},
 		{
-			name:    "wellnessMemberAccounts",
-			spec:    lensSpecNamed(t, wellnessledger.Package.Lenses, "wellnessMemberAccounts"),
-			keyCols: []string{"key"},
-			admit:   false,
-			why:     "its rows partition by the IDENTITY they key on, not by the booking it anchors on — no key column identifies the anchor",
+			name:        "wellnessMemberAccounts",
+			spec:        lensSpecNamed(t, wellnessledger.Package.Lenses, "wellnessMemberAccounts"),
+			keyCols:     []string{"key"},
+			admit:       true,
+			identifying: []string{"key"},
+			why:         "the anchor is the identity, and key is that anchor's own key",
 		},
 	}
 	for _, tc := range cases {

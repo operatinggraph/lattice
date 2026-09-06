@@ -167,7 +167,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"wellnessIdentitiesRead":         {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"wellnessInstructors":            {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"wellnessLedgerHistory":          {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
-	"wellnessMemberAccounts":         {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
+	"wellnessMemberAccounts":         {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"wellnessMembers":                {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"wellnessSessions":               {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"wellnessStudios":                {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
