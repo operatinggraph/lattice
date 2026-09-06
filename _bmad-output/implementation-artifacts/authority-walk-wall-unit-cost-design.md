@@ -477,3 +477,95 @@ for k in sorted(samples):
 ```
 
 Inc A retires this script: the same numbers arrive on the step-5 line and in `step5-latency`.
+
+---
+
+### Fire brief (build note, 2026-09-06 — Lattice steward, remote)
+
+**1. Scope sentence (verbatim, §3 + the board row).** *"The wall's second axis becomes observable: per-op
+wall time + live read/listing counts on the step-5 log line and the timeout path; a `step5-latency` Health KV
+signal beside `step3-latency`; and the `processor-event` rollup arm that makes both visible to `lattice
+health summary`. Clinic's one mechanical dedup ships, with the `(d)`→`(e)` annotation correction beside it."*
+Board: *"ships step-5 wall/read telemetry (log + `step5-latency` + summary arm), clinic's doubled
+`withProvider` listing, the re-measure at head."* Green bar: §11's gates; Inc C's probes are already recorded
+(§9, all three PASS) — C reduces to the parent's §5.1 pointer + the board flip.
+
+**2. Verified touch-list (live at `9b053cd`).**
+- `internal/processor/script_read_record.go:49-54` recorder struct; `:127-150` `record()`; `:179-189`
+  `ScriptReadRecord`. Every literal in the tree is field-keyed (`:129,144` + 15 in
+  `read_drift_guard_test.go`) — two int fields break nothing.
+- `internal/processor/starlark_kv.go:125` live GET → `sc.ReadRecorder.recordLiveRead` (`:135,144`); `:219`
+  listing → `recordEnumeration` (`:262`). Counters increment beside these calls.
+- `internal/processor/step5_execute.go:11-14` `ExecutorImpl{Runner, Logger}`; `:45` `Runner.Run`; `:50` error
+  return; `:53-58` the step-5 line. `ScriptTimeout` = `*ScriptError` with `Code=="ScriptTimeout"`
+  (`starlark_runner.go:76,212`).
+- `internal/processor/latency_ring.go:30,40,51,75` — `newLatencyRing`, `record`, `snapshot`, `ringPercentile`.
+  Reused for the wall; the read/listing means need per-sample counts, so the executor owns a small
+  three-column ring of its own with the same overwrite semantics (§5 table unchanged).
+- `internal/processor/health.go:183` `AttachCapabilityAuthorizer`; `:191` `AttachDDLCache` ("attached by
+  MakePipeline"); `:442-465` `emitCapabilityAuthSignals` — the emit shape to mirror.
+- **Rotted citation:** §4.1 wires `AttachExecutor` in `cmd/processor/main.go:213`. The executor is built
+  inside `MakePipeline` (`commit_path.go:1351`) and never reaches `main.go`; the heartbeater is built at
+  `:1283` in the same function. **Decision:** attach in `MakePipeline`, mirroring `AttachDDLCache`. Body §4.1
+  amended.
+- `cmd/lattice/health/health.go:92-95` `classifyKey` → `processor-event`; `:256-504` `computeSummaryRollup`,
+  no arm for the group; `:364-375` the generic green-unless-stale arm to mirror; tests
+  `cmd/lattice/health/health_test.go` (`TestHealthSummary_Rollup_StaleYellow:171` the shape to mirror).
+- `docs/observability/health-kv-schema.md:80` inventory row; `:502-515` document shape.
+- `internal/healthkv/completeness_test.go:145-155` (`//go:build integration`; `make test-health-completeness`
+  needs a live stack).
+- `packages/clinic-domain/ddls.go:2239` `appointment_provider`; `:2299` `sites_for_provider`; `:2323-2344`
+  `appointment_sites` (fallback `atSite` at `:2340`); `:2346-2362` `actor_bound_to_appointment_provider`,
+  `(d)` annotation at `:2357-2360`; the five doubled sites `:2931, 3076, 3202, 3397, 3458`, each with the
+  provider resolved 1–10 lines above (`:2929, 3074, 3200, 3387, 3456`). `BackfillAppointmentSite:3340-3341`
+  calls `sites_for_provider` directly (not a site of the dedup).
+- `packages/clinic-domain/manifest.yaml:2` + `package.go:141` `0.34.22` (the design's `0.34.21` moved once
+  since; bump to `0.34.23`).
+- `internal/testutil/pipeline.go:232` `PipelineConfig`; `:336-340` observers — no config hook exists, so Inc B
+  adds an `ExtraScriptReadObservers []processor.ScriptReadObserver` field appended to the multi-observer
+  (the `ListCalls` assertion cannot reach `cp.deps` from a package test).
+- Censuses re-run: 5 doubled sites ✓ · 1 re-resolve ✓ · 0 lint-pinned helpers ✓ · `identifiedBy` provider
+  link declared only by `SetProviderHours`/`SetProviderTimeOff` (`opmetas.go:339,373`) ✓ · baseline row
+  `read_drift_baseline.txt:128` ✓ · `ScriptReadObserver` absent from `cmd/processor/main.go` ✓ · `wallMs` /
+  `case "processor-event"` absent ✓.
+
+**3. Precedents.** Counters: `recordLiveRead` / `recordEnumeration` (`script_read_record.go`). Ring:
+`latency_ring.go` + `CapabilityAuthorizer.LatencyStats`. Emit: `emitCapabilityAuthSignals` (`health.go:442`).
+Attach: `AttachDDLCache` (`health.go:191`). Summary arm: the `component-heartbeat` arm (`health.go:364`) with
+`observedAt` in place of `heartbeatAt`. Heartbeat test: `TestEmitCapabilityAuthSignals_LiveKV`
+(`health_alerts_test.go:196`). Timeout test: `TestKVRead_SlowReadHitsWallBudget` (`starlark_kv_test.go:206`).
+Observer test: `TestScriptReadRecord_ObserverSeesOneRecordPerExecution` (`script_read_record_test.go:596`).
+Clinic harness: `TestWorkplace_TombstonedProviderConfersNothing` (`provider_tombstone_confinement_test.go:162`).
+
+**4. Increment order + green checks.**
+- **A1 (processor, opus — new state):** counters + `ExecutorImpl` clock/ring/counter + step-5 line + aborted
+  line + `AttachExecutor` + `step5-latency` emit + `MakePipeline` wiring + schema row/shape + completeness
+  entry. `go test ./internal/processor/ -count=1`.
+- **A2 (cmd/lattice, sonnet):** the `processor-event` arm + two tests. `go test ./cmd/lattice/... -count=1`.
+- **B (clinic, sonnet):** signature + five sites + annotation + version + harness hook + `ListCalls == 3` test.
+  `go test ./packages/clinic-domain/ -count=1`; `DIFF_BASE=9b053cd go run ./scripts/lint-package-version.go`.
+- **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, every `STRICT=1 scripts/lint-*.go`, then
+  against the native stack `make verify-kernel`, `make verify-package-clinic-domain`,
+  `make test-health-completeness`; `go test ./... -p 4` with `POSTGRES_TEST_DSN`.
+
+**5. In-scope gotchas.** Health-emission change ⇒ schema doc in the same change (SKILL §4). `null` means at
+`count == 0` (Contract #5 §5.4). Counters read off the recorder directly, never `record()` (sorts). A package
+content edit ⇒ manifest + `Version` bump. Dossier entries copied: Processor — *a gate's negative test must
+first prove its positive vector reaches the gate* (seventh sighting's report shape: every guard beside the test
+that reds when it is reverted); *Starlark WALL binds before the live-read budget* (CI masks the wall at 5 s —
+the timeout test drives the runner with its own budget). Packages — *census the CHECK, not the wrapper*; *a
+guard's OCC rests on whoever writes its read declaration* (the `(e)` annotation states the read stays live,
+undeclared, not newly declared). Standing checklist: #1 lifetime table (§5 — carried across executions, never
+reset, dies with the instance); #2 censuses re-run above; #3 revert-proof every counter, the ring record, the
+timeout increment and the dedup (`ListCalls` 4 → 3); #4 nothing removed; #5 one ring, one writer (the
+executor); #6 the `component-heartbeat` arm's `heartbeatAt` is NOT this doc's timestamp — use `observedAt`.
+
+**6. Adjacent finds.** None outside the fire; the `(d)` annotation defect is Inc B's own scope.
+
+**7. Non-goals.** No wall change, no live-read-budget change, no `details` on the `ScriptTimeout` error (§8
+row 8), no per-lane split, no step-4 hydration of declared enumerations (§8 row 4), café's Inc A (the parent's
+own row), `BackfillAppointmentSite`, `CreateAppointment`'s walk (§4.3).
+
+**Scope-diff gate:** every touch above traces to the scope sentence; the one deviation (attach site) narrows
+nothing and substitutes no mechanism. Dependencies: none declared; Inc A/B independent (§11) — verified, no
+shared file.
