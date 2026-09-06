@@ -202,3 +202,134 @@ future fires should live-verify a newly-installed lens directly rather than defa
 
 - **Mixed-use composition surfaces** (verticals.md) — front-desk/operations aggregate views consuming
   `one-bill-history` (and others) once a full bootstrap cycle activates it live.
+
+## Inc 4 — café arrears reminders (`cafeArrearsReminders`)
+
+### Fire brief (build note, 2026-09-06)
+
+**1. Scope sentence (verticals.md row, verbatim).** *Nothing ever tells a resident they owe the café money —
+Café's only Weaver targets are `cafeTabSettlement` + `cafeStaleTabSettlement`, while clinic carries
+`appointmentReminders` + `followUpReminders`, wellness `wellnessBookingReminders` and LoftSpace `leaseExpiry`.
+3 of 7 café debtors sit 12–19 days past the 15-day net term with nothing sent to either the resident or the
+desk. Ready: an arrears convergence target off `cafeLedgerHistory`'s aged balance, mirroring
+`wellnessBookingReminders`.* Green bar: a resident whose FIFO-oldest open charge passes the 15-day term gets
+ONE notification per arrears episode through the bridge's `notification` adapter, the desk's arrears grid and
+the resident's statement both show when it was sent, and no account is ever reminded for a balance it does
+not owe (the FE's `deriveStatement` FIFO and the op's FIFO agree).
+
+**Live premise, re-run 2026-09-06T16:00Z** (`cafe-ledger-history` read model, 36 rows / 56 lease rows): 6 debtor
+leases, not 7 (one settled since filing); 4 past the term (oldest open debit 07-22, 08-01, 08-02, 08-07), 2
+inside it (08-27 → due 09-11, 08-28 → due 09-12). The 4 are the first sends; the 2 are the first armed timers.
+
+**Alternatives.** (a) *Build nothing* — the desk already sees the arrears grid and the resident sees the red
+banner when they open the app; refused: the row's ask is the push (nothing is *sent*), which is exactly what
+the three sibling verticals have and café lacks. (b) *Anchor the target per DEBIT transaction* (`t.entry.dueAt`
+recorded at post) — refused: it fans out one reminder per aged charge (three croissants → three nags on three
+days) and needs a marker write on every debit; account-level is one op per episode. (c) *Have `post_entry`
+maintain the FIFO head exactly* — refused: a partial payment moves the head to a debit the op cannot name
+without replaying the account's history on every payment; the head is recomputed once, by the Weaver-dispatched
+op, only when it matters.
+
+**2. Verified touch-list.**
+- `packages/cafe-ledger/ddls.go:24` `accountDDL` — `PermittedCommands` += `EvaluateCafeArrears`; new
+  `accountArrearsAspectTypeDDL` (class `cafeAccountArrears`, writers: DebitAccount, CreditCafeAccount,
+  RefundCafeCharge, EvaluateCafeArrears); new notification-outcome DDL pair (`cafeArrearsNotificationOp` /
+  `cafeAccountArrearsNotification`) in a new `notifications.go` mirroring
+  `packages/wellness-reminders/notifications.go:1-140`.
+- `packages/cafe-ledger/scripts.go:691-960` `post_entry` — the `.arrears` state table below, beside the `.balance`
+  cache write at `:913-923`; `derive_reads` (`:978-1032`) returns `optionalReads: [<acct>.balance, <acct>.arrears]`.
+  New `EvaluateCafeArrears` branch in `accountDDLScript` (`:66-127`), with the bounded `postedTo` enumeration
+  mirroring `backfill_balance` (`:548-591`, `BALANCE_BACKFILL_PAGE_LIMIT`/`_MAX_PAGES` at `:545-546`).
+- `packages/cafe-ledger/lenses.go:36-56` — new `cafeArrearsReminders` convergence lens (nats-kv, `full`);
+  `leaseAccountsSpec` (`:97-106`) gains `arrearsDueAt` / `arrearsRemindedFor` / `arrearsReminderSentAt` columns.
+- `packages/cafe-ledger/targets.go` (new) — `WeaverTargets()` with the `cafeArrearsReminders` playbook;
+  `package.go:87-106` wires `WeaverTargets`, bumps `Version` 0.4.0 → **0.5.0** with `manifest.yaml` in lockstep.
+- `packages/cafe-ledger/permissions.go:54-84` — `EvaluateCafeArrears` + the replyOp to `operator`/any;
+  `opmetas.go:87-93,139-150` — `.arrears` added to both descriptor ops' `OptionalReads`.
+- `packages/cafe-domain/targets.go:64-74` — `missing_charge`'s `OptionalReads` += `row.accountKey.arrears`
+  (`DebitAccount` is dispatched from here too); `cafe-domain` 0.12.1 → **0.12.2** (`package.go:94` + manifest).
+- `packages/cafe-ledger/package_test.go:36-51` structure pins (DDLs 4→7, Permissions 5→7, Lenses 2→3,
+  WeaverTargets 0→1, OpMetas 2→4); `lens_cypher_test.go` new pins; `ledger_test.go` op pipeline tests.
+- `cmd/cafe-app/ledger.go:16` `statementGraceDays` → `cafeledger.ArrearsGraceDays` (the package owns the term;
+  one constant); `:110-122` `balanceRow` + `handleFrontDeskBalances` (`frontdesk.go:331-386`) gain
+  `reminderSentAt` joined from `cafeLeaseAccounts`; the resident ledger response likewise;
+  `cmd/cafe-app/web/app.js:393-405` (`statementLine`) and `:1116-1130` (`frontDeskArrearsLine`) render it.
+
+**3. Precedents to mirror.** Lens: `packages/wellness-reminders/lenses.go:132-149` (freshUntil / gap /
+`freshnessExpiry.byTarget` conjuncts, `fmt.Sprintf` on the target constant). Target:
+`wellness-reminders/targets.go:31-46` (directOp, `Params` from row columns, `Reads`/`OptionalReads`). Op script:
+`wellness-reminders/ddls.go:158-300` (Weaver-actor guard first statement, liveness guard, unconditioned marker,
+`external.notification` keyed `<entity>:<for>`). ReplyOp: `wellness-reminders/notifications.go`. `.arrears`
+write verb + `derive_reads`: `cafe-ledger/scripts.go:772-813, 913-923, 978-1032` (the `.balance` cache).
+Enumeration: `scripts.go:548-591`. FIFO: `cmd/cafe-app/ledger.go:211-259` `deriveStatement` — the op's
+FIFO must be the same algorithm (surplus carry-forward, sort by `(postedAt, transactionKey)` per
+`sortLedgerRows` `ledger.go:28-35`); pin both against one shared vector table.
+
+**`.arrears` state table** (class `cafeAccountArrears`; fields `evaluatedAt` always, `dueAt?`, `remindedFor?`,
+`sentAt?`, `stale?`). B = hydrated `.balance.balanceCents` before the entry, B′ after; "legacy" = no cache.
+| event | write |
+|---|---|
+| CreateAccount | none (the account owes nothing; `evaluatedAt = null` opens `missing_evaluation` once, the op writes `{evaluatedAt}`) |
+| debit, B ≤ 0, B′ > 0 | `{dueAt: postedAt + ArrearsGraceDays, evaluatedAt: postedAt}` — a new episode; create if absent, update if present (drops the old `remindedFor`/`sentAt`/`stale`) |
+| debit, B > 0 | none — the FIFO head is unchanged |
+| credit/refund, B′ ≤ 0 | `{evaluatedAt: postedAt}` — nothing owed, no timer; create or update |
+| credit/refund, B′ > 0 | present → carry every field + `stale: true`; absent → none |
+| legacy account, any entry | present → carry + `stale: true`; absent → none |
+| `EvaluateCafeArrears` | recompute the FIFO head over the bounded enumeration: no open head → `{evaluatedAt}`; head due D\* in the future → `{dueAt: D\*, evaluatedAt}` + carry `remindedFor`/`sentAt`; D\* passed and `remindedFor == D\*` → same, clears `stale`; D\* passed and `remindedFor ≠ D\*` → `{dueAt: D\*, remindedFor: D\*, sentAt: now, evaluatedAt}` + `external.notification` keyed `<accountKey>:<D\*>` |
+Crash/replay/redelivery: every `.arrears` write is create-if-absent (absence-conditioned via the declared
+optional read) or a bare update auto-conditioned on the hydrated revision — a race retries, never last-write-
+wins; a redelivered `Evaluate` recomputes to the same answer and the notification dedups at the adapter on the
+episode key. Tombstone: a tombstoned account is refused by the liveness guard. Upgrade: 56 live accounts carry
+no `.arrears` → 56 `missing_evaluation` gaps at install, one op each, then quiet.
+
+Lens `cafeArrearsReminders` (anchor `MATCH (a:cafeaccount {key: $actorKey})`, `OPTIONAL MATCH
+(a)-[:heldFor]->(l:leaseapp)`): columns `actorKey`, `entityKey`, `leaseAppKey`, `dueAt`, `remindedFor`,
+`reminderSentAt`, `stale`, `evaluatedAt`; `freshUntil = dueAt` when `dueAt` set ∧ `remindedFor <> dueAt` ∧ ¬stale
+∧ ¬(`freshnessExpiry.byTarget.cafeArrearsReminders >= dueAt`); one gap `missing_evaluation` (=`violating`) =
+`evaluatedAt = null` ∨ `stale = true` ∨ (`dueAt` set ∧ `remindedFor <> dueAt` ∧ `byTarget >= dueAt`). `(x = null)`
+is the engine's null test; a mis-compiled lens FALLS BACK silently — every conjunct gets a pin in
+`lens_cypher_test.go` (pending / due / sent / stale / cleared / never-evaluated), with a `recordLapse`-style
+helper copied from `wellness-reminders/lens_cypher_test.go:103-125`.
+
+**4. Increment order.**
+- **Inc 1 (package, opus — state-machine class):** everything under `packages/`. Green: `go test
+  ./packages/cafe-ledger/... ./packages/cafe-domain/... -count=1`; `go test ./internal/refractor/ -run
+  'TestCorpus|Census' -count=1` re-pinned deliberately; `STRICT=1 go run ./scripts/lint-conventions.go`;
+  `go run ./scripts/lint-lens-anchors.go`; `go run ./scripts/lint-gap-column-declaration.go`;
+  `go run ./scripts/lint-package-standard.go`; `DIFF_BASE=main go run ./scripts/lint-package-version.go`.
+  Revert-proofs: delete the `stale` write and watch the partial-payment pin fail; delete the FIFO surplus carry
+  and watch the shared-vector pin fail; swap the actor guard off and watch the forged-send pin fail.
+- **Inc 2 (FE, sonnet):** `cmd/cafe-app` per the touch-list. Green: `go test ./cmd/cafe-app/... -count=1`,
+  `go run ./scripts/lint-app-op-descriptors.go`, `go run ./scripts/lint-web.go`, `node --check` on app.js.
+- **Close:** `go build ./...`, `make vet`, `golangci-lint run ./...`, cold opus review over the whole diff,
+  merge, CI, then live: `make refresh-cafe` from the main checkout (diff-applies both packages + cycles
+  `bin/cafe-app`), watch Weaver dispatch 56 evaluations, assert the 4 overdue accounts carry `.arrears.sentAt`
+  + a `.arrearsNotification` outcome, the 2 pending carry armed `freshUntil`, and the grid/statement show it.
+
+**5. In-scope gotchas.** Package edits bump manifest + `Version` in lockstep (both packages). `# read-posture:`
+annotations on every `kv.Links`/`kv.Read` in the new branch (class (e) enumeration + follow-ups; `.arrears` is
+class (d) via `derive_reads`). Time facts are recorded on the entity — `dueAt` is written by the op, the lens
+never reads `$now`. The op-side FIFO sorts on `(postedAt, transactionKey)` because `rfc3339_utc` is whole
+seconds (two charges in one second need the total key). Dossier entries that bind here: *a lens MATCH edit is
+a corpus edit* (run the refractor census pins); *a guard's OCC rests on whoever writes its read declaration*
+(`.arrears` in `derive_reads` + one test with an empty `contextHint`); *a convergence gap that re-opens on a
+recorded clock lapse mints a new instance every window* (this design opens once per episode, never per
+window — assert no re-dispatch after a send); *an engine-recognized companion column whose name does not match
+its gap is dead* (build column names from the gap key); *a new op granted to `operator` by its own package is not
+callable from the console* (Weaver dispatches, not Loupe — no console grant needed, state that in the perm
+note); FE: *a server-side refusal added to one form leaves its sibling a dead end* (n/a — no new form), *an op
+name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`* (name the op by role in FE
+comments). Standing checklist: (1) the `.arrears` LIFETIME is the table above; (2) the 6-debtor census is
+pinned above; (3) every fix is revert-proven (listed in Inc 1); (4) n/a — nothing removed; (5) `.arrears` has
+five writers, all conditioned on one hydrated revision; (6) the wellness replyOp's create-only outcome aspect
+conflicts on a rescheduled class's second reply — NOT copied: café episodes recur, so the outcome aspect is an
+idempotent overwrite (identical content on redelivery).
+
+**6. Adjacent finds.** `wellness-reminders` / `clinic-reminders` notification-outcome aspects are create-only
+on a single key, so a rescheduled class's second outcome reply is rejected (audit-only aspect; the marker that
+gates the lens is unaffected) — absorbed as a batch unit only if the close pass has budget; otherwise it is the
+same precedent-debt shape the brief already refuses to copy, recorded here. Nothing else out of scope surfaced.
+
+**7. Non-goals.** No change to `deriveStatement`'s display math or the arrears grid's ordering; no resident-
+facing notification *content* beyond the adapter's params; no reminder cadence (one per episode, no
+escalation); no `.balance` backfill from the new op (a legacy account stays legacy for the payment cap).
