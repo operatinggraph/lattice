@@ -1194,6 +1194,18 @@ async function renderMyClasses() {
 // alike (the SessionStarted check runs before the booked/waitlisted branch),
 // so a member no longer sees an offer the op will refuse — including "leave
 // the waitlist" once the class they never got promoted into has begun.
+
+// reminderBadge shows the wellness-reminders package's own SendReminder
+// marker (wellnessBookings' reminderSentAt column) — before this, a 24h
+// class reminder went out with nothing anywhere saying so, on My Classes or
+// the front-desk Roster alike. Absent until that op fires.
+function reminderBadge(b) {
+  if (!b.reminderSentAt) return "";
+  const d = new Date(b.reminderSentAt);
+  const label = "🔔 Reminder sent" + (isNaN(d.getTime()) ? "" : " · " + d.toLocaleDateString());
+  return '<span class="badge reminder-sent">' + esc(label) + "</span>";
+}
+
 function myClassCard(b) {
   const id = domId(b.bookingKey);
   const cancelled = !b.sessionName;
@@ -1209,6 +1221,7 @@ function myClassCard(b) {
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
+    reminderBadge(b) +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
@@ -2234,6 +2247,7 @@ function rosterCard(b, markable, cancellable) {
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
+    reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     (markable ? attendanceActions(b) : "") +
     (cancellable ? seatCancelAction(b) : "") +

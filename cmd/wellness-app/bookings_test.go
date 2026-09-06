@@ -91,3 +91,46 @@ func TestComputeBookings_ResidentRateNoOverrideFallsBackToStandard(t *testing.T)
 	require.Len(t, rows, 1)
 	require.Equal(t, int64(1800), rows[0].PriceCents)
 }
+
+// TestComputeBookings_ReminderSentAtThreadsThroughUnchanged proves the row's
+// ReminderSentAt is exactly the wellnessBookings projection's own
+// reminderSentAt column — the FE cannot show a reminder marker computeBookings
+// silently drops going from projection to row.
+func TestComputeBookings_ReminderSentAtThreadsThroughUnchanged(t *testing.T) {
+	get := mapGetter(map[string]any{
+		"vtx.booking.b4": map[string]any{
+			"bookingKey":     "vtx.booking.b4",
+			"status":         "booked",
+			"rate":           "standard",
+			"sessionKey":     "vtx.session.s1",
+			"sessionName":    "Vinyasa Flow",
+			"priceCents":     1500.0,
+			"bookerKey":      "vtx.identity.dana",
+			"reminderSentAt": "2026-09-05T09:00:00Z",
+		},
+	})
+	rows := computeBookings([]string{"vtx.booking.b4"}, get, "", "")
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].ReminderSentAt)
+	require.Equal(t, "2026-09-05T09:00:00Z", *rows[0].ReminderSentAt)
+}
+
+// TestComputeBookings_NoReminderSentAtIsNil proves an unreminded booking's row
+// carries a nil ReminderSentAt (omitted from JSON), not an empty string that
+// would render a badge with no date.
+func TestComputeBookings_NoReminderSentAtIsNil(t *testing.T) {
+	get := mapGetter(map[string]any{
+		"vtx.booking.b5": map[string]any{
+			"bookingKey":  "vtx.booking.b5",
+			"status":      "booked",
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"priceCents":  1500.0,
+			"bookerKey":   "vtx.identity.erin",
+		},
+	})
+	rows := computeBookings([]string{"vtx.booking.b5"}, get, "", "")
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].ReminderSentAt)
+}

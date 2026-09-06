@@ -37,6 +37,10 @@ type bookingProjection struct {
 	// booking was made.
 	MissingStudio bool   `json:"missingStudio"`
 	BookerKey     string `json:"bookerKey"`
+	// ReminderSentAt is the wellness-reminders package's own SendReminder
+	// timestamp, projected off the booking's .reminder aspect — nil until that
+	// op runs.
+	ReminderSentAt *string `json:"reminderSentAt,omitempty"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
@@ -58,6 +62,10 @@ type bookingRow struct {
 	StudioName    string   `json:"studioName"`
 	MissingStudio bool     `json:"missingStudio"`
 	BookerKey     string   `json:"bookerKey"`
+	// ReminderSentAt shows a member or front-desk staffer that a class
+	// reminder already went out for this booking (24h-class-reminder gap:
+	// the send previously left no trace anywhere a person could see it).
+	ReminderSentAt *string `json:"reminderSentAt,omitempty"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to
@@ -95,19 +103,20 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 			priceCents = int64(*p.ResidentPriceCents)
 		}
 		rows = append(rows, bookingRow{
-			BookingKey:    p.BookingKey,
-			Status:        p.Status,
-			Rate:          p.Rate,
-			WaitlistSlot:  p.WaitlistSlot,
-			SessionKey:    p.SessionKey,
-			SessionName:   p.SessionName,
-			StartsAt:      p.StartsAt,
-			EndsAt:        p.EndsAt,
-			PriceCents:    priceCents,
-			StudioKey:     p.StudioKey,
-			StudioName:    p.StudioName,
-			MissingStudio: p.MissingStudio,
-			BookerKey:     p.BookerKey,
+			BookingKey:     p.BookingKey,
+			Status:         p.Status,
+			Rate:           p.Rate,
+			WaitlistSlot:   p.WaitlistSlot,
+			SessionKey:     p.SessionKey,
+			SessionName:    p.SessionName,
+			StartsAt:       p.StartsAt,
+			EndsAt:         p.EndsAt,
+			PriceCents:     priceCents,
+			StudioKey:      p.StudioKey,
+			StudioName:     p.StudioName,
+			MissingStudio:  p.MissingStudio,
+			BookerKey:      p.BookerKey,
+			ReminderSentAt: p.ReminderSentAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

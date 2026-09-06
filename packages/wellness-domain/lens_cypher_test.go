@@ -412,6 +412,31 @@ func TestWellnessBookings_ProjectsResidentPriceCents(t *testing.T) {
 	require.Equal(t, 1000.0, rows[0].Values["residentPriceCents"])
 }
 
+// TestWellnessBookings_ProjectsReminderSentAt proves reminderSentAt reads
+// the booking's own .reminder aspect (written by the separate
+// wellness-reminders package), and is null when that aspect is absent.
+func TestWellnessBookings_ProjectsReminderSentAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	remindedKey := f.vtx(t, "reminded1", "booking")
+	f.aspect(t, "reminded1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "seat": 1.0})
+	f.aspect(t, "reminded1", "reminder", "bookingReminder", map[string]any{"sentAt": "2026-07-07T09:00:00Z", "remindedFor": "2026-07-08T09:00:00Z"})
+
+	unremindedKey := f.vtx(t, "unreminded1", "booking")
+	f.aspect(t, "unreminded1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "seat": 1.0})
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r
+	}
+	require.Equal(t, "2026-07-07T09:00:00Z", byKey[remindedKey].Values["reminderSentAt"])
+	require.Nil(t, byKey[unremindedKey].Values["reminderSentAt"])
+}
+
 // TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor
 // hat rests on: a session led by a bound instructor projects that
 // instructor's key (which scopes their own-roster read) and display name

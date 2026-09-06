@@ -443,6 +443,14 @@ RETURN
 // (the session was tombstoned) OR when the session's OWN studio was
 // TombstoneStudio'd out from under it (missingStudio, same gap and same
 // meaning as wellnessSessionsSpec's own column above).
+//
+// reminderSentAt reads the booking's own .reminder aspect — written by the
+// separate wellness-reminders package's SendReminder op, not by anything in
+// this package — so a member or front-desk staffer looking at My Classes /
+// the roster can see a reminder already went out. The aspect projects null
+// (not a lookup error) until that op writes it, the same cross-package
+// aspect-read pattern wellness-reminders' own wellnessBookingRemindersSpec
+// uses in the other direction against this package's booking status/schedule.
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
@@ -462,7 +470,8 @@ RETURN
   s.key AS studioKey,
   s.profile.data.name AS studioName,
   ((se.key <> null) AND (s.key = null)) AS missingStudio,
-  id.key AS bookerKey`
+  id.key AS bookerKey,
+  b.reminder.data.sentAt AS reminderSentAt`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence
 // cypher: TombstoneSession deliberately does not cascade (package.go), so a

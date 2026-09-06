@@ -366,6 +366,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"instructor": "{me.instructor}",
 					"studio":     "{entity.studioKey}",
 				},
+				// The session vertex is REQUIRED, not optional: the script's
+				// vertex_alive/class_of guards fail closed on its absence, and
+				// its .schedule aspect is required for the same reason — the
+				// script reads it to rebuild the studio/instructor cells it
+				// releases (UnknownSession / cell-release correctness errors,
+				// not meaningful rejections), the same shape CancelBooking's
+				// Reads declare above.
+				Reads: []string{
+					"{payload.sessionKey}",
+					"{payload.sessionKey}.schedule",
+				},
 				// The ledBy and identifiedBy ownership probes. Absence of
 				// either is a meaningful rejection the script renders
 				// (AuthDenied), not a correctness error — the same shape

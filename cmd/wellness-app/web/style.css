@@ -173,6 +173,7 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .badge.open { color: var(--accent); border-color: var(--accent); }
 .badge.settled { color: var(--yellow); border-color: var(--yellow); }
 .badge.posted { color: var(--green); border-color: var(--green); }
+.badge.reminder-sent { color: var(--green); border-color: var(--green); }
 
 .empty {
   color: var(--text-dim);
