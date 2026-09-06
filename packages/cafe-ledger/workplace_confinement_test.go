@@ -71,6 +71,7 @@ func staffCapDocFor(actorKey string) *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreditCafeAccount", Scope: "any"},
+			{OperationType: "RefundCafeCharge", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -285,6 +286,71 @@ func TestCreditWorkplace_UnwiredStaffDeniedNotWidened(t *testing.T) {
 		wcStaffKey, acctA, "", processor.OutcomeRejected)
 	creditAs(t, ctx, conn, cp, cons, "cafewcunwiredaway001",
 		wcStaffKey, acctB, "", processor.OutcomeRejected)
+}
+
+// TestRefundWorkplace_StaffConfinedToWorkplace is CreditCafeAccount's
+// confinement pair run for RefundCafeCharge, and it is not redundant with it:
+// the two ops reach post_entry's require_workplace site through separate
+// execute() branches, so a refund branch that forgot confine=True would leave
+// a front-desk staffer refunding charges at buildings across town while the
+// payment vector above stayed green. The accepted vector runs first — a
+// rejection-only test would pass against a guard that denied everyone.
+func TestRefundWorkplace_StaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundworkplace")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := createAccount(t, ctx, conn, cp, cons, "caferwacctaaaa000001", leaseA)
+	acctB := createAccount(t, ctx, conn, cp, cons, "caferwacctbbbb000001", leaseB)
+	chargeA := postDebit(t, ctx, conn, cp, cons, "caferwdebitaaaa00001", acctA, 900, "Settled tab")
+	chargeB := postDebit(t, ctx, conn, cp, cons, "caferwdebitbbbb00001", acctB, 900, "Settled tab")
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+
+	refundAs(t, ctx, conn, cp, cons, "caferwrefundathome01",
+		wcStaffKey, acctA, chargeA, 900, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferwrefundaway0001",
+		wcStaffKey, acctB, chargeB, 900, "", processor.OutcomeRejected)
+}
+
+// TestRefundWorkplace_UnwiredStaffDeniedNotWidened covers the tombstone for the
+// refund branch: a soft-deleted worksAt link hydrates as a DOCUMENT, not None,
+// so unwiring a staffer must narrow their refund surface to nothing rather than
+// widen it from one building to all of them.
+func TestRefundWorkplace_UnwiredStaffDeniedNotWidened(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundunwired")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := createAccount(t, ctx, conn, cp, cons, "caferwuwacctaaa00001", leaseA)
+	acctB := createAccount(t, ctx, conn, cp, cons, "caferwuwacctbbb00001", leaseB)
+	chargeA := postDebit(t, ctx, conn, cp, cons, "caferwuwdebitaaa0001", acctA, 900, "Settled tab")
+	chargeB := postDebit(t, ctx, conn, cp, cons, "caferwuwdebitbbb0001", acctB, 900, "Settled tab")
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	tombstoneWorksAt(t, ctx, conn)
+
+	refundAs(t, ctx, conn, cp, cons, "caferwuwrefundhome01",
+		wcStaffKey, acctA, chargeA, 900, "", processor.OutcomeRejected)
+	refundAs(t, ctx, conn, cp, cons, "caferwuwrefundaway01",
+		wcStaffKey, acctB, chargeB, 900, "", processor.OutcomeRejected)
+}
+
+// TestRefundWorkplace_OperatorUnconfined proves the refund branch exempts root
+// by the holdsRole LINK, the same way the payment branch does: the operator
+// actor worksAt nowhere and refunds at both buildings.
+func TestRefundWorkplace_OperatorUnconfined(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundoperator")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := createAccount(t, ctx, conn, cp, cons, "caferwopacctaaa00001", leaseA)
+	acctB := createAccount(t, ctx, conn, cp, cons, "caferwopacctbbb00001", leaseB)
+	chargeA := postDebit(t, ctx, conn, cp, cons, "caferwopdebitaaa0001", acctA, 900, "Settled tab")
+	chargeB := postDebit(t, ctx, conn, cp, cons, "caferwopdebitbbb0001", acctB, 900, "Settled tab")
+
+	refundAs(t, ctx, conn, cp, cons, "caferwoprefundaaa001",
+		ledgerActorKey, acctA, chargeA, 900, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferwoprefundbbb001",
+		ledgerActorKey, acctB, chargeB, 900, "", processor.OutcomeAccepted)
 }
 
 // TestCreditWorkplace_UnlocatableAccountIsOperatorOnly pins the fail-closed

@@ -113,12 +113,20 @@ def execute(state, op):
     fail("account DDL: unknown operationType: " + ot)
 `
 
-// transactionDDLScript handles DebitAccount and CreditCafeAccount. Each mints a
-// fresh transaction vertex + a .entry aspect + the postedTo link to the
-// account. The ledger is append-only: no aspect on the account is read or
-// mutated here, so concurrent debits/credits against the same account never
-// race a read-modify-write — the balance is derived by the
-// cafeLedgerHistory lens summing entries.
+// transactionDDLScript handles DebitAccount, CreditCafeAccount and
+// RefundCafeCharge. Each mints a fresh transaction vertex + a .entry aspect +
+// the postedTo link to the account; a refund adds a reverses link to the charge
+// it gives back, which is the only thing distinguishing it from a payment.
+// Balances stay append-only — nothing on the ACCOUNT is read or mutated, so
+// concurrent debits and credits against it never race a read-modify-write, and
+// the balance is derived by the cafeLedgerHistory lens summing entries.
+//
+// The one maintained tally is refundedCents on the REVERSED CHARGE's own
+// .entry aspect: the refund ceiling, upserted under a CAS pinned to the
+// revision that aspect was hydrated at. Two refunds racing the same charge
+// therefore serialize — the loser's commit is refused on the stale revision
+// rather than admitted alongside the winner, which a ceiling recomputed by
+// enumerating prior reversals could never guarantee.
 const transactionDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -128,6 +136,13 @@ def make_aspect(vtx_key, local_name, cls, data):
     return {"op": "create", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
+    m = {"op": "update", "key": vtx_key + "." + local_name,
+         "document": {"class": cls, "isDeleted": False,
+                      "vertexKey": vtx_key, "localName": local_name, "data": data}}
+    m["expectedRevision"] = expected_revision
+    return m
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -443,7 +458,100 @@ def account_unit(acct_key):
 SELF_CREDIT_PAGE_LIMIT = 50
 SELF_CREDIT_MAX_PAGES = 10
 
-def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
+def reversed_charge(state, p, acct_key, amount_cents):
+    # Resolves payload.reversesRef into (the bare id of the charge this refund
+    # reverses, the mutation that books the refund against it), refusing every
+    # shape that would let a credit masquerade as a correction. All four checks
+    # fail closed, and each closes a distinct hole:
+    #
+    #   1. The ref names a live cafetransaction (declared read — a refund
+    #      against a vanished charge has nothing to correct).
+    #   2. It is postedTo the SAME account being credited. Without this a
+    #      staffer could point a refund on account A at a charge on account B
+    #      and drain A's balance against a debit that was never A's. It is
+    #      checked FIRST of the two shape tests, because the caller's standing
+    #      to touch this transaction at all is what it establishes: every
+    #      refusal after it describes a transaction on an account the caller
+    #      already named, so none of them tells a confined staffer anything
+    #      about a transaction elsewhere in the graph.
+    #   3. Its .entry is a DEBIT. Reversing a credit would let one refund
+    #      reverse another, compounding a payment into free money.
+    #   4. The amount fits within what that debit still has un-refunded — the
+    #      charge's own amountCents MINUS refundedCents, the running total this
+    #      function itself maintains on the charge. The single-refund case and
+    #      the cumulative case are the same arithmetic: two half-refunds of a
+    #      $10 charge are fine, a third is not.
+    #
+    # Both numbers are read from the debit's OWN .entry aspect, never from the
+    # payload, so the ceiling cannot be raised by the submitter. The new total
+    # is written back to that same aspect under a CAS pinned to the revision it
+    # was hydrated at, which is what makes check 4 a real cap rather than an
+    # advisory one: two refunds that both read refundedCents=0 cannot both
+    # commit, because the second's expectedRevision no longer matches. Every
+    # other field of the entry is carried across verbatim — the tally is an
+    # addition to the charge, not a rewrite of it.
+    reverses_key = required_string(p, "reversesRef")
+    _, reverses_id = parts_of(reverses_key, "reversesRef", "cafetransaction")
+    # An undeclared key and a tombstoned one are different faults and get
+    # different words: the platform hydrates exactly what contextHint.reads
+    # names, so a key absent from state was never asked for, and reporting that
+    # as "unknown transaction" sends the caller looking for a charge that is
+    # sitting there fine.
+    if reverses_key not in state:
+        fail("InvalidArgument: reversesRef: caller must declare " + reverses_key + " in contextHint.reads")
+    if not vertex_alive(state, reverses_key):
+        fail("UnknownTransaction: " + reverses_key)
+
+    entry_key = reverses_key + ".entry"
+    if entry_key not in state:
+        fail("InvalidArgument: reversesRef: caller must declare " + entry_key + " in contextHint.reads")
+    entry = state[entry_key]
+    if entry == None or (hasattr(entry, "isDeleted") and entry.isDeleted):
+        fail("UnknownTransaction: " + reverses_key + ": no .entry aspect")
+
+    # read-posture: (e) relation=postedTo epoch=none -- a cafetransaction
+    # carries exactly one postedTo link, written atomically by the op that
+    # minted the transaction and never added to afterward, so this is never a
+    # keyspace scan and nothing races it.
+    posted_page, _ = kv.Links(reverses_key, "postedTo", "out")
+    posted_to = None
+    for lk in posted_page:
+        if not lk.isDeleted:
+            posted_to = lk.targetVertex
+    if posted_to != acct_key:
+        fail("InvalidArgument: reversesRef: " + reverses_key +
+             " is not posted to account " + acct_key)
+
+    if entry.data.get("type") != "debit":
+        fail("InvalidArgument: reversesRef: only a posted charge (a debit) can be refunded; " +
+             reverses_key + " is a " + str(entry.data.get("type")))
+
+    charge_cents = entry.data.get("amountCents")
+    if charge_cents == None:
+        fail("InvalidArgument: reversesRef: " + reverses_key + " carries no amountCents")
+
+    refunded_cents = entry.data.get("refundedCents", 0)
+    remaining_cents = charge_cents - refunded_cents
+    if amount_cents > remaining_cents:
+        # No transaction key in the text: the front desk toasts this message
+        # verbatim, and a staffer reading "vtx.cafetransaction.<id>" learns
+        # nothing they can act on — the charge is the line they clicked.
+        fail("RefundExceedsCharge: amountCents " + str(amount_cents) + " exceeds the " +
+             str(remaining_cents) + " still refundable on this charge")
+
+    tally_data = {}
+    for k, v in entry.data.items():
+        tally_data[k] = v
+    tally_data["refundedCents"] = refunded_cents + amount_cents
+    # Class "transactionEntry" restated rather than read off the hydrated
+    # document: post_entry is the sole writer of a .entry aspect and writes
+    # exactly that class, so the upsert asserts the shape it expects instead of
+    # propagating whatever it happened to find.
+    tally = make_aspect_upsert_occ(reverses_key, "entry", "transactionEntry",
+                                   tally_data, entry.revision)
+    return reverses_id, tally
+
+def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses_ref, confine):
     p = op.payload
     acct_key = required_string(p, "accountKey")
     _, acct_id = parts_of(acct_key, "accountKey", "cafeaccount")
@@ -565,6 +673,20 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
             if not vertex_alive(state, tab_key):
                 fail("UnknownTab: " + tab_key)
 
+    # reversesRef (RefundCafeCharge only): the posted charge this credit gives
+    # back, REQUIRED on that op — a refund with no charge named is just a
+    # payment, which is exactly the confusion the op exists to end. Every other
+    # entry rejects the field outright rather than ignore it: a caller that
+    # sends reversesRef to CreditCafeAccount means to record a correction, and
+    # silently posting an unlinked payment would leave the statement saying the
+    # resident handed money over.
+    reverses_id = None
+    reverses_tally = None
+    if allow_reverses_ref:
+        reverses_id, reverses_tally = reversed_charge(state, p, acct_key, amount_cents)
+    elif hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+        fail("InvalidArgument: reversesRef: only valid on RefundCafeCharge, not " + op.operationType)
+
     tx_id = nanoid.new()
     tx_key = "vtx.cafetransaction." + tx_id
     posted_at = time.rfc3339_utc(op.submittedAt)
@@ -596,6 +718,21 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
         settles_lnk = "lnk.cafetransaction." + tx_id + ".settles.tab." + tab_id
         mutations.append(make_link(settles_lnk, tx_key, tab_key, "settles", "settles", {}))
 
+    if reverses_id != None:
+        # reverses: the refund (later-arriving) is the source, the pre-existing
+        # charge is the target (Contract #1 §1.1) — "this refund reverses that
+        # charge". The LINK is the refund's whole identity: the entry itself
+        # stays an ordinary credit, so every balance consumer sums it unchanged,
+        # and the cafeLedgerHistory lens walks this hop to tell the statement
+        # which line is a correction rather than a payment.
+        reverses_lnk = "lnk.cafetransaction." + tx_id + ".reverses.cafetransaction." + reverses_id
+        mutations.append(make_link(reverses_lnk, tx_key, "vtx.cafetransaction." + reverses_id,
+                                   "reverses", "reverses", {}))
+        # The charge's refundedCents tally, in the same atomic batch as the
+        # credit it accounts for: the ceiling and the entry that consumes it
+        # move together or neither does.
+        mutations.append(reverses_tally)
+
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
 
@@ -611,10 +748,10 @@ def execute(state, op):
         # task forOperation it, so op.authTargetValidated is never legitimately
         # true. Granting it to a staff role, or minting a task for it, makes
         # this claim false and requires confine=True here.
-        return post_entry(state, op, "debit", "account.debited", True, False)
+        return post_entry(state, op, "debit", "account.debited", True, False, False)
 
     if ot == "CreditCafeAccount":
-        # workplace-exempt: (ownership-bound) CreditCafeAccount now declares a
+        # workplace-exempt: (ownership-bound) CreditCafeAccount declares a
         # scope=self grant too (permissions.go): a resident's self-scoped
         # submit sets op.authTargetValidated (the platform's own target==actor
         # check), exempting it from the workplace walk below -- but that only
@@ -623,7 +760,60 @@ def execute(state, op):
         # walk). An operator or frontOfHouse scope=any submit carries no
         # target, so it still clears via actor_holds_operator /
         # require_workplace as before.
-        return post_entry(state, op, "credit", "account.credited", False, True)
+        return post_entry(state, op, "credit", "account.credited", False, False, True)
+
+    if ot == "RefundCafeCharge":
+        # A refund is never self-scoped. permissions.go grants it scope=any to
+        # [operator, frontOfHouse] and to NO consumer, so a submit carrying a
+        # target is either a client that misread the descriptor or a caller
+        # probing for a resident path that does not exist. Refusing here rather
+        # than falling through matters because post_entry's own
+        # authContextTarget branch is written for CreditCafeAccount: it treats a
+        # credit whose target owns the account's lease as a resident paying
+        # their own tab, capped by what they owe. A resident reaching that
+        # branch through THIS op would be minting credits against their own
+        # charges — giving themselves money back for coffee they drank.
+        # authcontext-target: (selector) selects the refusal branch and only
+        # that -- presence never grants anything here, it is the whole reason
+        # the submission stops.
+        #
+        # The refusal tests the validated bit as well as the raw target,
+        # because the validated bit is the one that DISCHARGES the workplace
+        # walk this op relies on (workplace_exempt). The raw target is a client
+        # hint any caller can set; validation is a property of the auth PATH
+        # that matched -- platform scope=self, or a task's ephemeral grant
+        # (internal/processor/operation_context.go). Both of those paths
+        # additionally require a non-empty target, so on today's Processor the
+        # second conjunct catches nothing the first does not. That subsumption
+        # is the PLATFORM's invariant, not this package's, and the two
+        # conjuncts fail under different edits: granting this op scope=self
+        # reaches only the first, while a task minted forOperation
+        # RefundCafeCharge is authorized entirely by the second. A refund that
+        # reached post_entry on the task path would arrive both exempt from the
+        # workplace walk and on the resident-credit branch, so the guard names
+        # the bit it actually depends on.
+        # workplace-exempt: (no-validated-path) permissions.go declares one
+        # scope=any grant to [operator, frontOfHouse] and no package mints a
+        # task forOperation RefundCafeCharge, so op.authTargetValidated is
+        # never legitimately true -- and this refusal stops it regardless, so
+        # the confine=True call below is reachable only by a standing grant,
+        # which require_workplace binds.
+        if op.authContextTarget != "" or op.authTargetValidated:
+            fail("AuthDenied: RefundCafeCharge is a front-desk act, never self-scoped")
+        # tabRef is DebitAccount's field and is refused here rather than
+        # ignored, the mirror of post_entry's own refusal of reversesRef on
+        # every op but this one. A caller that sends one means "refund the
+        # charge that settled this tab" and would instead get a credit with no
+        # settles link and no relation to the tab at all -- a silent drop is
+        # the shape that leaves a ledger disagreeing with what was asked for.
+        if hasattr(op.payload, "tabRef") and getattr(op.payload, "tabRef") != None:
+            fail("InvalidArgument: tabRef: only valid on DebitAccount, not RefundCafeCharge")
+        # workplace-exempt: (per-call-site) confine=True below hands the
+        # discharge to post_entry's own require_workplace site — a frontOfHouse
+        # staffer may refund only a charge on an account whose lease sits
+        # somewhere they worksAt, exactly as CreditCafeAccount confines a
+        # payment; the operator stays unconfined by the holdsRole walk.
+        return post_entry(state, op, "credit", "account.credited", False, True, True)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `

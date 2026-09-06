@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"regexp"
 	"testing"
 )
 
@@ -53,5 +54,54 @@ func TestOpCatalogKeysFromTypesParam(t *testing.T) {
 	want := []string{"VoidCharge", "CreditCafeAccount"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// TestKnownCatalogOpsCoversEveryCacheRead closes the silent-failure gap
+// between app.js's KNOWN_CATALOG_OPS literal and the reads it feeds. The
+// literal is what the client sends as `?types=`, so an op missing from it is
+// never fetched, `opCatalogCache.<Op>` is forever undefined, and the form
+// that depends on it reports itself unavailable — with no error anywhere, in
+// the browser or the build. Reading the embedded script and demanding every
+// cache read name an entry in the literal turns that into a compile-time
+// failure the moment a new descriptor-driven form lands.
+func TestKnownCatalogOpsCoversEveryCacheRead(t *testing.T) {
+	src, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	app := string(src)
+
+	literal := regexp.MustCompile(`(?s)const KNOWN_CATALOG_OPS = \[(.*?)\];`).FindStringSubmatch(app)
+	if literal == nil {
+		t.Fatal("app.js: no `const KNOWN_CATALOG_OPS = [...]` literal found")
+	}
+	declared := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"([A-Za-z0-9_]+)"`).FindAllStringSubmatch(literal[1], -1) {
+		declared[m[1]] = true
+	}
+	if len(declared) == 0 {
+		t.Fatalf("KNOWN_CATALOG_OPS parsed empty from %q", literal[1])
+	}
+
+	// Both read shapes the cache is consulted through: the dotted property
+	// and the bracketed string index. The declaration itself
+	// (`let opCatalogCache = null`) and the assignment in loadOpCatalog
+	// carry neither, so they need no exclusion.
+	reads := map[string]bool{}
+	for _, m := range regexp.MustCompile(`opCatalogCache\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(app, -1) {
+		reads[m[1]] = true
+	}
+	for _, m := range regexp.MustCompile(`opCatalogCache\["([A-Za-z0-9_]+)"\]`).FindAllStringSubmatch(app, -1) {
+		reads[m[1]] = true
+	}
+	if len(reads) == 0 {
+		t.Fatal("app.js: no opCatalogCache reads found — the regexes no longer match this file")
+	}
+
+	for op := range reads {
+		if !declared[op] {
+			t.Errorf("app.js reads opCatalogCache.%s but KNOWN_CATALOG_OPS omits it: the descriptor is never fetched and the form silently reports itself unavailable", op)
+		}
 	}
 }

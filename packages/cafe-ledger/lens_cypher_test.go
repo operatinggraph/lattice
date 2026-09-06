@@ -135,6 +135,91 @@ func TestCafeLedgerHistory_PostedCharge_ProjectsRow(t *testing.T) {
 	require.Equal(t, "2026-07-25T00:00:00Z", v["postedAt"])
 }
 
+// TestCafeLedgerHistory_RefundProjectsReversesKey pins the reverses hop: a
+// refund is an ordinary credit entry, so nothing in its own aspect
+// distinguishes it from a payment the resident handed over — reversesKey, the
+// projection of the link RefundCafeCharge writes, is the ONLY thing that does.
+// The charge it reverses is seeded with a settles link too, so the same run
+// pins tabKey on the debit's row (what the front desk reads to know a debit is
+// a café charge with something to give back) and, on the refund's own row,
+// that both columns are independent: a refund settles no tab, and a charge
+// reverses nothing.
+func TestCafeLedgerHistory_RefundProjectsReversesKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkPostedCharge(t, "refunded", 900, "Settled tab")
+	f.vtx(t, "refunded_tab", "tab")
+	f.edge(t, "settles", "refunded_tx", "refunded_tab")
+
+	// The charge's entry as a committed refund leaves it: the refundedCents
+	// tally added, every other field carried across untouched. Seeding the
+	// tally here is what makes the amountCents assertion below meaningful —
+	// the ledger's balance arithmetic reads the charge's own amount, so a
+	// tally that overwrote or netted it off would quietly halve what the
+	// resident is shown to owe. The aspect class is "transactionEntry", what
+	// post_entry and the refund's tally upsert both write (scripts.go) — the
+	// owning vertex's own type is not it.
+	f.aspect(t, "refunded_tx", "entry", "transactionEntry", map[string]any{
+		"type":          "debit",
+		"amountCents":   900.0,
+		"refundedCents": 400.0,
+		"memo":          "Settled tab",
+		"postedAt":      "2026-07-25T00:00:00Z",
+	})
+
+	f.vtx(t, "refund_tx", "cafetransaction")
+	f.edge(t, "postedTo", "refund_tx", "refunded_acct")
+	f.edge(t, "reverses", "refund_tx", "refunded_tx")
+	f.aspect(t, "refund_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "credit",
+		"amountCents": 400.0,
+		"memo":        "Wrong item charged",
+		"postedAt":    "2026-07-26T00:00:00Z",
+	})
+
+	rows := f.project(t, "cafeLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+
+	charge := byKey["vtx.cafetransaction."+f.ids["refunded_tx"]]
+	require.NotNil(t, charge)
+	require.Equal(t, "vtx.tab."+f.ids["refunded_tab"], charge["tabKey"], "the settles hop is what marks a debit as a refundable café charge")
+	require.Nil(t, charge["reversesKey"], "a charge reverses nothing")
+	require.Equal(t, 900.0, charge["amountCents"],
+		"the refundedCents tally is a note on the charge, not a rewrite of it — the projected charge keeps its full amount")
+	require.Equal(t, "Settled tab", charge["memo"], "the tally upsert carries every other entry field across")
+	require.NotContains(t, charge, "refundedCents", "the tally is the refund ceiling, not a column the statement reads")
+
+	refund := byKey["vtx.cafetransaction."+f.ids["refund_tx"]]
+	require.NotNil(t, refund)
+	require.Equal(t, "credit", refund["type"], "a refund posts an ordinary credit — every balance consumer sums it unchanged")
+	require.Equal(t, "vtx.cafetransaction."+f.ids["refunded_tx"], refund["reversesKey"],
+		"reversesKey is the only thing distinguishing a refund from a payment the resident made")
+	require.Nil(t, refund["tabKey"], "a refund settles no tab")
+}
+
+// TestCafeLedgerHistory_PlainCharge_NullsBothOptionalHops proves the two new
+// hops are genuinely OPTIONAL. A plain hand-posted debit — no tab behind it, no
+// refund against it — must still project its row; had either hop been written
+// REQUIRED, the whole history would vanish for every café that never refunds.
+func TestCafeLedgerHistory_PlainCharge_NullsBothOptionalHops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkPostedCharge(t, "plain", 650, "Flat white")
+
+	rows := f.project(t, "cafeLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1, "an unreversed, un-settled charge still projects")
+	require.Nil(t, rows[0].Values["reversesKey"])
+	require.Nil(t, rows[0].Values["tabKey"])
+}
+
 func TestCafeLedgerHistory_UnpostedTransaction_ProjectsNothing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

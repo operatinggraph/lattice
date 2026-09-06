@@ -24,16 +24,24 @@ type ledgerEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
+	ReversesKey    string   `json:"reversesKey"`
+	TabKey         string   `json:"tabKey"`
 }
 
 // ledgerEntryRow is the posted-charge-history row the resident house-tab view
-// renders.
+// renders. ReversesKey is set only on a refund and names the charge it gives
+// back — the statement reads it to say a line is a correction rather than a
+// payment the resident made, since the entry itself is an ordinary credit.
+// TabKey is set only on a charge the tab-settlement playbook posted, and is
+// what tells the front desk which debits can be refunded at all.
 type ledgerEntryRow struct {
 	TransactionKey string `json:"transactionKey"`
 	Type           string `json:"type"`
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	ReversesKey    string `json:"reversesKey,omitempty"`
+	TabKey         string `json:"tabKey,omitempty"`
 }
 
 // computeLedgerHistory filters the cafeLedgerHistory lens rows to one lease,
@@ -65,6 +73,8 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			ReversesKey:    p.ReversesKey,
+			TabKey:         p.TabKey,
 		})
 	}
 	sortLedgerRows(rows)

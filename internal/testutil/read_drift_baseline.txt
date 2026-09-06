@@ -107,6 +107,13 @@ read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
 read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
 read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
+# RefundCafeCharge runs CreditCafeAccount's workplace confinement verbatim (the
+# same post_entry require_workplace site), so it inherits the same two
+# undeclarable follow-ups: each worksAt key is built from a location the walk
+# itself discovered off the account's own heldFor / appliesToUnit / containedIn
+# chain, so no dispatcher can name it up front.
+read	RefundCafeCharge	lnk.identity.<id>.worksAt.building.<id>
+read	RefundCafeCharge	lnk.identity.<id>.worksAt.unit.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.building.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.unit.<id>
 read	RescheduleAppointment	vtx.provider.<id>.hours
@@ -214,6 +221,16 @@ walk	ReassignSession	vtx.session.<id> ledBy out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
+# RefundCafeCharge's half of CreditCafeAccount's confinement walk (see the read
+# rows above). The heldFor and appliesToUnit hubs are payload-reachable and the
+# descriptor could name them, but the containedIn hubs are link-discovered — a
+# unit's own containedIn target is not known until the walk that produced it has
+# run — so the chain is left undeclared as one piece rather than split across
+# two postures.
+walk	RefundCafeCharge	vtx.building.<id> containedIn out
+walk	RefundCafeCharge	vtx.cafeaccount.<id> heldFor out
+walk	RefundCafeCharge	vtx.leaseapp.<id> appliesToUnit out
+walk	RefundCafeCharge	vtx.unit.<id> containedIn out
 walk	ReportIssue	vtx.building.<id> containedIn out
 walk	ReportIssue	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.building.<id> containedIn out

@@ -10,6 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +56,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditCafeAccount", Scope: "any"},
+			{OperationType: "RefundCafeCharge", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -472,6 +476,576 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// --- RefundCafeCharge (front-desk correction of a posted charge) -----------
+
+// postDebit posts a charge to acctKey as the operator and returns its
+// transaction key — the charge every refund vector below reverses. tabRef is
+// optional; supplied, it writes the settles link a real playbook-posted café
+// charge carries.
+func postDebit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey string, amountCents int, memo string) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-10T08:00:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+			strconv.Itoa(amountCents) + `,"memo":"` + memo + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+// refundEnv builds one RefundCafeCharge submission and the transaction key it
+// will mint (deterministic from the request id), declaring exactly the reads
+// and enumerations the descriptor promises. authContextTarget is the raw
+// client-supplied hint — the script refuses its presence outright, which one
+// vector below exercises.
+func refundEnv(label, actorKey, acctKey, reversesRef string, amountCents int,
+	authContextTarget string) (*processor.OperationEnvelope, string) {
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RefundCafeCharge",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-11T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","reversesRef":"` + reversesRef +
+			`","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"Wrong item charged"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{acctKey, reversesRef, reversesRef + ".entry"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: reversesRef, Relation: "postedTo", Direction: "out"},
+			},
+		},
+	}
+	if authContextTarget != "" {
+		env.AuthContext = &processor.AuthContext{Target: authContextTarget}
+	}
+	return env, "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+// refundAs submits one RefundCafeCharge, drives it, asserts the outcome and
+// returns the refund's own transaction key.
+func refundAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, actorKey, acctKey, reversesRef string, amountCents int,
+	authContextTarget string, want processor.MessageOutcome) string {
+	t.Helper()
+	env, txKey := refundEnv(label, actorKey, acctKey, reversesRef, amountCents, authContextTarget)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return txKey
+}
+
+// chargeTally reads a charge's own .entry aspect back — the refund ceiling
+// lives there, on the charge, not on the account.
+func chargeTally(t *testing.T, ctx context.Context, conn *substrate.Conn, chargeKey string) map[string]any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, chargeKey+".entry")
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.entry carries no data", chargeKey)
+	}
+	return data
+}
+
+// TestRefundCafeCharge_PostsCreditAndReversesLink is the positive vector every
+// refusal below is measured against: a posted charge is refunded in full, and
+// the commit carries the ordinary credit shape (transaction + .entry{credit} +
+// postedTo) PLUS the reverses link back to the charge. The link is the refund's
+// whole identity — the entry itself is indistinguishable from a payment, which
+// is exactly why the correction has to be recorded as a relationship.
+func TestRefundCafeCharge_PostsCreditAndReversesLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundok")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFUNDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefundacct000001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefunddebit00001", acctKey, 900, "Settled tab")
+
+	refundKey := refundAs(t, ctx, conn, cp, cons, "caferefundpost000001",
+		ledgerActorKey, acctKey, chargeKey, 900, "", processor.OutcomeAccepted)
+
+	entryDoc := readDoc(t, ctx, conn, refundKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["type"].(string); got != "credit" {
+		t.Fatalf("refund entry.type = %q, want credit (a refund posts an ordinary credit)", got)
+	}
+	if got, _ := entryData["amountCents"].(float64); got != 900 {
+		t.Fatalf("refund entry.amountCents = %v, want 900", got)
+	}
+
+	acctID := acctKey[len("vtx.cafeaccount."):]
+	refundID := refundKey[len("vtx.cafetransaction."):]
+	chargeID := chargeKey[len("vtx.cafetransaction."):]
+	if !keyExists(t, ctx, conn, "lnk.cafetransaction."+refundID+".postedTo.cafeaccount."+acctID) {
+		t.Fatalf("refund must post to the account like any other entry")
+	}
+	reversesLnk := "lnk.cafetransaction." + refundID + ".reverses.cafetransaction." + chargeID
+	if !keyExists(t, ctx, conn, reversesLnk) {
+		t.Fatalf("reverses link must exist: %s", reversesLnk)
+	}
+	lnkDoc := readDoc(t, ctx, conn, reversesLnk)
+	if got, _ := lnkDoc["sourceVertex"].(string); got != refundKey {
+		t.Fatalf("reverses sourceVertex = %q, want the refund %q (the later-arriving vertex is the source)", got, refundKey)
+	}
+	if got, _ := lnkDoc["targetVertex"].(string); got != chargeKey {
+		t.Fatalf("reverses targetVertex = %q, want the charge %q", got, chargeKey)
+	}
+}
+
+// TestRefundCafeCharge_NonDebitRefRejected: a refund may only reverse a CHARGE.
+// Reversing a credit would let one refund reverse another — each credit
+// compounding the last into money the café never took.
+func TestRefundCafeCharge_NonDebitRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundnondebit")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFNQNDEBTLEAS")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefndbtacct00001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefndbtdebit0001", acctKey, 900, "Settled tab")
+
+	// The refund that succeeds is the positive vector; the SECOND refund, aimed
+	// at that first refund's own credit entry, is the one that must fail.
+	refundKey := refundAs(t, ctx, conn, cp, cons, "caferefndbtrefund001",
+		ledgerActorKey, acctKey, chargeKey, 400, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferefndbtoncredit1",
+		ledgerActorKey, acctKey, refundKey, 100, "", processor.OutcomeRejected)
+}
+
+// TestRefundCafeCharge_OtherAccountsChargeRejected: the reversed charge must be
+// postedTo the same account being credited. Without that hop a staffer could
+// aim a refund on one resident's account at another resident's charge and
+// credit money against a debit that was never theirs.
+func TestRefundCafeCharge_OtherAccountsChargeRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundotheracct")
+
+	leaseA := seedLease(t, ctx, conn, "BBCAFEREFQTHRLEASEAA")
+	leaseB := seedLease(t, ctx, conn, "BBCAFEREFQTHRLEASEBB")
+	acctA := createAccount(t, ctx, conn, cp, cons, "caferefotheracctaaa1", leaseA)
+	acctB := createAccount(t, ctx, conn, cp, cons, "caferefotheracctbbb1", leaseB)
+	chargeB := postDebit(t, ctx, conn, cp, cons, "caferefotherdebitbb1", acctB, 900, "Settled tab")
+
+	// Positive vector first: the same charge refunds fine against its OWN
+	// account, so the rejection below is the account mismatch and not a guard
+	// that denies every refund.
+	refundAs(t, ctx, conn, cp, cons, "caferefotherownacct1",
+		ledgerActorKey, acctB, chargeB, 100, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferefothercrossacc",
+		ledgerActorKey, acctA, chargeB, 100, "", processor.OutcomeRejected)
+}
+
+// TestRefundCafeCharge_OverRefundRejected: a single refund may not exceed the
+// charge it reverses.
+func TestRefundCafeCharge_OverRefundRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundover")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFQVERLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefoveracct00001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefoverdebit0001", acctKey, 900, "Settled tab")
+
+	refundAs(t, ctx, conn, cp, cons, "caferefoverexceeds01",
+		ledgerActorKey, acctKey, chargeKey, 901, "", processor.OutcomeRejected)
+	// Exactly the charge is fine — the cap is `>`, not `>=`.
+	refundAs(t, ctx, conn, cp, cons, "caferefoverexact0001",
+		ledgerActorKey, acctKey, chargeKey, 900, "", processor.OutcomeAccepted)
+}
+
+// TestRefundCafeCharge_CumulativeOverRefundRejected is the vector a per-refund
+// cap alone would pass: two partial refunds, each individually well under the
+// charge, whose SUM runs past it. The ceiling is the charge minus everything
+// already given back, so the second one has to fail — and the third, sized to
+// the true remainder, has to succeed, or the test would pass just as well
+// against a guard that denied every second refund.
+func TestRefundCafeCharge_CumulativeOverRefundRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundcumulative")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFCUMLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefcumacct000001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefcumdebit00001", acctKey, 1000, "Settled tab")
+
+	refundAs(t, ctx, conn, cp, cons, "caferefcumfirst00001",
+		ledgerActorKey, acctKey, chargeKey, 600, "", processor.OutcomeAccepted)
+	// 600 + 500 = 1100 > 1000, though 500 alone is under the charge.
+	refundAs(t, ctx, conn, cp, cons, "caferefcumsecond0001",
+		ledgerActorKey, acctKey, chargeKey, 500, "", processor.OutcomeRejected)
+	// The true remainder still refunds.
+	refundAs(t, ctx, conn, cp, cons, "caferefcumthird00001",
+		ledgerActorKey, acctKey, chargeKey, 400, "", processor.OutcomeAccepted)
+}
+
+// TestRefundCafeCharge_SelfScopedSubmitRejected: a refund is never self-scoped.
+// The resident who owes the charge does not get to decide it was wrong — and
+// were the submit to fall through to post_entry's resident branch, they would
+// be minting credits against their own charges, capped only by what they owe.
+func TestRefundCafeCharge_SelfScopedSubmitRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundselfscoped")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEREFSELFLEASEHJ", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefselfacct00001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefselfdebit0001", acctKey, 900, "Settled tab")
+
+	// The operator's own refund of the same charge proves the vector is
+	// otherwise well-formed, so the rejection below is the target and nothing
+	// else about the submission.
+	refundAs(t, ctx, conn, cp, cons, "caferefselfoperator1",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferefselftargeted1",
+		ledgerActorKey, acctKey, chargeKey, 100, ledgerActorKey, processor.OutcomeRejected)
+}
+
+// TestRefundCafeCharge_TallyLandsOnTheChargeItReverses reads back what a refund
+// actually writes to the charge: a refundedCents total, and nothing else
+// disturbed. That total IS the ceiling every later refund is measured against,
+// so the shape matters twice over — a tally that netted itself off the charge's
+// own amountCents would halve what the statement says the resident was charged,
+// and one that dropped the memo or postedAt would rewrite a posted line of a
+// permanent ledger to record a correction about it.
+func TestRefundCafeCharge_TallyLandsOnTheChargeItReverses(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundtally")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFTALLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereftallacct00001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafereftalldebit0001", acctKey, 1000, "Settled tab")
+
+	before := chargeTally(t, ctx, conn, chargeKey)
+	if _, ok := before["refundedCents"]; ok {
+		t.Fatalf("an unrefunded charge carries no tally yet, got %v", before)
+	}
+
+	refundAs(t, ctx, conn, cp, cons, "cafereftallfirst0001",
+		ledgerActorKey, acctKey, chargeKey, 600, "", processor.OutcomeAccepted)
+
+	after := chargeTally(t, ctx, conn, chargeKey)
+	if got, _ := after["refundedCents"].(float64); got != 600 {
+		t.Fatalf("charge refundedCents = %v, want 600", got)
+	}
+	if got, _ := after["amountCents"].(float64); got != 1000 {
+		t.Fatalf("charge amountCents = %v, want the charge's own 1000 — the tally records what was given back, it does not net it off", got)
+	}
+	if got, _ := after["type"].(string); got != "debit" {
+		t.Fatalf("charge type = %q, want debit", got)
+	}
+	if got, _ := after["memo"].(string); got != "Settled tab" {
+		t.Fatalf("charge memo = %q, want it carried across the tally upsert", got)
+	}
+	if got, _ := after["postedAt"].(string); got != "2026-07-10T08:00:00Z" {
+		t.Fatalf("charge postedAt = %q, want it carried across the tally upsert", got)
+	}
+
+	// A second partial refund accumulates onto the same tally rather than
+	// replacing it — the arithmetic the cumulative cap depends on.
+	refundAs(t, ctx, conn, cp, cons, "cafereftallsecond001",
+		ledgerActorKey, acctKey, chargeKey, 400, "", processor.OutcomeAccepted)
+	full := chargeTally(t, ctx, conn, chargeKey)
+	if got, _ := full["refundedCents"].(float64); got != 1000 {
+		t.Fatalf("charge refundedCents after two partial refunds = %v, want 1000", got)
+	}
+}
+
+// driveConcurrently fetches n pending operations and runs them through the
+// commit path SIMULTANEOUSLY, returning their outcomes. It exists because
+// DriveOne is strictly serial: a second refund driven after the first always
+// re-reads the tally the first wrote, so the arithmetic cap alone refuses it
+// and the compare-and-set that pins the tally is never exercised. Only
+// overlapping hydrations put two refunds on the same revision of the charge —
+// the race a live front desk with two terminals actually produces.
+func driveConcurrently(t *testing.T, ctx context.Context, cp *processor.CommitPath,
+	cons jetstream.Consumer, n int) []processor.MessageOutcome {
+	t.Helper()
+	batch, err := cons.Fetch(n, jetstream.FetchMaxWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("Fetch(%d): %v", n, err)
+	}
+	var msgs []jetstream.Msg
+	for m := range batch.Messages() {
+		msgs = append(msgs, m)
+	}
+	if err := batch.Error(); err != nil {
+		t.Fatalf("Fetch batch error: %v", err)
+	}
+	if len(msgs) != n {
+		t.Fatalf("fetched %d messages, want %d", len(msgs), n)
+	}
+
+	outcomes := make([]processor.MessageOutcome, n)
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, m := range msgs {
+		wg.Add(1)
+		go func(i int, m jetstream.Msg) {
+			defer wg.Done()
+			<-release
+			outcomes[i] = cp.HandleMessage(ctx, m)
+		}(i, m)
+	}
+	close(release)
+	wg.Wait()
+	return outcomes
+}
+
+// TestRefundCafeCharge_ConcurrentRefundsCannotJointlyExceedTheCharge is the
+// race the ceiling exists to survive: two full refunds of the same charge,
+// each legal on its own, hydrated together and committed together. Exactly one
+// may win. Which one, and by which refusal, is not fixed — the loser is turned
+// away either by the compare-and-set on the tally it read (if the hydrations
+// overlapped) or by the tally itself (if they did not) — but the outcome is:
+// one refund posted, the charge's tally equal to that one refund, never both.
+func TestRefundCafeCharge_ConcurrentRefundsCannotJointlyExceedTheCharge(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundrace")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFRACELEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefraceacct00001", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefracedebit0001", acctKey, 1000, "Settled tab")
+
+	envA, refundA := refundEnv("caferefracefirst0001", ledgerActorKey, acctKey, chargeKey, 1000, "")
+	envB, refundB := refundEnv("caferefracesecond001", ledgerActorKey, acctKey, chargeKey, 1000, "")
+	testutil.PublishOp(t, conn, envA)
+	testutil.PublishOp(t, conn, envB)
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	accepted := 0
+	for _, o := range outcomes {
+		if o == processor.OutcomeAccepted {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("outcomes = %v, want exactly one Accepted: two full refunds of one charge may never both post", outcomes)
+	}
+
+	tally := chargeTally(t, ctx, conn, chargeKey)
+	if got, _ := tally["refundedCents"].(float64); got != 1000 {
+		t.Fatalf("charge refundedCents = %v, want exactly one refund's 1000 (2000 would mean both committed against the same read)", got)
+	}
+
+	posted := 0
+	for _, k := range []string{refundA, refundB} {
+		if keyExists(t, ctx, conn, k) {
+			posted++
+		}
+	}
+	if posted != 1 {
+		t.Fatalf("%d refund transactions exist, want 1 — the loser must leave no entry behind", posted)
+	}
+}
+
+// TestRefundCafeCharge_MalformedReversesRefRejected: reversesRef must name a
+// cafetransaction, and the TYPE segment is what says so. The vector points it
+// at a live vertex of another type, so what refuses is the key's shape and not
+// its absence — a refund allowed to anchor on an arbitrary vertex would write
+// a reverses link into a class pair no consumer of the lens can read.
+func TestRefundCafeCharge_MalformedReversesRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundbadreftype")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFBADREFLEASE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefbadrefacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefbadrefdebit", acctKey, 900, "Settled tab")
+
+	// The well-formed ref refunds, so the rejection below is the type segment
+	// and nothing else about this account or this actor.
+	refundAs(t, ctx, conn, cp, cons, "caferefbadrefpositiv",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+
+	tabKey := "vtx.tab.BBCAFEREFBADTABHJKMN"
+	seedVertex(t, ctx, conn, tabKey, "tab", nil)
+	refundAs(t, ctx, conn, cp, cons, "caferefbadrefwrongty",
+		ledgerActorKey, acctKey, tabKey, 100, "", processor.OutcomeRejected)
+}
+
+// TestRefundCafeCharge_AbsentReversesRefRejected: a refund against a charge
+// that does not exist has nothing to correct. The ref is declared in reads
+// exactly as the front desk's descriptor declares it, so the refusal is the
+// platform's own dependence check on a declared read the script consults —
+// which is why the script does not invent an "unknown transaction" of its own
+// for this shape.
+func TestRefundCafeCharge_AbsentReversesRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundabsentref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFGQNELEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferefabsentacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferefabsentdebit", acctKey, 900, "Settled tab")
+
+	refundAs(t, ctx, conn, cp, cons, "caferefabsentpositiv",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "caferefabsentmissing",
+		ledgerActorKey, acctKey, "vtx.cafetransaction.BBCAFEREFABSENTTXHJK", 100, "",
+		processor.OutcomeRejected)
+}
+
+// TestCreditCafeAccount_ReversesRefRejected: reversesRef belongs to
+// RefundCafeCharge, and every other entry refuses it rather than ignoring it.
+// A caller that sends one to CreditCafeAccount means to record a correction;
+// dropping the field silently would post a plain payment, leaving the
+// statement saying the resident handed money over at the counter.
+func TestCreditCafeAccount_ReversesRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditrevref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECREDREVLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecreditrevacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafecreditrevdebit", acctKey, 900, "Settled tab")
+
+	creditEnv := func(label, payload string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "CreditCafeAccount",
+			Actor:         ledgerActorKey,
+			SubmittedAt:   "2026-07-12T09:00:00Z",
+			Class:         "cafetransaction",
+			Payload:       json.RawMessage(payload),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{acctKey, chargeKey, chargeKey + ".entry"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		}
+	}
+
+	// The same payment without the field is accepted, so the rejection below
+	// is the field and not the amount, the account or the actor.
+	testutil.PublishOp(t, conn, creditEnv("cafecreditrevrefokay",
+		`{"accountKey":"`+acctKey+`","amountCents":100}`))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, creditEnv("cafecreditrevrefbad",
+		`{"accountKey":"`+acctKey+`","amountCents":100,"reversesRef":"`+chargeKey+`"}`))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestRefundCafeCharge_TabRefRejected is the mirror of the refusal above: a
+// tabRef sent to RefundCafeCharge is refused rather than ignored. The field is
+// DebitAccount's — a refund settles no tab — and a caller sending one means
+// "give back the charge that settled this tab". Silently dropping it commits a
+// credit with no settles link and no relation to the tab at all, which is the
+// same disagreement between what was asked for and what the ledger records.
+func TestRefundCafeCharge_TabRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundtabref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFTABREFLEASE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereftabrefacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafereftabrefdebit", acctKey, 900, "Settled tab")
+	tabKey := "vtx.tab.BBCAFEREFTABHJKMNPQR"
+	seedVertex(t, ctx, conn, tabKey, "tab", nil)
+
+	refundAs(t, ctx, conn, cp, cons, "cafereftabrefpositiv",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+
+	// The live tab is what makes this the FIELD's refusal: an absent one would
+	// reject on the declared read alone, whichever op it was sent to.
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cafereftabrefrefused"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RefundCafeCharge",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-13T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","reversesRef":"` + chargeKey +
+			`","amountCents":100,"tabRef":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{acctKey, chargeKey, chargeKey + ".entry", tabKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: chargeKey, Relation: "postedTo", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+const (
+	ledgerTaskActorID  = "BBCAFETASKACTQRHJKMN"
+	ledgerTaskActorKey = "vtx.identity." + ledgerTaskActorID
+	ledgerTaskActorCap = "cap.ephemeral.identity." + ledgerTaskActorID
+	ledgerTaskKey      = "vtx.task.BBCAFEREFTASKHJKMNPQ"
+)
+
+// ledgerTaskCapDoc holds RefundCafeCharge through an ephemeral TASK grant. The
+// task branch reads the disjoint cap.ephemeral.identity.<id> key (Contract #10
+// §10.7), and a grant matched there is the OTHER path that sets
+// op.authTargetValidated — the bit workplace_exempt discharges confinement on.
+func ledgerTaskCapDoc(target string) *processor.CapabilityDoc {
+	return &processor.CapabilityDoc{
+		Key:                    ledgerTaskActorCap,
+		Actor:                  ledgerTaskActorKey,
+		Version:                "1.0",
+		ProjectedAt:            "2026-07-14T00:00:00Z",
+		ProjectedFromRevisions: map[string]uint64{ledgerTaskActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions:    []processor.PlatformPermission{},
+		ServiceAccess:          []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{
+			{
+				Source:        "task",
+				TaskKey:       ledgerTaskKey,
+				OperationType: "RefundCafeCharge",
+				Target:        target,
+				ExpiresAt:     time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			},
+		},
+		Roles: []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")},
+	}
+}
+
+// TestRefundCafeCharge_ValidatedTargetSubmitRejected drives the refusal from
+// the OTHER side of op.authTargetValidated: a task's ephemeral grant, matched
+// on the disjoint capability key, authorizes without any standing role and
+// exempts its holder from the workplace walk. A refund reaching post_entry that
+// way would arrive both unconfined and on the resident-credit branch, so the
+// task path has to stop at the same refusal a self-scoped submit does.
+func TestRefundCafeCharge_ValidatedTargetSubmitRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundtaskgrant")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEREFTASKLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereftaskacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafereftaskdebit", acctKey, 900, "Settled tab")
+
+	seedIdentity(t, ctx, conn, ledgerTaskActorID)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerTaskCapDoc(acctKey))
+
+	// The operator's own standing refund of the same charge proves the vector
+	// is otherwise well-formed.
+	refundAs(t, ctx, conn, cp, cons, "cafereftaskpositive",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+
+	env, _ := refundEnv("cafereftaskgrantpath", ledgerTaskActorKey, acctKey, chargeKey, 100, acctKey)
+	env.AuthContext.Task = ledgerTaskKey
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want rejected: a task-authorized refund is exempt from the workplace walk", outcome)
+	}
+	// The reason matters: a step-3 denial would mean the grant never matched
+	// and the script was never asked, which proves nothing about the guard.
+	if reply == nil || reply.Error == nil {
+		t.Fatalf("rejected reply carries no error: %+v", reply)
+	}
+	if !strings.Contains(reply.Error.Message, "front-desk act") {
+		t.Fatalf("rejection reason = %q, want the script's own refusal — a step-3 denial would mean the ephemeral grant never matched and the guard was never reached", reply.Error.Message)
+	}
 }
 
 // --- CreditCafeAccount consumer scope=self (resident self-pay) -------------

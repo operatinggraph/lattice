@@ -111,12 +111,15 @@ func transactionDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafetransaction",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount"},
+		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge"},
 		Description: "House-tab ledger transaction DDL. Vertex shape: vtx.cafetransaction.<NanoID>, " +
 			"class=cafetransaction, root data = {} (minimal, D5 — the entry detail is a .entry aspect). " +
 			"DebitAccount{accountKey, amountCents, memo?, tabRef?} records a café charge (a settled tab); " +
-			"CreditCafeAccount{accountKey, amountCents, memo?} records a payment received. Each mints a fresh " +
-			"vtx.cafetransaction.<NanoID> + a .entry aspect {type (debit|credit), amountCents, memo?, postedAt} + the " +
+			"CreditCafeAccount{accountKey, amountCents, memo?} records a payment received; " +
+			"RefundCafeCharge{accountKey, reversesRef, amountCents, memo?} gives back part or all of a charge " +
+			"already posted. Each mints a fresh " +
+			"vtx.cafetransaction.<NanoID> + a .entry aspect " +
+			"{type (debit|credit), amountCents, memo?, postedAt, refundedCents?} + the " +
 			"postedTo link (cafetransaction→cafeaccount, the cafetransaction is the later-arriving vertex so it is " +
 			"the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no balance is stored or mutated on the " +
 			"account; the cafeLedgerHistory lens derives a balance by summing entries, so concurrent debits/credits " +
@@ -124,21 +127,36 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"number. DebitAccount-only optional tabRef (the cafe-domain Settle consumer, mirroring loftspace-ledger's " +
 			"clauseRef): when present and the referenced tab is alive, writes the settles audit link " +
 			"(cafetransaction→tab) the cafeTabSettlement Weaver target reads to detect the charge is posted; a plain " +
-			"human-submitted DebitAccount omitting tabRef is byte-for-byte unaffected.",
+			"human-submitted DebitAccount omitting tabRef is byte-for-byte unaffected. " +
+			"RefundCafeCharge-only REQUIRED reversesRef: the vtx.cafetransaction.<NanoID> of the posted charge " +
+			"being given back. It posts an ordinary credit entry — so every balance consumer sums it unchanged — " +
+			"plus a reverses link (cafetransaction→cafetransaction, the refund is the later-arriving vertex so it " +
+			"is the source), which is what distinguishes a correction from a payment the resident handed over. The " +
+			"reference must name a live cafetransaction whose .entry is a DEBIT posted to the SAME accountKey, and " +
+			"amountCents may not exceed that charge's own amount minus what has already been given back against it " +
+			"(RefundExceedsCharge), so partial refunds accumulate to at most the charge. Balances remain " +
+			"append-only — no total is stored on the account — but the refunded amount IS maintained, as a " +
+			"refundedCents field on the reversed charge's own .entry aspect, upserted in the refund's batch under " +
+			"a compare-and-set pinned to the revision that aspect was read at. That single tally is the ceiling: " +
+			"two refunds racing one charge serialize, the second refused rather than granted alongside the first. " +
+			"A refund is a front-desk act and is never self-scoped: a submit carrying an authContext target is " +
+			"refused.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> the transaction posts to (DebitAccount/CreditCafeAccount; required, validated alive)."},` +
-			`"amountCents":{"type":"integer","description":"The transaction amount in whole cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab); a credit is a payment (decreases it)."},` +
-			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"Settled tab — table 4\", \"House tab payment\"). Optional."},` +
-			`"tabRef":{"type":"string","description":"DebitAccount only: vtx.tab.<NanoID> of the cafe-domain tab this charge settles (optional, validated alive when supplied). Writes the settles audit link."}},` +
+			`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> the transaction posts to (DebitAccount/CreditCafeAccount/RefundCafeCharge; required, validated alive)."},` +
+			`"amountCents":{"type":"integer","description":"The transaction amount in whole cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab); a credit is a payment (decreases it); a refund is a credit bounded by the charge it reverses."},` +
+			`"memo":{"type":"string","description":"Optional free-text description of the charge, payment or refund (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\"). Optional."},` +
+			`"tabRef":{"type":"string","description":"DebitAccount only: vtx.tab.<NanoID> of the cafe-domain tab this charge settles (optional, validated alive when supplied). Writes the settles audit link."},` +
+			`"reversesRef":{"type":"string","description":"RefundCafeCharge only: vtx.cafetransaction.<NanoID> of the posted charge being given back (required, validated alive, must be a debit on the same account). Writes the reverses link."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.cafetransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "Full vtx.cafeaccount.<NanoID> key the transaction posts to. DebitAccount/CreditCafeAccount validate it is alive and write the postedTo link (transaction→account) the cafeLedgerHistory lens walks.",
-			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens.",
-			"memo":        "Optional free-text description of the charge or payment (e.g. \"Settled tab — table 4\", \"House tab payment\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
-			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount.",
+			"accountKey":  "Full vtx.cafeaccount.<NanoID> key the transaction posts to. DebitAccount/CreditCafeAccount/RefundCafeCharge validate it is alive and write the postedTo link (transaction→account) the cafeLedgerHistory lens walks.",
+			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens — a refund never alters the charge's own amountCents. On RefundCafeCharge it is additionally capped by what the reversed charge still has un-refunded (its amountCents minus its refundedCents tally).",
+			"memo":        "Optional free-text description of the charge, payment or refund (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
+			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount, and refused outright (InvalidArgument) on RefundCafeCharge, whose credit settles no tab.",
+			"reversesRef": "RefundCafeCharge only, and required there. Full vtx.cafetransaction.<NanoID> key of the posted charge being given back — validated alive, required to be a DEBIT posted to the same accountKey, and the ceiling on amountCents (its own amountCents minus its refundedCents). Writes the reverses link (refund→charge) the cafeLedgerHistory lens projects as reversesKey, and adds this refund to the charge's refundedCents tally under a compare-and-set on that .entry aspect's hydrated revision.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -162,6 +180,17 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as DebitAccount, but writes .entry{type: credit, ...} and emits " +
 					"account.credited{accountKey, transactionKey, amountCents}. A payment reduces what the resident owes " +
 					"(the cafeLedgerHistory-derived balance = sum(debits) − sum(credits)).",
+			},
+			{
+				Name:    "RefundCafeCharge — give back a charge that should not have been posted",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "reversesRef": "vtx.cafetransaction.<NanoID>", "amountCents": 450, "memo": "Wrong item charged"},
+				ExpectedOutcome: "Validates the account is alive, that reversesRef names a live cafetransaction whose .entry " +
+					"is a debit postedTo that same account, and that 450 fits inside what that charge still has " +
+					"un-refunded. Commits the ordinary credit shape (transaction + .entry{type: credit, …} + postedTo) " +
+					"plus the reverses link (refund→charge) and the charge's own refundedCents tally, conditioned on " +
+					"the revision its .entry was read at, and emits account.credited. Rejects UnknownTransaction if " +
+					"the reference is absent, InvalidArgument if it is a credit or posted to another account, " +
+					"RefundExceedsCharge if the amount runs past the charge, and AuthDenied on a self-scoped submit.",
 			},
 		},
 	}
