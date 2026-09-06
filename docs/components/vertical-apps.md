@@ -47,4 +47,14 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   hides at zero balance and carries `max`; the front-desk form beside it rendered whenever an account existed, so
   the new cap turned a mis-key into a raw `AuthDenied` toast where the sibling form never lets one be typed.
   Minted: café house-tab payment cap (2026-09-05). Check: when an op gains a server refusal, walk every form that
-  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).
+  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).- **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
+  roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
+  only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N
+  and the op remove N−1, with the confirm dialog repeating the wrong number. Minted: wellness series call-off
+  (2026-09-06), caught cold. Check: for every "N will happen" label, diff the FE's filter against the
+  script's skip conditions conjunct by conjunct, and key the tally on every field the op confirms.
+- **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
+  rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
+  a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats
+  (2026-09-06). Check: run `lint-app-op-descriptors` on every `cmd/<app>` edit, comments included, and name
+  an undescribed op by role, never by literal.

@@ -2,6 +2,14 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-05 · (live-stack op run) · Orphaned-unit lease `fuW7HyE8At2DkH7xx28t` withdrawn + the 3 remaining stale cluster-A onboarding tasks cancelled, via the admin app session (CLI `op submit` stays classifier-refused unattended).
+- 2026-09-03 · `097aa843` · Café debt stops vanishing when a lease's unit is tombstoned — `cafeLeaseWorkplaces`'s new `missingLocation` flag routes it to every front-desk staffer instead of denying it to all of them.
+- 2026-09-03 · `3a1351cd` · The landlord portfolio card finally shows rent owed — `/api/portfolio-pulse` now folds every occupied lease's ledger balance into a worst-first arrears column, no more pulling leases one at a time.
+- 2026-09-03 · `cd16409c` · Front desk can finally take a payment against a landlord-unapproved café lease — `fillLeaseSelect`'s approval gate now scopes to the POS/OpenTab picker only, never the Resident-tab ledger+payment picker.
+- 2026-09-03 · `9fa0a8bf` · A stale lease-signing userTask now cancels itself once its gap closes elsewhere — new `staleUserTasks` target mirrors `orphanedTaskGrants`.
+- 2026-09-03 · `c3af15a3` · Self-pay clinic accounts can finally pay — `.balance` is now a maintained O(1) cache, not a full-history replay that blew the 250ms wall 9/10 times.
+- 2026-09-03 · `ac4add98` · Front desk no longer sees the provider/site admin surface it holds no grant to use — `/api/staff-hats` now reports the operator hat; the FE gates on it, not `isFrontDesk()`.
+- 2026-09-03 · `411c27d4` · The follow-up worklist no longer treats an earlier, still-before-due-date booking as having addressed the follow-up — `hasLaterVisit` now requires the later visit to land on/after `followUpDate`.
 - 2026-09-02 · `46268dee` · A corrected clinic no-show now reverses its stranded fee — `clinicNoShowSettlement`'s new `missing_reversal` gap auto-credits it back once `CorrectAppointmentStatus` moves the appointment off `noShow`.
 - 2026-09-02 · `70c73ac1` · A corrected wellness no-show now refunds its fee — `SetBookingAttendance` mints a wellnessrefund marker on a noShow→attended re-mark, mirroring `ReleaseOrphanedBooking`.
 - 2026-09-02 · (observation, no code) · The executed lease document's `AttachObject` grant fix (`2026-08-27` live) converged — Weaver's reclaim sweep has attached all known-affected leases, none failing since; no code change needed.
