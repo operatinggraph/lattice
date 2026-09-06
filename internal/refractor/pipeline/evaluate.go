@@ -285,7 +285,18 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	// reach here through evaluatePlainFromVertex with the owner/endpoint vertex
 	// as the entry, so each arm seeds precisely when its own vertex is an
 	// anchor.
-	seed := p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey)
+	// THE ARMING ANSWER IS READ ONCE, HERE, AND THREADED. partitionArmed
+	// conjoins a live predicate (the divergence audit's enrolment and
+	// suppression, and the deployment kill switch, all read at call time), so a
+	// frame that asked it again later could be told something else. The three
+	// places this frame needs it — the seed decision below, the multi-position
+	// producer's declined shape, and the tail's choice of diff — must agree or
+	// the event is unsound in one of two directions: a SEEDED one-anchor row set
+	// meeting the WHOLE target listing tombstones every other anchor's rows, and
+	// a whole row set meeting one anchor's partition retracts nothing it should.
+	// One read, one value, one frame.
+	armed := p.partitionArmed(rs)
+	seed := p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey, armed)
 	plain := p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil
 	// reentrant is true only while evaluatePlainDerivedAnchors is re-entering
 	// this dispatch for one of ITS OWN derived anchors (anchor_derivation_
@@ -334,7 +345,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// row set says nothing about the rows this vertex sits at the other
 		// position of. That producer's own doc carries the argument. Only a
 		// licensed `act` lens gets the correction, either way.
-		results, rowScope, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
+		results, rowScope, err = p.evaluateSeededMultiPosition(ctx, rs, entry, armed)
 	default:
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
 	}
@@ -391,27 +402,29 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			// but plainEntryForVertex found missing or tombstoned — never listed
 			// by anyone, so its rows would linger with no event left to name
 			// them.
+			//
+			// BOTH NARROW SCOPES FAIL THE EVENT RATHER THAN WIDEN when the
+			// frame is not armed. Each is unreachable — seedAnchorFor returns no
+			// seed for an unarmed diffRetraction lens, and the derivation index
+			// refuses one before any re-entry is substituted — and each is an
+			// error rather than a fall-through for the same reason: a whole
+			// listing diffed against a PARTIAL row set tombstones every anchor
+			// the frame did not cover, which is the one outcome this design
+			// forbids. Failing redelivers the event; widening deletes rows.
 			var derr error
 			switch rowScope.kind {
 			case scopeActed:
-				if !p.partitionArmed(rs) {
-					// Unreachable: the derivation index refuses an unarmed
-					// diffRetraction lens before any re-entry is substituted. It
-					// is still an error rather than a fall-through, because the
-					// one thing this design forbids is a whole diff over a
-					// partial row set — failing the event redelivers it, and a
-					// wrong whole diff tombstones every anchor the frame did not
-					// cover.
+				if !armed {
 					return nil, nil, ScopeAll(), fmt.Errorf(
 						"pipeline: rule %q substituted per-anchor evaluations without the partition-scoped diff armed; refusing to diff a partial row set against the whole target", p.ruleID)
 				}
 				results, derr = p.applyPartitionDiffRetraction(ctx, rs, rowScope.anchors, results)
 			case scopeSeeded:
-				if p.partitionArmed(rs) {
-					results, derr = p.applyPartitionDiffRetraction(ctx, rs, []string{seed}, results)
-				} else {
-					results, derr = p.applyDiffRetraction(ctx, results)
+				if !armed {
+					return nil, nil, ScopeAll(), fmt.Errorf(
+						"pipeline: rule %q evaluated one anchor without the partition-scoped diff armed; refusing to diff a single anchor's row set against the whole target", p.ruleID)
 				}
+				results, derr = p.applyPartitionDiffRetraction(ctx, rs, []string{seed}, results)
 			default:
 				results, derr = p.applyDiffRetraction(ctx, results)
 			}

@@ -16,6 +16,9 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -69,10 +72,27 @@ type partitionCountingAdapter struct {
 	// the transient tombstone failure whose FailClosed abort keeps a sibling
 	// upsert from landing past a row that should be gone.
 	failDeleteOn string
+	// onFirstListing runs once, inside the first listing call of an event, and
+	// is how a test moves the arming state MID-FRAME. It has to be a hook rather
+	// than a call between events: the window that matters is the one between the
+	// frame's seed decision and its diff, and a listing is the only point of the
+	// frame a test can reach from outside.
+	onFirstListing  func()
+	firstListingRun bool
+}
+
+// fireFirstListing runs the mid-frame hook at most once per event.
+func (c *partitionCountingAdapter) fireFirstListing() {
+	if c.onFirstListing == nil || c.firstListingRun {
+		return
+	}
+	c.firstListingRun = true
+	c.onFirstListing()
 }
 
 func (c *partitionCountingAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) {
 	c.wholeListings++
+	c.fireFirstListing()
 	return c.NatsKVAdapter.ListKeys(ctx)
 }
 
@@ -84,6 +104,7 @@ func (c *partitionCountingAdapter) ListKeysPrefix(ctx context.Context, prefix st
 func (c *partitionCountingAdapter) ListKeysWhere(ctx context.Context, fixed map[string]any, prefix string) ([]map[string]any, error) {
 	c.partitionListings++
 	c.listedPartitions = append(c.listedPartitions, fmt.Sprintf("%v", fixed))
+	c.fireFirstListing()
 	return c.NatsKVAdapter.ListKeysWhere(ctx, fixed, prefix)
 }
 
@@ -226,6 +247,7 @@ func (f *partitionFixture) writeGraph() {
 func (f *partitionFixture) resetListingCounts() {
 	f.adpt.wholeListings, f.adpt.partitionListings = 0, 0
 	f.adpt.listedPartitions = nil
+	f.adpt.firstListingRun = false
 }
 
 // nextSeq hands out a fresh, monotonically increasing stream sequence.
@@ -423,7 +445,7 @@ func TestPartitionRetraction_ArmedLens(t *testing.T) {
 func TestPartitionRetraction_UnarmedLensKeepsTheWholeDiff(t *testing.T) {
 	f := newPartitionFixture(t, false)
 	require.False(t, f.p.partitionArmed(f.p.ruleState()))
-	require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1),
+	require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1, f.p.partitionArmed(f.p.ruleState())),
 		"an unarmed DiffRetraction lens must still recompute its whole row set — its diff retracts everything it fails to re-derive")
 
 	f.projectAll()
@@ -736,7 +758,7 @@ func TestPartitionRetraction_HoldOutsKeepTheWholeDiff(t *testing.T) {
 		require.False(t, f.p.PartitionRetraction(),
 			"the whole diff on every event is the only shrink path an un-truncatable grant table has on a rebuild")
 
-		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1),
+		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1, f.p.partitionArmed(f.p.ruleState())),
 			"so it must still recompute its whole row set — a per-anchor row set met against a source-wide listing is a mass revoke")
 		f.projectAll()
 		require.Positive(t, f.adpt.wholeListings)
@@ -766,7 +788,7 @@ func TestPartitionRetraction_HoldOutsKeepTheWholeDiff(t *testing.T) {
 			"the partition-ONLY conjunct excludes a lens that already closes; its retraction is the read-free presence check")
 		require.False(t, f.p.ruleState().partition.only)
 
-		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1),
+		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1, f.p.partitionArmed(f.p.ruleState())),
 			"and its whole diff — the continuous healer the secure design kept on purpose — needs the whole row set")
 		f.event("leaseapp", partApp1)
 		require.Zero(t, f.adpt.partitionListings,
@@ -901,7 +923,7 @@ func TestPartitionRetraction_MultiPositionAnchorIsNotUnderCovered(t *testing.T) 
 			Properties: map[string]any{"lastModifiedAt": "2026-08-01T10:00:00Z"},
 		}
 		f.p.SetAnchorDerivationMode(DerivationModeOff)
-		_, gotScope, err := f.p.evaluateSeededMultiPosition(context.Background(), rs, entry)
+		_, gotScope, err := f.p.evaluateSeededMultiPosition(context.Background(), rs, entry, f.p.partitionArmed(rs))
 		require.NoError(t, err)
 		require.Equal(t, scopeSeeded, gotScope.kind,
 			"an unarmed lens's declined answer is the narrow single-seed call — today's shipped cost, never a rescan it never asked for")
@@ -1017,7 +1039,7 @@ func TestPartitionRetraction_AuditHalfDisarms(t *testing.T) {
 		require.False(t, f.p.partitionArmed(f.p.ruleState()),
 			"but with nothing standing to re-test a row a seeded evaluation left behind, the whole is not armed")
 
-		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1))
+		require.Empty(t, f.p.seedAnchorFor(f.p.ruleState(), "leaseapp", "vtx.leaseapp."+partApp1, f.p.partitionArmed(f.p.ruleState())))
 		require.Equal(t, RetractionTransportDiffRetraction, f.p.PlainRetractionTransport(false).Transport,
 			"and the operator is told what actually runs, not what the adapter would allow")
 
@@ -1085,4 +1107,165 @@ func TestPartitionRetraction_MultiWalkLensIsNeverArmed(t *testing.T) {
 		"as a multi-walk lens it must not: the merge drops the seed, so the evaluation is whole and only the whole diff is exact against it")
 	require.Empty(t, p.seedAnchorLabels,
 		"which is the same reason seeding itself is refused for a multi-walk lens")
+}
+
+// TestPartitionRetraction_ArmingIsReadOncePerFrame is the coherence pin.
+//
+// partitionArmed conjoins a LIVE predicate — the divergence audit's enrolment
+// and suppression and the deployment kill switch, all read at call time — and a
+// CDC frame consults that answer at three points: the seed decision, the
+// multi-position producer's declined shape, and the tail's choice of diff. If
+// each asked independently, an operator's action landing mid-event would split
+// them, and the split has a direction that DELETES:
+//
+//	armed → disarmed	a SEEDED one-anchor row set meets the WHOLE target
+//	                	listing, and every other anchor's rows read as gone.
+//	disarmed → armed	a whole-corpus row set meets ONE anchor's partition,
+//	                	and the rows it should have retracted survive.
+//
+// The frame reads the answer once and threads it, so neither happens. Each
+// subtest flips the state from inside the adapter double's first listing —
+// after the seed decision, before the diff — because that is the only window
+// that matters and the only one reachable from outside the frame.
+func TestPartitionRetraction_ArmingIsReadOncePerFrame(t *testing.T) {
+	t.Run("disarmed mid-frame: the seeded frame keeps its partition diff", func(t *testing.T) {
+		f := newPartitionFixture(t, true)
+		f.projectAll()
+		siblingRev := targetRevision(t, f.targetKV, partRowKey(partApp2, partLandlordX))
+		f.resetListingCounts()
+
+		// The kill switch goes down DURING the event, after the seed decision
+		// has already been made on "armed".
+		f.adpt.onFirstListing = func() { SetAuditEnabled(false) }
+		t.Cleanup(func() { SetAuditEnabled(true) })
+
+		f.event("leaseapp", partApp1)
+
+		require.False(t, f.p.partitionArmed(f.p.ruleState()),
+			"precondition: the flip really did take effect — a later frame would be unarmed")
+		require.Zero(t, f.adpt.wholeListings,
+			"THE ASSERTION: a frame that seeded on `armed` must never meet its one-anchor row set with the whole "+
+				"target listing, whatever an operator does between the two")
+		require.Positive(t, f.adpt.partitionListings,
+			"it diffs the partition it decided to, which is what its row set is exact against")
+		f.requireRows(
+			partRowKey(partApp1, partLandlordX),
+			partRowKey(partApp1, partLandlordY),
+			partRowKey(partApp2, partLandlordX),
+		)
+		require.Equal(t, siblingRev, targetRevision(t, f.targetKV, partRowKey(partApp2, partLandlordX)),
+			"and no sibling anchor's row is touched — a whole diff here would have tombstoned it")
+	})
+
+	t.Run("armed mid-frame: the whole frame keeps its whole diff", func(t *testing.T) {
+		// The reverse flap. The lens is fully activated and its audit enrolled —
+		// the enrolment itself is refused while the switch is down, so it has to
+		// happen first — and then the switch goes down, which leaves the frame
+		// unarmed: it does not seed, and its row set is the whole corpus. Arming
+		// it mid-event must not switch the tail to a partition diff, which would
+		// leave behind every row the whole diff was going to retract.
+		f := newPartitionFixture(t, true)
+		f.projectAll()
+
+		SetAuditEnabled(false)
+		t.Cleanup(func() { SetAuditEnabled(true) })
+		require.False(t, f.p.partitionArmed(f.p.ruleState()),
+			"precondition: the frame starts unarmed, so it evaluates whole")
+
+		f.resetListingCounts()
+		f.adpt.onFirstListing = func() { SetAuditEnabled(true) }
+
+		f.event("leaseapp", partApp1)
+
+		require.True(t, f.p.partitionArmed(f.p.ruleState()),
+			"precondition: the flip really did take effect")
+		require.Positive(t, f.adpt.wholeListings,
+			"a frame that evaluated the WHOLE corpus must diff the whole target — its row set is the complete truth, "+
+				"and a partition diff would retract nothing outside one anchor")
+		require.Zero(t, f.adpt.partitionListings)
+		f.requireRows(
+			partRowKey(partApp1, partLandlordX),
+			partRowKey(partApp1, partLandlordY),
+			partRowKey(partApp2, partLandlordX),
+		)
+	})
+}
+
+// TestPartitionRetraction_FrameAsksTheArmingOnce is the gate behind the fixture
+// above, and it is the one that can actually fail.
+//
+// The coherence the fixture describes cannot be falsified from outside the
+// pipeline: between a frame's seed decision and its diff, nothing touches the
+// adapter — the evaluation reads Core KV and adjacency — so a test has no
+// deterministic point at which to move the arming state INTO that window. A
+// behavioural fixture that flips during the diff passes whether the tail reads
+// the threaded value or re-reads live, which makes it a positive vector and not
+// a proof.
+//
+// What IS checkable is the shape the coherence rests on: ONE read per frame,
+// threaded. This reads the source and counts, the way
+// TestRuleState_RoundTripCarriesEveryField reads the two hand-maintained lists
+// rather than reflecting over a value — because "was this asked twice" is a
+// statement about statements, and no runtime value distinguishes a threaded
+// answer from a re-read that happened to agree.
+//
+// A second read added to any of the three seam functions fails here by name,
+// which is exactly when someone needs to be told: the two answers can differ,
+// and the direction that differs deletes rows.
+func TestPartitionRetraction_FrameAsksTheArmingOnce(t *testing.T) {
+	// The frame's own function, and the two it threads the answer into. The
+	// count for the frame is ONE — the read at the top; for the other two it is
+	// ZERO, because they take the value as a parameter.
+	for _, want := range []struct {
+		file  string
+		fn    string
+		calls int
+		why   string
+	}{
+		{"evaluate.go", "evaluateForEntryRaw", 1,
+			"the frame reads the arming once, at the top, and threads it into the seed decision, the multi-position " +
+				"producer and the tail — a second read here can be told something else, and a seeded row set met with " +
+				"the whole target listing retracts every other anchor's rows"},
+		{"rulestate.go", "seedAnchorFor", 0,
+			"the seed decision takes the frame's answer as a parameter; asking again would let the seed and the diff " +
+				"that follows it disagree"},
+		{"anchor_derivation_plain.go", "evaluateSeededMultiPosition", 0,
+			"the declined SHAPE and the diff the tail then runs are one decision's two halves, so this producer is " +
+				"handed the frame's answer rather than taking its own"},
+	} {
+		t.Run(want.fn, func(t *testing.T) {
+			got := countCallsIn(t, want.file, want.fn, "partitionArmed")
+			require.Equalf(t, want.calls, got,
+				"%s reads partitionArmed %d time(s), expected %d: %s", want.fn, got, want.calls, want.why)
+		})
+	}
+}
+
+// countCallsIn parses one file of this package and counts the calls to a method
+// of the given name inside one function body.
+func countCallsIn(t *testing.T, file, fn, method string) int {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+	require.NoErrorf(t, err, "%s must parse — this gate reads it as source", file)
+
+	for _, decl := range parsed.Decls {
+		d, isFunc := decl.(*ast.FuncDecl)
+		if !isFunc || d.Name.Name != fn || d.Body == nil {
+			continue
+		}
+		n := 0
+		ast.Inspect(d.Body, func(node ast.Node) bool {
+			call, isCall := node.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel && sel.Sel.Name == method {
+				n++
+			}
+			return true
+		})
+		return n
+	}
+	t.Fatalf("%s no longer declares %s — the seam moved, and this gate is watching a function that is gone", file, fn)
+	return 0
 }

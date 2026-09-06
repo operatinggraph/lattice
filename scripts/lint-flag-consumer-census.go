@@ -91,18 +91,23 @@ var registry = []flagSpec{{
 }, {
 	// The partition-scoped retraction's arming, gated on its READ SURFACE
 	// rather than on the raw bool. partitionArmed is where the flag's three
-	// halves are conjoined (activation, rule, audit), and every consumer reads
-	// it — so a new reader of the ARMING is a new place authorising a
-	// per-partition Delete, which is exactly what this ledger exists to make
-	// someone re-read the bound for.
+	// halves are conjoined (activation, rule, audit), and a new reader of the
+	// ARMING is a new place authorising a per-partition Delete — exactly what
+	// this ledger exists to make someone re-read the bound for.
+	//
+	// The reader set is SHORT ON PURPOSE, and shrinking it is the point rather
+	// than a side effect: the audit half makes this predicate LIVE, so a CDC
+	// frame that asked it more than once could act on two different answers.
+	// evaluateForEntryRaw reads it once and threads that value through the seed
+	// decision, the multi-position producer and the tail, which is why none of
+	// those three appears here. A new entry that is inside one event's frame
+	// belongs upstream of that read, not beside it.
 	name:     "Pipeline.partitionRetraction (partitionArmed)",
 	accessor: "partitionArmed",
 	field:    "partitionRetraction",
-	bound:    "internal/refractor/pipeline/pipeline.go, the partitionArmed doc comment (its three halves and what each costs when it is down)",
+	bound:    "internal/refractor/pipeline/pipeline.go, the partitionArmed doc comment (its three halves, and why a frame reads it once)",
 	readers: []string{
-		"internal/refractor/pipeline/rulestate.go#seedAnchorFor",
 		"internal/refractor/pipeline/anchor_derivation_plain.go#plainDerivationIndexRefusal",
-		"internal/refractor/pipeline/anchor_derivation_plain.go#evaluateSeededMultiPosition",
 		"internal/refractor/pipeline/anchor_derivation_plain.go#noteStaticPlainDerivationRefusal",
 		"internal/refractor/pipeline/evaluate.go#evaluateForEntryRaw",
 		"internal/refractor/pipeline/retraction_transport.go#PlainRetractionTransport",

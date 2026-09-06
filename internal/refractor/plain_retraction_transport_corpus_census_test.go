@@ -558,11 +558,20 @@ func TestPlainDerivationStaticallyEligible_IsTheLicencePrefix(t *testing.T) {
 		enrolled, auditRefusal := p.InstallAudit(pipeline.AuditOptions{AuthPlane: projection.IsAuthPlane(rule)})
 		auditAdmits := enrolled || auditRefusal == auditPlaneRefusal
 
-		closes := fullCR.ProjectsOneRowPerAnchor()
+		// The licence's own last conjunct, asked the way the licence asks it.
+		// It is PartitionsByAnchor rather than ProjectsOneRowPerAnchor because
+		// what a per-anchor evaluation depends on is that every row belongs to
+		// exactly one anchor — not that the row's KEY is additionally derivable
+		// from the anchor without a walk, which is the narrower question that
+		// decides which transport carries the Delete. Asking the narrower one
+		// here would let this test pass while the licence admitted a lens it
+		// does not model, which is the drift it exists to catch.
+		partitions, _ := fullCR.PartitionsByAnchor()
+		closes := partitions != nil
 
 		require.Equalf(t, indexReady && auditAdmits && closes, eligible,
 			"%s: the shared static predicate disagrees with the three shipped predicates it composes — "+
-				"index ready=%v, audit admits=%v (refusal %q), closes per anchor=%v, static eligible=%v (refusal %q). "+
+				"index ready=%v, audit admits=%v (refusal %q), partitions per anchor=%v, static eligible=%v (refusal %q). "+
 				"The gate and the licence both read the static predicate, so a conjunct it has dropped or gained "+
 				"is a lens the gate admits and the licence will never license, or the reverse",
 			name, indexReady, auditAdmits, auditRefusal, closes, eligible, refusal)

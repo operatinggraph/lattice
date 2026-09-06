@@ -74,7 +74,9 @@ func TestRuleSwap_ConcurrentHotReload_NoRace(t *testing.T) {
 		func() { p.ruleState().plainReactsTo("unit") },
 		func() { p.ruleState().linkRelationReactsTo("managedBy") },
 		func() { p.ruleState().plainVertexRelevant("booking") },
-		func() { p.seedAnchorFor(p.ruleState(), "unit", "vtx.unit.RACEswapAAAAAAAAAAAA") },
+		func() {
+			p.seedAnchorFor(p.ruleState(), "unit", "vtx.unit.RACEswapAAAAAAAAAAAA", p.partitionArmed(p.ruleState()))
+		},
 	}
 	for _, read := range readers {
 		wg.Add(1)

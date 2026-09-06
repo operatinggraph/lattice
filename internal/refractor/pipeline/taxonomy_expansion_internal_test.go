@@ -408,11 +408,11 @@ func TestSeedAnchorFor_LabelExpand_LeafTypeEventNarrowsInsteadOfFullRescan(t *te
 
 	rs := p.ruleState()
 	const unitKey = "vtx.unit.SEEDexpandAAAAAAAAAA"
-	require.Equal(t, unitKey, p.seedAnchorFor(rs, "unit", unitKey),
+	require.Equal(t, unitKey, p.seedAnchorFor(rs, "unit", unitKey, p.partitionArmed(rs)),
 		"a leaf-type event on a `*`-anchored lens must narrow to that one anchor — "+
 			"an empty return here means every unit write pays a full corpus rescan, strictly worse than today")
 
-	require.Empty(t, p.seedAnchorFor(rs, "owner", "vtx.owner.SEEDexpandBBBBBBBBBB"),
+	require.Empty(t, p.seedAnchorFor(rs, "owner", "vtx.owner.SEEDexpandBBBBBBBBBB", p.partitionArmed(rs)),
 		"a type outside location's resolved set must not seed anything")
 }
 
