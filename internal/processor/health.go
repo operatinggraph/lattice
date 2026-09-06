@@ -117,6 +117,12 @@ type HealthHeartbeater struct {
 	// rather than a fabricated healthy answer.
 	ddlCache *DDLCache
 
+	// executor surfaces the step-5 wall: how long the Starlark runner took per
+	// operation and how many live reads and listings the script paid for inside
+	// that time. Attached by MakePipeline; nil where no executor is wired, in
+	// which case no step5-latency key is written at all.
+	executor *ExecutorImpl
+
 	// openIssues tracks an internal issue key → since-timestamp for currently-open
 	// issues so the §5.5 since field persists across heartbeats and drops on
 	// resolve. The key is per-lane (ProcessorLaneLagging:<lane>) so two lanes
@@ -190,6 +196,14 @@ func (h *HealthHeartbeater) AttachCapabilityAuthorizer(ca *CapabilityAuthorizer)
 // the prior cache.
 func (h *HealthHeartbeater) AttachDDLCache(c *DDLCache) {
 	h.ddlCache = c
+}
+
+// AttachExecutor wires the step-5 executor whose wall ring each heartbeat tick
+// emits as the step5-latency key. Must be called before Run starts — the emit
+// loop reads the handle without synchronization. Idempotent: calling twice
+// replaces the prior executor.
+func (h *HealthHeartbeater) AttachExecutor(e *ExecutorImpl) {
+	h.executor = e
 }
 
 // AttachBacklogReader wires the lane-backlog reader (the ConsumerSupervisor) and
@@ -277,6 +291,8 @@ func (h *HealthHeartbeater) emit(ctx context.Context, lifecycle string) {
 
 	// Per-tick capability-auth signals.
 	h.emitCapabilityAuthSignals(ctx)
+	// Per-tick step-5 script wall signals.
+	h.emitStep5Signals(ctx)
 }
 
 // buildHealthDoc assembles the §5.2 heartbeat document for the given lifecycle
@@ -460,6 +476,49 @@ func (h *HealthHeartbeater) emitCapabilityAuthSignals(ctx context.Context) {
 	if raw, err := json.Marshal(latencyDoc); err == nil {
 		if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, latencyKey, raw, h.heartbeatTTL()); err != nil {
 			h.logger.Warn("health: write step3-latency", "key", latencyKey, "error", err)
+		}
+	}
+}
+
+// emitStep5Signals writes the step5-latency signal derived from the executor's
+// wall ring: the four latency figures over the last 128 executions, the mean
+// live-read and listing counts over the same window, and the cumulative
+// timeout count since the instance started (a reader diffs two ticks for a
+// rate). No-op when no executor is attached.
+//
+// The two means are null at count 0 rather than 0 (Contract #5 §5.4 — an
+// unmeasured metric is reported as unmeasured): a fabricated 0.0 would read as
+// "scripts run and touch nothing", which is a different claim from "no script
+// has run". The latency figures stay 0 at count 0, matching step3-latency.
+func (h *HealthHeartbeater) emitStep5Signals(ctx context.Context) {
+	if h.executor == nil {
+		return
+	}
+	// Always emit: a zero-sample doc is itself the signal that this Processor
+	// executed nothing this tick.
+	stats := h.executor.Step5Stats()
+	key := "health.processor." + h.instance + ".step5-latency"
+	var meanLiveReads, meanListings any
+	if stats.Count > 0 {
+		meanLiveReads = stats.MeanLiveReads
+		meanListings = stats.MeanListings
+	}
+	doc := map[string]any{
+		"key":           key,
+		"component":     "processor",
+		"instance":      h.instance,
+		"observedAt":    substrate.FormatTimestamp(time.Now()),
+		"count":         stats.Count,
+		"meanNs":        stats.Mean.Nanoseconds(),
+		"p95Ns":         stats.P95.Nanoseconds(),
+		"p99Ns":         stats.P99.Nanoseconds(),
+		"timeoutsTotal": stats.TimeoutsTotal,
+		"meanLiveReads": meanLiveReads,
+		"meanListings":  meanListings,
+	}
+	if raw, err := json.Marshal(doc); err == nil {
+		if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, key, raw, h.heartbeatTTL()); err != nil {
+			h.logger.Warn("health: write step5-latency", "key", key, "error", err)
 		}
 	}
 }

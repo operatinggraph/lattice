@@ -46,11 +46,24 @@ import (
 //
 // Nil-safe throughout: a ScriptContext built without one (every harness that
 // does not care) records nothing and yields a zero record.
+//
+// The two call counters alongside the sets are what the sets structurally
+// cannot carry: a set records that a read HAPPENED, a counter records how many
+// round trips it COST. Two identical `kv.Links(hub, rel, dir)` calls in one
+// execution are one member of `enumerations` (keyed {Hub, Relation, Direction})
+// and two units of wall time; the same holds for a repeated live `kv.Read`.
+// Step 5's telemetry reads the counters directly off the recorder — never
+// through record(), which sorts every set.
 type scriptReadRecorder struct {
 	declaredReads      map[string]struct{}
 	liveReads          map[string]struct{}
 	enumerations       map[ScriptEnumeration]struct{}
 	enumeratedVertices map[string]struct{}
+	// liveReadCalls counts every lazy kv.Read that issued a live GET, and
+	// listCalls every kv.Links that issued a listing. Monotone within one
+	// execution; both are single-goroutine (one Starlark thread per recorder).
+	liveReadCalls int
+	listCalls     int
 }
 
 // recordDeclaredRead records that the script read key and the step-4 snapshot
@@ -84,6 +97,8 @@ func (r *scriptReadRecorder) recordAllDeclaredReads(keys ...string) {
 
 // recordLiveRead records that the script read key through the lazy on-demand
 // Core KV fallthrough, which by construction the operation did not declare.
+// Both call sites (starlark_kv.go) sit after an issued ReadVertex — the absent
+// branch and the present one — so liveReadCalls counts issued GETs exactly.
 func (r *scriptReadRecorder) recordLiveRead(key string) {
 	if r == nil {
 		return
@@ -92,10 +107,14 @@ func (r *scriptReadRecorder) recordLiveRead(key string) {
 		r.liveReads = make(map[string]struct{})
 	}
 	r.liveReads[key] = struct{}{}
+	r.liveReadCalls++
 }
 
 // recordEnumeration records one kv.Links walk the script completed, in the same
-// (hub, relation, direction) terms a contextHint enumeration declares it.
+// (hub, relation, direction) terms a contextHint enumeration declares it. The
+// sole call site sits at the page the script receives (starlark_kv.go), one per
+// issued listing, so listCalls counts issued listings exactly — including the
+// repeats and the extra pages the triple-keyed set folds together.
 func (r *scriptReadRecorder) recordEnumeration(hub, relation, direction string) {
 	if r == nil {
 		return
@@ -104,6 +123,7 @@ func (r *scriptReadRecorder) recordEnumeration(hub, relation, direction string) 
 		r.enumerations = make(map[ScriptEnumeration]struct{})
 	}
 	r.enumerations[ScriptEnumeration{Hub: hub, Relation: relation, Direction: direction}] = struct{}{}
+	r.listCalls++
 }
 
 // recordEnumeratedVertex records a vertex an enumeration DISCOVERED — the far
@@ -146,6 +166,8 @@ func (r *scriptReadRecorder) record() ScriptReadRecord {
 		LiveReads:          sortedKeySet(r.liveReads),
 		Enumerations:       enums,
 		EnumeratedVertices: sortedKeySet(r.enumeratedVertices),
+		LiveReadCalls:      r.liveReadCalls,
+		ListCalls:          r.listCalls,
 	}
 }
 
@@ -186,6 +208,14 @@ type ScriptReadRecord struct {
 	// than named by the script" — which it could not if the hub were included,
 	// since the subject filter puts the hub on every link a walk returns.
 	EnumeratedVertices []string
+	// LiveReadCalls is the number of lazy kv.Read calls that issued a live GET,
+	// and ListCalls the number of kv.Links calls that issued a listing. They are
+	// round-trip COUNTS, not set sizes: a key read live twice is one member of
+	// LiveReads and two LiveReadCalls, and a repeated identical walk is one
+	// member of Enumerations and two ListCalls. The gap between a count and its
+	// set size is the execution's redundant work.
+	LiveReadCalls int
+	ListCalls     int
 }
 
 // ScriptReadObserver receives the ScriptReadRecord of every step-5 execution,

@@ -239,4 +239,123 @@ func TestEmitCapabilityAuthSignals_LiveKV(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("a heartbeat tick writes the key", func(t *testing.T) {
+		// emitCapabilityAuthSignals reachable from emit() is the whole wiring: a
+		// signal only a test calls directly never reaches Health KV in production.
+		const tickInstance = "proc-lat-tick"
+		reader := &fakeReader{entries: map[string][]byte{}}
+		ca, err := NewCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: time.Now()},
+			DefaultCapabilityAuthorizerConfig(), testLogger())
+		if err != nil {
+			t.Fatalf("NewCapabilityAuthorizer: %v", err)
+		}
+		hb := NewHealthHeartbeater(conn, testHealthBucket, tickInstance, 10*time.Second, &Metrics{}, testLogger())
+		hb.AttachCapabilityAuthorizer(ca)
+		hb.emit(ctx, "healthy")
+		doc := readHealthDoc(t, ctx, conn, testHealthBucket, "health.processor."+tickInstance+".step3-latency")
+		if doc["instance"] != tickInstance {
+			t.Fatalf("instance = %v, want %q", doc["instance"], tickInstance)
+		}
+	})
+}
+
+// emitStep5Signals writes the per-heartbeat step5-latency signal only when an
+// Executor is attached: nil executor emits nothing, an attached one emits the
+// zero-sample doc with both means NULL (Contract #5 §5.4 — an unmeasured metric
+// is reported as unmeasured, never as a fabricated 0), and an executor that has
+// run reports the real window.
+func TestEmitStep5Signals_LiveKV(t *testing.T) {
+	t.Parallel()
+	url := startEmbeddedNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	conn := connectSubstrate(t, url, "step5lat-test")
+	provisionHarness(t, ctx, conn)
+
+	const instance = "proc-step5-1"
+	latencyKey := "health.processor." + instance + ".step5-latency"
+
+	t.Run("no executor attached → no key written", func(t *testing.T) {
+		hb := NewHealthHeartbeater(conn, testHealthBucket, instance, 10*time.Second, &Metrics{}, testLogger())
+		hb.emitStep5Signals(ctx)
+		if _, err := conn.KVGet(ctx, testHealthBucket, latencyKey); err == nil {
+			t.Fatalf("step5-latency key written with no executor attached")
+		}
+	})
+
+	t.Run("executor attached, zero samples → null means", func(t *testing.T) {
+		hb := NewHealthHeartbeater(conn, testHealthBucket, instance, 10*time.Second, &Metrics{}, testLogger())
+		hb.AttachExecutor(NewExecutor(NewStarlarkRunner(0, 0), testLogger()))
+		hb.emitStep5Signals(ctx)
+
+		doc := readHealthDoc(t, ctx, conn, testHealthBucket, latencyKey)
+		if doc["key"] != latencyKey {
+			t.Fatalf("key = %v, want %q", doc["key"], latencyKey)
+		}
+		if doc["component"] != "processor" || doc["instance"] != instance {
+			t.Fatalf("component/instance = %v/%v, want processor/%s", doc["component"], doc["instance"], instance)
+		}
+		if doc["count"] != float64(0) {
+			t.Fatalf("count = %v, want 0 (zero-sample liveness)", doc["count"])
+		}
+		if doc["timeoutsTotal"] != float64(0) {
+			t.Fatalf("timeoutsTotal = %v, want 0", doc["timeoutsTotal"])
+		}
+		for _, f := range []string{"meanNs", "p95Ns", "p99Ns", "observedAt"} {
+			if _, ok := doc[f]; !ok {
+				t.Fatalf("step5-latency doc missing field %q", f)
+			}
+		}
+		// PRESENT and null — a reader distinguishes "no measurement" from "the
+		// metric is not emitted at all", which an absent key would not allow.
+		for _, f := range []string{"meanLiveReads", "meanListings"} {
+			v, ok := doc[f]
+			if !ok {
+				t.Fatalf("step5-latency doc missing field %q — it must be present with a null value at count 0", f)
+			}
+			if v != nil {
+				t.Fatalf("%s = %v at count 0, want JSON null", f, v)
+			}
+		}
+	})
+
+	t.Run("a heartbeat tick writes the key", func(t *testing.T) {
+		// emitStep5Signals reachable from emit() is the whole wiring: a signal
+		// only a test calls directly never reaches Health KV in production.
+		const tickInstance = "proc-step5-tick"
+		hb := NewHealthHeartbeater(conn, testHealthBucket, tickInstance, 10*time.Second, &Metrics{}, testLogger())
+		hb.AttachExecutor(NewExecutor(NewStarlarkRunner(0, 0), testLogger()))
+		hb.emit(ctx, "healthy")
+		doc := readHealthDoc(t, ctx, conn, testHealthBucket, "health.processor."+tickInstance+".step5-latency")
+		if doc["instance"] != tickInstance {
+			t.Fatalf("instance = %v, want %q", doc["instance"], tickInstance)
+		}
+	})
+
+	t.Run("after one execution → count 1 and numeric means", func(t *testing.T) {
+		exec := NewExecutor(NewStarlarkRunner(0, 0), testLogger())
+		sc := step5ReadingContext()
+		if _, err := exec.Execute(ctx, sc.Operation, HydratedState{Context: sc}); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		hb := NewHealthHeartbeater(conn, testHealthBucket, instance, 10*time.Second, &Metrics{}, testLogger())
+		hb.AttachExecutor(exec)
+		hb.emitStep5Signals(ctx)
+
+		doc := readHealthDoc(t, ctx, conn, testHealthBucket, latencyKey)
+		if doc["count"] != float64(1) {
+			t.Fatalf("count = %v, want 1", doc["count"])
+		}
+		if doc["meanLiveReads"] != float64(1) {
+			t.Fatalf("meanLiveReads = %v, want 1", doc["meanLiveReads"])
+		}
+		if doc["meanListings"] != float64(1) {
+			t.Fatalf("meanListings = %v, want 1", doc["meanListings"])
+		}
+		mean, ok := doc["meanNs"].(float64)
+		if !ok || mean <= 0 {
+			t.Fatalf("meanNs = %v, want a positive wall time", doc["meanNs"])
+		}
+	})
 }

@@ -78,6 +78,7 @@ Source package: `internal/processor/`
 |---|---|---|---|---|
 | `health.processor.<instance>` | ≥ 10s heartbeat | `internal/processor/health.go` | `HealthHeartbeater.emit()` | Category A — `interval×10`, re-armed |
 | `health.processor.<instance>.step3-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitCapabilityAuthSignals()` | Category A — same TTL, lock-step with the heartbeat |
+| `health.processor.<instance>.step5-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitStep5Signals()` | Category A — same TTL, lock-step with the heartbeat |
 | `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — fixed 1h default, not re-armed |
 | `health.processor.<instance>.claim-attempts.<outcome>` | per NFR-S6 operation call (`ClaimIdentity`, `CompleteCredentialLink`) | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.commit-conflicts` | per same-key commit conflict | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordCommitConflict()` | Category B — 1h default, re-armed each write |
@@ -513,6 +514,40 @@ currently reserved-but-unemitted.
   "p99Ns": <int64>
 }
 ```
+
+### `health.processor.<instance>.step5-latency` — Step 5 script wall latency
+
+```json
+{
+  "key": "health.processor.<instance>.step5-latency",
+  "component": "processor",
+  "instance": "<instance>",
+  "observedAt": "<RFC3339>",
+  "count": <int>,
+  "meanNs": <int64>,
+  "p95Ns": <int64>,
+  "p99Ns": <int64>,
+  "timeoutsTotal": <uint64>,
+  "meanLiveReads": <float64|null>,
+  "meanListings": <float64|null>
+}
+```
+
+Emitted whenever an Executor is attached (`MakePipeline`), including when it has
+executed nothing — a zero-sample document is itself the signal that this
+Processor ran no script this tick.
+
+| Field | Meaning |
+|---|---|
+| `count` | Executions in the ring window: every execution that reached the Starlark runner, aborted ones included. Occupancy of a 128-deep overwrite-only ring — it never decreases and pins at 128, so a burst's percentiles persist until 128 newer executions displace them. There is no time window: on an idle Processor the figures hold their last value. |
+| `meanNs` / `p95Ns` / `p99Ns` | Wall time of the script run itself (step 5 only — not hydration, validation or commit) over that window. `0` at `count: 0`, as `step3-latency` reports. |
+| `timeoutsTotal` | Cumulative `ScriptTimeout` count since the instance started. **Not** a ring statistic: monotone, never reset, so a reader derives a rate by diffing two ticks. A failed emit therefore loses nothing. |
+| `meanLiveReads` | Mean lazy `kv.Read` calls that issued a live Core KV GET per execution, over the ring window. **`null` when `count` is 0** (§5.4 — an unmeasured metric is reported as unmeasured; a fabricated `0` would claim scripts ran and read nothing). |
+| `meanListings` | Mean `kv.Links` calls that issued a listing per execution, over the same window. Same `null` rule. |
+
+The ring and the counter are per-process: a restart takes a new instance NanoID
+and therefore a new key (§5.1), and there is one ring per Executor, so a
+per-lane breakdown is not derivable from this key.
 
 ### `health.processor.<instance>.malformed-operation.<requestId>`
 

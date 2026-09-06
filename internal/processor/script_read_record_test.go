@@ -675,3 +675,120 @@ func TestScriptReadRecord_NilObserverIsNoOp(t *testing.T) {
 		t.Fatalf("OpsCommitted = %d, want 1", metrics.OpsCommitted.Load())
 	}
 }
+
+// TestScriptReadRecord_ListCallsCountsRepeatsTheEnumerationSetFolds — the
+// distinction the counter exists for. Two identical kv.Links(hub, rel, dir)
+// calls in one execution are ONE member of Enumerations (the set is keyed
+// {Hub, Relation, Direction}) and TWO listings issued against Core KV. Reading
+// the cost off len(Enumerations) would therefore under-count exactly the
+// redundant walk a dedup is meant to remove.
+func TestScriptReadRecord_ListCallsCountsRepeatsTheEnumerationSetFolds(t *testing.T) {
+	hub := "vtx.provider." + linkProvID
+	rec := &scriptReadRecorder{}
+	lister := &fakeLinkLister{links: []LinkDoc{{
+		Key:          "lnk.provider." + linkProvID + ".hasBooking.appointment." + linkApptID1,
+		Class:        "hasBooking",
+		SourceVertex: hub,
+		TargetVertex: "vtx.appointment." + linkApptID1,
+	}}}
+	sc := ScriptContext{LinkLister: lister, ReadRecorder: rec}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    a, _ = kv.Links("`+hub+`", "hasBooking", "out")
+    b, _ = kv.Links("`+hub+`", "hasBooking", "out")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The lister is the ground truth for how many listings were issued.
+	if len(lister.calls) != 2 {
+		t.Fatalf("lister saw %d calls, want 2 — the script did not issue two listings", len(lister.calls))
+	}
+	got := rec.record()
+	if got.ListCalls != 2 {
+		t.Fatalf("ListCalls = %d, want 2 (one per issued listing)", got.ListCalls)
+	}
+	if len(got.Enumerations) != 1 {
+		t.Fatalf("Enumerations = %+v, want exactly 1 — the set folds identical walks", got.Enumerations)
+	}
+}
+
+// TestScriptReadRecord_FailedEnumerationDoesNotCount — a listing the lister
+// errored on never reached the script and cost no page, so it is neither a set
+// member nor a call. The counter sits at the same recording point as the set
+// for exactly this reason.
+func TestScriptReadRecord_FailedEnumerationDoesNotCount(t *testing.T) {
+	hub := "vtx.provider." + linkProvID
+	rec := &scriptReadRecorder{}
+	sc := ScriptContext{LinkLister: &fakeLinkLister{err: errors.New("boom-list")}, ReadRecorder: rec}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    page, nxt = kv.Links("`+hub+`", "hasBooking", "out")
+    return {"mutations": [], "events": []}
+`); err == nil {
+		t.Fatal("expected the lister error to abort the script")
+	}
+	if got := rec.record(); got.ListCalls != 0 {
+		t.Fatalf("ListCalls = %d, want 0 for a failed walk", got.ListCalls)
+	}
+}
+
+// TestScriptReadRecord_LiveReadCallsCountsBothServingPaths — kv.Read issues a
+// live GET on two distinct branches: the key is absent (reader returns nil) and
+// the key is present. Both cost a round trip, so both must count. A repeat of
+// the same key is a second GET and a second count while LiveReads stays a
+// one-member set.
+func TestScriptReadRecord_LiveReadCallsCountsBothServingPaths(t *testing.T) {
+	presentKey := "vtx.identity." + readRecLiveID
+	absentKey := "vtx.identity." + readRecStateID
+	rec := &scriptReadRecorder{}
+	reader := &fakeKVReader{docs: map[string]*VertexDoc{
+		presentKey: {Key: presentKey, Class: "identity", Data: map[string]interface{}{}},
+	}}
+	sc := ScriptContext{KVReader: reader, ReadRecorder: rec}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    p1 = kv.Read("`+presentKey+`")
+    p2 = kv.Read("`+presentKey+`")
+    a = kv.Read("`+absentKey+`")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reader.calls) != 3 {
+		t.Fatalf("reader saw %v, want 3 issued GETs", reader.calls)
+	}
+	got := rec.record()
+	if got.LiveReadCalls != 3 {
+		t.Fatalf("LiveReadCalls = %d, want 3 (two present-path GETs + one absent-path GET)", got.LiveReadCalls)
+	}
+	assertRecordedKeys(t, "LiveReads", got.LiveReads, []string{absentKey, presentKey})
+}
+
+// TestScriptReadRecord_DeclaredReadCostsNoCall — a key the step-4 snapshot
+// answers issues no GET, so it must not inflate the counter. Without this the
+// counter would measure kv.Read calls rather than round trips, and a fully
+// declared script would look as expensive as an undeclared one.
+func TestScriptReadRecord_DeclaredReadCostsNoCall(t *testing.T) {
+	key := "vtx.identity." + readRecDeclaredID
+	rec := &scriptReadRecorder{}
+	reader := &fakeKVReader{docs: map[string]*VertexDoc{}}
+	sc := ScriptContext{
+		Hydrated:     map[string]VertexDoc{key: {Key: key, Class: "identity"}},
+		KVReader:     reader,
+		ReadRecorder: rec,
+	}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    v = kv.Read("`+key+`")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reader.calls) != 0 {
+		t.Fatalf("the hydrated key must not reach the reader, got %v", reader.calls)
+	}
+	if got := rec.record(); got.LiveReadCalls != 0 {
+		t.Fatalf("LiveReadCalls = %d, want 0 for a snapshot-served read", got.LiveReadCalls)
+	}
+}
