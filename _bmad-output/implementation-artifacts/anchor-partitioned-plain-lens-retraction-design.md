@@ -755,3 +755,129 @@ sighting of the "lifted refusal reveals the conjunct behind it" class): *lifting
 keeping a path unreachable — here `plainDerivationIndexRefusal`'s `diffRetraction` — re-arms every
 downstream consumer of the state that path produces; enumerate the consumers of the RESULT (the tail's
 diff over `results`), not only the consumers of the flag.*
+
+---
+
+## 14. Fire brief (build note, 2026-09-06 — Lattice steward, remote fire `claude/serene-meitner-gp1fox`)
+
+**1. Scope sentence (verbatim, §12).** *Increment 1 — the conjunct, the listing, the scoped diff, the seeding,
+the audit direction (posture-changing; full-depth review on the retraction seam).* `PartitionsByAnchor` +
+`PartitionPredicate`; `PartitionKeyLister` on Postgres, Protected, NATS-KV; `rs.partition` at install;
+`SetPartitionRetraction` + the activation-gate call; the decision sites of §3.3 including `acted`; the audit's
+partition arm (§3.5); the transport value; §5's censuses 1–5 and §11's engine / adapter / pipeline / audit
+tests; the comment rewrites of §10 (the rebuild argument first); the component doc's target-diff paragraph
+rewritten and the two enum docs updated. *Increment 2 — close (S):* census pins re-run at the merge base, the
+dossier entry, the build note. **Green bar:** §5's three memberships pinned (54 / 8 / 3, floor 65); the
+transport census moves exactly the five business lenses to `diffRetraction-partition`; the §11 pipeline
+fixture proves the licensed-neighbour outer frame runs NO listing; every gate in `.github/workflows/ci.yml`.
+
+**2. Verified touch-list (checked live at `e9cffe9`; the design's line numbers drifted 20–70 lines, no site
+changed shape).**
+
+| Site | Live anchor | Edit |
+|---|---|---|
+| `ruleengine/full/anchor_delete.go` | `anchorProjectionShape` :173–278 (the `exprReferencesOnlyVariable` conjunct at :250), `ProjectsOneRowPerAnchor` :334–345, `exprIdentifiesVariable` :352, `exprReferencesOnlyVariable` :378–445, `AnchorProjectionKey` :68–137 (read-free binding at :105–106, nil/node refusals :116–127) | parameterise the shape resolver by its reference predicate (closed = anchor-only; partition = any variable) so both predicates share one body; add `PartitionsByAnchor() (identifying []string, ok bool)` and `PartitionPredicate(eventKey, eventType string) (map[string]any, bool)`; the key-alphabet refusal uses `substrate/keys.Alphabet` (:13) |
+| `ruleengine/full/aggregate.go:103–106` | the four aggregate names | read-only premise — the refusal list in the walk already names them (:406) |
+| `pipeline/rulestate.go` | `ruleState` :16–116 (`seedAnchorLabels` :27), `seedAnchorFor` :390–404 (`if p.diffRetraction { return "" }` :400), comment :385–389 | add `partition` (`only bool; identifying []string`); conjunct `&& !p.partitionArmed(rs)`; rewrite the comment |
+| `pipeline/rulestate_completeness_test.go:48` | `TestRuleState_RoundTripCarriesEveryField` — discovers fields by AST, reads `Pipeline.ruleState`'s keyed literal and `publishRuleState`'s assignments | the new field must be carried through both or the build fails by name |
+| `pipeline/ruleinstall.go:425–438` | `installRule` deriving `seedAnchorLabels`; `personalClockRefusal` reset :414 | derive `next.partition` unconditionally from the compiled rule |
+| `pipeline/anchor_derivation_plain.go` | `plainDerivationIndexRefusal` :207–227 (reads flag :223), `plainDerivationStaticallyEligible` :431–462 (last conjunct :458), `evaluatePlainNeighbourEvent` :749–754, `evaluateSeededMultiPosition` :781–786, `plainDerivationDecide` :804–864 (acts at :862–863), `evaluatePlainDerivedAnchors` :667–695, `derivedRowIsLive` :718–731, `noteStaticPlainDerivationRefusal` :1011–1055 (flag :1025) | §3.3: both refusals become `p.diffRetraction && !p.partitionArmed(rs)` with the refusing condition named; the licence's last conjunct becomes `PartitionsByAnchor`; `plainDerivationDecide` returns `(results, acted, err)` — `acted` true only on the :863 path |
+| `pipeline/evaluate.go` | `evaluateForEntryRaw` :163–379: seed :288, dispatch switch :300–328, tail :345–361 (`else if !ok && p.diffRetraction` :350 → `applyDiffRetraction` :356); `applyDiffRetraction` :1508–1520; `diffRetractionListing` :1545–1566 (ownership comment :1534–1537, prefix :1551, whole :1561); `multiEntryRetractions` :1004–1098 (`FailClosed` :1027, tombstones-first :1097) | the tail's cases (a)/(b)/(c) + the defensive refusal; new `applyPartitionDiffRetraction(ctx, anchors, results)` mirroring `multiEntryRetractions` |
+| `pipeline/pipeline.go` | fields `diffRetraction` :362, `diffRetractionPrefix` :375, `authPlane` :494; `SetDiffRetraction` :1182–1190 (`KeyLister` refusal :1184); `SetDiffRetractionPrefix` :1203–1212 | add `partitionRetraction`, `SetPartitionRetraction(authPlane bool) error`, `partitionArmed(rs)`; the refusal for a partition-only business lens whose adapter lacks the lister |
+| `pipeline/retraction_transport.go` | constants :17–39; `PlainRetractionTransport` :97–150 (`case p.diffRetraction:` :113–117) | `RetractionTransportDiffRetractionPartition = "diffRetraction-partition"` when armed |
+| `pipeline/audit.go` | `auditAnchor` :764–857 — tombstoned arm :772–797 (`AnchorDeleteResult` :783), should-not-exist arm :839–855 (`AnchorProjectionKey` :845, "not checked in this direction" :842); `auditEnrolment` :999–1095 (comment :1046–1057); `AuditClassRetained` :89; `executeFullForAudit` `evaluate.go:465` | the partition-listing arm for armed lenses in both places; the comment rewrite |
+| `adapter/adapter.go` | `KeyLister` :58–60, `PrefixKeyLister` :77–79, `RowReader` :128–130 | add `PartitionKeyLister` (§3.2 verbatim) |
+| `adapter/postgres.go` | `buildListKeysSQL` :347–362, `ListKeys` :365–399, `GetRow` :477–524, pool doc :466–476, `buildDeleteSQL` :573–599; `rls.go:163` | `ListKeysWhere` = the listing SQL + `AND <k> = $n` bound per fixed column; empty `fixed` refused |
+| `adapter/natskv.go` | `kvStore` :73–84, `buildKey` :303–316, `ListKeys` :693–698, `ListKeysPrefix` :710–718, `mapKeys` :723–745 | `ListKeysWhere` = the same listing (whole, or `ListKeysPrefix` of a prefix the pipeline hands it) filtered in Go by equality on the fixed columns; **no `kvStore` change** (§8 row 8). The prefix must reach the adapter: mirror how `SetDiffRetractionPrefix` threads it, or take it as a parameter — decide in code, state it in the doc comment |
+| `adapter/read_path_adapters.go` | `ProtectedAdapter.ListKeys` :423, `GetRow` :444; `GrantWriterAdapter.ListKeys` :226–230 | Protected forwards `ListKeysWhere`; GrantWriter does **not** implement it (§3.7) |
+| `cmd/refractor/main.go` | rebuild-truncate comment :260–275; DiffRetraction guard :1605–1633; `admitRetractionTransport` call :1645 | comment rewrite (§10 row); the `SetPartitionRetraction(projection.IsAuthPlane(r))` call goes **after** `admitRetractionTransport` returns true (the prefix is bound inside it) |
+| `cmd/refractor/retractiontransport.go` | `admitRetractionTransport` :110–184, `siblingLensOf` :69–75 | the call site if it fits inside the gate; `retractionTransportRefusal` stays business-plane-only |
+| `cmd/refractor/reload.go:147, :820` | flag / prefix flip refusals | unchanged (pin by reading) |
+| `cmd/refractor/derivationstatus.go:64–77` | `copyLensRetractionTransport` copies any string | unchanged |
+| `internal/refractor/health/lattice_heartbeater.go:2520–2536`, `health/lens_retraction_transport_test.go` | the enum's publication + alert on `""`/`unclassified` only (the design cited `pipeline/…:2561`; it lives in `health/`) | unchanged; the census pin moves |
+| `internal/refractor/plain_retraction_transport_corpus_census_test.go:128–169` | pins per lens (`planeBusiness`/`planeAuth`, `dependsOnNeighbour`, transport) | the five business lenses → `diffRetraction-partition`; the rest unchanged |
+| `internal/refractor/plain_with_alias_closure_census_test.go` (+ `forEachCorpusCypher` at `label_derivation_corpus_census_test.go:608`, `closureKeyColumns` at `plain_scanroot_corpus_census_test.go:245–255`) | the enumeration to reuse | new `TestPlainPartitionCensus` beside it (§5.1); `plain_scanroot_corpus_census_test.go:153` and `label_derivation_corpus_census_test.go:190` pins re-read after the licence conjunct swap |
+| `docs/components/refractor.md:890–915`, `docs/observability/health-kv-schema.md:583`, `secure-plain-lens-retraction-and-audit-design.md:455` | the target-diff paragraph; the two enum value lists | rewrite / add the fifth value |
+| `packages/lease-signing/lenses.go:347–348` | the one lens note claiming the composite key "can never derive … read-free" | the read-free claim stays true; add that the lens seeds and diffs per partition. No other `DiffRetraction` declaration carries a "never seeds" note (grepped `read-free`, `never seeds` across `packages/`) |
+| `with-alias-anchor-closure-design.md:386–388`, `plain-lens-neighbour-anchor-derivation-design.md:436–438` | already pointed at this design by the designer's fire | **no edit** (§10's docs-only row is done) |
+
+**3. Precedents to mirror.** `PartitionsByAnchor` ← `ProjectsOneRowPerAnchor` + `anchorProjectionShape` (one
+parameterised resolver, never a second walk). `PartitionPredicate` ← `AnchorProjectionKey` :80–136 (label
+discrimination incl. `anchorExpand`, the read-free `executor{}` binding, the nil / `*nodeRef` refusals).
+`applyPartitionDiffRetraction` ← `multiEntryRetractions` :1004–1098 (list, tombstone every listed key the
+fresh set lacks, `FailClosed: true`, skip an already-tombstoned key via `RowReader.GetRow`, tombstones ahead
+of fresh). `SetPartitionRetraction` ← `SetDiffRetraction` :1182–1190. `ListKeysWhere` (NATS-KV) ←
+`ListKeysPrefix` :710–718 + `mapKeys`; (Postgres) ← `buildListKeysSQL` + `buildGetRowSQL`'s bound
+parameters. `rs.partition` ← `seedAnchorLabels` (derived in `installRule`, carried by the round-trip test).
+The audit arm ← the should-exist loop :812–837's `GetRow` + `AuditClassRetained` booking. The census ←
+`plain_with_alias_closure_census_test.go` through `forEachCorpusCypher`.
+
+**4. Increment order + green checks.**
+1. Engine: `PartitionsByAnchor` / `PartitionPredicate` + §11 vectors + the §5.5 mutation pin —
+   `go test ./internal/refractor/ruleengine/full/ -run 'Partition|AnchorProjection|ProjectsOneRow' -count=1`.
+2. Census 1 (`TestPlainPartitionCensus`) — expected 54 / 8 / 3 at floor 65; **a mismatch stops the build
+   here** (the design's scratch census was never committed, so this is the first executable re-run of §2.1) —
+   `go test ./internal/refractor/ -run TestPlainPartitionCensus -count=1 -v`.
+3. Adapters: `PartitionKeyLister` on Postgres / Protected / NATS-KV + §11 adapter tests —
+   `POSTGRES_TEST_DSN=… go test ./internal/refractor/adapter/ -run 'ListKeysWhere|ListKeysPrefix' -count=1`.
+4. Pipeline: `rs.partition`, `SetPartitionRetraction`, `partitionArmed`, the §3.3 sites, `acted`, the tail's
+   (a)/(b)/(c), `applyPartitionDiffRetraction`, the transport value, the audit arm, the §11 pipeline + audit
+   fixtures (NATS-backed via `natsfixture`), the finding-1 listing-call counter —
+   `go test ./internal/refractor/pipeline/ -count=1`.
+5. Activation: the `cmd/refractor` call + refusal; the transport census re-pin; `go test ./cmd/refractor/...
+   ./internal/refractor/... -count=1`.
+6. Docs + comments (§10 rows), then the full gate set: `go build ./...`, `make vet`, `golangci-lint run
+   ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-doc-orphan.go`,
+   `go run ./scripts/lint-flag-consumer-census.go`, `go vet -tags` for every build-tagged harness under
+   `internal/refractor` (`grep -rl "^//go:build " --include=*_test.go internal/refractor`), `make
+   test-lease-convergence` (the landlord lens's e2e neighbourhood), and the CI shards `unit-refractor` +
+   `unit-3` commands as `ci.yml` writes them.
+
+**5. In-scope gotchas.** (i) `TestRuleState_RoundTripCarriesEveryField` fails the build until `partition` is
+read into the snapshot AND published back — the fail-open shape the dossier retired. (ii) `p.partitionRetraction`
+is a **new process flag with readers**: `scripts/lint-flag-consumer-census.go` holds each registered flag's
+reader set — if the builder registers it (or `diffRetraction` is registered), every reader must be declared.
+(iii) No package edit, no manifest bump (`lint-package-version` sees only a comment change in
+`lease-signing/lenses.go`; a comment-only edit still trips the gate if it counts content — run
+`DIFF_BASE=<merge-base> go run ./scripts/lint-package-version.go` and bump if it demands one). (iv) The NATS-KV
+`ListKeysWhere` must never build a subject from a value (§3.2). (v) The Postgres arm binds values as
+parameters, never renders them. (vi) A `Delete` here lands on RLS-protected tables: every new tombstone path
+is `FailClosed` and probed live first. (vii) Docs-in-Definition-of-Done: `docs/components/refractor.md`'s
+target-diff paragraph and both enum docs land in the same commit as the code. **Dossier entries copied in
+(applicable, `docs/components/refractor.md` "Review keeps catching"):** *a lifted refusal reveals the conjunct
+behind it, and a GRANTED licence logs nothing — prove the payoff by the licence's POSITIVE verdict* (this
+fire: the transport census pin and `DerivationArmed`, never the refusal line's absence); *when you lift a
+refusal, re-derive the boundary from the CONSUMERS the refusal was protecting* (this fire: the tail's diff
+over `results` — case (a) — and the grant tables' rebuild shrink path, §2.9); *a fixture that establishes the
+favourable ORDER or ARM is an argument, not a test* (the pipeline fixture must take the licensed-neighbour
+path through `plainDerivationDecide`'s act arm with a real index, not a hand-built `acted`); *a fail-closed
+posture proved on the DELIVERY axis is not proved on the PROJECTION axis* (an unevaluable predicate fails the
+event — never "list wider"); *a widened operation silently drops the bound its narrow predecessor carried*
+(`ListKeysWhere` inherits `ListKeys`'s ctx bound; state it in the doc comment). **Standing checklist:**
+1 new state needs a LIFETIME (§4 is the table — carry it, don't re-derive); 2 every census is a premise
+(§5.1–5.4 re-run in this fire, numbers pinned); 3 a negative test needs its positive vector, and every fix is
+proved by reverting it — the `acted` plumbing especially (delete the `acted` return and the finding-1 fixture
+must fail); 4 removal needs a transport AND an observer (the audit arm ships with the seeding, §3.5); 5 one
+deterministic key, one writer (the partition tombstone and the upsert for the same key are ordered
+tombstones-first in one batch); 6 precedent may carry debt (`multiEntryRetractions` is prefix-scoped — the
+partition arm scopes by predicate, so re-read its ownership argument rather than copying it).
+
+**6. Adjacent finds (scoping, not filing).** None new beyond §12's two filed rows: (a) the auth-plane grant
+tables (already a `🗄️ shelved` row on the board, revive trigger stated); (b) `wellnessMemberAccounts`'s
+re-anchor (verticals lane, filed by the designer's commit). The design's heartbeat citation named the wrong
+package (`pipeline/` for `health/`) — corrected in the touch-list above, no code impact.
+
+**7. Non-goals.** No `kvStore` widening, no server-side subject filter; no `GrantWriterAdapter.ListKeysWhere`;
+no change to `ValidateUnanchoredForDiffRetraction`, the hot-reload refusals, `SharedTargetDiffRefusal`, the
+pkgmgr validators/serializers; no package cypher or manifest change; no `AnchorProjectionKey` widening (§7's
+last bullet); no Loupe reader; no contract text (§6).
+
+**Scope-diff gate.** Every row of part 2 traces to a clause of the §12 sentence; nothing in parts 2–4
+substitutes an adjacent mechanism (the NATS-KV arm is the Go-filtered owned listing §3.2 ratified, not §8's
+rejected row 8). Dependencies both ways: this fire depends on the with-alias resolver (`resolveThroughWithAliases`,
+shipped `595ea540`) and on `SetDiffRetractionPrefix` threading (shipped) — both live; nothing depends on
+this fire except verticals.md's landlord-visibility row, which stays on its own lane.
+
+**Delegation.** Inc 1 is posture-changing (a new enforcement point that authorises `Delete`s on RLS tables):
+`opus` builder, then a full 3-layer cold adversarial review (`opus`, never the implementer), fix round back to
+the implementer, then Winston admits.
