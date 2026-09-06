@@ -1264,16 +1264,31 @@ func (p *Pipeline) SetPartitionRetraction(authPlane bool) error {
 // conjoins this with the live rule's own verdict.
 func (p *Pipeline) PartitionRetraction() bool { return p.partitionRetraction }
 
-// partitionArmed is the WHOLE arming question, asked of one rule snapshot: the
-// activation half (adapter, plane, declaration) and the rule half (this body's
-// rows partition by anchor and are not already closed) together.
+// partitionArmed is the WHOLE arming question, asked of one rule snapshot, and
+// every consumer reads it rather than any of its halves — so a change to any of
+// them disarms seeding, the derivation index, the retraction and the published
+// transport together, in one place, with nothing to keep in step:
 //
-// Every consumer reads it rather than p.partitionRetraction, so the two halves
-// can never be asked separately — a reload that swaps in a body whose rows no
-// longer partition disarms seeding, the derivation index and the transport on
-// the next event, in one place, with no reload refusal to keep in step.
+//   - the ACTIVATION half (p.partitionRetraction): the declaration, the
+//     business plane, and a target that can list a partition and read a row
+//     back. Bound once before Run from inputs a running pipeline cannot change.
+//   - the RULE half (ruleState.partition.only): this body's rows partition by
+//     anchor and are not already closed. Re-derived at every install, so a MATCH
+//     reload onto a non-partitioning body disarms on the next event with no
+//     reload refusal to write.
+//   - the AUDIT half (auditNarrowingRefusal): an enrolled, unsuppressed
+//     divergence audit and the deployment kill switch up. This transport
+//     authorises Deletes on RLS-protected tables from a SEEDED evaluation, and
+//     the standing detector for a seeded evaluation that under-produces is that
+//     audit's own should-not-exist direction (§3.5) — which is armed by
+//     enrolment and does not exist without it. The derivation licence already
+//     demands the same audit merely to NARROW an evaluation; requiring less of a
+//     mechanism that also deletes would be the wrong way round. When it is down
+//     the lens falls back to exactly today's posture: no seeding, a whole-corpus
+//     rescan, and the whole target diff — which needs no detector because it is
+//     exact by construction.
 func (p *Pipeline) partitionArmed(rs ruleState) bool {
-	return p.partitionRetraction && rs.partition.only
+	return p.partitionRetraction && rs.partition.only && p.auditNarrowingRefusal() == ""
 }
 
 // SetDiffRetractionPrefix scopes the target-diff listing to prefix — the lens's

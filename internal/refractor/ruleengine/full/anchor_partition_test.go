@@ -104,6 +104,14 @@ func TestPartitionsByAnchor_Shapes(t *testing.T) {
 			why:         "both name the same anchor, and the predicate returns every column that does rather than the first",
 		},
 		{
+			name:    "a KEYED anchor pattern",
+			spec:    "MATCH (a:identity {key: 'vtx.identity.Hj4kPmRtw9nbCxz5vQ2y'})-[:duplicateOf]->(b:identity) RETURN nanoIdFromKey(a.key) AS aid, nanoIdFromKey(b.key) AS bid",
+			keyCols: []string{"aid", "bid"},
+			admit:   false,
+			why: "the pattern already point-reads the key it names and seedAnchorBinds refuses to displace it, so a seeded " +
+				"evaluation stays pinned to the literal while the predicate would name the EVENT's partition — a wipe of a scope the evaluation never computed",
+		},
+		{
 			name:    "an unmodelled node reached from a key column",
 			spec:    "MATCH (app:leaseapp)-[:appliesToUnit]->(u:unit) WITH CASE WHEN app.status = 'live' THEN app.key ELSE app.key END AS c, u RETURN c AS app_id, nanoIdFromKey(u.key) AS unit_id",
 			keyCols: []string{"app_id", "unit_id"},
@@ -125,6 +133,27 @@ func TestPartitionsByAnchor_Shapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPartitionsByAnchor_KeyedAnchorRefusalIsPartitionOnly pins that the
+// keyed-anchor refusal lives in the PARTITION reading and nowhere else.
+//
+// The two predicates share a resolver body, so a refusal written into that body
+// moves ProjectsOneRowPerAnchor's verdicts too — and closure's consumers do not
+// seed (AnchorProjectionKey resolves a key for a retraction its caller has
+// already scoped to one anchor), so a keyed anchor costs them nothing. The
+// negative vector alone could not tell a correctly-placed refusal from one that
+// quietly narrowed the other predicate; this is the half that can.
+func TestPartitionsByAnchor_KeyedAnchorRefusalIsPartitionOnly(t *testing.T) {
+	eng := New()
+	const spec = "MATCH (a:identity {key: 'vtx.identity.Hj4kPmRtw9nbCxz5vQ2y'})-[:duplicateOf]->(b:identity) " +
+		"RETURN nanoIdFromKey(a.key) AS aid, a.state.data.value AS state"
+	cr := parseForShape(t, eng, spec, []string{"aid", "state"})
+
+	require.True(t, cr.ProjectsOneRowPerAnchor(),
+		"a keyed anchor is still CLOSED — its key columns resolve from the anchor alone, which is the only thing closure claims")
+	_, ok := cr.PartitionsByAnchor()
+	require.False(t, ok, "and the partition reading refuses it, because that reading is the one whose consumer seeds")
 }
 
 // TestPartitionsByAnchor_IsASupersetOfClosure holds the construction the design

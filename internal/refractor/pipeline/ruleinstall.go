@@ -491,7 +491,7 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// the same reason: a reload must never leave a previous body's verdict
 	// standing, and this one authorises a per-anchor seeded evaluation whose
 	// retraction Deletes rows inside the partition it names.
-	next.partition = deriveRulePartition(next.cr)
+	next.partition = deriveRulePartition(next.cr, len(branches))
 
 	p.publishRuleState(next)
 	return nil
@@ -506,9 +506,21 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 // presence check, and clinicPatientsRead's whole diff is a ratified continuous
 // healer of the lost-anchor-event channel that only a whole listing can be.
 //
+// branchCount excludes a MULTI-WALK lens, and it is a soundness conjunct rather
+// than a scope choice: branch merging evaluates N independent queries and drops
+// the seed for all of them (evaluateBranches, branchmerge.go), so a multi-branch
+// lens armed on the strength of its head rule would evaluate its WHOLE corpus
+// and then diff that row set against ONE anchor's partition — every other
+// anchor's rows in that partition read as dropped. The head rule's own anchor
+// also speaks for none of the other branches' anchors. It mirrors the exclusion
+// seedAnchorLabels already applies for the same reason.
+//
 // A non-full-engine rule, and a nil one, carry the zero value: not partitioned,
 // which refuses under every consumer.
-func deriveRulePartition(cr ruleengine.CompiledRule) rulePartition {
+func deriveRulePartition(cr ruleengine.CompiledRule, branchCount int) rulePartition {
+	if branchCount > 1 {
+		return rulePartition{}
+	}
 	fullCR, isFull := cr.(*full.CompiledRule)
 	if !isFull || fullCR == nil {
 		return rulePartition{}

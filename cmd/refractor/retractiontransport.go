@@ -175,9 +175,20 @@ func admitRetractionTransport(
 	// not activate — for the same reason: dark is the safe end of half-armed.
 	// Every other lens is simply not armed, keeps today's whole diff, and
 	// returns no error.
-	if err := p.SetPartitionRetraction(projection.IsAuthPlane(r)); err != nil {
-		refuseLens(ctx, logger, reporter, r, "partition-scoped diff retraction", err.Error())
-		return false
+	//
+	// The auth plane is excluded HERE as well as inside SetPartitionRetraction,
+	// and the redundancy is §3.7's point rather than an oversight: the three
+	// grant tables are held out by THREE independent exclusions, so no single
+	// edit re-arms them. This is the third — the gate simply does not offer the
+	// transport to that plane — beside the setter's own plane conjunct and
+	// GrantWriterAdapter implementing no adapter.PartitionKeyLister. The plane
+	// is still passed to the setter rather than relied on being unreachable, so
+	// a future caller that skips this guard is refused by the setter too.
+	if !projection.IsAuthPlane(r) {
+		if err := p.SetPartitionRetraction(projection.IsAuthPlane(r)); err != nil {
+			refuseLens(ctx, logger, reporter, r, "partition-scoped diff retraction", err.Error())
+			return false
+		}
 	}
 	if p.PartitionRetraction() {
 		logger.Info("diff retraction scoped to the anchors an evaluation covers",

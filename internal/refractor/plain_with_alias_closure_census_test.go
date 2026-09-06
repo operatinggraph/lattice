@@ -146,7 +146,10 @@ var withAliasClosureBuckets = map[string]string{
 // classifier. It guards the shape an emptied enumeration takes: a census that
 // silently swept nothing would otherwise report every membership below as
 // satisfied and read as "nothing moved".
-const withAliasCensusFloor = 65
+//
+// It tracks the pinned table above, which is the enumeration's real record: a
+// floor left behind the corpus is a floor that admits a lens silently leaving.
+const withAliasCensusFloor = 66
 
 // carriesWithClause reports whether q has a WITH boundary at all — read off
 // the compiled AST rather than the cypher text, so a lens whose spec is

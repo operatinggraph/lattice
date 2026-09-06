@@ -514,3 +514,70 @@ func TestActivation_RetractionGuardsDecideWhetherTheLensRegisters(t *testing.T) 
 		assert.Contains(t, *status.LastError, "gateLiveDiff")
 	})
 }
+
+// partitionShapeSpec is a partition-only lens: its `(app_id, landlord_id)` key
+// carries a column bound to the neighbour a `manages` walk reached, so the rows
+// partition by the leaseapp anchor without being keyed on it alone.
+const partitionShapeSpec = `
+MATCH (app:leaseapp)
+MATCH (app)-[:appliesToUnit]->(u:unit)
+MATCH (u)<-[:manages]-(landlord:identity)
+RETURN nanoIdFromKey(app.key) AS app_id, nanoIdFromKey(landlord.key) AS landlord_id
+`
+
+// TestActivation_PartitionOnlyLensWithoutDiffRetractionIsRefused pins the
+// conjunct the transport verdict grew when the narrowing licence's shape test
+// widened from closure to PARTITIONING.
+//
+// The licence and the retraction answer two different questions, and only the
+// widened one moved. A rule whose rows partition by anchor may be narrowed —
+// that is what makes a per-anchor evaluation exact — but T1 delivers its
+// retraction through the read-free presence check, which needs the row's KEY
+// derivable from the anchor alone. On a lens that partitions WITHOUT closing and
+// declares no target diff, the derived path re-evaluates every affected anchor
+// and emits no Delete for the row a neighbour just dropped: the lens would have
+// activated announcing a transport that cannot carry a row off the target.
+//
+// A lens of this exact shape that DOES declare DiffRetraction is the five this
+// design arms, and it activates — which is why the vector below is the
+// declaration-less twin rather than the shape.
+func TestActivation_PartitionOnlyLensWithoutDiffRetractionIsRefused(t *testing.T) {
+	r := businessRule("gate-partition-nodiff", "gatePartitionNoDiff", "app_id", "landlord_id")
+	require.False(t, projection.IsAuthPlane(r), "precondition: the gate is scoped to the business plane")
+
+	p := activateLens(t, r, partitionShapeSpec, newKVAdapter(t))
+	v := p.PlainRetractionTransport(projection.IsAuthPlane(r))
+	require.True(t, v.DependsOnNeighbour,
+		"precondition: a `manages` hop this lens requires means a neighbour event really can drop its rows")
+
+	refusal := retractionTransportRefusal(p, r)
+	require.NotEmpty(t, refusal,
+		"a lens that narrows correctly and retracts nothing must not activate — its rows would be orphaned silently")
+	assert.Contains(t, refusal, "partition by anchor",
+		"and the reason names the shape, so an author is told which conjunct they are on the wrong side of")
+	assert.Contains(t, refusal, "declare target-diff retraction",
+		"with the move that fixes it: the partition-scoped diff is what carries the Delete for this shape")
+}
+
+// TestActivation_AuthPlaneLensIsNeverOfferedThePartitionTransport pins §3.7's
+// THIRD exclusion — the gate itself.
+//
+// The grant tables are held off the partition transport by three independent
+// things: the plane conjunct inside SetPartitionRetraction, the shared grant
+// writer implementing no adapter.PartitionKeyLister, and this — the gate never
+// offering it. Each is meant to hold on its own, and a test that only exercised
+// the setter would let the gate quietly become the single point of failure.
+func TestActivation_AuthPlaneLensIsNeverOfferedThePartitionTransport(t *testing.T) {
+	r := businessRule("gate-authplane-partition", "gateAuthPlanePartition", "app_id", "landlord_id")
+	r.Into.Bucket = projection.AuthPlaneBucket
+	require.True(t, projection.IsAuthPlane(r), "precondition: this rule really is on the auth plane")
+
+	p := activateLens(t, r, partitionShapeSpec, newKVAdapter(t))
+	require.NoError(t, p.SetDiffRetraction(true))
+
+	require.True(t, admitRetractionTransport(context.Background(), discardLogger(), nil, r, p, nil),
+		"the lens still activates — the auth plane is a hold-out from this transport, not a refusal")
+	assert.False(t, p.PartitionRetraction(),
+		"but the gate must never arm it: the whole diff on every event is the only shrink path an un-truncatable grant table "+
+			"has on a rebuild, and a partition-scoped diff would remove it")
+}

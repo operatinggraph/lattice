@@ -1395,7 +1395,7 @@ type LensSpec struct {
 	SecureColumns []SecureColumn
 
 	// DiffRetraction opts a plain (non-actorAggregate) lens into Refractor's
-	// Fire 3 target-diff retraction
+	// target-diff retraction
 	// (negative-filter-retraction-projection-design.md §2.4): for a lens whose
 	// output key cannot be derived read-free from its own anchor (a composite
 	// key with a column bound to a non-anchor variable — e.g. a landlord_id
@@ -1404,6 +1404,16 @@ type LensSpec struct {
 	// the target's live key set against each re-execute instead of relying on
 	// the anchor-self presence check, which structurally cannot reach this
 	// shape. Postgres or nats-kv (both adapters implement adapter.KeyLister).
+	//
+	// The diff's SCOPE is derived, never declared
+	// (anchor-partitioned-plain-lens-retraction-design.md §3.3). When the rule's
+	// rows partition by their anchor — one key column identifies it, the others
+	// may bind neighbours — Refractor seeds the lens on its own anchor's events
+	// and diffs within the anchors an evaluation covered instead of listing the
+	// whole target on every event. That is a cost property of the key an author
+	// writes, not a second flag: a key with no column identifying the anchor
+	// (or one on the auth plane, or one whose target cannot list a partition)
+	// keeps the whole-target diff, which is exact either way.
 	DiffRetraction bool
 }
 
