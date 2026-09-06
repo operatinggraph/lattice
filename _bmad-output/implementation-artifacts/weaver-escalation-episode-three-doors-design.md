@@ -613,3 +613,84 @@ folded:
 Verdict as returned: *needs the two BLOCKING items re-shaped before build; the rest are same-fire folds*. Both
 re-shapes are in the body above (the release is one conditioned mark delete; routing is by class presence), and
 the design is build-ready at size S–M.
+
+---
+
+### Fire brief (build note, 2026-09-06 — Steward, remote fire `claude/serene-meitner-ogelun`)
+
+**1. Scope sentence (verbatim, §11).** *Inc 1 — the seam and the class:* `escalateGap` extracted from
+`escalateExhaustedGap` (behaviour-neutral for door 1); `mark.Escalation` at all three write seams; `fireEpisode`'s
+trigger string; `bookEscalation`'s `unplannable` create; `bookDispatch`'s restart rule; the two doors routed (§4.1);
+`resolveGoalAction`'s config verdict (§4.2); the `escalated` threading removed and the reclaim's three consumers made
+unconditional with their comments rewritten. *Inc 2 — the release:* Rule 2 at the three sites of §4.3 (lane 1;
+reclaim + orphan-arm guard; count leg above the zero test, door 2 below the gates). *Docs:* `weaver.md` §"Dispatch
+suppression" paragraph + lane-1 decline table row; `augur.md` implementation-status rows. Green bar: §10's rows, all
+pins listed there green, §11's gates.
+
+**2. Verified touch-list (checked live at `07dc19d`).** Every §2 citation holds; two drifted: the `GapWithoutPlaybook`
+clear is `evaluator.go:357` (not :353) and `clearClosedMarks` is defined at `evaluator.go:1154` (:1296 is
+`recordEffectClose`). Edit sites — `internal/weaver/evaluator.go`: `dispatchGap` `!ok` arm :311-358, lane-1 tail
+:517-540 (`count, _, _ =` :535), `planGap` :726-737 (+ its doc :700-725), `fireEpisode` :894-1000 (`replace` :948,
+`create` :975, booking :997), `escalationLeg` :1635, `escalateExhaustedGap` :1943-2179 (release arm :1998-2011, policy
+:2013-2036, seam body :2067-2178). `internal/weaver/reconciler.go`: arm (j) :536-545 + :688-693, `violating` :685,
+suppression :689, door-1 route :694, arm (n) :752-790, leg-advance :796-819 (comment :813), orphan-column arm
+:915-927, `entityKey` guard :953-963, count read :973-978, reclaim :989-1006, classification :1084-1097,
+`planGap(pinned)` :1176, config-error arm :1177-1181, the three `escalated` consumers :1223-1224 / :1260 / :1271,
+`replace` :1226, comments :1217-1246. `internal/weaver/strategist.go`: `resolveGoalAction` :571-578 (→ `errConfig`),
+:592-597 (stays), `resolvedLegAction` :492-505, `augurEscalation` :644. `internal/weaver/state.go`: `mark` :110-120,
+`create` :158, `replace` :238, `bookDispatch` :495-523, `bookEscalation` :538-551. `internal/weaver/control.go`:
+`reArmDeclines` :597-639 (read-only: the verb must keep refusing both doors). Tests: `exhausted_gap_leg_internal_test.go`
+(`escalationMark` :99-110; :1442, :1535, :1612), `evaluator_internal_test.go` (:955, :981, :2009),
+`goal_dispatch_internal_test.go` (:85, :229), `replay_internal_test.go:361`, `control_internal_test.go:995`. Docs:
+`docs/components/weaver.md:141` (table row) and :460-468 (paragraph); `docs/components/augur.md:165,172`.
+
+**3. Precedents to mirror.** The seam body IS door 1's lower half (`evaluator.go:2067-2178`) — extract, don't rewrite.
+The mark field mirrors `EscalatedFrom` at every writer (`state.go:158/:238`, `evaluator.go:946-975`,
+`reconciler.go:1222-1226`). The release write mirrors `releaseCompletedLeg`'s **marked** branch
+(`evaluator.go:1511-1523`: `deleteRevision` at `markRev`, conflict → Ack). The restart rule mirrors `bookDispatch`'s
+leg-change restart (`state.go:502-514`). The count-leg re-fire route mirrors door 1's at `reconciler.go:694` →
+`escalateExhaustedGap`'s :1998-2010 shape. The `errConfig` verdict mirrors the candidates arm `strategist.go:441-446`.
+
+**4. Increment order + green checks.** Inc 1 (builder tier **opus** — a new field on a record + a booking rule is the
+state-machine class): `go test ./internal/weaver/ -count=1` with every §10 Inc-1 row green and every "must stay green"
+pin unchanged; revert-proof each of: the third `replace` caller's field threading, the `bookEscalation` create, the
+`bookDispatch` restart, the `errConfig` verdict. Inc 2 (**opus**): §10 Inc-2 rows; move-proofs for the two ordering
+claims (count-leg branch above `Count != 0`; door-2 route below `violating`/suppression). Then: `go build ./...`, `make
+vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `go run ./scripts/lint-weaver-classify-by-shape.go`,
+every other `scripts/lint-*.go`, `make verify-kernel`, `make test-control-plane-authz`, full `go test ./...` with
+`POSTGRES_TEST_DSN`. Docs land with Inc 2. One cold **opus** adversarial pass over the whole diff at close.
+
+**5. In-scope gotchas.** No package edit (no manifest bump); no contract edit; no build-tagged doubles reach
+`internal/weaver` (C7: none). A weaver fixture `targetId` must stay under 20 chars (`lint-conventions` NanoID
+heuristic). No history-narrating comments — the rewritten reclaim comments describe the code as it is. Dossier
+entries that bind this fire (`docs/components/weaver.md` §"Review keeps catching"; lead + check, verbatim): (1) *A gap
+class is decided by the dispatch's SHAPE, never by its action name … for every new seam that fires an episode, name
+the classifier it calls and the pacing rule it inherits — if a sibling seam guards the same state with a predicate
+this one skips, prove the skip.* (3) *A shared test fixture that always supplies an OPTIONAL input pins only the
+supplied case … for every fixture helper, list the columns it writes that production code treats as OPTIONAL, and
+require one vector that omits each.* (4) *An operator verb that hands a gap to a reconciler arm must refuse exactly
+what that arm PERMANENTLY declines … enumerate the arm's permanent declines, assert the verb refuses each with its
+own message.* (6) *A Health issue key is a LATCH … before adding a CLEAR, enumerate every OTHER leg that raises at
+that key … assert each raise still reaches each clear it had.* (8) *Prove each changed line by reverting THAT LINE,
+not the feature — and where the claim is about WHERE a block sits, the mutation is a MOVE.* (9) *Every RETIRE belongs
+above every "cannot act" GUARD … label every arm guard / act / retire.* (10) *A fact ends by more routes than the one
+you are editing — enumerate the LEGS … for every clear you add, enumerate every leg that can observe the same fact
+ending and every leg that can RE-RAISE at that key.* (11) *A presence assertion cannot pin a clear whose caller
+re-raises in the same pass — the STAMP is the observable … assert on `since`, not on membership.* (12) *A deliberate
+exemption is a claim about EVERY reader of the value, and a new field on a record is a claim about every WRITER of it
+… grep every reader of the value and every writer of the record, list them, and name which pin covers each.* Standing
+checklist (`agents/fire-brief-template.md`) items 1–6 walked; #1 and #4 are the load-bearing ones here (§5's
+lifetime table; the reclaim's three `escalated` consumers are the demoted mechanism's obligations — each accounted for
+in §4.1).
+
+**6. Adjacent finds.** None new beyond §12's named residuals. The `TemplateDataError`-under-a-sibling's-code arm
+(§12 row 2) is folded only if the close pass agrees; not pre-committed. The `staleMark` planned-mode limitation is the
+goal-leg design's (`weaver-goal-leg-external-class-design.md`, ✅ ratified, its own fire) — a non-goal here.
+
+**7. Non-goals.** `collapseOnlyReclaim` and its lint gate; `staleMark` / `externalDispatchGap`; `backoffInterval`;
+the `surface` guards; the admission gate; any `packages/` opt-in to `unplannable`; any contract text; Loupe.
+
+**Scope-diff gate:** parts 2–4 trace item-by-item to §11's two increments and §4's four subsections; nothing widened,
+no adjacent mechanism substituted. Declared dependency (the exhausted-gap design's seams) re-verified both ways: its
+`escalateExhaustedGap`, `bookEscalation`, `EscalatedAt` pacing and `escalatedFrom` are all live at head and are the
+precedents in part 3. Censuses C1–C3, C6, C7 re-run live: identical to §3.
