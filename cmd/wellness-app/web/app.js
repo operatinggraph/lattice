@@ -906,9 +906,18 @@ function upcomingSeriesCounts(sessions) {
   for (const se of sessions || []) {
     if (!se.seriesKey || !se.startsAt) continue;
     if (!(new Date(se.startsAt).getTime() > now)) continue;
-    counts.set(se.seriesKey, (counts.get(se.seriesKey) || 0) + 1);
+    const k = seriesCountKey(se);
+    counts.set(k, (counts.get(k) || 0) + 1);
   }
   return counts;
+}
+
+// seriesCountKey keys the tally on the series AND the studio: the op cancels
+// only occurrences still held at the studio the caller confirms (an occurrence
+// ReassignSession moved elsewhere is passed over, ddls.go), so a count on the
+// series alone would promise one more class than the op removes.
+function seriesCountKey(se) {
+  return se.seriesKey + "|" + (se.studioKey || "");
 }
 
 // scheduleGroups breaks the (already day-sorted) upcoming sessions into local
@@ -963,7 +972,7 @@ function scheduleCard(se, myStatusBySession, seriesCounts) {
   // not booking the run. The count comes from the grid's own rows, so it is
   // whatever THIS list can see; the whole line is text (esc() is a text-node
   // escaper — nothing here goes into an attribute).
-  const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(se.seriesKey) || 0 : 0;
+  const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(seriesCountKey(se)) || 0 : 0;
   const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
   return (
     '<div class="card">' +
@@ -1857,8 +1866,11 @@ function renderCancelClass(sessionKey) {
   // included when it has not started — which is precisely the set the op
   // cancels, so the number on the button is the number that disappears.
   const seriesCounts = upcomingSeriesCounts(staffSessionsCache);
-  const upcoming = se.seriesKey ? seriesCounts.get(se.seriesKey) || 0 : 0;
-  const offerSeries = !!se.seriesKey && isStaff() && upcoming > 1;
+  const upcoming = se.seriesKey ? seriesCounts.get(seriesCountKey(se)) || 0 : 0;
+  // A class whose studio was retired (missingStudio) has no studio key to
+  // confirm and the op's front-of-house walk resolves no workplace for it —
+  // only the operator can clear that run, and only per class for the desk.
+  const offerSeries = !!se.seriesKey && !se.missingStudio && isStaff() && upcoming > 1;
 
   const wrap = document.createElement("div");
   wrap.className = "card-actions";

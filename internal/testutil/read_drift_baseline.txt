@@ -8,7 +8,9 @@
 # A row is a shape the guard TOLERATES, never one it endorses. Reads already
 # sanctioned as Contract #2 §2.5 class-(e) follow-ups on an enumeration — the
 # key's vertex root was DISCOVERED by this execution's own kv.Links walk, hubs
-# excluded — are admitted by the guard itself and never appear here.
+# excluded — are admitted by the guard itself when the key is vertex-rooted
+# (vtx.<type>.<id>…); a link-shaped follow-up read (lnk.…) has no vertex root
+# for the guard to match, so it is listed here under category 3 below.
 #
 # WHAT THE READ ROWS ACTUALLY ARE — three different things, and only the first
 # two are removable. Do not read the file as one undifferentiated debt pile; the

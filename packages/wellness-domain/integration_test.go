@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -3973,6 +3974,41 @@ func TestTombstoneSessionSeries_SkipsOccurrenceMovedToAnotherStudio(t *testing.T
 	for _, cellKey := range wdSlotClaimKeys(t, studioA, "2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z") {
 		if !keyExists(t, ctx, conn, cellKey) {
 			t.Fatalf("the unrelated class's studio-A slot claim %s must still be held", cellKey)
+		}
+	}
+}
+
+// TestTombstoneSessionSeries_FiftyTwoOccurrencesUnderTheWall drives the op at
+// CreateSessionSeries's own ceiling (occurrenceCount 52) with every occurrence
+// still upcoming, under the Processor's DEFAULT script wall (the test sets no
+// PROCESSOR_SCRIPT_WALL_MS override — CI's 5000 ms override would hide the
+// bound). Every read in the arm is live (nothing is derivable from a series
+// key), so this is the budget the op must fit: ~3 reads per occurrence plus the
+// ledBy walk per cancellation. A wall breach here rejects the whole call-off in
+// production while the FE keeps offering the button.
+func TestTombstoneSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
+	if os.Getenv("PROCESSOR_SCRIPT_WALL_MS") != "" {
+		t.Skip("wall override set — this test measures the default budget")
+	}
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesfiftytwo")
+
+	instructorKey := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdseriesinstruct0052", "Sam")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdseriesstudio000052", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdseriescreate000052", studioKey, instructorKey, "Daily Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1, 52)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	started := time.Now()
+	if got, why := tombstoneSeries(t, ctx, conn, cp, cons, "wdseriestombston0052", seriesKey, studioKey, "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("TombstoneSessionSeries over 52 upcoming occurrences outcome = %v (%s), want Accepted (script wall?)", got, why)
+	}
+	t.Logf("52-occurrence call-off round trip: %s", time.Since(started))
+	for i, sessionKey := range sessionKeys {
+		if keyExists(t, ctx, conn, sessionKey) {
+			t.Fatalf("occurrence %d must be tombstoned", i)
 		}
 	}
 }

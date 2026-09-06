@@ -66,7 +66,8 @@
 //	  occurrences, each partOf-linked back to it; the whole series rejects
 //	  StudioConflict together if any single occurrence collides. Every
 //	  occurrence stays individually editable via ReassignSession/
-//	  TombstoneSession afterward — there is no TombstoneSessionSeries)
+//	  TombstoneSession afterward, and TombstoneSessionSeries calls off
+//	  every still-upcoming occurrence of a run in one act)
 //	CreateBooking (validates the session + booker alive + class, claims the
 //	  first free seat within capacity — SessionFull once exhausted — and,
 //	  when an optional leaseAppKey is supplied, verifies the booker is that

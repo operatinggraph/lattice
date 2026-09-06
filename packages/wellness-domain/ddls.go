@@ -478,9 +478,10 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"(NoUpcomingOccurrences), not a silent no-op. The SERIES VERTEX IS NOT TOMBSTONED: its already-run " +
 			"occurrences stay partOf it, and that parentage is the only record they were one recurring class. " +
 			"Bounded read cost: at most occurrenceCount (<= 52) occurrences, each costing three reads (liveness, " +
-			"its atStudio link, its .schedule) plus, for the ones actually cancelled, one single-link ledBy walk — " +
-			"the enumeration itself is 2 pages of 64, which strictly exceeds the largest occurrence set that can " +
-			"exist. Emits wellness.sessionSeriesCancelled {seriesKey, studio, sessionKeys} and returns NO primaryKey " +
+			"its atStudio link, its .schedule) plus, for the ones actually cancelled, the ledBy walk (its own " +
+			"liveness re-check and one single-link page) — the enumeration itself is 2 pages of 64, which strictly " +
+			"exceeds the largest occurrence set that can exist, and a cursor still open past that budget refuses " +
+			"SeriesWalkBound rather than reporting a partial call-off. Emits wellness.sessionSeriesCancelled {seriesKey, studio, sessionKeys} and returns NO primaryKey " +
 			"(it writes nothing on the series, and the reply constraint admits only a key the op wrote). Standing is CreateSessionSeries's own workplace confinement on the same studio " +
 			"(operator-exempt); there is no instructor path — an instructor cancels the class they lead, not a " +
 			"studio's standing booking.",
@@ -2950,6 +2951,15 @@ def execute(state, op):
                 cancelled_keys.append(sess_key)
             if cursor == None:
                 break
+        # The page budget strictly exceeds the largest occurrence set
+        # CreateSessionSeries can mint, so a cursor still open here means
+        # some other writer has hung occurrences off this series -- refuse
+        # rather than report a partial call-off as success (no reply channel
+        # carries the cancelled set back; PromoteWaitlistedBookings's
+        # WaitlistWalkBound is the house shape).
+        if cursor != None:
+            fail("SeriesWalkBound: series " + series_key + " has more partOf occurrences than " +
+                 str(SERIES_OCCURRENCE_MAX_PAGES * SERIES_OCCURRENCE_PAGE_LIMIT) + "; nothing cancelled")
 
         if len(cancelled_keys) == 0:
             fail("NoUpcomingOccurrences: series " + series_key + " has no live occurrence at studio " + studio +
