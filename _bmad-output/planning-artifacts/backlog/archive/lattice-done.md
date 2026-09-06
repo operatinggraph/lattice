@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
 - 2026-08-31 · `571e45e6` · [Contracts] #10 §10.8 {actor} hub token ratified ahead of build — transitional note in text; build fire filed 📋 ready
 - 2026-08-31 · `935492df` · [Contracts] #10 §10.8 ratified with posture trims — three-arm param grammar + directOp optionalReads land; gate narration and internal names stay out
 - 2026-08-31 · `0da6c431` · [Contracts] #10-substrate redrive clause adjudicated — branch rejected as mechanism-for-mechanism; clause rewritten to the observable promise; full-file posture sweep queued
