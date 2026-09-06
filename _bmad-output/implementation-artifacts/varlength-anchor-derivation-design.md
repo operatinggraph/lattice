@@ -858,3 +858,155 @@ mechanized as a mandated test shape (`15d24ef`).
 load" row (b), owned by the Whetstone, not this change: the lens that failed to activate is `hopIndexed`
 before and after this diff, the run's own tally shows `fellBack=0`, and the test passes 3/3 in isolation
 locally plus a full `make test-lease-convergence`. Green on the one sanctioned re-run.
+
+---
+
+## 18. Increment 2 fire brief (build note, 2026-09-06)
+
+Compiled at selection by two read-only scouts (`haiku`) + the lead's own census run. Branch:
+`claude/bold-newton-a48ino`. **Revive trigger met:** `2f65f67` (2026-09-01) records Increment 1 observed
+live — the eight stuck personal lenses drain at 10–25 msg/s, kernel verification green, no
+derivation-soundness regression — and flipped the board row to `📋 ready`.
+
+### 18.0 Phase 0 — the census baseline, RUN
+
+C1 green at head `b7e1725` (`TestCorpusAnchorHopIndex_PinnedConjuncts`, `TestScanRootCorpusCensus`,
+`POSTGRES_TEST_DSN` set). The two rows this increment moves are pinned today at
+`anchor_hopindex_corpus_census_test.go:125-126`:
+
+```go
+"edgeManifestReadGrants":      hopWithDropped,
+"edgeManifestStaffReadGrants": hopWithDropped, // Same shape, dropping `role`.
+```
+
+`edgeManifestProviderReadGrants` is already `hopIndexed` (`:118`) — a single-walk producer with no
+re-opened chain, which is the negative control the census already carries. **Expected after this
+increment:** exactly those two rows move to `hopIndexed`; nothing else moves in either census.
+
+**C4 is again NOT re-derived, for §17.9's reason unchanged** — this fire runs in an ephemeral remote
+container whose only stack is one it would bootstrap itself, with no accumulated lag and no suppression
+history. C4-after is the *live* acceptance measurement and is left to a live observation, exactly as
+Increment 1's was: the trigger that unblocked this increment was recorded by the fire that made that
+observation, not by a green suite. Acceptance here is the census move + T9/T10/T12 + the full gate set.
+
+### 18.1 Scope sentence (verbatim, §13)
+
+> **Increment 2 — the WITH narrowing** (engine; converts the two `cap-read.edgeManifest*` producers —
+> the live symptom). Depends on Increment 1 only for the census baseline, not for code.
+> `withScopeReject` gains the structural-identity whitelist (§5, §7.3). Tests T9, T10, T12.
+
+### 18.2 Verified touch-list (`file:line` re-checked live)
+
+| File | Anchor | What changes |
+|---|---|---|
+| `ruleengine/full/withscope.go` | `:61-71` the non-`With` clause arm | a re-referenced dropped name gets one admission test before the refusal stands |
+| " | `:33-114` `withScopeReject` | records each name's binding prefix as patterns are scanned; an admitted re-binding un-drops the name |
+| " | `:1-26` the package doc | the second hazard's narrowed form is stated where the refusal's posture is |
+| " | new helper (same file) | the structural-identity comparison — `PathPattern`/`NodePattern`/`RelPattern` field-by-field |
+| `ruleengine/full/ast.go` | `:81-115` `PathPattern`/`NodePattern`/`RelPattern` | **read-only** — `Variable`, `Label`, `LabelExpand`, `Properties`; `Type`, `Direction`, `MinHops`, `MaxHops` |
+| `ruleengine/full/hopindex.go` | `:254`, `:375` call sites; `:300-335`, `:411-450` switches | **unchanged** — the verdict changes, not where it is read |
+| " | `:649-663` `position()` | **unchanged** — the merge this admits is exactly the one it already performs by name |
+| `ruleengine/full/hopindex_test.go` | `:339-474` `TestAnchorHopIndex_WithScope` table | T9 + T10's vectors, one per structural difference |
+| `internal/refractor/anchor_hopindex_corpus_census_test.go` | `:119-126` | the two rows move to `hopIndexed`, each with its argument |
+| `internal/refractor/refractor_capability_reproject_e2e_test.go` | `:45-100` | T12's shape mirrors the reproject e2e's lens-activation wait |
+| `docs/components/refractor.md` | Rule engine §; dossier | the narrowed refusal; any class this fire's reviews mint |
+
+Citations that **rotted**: none. §5's `withscope.go:1-26` posture quote, `hopindex.go`'s switch ordering
+(`withReject` ahead of `ungrounded`), `generateProducerSpec`'s staged emission
+(`internal/pkgmgr/anchorwalk.go:548-581`) and its golden cypher (`anchorwalk_test.go:103-116`) all
+resolved verbatim. `chainResidence` is `packages/edge-manifest/lenses.go:468`.
+
+### 18.3 Precedents to mirror
+
+- The refusal's own vocabulary → `withReReference` / `withCannotModel` (`withscope.go:166-172`): an
+  admitted shape produces **no** new reason string, so `TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct`
+  (`:327`) stays satisfied without a new constant.
+- Determinism of a refusal → `firstIn`'s lexical-first rule (`:174-189`); the admission test must keep the
+  refused name stable when several dropped names are referenced by one clause.
+- Fail-closed default-deny → `varScan.refuse` (`:216-222`): an AST shape with no case refuses. The
+  admission test follows the same posture — anything it cannot compare exactly refuses.
+- Table-driven vectors → `TestAnchorHopIndex_WithScope` (`hopindex_test.go:339-474`), `reject: ""` meaning
+  "must be complete".
+- The e2e's activation wait → `refractor_capability_reproject_e2e_test.go:93-100`.
+- The generator's own staging guard → `TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart`
+  (`anchorwalk_test.go:122+`): two walks binding `x` to a task and a booking must **not** join. The
+  whitelist must refuse that pair — it is T10's most load-bearing vector, and it already exists as a
+  named hazard in the generator.
+
+Nothing here is greenfield; the one new thing is the comparison helper, which §5 of scout A's census of
+the package confirms has no existing normalizer to reuse (stated, not assumed).
+
+### 18.4 Increment order, each with its runnable green check
+
+1. **Record** — bind-prefix capture as patterns are scanned (no behaviour change: nothing is admitted yet).
+   → `go test ./internal/refractor/ruleengine/full/ -count=1`
+2. **Admit** — the structural-identity test + the un-drop, in the non-`With` clause arm. → same
+3. **Vectors** — T9 (the golden producer shape indexes) + T10 (one refusal vector per structural
+   difference: head-position rebind, non-carried head, differing relation type / direction / range /
+   label / expansion sigil / variable name / node property, a rel-variable rebind, a reference from a
+   `WHERE`, a `WITH` item, a `RETURN`). → same
+4. **Census** — the two pin rows move, each carrying its argument. →
+   `go test ./internal/refractor/ -count=1`
+5. **T12 e2e** — a `containedIn` link create reprojects only the affected actor for
+   `edgeManifestReadGrants`. → `go test ./internal/refractor/ -run E2E -count=1`
+6. **Docs** — `docs/components/refractor.md`.
+
+Fire green bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `STRICT=1 go run ./scripts/lint-lens-anchors.go` ·
+`go test ./internal/refractor/... -count=1` · `go test ./... -p 4` **with `POSTGRES_TEST_DSN` set**
+(`agents/steward/REMOTE.md` §3) · `make test-lease-convergence`.
+
+### 18.5 In-scope gotchas + the standing checklist
+
+- **The direction that matters is under-refusal.** `withScopeReject`'s posture (`withscope.go:23-26`):
+  *"over-refusing costs one BFS fallback, and under-refusing costs a grant that outlives its
+  revocation."* Every ambiguity in the comparison resolves to refuse.
+- **The whitelist is over a proven-identical shape, not a classifier** (§7.3). Anything it cannot compare
+  field-for-field — an unmodelled property expression, an ambiguous earlier binding, a name first bound at
+  a head position — refuses.
+- **`position()` is not touched.** The admission is a claim about what its existing by-name merge means
+  under this shape, not a change to it.
+- **No new state.** The bind-prefix record is local to one `withScopeReject` call and dies with it;
+  the standing checklist's #1 is satisfied by construction and asserted by a test that runs the same
+  query twice.
+- **No package/manifest version bump** — this fire edits no `packages/` content.
+- **Build-tagged harnesses:** no engine/service interface gains a method, so the tagged suites are not
+  reached; the convergence targets still run because they exercise the refractor pipeline.
+- **A row moving TO indexed is the direction the census harnesses say needs an argument** — both moved
+  rows carry theirs in the commit message and in the pin table's comment.
+- Dossier (`docs/components/refractor.md`, verbatim headlines; §16 names the six this design is built
+  against): *A removal verdict's premises are the whole mechanism — check the PROBED ARTIFACT* ·
+  *A soundness claim's stated REASON is load-bearing, and a reason measurement can falsify is worse than
+  none* · *An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one* ·
+  *A two-layer seam can be green at each layer and broken across it — the interposed step is where it
+  dies* · *A widened operation silently drops the bound or budget its narrow predecessor carried* ·
+  *A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis* · *One latch
+  guarding two states that commit at different times* · *An authoring gate and its runtime resolver must
+  agree, or the gate is advisory* · *A fixture that establishes the favourable ORDER or ARM is an
+  argument, not a test* · *A zero or empty reading that cannot be distinguished from "not measured" must
+  read UNREADABLE* · *A fence you remove was doing unstated work on a SECOND axis* · *An operator-driven
+  repair promoted to an AUTOMATIC one carries every tolerance the operator path had*.
+  The three that bind hardest here: the expansion sigil (`LabelExpand` is part of the comparison, and a
+  sigil difference refuses), *a widened operation drops the bound its narrow predecessor carried* (the
+  refusal being widened-through is a security bound — enumerate what it was doing on both hazards, not
+  just the merge one), and *a fixture that establishes the favourable ARM is an argument* (T9 must run
+  the **generator's own** emitted cypher, not a hand-written lookalike).
+- Standing checklist: (1) no new state — above; (2) every census is a premise — C1 re-run live in §18.0;
+  (3) a negative test needs its positive vector first, and every fix is revert-proven — T9 is the
+  positive, T10's vectors each red without the corresponding comparison field; (4) removal/replacement —
+  nothing is removed, the refusal is narrowed and its remaining reach is enumerated; (5) one writer —
+  n/a; (6) precedent may carry debt — the generator's staging guard is the precedent that names the
+  hazard the whitelist must keep refusing.
+
+### 18.6 Adjacent finds
+
+None outside the fire's own mechanism at compile time. Anything the build or the reviews surface is
+fixed in this run per `agents/steward/SKILL.md` §4, not filed.
+
+### 18.7 Non-goals (the drift fence)
+
+The generator (`internal/pkgmgr/anchorwalk.go`) — including §10 F's variant, which is sequenced behind
+its own named trigger. `ReferencedLabels`' exhaustiveness clear. Any cypher edit in `packages/`. The
+five Personal lenses, the two multi-walk lenses and the two `SecureColumns` plain lenses (§13's named
+conjuncts — unreachable work, not deferred work). `position()`, `Dist` and the completeness switch's
+ordering.
