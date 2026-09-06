@@ -594,4 +594,8 @@ mechanizes it (name the gate, strike the entry).
   recorded its own lapse, fired into a marker no cypher read. Check: for every `byTarget.<t>` a lens reads,
   name the lens that projects `freshUntil` for target `t`, assert both gate on ONE shared status fragment
   (pin it on the shipped specs, not on the constant), and for every `freshUntil` a lens projects, name the
-  reader of the marker it will produce — none ⇒ delete the column.
+  reader of the marker it will produce — none ⇒ delete the column. The same coupling binds a lens to the OP
+  its gap dispatches: every conjunct of `missing_<g>` must count the population the op's own test reads
+  (`wellnessWaitlistPromotion` counted `status = booked` while `PromoteWaitlistedBookings` read seat cells —
+  a class that ran and was rescheduled opened a gap the op could only decline, `GapBudgetExhausted` forever;
+  2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
