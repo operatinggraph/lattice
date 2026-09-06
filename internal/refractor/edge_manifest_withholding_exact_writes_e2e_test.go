@@ -239,6 +239,17 @@ func TestEdgeManifest_E2E_LinkCreateWritesExactlyTheEntriesItChanged(t *testing.
 	for _, idID := range residentIDs {
 		emWriteVertex(t, ctx, coreKV, substrate.VertexKey("identity", idID), "identity", map[string]any{"name": "T9 " + idID})
 	}
+	// The fourth identity exists from the start, AHEAD of the seed links in
+	// stream order, so its own create event is processed — and found to hold no
+	// grant — before the population barrier below can pass. Phase (b) is then
+	// exactly one event. Written beside the link create instead, the vertex
+	// event's evaluation races the link put: the rule consumer is one pump
+	// reading LIVE Core KV, so a vertex event picked up after the link landed
+	// derives the newcomer's entry from the vertex event, and the link event
+	// that follows finds all seven unchanged — 7 withheld, not 6, and the
+	// "exactly one write" the test pins lands under the wrong event.
+	newcomerID := pl2NanoID("t9-resident-d")
+	emWriteVertex(t, ctx, coreKV, substrate.VertexKey("identity", newcomerID), "identity", map[string]any{"name": "T9 newcomer"})
 	for _, instID := range instanceIDs {
 		for _, idID := range residentIDs {
 			emWriteLink(t, ctx, coreKV, "service", instID, "providedTo", "identity", idID)
@@ -295,8 +306,6 @@ func TestEdgeManifest_E2E_LinkCreateWritesExactlyTheEntriesItChanged(t *testing.
 	require.Positive(t, auditBefore, "the control: the seeding really did commit entries and audit them")
 
 	// --- (b) ONE LINK CREATE, fanning out to four actors over seven entries. ---
-	newcomerID := pl2NanoID("t9-resident-d")
-	emWriteVertex(t, ctx, coreKV, substrate.VertexKey("identity", newcomerID), "identity", map[string]any{"name": "T9 newcomer"})
 	newKey := grantKey(newcomerID, instanceIDs[0])
 
 	emWriteLink(t, ctx, coreKV, "service", instanceIDs[0], "providedTo", "identity", newcomerID)
