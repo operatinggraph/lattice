@@ -2716,9 +2716,11 @@ async function loadMyEncounters() {
 // (P5: read the lens read model, never Core KV). This tab is the clinic-wide queue of
 // those requests so one does not silently fall through: it reads EVERY appointment
 // (not the patient-scoped My Appointments view) and keeps the flagged ones. A
-// follow-up reads as "addressed" once a later non-cancelled appointment sits on the
-// same patient's record (the natural close-the-loop signal); the default filter hides
-// those so the list behaves as a worklist that empties.
+// follow-up with a target date reads as "addressed" once a later non-cancelled
+// appointment on/after that date sits on the same patient's record (the natural
+// close-the-loop signal); the default filter hides those so the list behaves as a
+// worklist that empties. A follow-up documented without a date has no due point a
+// visit can satisfy, so it leads the list until a date is set.
 //
 // Reads the PROTECTED, RLS-scoped /api/staff/appointments as the signed-in
 // identity — a staff actor's WildcardAnchor grant returns every appointment,
@@ -2749,15 +2751,19 @@ async function loadFollowups() {
 // appointment on or after the requested follow-up date — the heuristic that a
 // requested follow-up has since been addressed. A no-show never attended, so
 // it does not count any more than a cancellation does. A visit merely later
-// than the original (but still before followUpDate) does not address it.
+// than the original (but still before followUpDate) does not address it. A
+// follow-up with no target date has no due point a visit can satisfy, so it
+// is never addressed by any later visit — it stays outstanding until a date
+// is set.
 function hasLaterVisit(f, all) {
+  if (!f.followUpDate) return false;
   return all.some(
     (g) =>
       g.appointmentKey !== f.appointmentKey &&
       g.patientKey === f.patientKey &&
       !["cancelled", "noshow"].includes((g.status || "").toLowerCase()) &&
       g.startsAt > f.startsAt &&
-      (!f.followUpDate || g.startsAt >= f.followUpDate),
+      g.startsAt >= f.followUpDate,
   );
 }
 
@@ -2782,13 +2788,13 @@ function localDateStr(offsetDays) {
 }
 
 const FOLLOWUP_GROUPS = [
+  { key: "nodate", label: "Needs a target date" },
   { key: "overdue", label: "Overdue" },
   { key: "soon", label: "Due soon (next 14 days)" },
   { key: "later", label: "Upcoming" },
-  { key: "nodate", label: "No target date" },
 ];
 
-const FOLLOWUP_BADGE = { overdue: "Overdue", soon: "Due soon", later: "Upcoming", nodate: "No date" };
+const FOLLOWUP_BADGE = { overdue: "Overdue", soon: "Due soon", later: "Upcoming", nodate: "Needs a date" };
 
 function renderFollowups() {
   const grid = $("#followups");
@@ -2856,7 +2862,9 @@ function renderFollowupCard(f) {
 
   const target = document.createElement("div");
   target.className = "when";
-  target.textContent = f.followUpDate ? "Follow up by " + f.followUpDate.slice(0, 10) : "Follow-up requested (no date)";
+  target.textContent = f.followUpDate
+    ? "Follow up by " + f.followUpDate.slice(0, 10)
+    : "No target date — this follow-up can never come due until one is set.";
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -2889,6 +2897,13 @@ function renderFollowupCard(f) {
 
   const btns = document.createElement("span");
   btns.className = "card-btns";
+  if (!f.followUpDate) {
+    const setDate = document.createElement("button");
+    setDate.className = "ghost";
+    setDate.textContent = "Set date";
+    setDate.addEventListener("click", () => setFollowupDate(f));
+    btns.append(setDate);
+  }
   const book = document.createElement("button");
   book.className = "ghost";
   book.textContent = "Book follow-up";
@@ -2918,6 +2933,23 @@ function bookFollowup(f) {
   }
   showView("book");
   toast("Booking a follow-up for " + (f.patientName || shortKey(f.patientKey)) + ". Pick a date & time.", "ok");
+}
+
+// setFollowupDate routes a dateless follow-up to the documentation modal, which
+// is where the date is written (RecordEncounter re-validates it). The note must
+// be readable by this session first: a blank prefill saved over an existing note
+// would replace it, so the fetch runs unconditionally here — myEncountersLoaded
+// only records whether the LAST fetch succeeded, and this tab never fetched. No
+// note back for this reader (RLS: not the treating provider) means a toast, never
+// the modal.
+async function setFollowupDate(f) {
+  await loadMyEncounters();
+  if (state.myEncounters[f.appointmentKey]) {
+    openEncounter(f, loadFollowups);
+    return;
+  }
+  const who = f.providerName ? " (" + f.providerName + ")" : "";
+  toast("Only the treating provider" + who + " can set the date from their documentation.", "err");
 }
 
 // ---- Recurring visit series (clinic-wide worklist + the patient's own list) ----
@@ -4772,7 +4804,9 @@ function closeEncounter() {
 }
 
 function toggleFollowupDate() {
-  $("#enc-followup-date-field").hidden = !$("#enc-followup").checked;
+  const needed = $("#enc-followup").checked;
+  $("#enc-followup-date-field").hidden = !needed;
+  $("#enc-followup-date").required = needed;
 }
 
 async function submitEncounter(ev) {
@@ -4804,7 +4838,11 @@ async function submitEncounter(ev) {
   payload.followUpRequested = followUp;
   if (followUp) {
     const fd = $("#enc-followup-date").value;
-    if (fd) payload.followUpDate = fd;
+    if (!fd) {
+      toast("Set a target date for the follow-up.", "err");
+      return;
+    }
+    payload.followUpDate = fd;
   }
 
   const submit = $("#encounter-submit");
