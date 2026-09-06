@@ -129,8 +129,13 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.KVPurgeWithTTL(ctx, bucket, purgedKey, time.Second, 0))
 
-	// 4. An arm superseded by a re-arm before its own TTL runs out.
-	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t0"}`), time.Second)
+	// 4. An arm superseded by a re-arm before its own TTL runs out. The arm's
+	// TTL is the slack the re-arm has to land inside — a loaded host can stall
+	// one round trip past a 1 s TTL, and then the marker the arm mints is a
+	// legitimate expiry rather than the eviction this step pins — while the
+	// observation window at the end of the test (past the purge's own 4 s
+	// quiet period) still outlasts it by a wide margin.
+	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t0"}`), 3*time.Second)
 	require.NoError(t, err)
 	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t1"}`), 30*time.Second)
 	require.NoError(t, err)
@@ -168,7 +173,7 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 		"an expiring purge marker must not be re-marked as a MaxAge expiry")
 
 	// The evicted arm: the re-arm's own value is the only thing after it. The
-	// superseded 1s TTL must produce nothing, or an earlier step's deadline
+	// superseded 3s TTL must produce nothing, or an earlier step's deadline
 	// could fire after the cursor advanced.
 	awaitMarker(t, mc, evictedSubj, 2, "the re-arm's value must be delivered")
 	require.Len(t, mc.forSubject(evictedSubj), 2, "the re-arm's value follows the arm's")
