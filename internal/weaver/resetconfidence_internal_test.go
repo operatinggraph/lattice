@@ -71,7 +71,7 @@ func TestResetConfidence_DeletesOnlyThisTargetsEffectWindows(t *testing.T) {
 	// Everything the reset must NOT touch, all under t1's own prefix.
 	entityID := testNanoID(t)
 	if _, _, _, err := m.create(ctx, "t1", entityID, "missing_x",
-		"vtx.leaseApp."+entityID, actionDirectOp, ""); err != nil {
+		"vtx.leaseApp."+entityID, actionDirectOp, "", ""); err != nil {
 		t.Fatalf("create mark: %v", err)
 	}
 	if _, err := m.incrementDispatchCount(ctx, "t1", entityID, "missing_x", "", true, false, false); err != nil {

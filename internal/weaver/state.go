@@ -107,12 +107,21 @@ const dispatchCountTTLBackstopFactor = 256
 // pin (releaseCompletedLeg's effects-hold release) would go dark for as long as
 // the escalation stood. It is empty on an ordinary leg mark, and on any mark
 // that does not carry it — for which legOf falls to the count document.
+//
+// Escalation is the trigger the episode was escalated on ("unplannable" |
+// "exhausted"), and empty for an ordinary episode. It is what makes the mark
+// declare its own class: an escalation's Action is the reasoning op's dispatch
+// class, which a gap whose catalog ref was merely removed looks exactly like, so
+// a reader that inferred the class from "this action no longer resolves" would
+// take a removed ref under an open leg for a standing escalation. The document
+// declares its class; the key only addresses.
 type mark struct {
 	TargetID       string `json:"targetId"`
 	EntityKey      string `json:"entityKey"`
 	Gap            string `json:"gap"`
 	Action         string `json:"action"`
 	EscalatedFrom  string `json:"escalatedFrom,omitempty"`
+	Escalation     string `json:"escalation,omitempty"`
 	ClaimID        string `json:"claimId,omitempty"`
 	ClaimedAt      string `json:"claimedAt"`
 	LeaseExpiresAt string `json:"leaseExpiresAt,omitempty"`
@@ -153,9 +162,10 @@ func markKey(targetID, entityID, gapColumn string) string {
 // lease — the backstop that bounds the mark's life even if no reconciler ever
 // sweeps it.
 //
-// escalatedFrom is the plan leg this episode displaces — set only by an Augur
-// escalation, empty for every ordinary dispatch.
-func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom string) (revision uint64, claimID string, exists bool, err error) {
+// escalatedFrom is the plan leg this episode displaces and escalation the
+// trigger it was escalated on — both set only by an Augur escalation, empty for
+// every ordinary dispatch.
+func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, escalation string) (revision uint64, claimID string, exists bool, err error) {
 	claimID, err = substrate.NewNanoID()
 	if err != nil {
 		return 0, "", false, fmt.Errorf("weaver: mint mark claimId: %w", err)
@@ -167,6 +177,7 @@ func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, e
 		Gap:            gapColumn,
 		Action:         action,
 		EscalatedFrom:  escalatedFrom,
+		Escalation:     escalation,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
@@ -229,13 +240,14 @@ func (m *markStore) get(ctx context.Context, targetID, entityID, gapColumn strin
 // backoff longer than the default backstop (so the mark survives until the next
 // scheduled reclaim instead of TTL-expiring into a markless open gap).
 //
-// escalatedFrom is the displaced plan leg the mark carries (the mark type's
-// doc). The whole value is rewritten here, so a re-arm that did not thread it
-// through would drop the leg an escalation is standing over and take every
-// level test on that pin dark — the caller passes the leg the re-armed episode
-// is still displacing, which for an ordinary re-arm is the one already on the
-// mark.
-func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, claimID string,
+// escalatedFrom is the displaced plan leg the mark carries and escalation the
+// class it declares (the mark type's doc). The whole value is rewritten here, so
+// a re-arm that did not thread the pair through would drop the leg an escalation
+// is standing over — taking every level test on that pin dark — and leave the
+// re-armed mark unable to say it is an escalation at all. The caller passes what
+// the re-armed episode still is, which for an ordinary re-arm is what the mark
+// already carried.
+func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, escalation, claimID string,
 	expectedRevision uint64, ttl time.Duration) (revision uint64, conflict bool, err error) {
 
 	now := time.Now()
@@ -245,6 +257,7 @@ func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, 
 		Gap:            gapColumn,
 		Action:         action,
 		EscalatedFrom:  escalatedFrom,
+		Escalation:     escalation,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
@@ -499,7 +512,8 @@ func bookDispatch(dc dispatchCount, actionRef string, attempt, reclaim, legScope
 		leg = ""
 	}
 	if attempt {
-		if legScoped && leg != "" && next.Leg != "" && next.Leg != leg {
+		switch {
+		case legScoped && leg != "" && next.Leg != "" && next.Leg != leg:
 			// A leg change IS a new chain: the attempts charged to the previous
 			// leg bound that leg, not this one. It restarts the whole episode's
 			// bookkeeping, not just the tally: the re-arm history and the last
@@ -509,7 +523,25 @@ func bookDispatch(dc dispatchCount, actionRef string, attempt, reclaim, legScope
 			next.Count = 1
 			next.Reclaims = 0
 			next.EscalatedAt = ""
-		} else {
+		case next.Count == 0 && next.Leg == "" && next.EscalatedAt != "":
+			// An ESCALATION-ONLY document: no attempt has ever been charged to
+			// it and it names no leg, so the only thing it records is an
+			// escalation's pacing (bookEscalation creates exactly this shape for
+			// the `unplannable` trigger). The attempt booked over it belongs to a
+			// chain that can act again, and the re-arm history and last-fire
+			// instant it would otherwise inherit are the escalation's — carried
+			// forward, the fresh chain's first reclaim would wait out the dead
+			// episode's exponential. The same restart the leg change performs, for
+			// the same reason.
+			//
+			// An operator's un-park is the other document that reads 0, and it is
+			// told apart by its stored leg: resetDispatchCount rewrites only
+			// Count, so an un-parked chain still names the leg it was on and keeps
+			// inheriting its pacing.
+			next.Count = 1
+			next.Reclaims = 0
+			next.EscalatedAt = ""
+		default:
 			next.Count++
 		}
 		if leg != "" {
@@ -528,23 +560,42 @@ func bookDispatch(dc dispatchCount, actionRef string, attempt, reclaim, legScope
 // an open episode. Same bounded CAS read-modify-write loop as
 // incrementDispatchCount; booked=false means nothing was written.
 //
-// An ABSENT document is not created. An escalation is reached only past a spent
-// budget, so the document normally exists; creating one at Count 0 would make
-// the reconciler's count leg read it as an operator's un-park — the one state
-// that arm fires a fresh markless episode on — and hand the gap a dispatch
-// nobody asked for. Skipping the write costs the re-fire its pacing for one
-// cycle (an absent EscalatedAt fires now), which is the same disposition the
-// first escalation has.
-func (m *markStore) bookEscalation(ctx context.Context, targetID, entityID, gapColumn string, now time.Time) (booked bool, err error) {
+// An ABSENT document is created for the `unplannable` trigger and only for it.
+// That trigger is reached with no document by construction — the gap books
+// nothing, and one that has no plan has mounted no attempt — so refusing the
+// create would leave the two doors it serves with nothing to pace on at all, and
+// every re-fire unpaced forever. `exhausted` keeps the refusal: it is reached
+// only past a spent budget, so absence is impossible there, and a document
+// created at Count 0 for it would read to the reconciler's count leg as an
+// operator's un-park — the one state that arm fires a fresh markless episode on
+// — handing the gap a dispatch nobody asked for. The created shape is
+// {count:0, reclaims:1, escalatedAt:now}: no attempt is charged to it, and the
+// leg it names is empty, which is what tells it apart from an un-park (whose
+// stored leg survives the reset) at every reader of a zero.
+func (m *markStore) bookEscalation(ctx context.Context, targetID, entityID, gapColumn, trigger string, now time.Time) (booked bool, err error) {
 	key := countKey(targetID, entityID, gapColumn)
 	ttl := dispatchCountTTLBackstopFactor * m.lease
 	for try := 0; try < dispatchCountCASRetries; try++ {
 		entry, gErr := m.conn.KVGet(ctx, m.bucket, key)
 		if gErr != nil {
-			if errors.Is(gErr, substrate.ErrKeyNotFound) {
+			if !errors.Is(gErr, substrate.ErrKeyNotFound) {
+				return false, gErr
+			}
+			if trigger != escalateUnplannable {
 				return false, nil
 			}
-			return false, gErr
+			fresh := dispatchCount{Reclaims: 1, EscalatedAt: substrate.FormatTimestamp(now)}
+			body, mErr := json.Marshal(fresh)
+			if mErr != nil {
+				return false, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+			}
+			if _, cErr := m.conn.KVCreateWithTTL(ctx, m.bucket, key, body, ttl); cErr != nil {
+				if errors.Is(cErr, substrate.ErrRevisionConflict) {
+					continue // someone created it first — re-read and update.
+				}
+				return false, cErr
+			}
+			return true, nil
 		}
 		var dc dispatchCount
 		if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {

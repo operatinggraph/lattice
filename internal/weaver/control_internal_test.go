@@ -305,7 +305,7 @@ func TestRevoke_RemovesDurableMarksAndStaysDisabled(t *testing.T) {
 
 	// Seed an in-flight mark under t1.
 	entityID := testNanoID(t)
-	if _, _, _, err := h.engine.marks.create(ctx, "t1", entityID, "missing_x", "vtx.leaseApp."+entityID, "directOp", ""); err != nil {
+	if _, _, _, err := h.engine.marks.create(ctx, "t1", entityID, "missing_x", "vtx.leaseApp."+entityID, "directOp", "", ""); err != nil {
 		t.Fatalf("create mark: %v", err)
 	}
 

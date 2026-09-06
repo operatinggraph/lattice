@@ -978,7 +978,7 @@ func TestHandleRow_LiveEscalationMarkNotTornDownAndRefired(t *testing.T) {
 	}
 	// Simulate an escalation episode this function already fired: a LIVE
 	// mark (fresh lease) at the exact key the escalation dispatches under.
-	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "")
+	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted)
 	if err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
@@ -1027,7 +1027,7 @@ func TestHandleRow_ExhaustedEscalationRetiresThisEntitysIssue(t *testing.T) {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
-	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, ""); err != nil {
+	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted); err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
 	// Raised on an earlier pass, before the package added the augur policy.
@@ -2050,18 +2050,20 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 	}
 }
 
-// TestPlanGap_UnplannableEscalationRetiresConfigIssue pins the SCOPES of the
-// clears an escalated-then-built plan performs. An augur escalation that
-// resolves an unplannable plan says the playbook dead-end is covered, which is a
-// fact about the target; the plan that then builds says this ROW's gap has an
-// attempt left and its templates resolve, which are facts about one entity. Both
-// fire on this path, and neither may reach further than its own scope — a
-// target-scoped clear must never become a sweep of the per-entity family.
+// TestPlanGap_UnplannableEscalationRetiresConfigIssue pins the SCOPE of the one
+// clear planGap performs when it hands an escalation back, and the shape of the
+// hand-back itself.
 //
-// The admission gate denies, so the pass defers without dispatching. That is now
-// BELOW the build (a token is a permit to dispatch, drawn only for a plan that
-// would actually fire), so the deferral no longer hides the build's own clears —
-// which is why the entity assertions below name two different entities.
+// An augur policy that covers an unplannable gap says the playbook dead-end is
+// covered, which is a fact about the TARGET: its config latch retires here. The
+// per-entity facts (this row's spent budget, its template references) are the
+// escalation's own build to settle, at the seam that fires it — so nothing at
+// this seam may reach into that family, for this row or for any other.
+//
+// The hand-back is the rest of the pin: no plan, the reasoning GapAction the
+// policy built, escalate true, and an Ack. A plan returned here would be fired
+// as the gap's own next dispatch by every caller, which is exactly the episode
+// model an escalation must not get.
 func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 	t.Parallel()
 	const targetID = "fixtureUnplannableEscalate"
@@ -2087,24 +2089,46 @@ func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 	e.issues.set(issueKeyGapEntity(targetID, sibling, col), "warning", "GapBudgetExhausted", "another row's budget")
 
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID}
-	// A pin the catalog no longer names is the unplannable-flagged error.
-	if pl, _, _, dec := e.planGap(context.Background(), target, targetID, entityID, col,
-		goalGapFixture(t), row, 42, "aGhostLeg"); pl != nil || dec != substrate.NakWithDelay {
-		t.Fatalf("the escalated gap must escalate, build, then defer on admission, got plan=%v decision %v",
-			pl != nil, dec)
+	// A goal whose current row state no chain of catalog actions reaches.
+	pl, actionRef, esc, escalate, dec := e.planGap(context.Background(), target, targetID, entityID, col,
+		unreachableGoalGapFixture(t), row, 42, "")
+	if !escalate || pl != nil || actionRef != "" || dec != substrate.Ack {
+		t.Fatalf("planGap must hand the escalation back rather than plan one: escalate=%v plan=%v ref=%q dec=%v",
+			escalate, pl != nil, actionRef, dec)
+	}
+	if esc.Action != actionDirectOp || esc.Params["trigger"] != escalateUnplannable {
+		t.Fatalf("the returned GapAction must be the policy's reasoning dispatch, got %+v", esc)
 	}
 	if _, ok := issueAt(e.issues, issueKeyGapConfig(targetID, col)); ok {
 		t.Fatalf("the augur escalation covers the dead-end; its config issue must retire, issues = %+v",
 			e.issues.snapshot())
 	}
-	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, entityID, col)); ok {
-		t.Fatalf("a plan BUILT for this row disproves its GapBudgetExhausted — the build settles it, "+
-			"whether or not admission lets it fire; issues = %+v", e.issues.snapshot())
-	}
-	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, sibling, col)); !ok {
-		t.Fatalf("neither clear says anything about ANOTHER row's budget; the sibling's issue must stand, "+
+	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
+		t.Fatalf("this row's own facts are the escalation's build to settle at the seam, not this seam's; "+
 			"issues = %+v", e.issues.snapshot())
 	}
+	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, sibling, col)); !ok {
+		t.Fatalf("the clear says nothing about ANOTHER row's budget; the sibling's issue must stand, "+
+			"issues = %+v", e.issues.snapshot())
+	}
+}
+
+// unreachableGoalGapFixture is a goal gap whose catalog can never satisfy its
+// goal — the one input that makes resolveGoalAction return the unplannable flag.
+func unreachableGoalGapFixture(t *testing.T) GapAction {
+	t.Helper()
+	target := &Target{
+		TargetID: "fixtureUnreachableGoal",
+		Gaps: map[string]GapAction{"missing_x": {
+			Goal: json.RawMessage(`{"present":"subject.data.neverAsserted"}`),
+			Actions: []ActionCatalogEntry{{Ref: "legA", Action: actionDirectOp, Operation: "DoA",
+				Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.aDone"}`)}}},
+		}},
+	}
+	if err := validateTarget(target); err != nil {
+		t.Fatalf("validateTarget: %v", err)
+	}
+	return target.Gaps["missing_x"]
 }
 
 // TestGapSuppressedWithCount_MatchesTheReadingVariant pins the two entry points

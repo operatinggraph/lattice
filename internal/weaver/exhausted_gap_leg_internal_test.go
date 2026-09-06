@@ -93,16 +93,19 @@ func goalLegRow(entityID string, budget int, extra map[string]any) map[string]an
 }
 
 // escalationMark is the mark an Augur escalation leaves at the gap's own key:
-// its action is the reasoning op's dispatch CLASS, and the leg it displaced
-// rides escalatedFrom. escalatedFrom "" is the old-shape mark, written before
-// the field existed.
-func escalationMark(targetID, entityID, escalatedFrom, lease string) mark {
+// its action is the reasoning op's dispatch CLASS, the leg it displaced rides
+// escalatedFrom, and the trigger it was escalated on rides escalation. Either
+// field empty is a mark written before that field existed — escalatedFrom "" for
+// an escalation standing over no nameable leg, escalation "" for the old-shape
+// mark that declares no class at all.
+func escalationMark(targetID, entityID, escalatedFrom, escalation, lease string) mark {
 	return mark{
 		TargetID:       targetID,
 		EntityKey:      "vtx.leaseApp." + entityID,
 		Gap:            goalLegGap,
 		Action:         actionDirectOp,
 		EscalatedFrom:  escalatedFrom,
+		Escalation:     escalation,
 		ClaimID:        testNanoIDStatic("escalationClaim0"),
 		ClaimedAt:      substrate.FormatTimestamp(time.Now().Add(-2 * time.Hour)),
 		LeaseExpiresAt: lease,
@@ -385,7 +388,7 @@ func TestIncrementDispatchCount_LegChangeRestartsCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the seeded document: %v", err)
 	}
-	if _, err := m.bookEscalation(ctx, targetID, entityID, gap, time.Now().Add(-time.Hour)); err != nil {
+	if _, err := m.bookEscalation(ctx, targetID, entityID, gap, escalateExhausted, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("seed the escalation instant: %v", err)
 	}
 	before, _, err := m.getDispatchCount(ctx, targetID, entityID, gap)
@@ -562,7 +565,7 @@ func TestHandleRow_ExhaustedLegWhoseEffectsHoldReleasesAndAdvances(t *testing.T)
 			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap),
 				dispatchCount{Count: 2, Leg: "legA"})
 			putStateValue(t, ctx, h.conn, markKey(targetID, entityID, goalLegGap),
-				escalationMark(targetID, entityID, "legA", futureLease()))
+				escalationMark(targetID, entityID, "legA", escalateExhausted, futureLease()))
 			// legA's own pending confidence slot, opened when it dispatched: the
 			// release is what credits its close, and a window that was never
 			// opened would let that assertion pass over a slot nothing wrote.
@@ -702,7 +705,7 @@ func TestSweep_ReclaimReleasesEscalatedLeg(t *testing.T) {
 			// No leg on the count document: escalatedFrom is the only carrier.
 			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap), dispatchCount{Count: 2})
 			putStateValue(t, ctx, h.conn, markKey(targetID, entityID, goalLegGap),
-				escalationMark(targetID, entityID, "legA", pastLease()))
+				escalationMark(targetID, entityID, "legA", escalateExhausted, pastLease()))
 			h.putRow(t, ctx, targetID, entityID, goalLegRow(entityID, tc.budget, map[string]any{"aDone": true}))
 
 			h.pass(ctx)
@@ -755,7 +758,7 @@ func TestEscalateExhaustedGap_EffectsNotHolding_StillEscalates(t *testing.T) {
 			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap),
 				dispatchCount{Count: 2, Leg: "legA"})
 			putStateValue(t, ctx, h.conn, markKey(targetID, entityID, goalLegGap),
-				escalationMark(targetID, entityID, "legA", pastLease()))
+				escalationMark(targetID, entityID, "legA", escalateExhausted, pastLease()))
 
 			// aDone absent: legA has not finished.
 			row := goalLegRow(entityID, tc.budget, nil)
@@ -818,10 +821,12 @@ func TestEscalateExhaustedGap_OldShapeMark_DoesNotRelease(t *testing.T) {
 			registerSpec(t, h.engine.source, goalLegSpec(targetID, actionDirectOp, true))
 			entityID := testNanoID(t)
 
-			// The old shape, both halves: no escalatedFrom, no leg.
+			// The old shape, every half: no escalatedFrom, no declared class, no leg
+			// on the document — the mark a build before either field existed left
+			// behind.
 			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap), dispatchCount{Count: 2})
 			putStateValue(t, ctx, h.conn, markKey(targetID, entityID, goalLegGap),
-				escalationMark(targetID, entityID, "", pastLease()))
+				escalationMark(targetID, entityID, "", "", pastLease()))
 
 			// The row DOES satisfy legA — the release would fire if anything named it.
 			row := goalLegRow(entityID, tc.budget, map[string]any{"aDone": true})
@@ -1026,7 +1031,7 @@ func TestEscalateExhaustedGap_RefireIsPacedByReclaims(t *testing.T) {
 				Count: 2, Leg: "legA", Reclaims: 2,
 				EscalatedAt: substrate.FormatTimestamp(time.Now().Add(-10 * time.Minute)),
 			})
-			putStateValue(t, ctx, h.conn, markK, escalationMark(targetID, entityID, "legA", pastLease()))
+			putStateValue(t, ctx, h.conn, markK, escalationMark(targetID, entityID, "legA", escalateExhausted, pastLease()))
 			before, err := h.conn.KVGet(ctx, "weaver-state", markK)
 			if err != nil {
 				t.Fatalf("read the stale mark: %v", err)
@@ -1420,17 +1425,17 @@ func goalLegBlockedSpec(targetID string) map[string]any {
 	return spec
 }
 
-// TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing is the second
-// route an escalation reaches a dispatch seam by, and the one that wears no
-// label: planGap substitutes it for a plan it could not build, and hands the
-// caller an actionRef ("directOp") indistinguishable from an ordinary leg.
+// TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing is the
+// no-derivable-plan door reaching the shared episode seam over a chain that HAS
+// a leg — the shape where what the escalation must preserve is at its largest.
 //
-// Dispatched as an ordinary episode it would charge the chain to that dispatch
-// class, restart the budget under it and mint a mark with no displaced leg —
-// after which legOf answers "directOp", the boundary can never be tested, and
-// the gap alternates between its leg and the escalation with its exhaustion gate
-// postponed on every hop. So the fire books neither tally nor window, and the
-// mark carries the leg forward, exactly as the exhaustion escalation's does.
+// Dispatched as an ordinary episode it would charge the chain to the reasoning
+// op's dispatch class, restart the budget under it and mint a mark with no
+// displaced leg — after which legOf answers "directOp", the boundary can never
+// be tested, and the gap alternates between its leg and the escalation with its
+// exhaustion gate postponed on every hop. So the fire books neither tally nor
+// window; the mark carries the leg forward and declares its class; and the
+// document takes the escalation's pacing beside the chain's own record.
 //
 // The uncapped half is the fixture rule earning its keep rather than repeating
 // the capped one, because the two reach the same answer down different reads. A
@@ -1485,6 +1490,10 @@ func TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing(t *testing.T)
 				t.Fatalf("a confidence window opened at the escalation's dispatch class (present=%v err=%v) — "+
 					"its slots are keyed on a catalog ref, and nothing can ever close this one", present, err)
 			}
+			if doc.Reclaims != 1 || doc.EscalatedAt == "" {
+				t.Fatalf("count document = %+v, want the escalation's pacing pair recorded beside the chain's "+
+					"own tally: the re-fire is level-tested against it", doc)
+			}
 			rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, goalLegGap)
 			if err != nil || !found || rec.Action != actionDirectOp {
 				t.Fatalf("the escalation must own the gap's mark (rec=%+v found=%v err=%v)", rec, found, err)
@@ -1492,6 +1501,15 @@ func TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing(t *testing.T)
 			if rec.EscalatedFrom != "legA" {
 				t.Fatalf("escalatedFrom = %q, want %q — the leg the escalation stands over is recoverable from "+
 					"nowhere else once it owns the mark", rec.EscalatedFrom, "legA")
+			}
+			if rec.Escalation != escalateUnplannable {
+				t.Fatalf("escalation = %q, want %q: the mark declares its own class, so no reader has to infer "+
+					"one from an action that fails to resolve", rec.Escalation, escalateUnplannable)
+			}
+			if is, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, goalLegGap)); !ok ||
+				is.Code != codeGapEscalatedToAugur || !strings.Contains(is.Message, "has no derivable plan") {
+				t.Fatalf("issue at the gap's entity key = %+v (present=%v), want the escalation record naming "+
+					"this door", is, ok)
 			}
 			h.requireNoOp(t)
 
@@ -1523,24 +1541,38 @@ func TestPlanGap_UnplannableEscalation_PreservesLegAndBooksNothing(t *testing.T)
 	}
 }
 
-// TestSweep_ReclaimOfEscalationPreservesDisplacedLeg is the same rule on the
-// seam that rewrites the mark whole rather than minting one. A reclaim replaces
-// every field, so the displaced leg survives only by being threaded back
-// through — and the reclaim of an escalation whose pin is its own dispatch class
-// re-derives that escalation through planGap, which means it also decides the
-// booking.
+// TestSweep_ReclaimOfEscalationPreservesDisplacedLeg pins what the sweep does
+// with an expired escalation mark whose pin is the reasoning op's dispatch
+// class, and what survives the pass.
 //
-// Both halves run the same way: the reclaim reads the count document for its own
-// pacing whether or not a cap exists, so the leg is nameable either way.
+// The pin names no entry in the goal's catalog, and a pin the catalog does not
+// hold is a CONFIG error: only a re-author fixes it, and re-running the same row
+// changes nothing. So the reclaim plans nothing, dispatches nothing, alerts
+// PlaybookConfigError at `warning` and leaves the expired mark exactly where it
+// found it — which is what keeps the escalation's own record intact: the leg it
+// displaced and the class it declares are still on the mark for the boundary
+// test that follows, and the gap's budget is untouched.
+//
+// The boundary is the payoff: legA's effect lands and the pin — read off the
+// mark the reclaim left — releases and advances the chain, whether the mark
+// declares its class or is an old-shape one written before the field existed.
+//
+// The cap is orthogonal: the reclaim reads the count document for its own pacing
+// whether or not one is declared, so both halves run identically.
 func TestSweep_ReclaimOfEscalationPreservesDisplacedLeg(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	for _, tc := range []struct {
-		name   string
-		budget int
-	}{{"capped", 5}, {"uncapped", 0}} {
+		name     string
+		budget   int
+		declares string
+	}{
+		{"capped", 5, escalateUnplannable},
+		{"uncapped", 0, escalateUnplannable},
+		{"oldShapeMark", 5, ""},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1555,35 +1587,40 @@ func TestSweep_ReclaimOfEscalationPreservesDisplacedLeg(t *testing.T) {
 
 			putStateValue(t, ctx, h.conn, countKey(targetID, entityID, goalLegGap),
 				dispatchCount{Count: 2, Leg: "legA"})
-			putStateValue(t, ctx, h.conn, key, escalationMark(targetID, entityID, "legA", pastLease()))
+			putStateValue(t, ctx, h.conn, key, escalationMark(targetID, entityID, "legA", tc.declares, pastLease()))
+			before, _ := h.readMark(t, ctx, key)
 			h.putRow(t, ctx, targetID, entityID, goalLegRow(entityID, tc.budget, nil))
 
 			h.pass(ctx)
 
-			if op := h.nextOp(t); op["operationType"] != defaultAugurOp {
-				t.Fatalf("setup: operationType = %v, want the reasoning op re-derived by the reclaim", op["operationType"])
-			}
+			h.requireNoOp(t)
 			rec, _ := h.readMark(t, ctx, key)
-			if rec.Action != actionDirectOp || rec.EscalatedFrom != "legA" {
-				t.Fatalf("re-armed mark = %+v, want the escalation still standing over legA", rec)
+			if rec != before {
+				t.Fatalf("mark after the pass = %+v, want it left exactly as found (%+v): a pin the catalog no "+
+					"longer holds is a config error, and re-arming it would rewrite the record the boundary "+
+					"test reads", rec, before)
+			}
+			if is, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, goalLegGap)); !ok ||
+				is.Code != "PlaybookConfigError" || is.Severity != "warning" {
+				t.Fatalf("issue at the gap's config key = %+v (present=%v), want a warning PlaybookConfigError",
+					is, ok)
 			}
 			doc := readCount(t, ctx, h.conn, targetID, entityID, goalLegGap)
 			if doc.Count != 2 || doc.Leg != "legA" {
-				t.Fatalf("count document = %+v, want {2 legA} untouched: a re-derived escalation books no more "+
-					"than the first one did", doc)
+				t.Fatalf("count document = %+v, want {2 legA} untouched: nothing dispatched, so nothing books", doc)
 			}
 			if _, _, present, err := readEffectStats(ctx, h.engine.marks, targetID, goalLegGap, actionDirectOp); err != nil || present {
-				t.Fatalf("the reclaim opened a confidence window at the escalation's dispatch class "+
+				t.Fatalf("a confidence window opened at the escalation's dispatch class "+
 					"(present=%v err=%v) — nothing can ever close it", present, err)
 			}
 
-			// The boundary, tested off the re-armed mark alone.
+			// The boundary, tested off the mark the reclaim left alone.
 			h.putRow(t, ctx, targetID, entityID, goalLegRow(entityID, tc.budget, map[string]any{"aDone": true}))
 			h.reexpireMark(t, ctx, key)
 			h.pass(ctx)
 
 			if op := h.nextOp(t); op["operationType"] != "DoB" {
-				t.Fatalf("operationType = %v, want DoB: the re-armed escalation carried the leg, so the finished "+
+				t.Fatalf("operationType = %v, want DoB: the mark carried the leg, so the finished "+
 					"leg releases and the chain advances", op["operationType"])
 			}
 			h.requireNoOp(t)
@@ -1616,13 +1653,13 @@ func TestFireEpisode_StaleReArm_TakesTheEscalationsLegFromItsCaller(t *testing.T
 	}
 	for _, tc := range []struct {
 		name       string
-		escalation bool
+		escalation string
 		onTheMark  string
 		fromCaller string
 		want       string
 	}{
-		{"escalationTakesTheCallers", true, "", "legA", "legA"},
-		{"ordinaryReArmKeepsTheMarks", false, "legA", "", "legA"},
+		{"escalationTakesTheCallers", escalateUnplannable, "", "legA", "legA"},
+		{"ordinaryReArmKeepsTheMarks", "", "legA", "", "legA"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1649,7 +1686,7 @@ func TestFireEpisode_StaleReArm_TakesTheEscalationsLegFromItsCaller(t *testing.T
 			row := map[string]any{
 				"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true, "inflight_x": false,
 			}
-			pl, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
+			pl, _, _, _, dec := h.engine.planGap(ctx, target, targetID, entityID, "missing_x", target.Gaps["missing_x"], row, 1, "")
 			if pl == nil {
 				t.Fatalf("setup: planGap must produce a plan, got dec=%v", dec)
 			}

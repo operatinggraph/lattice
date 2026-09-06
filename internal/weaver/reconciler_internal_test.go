@@ -1348,7 +1348,7 @@ func TestMarkCreate_TTLBackstop(t *testing.T) {
 	entityID := testNanoID(t)
 	before := time.Now()
 	_, _, exists, err := h.engine.marks.create(ctx, targetID, entityID, "missing_x",
-		"vtx.leaseApp."+entityID, "directOp", "")
+		"vtx.leaseApp."+entityID, "directOp", "", "")
 	if err != nil || exists {
 		t.Fatalf("mark create: err=%v exists=%v", err, exists)
 	}
