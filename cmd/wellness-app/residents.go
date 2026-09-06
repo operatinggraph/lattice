@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
@@ -119,14 +122,34 @@ type memberProjection struct {
 // building whom the front desk books in. Only a REFUSAL is disqualifying.
 const declinedDecision = "declined"
 
-// memberRow is one entry of the front desk's book-a-member picker. The
-// covering set is deliberately NOT carried out to the client: it is the
-// server's confinement input, not something the FE needs or should publish —
-// a staffer learns which members they may book, never the topology that
-// decided it.
+// bookerProjection is one row of the wellness-domain `wellnessBookers` lens —
+// a live booking, the person who made it, and the locations covering the class
+// they booked. It is how somebody holding no lease reaches the desk at all.
+type bookerProjection struct {
+	BookingKey        string   `json:"bookingKey"`
+	BookerKey         string   `json:"bookerKey"`
+	Status            string   `json:"status"`
+	CoveringLocations []string `json:"coveringLocations"`
+}
+
+// memberRow is one entry of the front desk's book-a-member picker. A blank
+// LeaseAppKey is a GUEST — somebody the desk reaches through the class they
+// booked rather than through a lease. The covering set is deliberately NOT
+// carried out to the client: it is the server's confinement input, not
+// something the FE needs or should publish — a staffer learns which members
+// they may book, never the topology that decided it.
 type memberRow struct {
 	BookerKey   string `json:"bookerKey"`
 	LeaseAppKey string `json:"leaseAppKey"`
+}
+
+// hatsReachCoverage is the confinement test every member-directory row passes,
+// whichever lens it came from. Fails CLOSED: an operator alone is unrestricted,
+// a workplace covers nothing without isFrontDesk alongside it (covers is a
+// structural fact, never sufficient on its own — readauth.go), and an empty
+// covering set reaches nobody.
+func hatsReachCoverage(hats subjectHats, coveringLocations []string) bool {
+	return hats.isOperator || (hats.isFrontDesk() && hats.covers(coveringLocations))
 }
 
 // computeCoveredMembers decodes every wellnessMembers row and keeps the ones
@@ -159,7 +182,7 @@ func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memb
 		if strings.EqualFold(strings.TrimSpace(p.LandlordDecision), declinedDecision) {
 			continue
 		}
-		if !hats.isOperator && !(hats.isFrontDesk() && hats.covers(p.CoveringLocations)) {
+		if !hatsReachCoverage(hats, p.CoveringLocations) {
 			continue
 		}
 		rows = append(rows, memberRow{BookerKey: p.BookerKey, LeaseAppKey: p.LeaseAppKey})
@@ -173,9 +196,85 @@ func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memb
 	return rows
 }
 
+// computeCoveredBookers decodes every wellnessBookers row and keeps the ones
+// this caller's front desk reaches, one row per PERSON — the lens is one row
+// per booking, so a guest with three classes at the same building is one entry
+// here. Every row carries a blank LeaseAppKey: coverage came from the class,
+// not from a tenancy, and there is no lease to hand CreateBooking for a
+// resident rate.
+//
+// Same fail-closed construction as computeCoveredMembers: a row that fails to
+// decode or names no booker is skipped, and a booker whose class has no wired
+// location — or whose session was called off, leaving the coverage set empty —
+// is absent from the answer rather than defaulting to visible.
+func computeCoveredBookers(keys []string, get kvGetter, hats subjectHats) []memberRow {
+	rows := make([]memberRow, 0)
+	seen := make(map[string]bool)
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p bookerProjection
+		if json.Unmarshal(raw, &p) != nil || p.BookerKey == "" {
+			continue
+		}
+		if !hatsReachCoverage(hats, p.CoveringLocations) {
+			continue
+		}
+		if seen[p.BookerKey] {
+			continue
+		}
+		seen[p.BookerKey] = true
+		rows = append(rows, memberRow{BookerKey: p.BookerKey})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].BookerKey < rows[j].BookerKey })
+	return rows
+}
+
+// coveredMembers is the one answer every front-desk money surface confines
+// through: the members this caller reaches by LEASE, then the bookers they
+// reach by CLASS and hold no lease row for. Both are confinement sources, so a
+// missing bucket on either of them is an ERROR rather than an empty answer —
+// an empty picker would read as "nobody is a member here" instead of "this
+// app cannot tell who you may book". The two are unioned into ONE list,
+// deterministically sorted: lease rows first (by LeaseAppKey), then guest rows
+// (by BookerKey).
+//
+// The lease rows come first and a booker already named by one is dropped: a
+// member's row carries the leaseapp key their resident rate is derived from,
+// which the guest row cannot supply.
+func (s *server) coveredMembers(ctx context.Context, conn *substrate.Conn, hats subjectHats) ([]memberRow, error) {
+	membersBucket := wellnessdomain.WellnessMembersBucket
+	memberKeys, err := conn.KVListKeys(ctx, membersBucket)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w (is wellness-domain installed and the Refractor projecting?)", membersBucket, err)
+	}
+	bookersBucket := wellnessdomain.WellnessBookersBucket
+	bookerKeys, err := conn.KVListKeys(ctx, bookersBucket)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w (is wellness-domain installed and the Refractor projecting?)", bookersBucket, err)
+	}
+
+	rows := computeCoveredMembers(memberKeys, s.kvGetter(ctx, membersBucket), hats)
+	leased := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		leased[row.BookerKey] = true
+	}
+	for _, row := range computeCoveredBookers(bookerKeys, s.kvGetter(ctx, bookersBucket), hats) {
+		if leased[row.BookerKey] {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
 // handleMembers implements GET /api/members — the front desk's book-a-member
-// picker, served from the wellnessMembers lens (P5) and scoped server-side to
-// the members the caller's workplace covers.
+// picker, served from the wellnessMembers and wellnessBookers lenses (P5) and
+// scoped server-side to the people the caller's workplace covers. A row with a
+// blank leaseAppKey is a guest, reached through the class they booked rather
+// than through a lease.
 //
 // It is a STAFF surface: a member is refused outright rather than served their
 // own row, because a directory of who else lives here is not a member's to
@@ -205,17 +304,10 @@ func (s *server) handleMembers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	bucket := wellnessdomain.WellnessMembersBucket
-	// A missing bucket is an ERROR, not an empty answer. This one is the
-	// confinement source: an empty picker would read as "nobody is a member
-	// here" rather than "this app cannot tell who you may book" — the same
-	// distinction cmd/cafe-app draws for cafeLeaseWorkplaces.
-	keys, err := conn.KVListKeys(ctx, bucket)
+	rows, err := s.coveredMembers(ctx, conn, hats)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is wellness-domain 0.16.0 installed and the Refractor projecting?)")
+		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	rows := computeCoveredMembers(keys, s.kvGetter(ctx, bucket), hats)
 	s.writeJSON(w, http.StatusOK, map[string]any{"members": rows})
 }

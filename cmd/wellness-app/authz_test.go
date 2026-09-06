@@ -101,6 +101,7 @@ func newTestConn(t *testing.T) *substrate.Conn {
 		wellnessdomain.WellnessBookingsBucket,
 		wellnessdomain.WellnessInstructorsBucket,
 		wellnessdomain.WellnessMembersBucket,
+		wellnessdomain.WellnessBookersBucket,
 		wellnessledger.LedgerHistoryBucket,
 		wellnessledger.MemberAccountsBucket,
 	} {
@@ -1044,9 +1045,29 @@ func seedMemberDecided(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerSu
 	putJSON(t, conn, wellnessdomain.WellnessMembersBucket, leaseAppKey, row)
 }
 
+// seedBooker seeds one wellnessBookers row: a live booking by bookerSubject
+// (a bare id), covered by the locations of the class they booked — defaulting
+// to staffSubj's own building, the same defaulting seedMember uses. The row
+// carries no lease: this is exactly the guest wellnessMembers cannot see.
+func seedBooker(t *testing.T, conn *substrate.Conn, bookingKey, bookerSubject string, coveringLocations ...string) {
+	t.Helper()
+	if coveringLocations == nil {
+		coveringLocations = []string{staffWorkplace}
+	}
+	putJSON(t, conn, wellnessdomain.WellnessBookersBucket, bookingKey, map[string]any{
+		"bookingKey":        bookingKey,
+		"bookerKey":         "vtx.identity." + bookerSubject,
+		"status":            "booked",
+		"coveringLocations": coveringLocations,
+	})
+}
+
 const (
 	leaseHere      = "vtx.leaseapp.pK4mRtZbXvNqL7wHdYcj"
 	leaseElsewhere = "vtx.leaseapp.zT8nWpKrBvMqX3LdHcyg"
+
+	guestBookingHere      = "vtx.booking.gH3mKpXvZnBtL4wHdYcj"
+	guestBookingElsewhere = "vtx.booking.gQ8nWpKrBvMqX3LdHcyg"
 )
 
 func decodeMembers(t *testing.T, rec *httptest.ResponseRecorder) []memberRow {
@@ -1170,6 +1191,102 @@ func TestHandleMembers_OperatorSeesEveryMember(t *testing.T) {
 	}
 	if got := decodeMembers(t, rec); len(got) != 2 {
 		t.Fatalf("got %d members, want 2 — root is exempt from confinement, not from the read; %+v", len(got), got)
+	}
+}
+
+// The guest case the whole bookers lens exists for: somebody with no lease
+// anywhere, reached through the class they booked at this staffer's building.
+// Without the union they are billed for that class and invisible to every desk
+// that could settle it.
+func TestHandleMembers_GuestWithNoLeaseIsVisibleThroughTheirBooking(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedBooker(t, s.conn, guestBookingHere, memberB)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	members := decodeMembers(t, rec)
+	if len(members) != 1 {
+		t.Fatalf("got %d members, want 1 (the guest who booked here); %+v", len(members), members)
+	}
+	if members[0].BookerKey != "vtx.identity."+memberB {
+		t.Fatalf("got %+v, want the guest memberB", members[0])
+	}
+	if members[0].LeaseAppKey != "" {
+		t.Fatalf("a guest row must carry no lease, got %q", members[0].LeaseAppKey)
+	}
+}
+
+// The discriminating half: the same guest booked at ANOTHER building is not
+// this staffer's to see. A booking is a reach as narrow as a lease, never a
+// platform-wide directory.
+func TestHandleMembers_GuestBookedElsewhereStaysInvisible(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedBooker(t, s.conn, guestBookingElsewhere, memberB, otherWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 0 {
+		t.Fatalf("got %d members, want 0 — a class at another building reaches nobody here; %+v", len(got), got)
+	}
+}
+
+// A member who ALSO booked a class appears once, as their LEASE row: the lease
+// carries the resident-rate hint CreateBooking wants and a guest row cannot
+// supply.
+func TestHandleMembers_MemberWithABookingIsNotDuplicated(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+	seedBooker(t, s.conn, guestBookingHere, memberA)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	members := decodeMembers(t, rec)
+	if len(members) != 1 {
+		t.Fatalf("got %d members, want 1 — one person is one entry; %+v", len(members), members)
+	}
+	if members[0].LeaseAppKey != leaseHere {
+		t.Fatalf("got %+v, want the LEASE row to win so the resident rate survives", members[0])
+	}
+}
+
+// Two bookings by one guest are one directory entry — the lens is one row per
+// booking, and the desk books a person.
+func TestHandleMembers_GuestWithTwoBookingsAppearsOnce(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedBooker(t, s.conn, guestBookingHere, memberB)
+	seedBooker(t, s.conn, "vtx.booking.gZ2mKpXvZnBtL4wHdYcj", memberB)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 1 {
+		t.Fatalf("got %d members, want 1 — two classes, one person; %+v", len(got), got)
+	}
+}
+
+// A booking row carrying no covering set — a called-off class, or a row from an
+// older lens version — must DENY, the same fail-closed answer the members
+// bucket's own unwired-lease row gives.
+func TestHandleMembers_GuestWithoutCoveringLocationsDenies(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	putJSON(t, s.conn, wellnessdomain.WellnessBookersBucket, guestBookingHere, map[string]any{
+		"bookingKey": guestBookingHere,
+		"bookerKey":  "vtx.identity." + memberB,
+	})
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 0 {
+		t.Fatalf("got %d members, want 0 for a booking carrying no covering set; %+v", len(got), got)
 	}
 }
 

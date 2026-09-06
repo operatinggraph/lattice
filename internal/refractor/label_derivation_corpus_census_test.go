@@ -291,6 +291,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// empty, so the narrowed branch emits the `object` vertex form alone.
 	"objectLiveness":         {narrow, "object", modeRelation},
 	"orphanedTaskGrants":     {broad, "task", modeBroad},
+	"wellnessBookers":        {broad, "booking identity session", modeBroad},
 	"wellnessIdentitiesRead": {broad, "booking identity leaseapp session", modeBroad},
 	"wellnessMembers":        {broad, "identity leaseapp", modeBroad},
 	"wellnessSessions":       {broad, "instructor session studio", modeBroad},

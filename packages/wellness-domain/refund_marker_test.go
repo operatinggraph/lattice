@@ -22,6 +22,21 @@ import (
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
+// wdReleaseEnumerations mirrors the missing_release gap's declared walks
+// (targets.go's WeaverTargets) for one booking key, so a hand-built
+// ReleaseOrphanedBooking envelope carries exactly what Weaver publishes: the
+// forSession/bookedBy lookups that locate the class and the booker when the
+// .status aspect names neither, and the settles/settlesClassPrice lookups that
+// find an already-posted charge to refund.
+func wdReleaseEnumerations(bookingKey string) []processor.EnumerationHint {
+	return []processor.EnumerationHint{
+		{Hub: bookingKey, Relation: "forSession", Direction: "out"},
+		{Hub: bookingKey, Relation: "bookedBy", Direction: "out"},
+		{Hub: bookingKey, Relation: "settles", Direction: "in"},
+		{Hub: bookingKey, Relation: "settlesClassPrice", Direction: "in"},
+	}
+}
+
 // seedAspect directly seeds an aspect document — the mirror of seedVertex/
 // seedLink for the one shape neither covers.
 func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexKey, localName, class string, data map[string]any) {
@@ -464,9 +479,10 @@ func TestReleaseOrphanedBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T
 		SubmittedAt:   "2026-07-08T09:05:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status", sessionKey,
-		}},
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
 	}
 	testutil.PublishOp(t, conn, releaseEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -570,9 +586,10 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 		SubmittedAt:   "2026-07-08T09:40:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status", sessionKey,
-		}},
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
 	}
 	testutil.PublishOp(t, conn, releaseEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -622,6 +639,121 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 	}
 
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.classPriceRefundQueued")
+	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
+}
+
+// TestReleaseOrphanedBooking_ResolvesSessionAndBookerFromLinks proves the drain
+// stands on the booking's LINKS, not on the .status anchors: a booking whose
+// aspect carries only value/rate/seat — the at-rest shape of one minted before
+// CreateBooking stamped session and booker there — is still released off its
+// own forSession and bookedBy edges. The dispatch declares neither session key,
+// exactly as Weaver leaves them when the lens row's nullable sessionKey column
+// is null (targets.go's optionalReads), so the op must find the session, refuse
+// nothing, and still release the seat cell, the per-(session, booker)
+// double-book guard, the booker's own slot-claim cells, and the posted no-show
+// fee.
+func TestReleaseOrphanedBooking_ResolvesSessionAndBookerFromLinks(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanlinks")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphanlkstudio0001", "Priced Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdorphanlksessio0001", studioKey, "Priced Vinyasa", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLURPHLKBKR1HJKM")
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdorphanlkbookin0001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdorphanlkattend0001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	status := attendanceStatus(t, ctx, conn, bookingKey)
+	seat, _ := status["seat"].(float64)
+
+	// Rewrite the aspect without its session/booker anchors — the shape the
+	// live anchor-less bookings carry at rest. Everything the op needs beyond
+	// value and seat now has to come off the links.
+	seedAspect(t, ctx, conn, bookingKey, "status", "bookingStatus", map[string]any{
+		"value": "noShow", "rate": status["rate"], "seat": seat,
+		"className": status["className"], "classStartsAt": status["classStartsAt"],
+	})
+
+	acctKey := "vtx.wellnessaccount.BBWELLURPHLKACT1HJKM"
+	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
+	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLURPHLKTXN1HJKM", 2500.0)
+	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
+
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdorphanlktombst0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:35:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The booking and its status only — the session keys Weaver would have
+	// templated off the row's null sessionKey column are absent by design.
+	releaseReqID := testutil.GenReqID("wdorphanlkreleas0001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:40:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status"},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+	if seatCellKey := sessionKey + ".seat" + strconv.Itoa(int(seat)); keyExists(t, ctx, conn, seatCellKey) {
+		t.Fatalf("seat cell must be released: %s", seatCellKey)
+	}
+	if guardKey := sessionKey + ".bkr" + bookerID; keyExists(t, ctx, conn, guardKey) {
+		t.Fatalf("double-book guard must be released off the bookedBy link: %s", guardKey)
+	}
+	for _, cell := range wdSlotClaimKeys(t, bookerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z") {
+		if keyExists(t, ctx, conn, cell) {
+			t.Fatalf("booker slot-claim cell must be released: %s", cell)
+		}
+	}
+
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(releaseReqID)
+	detail := readDoc(t, ctx, conn, refundKey+".detail")
+	data, _ := detail["data"].(map[string]any)
+	if data["memo"] != "No-show fee refund" {
+		t.Fatalf("refund memo = %v, want %q", data["memo"], "No-show fee refund")
+	}
+	if data["amountCents"] != 2500.0 {
+		t.Fatalf("refund amountCents = %v, want 2500", data["amountCents"])
+	}
+	if data["accountKey"] != acctKey {
+		t.Fatalf("refund accountKey = %v, want %v", data["accountKey"], acctKey)
+	}
+
+	_, refundID, _ := substrate.ParseVertexKey(refundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+refundID+".reverses.wellnesstransaction."+noShowTxID) {
+		t.Fatalf("reverses link must exist")
+	}
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
 }
 

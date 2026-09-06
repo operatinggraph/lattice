@@ -2304,9 +2304,10 @@ func TestReleaseOrphanedBooking_ReleasesSeatAndGuardAfterSessionTombstoned(t *te
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status", sessionKey,
-		}},
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
 	}
 	testutil.PublishOp(t, conn, releaseEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -2351,9 +2352,10 @@ func TestReleaseOrphanedBooking_RejectsWhenSessionStillLive(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status", sessionKey,
-		}},
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
 	}
 	testutil.PublishOp(t, conn, releaseEnv)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -3264,9 +3266,10 @@ func TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned(t *te
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + waitlistKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{
-			waitlistKey, waitlistKey + ".status", sessionKey,
-		}},
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{waitlistKey, waitlistKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(waitlistKey),
+		},
 	}
 	testutil.PublishOp(t, conn, releaseEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

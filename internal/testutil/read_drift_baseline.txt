@@ -212,16 +212,6 @@ walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
 walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
-# Mirrors CancelBooking's identical undeclared settlesClassPrice/postedTo
-# walk pair above (line 143/148) — ReleaseOrphanedBooking runs the same
-# already-posted-charge lookup, unconditionally, to mint the same
-# wellnessrefund marker on a studio-initiated cancellation. `settles in` is
-# the no-show-fee sibling of settlesClassPrice: an already-noShow orphaned
-# booking (verticals.md, 2026-09-02) may carry a posted no-show fee that
-# reverses the same way — `postedTo out` above already covers both lookups
-# (same hub type vtx.wellnesstransaction.<id>).
-walk	ReleaseOrphanedBooking	vtx.booking.<id> settles in
-walk	ReleaseOrphanedBooking	vtx.booking.<id> settlesClassPrice in
 walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
 walk	ReportIssue	vtx.building.<id> containedIn out
@@ -240,12 +230,15 @@ walk	SetAppointmentSite	vtx.provider.<id> practicesAt out
 walk	SetAppointmentStatus	vtx.appointment.<id> atSite out
 walk	SetAppointmentStatus	vtx.appointment.<id> withProvider out
 walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
-# Mirrors ReleaseOrphanedBooking's identical settles/postedTo walk pair above
-# (line 223/226) — a re-mark from noShow to attended (verticals.md,
-# 2026-09-02) reverses the same already-posted no-show-fee charge, this time
-# because the mark itself was wrong, not because the class was called off.
-# `reverses in` is new: unlike CancelBooking/ReleaseOrphanedBooking (each
-# dispatched at most once per booking), SetBookingAttendance is re-markable,
+# A re-mark from noShow to attended reverses the same already-posted
+# no-show-fee charge ReleaseOrphanedBooking does, because the mark itself was
+# wrong rather than because the class was called off. Its `settles in` lookup
+# has no declaring channel, unlike ReleaseOrphanedBooking's identical one: that
+# op is a Weaver gap whose GapActionSpec declares the walk on every envelope
+# (wellness-domain/targets.go), while this one reaches the Processor from a
+# front-desk caller under a descriptor that names no enumeration. `reverses in`
+# has none either: unlike CancelBooking/ReleaseOrphanedBooking (each dispatched
+# at most once per booking), SetBookingAttendance is re-markable,
 # so this walk is an idempotency check guarding against walking into the
 # same settles-linked transaction twice and double-crediting it.
 walk	SetBookingAttendance	vtx.booking.<id> settles in

@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.22.21
+version: 0.22.22
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -45,12 +45,15 @@ description: |
   SetAppointmentStatus) that wellness-ledger's wellnessNoShowSettlement
   Weaver playbook reads to auto-charge the booker's ledger account; the field
   is dropped on a later re-mark to attended, though a posted charge stands.
-  Five plain projection lenses
+  Six plain projection lenses
   (wellnessStudios, wellnessSessions, wellnessBookings, wellnessInstructors,
-  wellnessMembers) are the P5 read models a wellness FE reads; wellnessMembers
-  carries each member's covering locations so the front desk's book-a-member
-  picker offers only the members whose building the staffer works at, mirroring
-  cafe-domain's cafeLeaseWorkplaces. wellnessIdentitiesRead is a PROTECTED
+  wellnessMembers, wellnessBookers) are the P5 read models a wellness FE reads;
+  wellnessMembers carries each member's covering locations so the front desk's
+  book-a-member picker offers only the members whose building the staffer works
+  at, mirroring cafe-domain's cafeLeaseWorkplaces, and wellnessBookers carries
+  the same coverage for a person reached through the class they booked rather
+  than a lease, so a guest the studio bills is visible to the desk that has to
+  settle it. wellnessIdentitiesRead is a PROTECTED
   Postgres SECURE LENS (Contract #3 §3.10) resolving a signed-in identity's
   own name — cmd/wellness-app reads it to render "Signed in as <name>"
   instead of a raw NanoID, mirroring loftspace-domain's applicantRosterRead.
@@ -148,6 +151,10 @@ declares:
     - canonicalName: wellnessMembers
       adapter: nats-kv
       bucket: wellness-members
+      engine: full
+    - canonicalName: wellnessBookers
+      adapter: nats-kv
+      bucket: wellness-bookers
       engine: full
     - canonicalName: wellnessIdentitiesRead
       adapter: postgres

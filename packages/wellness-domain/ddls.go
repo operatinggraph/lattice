@@ -1070,7 +1070,7 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"seat":           "The claimed seat index on the session (internal bookkeeping; present once value is booked, absent while waitlisted). CancelBooking / ReleaseOrphanedBooking read it to release the correct seat cell.",
 			"waitlistSlot":   "The claimed waitlist-slot index on the session (internal bookkeeping; present once value is waitlisted, absent once booked). CancelBooking's promotion walk / ReleaseOrphanedBooking read it to release the correct vtx.session.<s>.wl<n> cell.",
 			"booker":         "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
-			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). ReleaseOrphanedBooking reads it to find and re-confirm the session's liveness after TombstoneSession has killed the vertex the forSession link points to. Not a relationship — the forSession link carries the relationship.",
+			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). The FAST PATH ReleaseOrphanedBooking reads to re-confirm the session's liveness after TombstoneSession has killed the vertex; when it is absent that op enumerates the forSession link instead, which is the source of truth — this field is not a relationship.",
 			"className":      "The session's .schedule.name at the moment this booking was created or waitlisted (a point-in-time snapshot, not a live relationship). Carried forward unchanged by CancelBooking's promotion upsert and SetBookingAttendance. wellness-ledger's wellnessLedgerHistory lens reads it so a member's billing history still names the class after TombstoneSession kills the session vertex.",
 			"classStartsAt":  "The session's .schedule.startsAt at the moment this booking was created or waitlisted, the same snapshot idiom as className, RFC3339 UTC. Carried forward and read by wellnessLedgerHistory alongside className.",
 			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
@@ -4238,9 +4238,28 @@ def execute(state, op):
         value = status.data.get("value")
         if value != "booked" and value != "waitlisted" and value != "noShow":
             fail("InvalidState: " + book_key + " is not in booked, waitlisted, or noShow status; nothing to release")
+        # The class this booking was made for, from either of the two places
+        # that name it. The .status.session anchor is the fast path -- hydrated
+        # up front off the dispatch's declared optionalReads (targets.go) --
+        # and the forSession link is the source of truth: CreateBooking and
+        # JoinWaitlist each write the booking vertex, its status and both its
+        # links in one atomic batch, so every booking carries exactly one
+        # forSession link whether or not its aspect carries the anchor.
         session = status.data.get("session")
         if session == None:
-            fail("InvalidState: " + book_key + ".status carries no session anchor; nothing to release")
+            # read-posture: (e) relation=forSession epoch=none -- a booking
+            # carries exactly one LIVE forSession link, written atomically
+            # with the booking itself by CreateBooking/JoinWaitlist; the page
+            # is bounded by that one-live-link invariant, not by "one link
+            # total", so a tombstoned entry sorting first cannot starve the
+            # live one out of a page of 1.
+            session_page, _ = kv.Links(book_key, "forSession", "out", None, 8)
+            for slk in session_page:
+                if not slk.isDeleted:
+                    session = slk.targetVertex
+                    break
+        if session == None:
+            fail("InvalidState: " + book_key + " names no session, by anchor or by forSession link; nothing to release")
 
         # A LIVE session must go through CancelBooking instead. This op exists
         # only to drain a booking whose session TombstoneSession already
@@ -4250,7 +4269,9 @@ def execute(state, op):
         # liveness here, rather than trusting the dispatching lens row, keeps
         # a stale gap evaluation from ever touching a booking on a class that
         # is still on.
-        # read-posture: (a) declared reads at ReleaseOrphanedBooking dispatch.
+        # read-posture: (d) declared optionalReads at ReleaseOrphanedBooking
+        # dispatch, or (e) follow-up off the forSession enumeration above when
+        # the aspect carries no anchor.
         sess_doc = kv.Read(session)
         if sess_doc != None and not sess_doc.isDeleted:
             fail("SessionStillLive: " + session + " has not been cancelled; use CancelBooking instead")
@@ -4387,6 +4408,19 @@ def execute(state, op):
         # already confirmed dead above, so there is no seat left to promote
         # anyone into here (unlike CancelBooking's live-session path).
         booker = status.data.get("booker")
+        if booker == None:
+            # read-posture: (e) relation=bookedBy epoch=none -- a booking
+            # carries exactly one LIVE bookedBy link, written atomically with
+            # the booking itself by CreateBooking/JoinWaitlist, so it names
+            # the booker for a booking whose aspect carries no anchor; the
+            # page is bounded by that one-live-link invariant, not by "one
+            # link total", so a tombstoned entry sorting first cannot starve
+            # the live one out of a page of 1.
+            booker_page, _ = kv.Links(book_key, "bookedBy", "out", None, 8)
+            for blk in booker_page:
+                if not blk.isDeleted:
+                    booker = blk.targetVertex
+                    break
         if booker != None:
             _, guard_booker_id = parts_of(booker, "booker", "identity")
             mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
@@ -4396,7 +4430,9 @@ def execute(state, op):
             # (package.go's "no cascade" doctrine) — the same reason this op
             # exists at all — so the span is still readable here even though
             # the session itself is now dead.
-            # read-posture: (a) declared reads at ReleaseOrphanedBooking dispatch.
+            # read-posture: (d) declared optionalReads at ReleaseOrphanedBooking
+            # dispatch, or (e) follow-up off the forSession enumeration above
+            # when the aspect carries no anchor.
             sess_sched = kv.Read(session + ".schedule")
             if sess_sched != None and not sess_sched.isDeleted:
                 sess_starts = sess_sched.data.get("startsAt")

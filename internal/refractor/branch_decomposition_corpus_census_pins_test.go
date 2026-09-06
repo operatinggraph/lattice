@@ -122,6 +122,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"visitSeriesDue":                    {"g1/o1!no-aggregating-item", 0, 1},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
 	"visitSeriesSiteBackfill":           {"g2/o2!no-aggregating-item", 0, 2},
+	"wellnessBookers":                   {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessBookingReminders":          {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessBookings":                  {"g2/o3!no-aggregating-item", 0, 2},
 	"wellnessClassPriceSettlement":      {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
