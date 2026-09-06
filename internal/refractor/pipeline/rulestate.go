@@ -420,11 +420,20 @@ func ruleExpandsALabelSigil(cr ruleengine.CompiledRule) bool {
 //     ITS ANCHOR'S PARTITION instead (applyPartitionDiffRetraction), which a
 //     single-anchor row set is exactly the truth about, so the same evaluation
 //     that would have been unsound against a whole listing is exact against a
-//     scoped one. Arming is the whole conjunct set of SetPartitionRetraction
-//     (a partition-only rule, a business-plane lens, an adapter that can list a
-//     partition and read a row back), re-checked here against the live rule so
-//     a MATCH reload that stops partitioning disarms seeding on the next event.
-func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) string {
+//     scoped one.
+//
+// armed IS PASSED IN, not read here, and that is the whole point of the
+// parameter. Pipeline.partitionArmed conjoins a LIVE predicate — the divergence
+// audit's enrolment, its suppression, and the deployment kill switch, all read
+// at call time — so two reads inside one event can disagree. The pair that must
+// never disagree is THIS decision and the retraction the same frame runs:
+// seeding on "armed" and then diffing on a second read that says "not armed"
+// meets a single anchor's row set with the WHOLE target listing, which retracts
+// every other anchor's rows. evaluateForEntryRaw reads the answer once at the
+// top of the frame and threads that one value here, into the multi-position
+// producer and into the tail, so the frame is coherent whatever the operator
+// does mid-event.
+func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string, armed bool) string {
 	if eventKey == "" {
 		return ""
 	}
@@ -434,7 +443,7 @@ func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) stri
 	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
 		return ""
 	}
-	if p.diffRetraction && !p.partitionArmed(rs) {
+	if p.diffRetraction && !armed {
 		return ""
 	}
 	return eventKey

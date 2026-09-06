@@ -1287,6 +1287,21 @@ func (p *Pipeline) PartitionRetraction() bool { return p.partitionRetraction }
 //     the lens falls back to exactly today's posture: no seeding, a whole-corpus
 //     rescan, and the whole target diff — which needs no detector because it is
 //     exact by construction.
+//
+// THE AUDIT HALF MAKES THIS PREDICATE LIVE, so a caller that asks it twice can
+// be told two different things: an operator's pause, a kill-switch flip, or a
+// pass recording a suppression all land between one call and the next. ONE CDC
+// FRAME MUST ASK IT ONCE. evaluateForEntryRaw does exactly that and threads the
+// value into the seed decision, the multi-position producer's declined shape and
+// the tail's choice of diff — because those three are halves of a single
+// decision, and disagreeing halves are a whole-target diff run against one
+// anchor's row set, which retracts every other anchor's rows.
+//
+// The callers that DO read it live are the ones answering a per-call question
+// rather than deciding one event: the derivation index's refusal, the static
+// refusal note, the published retraction transport, and the audit's own
+// per-anchor listing. Each is a verdict about the lens as it stands right now,
+// and a fresh answer is the correct one for all four.
 func (p *Pipeline) partitionArmed(rs ruleState) bool {
 	return p.partitionRetraction && rs.partition.only && p.auditNarrowingRefusal() == ""
 }

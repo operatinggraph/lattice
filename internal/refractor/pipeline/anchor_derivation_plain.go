@@ -885,7 +885,11 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 // (same plainDerivationDecide call, different declined closure).
 //
 // THE DECLINED ANSWER DEPENDS ON WHETHER THE LENS IS PARTITION-ARMED, and the
-// two answers are not interchangeable.
+// two answers are not interchangeable. armed is the frame's ONE reading of that
+// question, passed down by evaluateForEntryRaw rather than asked again here: the
+// shape this function declines to and the diff the tail then runs have to be the
+// same answer's two halves, and Pipeline.partitionArmed is live enough to give
+// two different ones inside a single event.
 //
 //   - NOT armed: the NARROW single-seed call, which IS today's shipped answer
 //     for a seeded event (the very thing seedAnchorFor already computes). An
@@ -915,8 +919,8 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 // stating rather than leaving implicit. A partition-armed lens never reaches it
 // at all: its key carries a neighbour-bound column, so AnchorProjectionKey
 // declines and the tail takes the diff instead.
-func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, evalScope, error) {
-	if p.partitionArmed(rs) {
+func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry, armed bool) ([]ruleengine.EvalResult, evalScope, error) {
+	if armed {
 		unseeded := func() ([]ruleengine.EvalResult, error) {
 			return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
 		}
