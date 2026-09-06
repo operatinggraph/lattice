@@ -113,6 +113,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"appointmentReminders":              "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"augurDispatchPending":              "none",
 	"backgroundCheckFreshness":          "none",
+	"cafeArrearsReminders":              "cafeaccount:heldFor|leaseapp:heldFor",
 	"cafeStaleTabSettlement":            "none",
 	"cafeTabSettlement":                 "cafetransaction:settles|leaseapp:chargedTo,openFor|tab:chargedTo,openFor,settles",
 	"capability":                        "identity:holdsRole|role:holdsRole",

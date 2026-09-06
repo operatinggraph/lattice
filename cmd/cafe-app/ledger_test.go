@@ -215,6 +215,30 @@ func TestDeriveStatement_PartialPrepayThenLaterCreditFIFO(t *testing.T) {
 	}
 }
 
+// TestDeriveStatement_PartialRetirementLeavesTheHead is the display half of the
+// package-side vector of the same shape (packages/cafe-ledger's
+// arrearsFIFOVectors): a credit SMALLER than the oldest open charge's remainder
+// retires part of it and the head does NOT move, so the balance still ages from
+// that older charge. It is the only vector where a credit neither clears the
+// head nor overshoots it, and the wrong answer — popping the head anyway and
+// aging from Aug 20 — is a date the other vectors produce legitimately, so
+// nothing else here would catch it.
+func TestDeriveStatement_PartialRetirementLeavesTheHead(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 700, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 400, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1300, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (the Aug 1 charge is only PART paid, so it is still the head)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14, got overdue=%v days=%d", overdue, days)
+	}
+}
+
 func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
 	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "not-a-date"}}
 	due, overdue, days := deriveStatement(rows, 4750, time.Now())
@@ -225,18 +249,44 @@ func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
 
 func TestResolveLeaseAccount_FindsMatchOrEmpty(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
-		"vtx.leaseapp.aaa":   map[string]any{"leaseAppKey": "vtx.leaseapp.aaa", "accountKey": "vtx.cafeaccount.xyz"},
+		"vtx.leaseapp.aaa":   map[string]any{"leaseAppKey": "vtx.leaseapp.aaa", "accountKey": "vtx.cafeaccount.xyz", "arrearsDueAt": "2026-09-11T00:00:00Z", "arrearsReminderSentAt": "2026-09-12T00:00:00Z"},
 		"vtx.leaseapp.other": map[string]any{"leaseAppKey": "vtx.leaseapp.other", "accountKey": ""},
 		"vtx.leaseapp.bad":   map[string]any{},
 	})
 
-	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.aaa"); got != "vtx.cafeaccount.xyz" {
-		t.Errorf("resolveLeaseAccount(aaa) = %q, want vtx.cafeaccount.xyz", got)
+	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.aaa"); got.AccountKey != "vtx.cafeaccount.xyz" {
+		t.Errorf("resolveLeaseAccount(aaa).AccountKey = %q, want vtx.cafeaccount.xyz", got.AccountKey)
+	} else if got.ReminderSentAt != "2026-09-12T00:00:00Z" {
+		t.Errorf("resolveLeaseAccount(aaa).ReminderSentAt = %q, want the lens row's arrearsReminderSentAt (2026-09-12T00:00:00Z), not merely non-empty", got.ReminderSentAt)
+	} else if got.ArrearsDueAt != "2026-09-11T00:00:00Z" {
+		t.Errorf("resolveLeaseAccount(aaa).ArrearsDueAt = %q, want 2026-09-11T00:00:00Z", got.ArrearsDueAt)
 	}
-	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.other"); got != "" {
-		t.Errorf("resolveLeaseAccount(other) = %q, want empty (no account opened yet)", got)
+	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.other"); got.AccountKey != "" || got.ReminderSentAt != "" {
+		t.Errorf("resolveLeaseAccount(other) = %+v, want zero value (no account opened yet, nothing aged)", got)
 	}
-	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.unprojected"); got != "" {
-		t.Errorf("resolveLeaseAccount(unprojected) = %q, want empty (no row at all)", got)
+	if got := resolveLeaseAccount(keys, get, "vtx.leaseapp.unprojected"); got.AccountKey != "" || got.ReminderSentAt != "" {
+		t.Errorf("resolveLeaseAccount(unprojected) = %+v, want zero value (no row at all)", got)
+	}
+}
+
+// TestIndexLeaseAccounts_JoinsByLeaseAppKey proves the front-desk grid's
+// batch join: every cafeLeaseAccounts row's reminderSentAt is keyed by its
+// own leaseAppKey, and a lease with no row in the bucket at all (never
+// looked up) reads back the zero value rather than another lease's data.
+func TestIndexLeaseAccounts_JoinsByLeaseAppKey(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.leaseapp.aaa": map[string]any{"leaseAppKey": "vtx.leaseapp.aaa", "accountKey": "vtx.cafeaccount.xyz", "arrearsDueAt": "2026-09-11T00:00:00Z", "arrearsReminderSentAt": "2026-09-12T00:00:00Z"},
+		"vtx.leaseapp.bbb": map[string]any{"leaseAppKey": "vtx.leaseapp.bbb", "accountKey": "vtx.cafeaccount.qrs"},
+	})
+	idx := indexLeaseAccounts(keys, get)
+
+	if got := idx["vtx.leaseapp.aaa"].ReminderSentAt; got != "2026-09-12T00:00:00Z" {
+		t.Errorf("idx[aaa].ReminderSentAt = %q, want the lens row's arrearsReminderSentAt (2026-09-12T00:00:00Z)", got)
+	}
+	if got, ok := idx["vtx.leaseapp.bbb"]; !ok || got.ReminderSentAt != "" {
+		t.Errorf("idx[bbb] = %+v (ok=%v), want present with empty ReminderSentAt (no account row ever reminded)", got, ok)
+	}
+	if got, ok := idx["vtx.leaseapp.unlisted"]; ok || got.ReminderSentAt != "" {
+		t.Errorf("idx[unlisted] = %+v (ok=%v), want absent/zero value for a lease with no row at all", got, ok)
 	}
 }

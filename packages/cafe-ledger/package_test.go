@@ -33,33 +33,33 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 4; got != want {
+	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 5; got != want {
+	if got, want := len(Package.Permissions), 7; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 2; got != want {
+	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 0; got != want {
+	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 2; got != want {
+	if got, want := len(Package.OpMetas), 4; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"cafeaccount", "cafeLedgerAccountGuard", "cafeAccountBalance", "cafetransaction"}
+	wantDDLs := []string{"cafeaccount", "cafeLedgerAccountGuard", "cafeAccountBalance", "cafeAccountArrears", "cafetransaction", "cafeArrearsNotificationOp", "cafeAccountArrearsNotification"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"CreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditCafeAccount", "any"}, {"CreditCafeAccount", "self"}, {"RefundCafeCharge", "any"}}
+	wantPerms := []struct{ op, scope string }{{"CreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditCafeAccount", "any"}, {"CreditCafeAccount", "self"}, {"RefundCafeCharge", "any"}, {"EvaluateCafeArrears", "any"}, {"RecordCafeArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -70,14 +70,14 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantOpMetas := []string{"CreditCafeAccount", "RefundCafeCharge"}
+	wantOpMetas := []string{"CreditCafeAccount", "RefundCafeCharge", "EvaluateCafeArrears", "RecordCafeArrearsReminderNotification"}
 	for i, m := range Package.OpMetas {
 		if i < len(wantOpMetas) && m.OperationType != wantOpMetas[i] {
 			t.Errorf("OpMetas[%d]: got %q, want %q", i, m.OperationType, wantOpMetas[i])
 		}
 	}
 
-	wantLenses := []string{"cafeLedgerHistory", "cafeLeaseAccounts"}
+	wantLenses := []string{"cafeLedgerHistory", "cafeLeaseAccounts", "cafeArrearsReminders"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])

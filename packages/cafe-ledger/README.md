@@ -7,8 +7,9 @@ additionally carries a maintained `.balance` aspect, an O(1) authorization cache
 payment can be capped at what is actually owed without replaying a long house tab.
 
 Depends: `lease-signing` (the `leaseapp` vertex type an account is `heldFor` — the same resident lease
-`loftspace-ledger`'s own rent account anchors to; a house tab belongs to the same lease). Install:
-`lattice-pkg install packages/cafe-ledger` (after `lease-signing`).
+`loftspace-ledger`'s own rent account anchors to; a house tab belongs to the same lease) and
+`orchestration-base` (`MarkExpired` and the `freshnessExpiry` marker the arrears `@at` firing writes onto
+the account). Install: `lattice-pkg install packages/cafe-ledger` (after both).
 
 ## Increment 1 of 3 (Café vertical, `verticals.md`)
 
@@ -24,10 +25,11 @@ including the café FE (`cmd/cafe-app`). The one-bill composition lens unioning 
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `cafeaccount` (root `{}`, D5, `.balance` aspect) · `cafetransaction` (root `{}`, D5, `.entry` aspect) |
-| **Aspect types** (2) | `cafeLedgerAccountGuard` — `vtx.leaseapp.<id>.cafeLedgerAccount`, the per-lease create-only uniqueness guard · `cafeAccountBalance` — `vtx.cafeaccount.<id>.balance`, the maintained running total |
+| **Aspect types** (4) | `cafeLedgerAccountGuard` — `vtx.leaseapp.<id>.cafeLedgerAccount`, the per-lease create-only uniqueness guard · `cafeAccountBalance` — `vtx.cafeaccount.<id>.balance`, the maintained running total · `cafeAccountArrears` — `vtx.cafeaccount.<id>.arrears`, the arrears-episode state · `cafeAccountArrearsNotification` — `vtx.cafeaccount.<id>.arrearsNotification`, the reminder's audit-only outcome |
 | **Links** (4) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) · `settles` (cafetransaction → tab, the charge that settled a `cafe-domain` tab) · `reverses` (cafetransaction → cafetransaction, a refund to the charge it gives back) |
-| **Operations** (4) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditCafeAccount` · `RefundCafeCharge` |
-| **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
+| **Operations** (6) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditCafeAccount` · `RefundCafeCharge` · `EvaluateCafeArrears` (Weaver-dispatched) · `RecordCafeArrearsReminderNotification` (bridge replyOp) |
+| **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup, plus the account's arrears due date / reminder timestamp) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
+| **Weaver targets** (1) | `cafeArrearsReminders` — its own convergence lens → `weaver-targets`; one gap, `missing_evaluation` → `directOp(EvaluateCafeArrears)` |
 
 `CreateAccount` and `DebitAccount` are granted to `operator` alone at `scope: any`
 (`permissions.go`) — both are orchestrator-submitted, neither is something a person decides to do.
@@ -140,6 +142,60 @@ account, and `amountCents` may not exceed that charge's own amount minus its `re
 That tally is maintained on the charge's own `.entry` under a compare-and-set pinned to the revision it
 was hydrated at, so two refunds racing one charge serialize: the loser is refused, never admitted
 alongside the winner. A refund is a front-desk act and is never self-scoped.
+
+## The arrears reminder
+
+Nothing used to tell a resident they owed the café money. `cafeArrearsReminders` is the target that does,
+and it is this package's first orchestration.
+
+The account carries a `.arrears` aspect (`{evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?,
+historyTooLong?}`) whose whole lifetime is coarse on purpose. A charge that takes the balance from
+zero-or-below to **owing** IS the FIFO-oldest open charge, so `post_entry` can record the due date its own
+`postedAt` implies (`postedAt` + `ArrearsGraceDays`) without replaying anything; a payment that clears the
+balance rewrites the aspect to `{evaluatedAt}` alone and ends the episode. Everything in between it refuses to
+guess: a **partial** payment can move the head to a later charge with a later due date, a question only the
+whole history answers, so the entry marks the state `stale` instead. A charge against an account already in
+credit (a refund took it below zero) writes nothing at all — the surplus prepays it outright, so there is no
+open debit to age. An account carrying no `.balance` at all (the legacy set) can only ever mark stale — it has
+no before/after balance to reason from, so it never mints arrears state off a number it does not have.
+
+The lens arms Weaver's `@at` at the recorded `dueAt` and opens its one gap when the timer's lapse is recorded
+on the account, when the state is `stale`, or when the account has never been evaluated. All three dispatch
+the same remediation, `EvaluateCafeArrears`, which recomputes the head with **the same FIFO the resident's own
+statement runs** (`cmd/cafe-app/ledger.go`, `deriveStatement` — credits offset the oldest still-open charge
+first, an unapplied credit carries forward as surplus) and rewrites `.arrears`. A recomputed date that has
+passed is recorded as `remindedFor` — that is what closes the gap — and where **no reminder has yet gone out in
+this episode** (`sentAt` absent) the same commit stamps `sentAt` and fires `external.notification` to the
+bridge's `notification` adapter, keyed `<accountKey>:<dueAt>`.
+
+`sentAt`, not `remindedFor`, is the send condition, and the difference is what makes it **one reminder per
+arrears episode** rather than one per head. An episode runs from the charge that took the account from square
+to owing until the balance returns to zero; within one episode a partial payment retires the oldest charge and
+the head moves to the next, whose own term has usually passed too. Keying the send off the head would hand a
+resident who is visibly paying their tab down a second nag for the same continuous debt. `sentAt` is carried
+across every write of a live episode and dropped only where the episode ends, so a re-dispatch or redelivery
+finds it already recorded and emits nothing, and the adapter dedups a genuine redelivery on the episode key.
+A resident who pays off and runs a new tab up gets a fresh episode with a clean `sentAt`, and its due date is
+necessarily later than any instant the permanent `freshnessExpiry` marker already holds.
+
+An account whose transaction history outruns the evaluation's bounded replay budget is not refused — it is
+recorded. A refusal would be a permanent silent stop: the row's own gap is the only thing that re-drives the
+op, and a rejected op never closes it, so Weaver would re-dispatch a doomed evaluation on every window with
+nothing sent and nothing said. The evaluation instead writes `historyTooLong`, carrying `dueAt`/`remindedFor`/
+`sentAt` untouched and sending nothing, and the lens suppresses **both** the gap and the `@at` while the flag
+stands. The row stays in `weaver-targets` for an operator to find; the next posted entry drops the flag and
+re-marks the state stale, buying exactly one more attempt.
+
+The op is restricted to **Weaver's dispatch actor**. Its `operator`/`scope: any` grant admits every
+operator-role holder, and the account named on the payload is forwarded into a message a resident actually
+receives — a wider submitter set is a forged send. `RecordCafeArrearsReminderNotification` records the
+adapter's verdict as an audit-only `.arrearsNotification` aspect. Unlike the wellness/clinic precedents it
+mirrors, that write is an idempotent **overwrite** rather than create-only: café arrears recur on one account
+and every episode replies onto the same key, so a create-only write would reject every outcome after the
+first.
+
+The net term lives in one place — the exported `ArrearsGraceDays` constant (`scripts.go`), interpolated into
+the Starlark as a duration string and read directly by the FE's statement math.
 
 ## Out of scope
 

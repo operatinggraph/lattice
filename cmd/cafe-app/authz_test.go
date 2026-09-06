@@ -1254,7 +1254,7 @@ func TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases(t *testing.T) {
 // TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases's confinement check.
 func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	s, cookieFor, staff := staffAtOneBuilding(t)
-	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	old := time.Now().UTC().AddDate(0, 0, -(cafeledger.ArrearsGraceDays + 5)).Format(time.RFC3339)
 
 	// vtx.leaseapp.mine: an old unpaid debit at the staffer's own building —
 	// must come back overdue.
@@ -1305,7 +1305,7 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	}
 	if !row.IsOverdue {
 		t.Fatalf("isOverdue = false, want true for a debit %d days old (grace period is %d days)",
-			statementGraceDays+5, statementGraceDays)
+			cafeledger.ArrearsGraceDays+5, cafeledger.ArrearsGraceDays)
 	}
 	if row.DaysOverdue < 1 {
 		t.Fatalf("daysOverdue = %d, want >= 1", row.DaysOverdue)

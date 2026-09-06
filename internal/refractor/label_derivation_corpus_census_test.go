@@ -136,6 +136,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"augurProposals":                 {narrow, "augurproposal", modeRelation},
 	"availableListings":              {narrow, "unit", modeRelation},
 	"backgroundCheckFreshness":       {narrow, "service", modeRelation},
+	"cafeArrearsReminders":           {narrow, "cafeaccount leaseapp", modeRelation},
 	"cafeLeaseAccounts":              {narrow, "cafeaccount leaseapp", modeRelation},
 	"cafeLedgerHistory":              {narrow, "cafeaccount cafetransaction leaseapp tab", modeLabel},
 	"cafeStaleTabSettlement":         {narrow, "tab", modeRelation},

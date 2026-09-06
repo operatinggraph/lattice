@@ -92,6 +92,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"appointmentReminders":           oneKey,
 	"augurDispatchPending":           oneKey,
 	"backgroundCheckFreshness":       oneKey,
+	"cafeArrearsReminders":           oneKey,
 	"cafeStaleTabSettlement":         oneKey,
 	"cafeTabSettlement":              oneKey,
 	"capability":                     oneKey,

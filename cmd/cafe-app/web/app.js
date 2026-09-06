@@ -392,15 +392,21 @@ function ledgerBalanceLine(balanceCents) {
 
 // statementLine renders the ledger's dueDate/isOverdue/daysOverdue fields (a
 // FIFO-aged statement, cmd/cafe-app/ledger.go's deriveStatement) as a due-by
-// note or a red overdue banner — "" when there's nothing owed to age.
+// note or a red overdue banner — "" when there's nothing owed to age. An
+// overdue banner also says whether the arrears reminder (the Weaver-
+// dispatched convergence job that reaches the resident, joined onto this
+// row's reminderSentAt) has gone out yet.
 function statementLine(ledger) {
   if (!ledger.dueDate) return "";
   const due = new Date(ledger.dueDate).toLocaleDateString();
   if (ledger.isOverdue) {
     const days = ledger.daysOverdue || 0;
+    const reminder = ledger.reminderSentAt
+      ? " · reminder sent " + new Date(ledger.reminderSentAt).toLocaleDateString()
+      : " · no reminder sent yet";
     return (
       '<p class="ledger-overdue" style="color:#b00020;font-weight:600;">' +
-      "OVERDUE — " + days + (days === 1 ? " day" : " days") + " past due (was due " + due + ")" +
+      "OVERDUE — " + days + (days === 1 ? " day" : " days") + " past due (was due " + due + ")" + reminder +
       "</p>"
     );
   }
@@ -1117,12 +1123,16 @@ function frontDeskBalanceBadge(balance) {
 // daysOverdue fields as a compact inline banner for the standalone arrears
 // list — mirrors wellness-app's arrearsLine(), a small inline <span> rather
 // than statementLine()'s <p> block, since a list row needs one line, not a
-// paragraph.
+// paragraph. An overdue row also says whether the reminder has gone out
+// (row.reminderSentAt, joined server-side onto the same balance row).
 function frontDeskArrearsLine(row) {
   const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString() : "?";
   if (row.isOverdue) {
     const days = row.daysOverdue || 0;
-    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
+    const reminder = row.reminderSentAt
+      ? " · reminder sent " + new Date(row.reminderSentAt).toLocaleDateString()
+      : " · no reminder sent yet";
+    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + reminder + "</span>";
   }
   return "Due " + due;
 }

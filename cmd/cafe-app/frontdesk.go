@@ -316,16 +316,21 @@ func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 // handleFrontDeskBalances implements GET /api/frontdesk-balances — every
 // visible lease's balance/due-date/overdue statement for the front-desk
 // grid, served from the cafe-ledger package's cafeLedgerHistory lens (P5,
-// cmd/cafe-app/ledger.go's computeLedgerBalances). Staff-only and
-// workplace-confined, same as handleFrontDeskBookings. Unlike this file's
-// other three joins, cafe-ledger is a core cafe package always installed
-// alongside cafe-domain — this bucket going missing is not the ordinary
-// "optional package not installed" case — but the read still answers 200
-// empty on substrate.IsBucketNotFound rather than inventing a different
-// posture for what is otherwise the same failure shape. Every key is read
-// via readAllOrFail, same as the other three: a balance is money, and a
-// KVGet error on a key that just came back from KVListKeys is a real fetch
-// fault, not evidence the row doesn't exist (ledger.go's readAllOrFail doc
+// cmd/cafe-app/ledger.go's computeLedgerBalances), annotated with each
+// lease's reminderSentAt off the cafeLeaseAccounts lens (indexLeaseAccounts,
+// joined by leaseAppKey). Staff-only and workplace-confined, same as
+// handleFrontDeskBookings. Unlike this file's other three joins, cafe-ledger
+// is a core cafe package always installed alongside cafe-domain — the
+// ledger-history bucket going missing is not the ordinary "optional package
+// not installed" case — but the read still answers 200 empty on
+// substrate.IsBucketNotFound rather than inventing a different posture for
+// what is otherwise the same failure shape. The lease-accounts join is
+// best-effort by the same test: its bucket missing degrades every row's
+// reminderSentAt to empty rather than failing balances the ledger-history
+// read already produced. Every key from either bucket is read via
+// readAllOrFail, same as the other three: a balance is money, and a KVGet
+// error on a key that just came back from KVListKeys is a real fetch fault,
+// not evidence the row doesn't exist (ledger.go's readAllOrFail doc
 // comment) — letting it fall through as absent would silently understate a
 // lease's balance instead of failing the request.
 func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request) {
@@ -376,11 +381,40 @@ func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request)
 	}
 	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
 	rows := computeLedgerBalances(keys, get, time.Now().UTC())
+
+	acctBucket := cafeledger.LeaseAccountsBucket
+	var acctLookup map[string]leaseAccountLookup
+	acctKeys, err := conn.KVListKeys(ctx, acctBucket)
+	if err != nil {
+		if !substrate.IsBucketNotFound(err) {
+			s.logger.Error("list lease accounts for front-desk balances", "bucket", acctBucket, "error", err)
+			s.writeError(w, http.StatusBadGateway, "list "+acctBucket+": "+err.Error())
+			return
+		}
+	} else {
+		acctValues, err := readAllOrFail(acctKeys, func(key string) ([]byte, error) {
+			entry, err := conn.KVGet(ctx, acctBucket, key)
+			if err != nil {
+				return nil, err
+			}
+			return entry.Value, nil
+		})
+		if err != nil {
+			s.logger.Error("read lease accounts for front-desk balances", "bucket", acctBucket, "error", err)
+			s.writeError(w, http.StatusBadGateway, "read "+acctBucket+" incomplete: "+err.Error())
+			return
+		}
+		acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
+		acctLookup = indexLeaseAccounts(acctKeys, acctGet)
+	}
+
 	filtered := make([]balanceRow, 0, len(rows))
 	for _, row := range rows {
-		if visible.admits(row.LeaseAppKey) {
-			filtered = append(filtered, row)
+		if !visible.admits(row.LeaseAppKey) {
+			continue
 		}
+		row.ReminderSentAt = acctLookup[row.LeaseAppKey].ReminderSentAt
+		filtered = append(filtered, row)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"balances": filtered})
 }

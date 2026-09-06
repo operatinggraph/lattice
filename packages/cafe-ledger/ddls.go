@@ -3,29 +3,32 @@ package cafeledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `cafeaccount`
-// (CreateAccount), `cafetransaction` (DebitAccount, CreditCafeAccount,
-// RefundCafeCharge), the `cafeLedgerAccountGuard` aspect-type declaration (the
-// lease-anchored uniqueness guard CreateAccount writes), and the
-// `cafeAccountBalance` aspect-type declaration (the account-anchored
-// running-balance cache CreateAccount mints and every posted entry keeps
-// updated). Vertical-prefixed like clinic-ledger: a DDL canonicalName is
-// global across every installed package (internal/pkgmgr/installer.go
-// checkCanonicalNameCollision), and loftspace-ledger already owns the bare
-// `account` / `transaction` names.
+// (CreateAccount, EvaluateCafeArrears), `cafetransaction` (DebitAccount,
+// CreditCafeAccount, RefundCafeCharge), the `cafeLedgerAccountGuard`
+// aspect-type declaration (the lease-anchored uniqueness guard CreateAccount
+// writes), the `cafeAccountBalance` aspect-type declaration (the
+// account-anchored running-balance cache CreateAccount mints and every posted
+// entry keeps updated), the `cafeAccountArrears` aspect-type declaration (the
+// account's arrears-episode state), and the notification-outcome DDL pair
+// (notifications.go) the bridge replies onto. Vertical-prefixed like
+// clinic-ledger: a DDL canonicalName is global across every installed package
+// (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
+// loftspace-ledger already owns the bare `account` / `transaction` names.
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{
+	return append([]pkgmgr.DDLSpec{
 		accountDDL(),
 		accountGuardAspectTypeDDL(),
 		accountBalanceAspectTypeDDL(),
+		accountArrearsAspectTypeDDL(),
 		transactionDDL(),
-	}
+	}, notificationDDLs()...)
 }
 
 func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafeaccount",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAccount"},
+		PermittedCommands: []string{"CreateAccount", arrearsOp},
 		Description: "House-tab ledger account DDL. Vertex shape: vtx.cafeaccount.<NanoID>, class=cafeaccount, root " +
 			"data = {} (minimal, D5 — the DISPLAYED balance is LENS-derived by summing transactions). " +
 			"CreateAccount also mints a .balance aspect ({balanceCents: 0}, cafeAccountBalance DDL) alongside the " +
@@ -42,17 +45,49 @@ func accountDDL() pkgmgr.DDLSpec {
 			"would collide key-for-key with it) instead: a second CreateAccount for the same lease conflicts on that " +
 			"already-existing aspect key. Writes the heldFor link (cafeaccount→leaseapp, the cafeaccount is the " +
 			"later-arriving vertex so it is the source — Contract #1 §1.1). Requires the leaseAppKey be a live " +
-			"leaseapp (no orphan accounts).",
+			"leaseapp (no orphan accounts). " +
+			"EvaluateCafeArrears{accountKey, leaseAppKey?} is the second operation on this DDL, dispatched by " +
+			"Weaver's cafeArrearsReminders playbook rather than by a person: it replays the account's own postedTo " +
+			"history under a bounded budget, ages it with the same FIFO the resident's statement runs (credits offset " +
+			"the oldest still-open charge first; an unapplied credit carries forward as surplus), and records the " +
+			"resulting due date — the oldest open charge's postedAt plus the package's net term — on the account's " +
+			".arrears aspect (cafeAccountArrears DDL). Once that date has passed the evaluation records remindedFor = " +
+			"that date, and where NO reminder has yet gone out in this arrears episode (sentAt ABSENT) the same commit " +
+			"also stamps sentAt and fires an external.notification to the bridge's \"notification\" adapter keyed on " +
+			"(accountKey, dueAt). The send condition is sentAt's absence, not remindedFor's value: the unit is the " +
+			"EPISODE — from the charge that took the account from square to owing until the balance returns to zero — " +
+			"and a partial payment moves the head from one overdue charge to the next without starting a new episode, " +
+			"so exactly ONE notification goes out per episode however often the evaluation is re-dispatched, " +
+			"redelivered, or re-run over a moved head. An account whose history outruns the replay budget is not " +
+			"refused: the evaluation DEGRADES, recording historyTooLong (carrying dueAt/remindedFor/sentAt as they " +
+			"stood, clearing stale) and sending nothing, which holds the row quiet and visible rather than " +
+			"re-dispatching a doomed evaluation on every window; the next posted entry clears the flag and buys one " +
+			"more attempt. Restricted to Weaver's dispatch actor: the account it names is forwarded into a message a " +
+			"resident actually receives.",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the resident lease this café account is for (CreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one café account per lease) is enforced via the leaseapp's .cafeLedgerAccount guard aspect, not the account's own id."}},` +
-			`"required":["leaseAppKey"]}`,
+			`{"leaseAppKey":{"type":"string","description":"CreateAccount: vtx.leaseapp.<NanoID> of the resident lease this café account is for (required there, validated alive). The account gets its own independently-minted NanoID; uniqueness (one café account per lease) is enforced via the leaseapp's .cafeLedgerAccount guard aspect, not the account's own id. EvaluateCafeArrears: optional, carried into the notification's params for the adapter's own addressing."},` +
+			`"accountKey":{"type":"string","description":"EvaluateCafeArrears only: vtx.cafeaccount.<NanoID> of the account whose arrears are being aged (required there, validated alive)."}},` +
+			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from leaseAppKey."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> — the created account on CreateAccount (the caller must read it from the ACCEPTED reply, since the id can no longer be derived from leaseAppKey), or the evaluated account on EvaluateCafeArrears."}}}`,
 		FieldDescription: map[string]string{
-			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the resident lease the café account is opened for. CreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the leaseapp's .cafeLedgerAccount guard aspect (one café account per lease) and the heldFor link (cafeaccount→leaseapp).",
+			"leaseAppKey": "CreateAccount: full vtx.leaseapp.<NanoID> key of the resident lease the café account is opened for — validated alive, then the account is minted under a fresh independent NanoID alongside the leaseapp's .cafeLedgerAccount guard aspect (one café account per lease) and the heldFor link (cafeaccount→leaseapp). EvaluateCafeArrears: optional, the lease the account is held for (the playbook supplies it from the row's own heldFor walk), carried into the notification params only.",
+			"accountKey":  "EvaluateCafeArrears only, and required there. Full vtx.cafeaccount.<NanoID> key of the account to age. Validated alive; its postedTo history is replayed under a bounded budget and the FIFO-oldest open charge's due date is recorded on the account's .arrears aspect.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:    "EvaluateCafeArrears — age a house tab and remind once it is overdue",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Validates the account is alive, replays its postedTo history under the evaluation budget and ages it " +
+					"FIFO. Writes vtx.cafeaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?, sentAt?} — {evaluatedAt} " +
+					"alone when nothing is owed. When the oldest open charge's due date has passed it stamps remindedFor = " +
+					"that date, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps sentAt and " +
+					"emits external.notification keyed <accountKey>:<dueAt>. A re-run recomputes the head, finds sentAt " +
+					"already recorded, and sends nothing. A history past the replay budget records historyTooLong instead, " +
+					"carrying what was already recorded and sending nothing. Rejects AuthDenied for any actor but Weaver's " +
+					"dispatch actor and UnknownAccount for an absent or tombstoned account.",
+			},
 			{
 				Name:    "CreateAccount — open the house-tab account for a resident lease",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
@@ -166,10 +201,99 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// accountArrearsAspectTypeDDL declares the .arrears aspect (class
+// cafeAccountArrears) on the ACCOUNT — the arrears-episode state the
+// cafeArrearsReminders convergence lens reads, and the marker that records
+// which episode a reminder has already gone out for.
+//
+// Its LIFETIME, end to end. There is none at CreateAccount: a brand-new account
+// owes nothing, and its missing evaluatedAt is exactly what opens the
+// convergence gap once, so the first evaluation writes the aspect. From there
+// FIVE writers maintain it, each conditioned on one hydrated revision (the key
+// is declared optionalReads by both DDLs' derive_reads and by every dispatcher,
+// so a bare update is auto-conditioned and retry-eligible rather than
+// last-write-wins):
+//
+//   - DebitAccount that takes the balance from zero-or-below to owing opens an
+//     episode: {dueAt = this charge's postedAt + the net term, evaluatedAt},
+//     dropping any finished episode's remindedFor/sentAt/stale. A debit against
+//     an account that ALREADY owes writes nothing — the head is an older charge,
+//     and re-stamping dueAt would push a weeks-old debt's due date back to
+//     today. Nor does a debit that leaves the account still IN CREDIT (a refund
+//     took it below zero and this charge only eats into that surplus) — the
+//     surplus prepays the charge outright, so there is no open debit to age.
+//   - CreditCafeAccount / RefundCafeCharge that take the balance to zero or
+//     below end the episode: {evaluatedAt} alone, so no timer stays armed.
+//   - CreditCafeAccount / RefundCafeCharge that leave a balance mark the state
+//     stale (carrying every other field): a partial payment can move the FIFO
+//     head to a later charge with a later due date, which no single entry can
+//     compute. A legacy account (no .balance, so the entry op has no before/
+//     after balance at all) can ONLY ever mark stale, never mint.
+//   - EvaluateCafeArrears recomputes the head from the account's own history and
+//     rewrites the aspect outright — which is what the stale mark asks for, so
+//     stale is never carried across an evaluation, and neither is
+//     historyTooLong. It carries sentAt forward for as long as the episode runs:
+//     that field, not remindedFor, is what says a reminder has already gone out
+//     for THIS episode, so a head that a partial payment moved to another
+//     overdue charge is recorded (remindedFor) without sending again.
+//   - The one evaluation that does NOT recompute is the degraded one: an account
+//     whose postedTo history outran the replay budget records historyTooLong,
+//     carrying dueAt/remindedFor/sentAt untouched and dropping stale, and sends
+//     nothing. The flag suppresses both the convergence gap and the timer, so
+//     the row goes quiet rather than re-dispatching a doomed evaluation on every
+//     window; it is dropped by the next posted entry's carry, which buys exactly
+//     one more attempt.
+//
+// Non-sensitive: dates and two booleans on a vtx.cafeaccount (not an identity), no
+// money and no PII. Declaration-only: written by the four ops above, never
+// dispatched as an operation in its own right.
+func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "cafeAccountArrears",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge", arrearsOp},
+		Description: "Per-account arrears-episode aspect. Stored as vtx.cafeaccount.<NanoID>.arrears " +
+			"(class cafeAccountArrears) = {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?}. Non-sensitive. " +
+			"dueAt is the FIFO-oldest still-open charge's postedAt plus the ledger's net term — a RECORDED time " +
+			"fact, written by the op, never a clock a lens reads. remindedFor names the dueAt the evaluation has " +
+			"acknowledged as passed — it is what closes the convergence gap; sentAt is when a reminder actually went " +
+			"out, and its ABSENCE is the send condition, which is what makes the notification once-per-EPISODE rather " +
+			"than once-per-head or once-per-convergence-window. historyTooLong means the account's history outran the " +
+			"evaluation's replay budget, so no head could be computed: it suppresses both the gap and the timer (the " +
+			"row stays visible but quiet for an operator) and is dropped by the next posted entry, which buys one " +
+			"further attempt. stale means what is recorded may no longer " +
+			"describe the account (a partial payment moved the head, or the account carries no .balance to reason " +
+			"with) and is a request for a fresh EvaluateCafeArrears, which rewrites the aspect and so never carries " +
+			"it forward. Written by DebitAccount (opens an episode on an account that owed nothing), " +
+			"CreditCafeAccount / RefundCafeCharge (end the episode at zero, else mark stale) and EvaluateCafeArrears " +
+			"(recomputes the head). Read by the cafeArrearsReminders convergence lens and projected for the front " +
+			"desk by cafeLeaseAccounts. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written — by an evaluation or by the entry that changed the episode. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
+			"dueAt":          "RFC3339 instant (canonical UTC) the FIFO-oldest still-open charge falls overdue: that charge's own postedAt plus the ledger's net term. Absent when the account owes nothing.",
+			"remindedFor":    "The dueAt the last evaluation acknowledged as passed. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
+			"sentAt":         "RFC3339 instant (canonical UTC) a reminder for this arrears episode was sent — the timestamp the front-desk grid and the resident's statement show. Its ABSENCE is what lets the next passed deadline send; it is carried across every write of a live episode and dropped only where the episode itself ends.",
+			"stale":          "True when what is recorded may no longer describe the account (a partial payment moved the FIFO head, or the account carries no .balance). Opens the convergence gap; cleared by the evaluation that recomputes the head.",
+			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses BOTH the convergence gap and the freshness timer — the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "account arrears aspect — overdue, reminded once",
+				Payload:         map[string]any{"evaluatedAt": "2026-08-22T09:00:00Z", "dueAt": "2026-08-06T14:20:00Z", "remindedFor": "2026-08-06T14:20:00Z", "sentAt": "2026-08-22T09:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.cafeaccount.<NanoID>.arrears; written by EvaluateCafeArrears on the commit that also emitted the notification. remindedFor = dueAt closes the gap, so no second reminder goes out for this episode.",
+			},
+		},
+	}
+}
+
 // aspectDeclarationOnlyScript is the declaration-only Starlark for the
-// package's aspect-type DDLs — cafeLedgerAccountGuard and cafeAccountBalance
-// are written by CreateAccount's and the transaction ops' own handlers, never
-// dispatched as operations in their own right.
+// package's aspect-type DDLs — cafeLedgerAccountGuard, cafeAccountBalance and
+// cafeAccountArrears are written by CreateAccount's, the transaction ops' and
+// EvaluateCafeArrears' own handlers, never dispatched as operations in their
+// own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)

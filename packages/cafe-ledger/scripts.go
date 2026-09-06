@@ -1,6 +1,40 @@
 package cafeledger
 
-// accountDDLScript handles CreateAccount. The account gets its OWN
+import "fmt"
+
+// ArrearsGraceDays is the net term between a charge posting and the balance it
+// opened counting overdue. The package OWNS the term, so there is exactly one
+// source for it: the Starlark below reads it as a Go duration string
+// (ArrearsGraceDays × 24 hours, the form time.rfc3339_add takes) and
+// cmd/cafe-app's statement math reads the constant directly. A resident's
+// displayed due date and the instant the arrears reminder fires are the same
+// fact, and two copies of it drift into a statement that says one thing while
+// the notification says another.
+//
+// Days × 24h is exact here because every timestamp this ledger stores is
+// canonical UTC (time.rfc3339_utc at write time), where a calendar day is
+// always 24 hours — Go's AddDate(0, 0, ArrearsGraceDays) over a UTC instant
+// lands on the same second.
+const ArrearsGraceDays = 15
+
+// arrearsGracePrelude binds ArrearsGraceDays into Starlark, once, as the Go
+// duration string time.rfc3339_add takes. Both scripts that compute an arrears
+// due date open with it, so the account DDL's Weaver-dispatched evaluation and
+// the transaction DDL's episode-opening charge derive the same date from the
+// same Go constant rather than from two literals that can drift apart.
+//
+// Prepended rather than interpolated with a format verb: transactionDDLScript's
+// money formatting contains a literal '%' (dollars()), and a template would
+// make every future edit to either script responsible for escaping it.
+var arrearsGracePrelude = fmt.Sprintf(`
+ARREARS_GRACE_DURATION = "%dh"
+`, ArrearsGraceDays*24)
+
+// accountDDLScript is the account DDL's Starlark, opened by the grace-term
+// binding above.
+var accountDDLScript = arrearsGracePrelude + accountDDLScriptBody
+
+// accountDDLScriptTemplate handles CreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
 // all of Core KV, never reused across vertex types, even deliberately (see
 // adjacency-shared-nanoid-collision-design.md). "One café account per lease"
@@ -17,13 +51,36 @@ package cafeledger
 // every posted entry, so the payment cap never replays a house tab's whole
 // history to answer "how much is owed" (see transactionDDLScript's own comment
 // for the OCC shape that keeps it race-free under concurrent writers).
-const accountDDLScript = `
+//
+// It ALSO handles EvaluateCafeArrears, the Weaver-dispatched arrears
+// evaluation: it recomputes the account's FIFO-oldest open charge over a
+// bounded replay of the postedTo history, records the resulting due date in the
+// account's own .arrears aspect, and — once that date has passed and no
+// reminder has gone out for it — fires the external.notification the bridge
+// turns into a real message to the resident. The FIFO is deliberately NOT
+// maintained incrementally by post_entry: a partial payment moves the head to a
+// charge no single entry can name without replaying the account's history, so
+// the head is recomputed once, here, only when it matters (post_entry keeps
+// only the coarse episode state the convergence lens arms its timer on).
+const accountDDLScriptBody = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
 
 def make_aspect(vtx_key, local_name, cls, data):
     return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_aspect_update(vtx_key, local_name, cls, data):
+    # Deliberately NO expectedRevision — the same choice, for the same reason,
+    # transactionDDLScript's own make_aspect_update documents at length: a bare
+    # update on a key the operation DECLARED is auto-conditioned on the step-4
+    # hydrated revision (Contract #3 §3.2) and marked retry-eligible, so a lost
+    # race re-hydrates and re-runs instead of hard-conflicting. It is also the
+    # reviving verb for a tombstoned aspect, which a create would only collide
+    # with (Contract #3 §3.3).
+    return {"op": "update", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
@@ -40,6 +97,17 @@ def required_string(p, name):
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
+
+def optional_string(p, name):
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type(""):
+        return None
+    v = v.strip()
+    if len(v) == 0:
+        return None
+    return v
 
 def parts_of(key, name, want_type):
     parts = key.split(".")
@@ -63,9 +131,351 @@ def vertex_alive(state, key):
         return False
     return True
 
+# EvaluateCafeArrears' replay budget over the account's postedTo history: 10
+# pages of 50 entries covers many years of a house tab. The ceiling is not a
+# taste judgement — it is what the Processor's production script wall (250ms)
+# affords for a live paged walk plus a per-candidate follow-up read, so raising
+# it does not extend the reach, it just moves the failure from this budget to
+# the wall.
+#
+# An account that exceeds it is not aged against a truncated FIFO — a partial
+# replay would name the wrong head and the reminder that went out would name a
+# charge the resident had already paid. But it does not fail either: see the
+# degrade branch in execute(). A refusal here is a PERMANENT silent stop, because
+# the only thing that would re-drive the op is the very gap this account's row
+# opens, and a rejected op never closes it — Weaver would re-dispatch a doomed
+# evaluation on every window, forever, with no reminder and no operator signal.
+# Instead the exhaustion is RECORDED (historyTooLong) so the row goes quiet, the
+# operator can see it in the read model, and the next posted entry re-arms one
+# more attempt.
+ARREARS_PAGE_LIMIT = 50
+ARREARS_MAX_PAGES = 10
+
+def arrears_entries(acct_key):
+    # Every live entry posted to this account, as {postedAt, key, type,
+    # amountCents}, and whether the page budget ran out before the walk did. An
+    # entry missing any of those three fields is skipped rather than guessed at,
+    # exactly as backfill_balance skips it.
+    entries = []
+    cursor = None
+    budget_exhausted = True
+    for _page in range(ARREARS_MAX_PAGES):
+        # read-posture: (e) relation=postedTo epoch=none -- bounded by the page
+        # budget; the caller degrades when it is exhausted.
+        page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, ARREARS_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above -- each transaction's own .entry aspect, data-derived and
+            # unknowable client-side.
+            tx_entry = kv.Read(lk.sourceVertex + ".entry")
+            if tx_entry == None or tx_entry.isDeleted:
+                continue
+            tx_amount = tx_entry.data.get("amountCents")
+            tx_posted_at = tx_entry.data.get("postedAt")
+            tx_type = tx_entry.data.get("type")
+            if tx_amount == None or tx_posted_at == None or tx_type == None:
+                continue
+            entries.append({"postedAt": tx_posted_at, "key": lk.sourceVertex,
+                            "type": tx_type, "amountCents": tx_amount})
+        if cursor == None:
+            budget_exhausted = False
+            break
+    return entries, budget_exhausted
+
+def arrears_head(entries):
+    # The FIFO the resident's own statement runs, reproduced exactly
+    # (cmd/cafe-app/ledger.go deriveStatement + sortLedgerRows): entries in
+    # (postedAt, transactionKey) order, credits offsetting the OLDEST still-open
+    # debit first, and a credit with no open debit to apply to carrying its
+    # remainder forward as surplus that prepays whichever debits arrive next.
+    # The survivor at the front of the queue is the charge that has actually
+    # been unpaid longest — not merely the most recent one — which is the whole
+    # reason a reminder can name a date the resident recognises.
+    #
+    # The sort key is the PAIR, not postedAt alone: postedAt is whole-second
+    # canonical UTC (time.rfc3339_utc), so two charges rung up in the same
+    # second are indistinguishable by time and the transaction key is what makes
+    # the order total. Without it the op and the statement can disagree about
+    # which of the two is the head, and so about the due date.
+    rows = sorted(entries, key=lambda e: (e["postedAt"], e["key"]))
+    open_debits = []
+    surplus = 0
+    balance_cents = 0
+    for r in rows:
+        amount = r["amountCents"]
+        if r["type"] == "debit":
+            balance_cents += amount
+            if surplus >= amount:
+                surplus -= amount
+                continue
+            amount -= surplus
+            surplus = 0
+            open_debits.append({"postedAt": r["postedAt"], "remaining": amount})
+        elif r["type"] == "credit":
+            balance_cents -= amount
+            remaining = amount
+            # Starlark has no while: each pass either zeroes the remainder or
+            # retires one open debit, so len+1 passes is an exact bound, not a
+            # budget that can run out mid-walk.
+            for _i in range(len(open_debits) + 1):
+                if remaining <= 0 or len(open_debits) == 0:
+                    break
+                if open_debits[0]["remaining"] > remaining:
+                    open_debits[0]["remaining"] -= remaining
+                    remaining = 0
+                else:
+                    remaining -= open_debits[0]["remaining"]
+                    open_debits = open_debits[1:]
+            surplus += remaining
+    # An empty queue and a non-positive balance are the same condition under
+    # FIFO consumption (credits >= debits leaves nothing open, and vice versa),
+    # which is why deriveStatement's early "balance <= 0 has nothing to age"
+    # return needs no counterpart here.
+    if len(open_debits) == 0:
+        return None, balance_cents
+    return open_debits[0]["postedAt"], balance_cents
+
+def carry_arrears(doc):
+    out = {}
+    for k, v in doc.data.items():
+        out[k] = v
+    return out
+
+NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+
+def is_cafeaccount_key(key):
+    # Contract #1's whole vertex grammar for a cafeaccount, not a prefix test —
+    # derive_reads returns keys the Processor validates against that grammar and
+    # answers a malformed one with a DeriveReadsInvalid hydration fault raised
+    # BEFORE the operation's own validation runs, which would turn this branch's
+    # clean "InvalidArgument: accountKey" into an opaque hydration failure. The
+    # same helper transactionDDLScript carries, for the same reason.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "cafeaccount":
+        return False
+    if len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g), for the same reason transactionDDLScript's own
+    # derive_reads exists: the .arrears write below is a bare update
+    # auto-conditioned on the step-4 hydrated revision ONLY for a key the
+    # operation declared (Contract #3 §3.2), and contextHint is caller-supplied
+    # and never enforced. A dispatch that omitted the declaration would get a
+    # live read and an UNCONDITIONED write, so two evaluations racing one
+    # account (a redelivery alongside a fresh dispatch) could each decide to
+    # send against the same prior state. The cafeArrearsReminders target
+    # declares the same key (targets.go); that DOCUMENTS the read set, this
+    # GUARANTEES it.
+    #
+    # optionalReads, never reads: every account alive today carries no .arrears
+    # at all, and a required read's absence is a HydrationMiss that would block
+    # the very first evaluation of each one.
+    if op.operationType != "EvaluateCafeArrears":
+        return {}
+    acct_key = optional_string(op.payload, "accountKey")
+    if not is_cafeaccount_key(acct_key):
+        return {}
+    return {"optionalReads": [acct_key + ".arrears"]}
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
+
+    if ot == "EvaluateCafeArrears":
+        # actor-guard: (primordial) restricted to Weaver's dispatch actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind this
+        # op is operator/Scope:"any", which admits every operator-role holder —
+        # far wider than the one engine that dispatches the
+        # cafeArrearsReminders directOp playbook. accountKey arrives off the
+        # payload and the account it names is forwarded in the
+        # external.notification body the bridge turns into a real message to a
+        # resident, so a wider submitter set is a forged send: an arbitrary
+        # operator naming any account it likes and having the platform tell that
+        # resident they owe money. First statement in the branch: it also denies
+        # the payload-shape, vertex-alive and history-shape oracles beneath it.
+        if op.actor != primordialActor["weaver"]:
+            fail("AuthDenied: EvaluateCafeArrears is restricted to Weaver's dispatch actor; got " + op.actor)
+
+        acct_key = required_string(p, "accountKey")
+        parts_of(acct_key, "accountKey", "cafeaccount")
+
+        # Liveness guard: never mint arrears state (or a 4-segment aspect key)
+        # on an absent or tombstoned account. The op hydrates [accountKey]
+        # (the target's Reads), so the root is in state.
+        if not vertex_alive(state, acct_key):
+            fail("UnknownAccount: " + acct_key + " is absent or tombstoned; no arrears evaluated")
+
+        # The lease this account is held for, supplied by the playbook as
+        # Params{leaseAppKey: row.leaseAppKey} (the lens's own heldFor walk).
+        # Optional: it is routed into the notification's params for the
+        # adapter's own addressing, and nothing this op decides depends on it.
+        lease_key = optional_string(p, "leaseAppKey")
+        if lease_key != None:
+            # Held to the grammar even though nothing this op DECIDES depends on
+            # it: the value is copied verbatim into the notification's params,
+            # which the bridge's adapter addresses a real message from. An
+            # unchecked payload field reaching an external send is the same
+            # forged-send surface the actor guard above closes, one step later.
+            parts_of(lease_key, "leaseAppKey", "leaseapp")
+
+        # The op's own timestamp, normalized to canonical UTC so the lexical
+        # compare against dueAt below is sound to the second (the lease-signing
+        # idiom; a raw compare mis-answers for the first second after an
+        # instant, '.' sorting below 'Z').
+        evaluated_at = time.rfc3339_utc(op.submittedAt)
+
+        arrears_key = acct_key + ".arrears"
+        # read-posture: (d) optionalReads — derived server-side by this script's
+        # own derive_reads(op) for EvaluateCafeArrears (Contract #2 §2.5 class
+        # (g)), and declared statically by the cafeArrearsReminders target's
+        # GapActionSpec.OptionalReads (targets.go). Two questions, not one:
+        # absence decides the WRITE VERB (a create is refused against a
+        # tombstone, Contract #3 §3.3, so only a genuinely absent key is
+        # minted), presence-and-live decides whether there is prior episode
+        # state to carry.
+        arrears_doc = kv.Read(arrears_key)
+        arrears_absent = arrears_doc == None
+        prior = {}
+        if arrears_doc != None and not arrears_doc.isDeleted:
+            # The CLASS, not just the key — the doctrine post_entry applies to
+            # .balance and reversed_charge to the charge's .entry: this package
+            # is the sole writer of a .arrears aspect and writes exactly that
+            # class, so a document of any other class here is a fault to refuse,
+            # never state to decide a send on.
+            if not hasattr(arrears_doc, "class") or getattr(arrears_doc, "class") != "cafeAccountArrears":
+                fail("InvalidState: this account's arrears aspect is not a cafeAccountArrears")
+            prior = carry_arrears(arrears_doc)
+
+        entries, history_too_long = arrears_entries(acct_key)
+
+        if history_too_long:
+            # DEGRADE, never refuse. The account's history outran the replay
+            # budget, so the FIFO head is unknown and no send can be justified —
+            # but a rejection would be a permanent silent stop: the row's own gap
+            # is the only thing that re-drives this op, and a rejected op leaves
+            # it open, so Weaver would re-dispatch the same doomed evaluation
+            # every window and nothing would ever be sent or seen. Recording the
+            # exhaustion instead makes it OBSERVABLE and QUIET: the lens
+            # suppresses both the gap and the timer on historyTooLong, so the
+            # dispatch loop stops while the row stays in the weaver-targets
+            # bucket for an operator to find. What was already recorded is
+            # carried untouched — a reminder already sent stays recorded as sent,
+            # and a due date already armed is not erased by an evaluation that
+            # could not read the history. stale is dropped: it asks for a
+            # recomputation this op has just attempted, and re-asking would
+            # re-open the gap the degrade is closing. post_entry's own stale
+            # write drops historyTooLong in turn, so the next posted entry buys
+            # exactly one more attempt — bounded to one op per entry, never a
+            # loop.
+            data = {"evaluatedAt": evaluated_at, "historyTooLong": True}
+            for carried in ["dueAt", "remindedFor", "sentAt"]:
+                carried_value = prior.get(carried)
+                if carried_value != None:
+                    data[carried] = carried_value
+            if arrears_absent:
+                mutations = [make_aspect(acct_key, "arrears", "cafeAccountArrears", data)]
+            else:
+                mutations = [make_aspect_update(acct_key, "arrears", "cafeAccountArrears", data)]
+            return {"mutations": mutations,
+                    "events": [{"class": "account.arrearsEvaluated",
+                                "data": {"accountKey": acct_key, "dueAt": data.get("dueAt"),
+                                         "sentAt": data.get("sentAt"), "balanceCents": None,
+                                         "historyTooLong": True}}],
+                    "response": {"primaryKey": acct_key}}
+
+        head_posted_at, balance_cents = arrears_head(entries)
+
+        # evaluatedAt is written on EVERY outcome, including "owes nothing":
+        # its absence is what opens the convergence gap for an account that has
+        # never been evaluated (the 56 accounts standing at install), so a run
+        # that recorded nothing would re-dispatch forever.
+        data = {"evaluatedAt": evaluated_at}
+        events = []
+
+        if head_posted_at != None:
+            due_at = time.rfc3339_add(head_posted_at, ARREARS_GRACE_DURATION)
+            data["dueAt"] = due_at
+            reminded_for = prior.get("remindedFor")
+            sent_at = prior.get("sentAt")
+            if due_at <= evaluated_at:
+                # The head has come due. remindedFor records THIS due date
+                # whatever else happens: it is the conjunct the convergence lens
+                # reads, so leaving it naming an older head would hold the gap
+                # open and have Weaver re-dispatch this same evaluation forever.
+                data["remindedFor"] = due_at
+                # Whether anything is SENT is a different question, and its
+                # answer is sentAt's absence. The unit of "one reminder" is the
+                # EPISODE — the stretch from the charge that took the account
+                # from square to owing, until the balance comes back to zero —
+                # not the head, which a partial payment moves from one open
+                # charge to the next while the resident stays continuously in
+                # arrears. Keying the send off remindedFor instead would nag on
+                # every part-payment: pay some, the head shifts to a charge whose
+                # own term has also passed, and a second notification goes out
+                # for a debt the resident is visibly paying down. sentAt is
+                # carried across every write of a live episode and dropped only
+                # where the episode itself ends (post_entry's zero-balance and
+                # new-episode writes, and the no-open-head branch below), so its
+                # absence means exactly "nothing has gone out in this episode".
+                if sent_at != None:
+                    data["sentAt"] = sent_at
+                else:
+                    data["sentAt"] = evaluated_at
+                    # Keyed on (accountKey, dueAt): a redelivery of the same due
+                    # episode reuses the key so the adapter dedups, while a later
+                    # episode (a new head, a new due date) mints a fresh one and
+                    # sends again. Fired off this op's own transactional outbox —
+                    # no Loom pattern, the bridge's dispatch path is fully
+                    # generic.
+                    ext_ref = acct_key + ":" + due_at
+                    notif_params = {"accountKey": acct_key, "reminderType": "cafeArrears",
+                                    "dueAt": due_at, "balanceCents": balance_cents}
+                    if lease_key != None:
+                        notif_params["leaseAppKey"] = lease_key
+                    events.append({"class": "external.notification",
+                                   "data": {"instanceKey": ext_ref, "adapter": "notification",
+                                            "replyOp": "RecordCafeArrearsReminderNotification",
+                                            "externalRef": ext_ref, "idempotencyKey": ext_ref,
+                                            "params": notif_params}})
+            else:
+                # The head is not due yet: the timer re-arms at this dueAt, and
+                # the episode's record — whichever head it was reminded for, and
+                # when — is carried forward unchanged. Dropping it would re-open
+                # the gate and send a second time for the same episode.
+                if reminded_for != None:
+                    data["remindedFor"] = reminded_for
+                if sent_at != None:
+                    data["sentAt"] = sent_at
+        # head_posted_at == None: nothing is owed, so the episode is over and
+        # {evaluatedAt} alone is written — dueAt, remindedFor, sentAt and stale
+        # all go with it, which is what lets the NEXT charge open a clean
+        # episode rather than inherit this one's send record.
+        #
+        # stale is never carried on ANY path: recomputing the head from the
+        # account's own history is precisely what stale asks for, and it has
+        # just happened. historyTooLong goes the same way for the same reason —
+        # this evaluation read the whole history, so whatever recorded that it
+        # once could not is answered, and the lens un-suppresses the row.
+
+        if arrears_absent:
+            mutations = [make_aspect(acct_key, "arrears", "cafeAccountArrears", data)]
+        else:
+            mutations = [make_aspect_update(acct_key, "arrears", "cafeAccountArrears", data)]
+
+        events.append({"class": "account.arrearsEvaluated",
+                       "data": {"accountKey": acct_key, "dueAt": data.get("dueAt"),
+                                "sentAt": data.get("sentAt"), "balanceCents": balance_cents}})
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": acct_key}}
 
     if ot == "CreateAccount":
         lease_key = required_string(p, "leaseAppKey")
@@ -168,7 +578,22 @@ def execute(state, op):
 // (nothing conditioned but the CAS itself) the loser's commit is simply refused
 // on the stale revision. Either way exactly one refund posts, which a ceiling
 // recomputed by enumerating prior reversals could never guarantee.
-const transactionDDLScript = `
+//
+// The third maintained fact is the account's .arrears episode state, whose
+// whole lifetime is the table in cafe-ledger-design.md's Inc 4 section. It is
+// deliberately COARSE — post_entry records only "a new arrears episode opened
+// here" (a charge against an account that owed nothing, whose own postedAt
+// therefore IS the FIFO head), "nothing is owed any more", or "what was recorded
+// no longer describes this account" (the stale mark). It never tries to move a
+// head a payment shifted: which charge is now oldest-and-open is a function of
+// the whole history, not of the entry being posted, so that recomputation
+// belongs to EvaluateCafeArrears (accountDDLScript), which the stale mark asks
+// for. A legacy account — one carrying no .balance, so this op has no before/
+// after balance to reason with — can only ever mark existing state stale; it
+// never mints arrears state off a number it does not have.
+var transactionDDLScript = arrearsGracePrelude + transactionDDLScriptBody
+
+const transactionDDLScriptBody = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -252,6 +677,29 @@ def require_cents(p, name):
     if v != int(v):
         fail("InvalidArgument: " + name + ": required whole cents, got " + str(v))
     return int(v)
+
+def carry_arrears(doc):
+    # Every field of the account's recorded arrears state, copied forward, with
+    # ONE exception. The marks post_entry adds are ADDITIONS to that state, never
+    # a rewrite of it: the send record (remindedFor, sentAt) is what stops a
+    # second notification going out for an episode already reminded for, and
+    # dropping it while marking the state stale would send twice for one debt.
+    #
+    # historyTooLong is the exception, and only this script drops it. It records
+    # that an evaluation could not read the account's history inside its replay
+    # budget, and the lens holds the row QUIET while it stands — no gap, no
+    # timer. Carrying it across a posted entry would make that quiet permanent
+    # for the life of the account. Dropping it here is what buys exactly one more
+    # attempt per entry: this write also sets stale, so the gap re-opens once,
+    # the evaluation runs once, and if the history is still too long it records
+    # the mark again and the row goes quiet again. One op per entry, never a
+    # loop.
+    out = {}
+    for k, v in doc.data.items():
+        if k == "historyTooLong":
+            continue
+        out[k] = v
+    return out
 
 def dollars(cents):
     # Cents rendered the way the counter and the statement show money. The
@@ -910,6 +1358,7 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
     # auto-conditioned on the step-4 hydrated revision, so it serializes AND
     # retries under a concurrent writer, and revives a tombstone that a create
     # would only collide with (make_aspect_update's own comment).
+    new_balance_cents = None
     if balance_cents != None:
         if entry_type == "debit":
             new_balance_cents = balance_cents + amount_cents
@@ -921,6 +1370,84 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         else:
             mutations.append(make_aspect_update(acct_key, "balance", "cafeAccountBalance",
                                                 {"balanceCents": new_balance_cents}))
+
+    # The account's .arrears episode state (class cafeAccountArrears, ddls.go),
+    # decided here rather than beside .balance because every branch below needs
+    # this entry's own postedAt and the balance it leaves behind.
+    arrears_key = acct_key + ".arrears"
+    # read-posture: (d) optionalReads — derived server-side by this script's own
+    # derive_reads(op) for all three entry ops (Contract #2 §2.5 class (g)), and
+    # declared statically by opmetas.go's OpDispatchSpec.OptionalReads +
+    # cafe-domain's targets.go GapActionSpec.OptionalReads. Absence-tolerant:
+    # no account carries .arrears until something opens an episode on it.
+    arrears_doc = kv.Read(arrears_key)
+    # Two questions again, the .balance split exactly: absence picks the WRITE
+    # VERB (a create is refused against a tombstone, Contract #3 §3.3, so only a
+    # genuinely absent key is minted and a tombstoned one is revived by the
+    # update), presence-and-live decides whether there is state to carry.
+    arrears_absent = arrears_doc == None
+    arrears_live = arrears_doc != None and not arrears_doc.isDeleted
+    if arrears_live:
+        # The CLASS, not just the key — the doctrine .balance and the refund
+        # tally both apply: this package is the sole writer of a .arrears aspect
+        # and writes exactly that class.
+        if not hasattr(arrears_doc, "class") or getattr(arrears_doc, "class") != "cafeAccountArrears":
+            fail("InvalidState: this account's arrears aspect is not a cafeAccountArrears")
+
+    arrears_data = None
+    if balance_cents == None:
+        # LEGACY account (no .balance, and this op did not backfill one): there
+        # is no before/after balance, so this op cannot tell an episode opening
+        # from an episode continuing. It marks what already exists STALE — which
+        # is a request for EvaluateCafeArrears to recompute the head from the
+        # account's own history — and mints nothing where nothing exists, since
+        # a legacy account with no arrears state is already opening the
+        # never-evaluated gap.
+        if arrears_live:
+            arrears_data = carry_arrears(arrears_doc)
+            arrears_data["stale"] = True
+    elif entry_type == "debit":
+        if balance_cents <= 0 and new_balance_cents > 0:
+            # A NEW episode. The account owed nothing before this charge and
+            # owes something after it, so this charge is itself the FIFO-oldest
+            # open debit and its own postedAt starts the net term — the one case
+            # a posted entry can name the head without replaying anything. Every
+            # field of the finished episode (remindedFor, sentAt, stale) is
+            # dropped with the rewrite, which is what lets this episode be
+            # reminded for on its own merits rather than inheriting the last
+            # one's send record.
+            arrears_data = {"dueAt": time.rfc3339_add(posted_at, ARREARS_GRACE_DURATION),
+                            "evaluatedAt": posted_at}
+        # Nothing is written on either of the other two shapes:
+        #
+        #   - balance_cents > 0: the head is an older charge still open and this
+        #     charge queues behind it. A debit that re-stamped dueAt would push
+        #     the due date of a balance outstanding for weeks back to today.
+        #   - new_balance_cents <= 0: the account is IN CREDIT and stays there —
+        #     a refund left it owing less than nothing, and this charge only eats
+        #     into that credit. Under the FIFO the surplus prepays this charge
+        #     outright, so there is no open debit and no head at all; minting an
+        #     episode here would arm a timer that reminds a resident about money
+        #     they do not owe.
+    elif new_balance_cents <= 0:
+        # Paid off (or into credit). The episode is over: {evaluatedAt} alone,
+        # dropping dueAt/remindedFor/sentAt/stale, so no timer stays armed and
+        # the next charge opens a clean episode.
+        arrears_data = {"evaluatedAt": posted_at}
+    elif arrears_live:
+        # A PARTIAL payment (or a refund that left a balance): what is recorded
+        # may no longer describe this account — the FIFO head can have moved to a
+        # later charge with a later due date, which this op cannot compute. Carry
+        # every field and mark it stale; the convergence lens reads stale as an
+        # open gap and Weaver dispatches the recomputation.
+        arrears_data = carry_arrears(arrears_doc)
+        arrears_data["stale"] = True
+
+    if arrears_data != None:
+        if arrears_absent:
+            mutations.append(make_aspect(acct_key, "arrears", "cafeAccountArrears", arrears_data))
+        else:
+            mutations.append(make_aspect_update(acct_key, "arrears", "cafeAccountArrears", arrears_data))
 
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
@@ -998,6 +1525,11 @@ def derive_reads(op):
     # would block every entry against such an account rather than let a payment
     # backfill it.
     #
+    # .arrears rides the same declaration for the same two reasons: post_entry's
+    # own episode write is a bare update that is only auto-conditioned because
+    # the key is declared, and the aspect is absent on every account until
+    # something opens an episode on it.
+    #
     # The op argument is a struct -- op.operationType, op.actor, op.payload
     # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
     # pass, and a derivation that reads state is a read, not a derivation.
@@ -1010,7 +1542,7 @@ def derive_reads(op):
     acct_key = optional_string(op.payload, "accountKey")
     if not is_cafeaccount_key(acct_key):
         return {}
-    return {"optionalReads": [acct_key + ".balance"]}
+    return {"optionalReads": [acct_key + ".balance", acct_key + ".arrears"]}
 
 def execute(state, op):
     ot = op.operationType

@@ -71,7 +71,14 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// Absence-tolerant (not Reads) because an account minted under
 					// cafe-ledger < 0.4.0 carries no .balance and a charge against one
 					// posts without writing it — only a payment ever backfills.
-					OptionalReads: []string{"row.accountKey.balance"},
+					//
+					// row.accountKey.arrears is the account's arrears-episode state,
+					// declared on the same terms: a charge posted to an account that
+					// owed nothing OPENS an arrears episode by writing that aspect, and
+					// that write is only auto-conditioned on the revision it was
+					// hydrated at because the key is declared. Absence-tolerant because
+					// no account carries the aspect until an episode opens on it.
+					OptionalReads: []string{"row.accountKey.balance", "row.accountKey.arrears"},
 				},
 			},
 		},

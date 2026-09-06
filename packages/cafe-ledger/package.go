@@ -57,12 +57,35 @@
 //     a payment computes it from the account's own history; a charge or refund
 //     against such an account posts and leaves it alone.
 //
+//   - The `cafeAccountArrears` aspect type (DDL `cafeAccountArrears`) —
+//     vtx.cafeaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?,
+//     sentAt?, stale?}, the account's arrears-episode state. A charge against an
+//     account that owed nothing opens an episode by recording the due date its
+//     own postedAt implies; a payment that clears the balance ends it; a partial
+//     payment marks it stale, because which charge is now oldest-and-open is a
+//     function of the whole history rather than of the entry being posted.
+//
+//   - The `cafeArrearsReminders` weaver-target lens + its §10.8 playbook — this
+//     package's first ORCHESTRATION. It arms Weaver's @at timer at the recorded
+//     due date, opens one gap when that timer fires (or when the state is stale,
+//     or was never evaluated at all) and dispatches
+//     directOp(EvaluateCafeArrears), which ages the account with the same FIFO
+//     the resident's own statement runs and, once per episode, fires the
+//     external.notification the bridge turns into a real message.
+//     `.arrears.remindedFor` names the due date already reminded for, so a
+//     re-dispatched or redelivered evaluation recomputes the same head and sends
+//     nothing. `RecordCafeArrearsReminderNotification` records the outcome as an
+//     audit-only aspect (notifications.go) and does not gate the lens.
+//
 //   - The `cafeLedgerHistory` lens (one row per transaction, carrying the
 //     reverses and settles hops) the house-tab history FE reads (P5).
 //
 //   - The `cafeLeaseAccounts` lens (one row per lease, accountKey null until
 //     one is opened) — the FE's only way to resolve a lease's café account
-//     key, since it can no longer be derived from leaseAppKey.
+//     key, since it can no longer be derived from leaseAppKey. It also carries
+//     the account's arrears due date and reminder timestamp, which is what lets
+//     the front-desk grid and the resident's statement say when a reminder went
+//     out without a second read model.
 //
 // Mirrors packages/loftspace-ledger and packages/clinic-ledger, with the
 // account held for the SAME leaseapp loftspace-ledger already anchors to
@@ -78,7 +101,9 @@
 // ledgerHistory): a canonicalName is global across every installed package
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision).
 //
-// Depends lease-signing (the leaseapp vertex type an account is heldFor).
+// Depends lease-signing (the leaseapp vertex type an account is heldFor) and
+// orchestration-base (MarkExpired and the freshnessExpiry marker the arrears
+// @at firing writes onto the account).
 package cafeledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -86,7 +111,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.4.0",
+	Version: "0.5.0",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
 		"(DebitAccount/CreditCafeAccount/RefundCafeCharge, entries linked to the account via postedTo, each " +
@@ -97,10 +122,17 @@ var Package = pkgmgr.Definition{
 		"account's outstanding balance on every leg. RefundCafeCharge gives " +
 		"back a posted charge as a credit anchored on that charge by a reverses link, bounded by a CAS-pinned " +
 		"refundedCents tally on that charge's own entry rather than by the balance, staff-only at every scope. " +
-		"Depends lease-signing.",
-	Depends:     []string{"lease-signing"},
-	DDLs:        DDLs(),
-	Lenses:      Lenses(),
-	Permissions: Permissions(),
-	OpMetas:     OpMetas(),
+		"Also ships the arrears reminder: the account's .arrears episode aspect (a charge against an account that " +
+		"owed nothing records the due date its own postedAt implies; a payment that clears the balance ends the " +
+		"episode; a partial one marks it stale) + the cafeArrearsReminders weaver-target convergence lens, whose " +
+		"§10.8 playbook dispatches EvaluateCafeArrears — that op ages the account with the same FIFO the resident's " +
+		"statement runs and fires ONE external.notification per arrears episode to the bridge's \"notification\" " +
+		"adapter, keyed on (accountKey, dueAt). RecordCafeArrearsReminderNotification records the outcome. " +
+		"Depends lease-signing + orchestration-base.",
+	Depends:       []string{"lease-signing", "orchestration-base"},
+	DDLs:          DDLs(),
+	Lenses:        Lenses(),
+	Permissions:   Permissions(),
+	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 }

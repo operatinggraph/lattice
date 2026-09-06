@@ -10,10 +10,15 @@ import (
 
 // leaseAccountProjection is one row of the cafe-ledger `cafeLeaseAccounts`
 // lens — one per lease, AccountKey empty until OpenTab's settlement has
-// triggered CreateAccount for the first time.
+// triggered CreateAccount for the first time. ArrearsDueAt and
+// ArrearsReminderSentAt are informational columns off the account's own
+// `.arrears` aspect (both empty for a lease with no account, or an account
+// nothing has yet aged).
 type leaseAccountProjection struct {
-	LeaseAppKey string `json:"leaseAppKey"`
-	AccountKey  string `json:"accountKey"`
+	LeaseAppKey           string `json:"leaseAppKey"`
+	AccountKey            string `json:"accountKey"`
+	ArrearsDueAt          string `json:"arrearsDueAt"`
+	ArrearsReminderSentAt string `json:"arrearsReminderSentAt"`
 }
 
 // leaseRow is the lease-picker row the POS/front-desk views render.
@@ -36,7 +41,7 @@ func computeLeases(keys []string, get kvGetter) []leaseRow {
 		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
 			continue
 		}
-		rows = append(rows, leaseRow(p))
+		rows = append(rows, leaseRow{LeaseAppKey: p.LeaseAppKey, AccountKey: p.AccountKey})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].LeaseAppKey < rows[j].LeaseAppKey })
 	return rows

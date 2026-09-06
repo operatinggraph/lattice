@@ -79,6 +79,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"appointmentReminders":     hopIndexed,
 	"augurDispatchPending":     hopIndexed,
 	"backgroundCheckFreshness": hopIndexed,
+	"cafeArrearsReminders":     hopIndexed,
 	"cafeStaleTabSettlement":   hopIndexed,
 	"cafeTabSettlement":        hopIndexed,
 	"capability":               hopIndexed,

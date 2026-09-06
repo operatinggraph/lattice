@@ -1,5 +1,5 @@
 name: cafe-ledger
-version: 0.4.0
+version: 0.5.0
 description: |
   Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount,
   independently-minted id, one per lease via a .cafeLedgerAccount guard
@@ -15,10 +15,19 @@ description: |
   and staff alike. RefundCafeCharge gives back a posted charge as
   a credit anchored on that charge by a reverses link, bounded by a CAS-pinned
   refundedCents tally on that charge's own entry rather than by the balance,
-  and is staff-only at every scope. Depends
-  lease-signing.
+  and is staff-only at every scope. Also ships the arrears reminder: the
+  account's .arrears episode aspect (a charge against an account that owed
+  nothing records the due date its own postedAt implies; a payment that clears
+  the balance ends the episode; a partial one marks it stale) + the
+  cafeArrearsReminders weaver-target convergence lens, whose playbook dispatches
+  EvaluateCafeArrears — that op ages the account with the same FIFO the
+  resident's statement runs and fires ONE external.notification per arrears
+  episode to the bridge's "notification" adapter, keyed on (accountKey, dueAt).
+  RecordCafeArrearsReminderNotification records the outcome as an audit-only
+  aspect. Depends lease-signing + orchestration-base.
 depends:
   - lease-signing
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: cafeaccount
@@ -27,8 +36,14 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: cafeAccountBalance
       class: meta.ddl.aspectType
+    - canonicalName: cafeAccountArrears
+      class: meta.ddl.aspectType
     - canonicalName: cafetransaction
       class: meta.ddl.vertexType
+    - canonicalName: cafeArrearsNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: cafeAccountArrearsNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: cafeLedgerHistory
       adapter: nats-kv
@@ -38,9 +53,18 @@ declares:
       adapter: nats-kv
       bucket: cafe-lease-accounts
       engine: full
+    - canonicalName: cafeArrearsReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  weaverTargets:
+    - targetId: cafeArrearsReminders
+      lensRef: cafeArrearsReminders
   opMetas:
     - operationType: CreditCafeAccount
     - operationType: RefundCafeCharge
+    - operationType: EvaluateCafeArrears
+    - operationType: RecordCafeArrearsReminderNotification
   permissions:
     - operationType: CreateAccount
       scope: any
@@ -57,3 +81,9 @@ declares:
     - operationType: RefundCafeCharge
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: EvaluateCafeArrears
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordCafeArrearsReminderNotification
+      scope: any
+      grantsTo: [operator]

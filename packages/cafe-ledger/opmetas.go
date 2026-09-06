@@ -58,8 +58,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // key is what auto-conditions the update the script emits for it (Contract #3
 // §3.2), so a submitter that omitted it would otherwise get an unconditioned
 // update and lose one of two concurrent entries.
+//
+// EvaluateCafeArrears and the arrears notification replyOp carry a bare
+// OpMetaSpec — no Presentation, no Dispatch — for discoverability alone, parity
+// with wellness-reminders' own reminder + replyOp metas. Neither has a form to
+// render: Weaver's actuator resolves the first from the §10.8 playbook and the
+// bridge resolves the second from the event body, so neither reads a descriptor.
+// The S1 gate does not ask them for one either — both are granted to `operator`
+// alone.
 func OpMetas() []pkgmgr.OpMetaSpec {
-	return []pkgmgr.OpMetaSpec{
+	return append([]pkgmgr.OpMetaSpec{
 		{
 			OperationType: "CreditCafeAccount",
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -90,7 +98,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// Reads) so a payment against an account minted under
 				// cafe-ledger < 0.4.0 backfills its .balance instead of
 				// HydrationMiss-rejecting.
-				OptionalReads: []string{"{payload.accountKey}.balance"},
+				//
+				// .arrears rides beside it, absence-tolerant for the same two
+				// reasons: no account carries the aspect until something opens an
+				// arrears episode on it, and the episode write post_entry emits
+				// for it is a bare update that is only auto-conditioned on the
+				// hydrated revision because the key is declared.
+				OptionalReads: []string{"{payload.accountKey}.balance", "{payload.accountKey}.arrears"},
 				// Two walks the script runs: the operator-role confinement
 				// probe (workplace_exempt's short-circuit over the actor's own
 				// holdsRole links, scripts.go actor_holds_operator), and — only
@@ -147,7 +161,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// refund keeps it in lockstep like every other posted entry.
 				// Where it does NOT exist a refund leaves the account alone
 				// rather than backfilling — hence no postedTo replay below.
-				OptionalReads: []string{"{payload.accountKey}.balance"},
+				// .arrears rides beside it on the same terms: a refund that
+				// leaves a balance marks the recorded arrears state stale, and
+				// that write is only auto-conditioned because the key is
+				// declared.
+				OptionalReads: []string{"{payload.accountKey}.balance", "{payload.accountKey}.arrears"},
 				// Two live walks the script runs: the operator-role probe
 				// (workplace_exempt's short-circuit over the actor's own
 				// holdsRole links) and the reversed charge's single postedTo
@@ -161,5 +179,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
-	}
+		{OperationType: arrearsOp},
+	}, notificationOpMetas()...)
 }

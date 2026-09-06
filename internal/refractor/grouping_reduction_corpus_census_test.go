@@ -79,6 +79,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"backgroundCheckFreshness":          {"p p!lapsedAt", 0},
 	"cafeIdentitiesRead":                {"p", 0},
 	"cafeLeaseAccounts":                 {"p", 0},
+	"cafeArrearsReminders":              {"p", 0},
 	"cafeLeaseWorkplaces":               {"p", 0},
 	"cafeLedgerHistory":                 {"p", 0},
 	"cafeStaleTabSettlement":            {"p", 0},

@@ -266,16 +266,21 @@ FIFO must be the same algorithm (surplus carry-forward, sort by `(postedAt, tran
 `sortLedgerRows` `ledger.go:28-35`); pin both against one shared vector table.
 
 **`.arrears` state table** (class `cafeAccountArrears`; fields `evaluatedAt` always, `dueAt?`, `remindedFor?`,
-`sentAt?`, `stale?`). B = hydrated `.balance.balanceCents` before the entry, B′ after; "legacy" = no cache.
+`sentAt?`, `stale?`, `historyTooLong?`). B = hydrated `.balance.balanceCents` before the entry, B′ after;
+"legacy" = no cache. An **episode** is the stretch from the debit that takes B from ≤ 0 to > 0 until the
+balance returns to ≤ 0; `sentAt` is per-EPISODE, `remindedFor` per-HEAD (a partial payment moves the head
+within one episode).
 | event | write |
 |---|---|
 | CreateAccount | none (the account owes nothing; `evaluatedAt = null` opens `missing_evaluation` once, the op writes `{evaluatedAt}`) |
-| debit, B ≤ 0, B′ > 0 | `{dueAt: postedAt + ArrearsGraceDays, evaluatedAt: postedAt}` — a new episode; create if absent, update if present (drops the old `remindedFor`/`sentAt`/`stale`) |
+| debit, B ≤ 0, B′ > 0 | `{dueAt: postedAt + ArrearsGraceDays, evaluatedAt: postedAt}` — a new episode; create if absent, update if present (drops the old `remindedFor`/`sentAt`/`stale`/`historyTooLong`) |
 | debit, B > 0 | none — the FIFO head is unchanged |
+| debit, B ≤ 0, B′ ≤ 0 | none — the account is in credit and stays there; the surplus prepays the charge, so there is no open debit to age |
 | credit/refund, B′ ≤ 0 | `{evaluatedAt: postedAt}` — nothing owed, no timer; create or update |
-| credit/refund, B′ > 0 | present → carry every field + `stale: true`; absent → none |
-| legacy account, any entry | present → carry + `stale: true`; absent → none |
-| `EvaluateCafeArrears` | recompute the FIFO head over the bounded enumeration: no open head → `{evaluatedAt}`; head due D\* in the future → `{dueAt: D\*, evaluatedAt}` + carry `remindedFor`/`sentAt`; D\* passed and `remindedFor == D\*` → same, clears `stale`; D\* passed and `remindedFor ≠ D\*` → `{dueAt: D\*, remindedFor: D\*, sentAt: now, evaluatedAt}` + `external.notification` keyed `<accountKey>:<D\*>` |
+| credit/refund, B′ > 0 | present → carry every field except `historyTooLong` + `stale: true`; absent → none |
+| legacy account, any entry | present → carry (minus `historyTooLong`) + `stale: true`; absent → none |
+| `EvaluateCafeArrears` | recompute the FIFO head over the bounded enumeration: no open head → `{evaluatedAt}` (episode over — `sentAt` goes with it); head due D\* in the future → `{dueAt: D\*, evaluatedAt}` + carry `remindedFor`/`sentAt`; D\* passed → `{dueAt: D\*, remindedFor: D\*, evaluatedAt}` ALWAYS (this is what closes the gap), and **`sentAt` ABSENT is the send condition** — absent → `sentAt: now` + `external.notification` keyed `<accountKey>:<D\*>`; present → carried unchanged, nothing sent (one notification per EPISODE, not per head). `stale`/`historyTooLong` are never carried |
+| `EvaluateCafeArrears`, history past the replay budget | DEGRADE, never refuse: `{evaluatedAt: now, historyTooLong: true}` + carry `dueAt`/`remindedFor`/`sentAt` as they stood, `stale` dropped, no notification, op ACCEPTED. A refusal would be a permanent silent stop — the row's own gap is the only thing that re-drives the op, so a rejected op leaves it open and Weaver re-dispatches a doomed evaluation every window. The lens suppresses **both** `freshUntil` and `missing_evaluation` on `historyTooLong`, so the row goes quiet but stays visible in `weaver-targets`; the next posted entry drops the flag and buys exactly one more attempt |
 Crash/replay/redelivery: every `.arrears` write is create-if-absent (absence-conditioned via the declared
 optional read) or a bare update auto-conditioned on the hydrated revision — a race retries, never last-write-
 wins; a redelivered `Evaluate` recomputes to the same answer and the notification dedups at the adapter on the
@@ -284,12 +289,15 @@ no `.arrears` → 56 `missing_evaluation` gaps at install, one op each, then qui
 
 Lens `cafeArrearsReminders` (anchor `MATCH (a:cafeaccount {key: $actorKey})`, `OPTIONAL MATCH
 (a)-[:heldFor]->(l:leaseapp)`): columns `actorKey`, `entityKey`, `leaseAppKey`, `dueAt`, `remindedFor`,
-`reminderSentAt`, `stale`, `evaluatedAt`; `freshUntil = dueAt` when `dueAt` set ∧ `remindedFor <> dueAt` ∧ ¬stale
-∧ ¬(`freshnessExpiry.byTarget.cafeArrearsReminders >= dueAt`); one gap `missing_evaluation` (=`violating`) =
-`evaluatedAt = null` ∨ `stale = true` ∨ (`dueAt` set ∧ `remindedFor <> dueAt` ∧ `byTarget >= dueAt`). `(x = null)`
-is the engine's null test; a mis-compiled lens FALLS BACK silently — every conjunct gets a pin in
-`lens_cypher_test.go` (pending / due / sent / stale / cleared / never-evaluated), with a `recordLapse`-style
-helper copied from `wellness-reminders/lens_cypher_test.go:103-125`.
+`reminderSentAt`, `stale`, `historyTooLong`, `evaluatedAt`; `freshUntil = dueAt` when `dueAt` set ∧
+`remindedFor <> dueAt` ∧ ¬stale ∧ ¬historyTooLong ∧ ¬(`freshnessExpiry.byTarget.cafeArrearsReminders >= dueAt`);
+one gap `missing_evaluation` (=`violating`) = ¬historyTooLong ∧ (`evaluatedAt = null` ∨ `stale = true` ∨
+(`remindedFor <> dueAt` ∧ `byTarget >= dueAt`)). The gap's third arm carries no `dueAt` set test — `byTarget >= dueAt`
+is already false on a null `dueAt`, so the conjunct is dead there; `freshUntil` keeps its own, because there the
+comparison it guards is NEGATED. `(x = null)` is the engine's null test; a mis-compiled lens FALLS BACK silently —
+every conjunct gets a pin in `lens_cypher_test.go` (pending / due / sent / stale / historyTooLong / cleared /
+never-evaluated / no-lease), with a `recordLapse`-style helper copied from
+`wellness-reminders/lens_cypher_test.go:103-125`.
 
 **4. Increment order.**
 - **Inc 1 (package, opus — state-machine class):** everything under `packages/`. Green: `go test

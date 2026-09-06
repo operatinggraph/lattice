@@ -48,8 +48,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // from collections behind a balance that reads as paid ahead. DebitAccount gets
 // no matching self-scope grant — a resident pays down a balance, never charges
 // one.
+//
+// EvaluateCafeArrears and the arrears notification replyOp are the two ops no
+// human path reaches. Both grant `operator` at scope=any — the operator-grant
+// idiom every engine-submitted op in this package already uses — and neither is
+// callable from a console: WEAVER's dispatch actor submits the first (and the
+// script refuses every other actor outright, since the account it names ends up
+// in a message a resident actually receives), the BRIDGE's service actor the
+// second. Granting them to `operator` is what authorizes those two engines, and
+// deliberately mints no consoleOperator counterpart — there is no operator
+// workflow that runs either one by hand.
 func Permissions() []pkgmgr.PermissionSpec {
-	return []pkgmgr.PermissionSpec{
+	return append([]pkgmgr.PermissionSpec{
 		{
 			OperationType: "CreateAccount",
 			Scope:         "any",
@@ -80,5 +90,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator and front-of-house staff the right to submit RefundCafeCharge (gives back a charge already posted, anchored on that charge by a reverses link). A staffer is confined to accounts whose lease sits at a location they worksAt; the operator is unconfined. There is deliberately NO consumer grant at any scope: deciding a charge was wrong is the café's call, not the person who owes it, and a resident who could refund their own charges would simply erase what they drank.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
-	}
+		{
+			OperationType: arrearsOp,
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit EvaluateCafeArrears (ages a house tab and sends the one arrears reminder per episode). Dispatched by WEAVER's cafeArrearsReminders playbook — the script refuses every actor but Weaver's dispatch actor, because the account named on the payload is forwarded into a message a resident receives. Not a console operation: no consoleOperator grant is minted for it.",
+			GrantsTo:      []string{"operator"},
+		},
+	}, notificationPermissions()...)
 }

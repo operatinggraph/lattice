@@ -11,10 +11,6 @@ import (
 	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 )
 
-// statementGraceDays is the net term between a charge posting and it counting
-// overdue.
-const statementGraceDays = 15
-
 // ledgerEntryProjection is one row of the cafe-ledger `cafeLedgerHistory` lens.
 type ledgerEntryProjection struct {
 	TransactionKey string   `json:"transactionKey"`
@@ -114,11 +110,12 @@ func sumBalance(rows []ledgerEntryRow) int64 {
 // ledger view, but for every lease the front desk is confined to instead of
 // the one leaseAppKey a resident names.
 type balanceRow struct {
-	LeaseAppKey  string `json:"leaseAppKey"`
-	BalanceCents int64  `json:"balanceCents"`
-	DueDate      string `json:"dueDate"`
-	IsOverdue    bool   `json:"isOverdue"`
-	DaysOverdue  int    `json:"daysOverdue"`
+	LeaseAppKey    string `json:"leaseAppKey"`
+	BalanceCents   int64  `json:"balanceCents"`
+	DueDate        string `json:"dueDate"`
+	IsOverdue      bool   `json:"isOverdue"`
+	DaysOverdue    int    `json:"daysOverdue"`
+	ReminderSentAt string `json:"reminderSentAt,omitempty"`
 }
 
 // computeLedgerBalances groups the cafeLedgerHistory lens rows by
@@ -250,7 +247,7 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 	if err != nil {
 		return "", false, 0
 	}
-	due := oldest.AddDate(0, 0, statementGraceDays)
+	due := oldest.AddDate(0, 0, cafeledger.ArrearsGraceDays)
 	if !now.After(due) {
 		return due.Format(time.RFC3339), false, 0
 	}
@@ -258,10 +255,20 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 	return due.Format(time.RFC3339), true, days
 }
 
+// leaseAccountLookup is the join cafe-app needs out of one cafeLeaseAccounts
+// lens row: the café account key ("" if the lease has none opened yet) and
+// its arrears reminder state, informational columns the lens carries
+// straight off the account's own `.arrears` aspect.
+type leaseAccountLookup struct {
+	AccountKey     string
+	ArrearsDueAt   string
+	ReminderSentAt string
+}
+
 // resolveLeaseAccount scans the cafeLeaseAccounts lens rows for the one
-// matching leaseAppKey, returning its account key ("" if the lease has none
-// yet).
-func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string {
+// matching leaseAppKey, returning its account/arrears lookup (the zero value
+// if the lease has no row, or no account opened yet).
+func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) leaseAccountLookup {
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
@@ -271,9 +278,39 @@ func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string
 		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey != leaseAppKey {
 			continue
 		}
-		return p.AccountKey
+		return leaseAccountLookup{
+			AccountKey:     p.AccountKey,
+			ArrearsDueAt:   p.ArrearsDueAt,
+			ReminderSentAt: p.ArrearsReminderSentAt,
+		}
 	}
-	return ""
+	return leaseAccountLookup{}
+}
+
+// indexLeaseAccounts decodes every cafeLeaseAccounts lens row into a
+// leaseAppKey -> leaseAccountLookup map, the front-desk grid's join key for
+// annotating every visible lease's balance row in one pass instead of
+// re-scanning the bucket once per lease (resolveLeaseAccount's cost, applied
+// N times). A row that fails to decode or carries no leaseAppKey (a
+// tombstoned projection entry) is skipped.
+func indexLeaseAccounts(keys []string, get kvGetter) map[string]leaseAccountLookup {
+	out := make(map[string]leaseAccountLookup, len(keys))
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p leaseAccountProjection
+		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
+			continue
+		}
+		out[p.LeaseAppKey] = leaseAccountLookup{
+			AccountKey:     p.AccountKey,
+			ArrearsDueAt:   p.ArrearsDueAt,
+			ReminderSentAt: p.ArrearsReminderSentAt,
+		}
+	}
+	return out
 }
 
 // handleLedger implements GET /api/ledger?leaseAppKey= — the resident
@@ -330,7 +367,7 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
-	accountKey := resolveLeaseAccount(acctKeys, acctGet, leaseAppKey)
+	acctLookup := resolveLeaseAccount(acctKeys, acctGet, leaseAppKey)
 
 	bucket := cafeledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -355,12 +392,13 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	rows, balance := computeLedgerHistory(keys, get, leaseAppKey)
 	dueDate, isOverdue, daysOverdue := deriveStatement(rows, balance, time.Now().UTC())
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":  leaseAppKey,
-		"accountKey":   accountKey,
-		"transactions": rows,
-		"balanceCents": balance,
-		"dueDate":      dueDate,
-		"isOverdue":    isOverdue,
-		"daysOverdue":  daysOverdue,
+		"leaseAppKey":    leaseAppKey,
+		"accountKey":     acctLookup.AccountKey,
+		"transactions":   rows,
+		"balanceCents":   balance,
+		"dueDate":        dueDate,
+		"isOverdue":      isOverdue,
+		"daysOverdue":    daysOverdue,
+		"reminderSentAt": acctLookup.ReminderSentAt,
 	})
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -86,5 +87,111 @@ func TestEscapeHtml_EscapesBothQuoteCharacters(t *testing.T) {
 		if strings.ContainsAny(got, `"'<>`) {
 			t.Errorf("escapeHtml(%q) = %q: a raw quote or angle bracket survived, so the value can break out of the attribute it is interpolated into", in, got)
 		}
+	}
+}
+
+// statementLineDecl and frontDeskArrearsLineDecl lift the shipped
+// statementLine/frontDeskArrearsLine declarations out of the embedded
+// app.js — both are self-contained (Date + string concatenation, no DOM),
+// so running the REAL source is what makes the assertions below statements
+// about what ships rather than about a copy in this file.
+var statementLineDecl = regexp.MustCompile(`(?s)\nfunction statementLine\(ledger\) \{\n.*?\n\}\n`)
+var frontDeskArrearsLineDecl = regexp.MustCompile(`(?s)\nfunction frontDeskArrearsLine\(row\) \{\n.*?\n\}\n`)
+
+func reminderLinesVM(t *testing.T) (*goja.Runtime, goja.Callable, goja.Callable) {
+	t.Helper()
+	src, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	text := string(src)
+
+	stmtDecl := statementLineDecl.FindString(text)
+	if stmtDecl == "" {
+		t.Fatal("app.js: no top-level `function statementLine(ledger) {…}` declaration found — the extraction regex no longer matches this file")
+	}
+	arrearsDecl := frontDeskArrearsLineDecl.FindString(text)
+	if arrearsDecl == "" {
+		t.Fatal("app.js: no top-level `function frontDeskArrearsLine(row) {…}` declaration found — the extraction regex no longer matches this file")
+	}
+
+	vm := goja.New()
+	if _, err := vm.RunString(stmtDecl); err != nil {
+		t.Fatalf("goja eval of the shipped statementLine: %v", err)
+	}
+	if _, err := vm.RunString(arrearsDecl); err != nil {
+		t.Fatalf("goja eval of the shipped frontDeskArrearsLine: %v", err)
+	}
+	stmtFn, ok := goja.AssertFunction(vm.Get("statementLine"))
+	if !ok {
+		t.Fatal("statementLine is not a function after evaluating its declaration")
+	}
+	arrearsFn, ok := goja.AssertFunction(vm.Get("frontDeskArrearsLine"))
+	if !ok {
+		t.Fatal("frontDeskArrearsLine is not a function after evaluating its declaration")
+	}
+	return vm, stmtFn, arrearsFn
+}
+
+// localeDate renders isoDate through the VM's own toLocaleDateString, so the
+// expectation below is pinned to whatever this runtime's date formatting
+// actually is (goja's is not the same as a browser's) instead of a guessed
+// literal — the assertion is that the rendered suffix carries THIS date, not
+// that it matches one hardcoded string.
+func localeDate(t *testing.T, vm *goja.Runtime, isoDate string) string {
+	t.Helper()
+	v, err := vm.RunString(`new Date(` + strconv.Quote(isoDate) + `).toLocaleDateString()`)
+	if err != nil {
+		t.Fatalf("format %q via the VM's own Date: %v", isoDate, err)
+	}
+	return v.String()
+}
+
+// TestStatementLineAndFrontDeskArrearsLine_RenderReminderSuffix proves both
+// overdue banners say whether the café arrears reminder has gone out —
+// "reminder sent <date>" rendering the ROW'S OWN reminderSentAt (not
+// dueDate, not merely "some date"), and "no reminder sent yet" when the
+// field is absent. A lease that isn't overdue gets neither: the reminder
+// state has nothing to say until there is a due date to be late against.
+func TestStatementLineAndFrontDeskArrearsLine_RenderReminderSuffix(t *testing.T) {
+	vm, stmtFn, arrearsFn := reminderLinesVM(t)
+
+	const dueDate = "2026-08-07T00:00:00Z"
+	const reminderSentAt = "2026-08-12T00:00:00Z"
+	sentDate := localeDate(t, vm, reminderSentAt)
+	dueDateRendered := localeDate(t, vm, dueDate)
+	if sentDate == dueDateRendered {
+		t.Fatalf("fixture bug: reminderSentAt and dueDate render to the same locale date (%q) — the vector can't tell the two apart", sentDate)
+	}
+
+	call := func(t *testing.T, fn goja.Callable, obj map[string]any) string {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(obj))
+		if err != nil {
+			t.Fatalf("call(%+v) threw: %v", obj, err)
+		}
+		return res.String()
+	}
+
+	sent := map[string]any{"dueDate": dueDate, "isOverdue": true, "daysOverdue": 5, "reminderSentAt": reminderSentAt}
+	if got := call(t, stmtFn, sent); !strings.Contains(got, "reminder sent "+sentDate) {
+		t.Errorf("statementLine(overdue, reminderSentAt=%s) = %q, want it to render the row's own reminderSentAt (%s), not dueDate or a placeholder", reminderSentAt, got, sentDate)
+	}
+
+	unsent := map[string]any{"dueDate": dueDate, "isOverdue": true, "daysOverdue": 5}
+	if got := call(t, stmtFn, unsent); !strings.Contains(got, "no reminder sent yet") {
+		t.Errorf("statementLine(overdue, no reminderSentAt) = %q, want it to say no reminder sent yet", got)
+	}
+
+	notOverdue := map[string]any{"dueDate": "2026-09-11T00:00:00Z", "isOverdue": false}
+	if got := call(t, stmtFn, notOverdue); strings.Contains(got, "reminder") {
+		t.Errorf("statementLine(not overdue) = %q, want no reminder text at all (nothing is late yet)", got)
+	}
+
+	if got := call(t, arrearsFn, sent); !strings.Contains(got, "reminder sent "+sentDate) {
+		t.Errorf("frontDeskArrearsLine(overdue, reminderSentAt=%s) = %q, want it to render the row's own reminderSentAt (%s)", reminderSentAt, got, sentDate)
+	}
+	if got := call(t, arrearsFn, unsent); !strings.Contains(got, "no reminder sent yet") {
+		t.Errorf("frontDeskArrearsLine(overdue, no reminderSentAt) = %q, want it to say no reminder sent yet", got)
 	}
 }

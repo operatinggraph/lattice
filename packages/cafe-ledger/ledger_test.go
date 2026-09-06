@@ -57,6 +57,17 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditCafeAccount", Scope: "any"},
 			{OperationType: "RefundCafeCharge", Scope: "any"},
+			// Deliberately the SAME grant Weaver holds for EvaluateCafeArrears
+			// (arrearsWeaverCapDoc below). That is what makes the forged-send
+			// vector attributable: the refusal can only come from the script's
+			// own actor guard, never from a missing or narrower grant.
+			{OperationType: "EvaluateCafeArrears", Scope: "any"},
+			// The bridge's service actor is operator-equivalent, and this stands
+			// in for it: the replyOp is granted to operator/Scope:"any" by the
+			// package (permissions.go), so step 3 authorizes any operator that
+			// submits it. Everything that constrains WHAT such a submission can
+			// touch lives in the script's own validation of externalRef.
+			{OperationType: "RecordCafeArrearsReminderNotification", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -84,6 +95,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install cafe-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, arrearsWeaverCapDoc())
 	// CreditCafeAccount's workplace guard asks the GRAPH whether its caller is
 	// root, so the cap doc's Roles claim is not enough on its own — without the
 	// link this actor reads as an unprivileged caller with no worksAt anywhere
@@ -1895,8 +1907,8 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
 	}
-	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance"]}`) {
-		t.Fatalf("derive_reads no longer returns the account's .balance under optionalReads:\n%s", derive)
+	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance", acct_key + ".arrears"]}`) {
+		t.Fatalf("derive_reads no longer returns the account's .balance AND .arrears under optionalReads:\n%s", derive)
 	}
 	// optionalReads, never reads: a legacy account carries no .balance, and a
 	// required read's absence is a HydrationMiss on the very branch the replay
@@ -1982,4 +1994,981 @@ func TestAccountBalance_ConcurrentEntriesBothPost(t *testing.T) {
 	if got := balanceCents(t, ctx, conn, acctKey); got != 1000 {
 		t.Fatalf("balance after two concurrent charges = %v, want 1000 — neither may be dropped", got)
 	}
+}
+
+// --- arrears (Weaver-dispatched evaluation + the episode state post_entry keeps) ---
+
+// arrearsWeaverCapDoc grants Weaver's primordial dispatch actor
+// EvaluateCafeArrears. Read through a func, not a package var: bootstrap's
+// primordial globals are populated by SetupPackageTestEnv's EnsurePrimordials,
+// well after package var initialization.
+func arrearsWeaverCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.WeaverIdentityID,
+		Actor:                  bootstrap.WeaverIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.WeaverIdentityKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "EvaluateCafeArrears", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
+// arrearsHint is the contextHint the cafeArrearsReminders playbook dispatches
+// with (targets.go): the account root, its absence-tolerant .arrears aspect,
+// and the bounded postedTo replay. The per-transaction .entry reads that replay
+// discovers are NOT declared — their keys are data-derived, the class-(e) split.
+func arrearsHint(acctKey string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads:         []string{acctKey},
+		OptionalReads: []string{acctKey + ".arrears"},
+		Enumerations: []processor.EnumerationHint{
+			{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+		},
+	}
+}
+
+// evaluateArrears drives one EvaluateCafeArrears as `actor` at `submittedAt`,
+// asserts the outcome, and returns the reply (for a refusal's message) and the
+// request id (for the outbox the notification rides on). Class is LEFT EMPTY,
+// exactly as Weaver's actuator dispatches a directOp — it relies on the
+// Processor's operationType→class reverse index, which resolves to the
+// cafeaccount vertexType handler.
+func evaluateArrears(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, actor, acctKey, leaseKey, submittedAt string,
+	want processor.MessageOutcome) (*processor.OperationReply, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload := `{"accountKey":"` + acctKey + `"`
+	if leaseKey != "" {
+		payload += `,"leaseAppKey":"` + leaseKey + `"`
+	}
+	payload += `}`
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "EvaluateCafeArrears",
+		Actor:         actor,
+		SubmittedAt:   submittedAt,
+		Payload:       json.RawMessage(payload),
+		ContextHint:   arrearsHint(acctKey),
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != want {
+		t.Fatalf("%s: outcome = %v, want %v (reply: %+v)", label, outcome, want, reply.Error)
+	}
+	return reply, reqID
+}
+
+// arrearsData reads the account's .arrears aspect back. Returns nil when the
+// aspect is absent — which is a real state (a never-charged account carries
+// none), not an error.
+func arrearsData(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) map[string]any {
+	t.Helper()
+	if !keyExists(t, ctx, conn, acctKey+".arrears") {
+		return nil
+	}
+	doc := readDoc(t, ctx, conn, acctKey+".arrears")
+	if cls, _ := doc["class"].(string); cls != "cafeAccountArrears" {
+		t.Fatalf("%s.arrears class = %q, want cafeAccountArrears", acctKey, cls)
+	}
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.arrears carries no data", acctKey)
+	}
+	return data
+}
+
+// arrearsNotification returns the external.notification event this request's
+// own transactional outbox carries, or nil when it emitted none. "Nil" is the
+// assertion half the once-per-episode guarantee rests on.
+func arrearsNotification(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID string) map[string]any {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(requestID))
+	if err != nil {
+		t.Fatalf("read outbox aspect for %s: %v", requestID, err)
+	}
+	ob, err := processor.ParseOutboxAspect(entry.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect for %s: %v", requestID, err)
+	}
+	for _, e := range ob.Data.Events {
+		if e.EventType == "external.notification" {
+			return e.Payload
+		}
+	}
+	return nil
+}
+
+// debitAt posts a charge at an explicit instant — the arrears vectors turn on
+// WHEN a charge posted, which postDebit's fixed submittedAt cannot express.
+func debitAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey, submittedAt string, amountCents int) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"Settled tab"}`),
+		ContextHint:   debitHint(acctKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+// creditAt is debitAt's payment counterpart.
+func creditAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey, submittedAt string, amountCents int) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"House tab payment"}`),
+		ContextHint:   staffCreditHint(ledgerActorKey, acctKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestArrears_FirstChargeOpensAnEpisode (a). A charge posted to an account that
+// owes nothing IS the FIFO head, so post_entry can name the due date without
+// replaying anything: this charge's own postedAt plus the package's net term.
+func TestArrears_FirstChargeOpensAnEpisode(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsopen")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRPENLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearropenacct00001", leaseKey)
+	if arrearsData(t, ctx, conn, acctKey) != nil {
+		t.Fatal("CreateAccount must mint NO .arrears — a new account owes nothing, and its missing evaluatedAt is what opens the gap once")
+	}
+
+	debitAt(t, ctx, conn, cp, cons, "cafearropendebit0001", acctKey, "2026-08-01T09:00:00Z", 1425)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if data == nil {
+		t.Fatal("a charge against an account that owed nothing must open an arrears episode")
+	}
+	// 2026-08-01 + ArrearsGraceDays, the same arithmetic the resident's own
+	// statement runs — the constant is the package's, not two literals.
+	wantDue := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q (the charge's own postedAt + the net term)", got, wantDue)
+	}
+	if got, _ := data["evaluatedAt"].(string); got != "2026-08-01T09:00:00Z" {
+		t.Fatalf("evaluatedAt = %q, want the charge's postedAt", got)
+	}
+	if _, ok := data["stale"]; ok {
+		t.Fatal("a freshly opened episode is not stale")
+	}
+}
+
+// TestArrears_SecondChargeLeavesTheHead (b). The head is the OLDEST open
+// charge, and a second charge queues behind it — re-stamping dueAt here would
+// push a weeks-old debt's due date back to the day of the newest coffee.
+func TestArrears_SecondChargeLeavesTheHead(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearssecond")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRSNDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrsndacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrsnddebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	first := arrearsData(t, ctx, conn, acctKey)
+
+	debitAt(t, ctx, conn, cp, cons, "cafearrsnddebit00002", acctKey, "2026-08-20T09:00:00Z", 500)
+
+	second := arrearsData(t, ctx, conn, acctKey)
+	if second["dueAt"] != first["dueAt"] {
+		t.Fatalf("dueAt moved from %v to %v on a second charge — the head is the OLDEST open charge", first["dueAt"], second["dueAt"])
+	}
+	if second["evaluatedAt"] != first["evaluatedAt"] {
+		t.Fatalf("a charge that changes nothing must write nothing; evaluatedAt moved from %v to %v", first["evaluatedAt"], second["evaluatedAt"])
+	}
+}
+
+// TestArrears_PartialPaymentMarksStale (c). A partial payment can move the FIFO
+// head to a later charge with a later due date, which no single entry can
+// compute — so post_entry marks the recorded state stale rather than guessing,
+// and the convergence lens reads stale as an open gap.
+func TestArrears_PartialPaymentMarksStale(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsstale")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRSTLLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrstlacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrstldebit00001", acctKey, "2026-08-01T09:00:00Z", 1000)
+	debitAt(t, ctx, conn, cp, cons, "cafearrstldebit00002", acctKey, "2026-08-20T09:00:00Z", 500)
+	before := arrearsData(t, ctx, conn, acctKey)
+
+	creditAt(t, ctx, conn, cp, cons, "cafearrstlpay000001", acctKey, "2026-08-21T09:00:00Z", 1000)
+
+	after := arrearsData(t, ctx, conn, acctKey)
+	if stale, _ := after["stale"].(bool); !stale {
+		t.Fatalf("a partial payment must mark the recorded arrears state stale, got %+v", after)
+	}
+	if after["dueAt"] != before["dueAt"] {
+		t.Fatalf("the stale mark is an ADDITION, not a rewrite: dueAt moved from %v to %v", before["dueAt"], after["dueAt"])
+	}
+}
+
+// TestArrears_PaymentToZeroEndsTheEpisode (d). Paying the tab off rewrites
+// .arrears to {evaluatedAt} alone: no dueAt, so no timer stays armed, and
+// nothing of the finished episode survives to make the NEXT charge look already
+// reminded.
+func TestArrears_PaymentToZeroEndsTheEpisode(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearscleared")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRCLRLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrclracct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrclrdebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	creditAt(t, ctx, conn, cp, cons, "cafearrclrpay000001", acctKey, "2026-08-05T09:00:00Z", 1425)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if _, ok := data["dueAt"]; ok {
+		t.Fatalf("a paid-off account must carry no dueAt, got %+v", data)
+	}
+	if _, ok := data["stale"]; ok {
+		t.Fatalf("a paid-off account is not stale — there is nothing to recompute: %+v", data)
+	}
+	if got, _ := data["evaluatedAt"].(string); got != "2026-08-05T09:00:00Z" {
+		t.Fatalf("evaluatedAt = %q, want the payment's postedAt", got)
+	}
+}
+
+// TestArrears_DebitOnACreditBalanceOpensNoEpisode (d2). "The account owed
+// nothing before this charge" is B ≤ 0, but that is not the same question as
+// "does it owe anything after it". A refund can take an account into CREDIT, and
+// a charge that only eats into that credit leaves the resident still owed money
+// by the café — under the FIFO the surplus prepays the charge outright, so there
+// is no open debit and no head. An episode minted there arms a timer that
+// reminds a resident about money they do not owe, which is the one thing the
+// green bar says must never happen. The SECOND charge, the one that finally
+// takes the balance positive, is the one that opens the episode — and its own
+// postedAt is the term the resident is held to.
+func TestArrears_DebitOnACreditBalanceOpensNoEpisode(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearscredit")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRCRDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrcrdacct000001", leaseKey)
+
+	// Charge, pay it off, then refund the charge: B = -1000.
+	chargeKey := debitAt(t, ctx, conn, cp, cons, "cafearrcrddebit00001", acctKey, "2026-08-01T09:00:00Z", 1000)
+	creditAt(t, ctx, conn, cp, cons, "cafearrcrdpay000001", acctKey, "2026-08-05T09:00:00Z", 1000)
+	refundAs(t, ctx, conn, cp, cons, "cafearrcrdrefund0001",
+		ledgerActorKey, acctKey, chargeKey, 1000, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("fixture precondition: balanceCents = %v, want -1000 (the account is in credit)", got)
+	}
+
+	// B = -1000 ≤ 0 AND B′ = -500 ≤ 0: still in credit, so no episode.
+	debitAt(t, ctx, conn, cp, cons, "cafearrcrddebit00002", acctKey, "2026-08-20T09:00:00Z", 500)
+	data := arrearsData(t, ctx, conn, acctKey)
+	if data == nil {
+		t.Fatal("fixture precondition: the payment that cleared the tab must have written {evaluatedAt}")
+	}
+	if _, ok := data["dueAt"]; ok {
+		t.Fatalf("a charge that leaves the account IN CREDIT must open no episode — the resident owes nothing: %+v", data)
+	}
+
+	// B = -500 ≤ 0 AND B′ = +100 > 0: NOW the episode opens, on this charge.
+	debitAt(t, ctx, conn, cp, cons, "cafearrcrddebit00003", acctKey, "2026-08-21T09:00:00Z", 600)
+	wantDue := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	data = arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q — the charge that actually took the account into arrears starts the term", got, wantDue)
+	}
+	if got, _ := data["evaluatedAt"].(string); got != "2026-08-21T09:00:00Z" {
+		t.Fatalf("evaluatedAt = %q, want that charge's postedAt", got)
+	}
+}
+
+// TestArrears_EvaluateSendsOnceThenNothing (e) is the green bar: a resident past
+// the net term is reminded ONCE per episode. The first evaluation stamps
+// remindedFor + sentAt and emits the external.notification the bridge turns into
+// a real message; a re-dispatch recomputes the same head, finds remindedFor
+// already equal, and emits nothing at all.
+func TestArrears_EvaluateSendsOnceThenNothing(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearssend")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRSNDLEASEKMN")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrsendacct00001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrsenddebit0001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	wantDue := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrsendeval00001",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q (the FIFO head recomputed from the account's own history)", got, wantDue)
+	}
+	if got, _ := data["remindedFor"].(string); got != wantDue {
+		t.Fatalf("remindedFor = %q, want %q — this is what closes the gap for the episode", got, wantDue)
+	}
+	if got, _ := data["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt = %q, want the evaluation's own submittedAt", got)
+	}
+
+	notif := arrearsNotification(t, ctx, conn, reqID)
+	if notif == nil {
+		t.Fatal("an overdue head must emit external.notification — the send is the whole point of the target")
+	}
+	wantRef := acctKey + ":" + wantDue
+	if got, _ := notif["externalRef"].(string); got != wantRef {
+		t.Fatalf("externalRef = %q, want %q (the episode key the adapter dedups on)", got, wantRef)
+	}
+	if got, _ := notif["idempotencyKey"].(string); got != wantRef {
+		t.Fatalf("idempotencyKey = %q, want %q", got, wantRef)
+	}
+	if got, _ := notif["adapter"].(string); got != "notification" {
+		t.Fatalf("adapter = %q, want notification", got)
+	}
+	if got, _ := notif["replyOp"].(string); got != "RecordCafeArrearsReminderNotification" {
+		t.Fatalf("replyOp = %q, want RecordCafeArrearsReminderNotification", got)
+	}
+	params, _ := notif["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("the notification carries no params: %+v", notif)
+	}
+	if got, _ := params["accountKey"].(string); got != acctKey {
+		t.Fatalf("params.accountKey = %q, want %q", got, acctKey)
+	}
+	if got, _ := params["leaseAppKey"].(string); got != leaseKey {
+		t.Fatalf("params.leaseAppKey = %q, want %q (the playbook routes it from the row's heldFor walk)", got, leaseKey)
+	}
+	if got, _ := params["reminderType"].(string); got != "cafeArrears" {
+		t.Fatalf("params.reminderType = %q, want cafeArrears", got)
+	}
+	if got, _ := params["balanceCents"].(float64); got != 1425 {
+		t.Fatalf("params.balanceCents = %v, want 1425", got)
+	}
+
+	// The re-dispatch. Same account, same history, a later instant: the head is
+	// unchanged, remindedFor already names it, and NOTHING goes out.
+	_, reqID2 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrsendeval00002",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, reqID2); notif != nil {
+		t.Fatalf("a re-dispatched evaluation must send NOTHING for an episode already reminded for, got %+v", notif)
+	}
+	again := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := again["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt was re-stamped to %q — the original send record must be carried forward, not rewritten", got)
+	}
+	if got, _ := again["remindedFor"].(string); got != wantDue {
+		t.Fatalf("remindedFor = %q, want %q carried forward", got, wantDue)
+	}
+}
+
+// TestArrears_EvaluateRearmsOnACoveredHead (f). A payment covered the charge the
+// recorded due date came from, so the FIFO head is now a LATER charge with a
+// later due date. The evaluation recomputes it, clears stale, carries no send
+// record (none was made), and the recomputed date re-arms the timer — with no
+// notification, because nothing is overdue yet.
+func TestArrears_EvaluateRearmsOnACoveredHead(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsrearm")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRRRMLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrrearmacct0001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrrearmdebit001", acctKey, "2026-08-01T09:00:00Z", 1000)
+	debitAt(t, ctx, conn, cp, cons, "cafearrrearmdebit002", acctKey, "2026-08-20T09:00:00Z", 500)
+	creditAt(t, ctx, conn, cp, cons, "cafearrrearmpay00001", acctKey, "2026-08-21T09:00:00Z", 1000)
+	if stale, _ := arrearsData(t, ctx, conn, acctKey)["stale"].(bool); !stale {
+		t.Fatal("fixture precondition: the partial payment must have marked the state stale")
+	}
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrrearmeval0001",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	// The Aug 1 charge was fully paid off, so the head is the Aug 20 one.
+	wantDue := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q — the FIFO head moved to the surviving charge", got, wantDue)
+	}
+	if _, ok := data["stale"]; ok {
+		t.Fatalf("the evaluation IS the recomputation stale asked for, so it must clear it: %+v", data)
+	}
+	if _, ok := data["remindedFor"]; ok {
+		t.Fatalf("nothing has been reminded for this episode: %+v", data)
+	}
+	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
+		t.Fatalf("a head that is not yet due must send nothing, got %+v", notif)
+	}
+}
+
+// TestArrears_OneNotificationPerEpisodeNotPerHead (f2) is the once-per-episode
+// guarantee at its only hard case. An EPISODE is the stretch from the charge
+// that takes the account from square to owing until the balance comes back to
+// zero; the FIFO HEAD moves within one episode every time a partial payment
+// retires the oldest charge. A resident who pays SOMETHING off is doing the
+// right thing, and if the send were keyed on the head — on remindedFor naming
+// this dueAt — every part-payment would hand them a second nag for the same
+// continuous debt, because the charge the head moves to is usually past its own
+// term too. The send is keyed on sentAt's ABSENCE instead, which is a fact about
+// the episode. remindedFor is still written every time, because that is what
+// closes the convergence gap; the two are deliberately different questions.
+func TestArrears_OneNotificationPerEpisodeNotPerHead(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsepisode")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARREPSLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrepsacct000001", leaseKey)
+
+	debitAt(t, ctx, conn, cp, cons, "cafearrepsdebit00001", acctKey, "2026-08-01T09:00:00Z", 1000)
+	debitAt(t, ctx, conn, cp, cons, "cafearrepsdebit00002", acctKey, "2026-08-10T09:00:00Z", 1000)
+	dueC1 := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	dueC2 := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+
+	// The first charge falls due and the reminder goes out.
+	_, reqID1 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000001",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-17T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, reqID1) == nil {
+		t.Fatal("the first overdue head in an episode must send")
+	}
+	sent := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := sent["remindedFor"].(string); got != dueC1 {
+		t.Fatalf("remindedFor = %q, want %q", got, dueC1)
+	}
+	if got, _ := sent["sentAt"].(string); got != "2026-08-17T09:00:00Z" {
+		t.Fatalf("sentAt = %q, want the evaluation's own submittedAt", got)
+	}
+
+	// A PARTIAL payment retires the first charge exactly. The head moves to the
+	// second, whose own term has also passed — and nothing may go out for it.
+	creditAt(t, ctx, conn, cp, cons, "cafearrepspay000001", acctKey, "2026-08-18T09:00:00Z", 1000)
+	if stale, _ := arrearsData(t, ctx, conn, acctKey)["stale"].(bool); !stale {
+		t.Fatal("fixture precondition: a partial payment marks the state stale")
+	}
+
+	_, reqID2 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000002",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-27T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, reqID2); notif != nil {
+		t.Fatalf("the head moved WITHIN one episode — a resident paying their tab down must not be nagged twice: %+v", notif)
+	}
+	moved := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := moved["dueAt"].(string); got != dueC2 {
+		t.Fatalf("dueAt = %q, want %q (the head moved to the surviving charge)", got, dueC2)
+	}
+	if got, _ := moved["remindedFor"].(string); got != dueC2 {
+		t.Fatalf("remindedFor = %q, want %q — remindedFor tracks the HEAD, and leaving it on the retired charge holds the convergence gap open forever", got, dueC2)
+	}
+	if got, _ := moved["sentAt"].(string); got != "2026-08-17T09:00:00Z" {
+		t.Fatalf("sentAt = %q — the episode's send record is carried, not re-stamped", got)
+	}
+	if _, ok := moved["stale"]; ok {
+		t.Fatalf("the evaluation IS the recomputation stale asked for: %+v", moved)
+	}
+
+	// Paying the tab off ENDS the episode: the send record goes with it.
+	creditAt(t, ctx, conn, cp, cons, "cafearrepspay000002", acctKey, "2026-08-28T09:00:00Z", 1000)
+	cleared := arrearsData(t, ctx, conn, acctKey)
+	if _, ok := cleared["sentAt"]; ok {
+		t.Fatalf("a paid-off account keeps no send record — the NEXT episode must be able to send: %+v", cleared)
+	}
+	if _, ok := cleared["dueAt"]; ok {
+		t.Fatalf("a paid-off account carries no dueAt: %+v", cleared)
+	}
+
+	// A NEW tab, a new episode, and the reminder goes out again.
+	debitAt(t, ctx, conn, cp, cons, "cafearrepsdebit00003", acctKey, "2026-08-29T09:00:00Z", 500)
+	if _, ok := arrearsData(t, ctx, conn, acctKey)["sentAt"]; ok {
+		t.Fatal("a fresh episode starts with no send record")
+	}
+	_, reqID3 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrepseval000003",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-09-14T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, reqID3) == nil {
+		t.Fatal("a NEW episode past its term must send — one per episode is not one per account")
+	}
+}
+
+// TestArrears_ForgedSendRefused (g) is the actor guard. ledgerActorKey holds the
+// operator role AND the identical Scope:"any" EvaluateCafeArrears grant, so step
+// 3 authorizes it; only `op.actor != primordialActor["weaver"]` stops it from
+// having the platform tell an arbitrary resident they owe money. Nothing is
+// written either — a marker minted on a forged send would close the gap and
+// suppress the real reminder.
+func TestArrears_ForgedSendRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsforged")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRFGDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrfgdacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrfgddebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	before := arrearsData(t, ctx, conn, acctKey)
+
+	reply, _ := evaluateArrears(t, ctx, conn, cp, cons, "cafearrfgdeval000001",
+		ledgerActorKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Weaver's dispatch actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	after := arrearsData(t, ctx, conn, acctKey)
+	if _, ok := after["sentAt"]; ok {
+		t.Fatalf("a refused evaluation must record no send: %+v", after)
+	}
+	if after["evaluatedAt"] != before["evaluatedAt"] {
+		t.Fatalf("a refused evaluation must write nothing at all; evaluatedAt moved from %v to %v", before["evaluatedAt"], after["evaluatedAt"])
+	}
+}
+
+// TestArrears_MalformedLeaseKeyRefused (g2). leaseAppKey decides nothing this op
+// computes — which is exactly why it is easy to let through unchecked. It is
+// copied VERBATIM into the notification params the bridge's adapter addresses a
+// real message from, so an unvalidated payload field reaching an external send
+// is the same forged-send surface the actor guard closes, one step further
+// along. The positive vector is TestArrears_EvaluateSendsOnceThenNothing, which
+// passes a real lease key through the same field and asserts it lands in params.
+func TestArrears_MalformedLeaseKeyRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsbadlease")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRBDLLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrbdlacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrbdldebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+
+	reply, _ := evaluateArrears(t, ctx, conn, cp, cons, "cafearrbdleval000001",
+		bootstrap.WeaverIdentityKey, acctKey, "vtx.identity."+ledgerActorID, "2026-08-22T09:00:00Z",
+		processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+		t.Fatalf("want an InvalidArgument rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "leaseAppKey") {
+		t.Fatalf("the refusal must name the field it refused, got %q", reply.Error.Message)
+	}
+	if _, ok := arrearsData(t, ctx, conn, acctKey)["sentAt"]; ok {
+		t.Fatal("a refused evaluation records no send")
+	}
+}
+
+// TestArrears_LegacyAccountOnlyEverMarksStale (h). An account minted under
+// cafe-ledger < 0.4.0 carries no .balance, so a posted entry has no before/after
+// balance and cannot tell an episode opening from an episode continuing. It may
+// only mark EXISTING state stale — never mint arrears state off a number it does
+// not have, which would record a due date computed from one entry over a history
+// it never counted.
+func TestArrears_LegacyAccountOnlyEverMarksStale(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearslegacy")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRLGCLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEARRLGCACCTHJKM", leaseKey)
+
+	// No .arrears yet: a charge against a legacy account mints nothing. Such an
+	// account is already opening the never-evaluated gap on its missing
+	// evaluatedAt, so there is nothing to record and nothing to lose.
+	debitAt(t, ctx, conn, cp, cons, "cafearrlgcdebit00001", acctKey, "2026-08-01T09:00:00Z", 1425)
+	if data := arrearsData(t, ctx, conn, acctKey); data != nil {
+		t.Fatalf("a legacy account has no balance to reason from, so an entry must mint NO arrears state: %+v", data)
+	}
+
+	// Now give it arrears state, as the Weaver-dispatched evaluation would.
+	seedAspect(t, ctx, conn, acctKey, "arrears", "cafeAccountArrears", map[string]any{
+		"dueAt":       "2026-08-16T09:00:00Z",
+		"remindedFor": "2026-08-16T09:00:00Z",
+		"sentAt":      "2026-08-22T09:00:00Z",
+		"evaluatedAt": "2026-08-22T09:00:00Z",
+	})
+	debitAt(t, ctx, conn, cp, cons, "cafearrlgcdebit00002", acctKey, "2026-08-25T09:00:00Z", 500)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if stale, _ := data["stale"].(bool); !stale {
+		t.Fatalf("an entry against a legacy account carrying arrears state must mark it stale: %+v", data)
+	}
+	if got, _ := data["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt = %q — the send record must be CARRIED, not dropped, or the resident is reminded twice for one debt", got)
+	}
+	if got, _ := data["remindedFor"].(string); got != "2026-08-16T09:00:00Z" {
+		t.Fatalf("remindedFor = %q, want the recorded episode carried forward", got)
+	}
+}
+
+// TestArrears_HistoryPastTheBudgetDegrades (k) is the exhaustion path, and the
+// claim is that it is a DEGRADE and not a stop. The replay budget
+// (ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES) is fixed by the Processor's script
+// wall, so an account can genuinely outrun it, and the op then cannot name a
+// head. A refusal there would be permanent and SILENT: the only thing that
+// re-drives this op is the convergence gap the account's own row opens, and a
+// rejected op never closes it, so Weaver would re-dispatch the same doomed
+// evaluation on every window — no reminder, no error anyone reads, forever.
+//
+// So the op records the exhaustion instead. It is ACCEPTED, it sends nothing, it
+// leaves everything already recorded untouched (a reminder already sent stays
+// recorded as sent; a due date already armed is not erased by an evaluation that
+// could not read the history), and it drops stale — which the lens pin
+// TestCafeArrears_HistoryTooLongGoesQuiet turns into silence. The second half is
+// the way back out: the next posted entry drops the flag and re-marks the state
+// stale, which re-opens the gap for exactly one more attempt.
+func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsbudget")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRBGTLEASEHJK")
+	// A LEGACY account (no .balance): that is what makes the second half's
+	// DEBIT a stale-marking write. On an account with a balance cache a further
+	// charge against an already-owing tab writes nothing at all, so a payment
+	// would be the re-arming entry there.
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEARRBGTACCTHJKM", leaseKey)
+
+	// 501 posted entries: one more than ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES,
+	// so the walk ends with a live cursor and the budget genuinely runs out.
+	const overBudget = 501
+	for i := 0; i < overBudget; i++ {
+		seedLegacyEntry(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100)
+	}
+
+	// The state a previous, in-budget evaluation left: an episode reminded for.
+	seedAspect(t, ctx, conn, acctKey, "arrears", "cafeAccountArrears", map[string]any{
+		"dueAt":       "2026-08-16T09:00:00Z",
+		"remindedFor": "2026-08-16T09:00:00Z",
+		"sentAt":      "2026-08-17T09:00:00Z",
+		"evaluatedAt": "2026-08-17T09:00:00Z",
+		"stale":       true,
+	})
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "cafearrbgteval000001",
+		bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
+		t.Fatalf("an evaluation that could not read the history must send nothing — it does not know the head: %+v", notif)
+	}
+	data := arrearsData(t, ctx, conn, acctKey)
+	if flag, _ := data["historyTooLong"].(bool); !flag {
+		t.Fatalf("the exhaustion must be RECORDED, not raised — a refusal is a permanent silent stop: %+v", data)
+	}
+	if _, ok := data["stale"]; ok {
+		t.Fatalf("stale asks for a recomputation this op has just attempted; re-asking re-opens the gap the degrade closes: %+v", data)
+	}
+	if got, _ := data["evaluatedAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("evaluatedAt = %q, want the evaluation's own submittedAt", got)
+	}
+	for field, want := range map[string]string{
+		"dueAt":       "2026-08-16T09:00:00Z",
+		"remindedFor": "2026-08-16T09:00:00Z",
+		"sentAt":      "2026-08-17T09:00:00Z",
+	} {
+		if got, _ := data[field].(string); got != want {
+			t.Fatalf("%s = %q, want %q carried untouched — an evaluation that read nothing must erase nothing", field, got, want)
+		}
+	}
+
+	// The way back out: one more posted entry, one more attempt.
+	debitAt(t, ctx, conn, cp, cons, "cafearrbgtdebit00001", acctKey, "2026-08-25T09:00:00Z", 500)
+	after := arrearsData(t, ctx, conn, acctKey)
+	if _, ok := after["historyTooLong"]; ok {
+		t.Fatalf("a posted entry must drop the flag, or the row stays quiet for the life of the account: %+v", after)
+	}
+	if stale, _ := after["stale"].(bool); !stale {
+		t.Fatalf("and re-mark the state stale, which is what re-opens the gap for that one attempt: %+v", after)
+	}
+	if got, _ := after["sentAt"].(string); got != "2026-08-17T09:00:00Z" {
+		t.Fatalf("sentAt = %q — the send record is still carried across the re-arming entry", got)
+	}
+}
+
+// recordArrearsNotification submits one RecordCafeArrearsReminderNotification
+// exactly as the bridge does: no Class (the Processor's operationType→class
+// reverse index resolves the handler) and NO ContextHint at all — the generic
+// dispatch path declares nothing, which is why the op reads nothing and why
+// externalRef is the only thing that decides which vertex it writes to.
+func recordArrearsNotification(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, externalRef, status string, want processor.MessageOutcome) *processor.OperationReply {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordCafeArrearsReminderNotification",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-08-22T09:00:05Z",
+		Payload:       json.RawMessage(`{"externalRef":"` + externalRef + `","status":"` + status + `","result":"notification sent"}`),
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != want {
+		t.Fatalf("%s: outcome = %v, want %v (reply: %+v)", label, outcome, want, reply.Error)
+	}
+	return reply
+}
+
+// TestArrearsNotification_ForgedExternalRefRefused (l). externalRef arrives from
+// OUTSIDE the platform — the adapter echoes it back through the bridge — and it
+// is the op's only say over which vertex the outcome aspect is hung on. Splitting
+// it and trusting the left half means any 3-segment vtx key names a target: an
+// externalRef of "vtx.identity.<NanoID>:<dueAt>" would write a
+// cafeAccountArrearsNotification onto a RESIDENT'S IDENTITY, a vertex this
+// package has no business touching at all. The type check is what stops it.
+//
+// The accepted vector runs first, so the refusal below is attributable to the
+// type and not to a guard that denies every reply — the two submissions differ
+// in exactly one segment.
+func TestArrearsNotification_ForgedExternalRefRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsnotif")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRNTFLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrntfacct000001", leaseKey)
+
+	recordArrearsNotification(t, ctx, conn, cp, cons, "cafearrntfok00000001",
+		acctKey+":2026-08-16T09:00:00Z", "completed", processor.OutcomeAccepted)
+	outcome := arrearsNotificationOutcome(t, ctx, conn, acctKey)
+	if got, _ := outcome["status"].(string); got != "completed" {
+		t.Fatalf("status = %q, want completed", got)
+	}
+	if got, _ := outcome["remindedFor"].(string); got != "2026-08-16T09:00:00Z" {
+		t.Fatalf("remindedFor = %q, want the dueAt half of the externalRef", got)
+	}
+
+	// The same submission with the account key's TYPE segment swapped.
+	victim := "vtx.identity." + ledgerActorID
+	reply := recordArrearsNotification(t, ctx, conn, cp, cons, "cafearrntfforged0001",
+		victim+":2026-08-16T09:00:00Z", "completed", processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+		t.Fatalf("want an InvalidArgument rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "externalRef") {
+		t.Fatalf("the refusal must name the field it refused, got %q", reply.Error.Message)
+	}
+	if keyExists(t, ctx, conn, victim+".arrearsNotification") {
+		t.Fatalf("a forged externalRef wrote an aspect onto %s — the op must touch nothing but a cafeaccount", victim)
+	}
+}
+
+// arrearsNotificationOutcome reads the audit aspect the replyOp writes.
+func arrearsNotificationOutcome(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) map[string]any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, acctKey+".arrearsNotification")
+	if cls, _ := doc["class"].(string); cls != "cafeAccountArrearsNotification" {
+		t.Fatalf("%s.arrearsNotification class = %q, want cafeAccountArrearsNotification", acctKey, cls)
+	}
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.arrearsNotification carries no data", acctKey)
+	}
+	return data
+}
+
+// arrearsFIFOVector is one shared statement-aging vector: a history, and the due
+// date the FIFO must age it to. The five below are COPIED FROM
+// cmd/cafe-app/ledger_test.go's own deriveStatement vectors — the same entries,
+// the same hand-derived expectations — which is what makes
+// TestArrears_FIFOMatchesTheStatement a claim about AGREEMENT rather than about
+// this implementation agreeing with itself. The FE's tests pin the display side
+// against these; this pins the op's side.
+type arrearsFIFOVector struct {
+	name    string
+	acctID  string
+	leaseID string
+	entries []struct {
+		kind     string
+		postedAt string
+		cents    int
+	}
+	wantDue string
+}
+
+func arrearsFIFOVectors() []arrearsFIFOVector {
+	type e = struct {
+		kind     string
+		postedAt string
+		cents    int
+	}
+	return []arrearsFIFOVector{
+		{
+			name: "credits age off the oldest debit first", acctID: "BBCAFEAGEACCTAHJKMNP", leaseID: "BBCAFEAGELEASEAHJKMN",
+			entries: []e{
+				{"debit", "2026-08-01T00:00:00Z", 1000},
+				{"debit", "2026-08-20T00:00:00Z", 500},
+				{"credit", "2026-08-21T00:00:00Z", 1000},
+			},
+			wantDue: "2026-09-04T00:00:00Z",
+		},
+		{
+			name: "a prepaid credit carries forward", acctID: "BBCAFEAGEACCTBHJKMNP", leaseID: "BBCAFEAGELEASEBHJKMN",
+			entries: []e{
+				{"credit", "2026-08-01T00:00:00Z", 1000},
+				{"debit", "2026-08-02T00:00:00Z", 1000},
+				{"debit", "2026-08-28T23:50:00Z", 1425},
+			},
+			wantDue: "2026-09-12T23:50:00Z",
+		},
+		{
+			name: "an overpayment prepays later charges", acctID: "BBCAFEAGEACCTCHJKMNP", leaseID: "BBCAFEAGELEASECHJKMN",
+			entries: []e{
+				{"debit", "2026-08-01T00:00:00Z", 1425},
+				{"credit", "2026-08-02T00:00:00Z", 5000},
+				{"debit", "2026-08-03T00:00:00Z", 3000},
+				{"debit", "2026-08-28T00:00:00Z", 2000},
+			},
+			wantDue: "2026-09-12T00:00:00Z",
+		},
+		{
+			name: "a partial prepay and a later credit compose", acctID: "BBCAFEAGEACCTDHJKMNP", leaseID: "BBCAFEAGELEASEDHJKMN",
+			entries: []e{
+				{"credit", "2026-08-01T00:00:00Z", 500},
+				{"debit", "2026-08-02T00:00:00Z", 1000},
+				{"debit", "2026-08-20T00:00:00Z", 700},
+				{"credit", "2026-08-21T00:00:00Z", 500},
+			},
+			wantDue: "2026-09-04T00:00:00Z",
+		},
+		{
+			// A credit SMALLER than the head debit's remainder: it retires part
+			// of that charge and the head does not move. Every other vector
+			// clears the head outright or overshoots it, so this is the only one
+			// that exercises the partial-retirement arm — and the one that would
+			// pass if that arm popped the debit anyway, since the wrong answer
+			// there (Sep 4, aged from the Aug 20 charge) is a date the other
+			// vectors already produce legitimately.
+			name: "a credit smaller than the head's remainder leaves the head", acctID: "BBCAFEAGEACCTEHJKMNP", leaseID: "BBCAFEAGELEASEEHJKMN",
+			entries: []e{
+				{"debit", "2026-08-01T00:00:00Z", 1000},
+				{"debit", "2026-08-20T00:00:00Z", 700},
+				{"credit", "2026-08-21T00:00:00Z", 400},
+			},
+			wantDue: "2026-08-16T00:00:00Z",
+		},
+	}
+}
+
+// fifoTxID encodes (vector, entry) as a valid 20-char NanoID so each vector's
+// entries carry distinct keys without hand-writing an id per line.
+func fifoTxID(v, i int) string {
+	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+	return "BBCAFEAGETXAHJKMNP" + string([]byte{safe[v%len(safe)], safe[i%len(safe)]})
+}
+
+// TestArrears_FIFOMatchesTheStatement (i) is the green bar's other half: no
+// account is ever reminded for a balance it does not owe, because the op's aging
+// and the resident's own statement agree. Each vector's entries are SEEDED
+// (rather than posted through the ops) so the exact postedAt values the FE's
+// vectors specify survive — including the credits-before-any-debit shapes a
+// live CreditCafeAccount would refuse, which are precisely the surplus
+// carry-forward cases the two implementations have to agree about.
+func TestArrears_FIFOMatchesTheStatement(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsfifo")
+
+	for vi, vec := range arrearsFIFOVectors() {
+		leaseKey := seedLease(t, ctx, conn, vec.leaseID)
+		acctKey := seedLegacyAccount(t, ctx, conn, vec.acctID, leaseKey)
+		for ei, ent := range vec.entries {
+			seedEntryAt(t, ctx, conn, acctKey, fifoTxID(vi, ei), ent.kind, ent.cents, ent.postedAt)
+		}
+
+		evaluateArrears(t, ctx, conn, cp, cons, "cafearrfifoeval"+strconv.Itoa(100+vi),
+			bootstrap.WeaverIdentityKey, acctKey, leaseKey, "2026-08-29T00:00:00Z", processor.OutcomeAccepted)
+
+		got, _ := arrearsData(t, ctx, conn, acctKey)["dueAt"].(string)
+		if got != vec.wantDue {
+			t.Errorf("%s: dueAt = %q, want %q — the op's FIFO must age a history exactly as the resident's statement does", vec.name, got, vec.wantDue)
+		}
+	}
+}
+
+// TestArrears_UndeclaredSubmitterStillHydratesArrears (j) is the guarantee the
+// account-side and transaction-side derive_reads both exist for. This envelope
+// declares the account root and NOTHING else — the shape a client that never
+// read the descriptor sends. .arrears must still be hydrated, because a bare
+// update is auto-conditioned only on a key the operation DECLARED (Contract #3
+// §3.2), and an undeclared read would be LIVE and its write unconditioned.
+//
+// The read-drift guard armed on every CapabilityPipeline is the mechanism-level
+// assertion: a live, undeclared read of vtx.cafeaccount.<id>.arrears reds this
+// test deterministically. The state assertions below are the outcome-level
+// residual.
+func TestArrears_UndeclaredSubmitterStillHydratesArrears(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsundeclared")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRUNDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrundacct000001", leaseKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cafearrunddebit00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-08-01T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1425,"memo":"Settled tab"}`),
+		// The account alone. No optionalReads, no .balance, no .arrears.
+		ContextHint: &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if data == nil {
+		t.Fatal("the episode must open even when the submitter declared nothing about .arrears")
+	}
+	wantDue := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q", got, wantDue)
+	}
+
+	// And the same for the Weaver-dispatched evaluation, whose own derive_reads
+	// declares the key for a dispatcher that omitted it.
+	evalEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cafearrundeval000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "EvaluateCafeArrears",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   "2026-08-22T09:00:00Z",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{acctKey},
+			// The walk stays declared — only a read can be derived server-side.
+			Enumerations: []processor.EnumerationHint{
+				{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, evalEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := arrearsData(t, ctx, conn, acctKey)["remindedFor"].(string); got != wantDue {
+		t.Fatalf("remindedFor = %q, want %q — the evaluation must see and rewrite the hydrated aspect", got, wantDue)
+	}
+}
+
+// seedEntryAt seeds one posted transaction at an EXPLICIT postedAt —
+// seedLegacyEntry's counterpart for the aging vectors, which turn on when each
+// entry posted rather than only on its sign.
+func seedEntryAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	acctKey, txID, entryType string, amountCents int, postedAt string) {
+	t.Helper()
+	txKey := "vtx.cafetransaction." + txID
+	acctID := acctKey[len("vtx.cafeaccount."):]
+	seedVertex(t, ctx, conn, txKey, "cafetransaction", map[string]any{})
+	seedAspect(t, ctx, conn, txKey, "entry", "transactionEntry", map[string]any{
+		"type": entryType, "amountCents": amountCents, "postedAt": postedAt,
+	})
+	seedLink(t, ctx, conn,
+		"lnk.cafetransaction."+txID+".postedTo.cafeaccount."+acctID,
+		txKey, acctKey, "postedTo", "postedTo")
 }
