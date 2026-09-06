@@ -270,6 +270,11 @@ type PipelineConfig struct {
 	// was seeded from — or it drives a Processor that protects nothing and
 	// passes for that reason.
 	KernelLinkKeys []string
+	// ExtraScriptReadObservers are per-test observers appended after the
+	// harness's own drift guard + census, so a test can capture the
+	// ScriptReadRecord for an execution it drives without reaching into the
+	// pipeline's unexported deps.
+	ExtraScriptReadObservers []processor.ScriptReadObserver
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -342,6 +347,7 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	if census := SharedReadCensus(); census != nil {
 		observers = append(observers, census)
 	}
+	observers = append(observers, cfg.ExtraScriptReadObservers...)
 	deps.ScriptReadObserver = observers
 	cp := processor.NewCommitPath(deps)
 	filterSubjects := cfg.FilterSubjects
