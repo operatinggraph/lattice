@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.2.14
+version: 0.3.0
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
@@ -21,9 +21,11 @@ description: |
   three ops grant front-of-house staff alongside the operator, unconfined.
   ClinicCreditAccount ALSO grants a patient scope=self (pay down their own
   balance, never waive it — reason:"waiver" is rejected server-side for a
-  self-scoped submit) — ownership + amount proven server-side against the
-  account's own heldFor->patient->identifiedBy topology and the account's
-  maintained .balance aspect (O(1), not a full-history replay).
+  self-scoped submit) — ownership proven server-side against the account's own
+  heldFor->patient->identifiedBy topology, and the amount capped at the
+  account's maintained .balance aspect (O(1), not a full-history replay). The
+  key that cap reads is hydrated by the transaction DDL's own derive_reads, so
+  the update it conditions never rests on a declaration the submitter writes.
   Depends clinic-domain.
 depends:
   - clinic-domain

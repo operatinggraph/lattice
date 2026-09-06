@@ -9,6 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,7 +248,7 @@ func TestClinicCreateAccount_UnknownPatient(t *testing.T) {
 // TestDebitCreditAccount_PostEntries (test 2). ClinicDebitAccount/ClinicCreditAccount
 // each mint a fresh transaction vertex (root {} — D5) + a .entry aspect + the
 // postedTo link to the account; the account root is never touched (append-only
-// ledger, no balance stored).
+// ledger — the account's own .balance aspect, not its root, is what moves).
 func TestDebitCreditAccount_PostEntries(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "postentries")
@@ -538,6 +541,55 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestDebitAccount_RejectsFractionalCents rejects an amountCents that is not
+// a whole number — every schema in this package (the DDL, the .entry field
+// description, the .balance aspect) says integer cents, and a fractional
+// amount would post an entry the clinicLedgerHistory balance sums into a
+// non-representable total.
+func TestDebitAccount_RejectsFractionalCents(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fracamount")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatfrac0000000001", "Iris Kwan")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctfrac00001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitfracamount0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":10.5}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "required whole cents")
+}
+
+// TestDebitAccount_RejectsFractionalReimbursement rejects an
+// expectedReimbursementCents that is not a whole number, for the same reason
+// as TestDebitAccount_RejectsFractionalCents above.
+func TestDebitAccount_RejectsFractionalReimbursement(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fracreimb")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatfracr000000001", "Jonas Ward")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctfracr0001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitfracreimb00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:00:00Z",
+		Class:         "clinictransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey +
+			`","amountCents":1000,"billedTo":"insurance","expectedReimbursementCents":12.5}`),
+		ContextHint: &processor.ContextHint{Reads: []string{acctKey, acctKey + ".balance"}},
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "required whole cents")
 }
 
 // createProvider submits CreateProvider and returns the provider's full key.
@@ -1072,72 +1124,6 @@ func putDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string,
 	}
 }
 
-// TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch proves an account
-// whose history predates the .balance DDL revision (real postedTo history,
-// no .balance aspect at all — the exact shape createAccount's own accounts
-// could never produce post-fix, but every account minted before it did) is
-// NOT permanently bricked. post_entry's balance_is_new branch (scripts.go)
-// must replay that pre-existing history once, mint .balance seeded with the
-// correct total, and still charge the NEW entry on top — .balance ends up
-// exactly where it would have if this account had always carried the cache.
-func TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch(t *testing.T) {
-	ctx, conn := setupLedgerEnv(t)
-	cp, cons := newLedgerPipeline(t, ctx, conn, "legacybalance")
-
-	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatlegacy00000001", "Lena Ferraro")
-	patientID := patientKey[len("vtx.patient."):]
-
-	acctID := "CLLEGACYACCTHJKMNPQR"
-	acctKey := "vtx.clinicaccount." + acctID
-	putDoc(t, ctx, conn, acctKey, map[string]any{"class": "clinicaccount", "isDeleted": false, "data": map[string]any{}})
-	putDoc(t, ctx, conn, patientKey+".ledgerAccount", map[string]any{
-		"class": "clinicLedgerAccountGuard", "isDeleted": false, "vertexKey": patientKey, "localName": "ledgerAccount",
-		"data": map[string]any{"accountKey": acctKey},
-	})
-	heldForLnk := "lnk.clinicaccount." + acctID + ".heldFor.patient." + patientID
-	putDoc(t, ctx, conn, heldForLnk, map[string]any{
-		"class": "heldFor", "isDeleted": false, "sourceVertex": acctKey, "targetVertex": patientKey, "localName": "heldFor", "data": map[string]any{},
-	})
-	// NOTE: deliberately no vtx.clinicaccount.<id>.balance aspect — this IS
-	// the legacy shape.
-
-	// Pre-existing history: a $40 charge, a $10 payment — $30 owed, computed
-	// nowhere but this replay until the first post-fix touch below.
-	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNAHJKMNPQR", acctKey, acctID, "debit", 4000)
-	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNBHJKMNPQR", acctKey, acctID, "credit", 1000)
-
-	// A fresh $20 charge — the FIRST op to touch this account since the fix.
-	// OptionalReads (not Reads) for .balance mirrors opmetas.go's production
-	// shape exactly: the key doesn't exist yet, so a required Reads entry
-	// would HydrationMiss instead of exercising the self-heal.
-	debitReqID := testutil.GenReqID("legacydebit00000001")
-	debitEnv := &processor.OperationEnvelope{
-		RequestID:     debitReqID,
-		Lane:          processor.LaneDefault,
-		OperationType: "ClinicDebitAccount",
-		Actor:         ledgerActorKey,
-		SubmittedAt:   "2026-07-10T08:00:00Z",
-		Class:         "clinictransaction",
-		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2000,"memo":"New visit, legacy account"}`),
-		ContextHint: &processor.ContextHint{
-			Reads:         []string{acctKey},
-			OptionalReads: []string{acctKey + ".balance"},
-			Enumerations:  []processor.EnumerationHint{{Hub: acctKey, Relation: "postedTo", Direction: "in"}},
-		},
-	}
-	testutil.PublishOp(t, conn, debitEnv)
-	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
-		t.Fatalf("first debit against a legacy (pre-.balance) account outcome = %v, want Accepted (self-heal, not HydrationMiss)", outcome)
-	}
-
-	// $40 - $10 (backfilled from history) + $20 (this debit) = $50.
-	balanceDoc := readDoc(t, ctx, conn, acctKey+".balance")
-	balanceData, _ := balanceDoc["data"].(map[string]any)
-	if got, _ := balanceData["balanceCents"].(float64); got != 5000 {
-		t.Fatalf("legacy account .balance after self-heal = %v, want 5000 (4000-1000+2000)", got)
-	}
-}
-
 // TestCreditAccount_ConsumerSelfScope_RejectedNoBalance proves a self-credit
 // against a freshly-opened account (never charged, nothing owed) is rejected
 // — there is nothing to pay down.
@@ -1280,5 +1266,631 @@ func TestCreditAccount_ConsumerSelfScope_RejectedWaiver(t *testing.T) {
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-scoped waiver outcome = %v, want Rejected (AuthDenied) — a patient may pay down a balance, never waive it", outcome)
+	}
+}
+
+// --- The account's maintained .balance running total ----------------------
+
+// balanceCents reads back the account's own .balance aspect — the O(1) running
+// total post_entry keeps in lockstep with every posted entry, and the quantity
+// the self-pay cap is measured against.
+func balanceCents(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) float64 {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, acctKey+".balance")
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.balance carries no data", acctKey)
+	}
+	got, ok := data["balanceCents"].(float64)
+	if !ok {
+		t.Fatalf("%s.balance carries no balanceCents, got %v", acctKey, data)
+	}
+	return got
+}
+
+// staffDebitHint is the contextHint a ClinicDebitAccount submission carries,
+// mirroring opmetas.go's dispatch: the account plus its absence-tolerant
+// .balance aspect. No postedTo walk — a charge never backfills a legacy
+// account's balance, only a self-pay does.
+//
+// .balance is declared, not incidental: the declaration is what auto-conditions
+// the update post_entry emits for it on the revision it hydrated at
+// (Contract #3 §3.2). The script's own derive_reads(op) declares the same key
+// whatever a submitter sends, so these fixtures mirror the dispatchers rather
+// than supply the guarantee.
+func staffDebitHint(acctKey string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads:         []string{acctKey},
+		OptionalReads: []string{acctKey + ".balance"},
+	}
+}
+
+// selfPayHint is the contextHint a patient's scope=self ClinicCreditAccount
+// submission carries, exactly as opmetas.go declares it — the account, its
+// absence-tolerant .balance, and the bounded postedTo walk that backfills
+// .balance on a legacy account's first self-pay.
+func selfPayHint(acctKey string) *processor.ContextHint {
+	h := staffDebitHint(acctKey)
+	h.Enumerations = []processor.EnumerationHint{
+		{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+	}
+	return h
+}
+
+// staffDebitEnv builds one operator-voice ClinicDebitAccount of amountCents
+// against acctKey.
+func staffDebitEnv(label, acctKey string, amountCents int) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-20T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+			strconv.Itoa(amountCents) + `,"memo":"Office visit copay"}`),
+		ContextHint: staffDebitHint(acctKey),
+	}
+}
+
+// staffDebit submits one ClinicDebitAccount and asserts the outcome.
+func staffDebit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey string, amountCents int, want processor.MessageOutcome) {
+	t.Helper()
+	testutil.PublishOp(t, conn, staffDebitEnv(label, acctKey, amountCents))
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// selfPayEnv builds one scope=self (patient) ClinicCreditAccount of amountCents
+// against acctKey — the one leg the amount cap binds.
+func selfPayEnv(label, acctKey string, amountCents int) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-20T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+			strconv.Itoa(amountCents) + `}`),
+		ContextHint: selfPayHint(acctKey),
+		AuthContext: &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+}
+
+// selfPay submits one self-scoped ClinicCreditAccount and asserts the outcome.
+func selfPay(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey string, amountCents int, want processor.MessageOutcome) {
+	t.Helper()
+	testutil.PublishOp(t, conn, selfPayEnv(label, acctKey, amountCents))
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// assertRejectedBecause drives env and asserts it was rejected FOR THE STATED
+// REASON. MessageOutcome collapses every refusal into "rejected", so an
+// outcome-only assertion on a payment cap passes just as well against a guard
+// that denied the actor, the account or the payload — which is the whole
+// question when the order the guards run in is what is under test.
+func assertRejectedBecause(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, env *processor.OperationEnvelope, wantMessage string) {
+	t.Helper()
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, wantMessage) {
+		t.Fatalf("rejected with %+v, want a refusal containing %q", reply.Error, wantMessage)
+	}
+}
+
+// driveConcurrently fetches n pending operations and runs them through the
+// commit path SIMULTANEOUSLY, returning their outcomes. It exists because
+// DriveOne is strictly serial: a second entry driven after the first always
+// re-reads the .balance the first wrote, so the two never share a revision and
+// the compare-and-set that conditions the update is never exercised. Only
+// overlapping hydrations put two entries on the same revision of the account —
+// the race a live front desk and a patient portal actually produce.
+func driveConcurrently(t *testing.T, ctx context.Context, cp *processor.CommitPath,
+	cons jetstream.Consumer, n int) []processor.MessageOutcome {
+	t.Helper()
+	batch, err := cons.Fetch(n, jetstream.FetchMaxWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("Fetch(%d): %v", n, err)
+	}
+	var msgs []jetstream.Msg
+	for m := range batch.Messages() {
+		msgs = append(msgs, m)
+	}
+	if err := batch.Error(); err != nil {
+		t.Fatalf("Fetch batch error: %v", err)
+	}
+	if len(msgs) != n {
+		t.Fatalf("fetched %d messages, want %d", len(msgs), n)
+	}
+
+	outcomes := make([]processor.MessageOutcome, n)
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, m := range msgs {
+		wg.Add(1)
+		go func(i int, m jetstream.Msg) {
+			defer wg.Done()
+			<-release
+			outcomes[i] = cp.HandleMessage(ctx, m)
+		}(i, m)
+	}
+	close(release)
+	wg.Wait()
+	return outcomes
+}
+
+// seedAspect writes one aspect document directly, in the shape the platform
+// stores (vertexKey/localName carried alongside class/isDeleted/data).
+func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vtxKey, localName, class string, data map[string]any) {
+	t.Helper()
+	putDoc(t, ctx, conn, vtxKey+"."+localName, map[string]any{
+		"class": class, "isDeleted": false,
+		"vertexKey": vtxKey, "localName": localName, "data": data,
+	})
+}
+
+// seedTombstonedAspect writes one aspect document as a TOMBSTONE — present,
+// isDeleted true, exactly what kv.Read hands a script for a soft-deleted key
+// (step4_hydrate routes only ErrKeyNotFound to knownAbsent). No clinic op
+// tombstones a .balance, so this shape has to be planted; the write path must
+// still handle it, because a create against a tombstone is refused outright
+// (Contract #3 §3.3) and an account stuck that way would take no more entries.
+func seedTombstonedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vtxKey, localName, class string, data map[string]any) {
+	t.Helper()
+	putDoc(t, ctx, conn, vtxKey+"."+localName, map[string]any{
+		"class": class, "isDeleted": true,
+		"vertexKey": vtxKey, "localName": localName, "data": data,
+	})
+}
+
+// seedLegacyAccount seeds a clinic account in the shape one minted under
+// clinic-ledger < 0.3.0 sits in today: the vertex, the patient's own
+// .ledgerAccount guard and the heldFor link, and NO .balance aspect — a shape
+// no op produces any more.
+func seedLegacyAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, acctID, patientKey string) string {
+	t.Helper()
+	acctKey := "vtx.clinicaccount." + acctID
+	patientID := patientKey[len("vtx.patient."):]
+	seedVertex(t, ctx, conn, acctKey, "clinicaccount", map[string]any{})
+	seedAspect(t, ctx, conn, patientKey, "ledgerAccount", "clinicLedgerAccountGuard",
+		map[string]any{"accountKey": acctKey})
+	seedLink(t, ctx, conn,
+		"lnk.clinicaccount."+acctID+".heldFor.patient."+patientID,
+		acctKey, patientKey, "heldFor", "heldFor")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("the fixture must start with NO .balance aspect — that is the legacy shape under test")
+	}
+	return acctKey
+}
+
+// budgetTxID encodes i as a valid 20-char NanoID (Contract #1's alphabet — no
+// I/O/l/0), so the budget fixtures below can plant several hundred distinct
+// transactions without hand-writing an id per entry.
+func budgetTxID(i int) string {
+	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+	n := len(safe)
+	return "CLBUDGETTXAHJKMNP" + string([]byte{safe[i/(n*n)%n], safe[(i/n)%n], safe[i%n]})
+}
+
+// TestAccountBalance_ConcurrentEntriesBothPost is why the .balance update
+// carries NO expectedRevision of its own. Two charges against one account,
+// hydrated together and committed together, both read the same revision of
+// .balance — one of them necessarily loses the compare-and-set. Because the
+// condition was DEFAULTED by the Processor (a declared read, Contract #3 §3.2)
+// rather than asserted by the script, that loser is re-hydrated, re-executed
+// against the winner's total and re-committed, so both entries post and the
+// total is their sum. An explicit expectedRevision on the same update would be
+// read as a caller's compensating assertion, excluded from that retry, and the
+// loser would be rejected outright — a charge the clinic made and never billed.
+//
+// Serial driving cannot show this: DriveOne finishes the first entry before the
+// second hydrates, so the second reads the already-updated revision and never
+// races at all.
+func TestAccountBalance_ConcurrentEntriesBothPost(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancerace")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatbalrace0000001", "Rosa Iberra")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "balraceacctsetup0001", patientKey)
+
+	testutil.PublishOp(t, conn, staffDebitEnv("balracefirst00000001", acctKey, 700))
+	testutil.PublishOp(t, conn, staffDebitEnv("balracesecond0000001", acctKey, 300))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted: a lost race on the account's own .balance must re-hydrate and retry, not reject a charge the clinic made", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("balance after two concurrent charges = %v, want 1000 — neither may be dropped", got)
+	}
+}
+
+// TestAccountBalance_UndeclaredSubmitterStillConditioned is the guarantee
+// derive_reads exists for. contextHint is submitter-supplied and nothing
+// enforces it, and a bare update is auto-conditioned only on a key the operation
+// DECLARED (Contract #3 §3.2) — so a submitter that simply omits
+// `<accountKey>.balance` would, without the script's own class-(g) derivation,
+// get a live read and an unconditioned update, and K concurrent entries would
+// each write their own total over the others.
+//
+// These two envelopes declare nothing about .balance at all. Both must still
+// post, and the total must be their SUM: a lost update lands on one of the two
+// amounts instead.
+//
+// Two assertions carry it, and they fail at different depths. Deleting the
+// derivation makes the read LIVE and undeclared, which the read-drift guard
+// (armed on every CapabilityPipeline) reports deterministically — that is the
+// mechanism-level proof. Whether the lost update itself then materialises
+// depends on how far the two live reads actually overlap, so the sum below is
+// the outcome-level residual, not the primary signal.
+func TestAccountBalance_UndeclaredSubmitterStillConditioned(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balanceundeclared")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatbalundecl00001", "Tomas Halvorsen")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "balundeclacctsetup01", patientKey)
+
+	undeclaredDebit := func(label string, amountCents int) *processor.OperationEnvelope {
+		env := staffDebitEnv(label, acctKey, amountCents)
+		// The account alone. No optionalReads, no .balance — the shape a
+		// client that never read the descriptor sends.
+		env.ContextHint = &processor.ContextHint{Reads: []string{acctKey}}
+		return env
+	}
+	testutil.PublishOp(t, conn, undeclaredDebit("balundecfirst0000001", 700))
+	testutil.PublishOp(t, conn, undeclaredDebit("balundecsecond000001", 300))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("balance after two concurrent undeclared charges = %v, want 1000 — a submitter that declares nothing must not be able to turn the OCC condition off", got)
+	}
+}
+
+// TestDeriveReads_BalanceKey pins the class-(g) derivation as TEXT, because its
+// effect is otherwise invisible on the happy path: declared or not, the script
+// reads .balance through kv.Read and an undeclared read falls through to a live
+// Core KV GET that returns the same number. Only the concurrent test above shows
+// the difference behaviourally, and only this shows the derivation still covers
+// both ops rather than the one that test happens to drive.
+func TestDeriveReads_BalanceKey(t *testing.T) {
+	var script string
+	for _, d := range clinicledger.DDLs() {
+		if d.CanonicalName == "clinictransaction" {
+			script = d.Script
+		}
+	}
+	if script == "" {
+		t.Fatal("no `clinictransaction` DDL script found")
+	}
+	deriveIdx := strings.Index(script, "def derive_reads(op):")
+	executeIdx := strings.Index(script, "\ndef execute(state, op):")
+	if deriveIdx < 0 || executeIdx <= deriveIdx {
+		t.Fatalf("cannot locate derive_reads in the clinictransaction script (derive=%d execute=%d)", deriveIdx, executeIdx)
+	}
+	derive := script[deriveIdx:executeIdx]
+	for _, want := range []string{"ClinicDebitAccount", "ClinicCreditAccount"} {
+		if !strings.Contains(derive, want) {
+			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
+		}
+	}
+	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance"]}`) {
+		t.Fatalf("derive_reads no longer returns the account's .balance under optionalReads:\n%s", derive)
+	}
+	// optionalReads, never reads: a legacy account carries no .balance, and a
+	// required read's absence is a HydrationMiss on the very branch the replay
+	// exists for.
+	if strings.Contains(derive, `"reads"`) {
+		t.Fatalf("derive_reads returns a hard `reads` entry — every legacy account would HydrationMiss:\n%s", derive)
+	}
+}
+
+// TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch covers the accounts that
+// already exist. One minted under clinic-ledger < 0.3.0 carries no .balance
+// aspect, which is why every dispatcher declares the key optionalReads rather
+// than reads — a required read would HydrationMiss-reject every entry against
+// it. A SELF-PAY against such an account replays its postedTo history once,
+// bounded, to get the number its own cap needs, and mints the total from that;
+// every touch afterwards is O(1). The seeded history is a debit AND a credit so
+// a replay that summed only charges (or got the sign wrong) lands on a different
+// number than one that nets them.
+func TestAccountBalance_LegacyAccountSelfHealsOnFirstTouch(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "legacybalance")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEGACYPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLLEGACYACCTHJKMNPQR", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+
+	// Pre-existing history: a $40 charge, a $10 payment — $30 owed, computed
+	// nowhere but this replay until the first self-pay below.
+	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNAHJKMNPQR", acctKey, acctID, "debit", 4000)
+	seedLegacyTransaction(t, ctx, conn, "CLLEGACYTXNBHJKMNPQR", acctKey, acctID, "credit", 1000)
+
+	// The cap already measures against the replayed number, before any .balance
+	// exists: $30 is owed, so $30.01 is not payable — and a refused payment
+	// commits nothing, so the account is still legacy afterwards.
+	selfPay(t, ctx, conn, cp, cons, "legacyoverpay0000001", acctKey, 3001, processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("a REFUSED self-pay seeded .balance — nothing about a rejected op may commit")
+	}
+
+	// The first accepted self-pay mints the aspect from the replayed total.
+	selfPay(t, ctx, conn, cp, cons, "legacyselfpay0000001", acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 2000 {
+		t.Fatalf("backfilled balance = %v, want 2000 (4000 charged − 1000 paid − this 1000 self-pay)", got)
+	}
+
+	// And every touch after that is the O(1) path off the aspect itself.
+	selfPay(t, ctx, conn, cp, cons, "legacyselfpay0000002", acctKey, 2000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying the backfilled total = %v, want 0", got)
+	}
+}
+
+// TestAccountBalance_LegacyAccountDebitDoesNotSeed pins which leg pays for the
+// replay, and it is only the self-pay. A charge (and a staff credit or waiver)
+// against a legacy account posts normally and writes NO .balance: seeding the
+// cache from that one entry would record a total that never counted the history
+// behind it, and every later self-pay would be capped against that wrong number.
+// The account stays legacy until a self-pay first touches it — and that
+// self-pay's replay sums the whole history, the charges posted meanwhile
+// included.
+//
+// The wedge this avoids is the reason: clinicNoShowSettlement's missing_charge
+// dispatch is the ONLY writer of a no-show fee, it runs unattended, and an
+// account whose history outgrew the replay budget would refuse every one of
+// those dispatches forever with no repair path.
+func TestAccountBalance_LegacyAccountDebitDoesNotSeed(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "legacydebitnoseed")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLBALLGDPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLBALLGDACCTHJKMNPQR", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	seedLegacyTransaction(t, ctx, conn, "CLBALLGDTXAHJKMNPQRS", acctKey, acctID, "debit", 3000)
+
+	staffDebit(t, ctx, conn, cp, cons, "balgddebit0000000001", acctKey, 1000, processor.OutcomeAccepted)
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("a charge against a legacy account seeded .balance — only a self-pay may, and only from the whole history")
+	}
+
+	// The later self-pay's replay counts that charge: 4000 is owed, not 3000.
+	selfPay(t, ctx, conn, cp, cons, "balgdoverpay00000001", acctKey, 4001, processor.OutcomeRejected)
+	selfPay(t, ctx, conn, cp, cons, "balgdselfpay00000001", acctKey, 4000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying off a legacy account = %v, want 0 (3000 seeded + 1000 charged − 4000 paid)", got)
+	}
+}
+
+// TestAccountBalance_LegacyFirstTouchRace is the two-self-pay race on the FIRST
+// touch of a legacy account, where neither submission has a .balance revision to
+// be conditioned on — both see the key absent and both emit a create. The create
+// carries that declared absence as its assertion, so the loser is not rejected:
+// commit_path.go re-probes it (materializedAbsentKeys), re-hydrates, and
+// re-executes against the winner's freshly minted total.
+//
+// The two halves are sized so that a correct retry accepts BOTH (1500 + 1500
+// against 3000 owed, the second measured against the winner's 1500). That is
+// what makes the assertion sharp: a hard RevisionConflict, or a create that
+// clobbered the winner, shows up as a rejection or a wrong total rather than
+// hiding behind an outcome the cap could also have produced.
+func TestAccountBalance_LegacyFirstTouchRace(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "legacyfirsttouchrace")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLBALLGRPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLBALLGRACCTHJKMNPQR", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	seedLegacyTransaction(t, ctx, conn, "CLBALLGRTXAHJKMNPQRS", acctKey, acctID, "debit", 3000)
+
+	testutil.PublishOp(t, conn, selfPayEnv("balgracefirst0000001", acctKey, 1500))
+	testutil.PublishOp(t, conn, selfPayEnv("balgracesecond000001", acctKey, 1500))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	for i, o := range outcomes {
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("outcome[%d] = %v, want accepted: the loser of a first-touch race re-hydrates against the winner's minted .balance and re-runs, never conflicts out", i, o)
+		}
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after two concurrent 1500 self-pays on a 3000 legacy balance = %v, want 0", got)
+	}
+}
+
+// TestAccountBalance_TombstonedBalanceRevivesByUpdate is the shape a create
+// cannot serve. Contract #3 §3.3 refuses a create against a tombstone, so the
+// absence a legacy account presents and the absence a TOMBSTONED .balance
+// presents are not the same absence: the first is minted, the second is revived
+// by the update verb, auto-conditioned on the tombstone's own hydrated revision.
+// Collapsing the two would reject every entry against such an account.
+func TestAccountBalance_TombstonedBalanceRevivesByUpdate(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancetombstone")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLBALTMBPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLBALTMBACCTHJKMNPQR", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	seedLegacyTransaction(t, ctx, conn, "CLBALTMBTXAHJKMNPQRS", acctKey, acctID, "debit", 3000)
+	seedTombstonedAspect(t, ctx, conn, acctKey, "balance", "clinicAccountBalance",
+		map[string]any{"balanceCents": 0})
+
+	selfPay(t, ctx, conn, cp, cons, "baltombselfpay000001", acctKey, 1000, processor.OutcomeAccepted)
+
+	doc := readDoc(t, ctx, conn, acctKey+".balance")
+	if deleted, _ := doc["isDeleted"].(bool); deleted {
+		t.Fatalf("%s.balance is still tombstoned after an accepted self-pay", acctKey)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 2000 {
+		t.Fatalf("revived balance = %v, want 2000 (3000 replayed − 1000 paid) — the tombstoned document's own stale zero must not be read", got)
+	}
+}
+
+// TestAccountBalance_WrongClassRefused: the script is the sole writer of a
+// .balance aspect and writes exactly clinicAccountBalance, so a document of any
+// other class under that key is a fault, not a number to move or to measure a
+// self-pay cap against. Reading balanceCents off whatever happened to be there
+// would let an unrelated aspect's field decide how much a patient may pay.
+func TestAccountBalance_WrongClassRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancewrongclass")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatbalwrcls000001", "Ada Mwangi")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "balwrongclsacct00001", patientKey)
+	seedAspect(t, ctx, conn, acctKey, "balance", "transactionEntry",
+		map[string]any{"balanceCents": 900000})
+
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		staffDebitEnv("balwrongclsdebit0001", acctKey, 5000),
+		"InvalidState: this account's balance aspect is not a clinicAccountBalance")
+}
+
+// TestCreditAccount_StrangersAccountDeniedBeforeAnyReplay is the amplification
+// primitive the ordering closes. The scope=self grant is held by every patient,
+// and the accountKey is payload-supplied — so if the legacy backfill ran before
+// the ownership proof, any patient could name any account, make the server walk
+// that account's whole transaction history repeatedly, and be denied only
+// afterwards.
+//
+// The stranger's account is deliberately over-budget, which is what makes the
+// ordering visible rather than merely believed: run the replay first and the
+// refusal is the budget's ("could not backfill…"); prove ownership first and it
+// is this one. A same-shaped account under the budget would refuse identically
+// either way and prove nothing.
+func TestCreditAccount_StrangersAccountDeniedBeforeAnyReplay(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfamplify")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	strangerID := "CLAMPLSTRANGERHJKMNP"
+	seedIdentity(t, ctx, conn, strangerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLAMPLQTHERPATNTHJKM", strangerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLAMPLACCTHJKMNPQRST", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	for i := 0; i < 501; i++ {
+		seedLegacyTransaction(t, ctx, conn, budgetTxID(i), acctKey, acctID, "debit", 100)
+	}
+
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		selfPayEnv("amplifyselfpay000001", acctKey, 100),
+		"AuthDenied: a patient may only pay down their own account")
+}
+
+// TestCreditAccount_BackfillBudgetExhausted is the fail-closed end of the
+// replay. The budget is 10 pages of 50, so an account carrying more than 500
+// postedTo entries cannot be summed in one operation — and the script refuses
+// the payment rather than seeding .balance from the partial sum it did reach,
+// which would silently under-state the debt for the life of the account.
+//
+// The refusal names no key: it is toasted verbatim at whoever tried to pay.
+func TestCreditAccount_BackfillBudgetExhausted(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "balancebudget")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLBALBUDPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := seedLegacyAccount(t, ctx, conn, "CLBALBUDACCTHJKMNPQR", patientKey)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	for i := 0; i < 501; i++ {
+		seedLegacyTransaction(t, ctx, conn, budgetTxID(i), acctKey, acctID, "debit", 100)
+	}
+
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		selfPayEnv("balbudgetselfpay0001", acctKey, 100),
+		"AuthDenied: could not backfill this account's balance (too much transaction history for one op)")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("the refused self-pay seeded .balance from a partial replay — the whole point is that it must not")
+	}
+}
+
+// TestCreditAccount_SelfPayCapNamesDollars pins the refusal TEXT the patient is
+// shown. MessageOutcome collapses every refusal into "rejected", so the two
+// existing over-balance tests pass just as well against a guard that denied the
+// actor or the account; and the number in the text is what the patient acts on,
+// so "exceeds 2500" — a raw cent count, or a vtx key — is the wrong thing to
+// toast at them.
+func TestCreditAccount_SelfPayCapNamesDollars(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfcaptext")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLBALWRCPATNTHJKMNPQ", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "captextacctsetup0001", patientKey)
+
+	// Nothing owed yet: the empty-balance refusal, which names no account.
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		selfPayEnv("captextnobalpay00001", acctKey, 100),
+		"AuthDenied: this account has no outstanding balance to pay")
+
+	staffDebit(t, ctx, conn, cp, cons, "captextdebit00000001", acctKey, 1425, processor.OutcomeAccepted)
+
+	// $14.25 owed; the patient types $50.00. Both amounts are spelled as money.
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		selfPayEnv("captextoverpay000001", acctKey, 5000),
+		"AuthDenied: a payment of $50.00 exceeds the outstanding balance of $14.25")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
+		t.Fatalf("balance after the refused self-pay = %v, want the untouched 1425", got)
+	}
+
+	// Exactly what is owed is fine — the cap is `>`, not `>=`, and a
+	// rejection-only test would pass against a guard that refused every payment.
+	selfPay(t, ctx, conn, cp, cons, "captextexactpay00001", acctKey, 1425, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying in full = %v, want 0", got)
+	}
+}
+
+// TestCreditAccount_StaffLegStaysUncapped is the boundary of the cap. A
+// front-desk credit records a decision the clinic made — cash taken at the
+// counter, or a charge waived — and clinicNoShowSettlement's missing_reversal
+// dispatch gives back a charge that may already have been paid. Capping either
+// at what is currently owed would make the one case a reversal exists for the
+// one case that could not be posted, so the staff leg stays uncapped and the
+// balance legitimately goes negative.
+func TestCreditAccount_StaffLegStaysUncapped(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditstaffuncapped")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatstaffuncap0001", "Yusuf Bektas")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "staffuncapacctsetup1", patientKey)
+	staffDebit(t, ctx, conn, cp, cons, "staffuncapdebit00001", acctKey, 900, processor.OutcomeAccepted)
+
+	waiverEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("staffuncapwaiver0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-20T10:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reason":"waiver"}`),
+		ContextHint:   staffDebitHint(acctKey),
+	}
+	testutil.PublishOp(t, conn, waiverEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1600 {
+		t.Fatalf("balance after waiving 2500 against a 900 charge = %v, want -1600 — the staff leg is not capped by what is owed", got)
 	}
 }

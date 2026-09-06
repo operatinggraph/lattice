@@ -3109,9 +3109,12 @@ async function openLedgerAccount(patientKey) {
 // first-ever charge or payment (state.ledger.accountKey empty). A signed-in
 // patient paying down their OWN balance (actingAsSelf) submits ClinicCreditAccount
 // self-scoped (packages/clinic-ledger's consumer scope=self grant) — ownership
-// + amount trust are proven server-side against the account's own heldFor→
-// patient→identifiedBy topology and postedTo history, so a forged accountKey
-// or an over-balance amount only fails closed. ClinicDebitAccount never goes
+// is proven server-side against the account's own heldFor→patient→identifiedBy
+// topology, and the amount is capped at the account's own maintained .balance
+// aspect, so a forged accountKey or an over-balance amount only fails closed.
+// That cap binds the self leg alone: a front-desk credit or waiver under the
+// scope=any grant records a decision the clinic made and is deliberately
+// uncapped. ClinicDebitAccount never goes
 // self (permissions.go grants no self-scope charge) — a patient viewing their
 // own record only ever reaches this path via the payment button, since
 // applyHatGating hides #ledger-charge from non-front-desk sessions.

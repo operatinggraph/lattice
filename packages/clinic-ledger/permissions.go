@@ -39,8 +39,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // patient and binds it to the caller's identity) and amount (a self-credit
 // may never exceed the account's own maintained .balance aspect — an O(1)
 // cache post_entry keeps in lockstep with every posted entry, not a live
-// full-history replay). ClinicDebitAccount gets no matching self-scope grant — a patient
+// full-history replay). The ownership proof runs FIRST, before the balance is
+// read or a legacy account's history is replayed, so a scope=self holder naming
+// a stranger's account is turned away without spending that budget.
+// ClinicDebitAccount gets no matching self-scope grant — a patient
 // may pay down a balance, never charge one.
+//
+// The cap is a property of THIS grant, not of the operation. A front-desk
+// credit under the scope=any grant is staff recording a decision the clinic
+// made — cash taken at the counter, or a charge waived — and the reversal
+// clinicNoShowSettlement dispatches gives back a charge that may already have
+// been paid, so neither is bounded by what is currently owed.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{

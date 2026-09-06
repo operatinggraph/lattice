@@ -61,13 +61,16 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Reads: []string{"row.accountKey", "row.appointmentKey"},
 					// OptionalReads: the account's own .balance aspect post_entry
 					// maintains — resolveReadKey's row.<col>.<aspect> derived-aspect
-					// form (strategist.go). Absence-tolerant (not Reads) so an account
-					// opened before this DDL revision self-heals its .balance on next
-					// touch instead of HydrationMiss-rejecting every dispatch against it.
+					// form (strategist.go). It states this dispatch's read set
+					// truthfully; what GUARANTEES the key is hydrated (and so that the
+					// charge's own .balance update is auto-conditioned on the revision
+					// it was read at, Contract #3 §3.2) is clinic-ledger's own
+					// derive_reads, which returns it whatever a dispatcher declares.
+					// Absence-tolerant (not Reads) because an account opened before the
+					// .balance DDL revision carries none and a charge against one posts
+					// without writing it — only a self-scoped patient payment ever
+					// backfills, so this unattended dispatch never replays a history.
 					OptionalReads: []string{"row.accountKey.balance"},
-					// A legacy account (no .balance aspect yet) makes
-					// post_entry walk its postedTo history once to backfill.
-					Enumerations: []pkgmgr.EnumerationSpec{{Hub: "row.accountKey", Relation: "postedTo", Direction: "in"}},
 				},
 				"missing_reversal": {
 					Action:    "directOp",
@@ -90,9 +93,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// same way missing_charge's memo field already did (comment above).
 					Reads: []string{"row.accountKey", "row.chargeTxKey"},
 					// OptionalReads: same derived-aspect / absence-tolerant shape as
-					// missing_charge above.
+					// missing_charge above, and the same reason for no postedTo walk —
+					// a reversal is a staff-voice credit, so it is neither capped by the
+					// balance nor a leg that backfills one.
 					OptionalReads: []string{"row.accountKey.balance"},
-					Enumerations:  []pkgmgr.EnumerationSpec{{Hub: "row.accountKey", Relation: "postedTo", Direction: "in"}},
 				},
 			},
 		},

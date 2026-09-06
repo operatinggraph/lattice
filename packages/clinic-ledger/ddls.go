@@ -112,8 +112,13 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 			"(class clinicAccountBalance) = {balanceCents: <integer>}. Non-sensitive. Minted at {balanceCents: 0} by " +
 			"ClinicCreateAccount alongside the account vertex it names, then kept in lockstep with every posted entry by " +
 			"ClinicDebitAccount (+= amountCents) and ClinicCreditAccount (-= amountCents) via a bare update — auto-conditioned " +
-			"on the step-4 hydrated revision (a declared read) rather than an explicit expectedRevision, which is what makes " +
-			"it retry-eligible under a concurrent writer instead of hard-conflicting. Exists purely as this package's own O(1) " +
+			"on the step-4 hydrated revision rather than an explicit expectedRevision, which is what makes " +
+			"it retry-eligible under a concurrent writer instead of hard-conflicting. That conditioning depends on the key " +
+			"being declared, and the transaction DDL's own derive_reads declares it on every dispatch rather than trusting the " +
+			"submitter to (every dispatcher declares it in optionalReads as well). An account opened before this aspect " +
+			"existed carries none: a charge, a staff payment and a waiver against such an account post and leave it alone, and " +
+			"only a self-scoped patient payment — the one leg whose cap needs the number — replays the account's own history " +
+			"to compute and mint it. Exists purely as this package's own O(1) " +
 			"authorization cache (the self-scoped ClinicCreditAccount amount-owed check); the clinicLedgerHistory lens remains " +
 			"the independently-derived display source of truth and never reads this aspect. Declaration-only: no op handler " +
 			"of its own.",
@@ -154,11 +159,18 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"reason? (credit only)} " +
 			"+ the postedTo link (transaction→account, the transaction is the later-arriving vertex so it is the source — " +
 			"Contract #1 §1.1) + a bare (no explicit expectedRevision) update of the account's own .balance aspect (accountDDL) " +
-			"by the signed amount — auto-conditioned on the step-4 hydrated revision since .balance is a declared read, which " +
+			"by the signed amount — auto-conditioned on the step-4 hydrated revision since this DDL's own derive_reads declares " +
+			".balance on every dispatch, which " +
 			"is what makes it retry-eligible: a lost race re-hydrates and retries the whole op rather than hard-conflicting. " +
+			"An account opened before that aspect existed carries none, and only a self-scoped (patient) ClinicCreditAccount " +
+			"backfills it, by replaying that account's own postedTo history once under a bounded budget: a charge, a staff " +
+			"payment and a waiver against such an account post without writing .balance, so the account stays legacy until a " +
+			"self-pay first touches it and the cache is never seeded from a partial sum. " +
 			"The ledgerHistory lens still derives its own full-history sum independently " +
 			"(the display source of truth); .balance is this DDL's O(1) authorization cache, letting a self-scoped credit " +
-			"verify the amount owed without replaying the account's whole transaction history. Requires " +
+			"verify the amount owed without replaying the account's whole transaction history. A self-scoped credit may never " +
+			"exceed that outstanding balance (AuthDenied, the amounts spelled as dollars); a staff credit or waiver is not " +
+			"capped by it and may take the balance negative. Requires " +
 			"the accountKey be a live account and amountCents be a positive number. A debit carries a bounded payer dimension — " +
 			"billedTo (self|insurance, default self when omitted) and, only when billedTo is insurance, " +
 			"expectedReimbursementCents (positive, capped at amountCents) — so a clinic can track what it billed insurance for " +
