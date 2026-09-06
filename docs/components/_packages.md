@@ -492,10 +492,12 @@ mechanizes it (name the gate, strike the entry).
   (`cls == "location"` would have rejected all 69 live locations; the accepted-widening arm was then unpinned
   in 4 of 7 packages, so narrowing it back left the whole suite green). Check: every guard needs a *positive*
   vector per live shape, not just a negative — and mutation-test each by narrowing the set.
-- **Census the CHECK, not the wrapper** — a generic helper (`require_live_typed(…, "location")`) reaches the
-  same guard as the named wrapper, so a grep for wrapper names undercounts. Minted: dynamic-type-taxonomy §9.2
-  (8 sites / 5 packages claimed; 19 / 7 real, plus two JavaScript submit sites no Go census would find).
-  Check: grep the predicate and the error string, then re-derive at Phase 0.
+- **A playbook `Params` entry bound to an OPTIONAL-hop column is a dispatch refusal on every row where the hop
+  misses** — Weaver declines a null param outright (`strategist.go` "references row.<col>, which is null/absent"),
+  the gap stands open forever, and nothing in the package's own suite notices because every fixture seeds the hop.
+  Minted: café `cafeArrearsReminders` (2026-09-06), live — the one account with no `heldFor` lease was never
+  evaluated. Check: every `Params` value names a column the anchor itself projects (`entityKey` or an aspect on it);
+  anything reached by a walk is resolved by the op from state, and one lens pin seeds the anchor with the walk missing.
 - **A shared-vertex repoint needs a content-and-revision gate against EVERY other writer of that vertex, not
   just atomicity within its own batch.** A script's own mutation batch being atomic (CAS-guarded) proves
   nothing about a DIFFERENT op racing the same key between that op's own live read and its commit — the

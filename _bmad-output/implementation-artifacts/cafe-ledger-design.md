@@ -341,3 +341,17 @@ same precedent-debt shape the brief already refuses to copy, recorded here. Noth
 **7. Non-goals.** No change to `deriveStatement`'s display math or the arrears grid's ordering; no resident-
 facing notification *content* beyond the adapter's params; no reminder cadence (one per episode, no
 escalation); no `.balance` backfill from the new op (a legacy account stays legacy for the payment cap).
+
+### Inc 4 — shipped 2026-09-06 (`b5c8e7a8`, `bdfb344d`; cafe-ledger 0.5.1, cafe-domain 0.12.2)
+
+Live at 11:00Z+7: nine accounts evaluated; five past-due episodes sent one reminder each (the bridge's
+notification adapter recorded five `completed` outcomes), two timers armed (due 09-12, 09-19), two accounts owe
+nothing; the front-desk grid and the resident statement carry the sent stamp. Two things the live run taught:
+the first eight dispatches fired within a second of the install and were `AuthDenied` because the capability
+lens had not yet projected the new grant — the 30-minute mark lease healed it (filed on the board as a platform
+row); and Weaver refuses a row whose `Params` column is null, which un-dispatched the one account with no
+`heldFor` lease — fixed by deriving the lease in the op (`bdfb344d`). Close-pass classification: M3 (one send per
+episode, not per head) and M4 (degrade, never refuse, past the history budget) were **design gaps** in this brief;
+M1 (replyOp key grammar) and M2 (episode minted on a credit balance) were **implementation bugs**; the null-`Params`
+refusal is a **package-authoring class**, appended to the `_packages.md` dossier; the install race is a
+**platform gap**, filed.
