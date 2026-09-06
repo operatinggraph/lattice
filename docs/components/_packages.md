@@ -563,6 +563,19 @@ mechanizes it (name the gate, strike the entry).
   `go test ./internal/refractor/ -run 'TestCorpus|Census' -count=1` before merge and re-pins deliberately, stating
   in the commit why each verdict moved.
 
+- **A guard's OCC rests on whoever writes its read declaration.** `contextHint` is submitter-supplied and never
+  enforced, so a cap that reads a maintained aspect declared only in a descriptor's `optionalReads` is hydrated —
+  and its bare update revision-conditioned — only for callers who repeat the declaration; a caller that omits it
+  gets a live read and a last-write-wins update under concurrency. Minted: café `CreditCafeAccount`'s `.balance`
+  cap (2026-09-05), caught cold; clinic-ledger carried the identical shape from the precedent it mirrored. Check:
+  any key a script's correctness depends on being HYDRATED (an OCC-conditioned update, a read-before-create) is
+  returned by the script's own `derive_reads`, and one test submits with an empty `contextHint`.
+- **An amount cap written for the self-service leg leaves the staff leg unbounded, and a bounded replay hoisted
+  above the ownership proof is an amplification primitive.** The trust argument ("no rail verifies the payment")
+  is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the
+  caller may name the account lets any grant-holder bill ~500 live reads to a stranger's key. Minted: café
+  `CreditCafeAccount` (2026-09-05). Check: ask which leg the guard is NOT on, and what runs before the proof that
+  names the target.
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

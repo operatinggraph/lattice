@@ -43,3 +43,8 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   stays green. Minted: café `CreditCafeAccount` + `RefundCafeCharge` front-desk legs (2026-09-05). Check:
   every `renderOpForm` context whose descriptor carries a `{actor}` enumeration passes `me`, and the
   comment beside it names the enumeration, not only `buildAuthContext`.
+- **A server-side refusal added to one form leaves its sibling form a dead end** — the resident self-pay form
+  hides at zero balance and carries `max`; the front-desk form beside it rendered whenever an account existed, so
+  the new cap turned a mis-key into a raw `AuthDenied` toast where the sibling form never lets one be typed.
+  Minted: café house-tab payment cap (2026-09-05). Check: when an op gains a server refusal, walk every form that
+  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).
