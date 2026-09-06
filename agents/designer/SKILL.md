@@ -405,6 +405,14 @@ census against it as you would against a stranger's.
   list/set/map must mean something, write what empty renders to and what the consumer does with it.
   (2026-08-21 · app-tier read scope)
 
+- **A declared column is read by every GATE on the path, including the ones that run BEFORE the variable your
+  design reasons about is bound.** Before adding a per-gap column over a mixed-class catalog, grep every reader
+  of the column family (`inflightColumnPrefix`) and mark where each sits relative to the leg/pin binding: the
+  suppression gate short-circuits on the column with no leg chosen, so a bare `inflight_<g>` parked two human
+  legs. Scope the column's VALUE to the state the gate should act on (conjoin with the leg's unmet effect); and
+  price a payoff in the state the SENSOR reports for the harm — a lost call reads "in flight" forever, so the
+  mechanism only separates what the column separates. (2026-09-05 · goal-leg external class)
+
 **E. State, time, cost**
 
 - **New state gets a LIFETIME at every boundary its neighbour honours** — created / reset / carried / ordered at
