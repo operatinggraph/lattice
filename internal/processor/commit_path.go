@@ -1342,13 +1342,20 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 	hydrator.PrimordialActors = authWiring.PrimordialActors
 
 	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now, authWiring.KernelLinkKeys)
+
+	// Built once here so the heartbeat can read the executor's wall ring: each
+	// tick then reports the step-5 script latency and per-execution
+	// live-read/listing cost of this instance alongside the step-3 auth latency.
+	executor := NewExecutor(NewStarlarkRunner(0, 0), logger)
+	hb.AttachExecutor(executor)
+
 	cp := NewCommitPath(Deps{
 		Conn:            conn,
 		CoreBucket:      coreBucket,
 		HealthKV:        healthBucket,
 		Authorizer:      authz,
 		Hydrator:        hydrator,
-		Executor:        NewExecutor(NewStarlarkRunner(0, 0), logger),
+		Executor:        executor,
 		Validator:       NewValidator(ddls, conn, coreBucket, logger),
 		Committer:       committer,
 		Metrics:         metrics,

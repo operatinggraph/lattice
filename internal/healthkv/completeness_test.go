@@ -154,6 +154,18 @@ func checkRequiredKeys(t *testing.T, ctx context.Context, conn *substrate.Conn) 
 			desc: "health.processor.<instance>.step3-latency not found — emitted per heartbeat tick only when CapabilityAuthorizer is attached (AuthModeCapability required)",
 		},
 		{
+			name: "health.processor.<instance>.step5-latency",
+			present: func(ks map[string]struct{}) bool {
+				for k := range ks {
+					if strings.HasPrefix(k, "health.processor.") && strings.HasSuffix(k, ".step5-latency") {
+						return true
+					}
+				}
+				return false
+			},
+			desc: "health.processor.<instance>.step5-latency not found — emitted per heartbeat tick once the Executor is attached by MakePipeline",
+		},
+		{
 			name: "health.refractor.<instance>",
 			present: func(ks map[string]struct{}) bool {
 				for k := range ks {

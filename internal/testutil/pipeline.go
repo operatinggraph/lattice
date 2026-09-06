@@ -311,13 +311,18 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	hydrator.Vault = v
 	hydrator.PrimordialActors = PrimordialActors(t)
 	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now, cfg.KernelLinkKeys)
+	// Mirrors MakePipeline: the heartbeat reports this executor's step-5 wall
+	// ring, so a harness heartbeat carries the same step5-latency key production
+	// does.
+	executor := processor.NewExecutor(processor.NewStarlarkRunner(0, 0), logger)
+	hb.AttachExecutor(executor)
 	deps := processor.Deps{
 		Conn:        conn,
 		CoreBucket:  HarnessCoreBucket,
 		HealthKV:    HarnessHealthBucket,
 		Authorizer:  authz,
 		Hydrator:    hydrator,
-		Executor:    processor.NewExecutor(processor.NewStarlarkRunner(0, 0), logger),
+		Executor:    executor,
 		Validator:   processor.NewValidator(cache, conn, HarnessCoreBucket, logger),
 		Committer:   committer,
 		Metrics:     metrics,
