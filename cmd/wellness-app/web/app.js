@@ -573,7 +573,9 @@ async function loadMembers() {
 // cross-vertical bucket (~100 ops from every installed package, unrelated to
 // wellness). A name missing here simply never appears in the cache, the same
 // "not offered" outcome as a package that hasn't declared the op yet.
-const KNOWN_CATALOG_OPS = ["CreateInstructor", "SetInstructorProfile", "WellnessDebitAccount", "WellnessCreditAccount"];
+const KNOWN_CATALOG_OPS = [
+  "CreateInstructor", "SetInstructorProfile", "WellnessDebitAccount", "WellnessCreditAccount", "CreateUnclaimedIdentity",
+];
 let opCatalogPromise = null;
 let opCatalogCache = null;
 async function loadOpCatalog() {
@@ -1484,9 +1486,8 @@ async function sha256Hex(s) {
 // mintClaimSecret returns a random claim-secret plaintext for a new guest's
 // unclaimed identity. It is hashed and only the hash is sent as
 // CreateUnclaimedIdentity's claimKeyHash; the plaintext never enters
-// Lattice. A front-desk-created guest never needs the plaintext back — unlike
-// loftspace's self-registration flow, nothing here ever signs in as this
-// identity — so unlike loftspace-app it is discarded rather than surfaced.
+// Lattice. It is handed to the shared descriptorform module's
+// revealCeremonySecret, the desk's one chance to see it.
 function mintClaimSecret() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
@@ -1510,7 +1511,14 @@ async function submitNewGuest(ev) {
   const submit = document.getElementById("guest-submit");
   submit.disabled = true;
   try {
-    const claimKeyHash = await sha256Hex(mintClaimSecret());
+    // The reveal wrapper cannot show a secret without the shared module, and
+    // a secret nobody can be shown must never be minted — both are readied
+    // before anything is written, so a load failure aborts here rather than
+    // after the identity is already armed.
+    await loadDescriptorform();
+    await loadOpCatalogQuiet();
+    const claimSecret = mintClaimSecret();
+    const claimKeyHash = await sha256Hex(claimSecret);
     const payload = { name, claimKeyHash };
     if (email) payload.email = email;
     if (phone) payload.phone = phone;
@@ -1523,6 +1531,15 @@ async function submitNewGuest(ev) {
       "create the guest",
       false,
     );
+    const ceremony = (opCatalogCache && opCatalogCache.CreateUnclaimedIdentity && opCatalogCache.CreateUnclaimedIdentity.ceremony) || {};
+    const reveal = {
+      title: ceremony.revealTitle || "Their claim secret — shown once",
+      help:
+        ceremony.revealHelp ||
+        "Give this to them now. Lattice stored only its hash, so this screen is the one and only " +
+          "time the secret exists; if it is lost, the identity needs a fresh one issued.",
+      plaintext: claimSecret,
+    };
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     closeNewGuest();
     if (key) {
@@ -1539,6 +1556,7 @@ async function submitNewGuest(ev) {
     } else {
       toast("Guest created.", true);
     }
+    revealCeremonySecret(reveal, reply);
   } catch (e) {
     toast("Could not create guest: " + e.message, false);
   } finally {

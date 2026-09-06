@@ -495,7 +495,7 @@ function rejectionMessage(reply) {
 // outcome as a package that hasn't declared the op yet.
 const KNOWN_CATALOG_OPS = [
   "AssignProviderSite", "CreateProvider", "SetProviderProfile", "StartVisitSeries",
-  "ClinicDebitAccount", "ClinicCreditAccount", "CorrectAppointmentStatus",
+  "ClinicDebitAccount", "ClinicCreditAccount", "CorrectAppointmentStatus", "CreateUnclaimedIdentity",
 ];
 let opCatalogPromise = null;
 async function loadOpCatalog() {
@@ -865,6 +865,8 @@ async function sha256Hex(s) {
 // mintClaimSecret returns a random claim-secret plaintext for a new patient's
 // unclaimed identity. It is hashed and only the hash is sent as
 // CreateUnclaimedIdentity's claimKeyHash; the plaintext never enters Lattice.
+// The plaintext itself is handed to the shared descriptorform module's
+// revealCeremonySecret, the desk's one chance to see it.
 function mintClaimSecret() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
@@ -885,8 +887,17 @@ async function submitNewPatient(ev) {
   submit.disabled = true;
   try {
     let identityKey = "";
+    let idReply = null;
+    let reveal = null;
     if (email || phone) {
-      const claimKeyHash = await sha256Hex(mintClaimSecret());
+      // The reveal wrapper cannot show a secret without the shared module, and
+      // a secret nobody can be shown must never be minted — both are readied
+      // before anything is written, so a load failure aborts here rather than
+      // after the identity is already armed.
+      await loadDescriptorform();
+      await loadOpCatalogQuiet();
+      const claimSecret = mintClaimSecret();
+      const claimKeyHash = await sha256Hex(claimSecret);
       const idPayload = { name, claimKeyHash };
       if (email) idPayload.email = email;
       if (phone) idPayload.phone = phone;
@@ -894,13 +905,22 @@ async function submitNewPatient(ev) {
       // identity-domain's own derive_reads computes from this payload
       // (Contract #2 §2.5), so the browser no longer ports sha256NanoID or the
       // package's contact normalization to name them.
-      const idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
+      idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
       const idMsg = rejectionMessage(idReply);
       if (idMsg) {
         toast("Could not create patient — " + idMsg, "err");
         return;
       }
       identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
+      const ceremony = (state.opCatalog && state.opCatalog.CreateUnclaimedIdentity && state.opCatalog.CreateUnclaimedIdentity.ceremony) || {};
+      reveal = {
+        title: ceremony.revealTitle || "Their claim secret — shown once",
+        help:
+          ceremony.revealHelp ||
+          "Give this to them now. Lattice stored only its hash, so this screen is the one and only " +
+            "time the secret exists; if it is lost, the identity needs a fresh one issued.",
+        plaintext: claimSecret,
+      };
     }
 
     const payload = { fullName: name };
@@ -918,6 +938,10 @@ async function submitNewPatient(ev) {
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not create patient — " + msg, "err");
+      // The identity is armed either way — CreatePatient's own rejection does
+      // not undo CreateUnclaimedIdentity's commit — so the desk still needs
+      // this secret, or needs to know it was withheld.
+      revealCeremonySecret(reveal, idReply);
       return;
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
@@ -932,6 +956,7 @@ async function submitNewPatient(ev) {
     const search = $("#patient-search");
     if (search) search.value = "";
     setTimeout(loadPatients, 700);
+    revealCeremonySecret(reveal, idReply);
   } catch (e) {
     toast("Could not create patient: " + e.message, "err");
   } finally {
