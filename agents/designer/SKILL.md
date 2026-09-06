@@ -405,6 +405,11 @@ census against it as you would against a stranger's.
   list/set/map must mean something, write what empty renders to and what the consumer does with it.
   (2026-08-21 · app-tier read scope)
 
+- **A strict-order comparison over a recorded stamp has a GRANULARITY — put the EQUAL row in the state table.**
+  `time.rfc3339_utc` formats whole seconds (`starlarksandbox/modules.go`), so two writes in one second tie, and a
+  `>` in both the lens and the op left two live checks forever with no row, no gap, no signal. Check: for every
+  `>`/`<` between two recorded instants, name the format's resolution, write the tie row, and break it on a total
+  key in every predicate that shares the rule. (2026-09-06 · bgcheck supersession)
 - **A declared column is read by every GATE on the path, including the ones that run BEFORE the variable your
   design reasons about is bound.** Before adding a per-gap column over a mixed-class catalog, grep every reader
   of the column family (`inflightColumnPrefix`) and mark where each sits relative to the leg/pin binding: the
