@@ -446,6 +446,9 @@ jobs:
       - name: Install + verify clinic-reminders package (co-installs orchestration-base + clinic-domain)
         run: make verify-package-clinic-reminders
 
+      - name: Install + verify wellness-domain package
+        run: make verify-package-wellness-domain
+
       - name: Install + verify location-domain package
         run: make verify-package-location-domain
 
