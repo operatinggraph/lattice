@@ -84,7 +84,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"subtracts the given positive amount without touching .status.lines at all. Either form then subtracts " +
 			"the resolved amount from the OPEN tab's running total, same OCC-conditioned upsert as Charge, clamped " +
 			"at 0 rather than rejected when the void exceeds the current total (an over-void is a caller mistake " +
-			"worth correcting cleanly, not a hard failure), and appends \"Void correction\" to itemsMemo when it " +
+			"worth correcting cleanly, not a hard failure). A lineId void re-derives itemsMemo from the non-voided " +
+			"lines (the voided line drops out); the legacy amount-only form appends \"Void correction\" to itemsMemo when it " +
 			"actually reduced the total (a void against an already-0 tab appends nothing — there was no charge to " +
 			"correct). " +
 			"Settle{tabKey} closes an " +
@@ -183,8 +184,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the tab is alive + open and line-2 exists and is not already voided on " +
 					".status.lines, derives the void amount from that line's own amountCents (never trusting a " +
 					"caller-supplied amountCents), subtracts it from .status.totalCents (OCC-conditioned, clamped " +
-					"at 0), marks the line voided:true in place, and appends \"Void correction\" to .status.itemsMemo " +
-					"when the total actually decreased. Returns primaryKey. Rejects TabNotOpen if the tab is already " +
+					"at 0), marks the line voided:true in place, and re-derives .status.itemsMemo from the remaining " +
+					"non-voided lines (line-2 drops out of it). Returns primaryKey. Rejects TabNotOpen if the tab is already " +
 					"settled, or UnknownChargeLine if line-2 is absent or already voided.",
 			},
 			{
@@ -240,10 +241,11 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
 			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor} entry to lines, " +
 			"carries staleAt forward unchanged), VoidCharge " +
-			"(OCC-conditioned decrement of totalCents, clamped at 0, appends \"Void correction\" to itemsMemo when the " +
-			"total actually decreased; a lineId-targeted void additionally marks that lines entry voided:true in place, " +
-			"a legacy amountCents-only void leaves lines untouched; carries staleAt forward unchanged), Settle/SettleStaleTab " +
-			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/itemsMemo/lines carried over frozen, staleAt dropped — " +
+			"(OCC-conditioned decrement of totalCents, clamped at 0; a lineId-targeted void marks that lines entry voided:true in place " +
+			"and re-derives itemsMemo from the non-voided lines, a legacy amountCents-only void leaves lines untouched and appends " +
+			"\"Void correction\" to itemsMemo when the total actually decreased; carries staleAt forward unchanged), Settle/SettleStaleTab " +
+			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/lines carried over frozen, itemsMemo frozen as the " +
+			"comma-joined non-voided line descriptions, staleAt dropped — " +
 			"no longer meaningful once settled), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
 			"before that field shipped, computed the same way OpenTab computes it; a no-op once staleAt is already present) — " +
 			"all owned by the tab vertexType DDL's script. " +
@@ -257,7 +259,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
-			"itemsMemo":   "A comma-joined, running line of what was charged — each Charge appends the item's own name (or an off-menu charge's caller-supplied/default description), each qualifying VoidCharge appends \"Void correction\". Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
+			"itemsMemo":   "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it carries, a legacy amount-only void appending \"Void correction\" to it. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
 			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
@@ -935,11 +937,29 @@ def require_menu_item_price(state, p):
     return price.data.get("priceCents"), price.data.get("name")
 
 def append_items_memo(existing_memo, line):
-    # The running itemsMemo accumulator Charge/VoidCharge both append to —
-    # comma-joined, empty-string-safe (a fresh tab's itemsMemo is "").
+    # Comma-joined, empty-string-safe append (a fresh tab's itemsMemo is "").
+    # Used only by VoidCharge's legacy no-lines fallback, where the .status
+    # aspect carries no itemized lines to project a memo from.
     if existing_memo == None or existing_memo == "":
         return line
     return existing_memo + ", " + line
+
+def items_memo_from_lines(lines, fallback):
+    # itemsMemo is a projection of the tab's own live .status.lines, not an
+    # accumulator: the comma-joined description of every non-voided line, so
+    # a voided line drops out of the memo the moment it is voided rather than
+    # staying on it with a separate correction line appended after it. A tab
+    # opened before .status.lines existed carries no lines at all, so it
+    # falls back to whatever memo it already has (fallback), leaving those
+    # legacy tabs' memos exactly as VoidCharge's own no-lines branch writes
+    # them.
+    if lines == None or len(lines) == 0:
+        return fallback
+    descriptions = []
+    for line in lines:
+        if not line.get("voided", False):
+            descriptions.append(line.get("description"))
+    return ", ".join(descriptions)
 
 def void_line_by_id(lines, line_id):
     # Marks the .status.lines entry matching line_id voided:true in place
@@ -1165,12 +1185,12 @@ def execute(state, op):
                      " is not served at tab " + tab_key + "'s building")
 
         new_total = existing.data.get("totalCents") + amount_cents
-        new_memo = append_items_memo(existing.data.get("itemsMemo", ""), item_name)
         existing_lines = existing.data.get("lines", [])
         new_line_id = "line-" + str(len(existing_lines) + 1)
         new_lines = existing_lines + [{"id": new_line_id, "description": item_name,
                                         "amountCents": amount_cents, "voided": False,
                                         "orderedBy": op.actor}]
+        new_memo = items_memo_from_lines(new_lines, existing.data.get("itemsMemo", ""))
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo, "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "staleAt": existing.data.get("staleAt"),
@@ -1231,12 +1251,20 @@ def execute(state, op):
         new_total = old_total - amount_cents
         if new_total < 0:
             new_total = 0
-        # Only a void that actually reduced the total gets an itemsMemo line —
-        # an over-void against an already-0 tab corrected nothing, so there is
-        # no correction to name.
-        new_memo = existing.data.get("itemsMemo", "")
-        if new_total < old_total:
-            new_memo = append_items_memo(new_memo, "Void correction")
+        # A lineId-targeted void projects itemsMemo straight off the
+        # now-updated lines (the voided line simply drops out of the join —
+        # no separate correction entry, since the line itself still carries
+        # the record). The legacy amountCents-only path touches no lines
+        # entry, so nothing else records the correction there: it keeps the
+        # bare "Void correction" append, and only when the void actually
+        # reduced the total (an over-void against an already-0 tab corrected
+        # nothing, so there is no correction to name).
+        if line_id != None and line_id != "":
+            new_memo = items_memo_from_lines(new_lines, existing.data.get("itemsMemo", ""))
+        else:
+            new_memo = existing.data.get("itemsMemo", "")
+            if new_total < old_total:
+                new_memo = append_items_memo(new_memo, "Void correction")
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo, "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "staleAt": existing.data.get("staleAt"),
@@ -1285,8 +1313,10 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only settle their own tab")
 
-        status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": existing.data.get("itemsMemo", ""),
-                        "lines": existing.data.get("lines", []),
+        existing_lines = existing.data.get("lines", [])
+        frozen_memo = items_memo_from_lines(existing_lines, existing.data.get("itemsMemo", ""))
+        status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": frozen_memo,
+                        "lines": existing_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
         # Two releases, both unconditioned, mirroring clinic-domain's slot-cell
@@ -1380,8 +1410,10 @@ def execute(state, op):
         lease_key = existing.data.get("leaseAppKey")
         _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
 
-        status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": existing.data.get("itemsMemo", ""),
-                        "lines": existing.data.get("lines", []),
+        existing_lines = existing.data.get("lines", [])
+        status_data = {"value": "settled", "totalCents": total_cents,
+                        "itemsMemo": items_memo_from_lines(existing_lines, existing.data.get("itemsMemo", "")),
+                        "lines": existing_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
         mutations = [

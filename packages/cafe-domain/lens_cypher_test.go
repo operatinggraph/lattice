@@ -177,6 +177,34 @@ func TestCafeTabSettlement_SettledStatusAndTimestampsProjected(t *testing.T) {
 	require.Equal(t, false, v["violating"], "fully posted — converged")
 }
 
+// TestCafeTabSettlement_ItemsMemoProjectsThrough proves the settlement lens
+// row's itemsMemo column carries whatever the settled tab's own .status
+// aspect froze there — the exact "Latte, Latte" shape
+// TestChargeVoidSettleItemsMemo_ProjectsLiveNonVoidedLines
+// (integration_test.go) drives Charge/VoidCharge/Settle to produce, seeded
+// directly here since this lens's own column is a plain pass-through.
+func TestCafeTabSettlement_ItemsMemoProjectsThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "memotab", "tab")
+	f.aspect(t, "memotab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 800.0, "itemsMemo": "Latte, Latte",
+		"lines": []any{
+			map[string]any{"id": "line-1", "description": "Croissant", "amountCents": 400.0, "voided": true},
+			map[string]any{"id": "line-2", "description": "Latte", "amountCents": 400.0, "voided": false},
+			map[string]any{"id": "line-3", "description": "Latte", "amountCents": 400.0, "voided": false},
+		},
+		"openedAt": "2026-07-22T12:00:00Z", "settledAt": "2026-07-22T13:00:00Z",
+	})
+	f.vtx(t, "memotab_lease", "leaseapp")
+	f.edge(t, "chargedTo", "memotab", "memotab_lease")
+
+	v := f.valuesAt(t, "memotab")
+	require.Equal(t, "Latte, Latte", v["itemsMemo"], "the settlement lens row must carry the same frozen memo the op wrote")
+}
+
 func TestCafeTabSettlement_SettledZeroTotal_NotViolating(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

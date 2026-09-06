@@ -693,8 +693,8 @@ func TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided(t *testing.T) {
 	if got, want := statusData["totalCents"].(float64), float64(300); got != want {
 		t.Fatalf("status.totalCents = %v, want %v (750-450, amount derived from line-1, not caller-supplied)", got, want)
 	}
-	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Off-menu charge, Void correction"; got != want {
-		t.Fatalf("status.itemsMemo = %q, want %q", got, want)
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (line-1 voided drops out of the join, line-2 remains)", got, want)
 	}
 	lines, _ := statusData["lines"].([]any)
 	if len(lines) != 2 {
@@ -756,6 +756,170 @@ func TestVoidCharge_ByLineId_RejectsUnknownLine(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestChargeVoidSettleItemsMemo_ProjectsLiveNonVoidedLines proves the Unit A
+// fix end to end: itemsMemo is a projection of .status.lines at every write,
+// not an append-only accumulator, so a voided line drops out of the frozen
+// settlement memo instead of staying on it with a trailing "Void correction"
+// line appended after it.
+func TestChargeVoidSettleItemsMemo_ProjectsLiveNonVoidedLines(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargevoidsettlememo")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNCVSMLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabcvsm0000001", leaseKey)
+
+	charge := func(reqLabel, description string) {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(reqLabel),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-22T12:05:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":400,"description":"` + description + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	}
+	charge("cdcvsmchargeone00001", "Croissant")
+	charge("cdcvsmchargetwo00001", "Latte")
+	charge("cdcvsmchargethre0001", "Latte")
+
+	voidEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdcvsmvoidline000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, voidEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	settleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdcvsmsettle0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T13:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, settleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Latte, Latte"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (Croissant voided drops out of the join, no trailing Void correction)", got, want)
+	}
+}
+
+// TestVoidChargeSettle_LegacyNoLines_PreservesMemoThroughBoth proves the
+// legacy no-lines fallback items_memo_from_lines falls back to: a tab whose
+// .status predates .status.lines entirely (seeded directly, the same
+// schema-gap shape TestSettle_BackfillsChargedToWhenMissing models) keeps its
+// existing itemsMemo verbatim through both VoidCharge — which still appends
+// the bare "Void correction", since nothing else on this tab records the
+// correction — and Settle, which freezes whatever memo it inherits, having no
+// lines to project from.
+func TestVoidChargeSettle_LegacyNoLines_PreservesMemoThroughBoth(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "legacynolines")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNLGNLLEASEHJ")
+	tabKey := "vtx.tab.BBCAFEDMNLGNLTABHJKM"
+	tabID := tabKey[len("vtx.tab."):]
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 500.0, "itemsMemo": "Muffin",
+		"openedAt": "2026-07-20T10:00:00Z", "leaseAppKey": leaseKey,
+	})
+	seedLink(t, ctx, conn, "lnk.tab."+tabID+".chargedTo.leaseapp."+leaseID, tabKey, leaseKey, "chargedTo", "chargedTo")
+	seedLink(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID, tabKey, leaseKey, "openFor", "openFor")
+	seedAspect(t, ctx, conn, leaseKey, "cafeOpenTab", "cafeOpenTabGuard", map[string]any{"tabKey": tabKey})
+
+	voidEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdlgnlvoid0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":200}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, voidEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["itemsMemo"].(string), "Muffin, Void correction"; got != want {
+		t.Fatalf("status.itemsMemo after VoidCharge = %q, want %q (legacy no-lines fallback still appends)", got, want)
+	}
+	if got, want := statusData["totalCents"].(float64), float64(300); got != want {
+		t.Fatalf("status.totalCents = %v, want %v (500-200)", got, want)
+	}
+
+	settleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdlgnlsettle000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T13:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, settleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	settledDoc := readDoc(t, ctx, conn, tabKey+".status")
+	settledData, _ := settledDoc["data"].(map[string]any)
+	if got, _ := settledData["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, want := settledData["itemsMemo"].(string), "Muffin, Void correction"; got != want {
+		t.Fatalf("status.itemsMemo after Settle = %q, want %q (frozen verbatim — no lines to project from)", got, want)
+	}
 }
 
 // TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched proves the
@@ -983,7 +1147,7 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 		t.Fatalf("status.totalCents = %v, want 1200 (frozen)", got)
 	}
 	if got, want := statusData["itemsMemo"].(string), "Off-menu charge"; got != want {
-		t.Fatalf("status.itemsMemo = %q, want %q (carried over frozen from the Charge, same as totalCents)", got, want)
+		t.Fatalf("status.itemsMemo = %q, want %q (projected from the live lines and frozen, same as totalCents)", got, want)
 	}
 	if _, ok := statusData["settledAt"]; !ok {
 		t.Fatalf("status.settledAt must be stamped on settle")
