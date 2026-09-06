@@ -277,7 +277,7 @@ function isStaff() {
 // isOperatorHat reports whether the caller holds the platform `operator`
 // role — the app-side mirror of resolveSubjectHats' isOperator
 // (cmd/wellness-app/readauth.go). Gates the New-instructor surface:
-// CreateInstructor / BindInstructorIdentity (packages/wellness-domain/permissions.go)
+// CreateInstructor and the instructor identity bind (packages/wellness-domain/permissions.go)
 // grant only `operator`, never `frontOfHouse`, so a front-desk-only session
 // showing that form met AuthDenied on every submit. Also lets an
 // operator-only session (no worksAt anchor) reach the Studios tab at all —
@@ -350,8 +350,8 @@ function signOut() {
 // role alone (an operator with no workplace still needs somewhere to reach
 // New instructor) — and bounces the active view if it just became
 // disallowed. The New-instructor toggle/form stay hidden from a staff-only
-// session that reached the Studios tab on isStaff(): CreateInstructor /
-// BindInstructorIdentity grant only operator, so only isOperatorHat() opens
+// session that reached the Studios tab on isStaff(): CreateInstructor and
+// the instructor identity bind grant only operator, so only isOperatorHat() opens
 // them. Idempotent; re-run whenever whoami resolves.
 function applyHatGating() {
   document.getElementById("tab-roster").hidden = !(isStaff() || instructorKey());

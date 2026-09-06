@@ -242,9 +242,9 @@ func (s *server) writeAuthError(w http.ResponseWriter, err error) {
 // caller's server-resolved read-boundary role resolveSubjectHats already
 // computes — frontOfHouse, and isOperator (added so the FE can hide the
 // instructor-provisioning surface from a front-desk session that holds no
-// grant on CreateInstructor / BindInstructorIdentity: both are operator-only,
-// so a front-desk caller showing the "New instructor" form only ever meets
-// AuthDenied). Mirrors cmd/clinic-app's identical handler; see its comment.
+// grant on CreateInstructor or the instructor identity bind: both are
+// operator-only, so a front-desk caller showing the "New instructor" form
+// only ever meets AuthDenied). Mirrors cmd/clinic-app's identical handler; see its comment.
 // The nav gates staff-only surfaces on this instead of the raw worksAt anchor
 // alone, so a worksAt-only caller with no frontOfHouse role sees them hidden
 // rather than hitting the same 403 the write side already gives them
