@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-09-01 · `8a2cee97` · [Refractor] executor reads a marked hub at the hop's relation, validator re-reads scoped; composed whole reads pin both ways; torn multi-walk footprints rejected — hub drain gone; pair's cost is the `$now` rescan
 - 2026-09-01 · `1fca25cf` · [Refractor] pattern-scoped actor walk + Postgres `GetRow` + idle-aware periodic loops + rebuild registration race — 8 stuck personal lenses drain at 10–25 msg/s
 - 2026-09-01 · (triage, no code) · [orchestration-base] duplicate-human-task row retired — the prescribed work-scoped dedup is REFUTED (3 shapes, code-cited); cause is an anchor-vs-work granularity mismatch, package fix filed on verticals
 - 2026-08-31 · `044ac715` · [Contracts] full-corpus public-posture sweep DONE — all 15 files at promise altitude; 6 factual drifts fixed, ~40 dangling §refs retargeted, rule codified in contracts README
