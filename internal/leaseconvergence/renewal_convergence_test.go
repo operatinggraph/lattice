@@ -21,15 +21,18 @@
 package leaseconvergence_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bridge"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -492,4 +495,529 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, renewalCount, "exactly one renewal cycle must exist for the cancelled leaseapp — no reopen")
+}
+
+// --- the goal gap's external leg (weaver-goal-leg-external-class-design.md §9) ---
+//
+// renewalComplete is the corpus's one goal-mode target, and its catalog is
+// MIXED: refreshBgcheck is a triggerLoom over the externalTask-only
+// backgroundCheck pattern, while verifyGuarantor / setTerms / signRenewal are
+// human assignTasks. The two tests below are the ephemeral-stack halves of that
+// design's Increment 3 — the reclaim payoff on the external leg, and the
+// leg-scoping of the inflight_renewalComplete companion that makes the payoff
+// safe over a mixed catalog. The rule-engine halves live beside the cypher
+// (packages/lease-signing/bgcheck_freshness_lens_test.go).
+
+// renewalLegMarkLease is the Weaver mark lease both tests below run at, and it
+// is what paces every reclaim they observe: a leg's expired episode is only
+// reconsidered once its lease runs out.
+//
+// It carries the same FLOOR asyncMarkLease documents, for the same reason.
+// inflight_renewalComplete is presence-based on the instance's .dispatch aspect,
+// which the BRIDGE writes only once its adapter has accepted the call, so
+// between the dispatch op committing and .dispatch landing the row reads
+// not-in-flight over a call that already exists. A lease whose whole span fits
+// inside that window would be reclaimed as concluded and mint a genuinely second
+// call — correct per §10.3, but not what these tests are measuring. 5s against
+// the tens of milliseconds a local bridge turnaround takes is ~100×;
+// production's default is ~36000×.
+const renewalLegMarkLease = 5 * time.Second
+
+// renewalLegOpts paces Weaver so a mark's lease actually expires and the
+// reconciler sweep actually ticks inside a test, without touching the bridge's
+// own horizons. bgcheckAsync selects the adapter: nil keeps the production-
+// faithful synchronous FakeBackgroundCheck (every call concludes inline, so no
+// .dispatch marker is ever written and nothing is ever in flight); a non-nil
+// FakeAsyncCheck that never resolves keeps every call WITHHELD — accepted by the
+// vendor, .dispatch written, no outcome — which is the only shape that makes
+// inflight_renewalComplete readable as true.
+//
+// The bridge's CallDeadline is pushed past the harness context's own ceiling so
+// the give-up timeout never fires: these tests decide when a withheld call
+// concludes (by submitting the replyOp themselves), rather than racing a
+// wall-clock horizon.
+func renewalLegOpts(bgcheckAsync *bridge.FakeAsyncCheck) []harnessOpt {
+	return []harnessOpt{func(hc *harnessConfig) {
+		hc.bgcheckAsync = bgcheckAsync
+		hc.weaverMarkLease = renewalLegMarkLease
+		hc.weaverSweepInterval = 500 * time.Millisecond
+		hc.weaverSweepWarmup = 500 * time.Millisecond
+		hc.bridgePollInterval = 2 * time.Second
+		hc.bridgeCallDeadline = 10 * time.Minute
+	}}
+}
+
+// weaverStateDoc reads one weaver-state document (a mark, or a `__count`),
+// returning nil when the key is absent or unreadable. Weaver-state is the
+// engine's own dispatch ledger — the only place a gap's LEG and its per-leg
+// attempt tally are observable — and neither is projected into any lens row.
+func (h *harness) weaverStateDoc(key string) map[string]any {
+	entry, err := h.conn.KVGet(h.ctx, bootstrap.WeaverStateBucket, key)
+	if err != nil || entry == nil || len(entry.Value) == 0 {
+		return nil
+	}
+	var doc map[string]any
+	if json.Unmarshal(entry.Value, &doc) != nil {
+		return nil
+	}
+	return doc
+}
+
+// gapMarkClaimID returns the per-open-episode claimId on a gap's in-flight mark,
+// or "" when no mark stands. Every Loom instance id a triggerLoom dispatch
+// supplies is claimId-seeded, so a reclaim that PRESERVES this value re-dispatches
+// onto the same (already terminal) instance as a no-op, while one that MINTS A
+// FRESH value produces a genuinely new instance — the §10.3 difference the
+// external class buys, observed at its source.
+func (h *harness) gapMarkClaimID(targetID, entityID, gapColumn string) string {
+	doc := h.weaverStateDoc(targetID + "." + entityID + "." + gapColumn)
+	if doc == nil {
+		return ""
+	}
+	id, _ := doc["claimId"].(string)
+	return id
+}
+
+// gapDispatchCount reads a gap's dispatch-count document: the attempts booked
+// against the chain (count) and the catalog Ref they are charged to (leg). For a
+// GOAL gap the tally is leg-scoped — a leg change restarts it — so `count` is
+// the attempt tally of the named leg alone, which is what makes "the
+// refreshBgcheck leg reads 2" a statement about the external leg rather than
+// about the renewal's whole chain. present=false means no dispatch has been
+// booked for this gap yet.
+func (h *harness) gapDispatchCount(targetID, entityID, gapColumn string) (count int, leg string, present bool) {
+	doc := h.weaverStateDoc(targetID + "." + entityID + "." + gapColumn + ".__count")
+	if doc == nil {
+		return 0, "", false
+	}
+	n, _ := doc["count"].(float64)
+	leg, _ = doc["leg"].(string)
+	return int(n), leg, true
+}
+
+// taskScopedTo returns the bare id of a task vertex scopedTo the given entity id,
+// or "" when none exists. It is awaitDispatchedTask's single-scan sibling: a hold
+// that asserts NO task was dispatched needs one scan per tick, not a helper that
+// polls for its own deadline.
+func (h *harness) taskScopedTo(scopedToID string) string {
+	keys, err := h.conn.KVListKeys(h.ctx, bootstrap.CoreKVBucket)
+	if errors.Is(err, context.Canceled) || substrate.IsConnectionError(err) {
+		return ""
+	}
+	if err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		t1, taskID, name, _, dstID, ok := substrate.ParseLinkKey(k)
+		if ok && t1 == "task" && name == "scopedTo" && dstID == scopedToID {
+			return taskID
+		}
+	}
+	return ""
+}
+
+// taskAssignedTo returns the bare identity id a task is assignedTo, or "" when
+// the link is absent. The renewal catalog assigns its three human legs to two
+// different people — setTerms and verifyGuarantor to the landlord, signRenewal to
+// the tenant — so the assignee identifies WHICH leg a dispatched task belongs to
+// without resolving the task's forOperation meta-vertex.
+func (h *harness) taskAssignedTo(taskID string) string {
+	keys, err := h.conn.KVListKeys(h.ctx, bootstrap.CoreKVBucket)
+	if err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		t1, srcID, name, _, dstID, ok := substrate.ParseLinkKey(k)
+		if ok && t1 == "task" && srcID == taskID && name == "assignedTo" {
+			return dstID
+		}
+	}
+	return ""
+}
+
+// withheldBgchecks returns the applicant's background-check instances that the
+// vendor ACCEPTED and has not answered — a .dispatch marker with a vendorRef, no
+// .outcome. It is exactly the population the lens's bgInflight fan counts, read
+// back off Core KV so a test can say which instance is holding the column up.
+func (h *harness) withheldBgchecks(applicantID string) (handles []string) {
+	for _, svcKey := range h.serviceOutcomes(applicantID) {
+		if !h.isBgcheckInstance(svcKey) {
+			continue
+		}
+		dispatch := h.aspectData(svcKey, "dispatch")
+		if dispatch == nil || dispatch["vendorRef"] == nil {
+			continue
+		}
+		if h.aspectData(svcKey, "outcome") == nil {
+			handles = append(handles, svcKey[len("vtx.service."):])
+		}
+	}
+	return handles
+}
+
+// concludeBgcheck posts the terminal outcome the bridge would post, through the
+// real replyOp: a definitive vendor verdict on one instance handle. `failed` is a
+// business rejection — a check that CONCLUDED without success — which is the
+// state the goal leg's reclaim is allowed to retry; it is deliberately not a
+// withheld reply, which is the lost-after-accept state no presence-based column
+// can separate.
+func (h *harness) concludeBgcheck(handle, status string) {
+	h.t.Helper()
+	reply := h.submitOp("RecordLeaseServiceOutcome", "leaseServiceReply", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"externalRef": handle, "status": status, "result": "renewal-leg e2e: " + status,
+	}, nil)
+	require.Equalf(h.t, processor.ReplyStatusAccepted, reply.Status,
+		"RecordLeaseServiceOutcome(%s, %s): %+v", handle, status, reply.Error)
+}
+
+// seedCompletedBgcheck mints one background-check instance for the subject and
+// records a COMPLETED outcome on it, through the two real ops the platform uses
+// (CreateLeaseServiceInstance as Loom's relay actor, then the replyOp). The
+// outcome's validUntil is derived from the op's own submittedAt plus the
+// package's freshness window, so the check reads CURRENT to every reader for that
+// window.
+//
+// The fixture mints it rather than waiting for the platform to, because the state
+// the scoping test needs — a completed check standing BESIDE a withheld one — is
+// one the running chain never produces on its own: the suppression under test is
+// exactly what keeps a second check from being dispatched while the first is in
+// flight.
+func (h *harness) seedCompletedBgcheck(subjectKey string) string {
+	h.t.Helper()
+	handle := mustNanoID(h.t)
+	create := h.submitOp("CreateLeaseServiceInstance", "leaseServiceInstance", "default", bootstrap.LoomIdentityKey, map[string]any{
+		"instanceKey": handle,
+		"subjectKey":  subjectKey,
+		"adapter":     "backgroundCheck",
+		"replyOp":     "RecordLeaseServiceOutcome",
+		"params":      map[string]any{"family": "backgroundCheck"},
+	}, &processor.ContextHint{Reads: []string{subjectKey}})
+	require.Equalf(h.t, processor.ReplyStatusAccepted, create.Status, "CreateLeaseServiceInstance(seed): %+v", create.Error)
+	h.concludeBgcheck(handle, "completed")
+	return handle
+}
+
+// TestRenewalConvergence_ExternalLegReclaimsAfterAFailedCheck is the payoff half
+// of the goal-leg external-class design (§1.2 rows 1-2, §9 Inc 3): the renewal's
+// refreshBgcheck leg is a triggerLoom over an externalTask-only pattern, so when
+// its check CONCLUDES WITHOUT SUCCESS the expired episode must be reclaimed with a
+// FRESH claimId — a genuinely new vendor call — rather than collapsing back onto
+// the terminal instance forever.
+//
+// The vector is a `failed` reply, not a withheld one, and that choice is
+// load-bearing: a withheld reply is the lost-after-accept state (§1.2 row 3),
+// which a presence-based in-flight column cannot separate from a healthy call and
+// which this design explicitly does not fix. Using it as the payoff would assert
+// something untrue.
+//
+// The renewal's tenant reaches this state the way a real one does — an onboarding
+// check that CLEARED and then LAPSED — after which every later check is declined,
+// so no completed check ever stands again and bgcheckValidUntil is null for the
+// rest of the run.
+//
+// Two things are asserted, and they are the two halves of the same mechanism: the
+// mark's claimId CHANGES across the reclaim (the mint the external class grants),
+// and the count document's refreshBgcheck leg reaches 2 (the reclaim booked a real
+// ATTEMPT, not a collapse-only re-arm). Before the engine classified a goal gap by
+// its resolved leg, both stood still forever: staleMark read the playbook entry,
+// whose Action is empty for every goal gap, and answered "never makes an external
+// call".
+func TestRenewalConvergence_ExternalLegReclaimsAfterAFailedCheck(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
+	}
+	// backgroundCheckFreshness rides along because it is what RECORDS a lapse:
+	// freshness is a recorded fact, not a clock reading, so without this target's
+	// timer arming on the instance the onboarding check never goes stale and the
+	// renewal's bgcheck atom is never unmet. leaseExpiry / renewalComplete are
+	// deliberately NOT activated at boot — see the late activation below.
+	h := newHarness(t, append(renewalLegOpts(nil), withExtraLenses("backgroundCheckFreshness"))...)
+
+	appKey, applicant, unit := h.seedRenewableApplication("R")
+	h.assignLandlord(unit)
+	h.approveWithTenancy(appKey, applicant, unit)
+	appID := appKey[len("vtx.leaseapp."):]
+	applicantID := applicant[len("vtx.identity."):]
+
+	// A guarantor-less profile: renewalComplete projects hasGuarantor as
+	// (…hasGuarantor = True), so this is a REAL false and the goal's anyOf
+	// disjunct is satisfied without any verification — verifyGuarantor never
+	// becomes pre-eligible, which keeps the catalog's actionable set small enough
+	// to reason about below.
+	profile := h.submitOp("SetApplicantProfile", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"leaseAppKey": appKey, "unit": unit, "annualIncome": 60000, "employmentStatus": "employed",
+	}, &processor.ContextHint{Reads: []string{appKey}})
+	require.Equalf(t, processor.ReplyStatusAccepted, profile.Status, "SetApplicantProfile(R): %+v", profile.Error)
+
+	// The onboarding check clears (the synchronous adapter is still in its
+	// default clearing mode), so the tenant genuinely holds a CURRENT check
+	// before anything about the renewal is in play.
+	var onboardingBgcheck string
+	require.Eventuallyf(t, func() bool {
+		onboardingBgcheck = h.bgcheckHandle(applicantID)
+		if onboardingBgcheck == "" {
+			return false
+		}
+		outcome := h.aspectData("vtx.service."+onboardingBgcheck, "outcome")
+		return outcome != nil && outcome["status"] == "completed"
+	}, 60*time.Second, 250*time.Millisecond, "the onboarding background check must clear before it can lapse")
+
+	// Arm the decline BEFORE the lapse re-opens the gap: from here every check the
+	// platform dispatches concludes `failed`, so no completed check ever stands
+	// again and bgcheckValidUntil stays null for the rest of the run. Armed after
+	// the clearing outcome above is observed and well before the lapse (a whole
+	// freshness window away), so which mode each dispatch sees is decided, not raced.
+	h.bgFake.SetDeclineAll(true)
+
+	// The lapse is a RECORDED fact: wait for the instance's own
+	// backgroundCheckFreshness row to go null, which happens only once its @at
+	// fired and MarkExpired committed the lapse onto it. Sleeping past the window
+	// would prove nothing.
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("backgroundCheckFreshness", onboardingBgcheck)
+		return row != nil && row["freshUntil"] == nil
+	}, 90*time.Second, 300*time.Millisecond,
+		"the onboarding check must be RECORDED lapsed — the state that leaves the renewal's bgcheck atom unmet")
+
+	// The lapse re-opens the STATIC target's own missing_bgcheck gap over the same
+	// providedTo fan (lenses.go: a leased AND approved application re-opens on the
+	// lapse), and that gap dispatches its own declined checks for this same tenant.
+	// It is bounded by its own maxretries_bgcheck, so it spends that budget and
+	// stops — and only once it has is the tenant's instance population attributable
+	// to the renewal leg alone. This is the §3.5 static-target overlap, waited out
+	// rather than assumed away.
+	staticCap := 0
+	require.Eventuallyf(t, func() bool {
+		row := h.readRow(appID)
+		if row == nil {
+			return false
+		}
+		declared, ok := row["maxretries_bgcheck"].(float64)
+		if !ok || declared <= 0 {
+			return false
+		}
+		staticCap = int(declared)
+		// The static gap is not a goal gap, so its count document records the
+		// dispatch ACTION rather than a catalog Ref — only the tally is read here.
+		count, _, present := h.gapDispatchCount("leaseApplicationComplete", appID, "missing_bgcheck")
+		return present && count >= staticCap
+	}, 90*time.Second, 250*time.Millisecond,
+		"the static bgcheck gap must spend its whole retry budget on declined checks before the renewal leg is measured")
+
+	// …and stay spent: no further static dispatch across a full mark-lease expiry
+	// plus several sweep ticks, which is what makes the baseline below a fixed
+	// point rather than a sample of a still-moving population.
+	baseline := h.countBgcheckInstances(applicantID)
+	require.Neverf(t, func() bool {
+		return h.countBgcheckInstances(applicantID) != baseline
+	}, 2*renewalLegMarkLease, 300*time.Millisecond,
+		"the exhausted static gap must dispatch nothing more; baseline=%d cap=%d", baseline, staticCap)
+
+	// Only NOW does the renewal chain come into being. Activating its two lenses
+	// late is what keeps the whole static-exhaustion phase above free of renewal
+	// dispatches — a lens Weaver cannot see projects no rows, so no renewal target
+	// competes for the same tenant's checks while the budget is being spent.
+	h.activateActorAggregateLensNow(h.ctx, "leaseExpiry")
+	h.activateActorAggregateLensNow(h.ctx, "renewalComplete")
+
+	renewalKey := h.findRenewalKey(appID, 60*time.Second)
+	require.NotEmpty(t, renewalKey, "leaseExpiry must open a renewal cycle once its lens is live")
+	renewalID := renewalKey[len("vtx.renewal."):]
+
+	// Set the terms directly so refreshBgcheck is the catalog's ONE actionable
+	// leg: with terms set, no guarantor claimed and bgcheckValidUntil null,
+	// signRenewal's pre is unmet and verifyGuarantor is not pre-eligible, so every
+	// dispatch the gap makes from here is the external one. (The gap's count is
+	// leg-scoped, so whichever leg Weaver picked before this lands restarts the
+	// tally at the boundary rather than polluting it.)
+	terms := h.submitOp("SetRenewalTerms", "renewal", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"renewalKey": renewalKey, "rentAmount": 2100, "termMonths": 12,
+	}, &processor.ContextHint{Reads: []string{renewalKey}})
+	require.Equalf(t, processor.ReplyStatusAccepted, terms.Status, "SetRenewalTerms(R): %+v", terms.Error)
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("renewalComplete", renewalID)
+		return row != nil && row["termsSetAt"] != nil
+	}, 30*time.Second, 200*time.Millisecond, "SetRenewalTerms must settle before the external leg is the only one left")
+
+	// The reclaim payoff. Every claimId the mark carries is collected as the poll
+	// runs, because the reclaim REPLACES the mark in place: sampling the value once
+	// before and once after would be a race, while accumulating every distinct
+	// value the episode ever showed is not. A collapse-only reclaim preserves the
+	// claimId, so the set stays at one member however long the poll runs.
+	claimIDs := map[string]bool{}
+	var legCount int
+	require.Eventuallyf(t, func() bool {
+		if id := h.gapMarkClaimID("renewalComplete", renewalID, "missing_renewalComplete"); id != "" {
+			claimIDs[id] = true
+		}
+		count, leg, present := h.gapDispatchCount("renewalComplete", renewalID, "missing_renewalComplete")
+		if !present || leg != "refreshBgcheck" {
+			return false
+		}
+		legCount = count
+		return count >= 2
+	}, 120*time.Second, 200*time.Millisecond,
+		"the refreshBgcheck leg must book a SECOND attempt after its failed check's lease expires — "+
+			"a collapse-only reclaim books no attempt at all and the tally stands at 1 forever")
+
+	require.Equal(t, 2, legCount,
+		"the count document tallies attempts on the refreshBgcheck leg alone (a goal gap's tally is leg-scoped)")
+	require.GreaterOrEqualf(t, len(claimIDs), 2,
+		"the reclaim must MINT a fresh claimId, not preserve the concluded episode's — every Loom instance id is "+
+			"claimId-seeded, so a preserved claimId re-dispatches onto the terminal instance as a no-op; saw %v", claimIDs)
+
+	// The observable consequence of that fresh mint: a genuinely SECOND Loom
+	// instance, and so a second background-check claim vertex providedTo the
+	// tenant, beyond everything the static gap left behind.
+	//
+	// The ledger LEADS the artifact: the reclaim books its attempt as it re-arms
+	// the mark, while the instance it dispatches only exists once triggerLoom →
+	// Loom → the externalTask's CreateLeaseServiceInstance has committed. So this
+	// is a wait, not a read — an immediate assertion here catches the window in
+	// between and reads one instance short.
+	require.Eventuallyf(t, func() bool {
+		return h.countBgcheckInstances(applicantID) >= baseline+2
+	}, 60*time.Second, 200*time.Millisecond,
+		"the refreshBgcheck leg must have minted TWO background-check instances (the first attempt and the reclaim's "+
+			"fresh one) beyond the %d the static gap left; a preserved claimId collapses the second onto the first",
+		baseline)
+
+	// Each renewal-leg attempt concluded with a definitive vendor rejection —
+	// the state §1.2 row 1 names, and the whole reason the retry is legitimate.
+	require.Eventuallyf(t, func() bool {
+		return h.failedBgcheckInstances(applicantID) >= baseline+1
+	}, 60*time.Second, 200*time.Millisecond,
+		"the renewal leg's own attempts must carry terminal failed outcomes — a check that concluded without success, "+
+			"never a withheld reply")
+
+	// The gap is still open: a retried external leg is a bounded retry toward the
+	// goal, not a silent close.
+	row := h.weaverTargetRow("renewalComplete", renewalID)
+	require.NotNil(t, row)
+	require.Nil(t, row["bgcheckValidUntil"], "no check ever cleared again, so the goal's bgcheck atom stays unmet")
+	require.Equal(t, true, rowBool(row, "missing_renewalComplete"), "the renewal still has work to do")
+}
+
+// TestRenewalConvergence_InflightIsLegScopedAcrossTheStaticCheck is the scoping
+// half (§3.5, the design's BLOCKING adversarial finding). Weaver answers a gap's
+// suppression gate on inflight_<g> BEFORE it binds a leg, so over renewalComplete's
+// mixed catalog the bare in-flight fact would park the landlord's and the tenant's
+// human tasks behind ANY background check running for the same tenant — including
+// the static leaseApplicationComplete target's own check, which fans through the
+// identical providedTo hop. Conjoining the in-flight fact with the external leg's
+// unmet effect (bgcheckValidUntil = null) makes the column read true only while the
+// check is what the chain is still waiting on.
+//
+// The two states are asserted in sequence on ONE renewal:
+//
+//  1. a WITHHELD check (the vendor accepted it, .dispatch written, no outcome) and
+//     no completed check ⇒ the column reads true and the gap dispatches nothing —
+//     no task for the landlord, no second check.
+//  2. a completed, unlapsed check standing BESIDE that same still-withheld one ⇒
+//     the column flips FALSE and the human leg dispatches. This is the
+//     discriminating vector: the bare in-flight fact is unchanged between (1) and
+//     (2) — a check is in flight throughout — so only the conjunct can move.
+//
+// The withheld check is the STATIC target's, which is the overlap §3.5 is about;
+// the completed one is seeded, because the suppression under test is precisely
+// what stops the running chain from producing a second check while the first is in
+// flight.
+func TestRenewalConvergence_InflightIsLegScopedAcrossTheStaticCheck(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
+	}
+	// An adapter that accepts every call and never resolves it: the only shape
+	// that yields a durable .dispatch-without-outcome, which is what the lens's
+	// bgInflight fan counts. backgroundCheckFreshness is deliberately NOT
+	// activated — freshness is a recorded fact, so with no target to arm the @at
+	// the seeded completed check below stays UNLAPSED for the whole test.
+	h := newHarness(t, renewalLegOpts(bridge.NewFakeAsyncCheck(1_000_000))...)
+
+	appKey, applicant, unit := h.seedRenewableApplication("S")
+	landlord := h.assignLandlord(unit)
+	h.approveWithTenancy(appKey, applicant, unit)
+	appID := appKey[len("vtx.leaseapp."):]
+	applicantID := applicant[len("vtx.identity."):]
+	landlordID := landlord[len("vtx.identity."):]
+
+	// Guarantor-less, so verifyGuarantor is never pre-eligible: the only human leg
+	// the catalog can offer for an unset-terms renewal is setTerms.
+	profile := h.submitOp("SetApplicantProfile", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"leaseAppKey": appKey, "unit": unit, "annualIncome": 60000, "employmentStatus": "employed",
+	}, &processor.ContextHint{Reads: []string{appKey}})
+	require.Equalf(t, processor.ReplyStatusAccepted, profile.Status, "SetApplicantProfile(S): %+v", profile.Error)
+
+	// The static target's own onboarding check goes out and is never answered.
+	var withheld string
+	require.Eventuallyf(t, func() bool {
+		handles := h.withheldBgchecks(applicantID)
+		if len(handles) != 1 {
+			return false
+		}
+		withheld = handles[0]
+		return rowBool(h.readRow(appID), "inflight_bgcheck")
+	}, 60*time.Second, 200*time.Millisecond,
+		"the static bgcheck gap's own check must be accepted and left WITHHELD before the renewal chain exists")
+
+	// The renewal opens with that check already in flight. Activating the two
+	// renewal lenses only now is what makes the ORDER deterministic: a lens
+	// activated at boot would race the bridge's .dispatch write, and a renewal row
+	// projected in that window would read not-in-flight over a call that already
+	// exists and dispatch before the state under test is reached.
+	h.activateActorAggregateLensNow(h.ctx, "leaseExpiry")
+	h.activateActorAggregateLensNow(h.ctx, "renewalComplete")
+
+	renewalKey := h.findRenewalKey(appID, 60*time.Second)
+	require.NotEmpty(t, renewalKey, "leaseExpiry must open a renewal cycle once its lens is live")
+	renewalID := renewalKey[len("vtx.renewal."):]
+
+	// State (1): in flight, nothing completed.
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("renewalComplete", renewalID)
+		return row != nil && row["bgcheckValidUntil"] == nil && rowBool(row, "inflight_renewalComplete")
+	}, 60*time.Second, 200*time.Millisecond,
+		"with a check in flight and none completed, inflight_renewalComplete must read TRUE — the external leg is "+
+			"what the chain is waiting on")
+
+	// …and the gap dispatches NOTHING while it does: no landlord task, no second
+	// check. The hold spans two full mark-lease expiries so the reconciler sweep's
+	// own dispatch leg is exercised, not just lane 1's.
+	require.Neverf(t, func() bool {
+		return h.taskScopedTo(renewalID) != "" || len(h.withheldBgchecks(applicantID)) != 1 ||
+			h.countBgcheckInstances(applicantID) != 1
+	}, 2*renewalLegMarkLease, 300*time.Millisecond,
+		"a suppressed goal gap dispatches nothing at all — not through lane 1 and not through the sweep")
+
+	// State (2): a completed, unlapsed check seeded BESIDE the still-withheld one.
+	// Nothing about the in-flight fact changes here — the same check is still in
+	// flight, and the assertion below re-checks that — so the column can only move
+	// because of the conjunct.
+	seeded := h.seedCompletedBgcheck(applicant)
+	require.NotEqual(t, withheld, seeded, "the seeded completed check is a SECOND instance, not the withheld one")
+
+	require.Eventuallyf(t, func() bool {
+		row := h.weaverTargetRow("renewalComplete", renewalID)
+		return row != nil && row["bgcheckValidUntil"] != nil && !rowBool(row, "inflight_renewalComplete")
+	}, 60*time.Second, 200*time.Millisecond,
+		"a completed, unlapsed check meets the external leg's effect, so the leg-scoped column must read FALSE even "+
+			"though a check is still in flight — the bare in-flight fact would still read true here")
+
+	require.Containsf(t, h.withheldBgchecks(applicantID), withheld,
+		"the original check must STILL be withheld at the moment the column reads false — that is what makes this "+
+			"vector discriminating rather than a check simply concluding")
+
+	// …and the human leg the false column releases actually dispatches: a task
+	// scopedTo the renewal, assigned to the LANDLORD, which over this catalog can
+	// only be setTerms (verifyGuarantor is not pre-eligible for a guarantor-less
+	// tenant, and signRenewal is the tenant's).
+	var taskID string
+	require.Eventuallyf(t, func() bool {
+		taskID = h.taskScopedTo(renewalID)
+		return taskID != ""
+	}, 60*time.Second, 250*time.Millisecond,
+		"once the column reads false the goal gap must dispatch its human leg — the park the bare column would cause")
+	require.Equal(t, landlordID, h.taskAssignedTo(taskID),
+		"the released leg is setTerms: the landlord's task, not the tenant's")
 }
