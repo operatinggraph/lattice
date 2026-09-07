@@ -64,7 +64,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Bootstrap/Loom] The 1 s marker TTL is the delivery window of every TTL-expiry signal** | `LimitMarkerTTL=1s` on all six `PerKeyTTL` buckets means a `deadline.*` expiry (Loom's only rejected/lost-step signal) and a tracker expiry exist for one second; a consumer down across that second never sees it, no startup scan notices, and the deadline handler's Nak on a probe error asks for a redelivery of that same second-lived marker. Decide the value per bucket. | ★★★ | S | 📋 ready · [why](../../implementation-artifacts/loom-state-tombstone-sweep-design.md) §11 |
 | **[Weaver/Loom/Refractor] Retire the holder-less `control-operator` role** | Decided: its intended holder went to `consoleOperator` (a strict superset) one day after it shipped, two later ratified designs declined to use it, nothing references it. Recipe: `control-authz` version bump; `diffManifest` tombstones the orphans (two-way door); drop the lint allowlist entry. | ★ | XS | 📋 ready · [triage §9](../../../docs/reviews/lattice-designer-triage-2026-08-27.md) |
 | **[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row** | Every catalog row repeats the descriptor vocabulary (~2 KB × 26–97 rows per actor), so one actor's content pass is 50–200 KB of near-identical text; a vocabulary reference per row, or a per-actor vocabulary row, would cut it by an order of magnitude. Measured at the personal-lens delta T7. | ★ | S | 📋 ready · [why](../../implementation-artifacts/personal-lens-delta-publication-design.md) §13 |
-| **[Refractor] `adjacency.upsertEdge` removes an edge by `EdgeID` with no ordering guard** | Deterministic `EdgeID`s: a revoke→re-grant reuses one and neither arm compares sequences, so an older tombstone deletes a live edge (under-grant) and an older create resurrects a revoked one (over-grant). 19 lenses, 5 PII tables. Fix: a per-edge sequence floor on both arms. | ★★★ | S–M | 🏗️ owner: claude/bold-newton-txzgaq · [design](../../implementation-artifacts/adjacency-edge-ordering-guard-design.md) · next: Inc 1 guard + pins |
 
 | **[Weaver] A goal-mode gap's dispatch shape never reaches `externalDispatchGap`** | Switches on `ga.Action` ([evaluator.go:616](../../../internal/weaver/evaluator.go:616)) — `""` for every goal gap — so `staleMark` never returns true for one; four sites read that: `renewalComplete`'s external `refreshBgcheck` leg always reclaims collapse-only, and `reset-budget` refuses it forever. `resolvedLegAction` resolves it a line above two of them. | ★★ | S–M | ✅ ratified (Winston-adjudicated) · [design](../../implementation-artifacts/weaver-goal-leg-external-class-design.md) |
 
@@ -147,6 +146,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-07 · `5d92513` · [Refractor] a per-edge sequence floor orders the adjacency index — stale-removal under-grant and stale-create over-grant both closed ([design](../../implementation-artifacts/adjacency-edge-ordering-guard-design.md))
 - 2026-09-06 · `860bb73` · [Refractor] the WITH-scope refusal admits a chain re-walked from a carried head — `edgeManifestStaffReadGrants` off the BFS ([design](../../implementation-artifacts/varlength-anchor-derivation-design.md))
 - 2026-09-06 · `686998b` · [CI] two wall-clock fixture flakes root-caused — edge/sync gate deadline (ea16770), substrate marker re-arm slack; main green on both re-runs
 - 2026-09-06 · `d01086e` · [Weaver] one escalation episode, three doors SHIPPED — escalateGap seam, class-declaring mark, release when the gap can act ([design](../../implementation-artifacts/weaver-escalation-episode-three-doors-design.md))
@@ -171,7 +171,6 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-03 · `689eb0c0` · [lease-signing] TombstoneSupersededLeaseServiceInstance (ownership-checked, operator-only) + purge of 12,245 superseded background checks on the dev stack, 0 rejected
 - 2026-09-03 · `7e2ef6b2` · [lease-signing] a background check stays valid 30 days (not 5 min) and the op-meta targets are labeled — the runaway re-check loop stops; leaseApplicationComplete narrows to 7 labels
 - 2026-09-03 · `3017eac3` · [Refractor] a lens Output edit re-activates the lens in place — ownership-tested purge, refusal by construction, scoped health clear; live round trip on cafeStaleTabSettlement
-- 2026-09-03 · `cf897d71` · [Refractor] personal-lens derivation licence SHIPPED — edges, cap-read closure, licence + single-instance gate, multi-walk union; edgeCatalog 3/min→25 msg/s
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 

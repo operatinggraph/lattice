@@ -302,8 +302,11 @@ intent, on the one writer the fence protected:
 3. **S-wrong is filed, not absorbed** (§13): an ordering guard on `upsertEdge`'s removal is an adjacency-index fix
    with its own consumers (every lens, the enumerator, the CDC path today), and this design neither widens nor narrows
    it — a wrongly-removed edge produces the same under-grant through the next CDC event on A with or without
-   withholding. Until it lands, an S-wrong tombstone from `Reproject` heals at the next CDC event on A (row 4) or at
-   the sweep's next pass after the index is repaired.
+   withholding. **Landed 2026-09-07 (`5d92513`,
+   [design](adjacency-edge-ordering-guard-design.md)):** the index carries a per-edge sequence floor on both arms, so
+   S-wrong no longer arises on the link path — the stale removal that produced it is declined. The healers below still
+   apply to the residuals that design names (an evicted floor, a re-provisioned Core KV stream): an S-wrong tombstone
+   from `Reproject` heals at the next CDC event on A (row 4) or at the sweep's next pass after the index is repaired.
 
 **What remains (§5 rows 7r, 7s; §9).** Row 7r needs a retraction the fan-out already failed to deliver (an over-grant
 the sweep already owns). Row 7s needs S-wrong. Both are pre-existing classes, both deny-direction under this design,
@@ -537,7 +540,9 @@ draft and is priced against the code that refuted it.
   ordering guard* — a redelivered older tombstone of a reused link key (`builder.go:150-162`, `bootstrap.go:179-183`)
   deletes a live edge; every executor walk, the enumerator and the CDC prefix diff then read the link as absent
   until the next apply or an overflow-arm read. Evidence and consumers in §4.4 (S-wrong); this design's row 7s is the
-  first named victim. ★★ · S–M · 📋 ready.
+  first named victim. ★★ · S–M · **SHIPPED 2026-09-07 (`5d92513`,
+  [design](adjacency-edge-ordering-guard-design.md))** — the build found the mirror direction this filing missed (a
+  stale create resurrecting a revoked edge, an over-grant) and closed both.
 
 ## 14. Dossier entries this design is built against (`docs/components/refractor.md` § *Review keeps catching*)
 
