@@ -40,17 +40,26 @@
 // cannot see was resolved. A static gap resolves to its own action, so the rule
 // costs it nothing.
 //
-// Rule 2 (staleMark's GapAction argument). Every call to staleMark passes, as
-// its GapAction argument, a plain identifier whose EVERY assignment in the
-// enclosing function is one of: (a) a call to resolvePlannedAction or
-// resolvedLegAction (the identifier on the LHS of that call's result list);
-// (b) the zero composite literal GapAction{}; (c) an identifier that itself
-// satisfies (a) — one hop, so `leg = resolved` inside an
+// Rule 2 (staleMark's GapAction argument). Every call to staleMark passes, in
+// the argument position staleMark's OWN DECLARATION gives its GapAction
+// parameter — never assumed to be the last argument, since that assumption
+// breaks silently the day another parameter is threaded through the call — a
+// plain identifier whose EVERY assignment in the enclosing function is one
+// of: (a) a call to resolvePlannedAction or resolvedLegAction (the
+// identifier on the LHS of that call's result list); (b) the zero value of
+// GapAction — the composite literal GapAction{} on an assignment, or a
+// `var leg GapAction` declaration with no initializer; (c) an identifier
+// that itself satisfies (a) — one hop, so `leg = resolved` inside an
 // `if resolved, _, perr := e.resolvePlannedAction(…); perr == nil { … }` passes.
 // A selector (`target.Gaps[col]`, `rec.Action`), a function parameter, a map
-// index, or an identifier bound any other way (`leg := ga`) is a finding — the
-// same hazard as Rule 1, applied to the classifier staleMark itself resolves
-// its verdict through.
+// index, or an identifier bound any other way (`leg := ga`, `var leg = ga`)
+// is a finding — the same hazard as Rule 1, applied to the classifier
+// staleMark itself resolves its verdict through. Locating that argument
+// position requires staleMark's own declaration: if it is missing from the
+// corpus, or carries zero or more than one GapAction-typed parameter, the
+// gate cannot say which argument is the one Rule 2 is about and refuses to
+// run rather than guess — inspecting the wrong argument would silently pass
+// through exactly the shape this rule exists to catch.
 //
 // Rule 2b (externalDispatchGap's only caller). externalDispatchGap is called
 // from exactly one site: inside staleMark, on staleMark's own GapAction
@@ -63,7 +72,14 @@
 // per-function scan (it does not model closures capturing outer-scope
 // variables, or reassignment of a captured binding from inside a nested
 // literal) — the real call sites this gate exists for bind their leg directly
-// in the function that calls staleMark, not through a closure.
+// in the function that calls staleMark, not through a closure. Two further
+// shapes sit outside the scan by the same construction: a field mutation
+// after resolution (`leg.Action = ga.Action`) has a selector on its
+// left-hand side, which collectBindings never records, so it is invisible to
+// Rule 2; and a method value (`f := e.staleMark; f(…, ga)`) matches neither
+// the selector the call walk looks for nor the call counter, so it is both
+// unchecked and uncounted. Neither shape appears at any of today's four call
+// sites.
 //
 // A SELF-TEST RUNS ON EVERY INVOCATION (synthetic sources through the two
 // checkers; verbose with --selftest, silent-unless-failing otherwise; exit 2 on
@@ -130,6 +146,12 @@ func main() {
 	}
 	sort.Strings(names)
 	fset := token.NewFileSet()
+	type parsed struct {
+		path string
+		file *ast.File
+	}
+	var files []parsed
+	var asts []*ast.File
 	for _, n := range names {
 		path := filepath.Join(weaverDir, n)
 		file, perr := parser.ParseFile(fset, path, nil, 0)
@@ -137,9 +159,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: parse %s: %v\n", path, perr)
 			os.Exit(2)
 		}
+		files = append(files, parsed{path, file})
+		asts = append(asts, file)
+	}
+
+	// Rule 2's argument position is derived from staleMark's own declaration,
+	// found in this same corpus, before a single call site is inspected — a
+	// gate that cannot locate what it is checking must refuse the run rather
+	// than fall back to a guessed position (see staleMarkGapArgIndex).
+	gapIdx, gerr := staleMarkGapArgIndex(asts)
+	if gerr != nil {
+		fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: cannot locate %s's GapAction argument: %v — refusing the run\n", staleMarkFunc, gerr)
+		os.Exit(2)
+	}
+
+	for _, pf := range files {
 		st.files++
-		findings = append(findings, checkFile(fset, path, file, &st)...)
-		findings = append(findings, checkFileLegShape(fset, path, file, &st)...)
+		findings = append(findings, checkFile(fset, pf.path, pf.file, &st)...)
+		findings = append(findings, checkFileLegShape(fset, pf.path, pf.file, &st, gapIdx)...)
 	}
 
 	if st.calls == 0 {
@@ -293,7 +330,11 @@ func funcParamNames(fd *ast.FuncDecl) map[string]bool {
 
 // collectBindings walks fd's body flat (nested closures included, per SCOPE)
 // and records every assignment of every local identifier, so Rule 2 can ask
-// "is EVERY assignment of this name one of (a)/(b)/(c)".
+// "is EVERY assignment of this name one of (a)/(b)/(c)". A `var leg GapAction`
+// declaration with no initializer IS clause (b)'s zero value exactly as much
+// as `leg = GapAction{}` is — GapAction's zero value doesn't care which
+// syntax produced it — so a *ast.DeclStmt's var specs are walked alongside
+// *ast.AssignStmt, not left to fall through as an unrecorded binding.
 func collectBindings(body *ast.BlockStmt) map[string][]binding {
 	bindings := map[string][]binding{}
 	if body == nil {
@@ -305,23 +346,47 @@ func collectBindings(body *ast.BlockStmt) map[string][]binding {
 		}
 		bindings[id.Name] = append(bindings[id.Name], b)
 	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		if len(as.Rhs) == 1 && len(as.Lhs) > 1 {
-			b := classifyRHS(as.Rhs[0])
-			for _, lhs := range as.Lhs {
-				id, _ := lhs.(*ast.Ident)
+	recordPairs := func(names []*ast.Ident, values []ast.Expr) {
+		if len(values) == 1 && len(names) > 1 {
+			b := classifyRHS(values[0])
+			for _, id := range names {
 				record(id, b)
 			}
-			return true
+			return
 		}
-		if len(as.Lhs) == len(as.Rhs) {
-			for i := range as.Lhs {
-				id, _ := as.Lhs[i].(*ast.Ident)
-				record(id, classifyRHS(as.Rhs[i]))
+		if len(names) == len(values) {
+			for i, id := range names {
+				record(id, classifyRHS(values[i]))
+			}
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			lhs := make([]*ast.Ident, len(s.Lhs))
+			for i, e := range s.Lhs {
+				lhs[i], _ = e.(*ast.Ident)
+			}
+			recordPairs(lhs, s.Rhs)
+		case *ast.DeclStmt:
+			gd, ok := s.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if len(vs.Values) == 0 {
+					if id, ok := vs.Type.(*ast.Ident); ok && id.Name == gapActionType {
+						for _, name := range vs.Names {
+							record(name, binding{kind: bindZero})
+						}
+					}
+					continue
+				}
+				recordPairs(vs.Names, vs.Values)
 			}
 		}
 		return true
@@ -376,25 +441,75 @@ func satisfiesRule2(name string, params map[string]bool, bindings map[string][]b
 	return true
 }
 
+// staleMarkGapArgIndex finds staleMark's own declaration among the given
+// files and returns the position, among a CALL's arguments (the receiver is
+// not one — a method call passes it via the selector, not an Args entry), of
+// the parameter typed GapAction. Rule 2 exists to hold that one argument to
+// a resolved leg; inspecting a fixed position such as "the last argument"
+// instead of asking the declaration works only until a future signature
+// change adds a further trailing parameter, at which point it silently
+// inspects the wrong one and reports the all-clear regardless. A missing
+// declaration, or one with zero or more than one GapAction-typed parameter,
+// leaves the gate unable to say which argument it means, so it errors rather
+// than falling back to a guess.
+func staleMarkGapArgIndex(files []*ast.File) (int, error) {
+	var decl *ast.FuncDecl
+	for _, file := range files {
+		for _, d := range file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name == nil || fd.Name.Name != staleMarkFunc || fd.Type == nil {
+				continue
+			}
+			if decl != nil {
+				return 0, fmt.Errorf("%s is declared more than once in the corpus", staleMarkFunc)
+			}
+			decl = fd
+		}
+	}
+	if decl == nil {
+		return 0, fmt.Errorf("no declaration of %s found in the corpus", staleMarkFunc)
+	}
+	idx, count, pos := -1, 0, 0
+	if decl.Type.Params != nil {
+		for _, field := range decl.Type.Params.List {
+			n := len(field.Names)
+			if n == 0 {
+				n = 1 // an unnamed parameter still occupies one call-argument position
+			}
+			if id, ok := field.Type.(*ast.Ident); ok && id.Name == gapActionType {
+				count += n
+				if count == 1 {
+					idx = pos
+				}
+			}
+			pos += n
+		}
+	}
+	if count != 1 {
+		return 0, fmt.Errorf("%s's declaration has %d %s-typed parameter(s), want exactly 1", staleMarkFunc, count, gapActionType)
+	}
+	return idx, nil
+}
+
 // checkFileLegShape reports Rule 2 and Rule 2b findings, one FuncDecl at a
 // time: staleMark's own classifier (externalDispatchGap over a GapAction) is
 // covered, unlike collapseOnlyReclaim's single flat walk, because reading a
 // binding's history requires knowing which function it lives in — the file-wide
 // ast.Inspect checkFile uses does not carry that, so this is a second walk,
 // scoped per function, rather than a case added to the first.
-func checkFileLegShape(fset *token.FileSet, path string, file *ast.File, st *stats) []string {
+func checkFileLegShape(fset *token.FileSet, path string, file *ast.File, st *stats, gapIdx int) []string {
 	var findings []string
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok || fd.Body == nil {
 			continue
 		}
-		findings = append(findings, checkFuncLegShape(fset, path, fd, st)...)
+		findings = append(findings, checkFuncLegShape(fset, path, fd, st, gapIdx)...)
 	}
 	return findings
 }
 
-func checkFuncLegShape(fset *token.FileSet, path string, fd *ast.FuncDecl, st *stats) []string {
+func checkFuncLegShape(fset *token.FileSet, path string, fd *ast.FuncDecl, st *stats, gapIdx int) []string {
 	var findings []string
 	params := funcParamNames(fd)
 	bindings := collectBindings(fd.Body)
@@ -417,10 +532,12 @@ func checkFuncLegShape(fset *token.FileSet, path string, fd *ast.FuncDecl, st *s
 		switch sel.Sel.Name {
 		case staleMarkFunc:
 			st.staleMarkCalls++
-			if len(call.Args) == 0 {
+			if gapIdx >= len(call.Args) {
+				findings = append(findings, fmt.Sprintf("%s:%d: %s call has %d argument(s), too few to reach its GapAction argument at position %d — the gate cannot check what isn't there",
+					path, pos.Line, staleMarkFunc, len(call.Args), gapIdx))
 				return true
 			}
-			arg := call.Args[len(call.Args)-1]
+			arg := call.Args[gapIdx]
 			id, ok := arg.(*ast.Ident)
 			if !ok {
 				findings = append(findings, fmt.Sprintf("%s:%d: %s's GapAction argument is not a plain identifier (%T) — the gate cannot see it was resolved",
@@ -447,6 +564,22 @@ func checkFuncLegShape(fset *token.FileSet, path string, fd *ast.FuncDecl, st *s
 		return true
 	})
 	return findings
+}
+
+// legShapeGapIdx is the GapAction argument position the self-test's synthetic
+// staleMark call sites use. The self-test's sources never declare staleMark
+// itself — there is nothing for staleMarkGapArgIndex to find in a single
+// synthetic snippet — so each legshape case states the position its own
+// `e.staleMark(t, e2, row, col, leg, …)` calls put GapAction at, rather than
+// leaving it to be inferred the way the corpus run infers it.
+const legShapeGapIdx = 4
+
+// legShapeCheck adapts checkFileLegShape's extra gapIdx parameter to the
+// self-test table's uniform check signature.
+func legShapeCheck(gapIdx int) func(fset *token.FileSet, path string, file *ast.File, st *stats) []string {
+	return func(fset *token.FileSet, path string, file *ast.File, st *stats) []string {
+		return checkFileLegShape(fset, path, file, st, gapIdx)
+	}
 }
 
 // runSelfTest proves both walks on synthetic sources before the corpus is ever
@@ -476,7 +609,7 @@ func f(e *Engine, t, e2 string, row map[string]any, col string) bool {
 	leg, _, perr := e.resolvedLegAction(t, e2, row, col)
 	_ = perr
 	return e.staleMark(t, e2, row, col, leg)
-}`, 0, checkFileLegShape},
+}`, 0, legShapeCheck(legShapeGapIdx)},
 		{"legshape-zero-then-resolved", `package weaver
 func f(e *Engine, t, e2 string, row map[string]any, col string) bool {
 	leg := GapAction{}
@@ -484,32 +617,48 @@ func f(e *Engine, t, e2 string, row map[string]any, col string) bool {
 		leg = r
 	}
 	return e.staleMark(t, e2, row, col, leg)
-}`, 0, checkFileLegShape},
+}`, 0, legShapeCheck(legShapeGapIdx)},
 		{"legshape-resolved-local-named-ref", `package weaver
 func f(e *Engine, t, e2 string, row map[string]any, col string) bool {
 	leg, ref, perr := e.resolvedLegAction(t, e2, row, col)
 	_ = ref
 	_ = perr
 	return e.staleMark(t, e2, row, col, leg)
-}`, 0, checkFileLegShape},
+}`, 0, legShapeCheck(legShapeGapIdx)},
 		{"legshape-param", `package weaver
 func f(e *Engine, t, e2 string, row map[string]any, col string, ga GapAction) bool {
 	return e.staleMark(t, e2, row, col, ga)
-}`, 1, checkFileLegShape},
+}`, 1, legShapeCheck(legShapeGapIdx)},
 		{"legshape-index-expr", `package weaver
 func f(e *Engine, t, e2 string, row map[string]any, col string, target *Target) bool {
 	return e.staleMark(t, e2, row, col, target.Gaps[col])
-}`, 1, checkFileLegShape},
+}`, 1, legShapeCheck(legShapeGapIdx)},
 		{"legshape-param-aliased", `package weaver
 func f(e *Engine, t, e2 string, row map[string]any, col string, ga GapAction) bool {
 	leg := ga
 	return e.staleMark(t, e2, row, col, leg)
-}`, 1, checkFileLegShape},
+}`, 1, legShapeCheck(legShapeGapIdx)},
 		{"legshape-external-outside-stalemark", `package weaver
 func f(e *Engine, ga GapAction, row map[string]any) {
 	ext, _, _ := e.externalDispatchGap(ga, row)
 	_ = ext
-}`, 1, checkFileLegShape},
+}`, 1, legShapeCheck(legShapeGapIdx)},
+		{"legshape-var-zero", `package weaver
+func f(e *Engine, t, e2 string, row map[string]any, col string) bool {
+	var leg GapAction
+	return e.staleMark(t, e2, row, col, leg)
+}`, 0, legShapeCheck(legShapeGapIdx)},
+		{"legshape-var-aliased", `package weaver
+func f(e *Engine, t, e2 string, row map[string]any, col string, ga GapAction) bool {
+	var leg = ga
+	return e.staleMark(t, e2, row, col, leg)
+}`, 1, legShapeCheck(legShapeGapIdx)},
+		{"legshape-trailing-arg-hides-unresolved", `package weaver
+func f(e *Engine, t, e2 string, row map[string]any, col string, ga GapAction) bool {
+	other, _, perr := e.resolvedLegAction(t, e2, row, col)
+	_ = perr
+	return e.staleMark(t, e2, row, col, ga, other)
+}`, 1, legShapeCheck(legShapeGapIdx)},
 	}
 	failed := false
 	for _, c := range cases {
