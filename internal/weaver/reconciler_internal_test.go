@@ -2740,6 +2740,118 @@ func TestSweep_CountLegEscalatesToAugurWithNoMark(t *testing.T) {
 	h.requireNoOp(t)
 }
 
+// TestSweep_CountLegReleasesAMarklessLegUnderSuppression pins the one derivation
+// of a leg boundary that exists nowhere else. The gap is a goal chain whose
+// pinned leg has concluded — its declared effect holds in the row — and whose
+// mark has already gone, while inflight_<g> is TRUE because the same lens fan
+// projects a remediation of some other chain over this row.
+//
+// Every other reader declines that state by construction: lane 1's suppressed
+// arm releases only against a mark (it holds no count revision to condition a
+// markless release's writes on), and the sweep's mark leg never visits a gap
+// with no mark to enumerate. So if this gate withheld the release too, the
+// boundary would wait for a mark that is never coming back, and the chain's next
+// leg with it.
+//
+// A release is not a dispatch, and this vector asserts both halves: the count
+// document — the release's own mutex, and the only durable record of the leg —
+// is gone, and NOTHING was dispatched. The gap stays suppressed and markless,
+// which is exactly the state lane 1 dispatches the next leg from once the row's
+// in-flight column flips.
+func TestSweep_CountLegReleasesAMarklessLegUnderSuppression(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSuppressedRelease"
+	const gap = "missing_x"
+	const leg = "refreshBgcheck"
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID := testNanoID(t)
+
+	// The row the leg concluded on: bgFresh present is refreshBgcheck's declared
+	// effect, and inflight_x true is the suppression the gate acts on.
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant":  "vtx.identity." + testNanoID(t),
+		"bgFresh":    "2026-09-01T00:00:00Z",
+		"inflight_x": true, "maxretries_x": 3,
+	})
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, leg, true, false, true); err != nil {
+		t.Fatalf("seed leg-scoped dispatch-count: %v", err)
+	}
+	if doc := readCount(t, ctx, h.conn, targetID, entityID, gap); doc.Leg != leg {
+		t.Fatalf("setup: the count document must name the leg; got %+v", doc)
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("setup: this vector requires a markless gap")
+	}
+
+	h.pass(ctx)
+
+	if h.countExists(t, ctx, targetID, entityID, gap) {
+		t.Fatalf("the concluded leg's boundary must be recorded even while the gap is suppressed: "+
+			"the count document (count %d) still stands", h.countValue(t, ctx, targetID, entityID, gap))
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("a release is not a dispatch: the suppressed gap must hold no fresh episode's mark")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegLeavesANonGoalSuppressedGapUntouched is the release's
+// negative control, and it differs from the positive vector in the ONE field
+// that decides the question: the gap declares an action rather than a goal, so
+// it has no legs and no boundary to record. Its count document names a leg all
+// the same — an ordinary directOp chain records the ref it dispatched — which is
+// what keeps the vector honest: nothing but the missing goal declines it.
+//
+// A suppressed non-goal gap must leave the pass exactly as it entered it. Its
+// budget is the state the exhaustion gate will one day measure, and deleting it
+// here would silently forgive a chain's whole spent history.
+func TestSweep_CountLegLeavesANonGoalSuppressedGapUntouched(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSuppressedNonGoal"
+	const gap = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{gap: {Action: actionTriggerLoom, Pattern: "someFlow", Subject: "row.entityKey"}},
+	})
+	entityID := testNanoID(t)
+	row := exhaustedRow(entityID, gap, 3)
+	row["inflight_x"] = true
+	h.putRow(t, ctx, targetID, entityID, row)
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, "someFlowLeg", true, false, false); err != nil {
+		t.Fatalf("seed dispatch-count: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if !h.countExists(t, ctx, targetID, entityID, gap) {
+		t.Fatal("a suppressed gap that declares no goal has no leg boundary to record, so its budget must survive the pass")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, gap); got != 1 {
+		t.Fatalf("dispatch-count = %d, want 1: the pass must not touch a non-goal gap's budget", got)
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("a suppressed gap must not be dispatched")
+	}
+	h.requireNoOp(t)
+}
+
 // TestSweep_CountLegDefersToTheMarkLeg pins WHERE the mark-listed guard sits:
 // below the level reconcile (which must run for every key, gated by nothing)
 // and above every arm that escalates. Two entities, one pass, one target:

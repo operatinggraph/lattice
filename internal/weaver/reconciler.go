@@ -549,8 +549,12 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 //	    escalateExhaustedGap site the mark leg calls — a fresh Augur episode
 //	    where the target escalates "exhausted", else the standing
 //	    GapBudgetExhausted issue;
-//	(m) gap suppressed with a call in flight (inflight_<g>) → return: the lens
-//	    re-projects when the call lands and lane-1 re-delivers;
+//	(m) gap suppressed with a call in flight (inflight_<g>) → record the LEG
+//	    BOUNDARY if the document names a goal leg whose declared effects now
+//	    hold, then return. A release is not a dispatch, and a markless one has
+//	    no other derivation: lane 1 releases only against a mark and the mark
+//	    leg never visits a gap without one. Nothing is dispatched here — the
+//	    lens re-projects when the call lands and lane-1 re-delivers;
 //	(n) everything above passed AND the budget reads exactly 0 AND the gap is
 //	    not collapse-only AND the sweep is warmed up → DISPATCH it as a fresh
 //	    episode. This is the only line in the leg that acts on the world, and
@@ -726,14 +730,47 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			}
+		} else if ga.Goal != nil && count.Leg != "" {
+			// The leg boundary a suppressed gap is still owed. A RELEASE IS NOT
+			// A DISPATCH: the gate above decides only what may be STARTED
+			// (releaseSuppressedLeg's doc, Contract #10 §10.3), while the fact
+			// that this document's pinned leg has its declared effects holding
+			// in the row is a fact about a leg that has already RUN — true
+			// whatever else is in flight over the same fan.
+			//
+			// MARKLESS is what makes the boundary this seam's alone. Lane 1's
+			// suppressed arm releases only against a mark, holding no count
+			// revision it could condition a markless release's writes on; the
+			// sweep's mark leg never visits a gap that has no mark; and the
+			// escalation route below is reached only by a document stamped
+			// `escalatedAt`. This pass holds exactly the revision the markless
+			// branch takes its mutual exclusion on, which is why the release can
+			// be claimed here at all — a concurrent dispatch that booked against
+			// the budget wins that delete instead and this pass abandons,
+			// crediting the leg once.
+			//
+			// Only the release, mirroring the gate's other arm's exclusivity:
+			// escalateExhaustedGap owes the same boundary and takes it over the
+			// real count pair, so an exhausted gap must not be released twice.
+			// No advance and no escalation follow — an advance IS a dispatch and
+			// the gap is still suppressed. Nothing is stranded by waiting: the
+			// release deletes the document, so this leg stops enumerating the
+			// gap, and the suppression can only lift by a write to inflight_<g>
+			// on this very row, which is a delivery lane 1 dispatches the
+			// chain's next leg from.
+			e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, count.Leg, row, 0, entry.Revision)
 		}
 		return
 	}
 	// A markless document stamped `escalatedAt` is an escalation whose mark has
 	// gone — the normal state between paced re-fires, the mark's TTL being
 	// shorter than every backoff step past the second. It is routed HERE: below
-	// the violating and suppression gates, so it never acts where lane 1 would
-	// not and an exhausted gap has already gone to its own door above; and above
+	// the violating and suppression gates, because everything it does is a
+	// DISPATCH — a paced re-fire, or a release and the advance that follows one
+	// — and lane 1 dispatches neither over a suppressed gap. What a suppressed
+	// gap IS owed is its leg boundary, and the gate above takes that in its own
+	// arms: an exhausted gap inside escalateExhaustedGap, a gap with a call in
+	// flight from the markless release beside it. This route sits above
 	// arm (n)'s `Count == 0` test, because an escalation that displaced a leg
 	// left that leg's attempts on the document, and a route below the zero test
 	// would never reach it — a dead claim over a leg would then never retry on a
