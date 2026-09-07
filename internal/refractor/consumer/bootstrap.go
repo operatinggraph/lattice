@@ -348,7 +348,22 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg substrate.Message) su
 	// staler than what it already holds, and the sequence is what that verdict
 	// is made against. Taking it from the body would let a message name its own
 	// floor and so promote itself over the events it must lose to.
-	evt.Seq = msg.Sequence
+	//
+	// Only when this message's own key IS the EdgeID, though, and that
+	// condition is the whole safety of the guard on this arm. The index's floors
+	// are only ever recoverable because a floor for edge L is set exclusively
+	// from messages on subject L: the buckets run at the KV default History 1,
+	// so L's live revision is always at or above every sequence L has ever
+	// produced, and a redrain, a lens rebuild or a bucket wipe therefore always
+	// re-presents an event that clears L's own floor. This arm takes its EdgeID
+	// from the message BODY, so an unrelated key far ahead in the stream could
+	// pin a floor on an edge whose own key sits far behind it — a floor no
+	// future event for that edge, replay included, could ever reach. An event
+	// that cannot honour the invariant stays unsequenced instead, which is this
+	// arm's behaviour with no guard at all.
+	if key == evt.EdgeID {
+		evt.Seq = msg.Sequence
+	}
 
 	// Skip non-edge entries (node-only records carry no NodeID for the adjacency index).
 	if evt.NodeID == "" {
@@ -413,11 +428,23 @@ func (b *Bootstrapper) processLinkEnvelope(ctx context.Context, msg substrate.Me
 		isDeleted = meta.IsDeleted
 	}
 
+	// A delivered JetStream message always carries a backing-stream sequence;
+	// substrate leaves it at 0 only when the message's metadata could not be
+	// read, and an event stamped 0 is one the adjacency ordering floor cannot
+	// arbitrate. Without this line an index running entirely unguarded would
+	// look exactly like a guarded one from the outside.
+	if msg.Sequence == 0 {
+		slog.Warn("adjacency bootstrap: link bridge: message carries no backing-stream sequence — indexing it unordered",
+			"key", key, "subject", msg.Subject)
+	}
+
 	// Emit both directional events. The link key serves as a unique EdgeID per
 	// Decision #1 (Contract #1 link keys are globally unique) — which is also
 	// why the message's backing-stream sequence rides along: a link key is
 	// reused across a revoke → re-grant, so the sequence is the only thing that
-	// tells the index which version of that one EdgeID it is being handed.
+	// tells the index which version of that one EdgeID it is being handed. It is
+	// also the message's own key here, which is what keeps a floor recoverable
+	// (see the stamp in processMsg).
 	for _, evt := range adjacency.EventsForLink(key, srcType, srcID, linkName, dstType, dstID, isDeleted, msg.Sequence) {
 		if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
 			if substrate.IsInvalidKeyError(buildErr) {

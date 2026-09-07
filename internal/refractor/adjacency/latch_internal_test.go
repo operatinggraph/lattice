@@ -2,9 +2,11 @@ package adjacency
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
@@ -50,4 +52,40 @@ func startLatchKV(t *testing.T) *substrate.KV {
 	require.NoError(t, err)
 
 	return kv
+}
+
+// TestLatch_ClearsTheRemovalFloorsWithTheEdges pins the half of the latch's
+// replacement document that is otherwise only incidental: the body it writes
+// zero-values Removals as well as Edges, so a latched node keeps no ordering
+// floors either.
+//
+// It matters because the two halves are kept for opposite reasons and a future
+// edit could easily preserve one. A marked node's reads enumerate Core KV,
+// which is authoritative and needs no floor, so a floor left behind would be
+// state nothing consults — and, since the mark is never lifted, state nothing
+// ever will.
+func TestLatch_ClearsTheRemovalFloorsWithTheEdges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS JetStream")
+	}
+	ctx := context.Background()
+	kv := startLatchKV(t)
+
+	const nodeID = "nodeFloorLatch"
+	seeded, err := json.Marshal(AdjValue{
+		Edges:    []EdgeEntry{{CoreKvKey: "lnk.a.b.c.d.e", EdgeID: "lnk.a.b.c.d.e", Seq: 7}},
+		Removals: map[string]uint64{"lnk.gone.1": 3, "lnk.gone.2": 5},
+	})
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, subjects.AdjKey(nodeID), seeded)
+	require.NoError(t, err)
+
+	require.NoError(t, latch(ctx, kv, nodeID, 1, len(seeded)))
+
+	entry, err := kv.Get(ctx, subjects.AdjKey(nodeID))
+	require.NoError(t, err)
+	var doc AdjValue
+	require.NoError(t, json.Unmarshal(entry.Value, &doc))
+	assert.Empty(t, doc.Edges, "the latch gives up the edge list")
+	assert.Empty(t, doc.Removals, "and the floors that guarded the edges it no longer holds")
 }

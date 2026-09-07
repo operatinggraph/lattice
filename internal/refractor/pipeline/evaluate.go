@@ -1268,18 +1268,21 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry rulee
 // (internal/refractor/consumer/bootstrap.go) and this pipeline both react to
 // the same link event with no cross-consumer ordering guarantee. Before
 // enumerating, we idempotently apply the link to adjKV ourselves (mirroring
-// processLinkEnvelope) so the reprojection cypher sees a consistent edge set
-// regardless of which consumer reached the link first. adjacency.Build upserts
-// (create) / removes (tombstone) by EdgeID, so the dedicated consumer's later
-// Build for the same edge is a no-op. This guarantees the reprojection never
-// races ahead of the edge that triggered it.
+// processLinkEnvelope) so the reprojection cypher never reads an edge set that
+// predates the event it is reacting to, regardless of which consumer reached
+// the link first.
 //
 // seq is the backing-stream sequence of the message that carried this link, and
 // it is what keeps "idempotent" from meaning "last writer wins": a link key is
 // reused across a revoke → re-grant, so without it a pipeline lagging behind
 // the dedicated consumer would apply its older view of the link over the newer
-// one. The index refuses that write instead, leaving the newer edge set — the
-// one this reprojection should read — in place.
+// one. With it, the stale write is declined and the newer edge set stands.
+//
+// The two writers therefore converge without ordering: whichever event carries
+// the higher sequence is the one the index keeps, and the other writer's Build
+// for the same edge changes nothing — a no-op when the two sequences are equal
+// (the same message seen twice), a decline when this one is behind, and the
+// applied write when it is ahead.
 func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey string, isDeleted bool, seq uint64) ([]ruleengine.EvalResult, []string, PublishScope, error) {
 	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(linkKey)
 	if !ok {

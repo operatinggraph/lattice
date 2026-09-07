@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -52,20 +53,65 @@ type AdjValue struct {
 	// accounting and edgesWithoutLinkKeys all treat an entry as a live edge,
 	// and none of them has to learn otherwise for the floor to work.
 	//
-	// Bounded at maxRemovalFloors per node, lowest sequences evicted first.
+	// Bounded at MaxRemovalFloors per node, lowest sequences evicted first.
 	Removals map[string]uint64 `json:"removals,omitempty"`
 }
 
-// maxRemovalFloors bounds Removals per node. A node's whole edge list lives in
-// one KV document, so unbounded auxiliary state is how this index fails (that
-// is what the overflow latch exists for); the floor map has to be bounded for
-// the same reason, and it is bounded by evicting the LOWEST sequences first. A
-// floor's only job is to refuse an event staler than itself, and the stalest
-// floors are the ones whose racing events can no longer be in flight —
-// redelivery is bounded by AckWait × MaxDeliver, and a lens pipeline's lag is
-// bounded by its own consumer. Evicting one re-opens the stale-create window
-// for that single edge, and only after 128 further removals on the same node.
-const maxRemovalFloors = 128
+// MaxRemovalFloors bounds Removals per node.
+//
+// The cap is a DOCUMENT-SIZE requirement and nothing else. A node's whole edge
+// list lives in one KV document; unbounded auxiliary state in it is how this
+// index fails, which is what the overflow latch exists for, and the floor map
+// has to be bounded for exactly that reason. No claim is made that an evicted
+// floor is one whose racing event can no longer arrive: nothing here bounds
+// that. A durable consumer sets no MaxDeliver (substrate.DurableConsumerConfig
+// applies one only when it is > 0, so JetStream's default is unlimited), and a
+// lens can sit at InitialPause: PauseInfra until an operator resumes it, so a
+// message may be held or redelivered arbitrarily late.
+//
+// What an eviction costs is therefore stated positively: that one edge reverts
+// to the behaviour this package had before the guard existed — a stale create
+// can resurrect it. The guard is never worse than that baseline anywhere, only
+// incomplete past the cap.
+//
+// 1024, not a smaller number, because the eviction key is a COUNT of removals
+// on one node while the traffic that produces them is bursty: a single atomic
+// batch carries up to 998 business mutations (atomic-batch-size-ceiling-design),
+// so any cap at or below that lets ONE offboarding operation shed every floor
+// recorded before it. 1024 clears that ceiling, and its cost is bounded: at the
+// ~90 B a link-key floor marshals to, a full map is ≈ 92 KB against the 800 KiB
+// overflowBytes budget — visible to the latch (which measures the marshalled
+// document) and far from dominating it.
+//
+// It must stay >= 1: at 0 the eviction loop would drop the floor removeEdge
+// just recorded, silently disabling the stale-create half of the guard.
+//
+// Exported because it is a property of the stored document, not a private
+// tuning knob: a reader of an AdjValue can tell a complete floor set from a
+// truncated one only against this number.
+const MaxRemovalFloors = 1024
+
+// declinedWrites counts the edge writes the ordering floor has refused since
+// this process started.
+//
+// It exists because the refusal is otherwise invisible: upsertEdge declines by
+// writing nothing and returning nil, which is byte-identical to a healthy
+// no-op, so an operator asking "is anything being reordered under me" would
+// have no way to tell a quiet stack from one where a lagging writer's every
+// event is being dropped. The precedent this guard is modelled on — the grant
+// writer's monotonic watermark — reports its declines to the caller
+// (DeclinedByWatermark); this path has no caller-visible verdict to carry one,
+// so the count is where that signal lives.
+//
+// It is a counter and not a health field on purpose: a rising count is normal
+// on a lagging stack and means "the guard is doing its job", not "the component
+// is unhealthy".
+var declinedWrites atomic.Uint64
+
+// DeclinedWrites reports how many edge writes this process's ordering floor has
+// refused. Monotone for the life of the process; a delta over an interval is
+// the quantity worth reading.
+func DeclinedWrites() uint64 { return declinedWrites.Load() }
 
 // DirectionMatches compares an EdgeEntry.Direction string ("outbound" /
 // "inbound", the vocabulary this package's Build/Neighbors persist) against
@@ -104,10 +150,18 @@ type CoreKVEvent struct {
 	IsDeleted   bool   `json:"isDeleted"`
 
 	// Seq is the Core KV backing-stream sequence of the message this event was
-	// derived from — for a NATS KV bucket the backing stream IS the bucket, so
-	// the number is also the KV revision of the link key, per-key monotone by
-	// construction and comparable across every writer of this index, because
-	// all three consume the one Core KV stream.
+	// derived from. What makes it usable as an ordering key is the total order
+	// of that ONE stream: every writer of this index consumes it, so any two
+	// events carrying a sequence are comparable whichever writer produced them.
+	//
+	// On the link arm the number is additionally the KV revision of the link
+	// key itself, because the event's EdgeID IS the key the message arrived on.
+	// That is a stronger property than comparability and the consumer is
+	// responsible for preserving it: a floor for edge L must only ever be set
+	// from a message on subject L, or an unrelated key's position could pin a
+	// floor L's own future revisions can never reach. The legacy event path
+	// takes its EdgeID from the message BODY, so it stamps a sequence only when
+	// that EdgeID is the message's own key.
 	//
 	// `json:"-"` is a correctness tag, not a cosmetic one. The legacy event
 	// path unmarshals a CoreKVEvent straight out of a Core KV message BODY; a
@@ -149,10 +203,18 @@ type CoreKVEvent struct {
 // same way and must agree on what indexing it means.
 //
 // seq is the Core KV backing-stream sequence of the message the link envelope
-// arrived on, and it is stamped on BOTH directional events: the two endpoints
-// index the same link and must arbitrate it against the same number, or one
-// arm of an edge could keep a version the other has already refused. Callers
-// with no sequence to offer pass 0, which is the floor every event clears.
+// arrived on, and it is stamped on BOTH directional events so that the two
+// endpoints arbitrate the same link against the same NUMBER. That is all the
+// stamp buys, and the distinction matters: the same number does not guarantee
+// the same VERDICT, because each endpoint measures it against the floors ITS
+// OWN node document holds, and a busy node can have evicted a floor a quiet one
+// still keeps (see MaxRemovalFloors). The asymmetry that leaves — an edge
+// present at one end and absent at the other — is a stated residual of this
+// index, not something the stamp closes.
+//
+// A caller with no sequence passes 0. That is not "the floor every event
+// clears": an event carrying 0 applies only where the floor is still 0, and is
+// declined against any real floor (see upsertEdge).
 func EventsForLink(key, srcType, srcID, linkName, dstType, dstID string, isDeleted bool, seq uint64) []CoreKVEvent {
 	return []CoreKVEvent{
 		{
@@ -218,17 +280,25 @@ func Build(ctx context.Context, kv *substrate.KV, evt CoreKVEvent) error {
 // So an event applies only if its sequence is at least the floor its EdgeID
 // already carries — the stored entry's own Seq, or, for an edge this node no
 // longer holds, the sequence of the removal that dropped it. A refused event is
-// DECLINED, not failed: nothing is written and the caller acks, because a
-// redelivery would present the same stale event again.
+// DECLINED, not failed: nothing at all is written — not even a rewrite of the
+// identical document, which would churn the node's KV revision on every stale
+// redelivery and manufacture CAS conflicts for the other two writers — and the
+// caller acks, because a redelivery would present the same stale event again.
+// A decline is counted (DeclinedWrites) and logged at Debug rather than passed
+// back, because on a lagging stack it is the expected outcome, not a fault.
 //
-// The comparison is >=, and the direction is load-bearing. An event with no
-// sequence carries 0, meets a floor of 0, and applies — so every path that does
-// not carry a sequence, and every document written before entries carried one,
-// behaves exactly as an unguarded index would. With > instead, every
-// unsequenced event would stop applying and the index would silently shrink.
-// The guard therefore engages only between two events that both name a real
-// position in the Core KV stream, which is the only population it can order.
-// Equal sequences are one message redelivered, and applying it is idempotent.
+// The comparison is >=, and the direction is load-bearing — but its guarantee
+// is narrower than "nothing changes for an unsequenced caller". What holds
+// exactly: an event carrying no sequence meets a floor of 0 and applies, so an
+// edge NO sequenced writer has touched indexes as it always did, and so does
+// every document written before entries carried a sequence. What does NOT hold:
+// once any writer of an edge is sequenced, an unsequenced writer of that same
+// edge is declined, because 0 is below that edge's floor. Mixed writers of one
+// edge therefore lose the unsequenced one — an acceptable outcome only because
+// every production writer of a link is sequenced, and the alternative (>) would
+// make every unsequenced path stop applying everywhere and shrink the index
+// silently. Equal sequences are one message redelivered, and re-applying it is
+// idempotent.
 //
 // The floor is recomputed on every CAS pass, from the document that pass read:
 // a concurrent writer's newer entry (or newer removal floor) is part of the
@@ -247,7 +317,11 @@ func upsertEdge(ctx context.Context, kv *substrate.KV, nodeID string, edge EdgeE
 		}
 
 		current := st.doc
-		if edge.Seq < edgeFloor(current, edge.EdgeID) {
+		if floor := edgeFloor(current, edge.EdgeID); edge.Seq < floor {
+			declinedWrites.Add(1)
+			slog.Debug("adjacency: declined an edge write staler than the floor the index already holds",
+				"nodeId", nodeID, "edgeId", edge.EdgeID, "evtSeq", edge.Seq, "floor", floor,
+				"remove", remove)
 			return nil
 		}
 		if remove {
@@ -372,13 +446,15 @@ func edgesWithoutLinkKeys(edges []EdgeEntry) int {
 // node: the sequence of the entry the node holds for it, or of the removal that
 // dropped it, whichever is higher.
 //
-// Both are consulted rather than one or the other because the two records
-// answer different questions and only their maximum answers "how recent is what
-// I already know about this edge". An entry and a floor coexist only
-// transiently — an applied upsert clears the floor (see upsertEntry) — but a
-// document written by a binary that does not keep floors can present an entry
-// with no floor, and taking the maximum makes that case degrade to the entry's
-// own sequence rather than to nothing.
+// Under this code the two can never both be present for one EdgeID: an applied
+// upsert deletes the floor and an applied removal deletes the entry, so exactly
+// one of them (or neither) answers. The maximum is therefore defensive rather
+// than a rule with a reachable case behind it — it is written as a maximum so
+// that a document holding both, however it came to, resolves to the more recent
+// of the two rather than to whichever branch happened to be checked first. No
+// binary produces such a document today: EdgeEntry.Seq and AdjValue.Removals
+// are one and the same addition, so a binary without the floors has no entry
+// sequences either and every floor it can present reads as 0.
 func edgeFloor(doc AdjValue, edgeID string) uint64 {
 	floor := doc.Removals[edgeID]
 	for _, e := range doc.Edges {
@@ -396,6 +472,15 @@ func edgeFloor(doc AdjValue, edgeID string) uint64 {
 // same EdgeID, and drops any removal floor that EdgeID carried: the entry now
 // holds the floor in its own Seq, and keeping both would have one edge defended
 // by two numbers that can disagree.
+//
+// It returns an AdjValue but is NOT a pure function of one: it overwrites doc's
+// edge slice in place and deletes from the map doc names, so every alias of
+// either sees the change. That is safe only because the sole caller passes a
+// document it has just decoded and abandons after the call, re-reading a fresh
+// one on each CAS pass. It is worth stating because a decoded document's edge
+// slice does escape elsewhere in this package — prefetch hands st.doc.Edges
+// straight to the executor's memo maps — so a future caller that shared one
+// with a reader would corrupt it silently.
 func upsertEntry(doc AdjValue, edge EdgeEntry) AdjValue {
 	delete(doc.Removals, edge.EdgeID)
 
@@ -417,6 +502,11 @@ func upsertEntry(doc AdjValue, edge EdgeEntry) AdjValue {
 // an event that names no position in the stream makes no ordering claim, and a
 // floor of 0 is indistinguishable from no floor at all. That confines every
 // byte of floor state to the sequenced paths.
+//
+// Like upsertEntry it mutates in place behind its return value — it compacts
+// doc's edge slice through doc.Edges[:0] and writes into the map doc names — so
+// the same caller discipline applies: pass a freshly decoded document, and do
+// not share one with a reader.
 func removeEdge(doc AdjValue, edgeID string, seq uint64) AdjValue {
 	out := doc.Edges[:0]
 	for _, e := range doc.Edges {
@@ -437,17 +527,26 @@ func removeEdge(doc AdjValue, edgeID string, seq uint64) AdjValue {
 	return doc
 }
 
-// evictStalestFloors trims removals to maxRemovalFloors by dropping the lowest
-// sequences, which are the floors whose racing events can no longer be in
-// flight. Ties break on the EdgeID so the eviction is deterministic — two
-// writers reaching the cap on the same document must shed the same floors, or
-// the surviving set would depend on map iteration order.
+// evictStalestFloors trims removals to MaxRemovalFloors by dropping the lowest
+// sequences — the floors whose edges have been gone longest, which is the least
+// arbitrary order available and not a claim that their racing events have
+// expired (see MaxRemovalFloors). Ties break on the EdgeID so the choice is
+// deterministic: two writers reaching the cap on the same document must shed
+// the same floors, or the surviving set would depend on map iteration order.
+//
+// The victim is tracked with an explicit `found` flag rather than by treating a
+// zero-valued id as "nothing chosen yet". An EdgeID is an arbitrary string and
+// the empty one is a legal map key, so a sentinel of "" would both make the
+// first candidate's selection depend on iteration order and leave a floor
+// stored under "" permanently unevictable.
 func evictStalestFloors(removals map[string]uint64) {
-	for len(removals) > maxRemovalFloors {
-		stalestID, stalestSeq := "", uint64(0)
+	for len(removals) > MaxRemovalFloors {
+		var stalestID string
+		var stalestSeq uint64
+		found := false
 		for id, seq := range removals {
-			if stalestID == "" || seq < stalestSeq || (seq == stalestSeq && id < stalestID) {
-				stalestID, stalestSeq = id, seq
+			if !found || seq < stalestSeq || (seq == stalestSeq && id < stalestID) {
+				stalestID, stalestSeq, found = id, seq, true
 			}
 		}
 		delete(removals, stalestID)

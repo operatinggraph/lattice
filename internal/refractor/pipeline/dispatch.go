@@ -181,6 +181,24 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors, scope)
 }
 
+// warnIfUnsequencedLink reports a link event that carries no backing-stream
+// sequence, on either of the two arms that write the adjacency index.
+//
+// A delivered JetStream message always has one; substrate leaves Message
+// .Sequence at 0 only when the message's metadata could not be read. An event
+// stamped 0 is one the adjacency ordering floor cannot arbitrate, so the write
+// it produces is unordered against every other writer of that edge — and
+// nothing else about the event, the projection or the logs would say so. This
+// is the line that keeps an entirely unguarded index from being
+// indistinguishable from a guarded one.
+func (p *Pipeline) warnIfUnsequencedLink(msg substrate.Message, key, arm string) {
+	if msg.Sequence != 0 {
+		return
+	}
+	slog.Warn("pipeline: link event carries no backing-stream sequence — its adjacency write is unordered",
+		"ruleId", p.ruleID, "entityId", key, "arm", arm, "subject", msg.Subject)
+}
+
 // evalLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
 // It determines whether the link is a create or a tombstone, drives the
 // endpoint-seeded fan-out reprojection (evaluateLinkFanOut), and writes the
@@ -200,6 +218,8 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, rs ruleState, msg substra
 		}
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
+
+	p.warnIfUnsequencedLink(msg, key, "link fan-out")
 
 	results, enumeratedActors, scope, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted, msg.Sequence)
 	if err != nil {
@@ -261,13 +281,17 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, rs ruleState
 // Like the actor-aware link fan-out, the link is first idempotently applied
 // to adjKV (both directional entries, the link key as EdgeID — matching the
 // dedicated adjacency consumer's events exactly): the two consumers observe
-// the same CDC event with no cross-consumer ordering guarantee, so applying
-// it here first is what guarantees the re-execute always reads a consistent
-// edge set — a tombstone's re-execute can never still see the removed edge.
-// The event carries its message's backing-stream sequence, so the index can
-// tell this pipeline's view of the link apart from a newer one another writer
-// already applied; when it declines the write, the edge set the re-execute then
-// reads is the newer one, which is the answer this arm wanted either way.
+// the same CDC event with no cross-consumer ordering guarantee, so applying it
+// here first is what stops the re-execute from reading an edge set that
+// predates the event it is reacting to.
+//
+// What that buys is "never staler than this event", not "exactly this event".
+// The pre-apply carries the message's backing-stream sequence and the index
+// declines it when it already holds a NEWER view of the same link — so a
+// tombstone's re-execute can still see the edge, if a later create has already
+// been applied by another writer. That is the correct read either way: the
+// edge set is the newest one any writer has established, and the reprojection
+// this arm then performs is the one that event deserved.
 func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
 	type1, id1, linkName, type2, id2, ok := substrate.ParseLinkKey(key)
 	if !ok {
@@ -297,6 +321,8 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 		}
 		isDeleted, _ = linkProps["isDeleted"].(bool)
 	}
+	p.warnIfUnsequencedLink(msg, key, "plain link reprojection")
+
 	for _, evt := range adjacency.EventsForLink(key, type1, id1, linkName, type2, id2, isDeleted, msg.Sequence) {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
 			slog.Error("pipeline: plain link reprojection: adjacency build",
