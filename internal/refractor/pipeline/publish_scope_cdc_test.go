@@ -311,7 +311,7 @@ func TestPublishScopeProducers(t *testing.T) {
 	t.Run("the link arm names BOTH endpoints", func(t *testing.T) {
 		p, _ := newScopeProducerFixture(t)
 		linkKey := substrate.LinkKey("identity", personalActorA, "holds", "lease", scopedLeaseIDs[0])
-		_, _, scope, err := p.evaluateLinkFanOut(ctx, p.ruleState(), linkKey, false)
+		_, _, scope, err := p.evaluateLinkFanOut(ctx, p.ruleState(), linkKey, false, 0)
 		require.NoError(t, err)
 		assert.Equal(t, ScopeVertices([]string{actorKey, leaseKey}).String(), scope.String(),
 			"a link create binds both endpoints; a link tombstone leaves the near one bound on the row that lost its far side")

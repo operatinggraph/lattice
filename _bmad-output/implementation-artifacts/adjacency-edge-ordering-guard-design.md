@@ -56,18 +56,41 @@ Neither helper compares anything but `EdgeID`, and under Contract #1 a link key 
 (`EventsForLink`, `builder.go:104-127`), globally unique **and stable across a revoke→re-grant**. So the
 identity that makes the index writable is exactly the identity that makes it reorderable.
 
-**Two independent sources of out-of-order delivery, both live at head:**
+**How a stale event actually reaches this index — verified live, and NOT the mechanism a first reading
+suggests.**
 
-1. **Redelivery.** The adjacency durable is configured with no `MaxAckPending`
-   (`consumer/bootstrap.go:95-99` — `Stream` / `FilterSubject` / `Durable` only), so the server default
-   (~1000) applies and many messages are in flight. `processMsg` Naks on a `Build` error
-   (`bootstrap.go:367`); the Nak'd message is redelivered *after* messages that were behind it.
-2. **Three concurrent writers, no cross-consumer ordering — the routine case, not the rare one.** The
-   dedicated bootstrapper (`consumer/bootstrap.go:411`), the actor-aware link fan-out's pre-apply
-   (`pipeline/evaluate.go:1287`) and plain-link reprojection (`pipeline/dispatch.go:296`) all call
-   `adjacency.Build` for the same link. Both pipeline sites say so in their own comments
-   ("no cross-consumer ordering guarantee"). A lens pipeline running behind the bootstrapper pre-applies its
-   own *older* view of a link over the newer one.
+The obvious story is "a lagging consumer is delivered an old revision of the link." **That story is false
+here, and it is worth killing explicitly so nobody builds on it.** Every platform bucket is provisioned at
+the KV default `History: 1` (`internal/bootstrap/primordial.go:112-115` — the config carries no `History`,
+and the comment says so), which makes `KV_core-kv` `MaxMsgsPerSubject: 1`: a superseded revision **leaves
+the stream**. A cursor sitting far behind is therefore never handed an old revision of a key — it is handed
+the current one, or nothing. Redelivery is likewise weak on its own: a Nak'd message is re-presented behind
+the messages that were behind it, but under `History: 1` what it carries is still the key's live value.
+
+**The real route is a message already in a handler's hands while the world moves on**, and it is measured,
+not hypothesised. `refractor-hub-walk-and-periodic-load-design.md:23-24` (its own numbers re-derived live)
+records **24 lens consumers holding one in-flight message each with 10k–128k unprocessed**, at a
+**per-message handler cost of 20 s – 190 s**, all parked inside `adjacency.Neighbors` /
+`neighborsFromCoreKV`. A pipeline that fetched link L's create at 09:00:00 and reaches its
+`adjacency.Build` three minutes later applies a view of L that a revoke at 09:00:30 — long since applied by
+the bootstrapper, whose handler is cheap — has already superseded. The event is not stale in the stream; it
+is stale **in the handler**.
+
+That gives the two ingredients the defect needs, both live at head:
+
+1. **Minutes of skew between the three writers' apply points.** The dedicated bootstrapper
+   (`consumer/bootstrap.go:411`), the actor-aware link fan-out's pre-apply (`pipeline/evaluate.go:1287`)
+   and plain-link reprojection (`pipeline/dispatch.go:296`) all call `adjacency.Build` for the same link,
+   off the same stream, with wildly different per-message costs. Both pipeline sites already say in their
+   own comments that there is "no cross-consumer ordering guarantee" — the load census is what turns that
+   caveat into minutes.
+2. **A revoke → re-grant reuses the `EdgeID`**, so those two apply points are writing *different versions of
+   one key* rather than different keys. Without a version stamp the later writer simply wins.
+
+A lens can also be held **indefinitely** rather than merely for minutes: one starting at
+`InitialPause: PauseInfra` (`cmd/refractor/main.go:2464`, the read-path-posture lenses) does not drain until
+an operator resumes it, and a durable sets no `MaxDeliver` (`substrate/consumer.go:247` applies one only when
+it is > 0, so JetStream's default is unlimited). Nothing in the system bounds how late an apply can be.
 
 **Both directions are reachable, and they fail opposite ways:**
 
@@ -96,7 +119,8 @@ version of this link am I looking at" wants.
 
 | writer | stream it consumes | site |
 |---|---|---|
-| adjacency bootstrapper | `subjects.CoreKVStream(coreKVBucket)` | `consumer/bootstrap.go:66`, `:96` |
+| adjacency bootstrapper — link arm | `subjects.CoreKVStream(coreKVBucket)` | `consumer/bootstrap.go:66`, `:96`, `:411` |
+| adjacency bootstrapper — legacy (body-parsed) arm | same stream, same consumer | `consumer/bootstrap.go:340-358` |
 | every lens pipeline (both link arms) | `subjects.CoreKVStream(coreKVBucket)` | `cmd/refractor/main.go:2458` (`lensConsumerSpec`) |
 
 One stream, one sequence space. Rejected alternatives: a wall-clock stamp (no ordering guarantee across
@@ -104,6 +128,13 @@ processes, and the repo's own determinism rule refuses clock-as-correctness); a 
 comparable across the three writers, which is the whole problem); a live Core KV read of the link key per event
 (one extra round trip on the hottest path in the index — the cost axis three shipped designs have been
 fighting).
+
+**Comparability is not the only property the number carries, and the second one has to be preserved by hand.**
+On a link message the sequence is *also the KV revision of the EdgeID itself*, because the event's EdgeID IS
+the key the message arrived on. That is what §4's recoverability argument rests on. The **legacy arm breaks
+the identity**: it takes its EdgeID from the message *body* while its sequence comes from the carrier key, so
+an unrelated key's position could be recorded as a floor on an edge whose own key sits far behind it. §3.1
+states the condition that keeps the arm honest.
 
 ### 2.2 Where the floor lives for an ABSENT edge — a capped map beside `Edges`
 
@@ -137,8 +168,16 @@ type CoreKVEvent struct {
 
 `json:"-"` is not cosmetic. The legacy non-link arm (`consumer/bootstrap.go:340-358`) unmarshals a
 `CoreKVEvent` straight out of a message **body**; a wire-visible field would let the body choose its own
-ordering floor. The tag makes that unrepresentable, and the arm assigns `evt.Seq = msg.Sequence` after the
-unmarshal.
+ordering floor. The tag makes that unrepresentable.
+
+**The legacy arm stamps CONDITIONALLY — `if key == evt.EdgeID { evt.Seq = msg.Sequence }` — and the condition
+is load-bearing.** An unconditional stamp there would let an unrelated key at sequence 9,000 pin a floor on an
+edge whose own key's live revision is 500. Under `History: 1` that edge's key can never again produce a
+sequence at or above its floor, so **every** future event for it — a redrain, a lens rebuild, a full replay
+included — is declined forever: silent under-grant with no healer short of wiping the adjacency bucket. An
+event that cannot honour "a floor for edge L comes only from a message on subject L" therefore stays
+unsequenced, which is exactly this arm's behaviour with no guard at all. Every other path satisfies the
+invariant by construction, because `EventsForLink` sets `EdgeID = key`.
 
 `EventsForLink` takes the sequence as a parameter and stamps both directional events. Three production call
 sites supply `msg.Sequence`; all three have it in scope:
@@ -156,11 +195,21 @@ floor(EdgeID) = max( stored entry's Seq (0 if absent), Removals[EdgeID] (0 if ab
 apply iff evt.Seq >= floor(EdgeID)
 ```
 
-**`>=`, not `>`, and that is the whole compatibility story.** An unsequenced event (`Seq == 0`) meets a floor of
-0 and applies — so every path that does not yet carry a sequence, every legacy document written before this
-change, and every existing test that constructs a bare `CoreKVEvent{…}` literal behaves **bit-identically to
-today**. The guard only ever engages between two events that both carry real sequences, which is precisely the
-population it reasons about. Equal sequences are the same message redelivered; applying it is idempotent.
+**`>=`, not `>`, and the direction is load-bearing — but the guarantee it buys is narrower than "nothing
+changes for an unsequenced caller", and the narrower statement is the true one.**
+
+What holds exactly: an unsequenced event (`Seq == 0`) meets a floor of **0** and applies. So an edge that **no
+sequenced writer has touched** indexes exactly as it did before this change — every legacy document written
+before entries carried a sequence, and every existing test that constructs a bare `CoreKVEvent{…}` literal.
+
+What does **not** hold: `0` is below every *real* floor, so **once any writer of an edge is sequenced, an
+unsequenced writer of that same edge is declined.** Mixed writers of one edge lose the unsequenced one. That
+is acceptable only because every production writer of a *link* is sequenced (§3.1) — and it is the reason the
+legacy arm's unsequenced fallback (§3.1) is safe: those edges have no sequenced writer at all.
+
+With `>` instead, an unsequenced event would clear no floor anywhere, every unsequenced path would stop
+applying, and the index would shrink silently — a strictly worse failure than the one being fixed. Equal
+sequences are the same message redelivered; applying it is idempotent.
 
 A removal records `Removals[EdgeID] = Seq` **only when `Seq > 0`.** An unsequenced removal stays a pure drop,
 exactly as today: an event with no ordering information has no ordering claim to record, and recording 0 would
@@ -171,12 +220,36 @@ carrying both would double-count.
 
 ### 3.3 Bounding the map
 
-`Removals` is capped at `maxRemovalFloors = 128` per node; on overflow the **lowest** sequences are dropped
-first, because a floor's only job is to refuse a *staler* event and the stalest floors are the ones whose
-racing events can no longer be in flight (redelivery is bounded by `AckWait × MaxDeliver`; a lens pipeline's
-lag is bounded by its own consumer). Dropping a floor re-opens D2 for that one edge only, and only after 128
-further removals on the same node — a strictly smaller hole than the unbounded one it replaces, and a bounded
-document is the non-negotiable half (`latch` exists because unbounded documents are how this index fails).
+`Removals` is capped at `MaxRemovalFloors = 1024` per node; on overflow the **lowest** sequences are dropped
+first.
+
+**The cap is a document-size requirement and nothing else, and no time argument supports the eviction order.**
+An earlier draft of this section claimed the stalest floors are the ones whose racing events can no longer be
+in flight, "because redelivery is bounded by `AckWait × MaxDeliver` and a lens pipeline's lag is bounded by
+its own consumer." **Both halves are false.** `DurableConsumerConfig` sets `MaxDeliver` only when it is > 0
+(`substrate/consumer.go:247`), so JetStream's unlimited default applies; and a lens at
+`InitialPause: PauseInfra` (`cmd/refractor/main.go:2464`) waits for an operator, not for a timer. Nothing
+bounds how late an apply can be — which is §1's whole point.
+
+So the honest statement is positive rather than protective: **an evicted floor returns that one edge to the
+behaviour this package had before the guard existed** (a stale create can resurrect it). The guard is never
+worse than that baseline anywhere; past the cap it is merely *incomplete*. Lowest-sequence-first is the
+least arbitrary order available — the edges gone longest — not a claim that their racing events have expired.
+
+**Why 1024 and not a smaller number.** The eviction key is a **count** on one node while the traffic that
+produces removals is bursty. A single atomic batch carries up to **998** business mutations
+(`atomic-batch-size-ceiling-design.md`, Contract #3 §3.9.1), so any cap at or below that lets **one**
+offboarding operation shed every floor recorded before it — precisely the case the guard exists for. 1024
+clears that ceiling. The cost is bounded and visible: at the ~90 B a link-key floor marshals to, a full map is
+**≈ 92 KB** against the 800 KiB `overflowBytes` budget, and the latch measures the marshalled document, so the
+floors are counted rather than hidden. The constant must stay ≥ 1 — at 0 the eviction loop would drop the
+floor `removeEdge` has just recorded, silently disabling the D2 half.
+
+**The cap makes the two arms of one edge decidable differently, and that is a residual, not a bug to hide.**
+Floors are per node. A busy node (many removals) can evict a floor that a quiet node still holds, so a stale
+create can be *applied* at one endpoint and *declined* at the other — leaving the edge outbound-present and
+inbound-absent. The sequence stamp guarantees both arms are arbitrated against the same **number**
+(§3.1), never that they reach the same **verdict**. See §4.
 
 ### 3.4 State table for `Removals` (standing checklist #1 — a lifetime, not a data structure)
 
@@ -187,20 +260,52 @@ document is the non-negotiable half (`latch` exists because unbounded documents 
 | carried | inside the node document; re-read from KV on **every** CAS retry pass, so a concurrent writer's floors are never clobbered |
 | ordered by | the shared Core KV backing-stream sequence (§2.1) |
 | crash / replay | durable in the adjacency bucket; a replay re-presents the same sequences and the guard makes re-application idempotent |
-| bucket rebuild | starts from an absent document — every floor is 0, the replay applies in stream order, and the end state is the same as a fresh index |
-| overflow latch | unreachable: `upsertEdge` returns at `st.marked` (`builder.go:158`) before any of this; `latch` empties `Edges` **and** `Removals` together |
+| bucket rebuild (adjacency) | starts from an absent document — every floor is 0, the replay applies in stream order, and the end state is the same as a fresh index |
+| **Core KV stream re-provision** | **the one state with no healer. Delete/re-create `KV_core-kv`, or restore it from an older snapshot, while `refractor-adjacency` survives, and sequences restart at 1: every replayed event falls below the persisted floors, so every write is declined FOREVER — under-grant and over-grant at once, silently. Pre-guard this state was self-correcting (the replay simply rewrote the index). Operational rule: WIPE `refractor-adjacency` whenever `KV_core-kv` is re-provisioned or restored. No runtime detection is built in this fire — the state is named, not defended.** |
+| overflow latch (already marked) | no interaction: `upsertEdge` returns at `st.marked` (`builder.go:158`) before the floor is read; `latch` empties `Edges` **and** `Removals` together |
+| **overflow latch (causing the mark)** | **floors can now CAUSE a latch, which is new.** `len(data)` includes the marshalled `removals`, and a removal of an edge the node never held drops nothing while adding a floor — so a removal can now *grow* a document past `overflowBytes`, where before it could only shrink it. Latching is irreversible and changes a node's self-link read semantics (`EventsForLink`'s doc comment). The direction is safe — a latched node's reads enumerate Core KV, which is authoritative — and §3.3's 92 KB ceiling keeps the contribution small against 800 KiB, but "unreachable" would be wrong |
 | upgrade / downgrade | old→new: floors absent, read as 0, everything applies (today's behaviour). new→old: `removals` is an unknown JSON field an old binary ignores and drops on rewrite — degrades to today, never worse |
+| **rolling deploy** | during the roll the guard is on or off **per node and per moment**, decided by which binary happened to write that node last, with nothing observable from outside saying which. None of §5's pins describes a mixed fleet; each describes one binary. The mixed state is bounded by the two rows above — every combination degrades to today's behaviour or better — but it is not *pinned* |
 
 ---
 
 ## 4. What this does NOT close
 
-- **A pruned floor** (§3.3) — bounded, stated, and strictly better than head.
+- **A pruned floor** (§3.3) — that edge reverts to head's own behaviour, bounded and stated.
+- **A half-edge.** Because floors are per node and the cap is per node, a stale create can be applied at one
+  endpoint and declined at the other, leaving an edge **present outbound and absent inbound**. Nothing
+  downstream is written for a half-edge: `Neighbors` answers per node, the executor's directional match
+  (`DirectionMatches`) will simply find one arm, and a `both`-direction walk sees the edge from one side only.
+  This is a *narrowing* of today's failure (today BOTH arms can be wrong) but it is a new **shape** of wrongness
+  and it is named here rather than left to be discovered.
 - **An overflow-marked node** — it keeps no document at all, and its reads enumerate Core KV live
   (`neighborsFromCoreKV`, `store.go:257-320`), which is authoritative and needs no ordering guard.
+- **A Core KV stream re-provision** — §3.4's own row; the one state that needs an operator.
 - **The `Reproject` presence refusals** of `perentry-unchanged-entry-withholding-design.md` §4.4 — those stay
   as they are. This design removes the S-wrong *cause* they were written to survive; it does not remove them,
   and the filing design's row 7s is narrowed rather than deleted.
+
+### 4.1 The safety property `History: 1` buys — the strongest thing this design can say
+
+On the link path a floor for edge `L` is only ever set from a message on subject `L` (§3.1 is what makes the
+legacy arm obey it too). Every platform bucket runs at the KV default `History: 1`
+(`internal/bootstrap/primordial.go:112-115`), so `L`'s **live head revision is always at or above every
+sequence `L` has ever produced**. Therefore:
+
+> **The live message for an edge always clears that edge's own floor.**
+
+Which is why the guard introduces **no new way to lose a live edge**: a bootstrapper redrain, a lens rebuild
+from `DeliverAll`, or an adjacency-bucket wipe all re-present `L` at its head revision, which is ≥ any floor
+`L` could have written, so the index converges on the live truth deterministically. That is a stronger claim
+than "it self-heals eventually" — it is arithmetic, not hope.
+
+Exactly two things break it, and both are enumerated above:
+
+- **An evicted floor** (§3.3) — fails *open*: the edge reverts to head's behaviour.
+- **A foreign-keyed floor** — would fail *closed* and permanently; §3.1's condition is what prevents it, and it
+  is the reason that condition exists rather than an unconditional stamp.
+- (A Core KV re-provision resets the sequence space itself, which is not a floor problem but a coordinate
+  problem — §3.4.)
 
 ---
 
@@ -217,14 +322,34 @@ New pins, each **revert-proved** (standing checklist #3 — the guard is removed
 
 | test | pins |
 |---|---|
-| `TestBuild_StaleRemovalCannotDeleteALiveEdge` | D1: create@200 then remove@100 ⇒ edge survives |
-| `TestBuild_StaleCreateCannotResurrectARemovedEdge` | D2: remove@200 (edge absent) then create@100 ⇒ edge stays absent |
-| `TestBuild_NewerRemovalAndNewerCreateStillApply` | the positive vector for both — @300 over a @200 floor applies on each arm |
-| `TestBuild_UnsequencedEventsBehaveExactlyAsBefore` | `Seq == 0` on both arms is today's behaviour, and records no floor |
-| `TestBuild_RemovalFloorsAreCappedAndDropTheStalest` | `Removals` never exceeds `maxRemovalFloors`; the survivors are the highest sequences |
+| `TestBuild_StaleRemovalCannotDeleteALiveEdge` | D1: create@200 then remove@100 ⇒ edge survives, **and the node's KV revision is unchanged** (a decline writes nothing, not the identical document) |
+| `TestBuild_StaleCreateCannotResurrectARemovedEdge` | D2: remove@200 (edge absent) then create@100 ⇒ edge stays absent, revision unchanged |
+| `TestBuild_NewerRemovalAndNewerCreateStillApply` | the positive vector for both — @300 over a @200 floor applies on each arm; equal sequences are idempotent |
+| `TestBuild_UnsequencedEventsBehaveExactlyAsBefore` | both halves of §3.2: an edge no sequenced writer has touched is unchanged, **and** an unsequenced writer of a sequenced edge is declined |
+| `TestBuild_RemovalFloorsAreCappedAndDropTheStalest` | `Removals` never exceeds `MaxRemovalFloors`; the survivors are the highest sequences |
 | `TestEventsForLink_StampsTheSequenceOnBothDirections` | the stamp reaches both directional events |
 | `TestBuild_UpsertClearsTheRemovalFloor` | a floor does not outlive the entry that supersedes it |
 | `TestCoreKVEvent_SequenceIsNotWireCarried` | `json:"-"` — a message body cannot choose its own floor |
+
+**Threading pins — the mechanism is inert unless the sequence actually reaches it, and "non-zero" does not
+pin a threaded value.** Each asserts the persisted `EdgeEntry.Seq` **equals the delivering message's own
+sequence**, read back from the publish:
+
+| test | pins |
+|---|---|
+| `TestProcessLinkEnvelope_StampsTheDeliveringMessagesSequence` | a real link envelope through a real `Bootstrapper`; both endpoints |
+| `TestProcessMsg_LegacyArmStampsOnlyItsOwnKey` | §3.1's condition: a body-named EdgeID stays unsequenced; an EdgeID that IS the key is stamped |
+| `TestLinkArmsStampTheDeliveringMessagesSequence` | both pipeline arms through `Pipeline.handle`; both endpoints each |
+
+**Mechanism pins beyond the guard arithmetic:**
+
+| test | pins |
+|---|---|
+| `TestEvictStalestFloors_ChoosesTheVictimWithoutASentinelID` | the empty EdgeID is an ordinary key, ties break deterministically, and the choice does not depend on map iteration order (200 passes) |
+| `TestMaxRemovalFloorsIsAtLeastOne` | §3.3's floor on the constant — at 0 the D2 half is silently off |
+| `TestBuild_ConcurrentWritersKeepEachOthersFloors` | §3.4's *carried* row: the state is re-read on every CAS pass, so racing writers keep each other's floors |
+| `TestLatch_ClearsTheRemovalFloorsWithTheEdges` | §3.4's latch row, which the replacement document otherwise satisfies only incidentally |
+| `TestBuild_DeclinedWritesAreCounted` | the decline is observable (`adjacency.DeclinedWrites`), not silent |
 
 ---
 
@@ -233,6 +358,10 @@ New pins, each **revert-proved** (standing checklist #3 — the guard is removed
 Deploy-order-free and revertible in both directions. The index self-heals into the guarded steady state as
 events arrive: an entry written before this change has `Seq == 0` and is superseded by the first real event
 that touches it. No rebuild, no migration, no package version bump (nothing under `packages/` changes).
+
+**One standing operational rule this ships with** (§3.4): the floors are coordinates in `KV_core-kv`'s
+sequence space, so **wipe `refractor-adjacency` whenever `KV_core-kv` is deleted, re-provisioned or restored
+from a snapshot.** Nothing detects that state at runtime in this fire.
 
 ---
 
@@ -251,13 +380,16 @@ ordering guard … Fix: seq-guard removal + upsert per edge.* Green bar = §5.
 | `internal/refractor/adjacency/builder.go:104-127` | `EventsForLink` takes `seq uint64`, stamps both events |
 | `internal/refractor/adjacency/builder.go:138-148` | `Build` carries `evt.Seq` onto the `EdgeEntry` |
 | `internal/refractor/adjacency/builder.go:150-217` | `upsertEdge`: floor computed per CAS pass; both arms guarded |
-| `internal/refractor/adjacency/builder.go:254` | `latch` empties `Removals` with `Edges` |
-| `internal/refractor/adjacency/builder.go:279-298` | `upsertEntry` / `removeEdge` become floor-aware |
-| `internal/refractor/consumer/bootstrap.go:340-358` | legacy arm: `evt.Seq = msg.Sequence` after unmarshal |
+| `internal/refractor/adjacency/builder.go:254` | `latch` empties `Removals` with `Edges` (the replacement document zero-values both; the comment says so) |
+| `internal/refractor/adjacency/builder.go:279-298` | `upsertEntry` / `removeEdge` become floor-aware; `edgeFloor` + `evictStalestFloors` are added beside them |
+| `internal/refractor/adjacency/builder.go` (package scope) | `MaxRemovalFloors` (exported — a property of the stored document, §3.3), `declinedWrites` + `DeclinedWrites()` (§3.2's observability) |
+| `internal/refractor/consumer/bootstrap.go:340-358` | legacy arm: `if key == evt.EdgeID { evt.Seq = msg.Sequence }` after unmarshal (§3.1) |
 | `internal/refractor/consumer/bootstrap.go:411` | `EventsForLink(…, msg.Sequence)` |
 | `internal/refractor/pipeline/dispatch.go:192-204` | `evalLinkFanOut` passes `msg.Sequence` down |
 | `internal/refractor/pipeline/dispatch.go:296` | `EventsForLink(…, msg.Sequence)` |
 | `internal/refractor/pipeline/evaluate.go:1276`, `:1287` | `evaluateLinkFanOut(…, seq uint64)`; stamps its pre-apply |
+| `internal/refractor/pipeline/dispatch.go` (both link arms) | `warnIfUnsequencedLink` — a `Message.Sequence` of 0 means `msg.Metadata()` failed (`substrate/consumer.go:477-495` swallows that), and an entirely unguarded index must not look like a guarded one |
+| `internal/refractor/consumer/bootstrap.go:411` | the same warning on the bootstrapper's link arm |
 
 **3. Precedents to mirror.** The monotone-guard idiom is `internal/refractor/adapter`'s `SeqGuarded`
 grant-writer — a `projectionSeq` on every write, the stale write **declined** rather than erroring
@@ -267,7 +399,9 @@ the shape precedent for an ordering pin is `TestBuild_UpsertReplacesExistingEdge
 
 **4. Increment order.** (1) `adjacency` — fields, `EventsForLink` signature, the guard, `latch`, and the eight
 pins; `go test ./internal/refractor/adjacency/... -count=1`. (2) thread the sequence through the three call
-sites + their test callers; `go test ./internal/refractor/consumer/... ./internal/refractor/pipeline/...
+sites + their test callers, **with a producer-level pin per site asserting the persisted `Seq` equals the
+delivering message's own sequence** — a threading site with no pin of its own is a site that can be zeroed
+with the whole suite green; `go test ./internal/refractor/consumer/... ./internal/refractor/pipeline/...
 -count=1`. (3) full gates (§5).
 
 **5. In-scope gotchas.** No `// Story …` / "was:" comments (CLAUDE.md). Deterministic sync only — no
@@ -287,9 +421,12 @@ explicit arbitration a deterministic key with three writers requires.
 **6. Adjacent finds.** D2 (§1) — absorbed into this fire, same root cause, same code. Nothing else surfaced.
 
 **7. Non-goals.** No reader changes (`Neighbors` / `NeighborsScoped` / `PrefetchNodes` untouched — §2.2 is what
-buys that). No change to the overflow latch policy, to `neighborsFromCoreKV`, to `Reproject`'s §4.4 refusals,
-or to any consumer configuration (`MaxAckPending` stays unset — this design orders the writes rather than
-serialising the delivery).
+buys that). No change to the overflow latch **policy** — thresholds, the mark, and what a marked node reads are
+all as they were — though the latch's *inputs* do change: floors are part of the marshalled document, so a
+removal can now grow it (§3.4's second latch row). No change to `neighborsFromCoreKV`, to `Reproject`'s §4.4
+refusals, or to any consumer configuration (`MaxAckPending` stays unset — this design orders the writes rather
+than serialising the delivery). No Health KV surface for the decline counter: that is a health-schema change,
+and a rising count is normal on a lagging stack.
 
 **Scope-diff gate.** Every touch in part 2 traces to "seq-guard removal + upsert per edge": the fields and
 `EventsForLink` carry the sequence, `upsertEdge` is the guard, `Removals` is the guard's floor for the absent
