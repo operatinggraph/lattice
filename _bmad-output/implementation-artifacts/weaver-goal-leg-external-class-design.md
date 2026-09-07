@@ -574,3 +574,131 @@ sizing stand.
 
 **Stamp.** No fork (§0), no contract edit (§5), gates discharged (§2.3 walk in §12; the adversarial pass above):
 `✅ RATIFIED (Winston-adjudicated, per the 2026-08-20 delegation)` — build-ready for the Lattice Steward, §11.
+
+---
+
+## 14. Goal-leg external class — fire brief (build note, 2026-09-07)
+
+Compiled by the Lattice Steward at `c5cb20f` from two read-only scouts, before the first edit.
+Branch `claude/bold-newton-kwqpv7`; board row `🏗️ owner: claude/bold-newton-kwqpv7`.
+
+### 14.1 Scope sentence (verbatim, §3.1)
+
+> **A gap's external class is decided by the dispatch it resolves to — the leg — never by the playbook
+> entry.** `staleMark` takes the resolved leg's `GapAction`; each of the four consumers hands it the leg it
+> has already resolved (or resolves it, once, by the pure pinned lookup); a leg that cannot be resolved for
+> this row confers no stale-reconcile authority.
+
+Green bar: §11's gate list, run in full; the §9 tests green; the gate's negative proof recorded.
+
+### 14.2 Verified touch-list — every design citation re-checked live at `c5cb20f`
+
+The design was grounded at `259aa629`; several fires have landed since, so **every line number in §2/§3/§7
+has drifted.** Counts are unchanged except C3 and C4b. Live anchors:
+
+| Design cites | Live at `c5cb20f` | Note |
+|---|---|---|
+| `staleMark` decl `evaluator.go:573` | **`evaluator.go:649`** (doc from `:619`) | — |
+| `externalDispatchGap` call `evaluator.go:581` | **`evaluator.go:657`** | the sole caller, inside `staleMark` |
+| `externalDispatchGap` decl `evaluator.go:616` | **`evaluator.go:692`** (doc from `:667`) | the lane-1 sentence to correct is at `:687-689` |
+| lane-1 stale gate `evaluator.go:481` | **`evaluator.go:558`** | `pinnedAction` bound at `:436-439`; `planGap` at `:594` |
+| sweep markless re-arm `reconciler.go:779/785` | **`reconciler.go:885/891`** | — |
+| sweep reclaim `staleMark` `reconciler.go:1071` | **`reconciler.go:1229`** | — |
+| sweep reclaim's existing resolution `reconciler.go:1094` | **`reconciler.go:1252-1255`** | the block to hoist |
+| `reArmDeclines` `control.go:625/630/631` | **`control.go:625/630/631`** | unmoved |
+| `resolvedLegAction` decl `strategist.go:492` | **`strategist.go:491`** | returns `(action, ref string, perr *planError)` |
+| `resolvePlannedAction` decl `strategist.go:430` | **`strategist.go:426`** | pinned branch pure, `:434/:437/:558` |
+| `catalogEntryGapAction` `strategist.go:526` | **`strategist.go:521`** | carries `Action` **and** `Pattern` — verified |
+| `renewalComplete` target `renewal_targets.go:138` | **`renewal_targets.go:138`** | `Mode: "planned"`, unmoved |
+| `refreshBgcheck` leg | **`renewal_targets.go:79-84`** | `Action: "triggerLoom"`, `Pattern: "backgroundCheck"` — verified |
+| renewal `BodyColumns` `renewal_lenses.go:70-73` | **`renewal_lenses.go:69-73`** | 13 columns, no `inflight_renewalComplete` |
+| renewal cypher `renewal_lenses.go:269-303` | **`renewal_lenses.go:260-306`** | `bgcheckValidUntil` is a `WITH` alias at `:279`; `RETURN` from `:281` |
+| `bgInflight` fan `lenses.go:909` | **`lenses.go:914`** (and `:1225`) | identical CASE, verbatim reusable |
+| is-null idiom `lenses.go:953` | **`lenses.go:958`** (`missing_onboarding`) | `(ssnVal = null)` |
+| gate `scripts/lint-weaver-classify-by-shape.go`, `ci.yml:373` | **both unmoved** | `checkFile` at `:133-135` matches `*ast.Ident` callees only — confirmed |
+| dossier parked clause `weaver.md:1307` | **`weaver.md:1331-1332`** | §10.3 companion paragraph at `:496-514` |
+| manifest `0.31.27` + mirrored `Version` | **`manifest.yaml:2` = `0.31.27`; `package.go:92` = `"0.31.27"`** | both bump to `0.31.28` |
+
+**Census deltas — resolved here, not left for admit (the scope-diff gate):**
+
+- **C3 is 3, not 2.** A third `resolvedLegAction` caller exists: `escalationCanRelease`
+  (`evaluator.go:1769`), `_, _, perr := …` — it reads **only** the `planError`. Changing the first return
+  from `string` to `GapAction` is source-compatible there and changes nothing it decides. Inc 1 leaves that
+  site byte-identical; the brief records it so a reviewer does not read it as an unaccounted caller.
+- **C4b is 0 in Go source** (one `duplicateCandidates` prose hit in `clinic-domain/manifest.yaml`, not a
+  gap spec) — row 11 still has zero live consumers, as the design says.
+- **C6's extra files are false hits** — `staleMarker` (`internal/loom/deadline_provenance_internal_test.go`),
+  `staleMarkStanding` (`escalation_doors_internal_test.go`), and four comment mentions. The real callers are
+  `internal/weaver/evaluator_internal_test.go` (`TestStaleMark_ExternalDispatchClassifier` `:561`,
+  `TestStaleMark_ClassifierFollowsRegistryReplay` `:612`) and `internal/pkgmgr/gapcompanionpin_test.go`'s AST
+  pin. The pin counts case clauses whose **whole body** is one `return true, …`; the new `case "":` returns
+  `false` first, so it is not counted — read at `gapcompanionpin_test.go:224-244` and confirmed.
+- **C1 = 4, C2 = 1 caller, C5 = 0, C7 clean (18 files, 3 calls), C9 `staleMark`:558 before `planGap`:594,
+  C10 = 0 / 7 of 7** — all as designed.
+
+### 14.3 Precedents to mirror
+
+- **Inc 1's four sites** mirror `reconciler.go:1252-1255` — the reclaim's own pinned resolution, which the
+  design hoists rather than invents. Its doc comment (`:1234-1251`) already states the rule this fire extends
+  to the sibling predicate.
+- **The `""` arm** mirrors `externalDispatchGap`'s existing `default` arm shape (`evaluator.go:715`):
+  `return false, false, "<why>"`.
+- **Inc 2's Rule 2** mirrors the file's own `checkFile` + `runSelfTest` structure; it needs a **second walk**
+  (selector callee + `FuncDecl` scope), not an extension of the existing `*ast.Ident` matcher.
+- **Inc 3's column** mirrors `lenses.go:914`'s `bgInflight` CASE verbatim, conjoined per §3.5; the is-null
+  idiom mirrors `lenses.go:958`; the `WITH` already mixes `max(…)`/`min(…)` aggregates with non-aggregates
+  (`renewal_lenses.go:270-279`), so `count(DISTINCT CASE …)` is the shape the rule engine already accepts here.
+- **The lens test** mirrors `bgcheck_freshness_lens_test.go`'s fixture family and its "a declared false, not
+  an omitted column" assertion (`:70`).
+
+### 14.4 Increment order + runnable green checks
+
+| Inc | Green check (runnable) |
+|---|---|
+| 1 · engine | `go build ./...` · `go test ./internal/weaver/ ./internal/pkgmgr/` · `go vet` |
+| 2 · gate | `go run ./scripts/lint-weaver-classify-by-shape.go --selftest` · `STRICT=1 go run ./scripts/lint-weaver-classify-by-shape.go` · the negative proof against pre-Inc-1 `main` |
+| 3 · package | `go test ./packages/lease-signing/ -run 'Renewal\|Bgcheck'` · `DIFF_BASE=c5cb20f go run ./scripts/lint-package-version.go` · `make test-lease-convergence` |
+| close | `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go` · `go test ./... -p 4` with `POSTGRES_TEST_DSN` set · `make test-lease-convergence` |
+
+Baseline recorded before the first edit: `go build ./...` clean; `lint-weaver-classify-by-shape` clean
+(18 files, 3 calls); `go test -tags leaseshortwindow ./internal/leaseconvergence/... -run TestRenewalConvergence`
+**green**.
+
+### 14.5 In-scope gotchas
+
+- **`packages/` content edit ⇒ bump BOTH** `manifest.yaml` and the mirrored `Version` in `package.go`
+  (`0.31.27 → 0.31.28`), else a plain install no-ops the change on a running stack.
+- **`internal/leaseconvergence` is invisible to `go test ./...`** — 7 of 7 files carry `//go:build
+  leaseshortwindow`. Run `make test-lease-convergence` by name.
+- **Postgres-gated tests skip silently without `POSTGRES_TEST_DSN`** — a remote fire's `go test ./...` is
+  falsely green otherwise (REMOTE.md §3).
+- **No history/changelog comments** (CLAUDE.md): the comment corrections describe what the code does now.
+- **The shallow clone** makes every history-derived negative an artifact until `--deepen`.
+
+**Weaver dossier entries this fire trips** (copied verbatim per the template):
+
+1. *A gap class is decided by the dispatch's SHAPE, never by its action name* — a NEW dispatch seam inherits
+   that classifier and the pacing built on it. Check: for every new seam that fires an episode, name the
+   classifier it calls and the pacing rule it inherits. **This fire lifts the entry's own parked clause.**
+2. *A shared test fixture that always supplies an OPTIONAL input pins only the supplied case.* Check: list the
+   columns the fixture writes that production treats as OPTIONAL and require one vector that omits each —
+   **here, the `inflight_x`-omitted vector that pins row 5.**
+3. *An operator verb that hands a gap to a reconciler arm must refuse exactly what that arm PERMANENTLY
+   declines* — transient declines accepted, permanent ones refused **and named**. Check: one vector per
+   decline plus a control that resets — **here, `reArmDeclines` over an external leg vs. a human leg.**
+
+Standing checklist, the three that bite here: **#2** every census is a premise (done, §14.2); **#3** a negative
+test needs its positive vector proven first, and every fix is proven by reverting it; **#6** precedent may
+carry debt.
+
+### 14.6 Adjacent finds
+
+None out of scope so far. `resolvedLegAction`'s third caller (§14.2) is in scope and inert. Anything the
+build surfaces is fixed in this run per SKILL §4.
+
+### 14.7 Non-goals (the drift fence)
+
+Not touched: the suppression gate's ordering (`gapSuppressionTerms`, `evaluator.go`); the escalation seam
+(rows 9/10 must stay byte-identical); `collapseOnlyReclaim`'s own body; the `proposedOp` recorded
+disagreement (row 14); the install-time validator (§8 row 7); the lost-after-accept limit (§10) — the
+presence-based column's posture, not this fire's. No `docs/contracts/*` edit.
