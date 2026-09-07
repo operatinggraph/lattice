@@ -901,6 +901,34 @@ func seedGoalLegFixture(t *testing.T, ctx context.Context, h *sweepHarness,
 	return entityID, key
 }
 
+// seedMarklessGoalLegFixture is seedGoalLegFixture's re-arm counterpart: the
+// same catalog and row, but a budget an operator zeroed and NO mark at all —
+// the one state the count leg's re-arm arm (reconciler.go arm (n)) fires on.
+// The budget goes through seedReArmedCount's real increment-then-reset path, so
+// the key the sweep enumerates carries the value shape and revision history
+// ResetRetryBudget leaves.
+//
+// With no mark there is no pin, so which leg the arm judges comes from a fresh
+// synthesis over the row — which is exactly what each vector varies through the
+// goal-state columns it supplies.
+func seedMarklessGoalLegFixture(t *testing.T, ctx context.Context, h *sweepHarness,
+	targetID, gap string, row map[string]any) (entityID string) {
+
+	t.Helper()
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID = testNanoID(t)
+	full := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant": "vtx.identity." + testNanoID(t),
+	}
+	for k, v := range row {
+		full[k] = v
+	}
+	h.putRow(t, ctx, targetID, entityID, full)
+	h.seedReArmedCount(t, ctx, targetID, entityID, gap)
+	return entityID
+}
+
 // TestSweep_GoalLegExternalReclaimMintsFreshClaimID is the reclaim's half of the
 // rule that a gap's external class comes from the dispatch it RESOLVES to. A
 // goal gap's playbook entry names no action, so an entry-classified reclaim
@@ -927,6 +955,16 @@ func seedGoalLegFixture(t *testing.T, ctx context.Context, h *sweepHarness,
 //     vector the fixture rule demands: every other vector supplies a column
 //     production treats as optional, and only this one pins what happens
 //     without it.
+//
+// The last two vectors take the same verdict at the OTHER site that asks it: the
+// count leg's re-arm arm, where an operator's zeroed budget stands over a gap
+// with no mark at all. Nothing there is pinned, so the leg comes from a fresh
+// synthesis over the row — and the arm's collapse-only refusal, being the whole
+// reason it may fire without a claimId to preserve, has to be taken over that
+// leg for the identical reason the reclaim does. The pair moves in opposite
+// directions from one row column: with the check lapsed the plan opens on the
+// external leg and the budget re-arms, and with the check current it opens on
+// the human one and nothing fires.
 func TestSweep_GoalLegExternalReclaimMintsFreshClaimID(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1033,6 +1071,49 @@ func TestSweep_GoalLegExternalReclaimMintsFreshClaimID(t *testing.T) {
 		t.Fatalf("a row that never nominated the gap for the external class keeps its claimId whatever its leg "+
 			"dispatches: got %q want %q", rec.ClaimID, undeclaredClaim)
 	}
+
+	// (5) and (6): the re-arm arm, which has no mark to classify from. The arm
+	// is warm-up gated, so the anchor is rewound once for both.
+	h.agePastWarmup()
+
+	// (5) A re-armed budget over a row whose check has lapsed: the synthesis
+	// opens on the external leg, which is re-dispatchable, so the operator's
+	// verb has its effect.
+	const reArmTarget = "fixtureGoalLegReArmExternal"
+	reArmEntity := seedMarklessGoalLegFixture(t, ctx, h, reArmTarget, gap, declared)
+
+	// (6) The same re-armed budget over a row whose check is current: the
+	// synthesis opens on the human leg instead, whose task may still be sitting
+	// on someone's queue — and the claimId that would collapse a re-dispatch
+	// onto it died with the mark. Nothing may fire.
+	const humanReArmTarget = "fixtureGoalLegReArmHuman"
+	humanReArmEntity := seedMarklessGoalLegFixture(t, ctx, h, humanReArmTarget, gap,
+		map[string]any{"inflight_x": false, "maxretries_x": 3, "bgFresh": "2026-09-01T00:00:00Z"})
+
+	h.pass(ctx)
+
+	op = h.nextOp(t)
+	if op["operationType"] == nil {
+		t.Fatalf("the re-armed external leg's op names no operation: %v", op)
+	}
+	if !h.markExists(t, ctx, markKey(reArmTarget, reArmEntity, gap)) {
+		t.Fatal("a re-armed external leg dispatches a FRESH episode, which must hold its own mark")
+	}
+	if got := h.countValue(t, ctx, reArmTarget, reArmEntity, gap); got != 1 {
+		t.Fatalf("re-armed budget = %d, want 1: the operator's verb bought one attempt against the leg", got)
+	}
+
+	// The human leg's vector is what the arm must refuse, and it is refused on
+	// the LEG: its goal gap's own entry names no action at all, so an
+	// entry-classified arm reads it as "not collapse-only" and mints a duplicate
+	// task beside the open one.
+	if h.markExists(t, ctx, markKey(humanReArmTarget, humanReArmEntity, gap)) {
+		t.Fatal("an assignTask leg's markless re-arm would mint a duplicate task: no episode may be created")
+	}
+	if got := h.countValue(t, ctx, humanReArmTarget, humanReArmEntity, gap); got != 0 {
+		t.Fatalf("refused re-arm booked %d attempts, want 0", got)
+	}
+	h.requireNoOp(t)
 }
 
 // TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId is the headline

@@ -930,6 +930,119 @@ func TestHandleRow_GoalLegExternalStaleMarkMintsFreshClaimId(t *testing.T) {
 	}
 }
 
+// TestHandleRow_SuppressedGapReleasesACompletedLegWithoutDispatching pins the
+// one thing lane-1's suppression gate may NOT withhold: a leg boundary. A
+// release is not a dispatch, and inflight_<g> says only that a remediation is
+// already in flight — a statement about what may be started, never about a leg
+// that has already run.
+//
+// The vector is the state that makes the two collide, and a lens fan produces it
+// without anything going wrong. A goal chain's planner has pinned the human leg
+// while the check it depends on was current; the check then lapses, which
+// re-opens a SIBLING remediation over the same fan, and the lens projects
+// inflight_<g> true for this gap on the strength of it. The human completes the
+// pinned leg anyway — nothing about a background check blocks a signature — so
+// the leg's declared effect now holds in the row while the gap reads suppressed.
+//
+// Gate the release on that suppression and the boundary has no derivation left
+// in this lane at all: it waits on the sweep's mark-leg reclaim, which cannot
+// act until the mark's whole lease has run out, and the chain's next leg waits
+// with it — on every delivery in between.
+//
+// What the release must NOT do is act any further. The gap is still suppressed
+// when it returns, so nothing is planned, nothing is escalated and nothing
+// reaches the wire; the mark's lease is expired here precisely so that a leaked
+// dispatch would be visible as the reclaim it would become. And the second
+// vector is the shape that must pay nothing at all: a static gap records a
+// dispatch action rather than a plan leg, has no boundary any release could
+// test, and its suppressed delivery is byte-identical to what it always was.
+func TestHandleRow_SuppressedGapReleasesACompletedLegWithoutDispatching(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureSuppressedRelease"
+	const gap = "missing_x"
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.engine.source.mu.Lock()
+	h.engine.source.opMetaByType["SignLease"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+
+	entityID := testNanoID(t)
+	pinned := fixtureMark(targetID, entityID, gap, "signRenewal", pastLease())
+	pinned.ClaimID = "Rt7Yu6Zj5Xk4Pk3Mn2Bq"
+	body, err := json.Marshal(pinned)
+	if err != nil {
+		t.Fatalf("marshal the pinned mark: %v", err)
+	}
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", markKey(targetID, entityID, gap), body); err != nil {
+		t.Fatalf("seed the pinned mark: %v", err)
+	}
+	// The attempt the pinned leg spent, charged to that leg exactly as a real
+	// goal-gap dispatch books it: the release's other half is the per-chain
+	// budget, and a document that was never there could not prove it went.
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, "signRenewal", true, false, true); err != nil {
+		t.Fatalf("seed the leg's dispatch-count: %v", err)
+	}
+
+	// `signed` present is signRenewal's declared effect holding; `bgFresh` is
+	// gone, which is both what re-opened the sibling remediation and what leaves
+	// the chain a next leg to dispatch once the suppression lifts.
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant":  "vtx.identity." + testNanoID(t),
+		"inflight_x": true, "maxretries_x": 3,
+		"signed": "vtx.leaseSignature." + testNanoID(t),
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 1)); dec != substrate.Ack {
+		t.Fatalf("a suppressed gap Acks whatever its release did, got %v", dec)
+	}
+
+	if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap); err != nil || found {
+		t.Fatalf("the completed leg is still pinned (found=%v, err=%v): a suppressed delivery must still "+
+			"record the boundary, or nothing does until the mark's lease runs out", found, err)
+	}
+	if _, rev, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gap); err != nil || rev != 0 {
+		t.Fatalf("the released leg's budget survived (rev %d, err=%v): the release resets the per-chain "+
+			"count with the pin it belonged to", rev, err)
+	}
+	h.requireNoOp(t)
+
+	// The shape with no leg: unchanged, down to the mark's revision.
+	const staticTarget = "fixtureSuppressedStatic"
+	h.seedTarget(&Target{
+		TargetID: staticTarget,
+		Gaps:     map[string]GapAction{"missing_y": {Action: actionDirectOp, Operation: "FixY"}},
+	})
+	staticEntity := testNanoID(t)
+	staticKey := markKey(staticTarget, staticEntity, "missing_y")
+	staticBody, err := json.Marshal(fixtureMark(staticTarget, staticEntity, "missing_y", actionDirectOp, pastLease()))
+	if err != nil {
+		t.Fatalf("marshal the static gap's mark: %v", err)
+	}
+	before, err := h.conn.KVCreate(ctx, "weaver-state", staticKey, staticBody)
+	if err != nil {
+		t.Fatalf("seed the static gap's mark: %v", err)
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, staticTarget, staticEntity, map[string]any{
+		"entityKey": "vtx.leaseApp." + staticEntity, "violating": true, "missing_y": true,
+		"inflight_y": true, "maxretries_y": 3,
+	}, 5, 1)); dec != substrate.Ack {
+		t.Fatalf("a suppressed static gap Acks, got %v", dec)
+	}
+	after, err := h.conn.KVGet(ctx, "weaver-state", staticKey)
+	if err != nil || after.Revision != before {
+		t.Fatalf("a gap with no plan leg has no boundary to record: its mark must be left exactly as found "+
+			"(rev %d → %v, err=%v)", before, after.Revision, err)
+	}
+	h.requireNoOp(t)
+}
+
 // TestHandleRow_BudgetIncrementsThenSuppresses proves the §E mechanism-B budget
 // end-to-end through lane-1: each dispatch increments the weaver-state
 // dispatch-count, and once the count reaches the row's maxretries_<g> the gap is

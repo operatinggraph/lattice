@@ -232,6 +232,12 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 			// suppression site, never a silent park") — escalateExhaustedGap
 			// redirects to the Augur AI tier if the target opts "exhausted"
 			// into its augur block, else raises that standing issue itself.
+			//
+			// The in-flight branch still owes the LEG BOUNDARY: a release is
+			// not a dispatch, and the gate above only decides what may be
+			// started (releaseSuppressedLeg's doc). The exhausted branch owes it
+			// too, and takes it inside escalateExhaustedGap — over the real
+			// count pair its own verdict rested on — so the two are exclusive.
 			if exhausted {
 				switch e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, col, row, msg.Sequence, budgetIsDefault, count, countRev) {
 				case substrate.Nak:
@@ -242,6 +248,8 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 					longDelayed = true
 				default:
 				}
+			} else {
+				e.releaseSuppressedLeg(ctx, targetID, entityID, col, ga, row)
 			}
 			continue
 		}
@@ -278,6 +286,70 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		return substrate.NakWithLongDelay
 	}
 	return substrate.Ack
+}
+
+// releaseSuppressedLeg records the boundary of a goal-mode gap's completed leg
+// on a delivery the suppression gate has already stopped from dispatching.
+//
+// A RELEASE IS NOT A DISPATCH, and the gate does not govern it. inflight_<g>
+// carries exactly one meaning by contract (Contract #10 §10.3: "a remediation is
+// already in flight → suppress re-dispatch") — a statement about what may be
+// STARTED. That a pinned leg's declared effects now hold in the row is a fact
+// about a leg that has already RUN, and it is true whatever else is in flight
+// over the same fan. The sweep's mark leg already reads the two that way: its
+// release sits above its own suppression gate. This is lane 1's half of the same
+// ordering.
+//
+// The gap it protects is a real one. A row can suppress on a remediation that
+// belongs to a DIFFERENT chain — the same lens fan projects inflight_<g> for a
+// sibling target's dispatch — while this gap's own pinned leg concludes on a
+// person who is not blocked by any of it. Without a release here, the only
+// derivation of that boundary left is the sweep's mark-leg reclaim, which cannot
+// run until the mark's lease expires: a leg that finished seconds ago sits
+// pinned for the length of a whole lease, on every delivery in between, and the
+// chain's next leg waits with it.
+//
+// Only a gap that can HAVE a pinned leg is asked, which is releaseCompletedLeg's
+// own precondition restated at the call site so no other shape pays for it: a
+// static, candidates or surface gap records its dispatch action rather than a
+// plan leg, has no boundary to test, and its suppressed delivery stays exactly
+// what it was, KV reads included.
+//
+// The mark is READ HERE rather than inherited. This lane's mark read lives in
+// dispatchGap, which a suppressed gap never reaches. It is also what the release
+// takes its mutual exclusion on — the delete is conditioned on the revision read
+// here — so a pass that loses that CAS to the sweep, or to a concurrent
+// delivery, abandons the release rather than crediting the leg twice. A read
+// failure defers the boundary to the next delivery: the test is level-triggered
+// and the effects go on holding.
+//
+// The count document is deliberately NOT read. A verdict that suppressed on
+// inflight_<g> never rested on the budget term, so the caller holds the zero
+// document at revision 0 — and the leg this site can name is the MARK's (legOf's
+// mark terms), not the count's. That zero revision reaches no revision-
+// conditioned write: a marked release takes its mutex on the mark delete and
+// removes the budget under it. A gap with no mark therefore releases nothing
+// here, which is the honest answer for a site holding no revision it could
+// condition such a delete on.
+//
+// NOTHING else runs. No plan, no dispatch, no escalation: the gap is still
+// suppressed when this returns, and its next leg is dispatched by whichever
+// delivery or sweep pass finds the suppression lifted. What that leaves behind —
+// a still-open gap holding no mark — is a state every other reader already
+// handles, and is exactly what the sweep's count leg enumerates.
+func (e *Engine) releaseSuppressedLeg(ctx context.Context, targetID, entityID, col string, ga GapAction, row map[string]any) {
+	if ga.Goal == nil {
+		return
+	}
+	rec, markRev, found, err := e.marks.get(ctx, targetID, entityID, col)
+	if err != nil {
+		e.logger.Warn("weaver: mark read failed on a suppressed gap; its leg boundary is untestable this delivery",
+			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+		return
+	}
+	if found {
+		e.releaseCompletedLeg(ctx, targetID, entityID, col, ga, legOf(ga, rec, dispatchCount{}), row, markRev, 0)
+	}
 }
 
 // dispatchGap runs Evaluator L2 + Strategist + Actuator for one open gap.
