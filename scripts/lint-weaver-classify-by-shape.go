@@ -567,11 +567,18 @@ func checkFuncLegShape(fset *token.FileSet, path string, fd *ast.FuncDecl, st *s
 }
 
 // legShapeGapIdx is the GapAction argument position the self-test's synthetic
-// staleMark call sites use. The self-test's sources never declare staleMark
-// itself — there is nothing for staleMarkGapArgIndex to find in a single
-// synthetic snippet — so each legshape case states the position its own
+// staleMark call sites use. Those sources declare no staleMark of their own —
+// there is nothing for staleMarkGapArgIndex to find in a single synthetic call
+// snippet — so each legshape case states the position its own
 // `e.staleMark(t, e2, row, col, leg, …)` calls put GapAction at, rather than
 // leaving it to be inferred the way the corpus run infers it.
+//
+// Stating it is what keeps those cases about the CHECKER, and is also the reason
+// they say nothing about the derivation: a checker proved at a position it was
+// handed proves nothing about the function that decides that position. The
+// derivation carries its own vectors (gapArgIndexCases), over declarations rather
+// than call sites, and they are the ones that fail if the counting or the refusal
+// is wrong.
 const legShapeGapIdx = 4
 
 // legShapeCheck adapts checkFileLegShape's extra gapIdx parameter to the
@@ -677,7 +684,84 @@ func f(e *Engine, t, e2 string, row map[string]any, col string, ga GapAction) bo
 			fmt.Printf("self-test %s: ok (%d finding(s))\n", c.name, got)
 		}
 	}
+	if runGapArgIndexSelfTest(verbose) {
+		failed = true
+	}
 	if failed {
 		os.Exit(2)
 	}
+}
+
+// runGapArgIndexSelfTest proves staleMarkGapArgIndex itself, over DECLARATIONS:
+// the position it derives for the shape the corpus actually has, the two ways
+// that position moves (a field's names each occupy one, so a grouped field is not
+// one position; a GapAction parameter that is not the trailing one is not the
+// last position either), and the three refusals — a declaration carrying two
+// GapAction parameters, one carrying none, and a corpus that declares no
+// staleMark at all. Each refusal is a case where a fallback guess would name
+// SOME argument, and Rule 2 would then be enforced over whatever sits there,
+// reporting the all-clear about an argument it never inspected.
+//
+// wantIdx -1 means the derivation must return an error. Reporting failures
+// rather than exiting keeps one run's output complete when several break at
+// once, like the checker table above.
+func runGapArgIndexSelfTest(verbose bool) (failed bool) {
+	cases := []struct {
+		name    string
+		src     string
+		wantIdx int
+	}{
+		{"gapidx-corpus-shape", `package weaver
+func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col string, leg GapAction) bool {
+	return false
+}`, 4},
+		{"gapidx-grouped-names-shift-it", `package weaver
+func (e *Engine) staleMark(targetID, entityID, col string, leg GapAction, row map[string]any, extra string) bool {
+	return false
+}`, 3},
+		{"gapidx-unnamed-parameters", `package weaver
+func (e *Engine) staleMark(string, string, GapAction) bool {
+	return false
+}`, 2},
+		{"gapidx-two-gapactions", `package weaver
+func (e *Engine) staleMark(targetID string, leg GapAction, entry GapAction) bool {
+	return false
+}`, -1},
+		{"gapidx-no-gapaction", `package weaver
+func (e *Engine) staleMark(targetID, entityID, col string, row map[string]any) bool {
+	return false
+}`, -1},
+		{"gapidx-no-declaration", `package weaver
+func f(e *Engine, t, e2 string, row map[string]any, col string, leg GapAction) bool {
+	return e.staleMark(t, e2, row, col, leg)
+}`, -1},
+		{"gapidx-declared-twice", `package weaver
+func (e *Engine) staleMark(targetID string, leg GapAction) bool { return false }
+func (e *Engine) staleMark(entityID string, leg GapAction) bool { return false }`, -1},
+	}
+	for _, c := range cases {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, c.name+".go", c.src, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: self-test %s does not parse: %v\n", c.name, err)
+			os.Exit(2)
+		}
+		idx, ierr := staleMarkGapArgIndex([]*ast.File{file})
+		switch {
+		case c.wantIdx < 0 && ierr == nil:
+			failed = true
+			fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: self-test %s: derived argument position %d, want a refusal\n", c.name, idx)
+		case c.wantIdx >= 0 && ierr != nil:
+			failed = true
+			fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: self-test %s: refused (%v), want argument position %d\n", c.name, ierr, c.wantIdx)
+		case c.wantIdx >= 0 && idx != c.wantIdx:
+			failed = true
+			fmt.Fprintf(os.Stderr, "lint-weaver-classify-by-shape: self-test %s: derived argument position %d, want %d\n", c.name, idx, c.wantIdx)
+		case verbose && c.wantIdx < 0:
+			fmt.Printf("self-test %s: ok (refused: %v)\n", c.name, ierr)
+		case verbose:
+			fmt.Printf("self-test %s: ok (argument position %d)\n", c.name, idx)
+		}
+	}
+	return failed
 }

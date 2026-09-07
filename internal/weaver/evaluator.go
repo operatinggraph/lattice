@@ -1685,19 +1685,41 @@ func (e *Engine) reflectSurface(targetID string, reflection surfaceReflection) {
 // claim on the gap — but there is no mark to take the mutex on, so the COUNT
 // DOCUMENT takes it: countRev is the revision the caller read the count at, and
 // the release begins by deleting it at that revision. Nothing else here is
-// idempotent (recordEffectClose flips one pending slot per call), and two
-// markless derivations of the same boundary genuinely race — a lane-1 delivery
-// and the sweep's count leg both read the mark absent — so the loser of the
-// count delete must abandon the whole release rather than credit the leg a
-// second time. countRev 0 means there is no document at all, and a release has
-// no budget to release: also nothing to do.
+// idempotent (recordEffectClose flips one pending slot per call), and the
+// markless derivation races ITSELF — every Weaver instance's sweep enumerates the
+// same budget key, and each one reads the mark absent — so the loser of the count
+// delete abandons the whole release rather than credit the leg a second time.
+// countRev 0 means there is no document at all, and a release has no budget to
+// release: also nothing to do.
+//
+// That delete excludes the other MARKLESS derivations, and a concurrent dispatch
+// that booked against the same budget. It does not exclude the MARKED branch,
+// which takes its mutex on a different key: between that branch's mark delete and
+// its own blind count delete below there is a window in which a markless pass
+// re-reads the mark as absent and still holds a matching count revision, and both
+// credit the leg. The consequence is confined to the leg's `__effect` window —
+// one extra close in the confidence sample, so effectCloseRate over-reports and
+// effectMismatch under-alerts by it — while no mark, no budget and no dispatch
+// decision is touched: the marked branch owns the release either way, and the
+// markless one deletes a document it was going to delete. Closing the window
+// would mean deleting the count BEFORE the mark CAS that decides whether this
+// caller owns the release at all, which destroys the budget of an episode a
+// concurrent path is still running — a live chain's spent history traded for a
+// stats sample.
 //
 // The gap's entity-scoped latch is cleared with the rest. Both facts that can
 // stand there for a parked gap — a spent budget, and a budget spent and handed
 // to the reasoning tier — describe a budget that no longer exists once the
-// document is deleted, and the fresh plan that follows a release can fail to
-// build (a config fault alerts at a different key), which would otherwise leave
+// document is deleted, and a fresh plan the caller goes on to build can fail
+// (a config fault alerts at a different key), which would otherwise leave
 // "escalated to Augur" standing over a gap that has left the reasoning tier.
+//
+// The Info log says what this function did, and no more. Whether the chain then
+// re-plans from the advanced state is the CALLER's disposition, not this
+// function's: a release taken while the gap is suppressed advances nothing — a
+// release is not a dispatch, and only the advance is the suppression gate's
+// business — so the advance announces itself at the site that takes it
+// (advanceReleasedLeg).
 func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, col string, ga GapAction, pinnedAction string,
 	row map[string]any, markRev, countRev uint64) bool {
 
@@ -1790,7 +1812,7 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 		}
 	}
 	e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
-	e.logger.Info("weaver: goal leg released; re-planning from the advanced state",
+	e.logger.Info("weaver: goal leg released",
 		"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction)
 	return true
 }
@@ -1928,6 +1950,11 @@ func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col 
 func (e *Engine) advanceReleasedLeg(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	ga GapAction, row map[string]any, rowRevision uint64) substrate.Decision {
 
+	// The half of a boundary that releaseCompletedLeg cannot claim: the release
+	// is owed to every caller, the advance only to the ones whose gap may be
+	// dispatched into, so the re-plan is announced from here.
+	e.logger.Info("weaver: released goal leg's chain advancing; re-planning from the advanced state",
+		"targetId", targetID, "entityId", entityID, "gap", col)
 	pl, actionRef, esc, escalate, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, rowRevision, "")
 	if escalate {
 		return e.escalateGap(ctx, target, targetID, entityID, entityKey, col, esc, escalateUnplannable,

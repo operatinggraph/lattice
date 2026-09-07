@@ -1156,12 +1156,45 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// that satisfied this leg's effect may be the last one for a while).
 	// Dispatch the next leg as a genuinely fresh episode via the SAME
 	// CAS-create path lane-1 uses (fireEpisode's found=false branch)
-	// instead of merely releasing.
+	// instead of merely releasing. The one state where releasing and returning
+	// is nevertheless safe is the suppressed one just below, which has a
+	// guaranteed row write of its own.
 	//
 	// legOf, not the mark's action alone: a gap handed to the reasoning tier
 	// carries its displaced leg on the escalation's own mark, so its boundary
 	// stays testable from this leg too.
 	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, legOf(ga, rec, count), row, markRev, countRev) {
+		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, 0); suppressed {
+			// The ADVANCE is a dispatch, and the gap has a call in flight. The
+			// suppression gate below is the load-bearing skip for exactly that
+			// state — the mark-lease expiry → reclaim is the re-dispatch path a
+			// long-pending external call is actually exposed to — and an advance
+			// taken here jumps it from ABOVE: a fresh episode fired at the vendor
+			// while the previous call is still outstanding, which is the one
+			// thing inflight_<g> exists to prevent.
+			//
+			// The RELEASE above stands regardless. A release is not a dispatch:
+			// the gate governs only what may be STARTED (releaseSuppressedLeg's
+			// doc, Contract #10 §10.3), while a pinned leg whose declared effects
+			// hold in the row is a fact about a leg that has already run. Only
+			// the advance is the gate's business, so only the advance is
+			// conditional.
+			//
+			// The count is asked as ZERO because the release has just deleted the
+			// document: the budget term would be measuring a chain that no longer
+			// exists, and what remains to decide the advance is the inflight term
+			// the row alone carries.
+			//
+			// Nothing is stranded by holding here. The release removed the mark
+			// and the count, so neither sweep leg enumerates this gap any more —
+			// but inflight_<g> is a column of THIS row, so the only thing that can
+			// lift the suppression is a write to the row, and that write is a
+			// lane-1 delivery. It arrives at a gap holding no mark and no pin,
+			// which is a genuinely fresh episode's dispatch, chain advanced.
+			e.logger.Debug("weaver sweep: goal leg released with its advance withheld; the gap has a call in flight",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			return
+		}
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
@@ -1278,11 +1311,22 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// resolves to a planError: the dispatch action falls back to the mark's
 	// recorded string, and the leg stays zero, which confers no stale-reconcile
 	// authority at all (no resolution, no fresh claimId).
+	//
+	// The resolution is guarded on the PIN, mirroring lane 1's (dispatchGap):
+	// resolvePlannedAction with an empty pinnedAction routes a goal gap into
+	// resolveGoalAction's FRESH branch and runs Synthesize — planning work this
+	// classification must never pay, and never needs to. A mark that records no
+	// action names no leg to classify, so the honest answer is the zero
+	// GapAction, and the fail-closed one is the same: a synthesized leg the
+	// episode was never pinned to would feed staleMark a dispatch nothing
+	// dispatched, and could mint a fresh claimId over an artifact still open.
 	leg := GapAction{}
 	dispatchAction := rec.Action
-	if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
-		leg = resolved
-		dispatchAction = resolved.Action
+	if rec.Action != "" {
+		if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
+			leg = resolved
+			dispatchAction = resolved.Action
+		}
 	}
 
 	// confirmedConcluded mirrors fireEpisode's staleMark (evaluator.go): true
