@@ -105,7 +105,16 @@ func NewSeeder(nc *nats.Conn, logger *slog.Logger) (*Seeder, error) {
 }
 
 // ProvisionBuckets creates all required KV buckets and JetStream streams.
-// Re-running is idempotent: existing buckets are left unchanged.
+// Re-running converges rather than rewrites: a bucket whose live stream already
+// carries its registry row's settings is left untouched, and only a divergent
+// one is written.
+//
+// The skip is not an optimisation. The stream config nats.go derives from a
+// KeyValueConfig carries no AllowAtomicPublish, so a write against an existing
+// core-kv or loom-state CLEARS that flag and only the following UpdateStream
+// restores it — and between those two round trips every Conn.AtomicBatch on the
+// bucket (each Processor commit, each Loom transition) is refused with "atomic
+// publish is disabled". A boot that writes nothing opens no such window.
 func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 	for _, b := range PlatformBuckets() {
 		cfg := jetstream.KeyValueConfig{
@@ -122,11 +131,16 @@ func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 			cfg.LimitMarkerTTL = b.MarkerTTL
 		}
 
-		kv, err := s.js.CreateOrUpdateKeyValue(ctx, cfg)
+		converged, err := s.kvStreamMatchesRow(ctx, b)
 		if err != nil {
-			return fmt.Errorf("create/update KV bucket %q: %w", b.Name, err)
+			return err
 		}
-		s.logger.Info("KV bucket ready", "bucket", kv.Bucket())
+		if !converged {
+			if _, err := s.js.CreateOrUpdateKeyValue(ctx, cfg); err != nil {
+				return fmt.Errorf("create/update KV bucket %q: %w", b.Name, err)
+			}
+		}
+		s.logger.Info("KV bucket ready", "bucket", b.Name)
 
 		// AllowAtomicPublish must be set on the underlying stream for buckets
 		// whose writers use Conn.AtomicBatch: Core KV (the Processor's commit
@@ -173,6 +187,9 @@ func (s *Seeder) enableAtomicPublish(ctx context.Context, bucket string) error {
 	if err != nil {
 		return fmt.Errorf("stream info %q: %w", streamName, err)
 	}
+	if info.Config.AllowAtomicPublish {
+		return nil
+	}
 	cfg := info.Config
 	cfg.AllowAtomicPublish = true
 	_, err = s.js.UpdateStream(ctx, cfg)
@@ -181,6 +198,34 @@ func (s *Seeder) enableAtomicPublish(ctx context.Context, bucket string) error {
 	}
 	s.logger.Info("AllowAtomicPublish enabled", "stream", streamName)
 	return nil
+}
+
+// kvStreamMatchesRow reports whether the bucket's backing stream already exists
+// carrying every setting its registry row asks for. A bucket that does not exist
+// yet, or whose live settings differ, reports false and is written.
+//
+// The compared set is what ProvisionBuckets actually asks a KV bucket for:
+// the description, the marker lifetime, and per-key TTL support. Anything the
+// registry does not state is not this function's to judge — a stream property
+// nobody here sets must not make a converged bucket look divergent and
+// reintroduce the write on every boot.
+func (s *Seeder) kvStreamMatchesRow(ctx context.Context, b PlatformBucket) (bool, error) {
+	streamName := "KV_" + b.Name
+	stream, err := s.js.Stream(ctx, streamName)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get stream %q: %w", streamName, err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return false, fmt.Errorf("stream info %q: %w", streamName, err)
+	}
+	cfg := info.Config
+	return cfg.Description == b.Description &&
+		cfg.SubjectDeleteMarkerTTL == b.MarkerTTL &&
+		cfg.AllowMsgTTL == (b.MarkerTTL > 0), nil
 }
 
 // provisionStreams creates the required JetStream streams (not KV).
