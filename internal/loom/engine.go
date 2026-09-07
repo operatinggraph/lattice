@@ -61,6 +61,22 @@ const triggerDurable = "loom-trigger"
 // triggerSubject is the single subject the trigger consumer filters on.
 const triggerSubject = "events.loom.patternStarted"
 
+// MaxDeadlineArm is the longest deadline a step may arm: withDefaults clamps
+// both StepTimeout and CreateTaskTimeout down to it, the mirror of the
+// one-second floor they are clamped up to.
+//
+// It is a soundness bound, not a taste. A deadline expiry is delivered as a
+// marker that stands for the loom-state bucket's marker TTL, and the probe
+// woken by that marker decides rejected-or-lost from the ABSENCE of the op
+// tracker — which the Processor writes with a 24h TTL. So the whole path,
+// arm plus delivery window, has to finish well inside the tracker's life:
+// past it, the probe reads a committed op's aged-out tracker as "never
+// committed" and fails a healthy instance. An hour of arm against a one-hour
+// window leaves that path an order of magnitude of headroom, and a step that
+// has not reported for an hour is lost rather than slow — waiting longer buys
+// nothing the off-stream backstop is for.
+const MaxDeadlineArm = 1 * time.Hour
+
 // Config parameterizes the engine. Bucket/stream names default to the
 // platform-standard values; callers (cmd/loom, tests) override only what they
 // need.
@@ -84,7 +100,7 @@ type Config struct {
 	// StepTimeout is the per-step deadline: a step whose committed event is not
 	// seen within this window trips the step-deadline-exceeded handler (the
 	// off-stream failed/rejected backstop, §10.6). Must be >= 1s (NATS per-key
-	// TTL floor). Default 60s.
+	// TTL floor) and <= MaxDeadlineArm. Default 60s.
 	StepTimeout time.Duration
 	// CreateTaskTimeout is the bounded creation-deadline a userTask or
 	// externalTask step arms while it waits for its dispatch op to commit — a
@@ -95,8 +111,8 @@ type Config struct {
 	// latency (NOT a human/bridge response window): once the probe confirms the
 	// dispatch committed (the task vertex exists, or the instanceOp's tracker
 	// exists), the expired deadline is not re-armed and the wait for the
-	// completer (human or bridge) runs on unbounded (§10.6). Must be >= 1s (NATS per-key TTL floor).
-	// Default 60s.
+	// completer (human or bridge) runs on unbounded (§10.6). Must be >= 1s (NATS
+	// per-key TTL floor) and <= MaxDeadlineArm. Default 60s.
 	CreateTaskTimeout time.Duration
 	// HeartbeatEvery is the Contract #5 heartbeat cadence. The 10s default is
 	// the §5.6/NFR-O1 production cadence; a shorter value lets a test observe
@@ -169,16 +185,27 @@ func (c *Config) withDefaults() {
 		c.StepTimeout = 60 * time.Second
 	}
 	if c.StepTimeout < time.Second {
-		// NATS per-key TTL floor: loom-state is provisioned LimitMarkerTTL >= 1s,
-		// so a sub-second deadline would not arm a marker and the off-stream
-		// failed terminal would never fire. Clamp up rather than silently degrade.
+		// NATS refuses a per-message TTL below one second outright
+		// (parseMessageTTL, nats-server/server/stream.go:5342-5351), and the
+		// deadline arm carries one inside the transition's all-or-nothing
+		// AtomicBatch — so a sub-second value does not merely lose a marker,
+		// it fails every transition and wedges the engine. Clamp up.
 		c.StepTimeout = time.Second
+	}
+	if c.StepTimeout > MaxDeadlineArm {
+		// The mirror clamp: an arm long enough to outlast the tracker the
+		// deadline probe reads as its evidence turns the probe against healthy
+		// instances (MaxDeadlineArm).
+		c.StepTimeout = MaxDeadlineArm
 	}
 	if c.CreateTaskTimeout <= 0 {
 		c.CreateTaskTimeout = 60 * time.Second
 	}
 	if c.CreateTaskTimeout < time.Second {
 		c.CreateTaskTimeout = time.Second
+	}
+	if c.CreateTaskTimeout > MaxDeadlineArm {
+		c.CreateTaskTimeout = MaxDeadlineArm
 	}
 	if c.Instance == "" {
 		c.Instance = defaultInstance()
@@ -1345,11 +1372,12 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 // marker still fires for the overwriting arm.
 //
 // Every error return from this probe Naks the marker that woke it, and that
-// marker is a MaxAge marker the server removes one second after emission — so a
-// transient failure on ANY read here (the record, the deadline key, the pattern
-// pin, the lattice.op.status RPC, the outbox) loses that expiry outright. There
-// is deliberately no retry loop: the marker's TTL, not this handler, is where
-// the redelivery window for an expiry signal is sized.
+// marker stands only for the loom-state bucket's marker TTL — so a transient
+// failure on ANY read here (the record, the deadline key, the pattern pin, the
+// lattice.op.status RPC, the outbox) has until then to be redelivered into a
+// pass that succeeds, and loses the expiry outright after it. There is
+// deliberately no retry loop: the marker's TTL, not this handler, is where the
+// redelivery window for an expiry signal is sized.
 //
 // The pending step's kind selects the probe:
 //   - userTask (vtx.task.<id> token) → onUserTaskDeadline: the deadline is

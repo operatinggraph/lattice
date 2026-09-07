@@ -114,11 +114,12 @@ func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 			// MaxValueSize: -1 (unlimited)
 			// History: 1 (default)
 		}
-		if b.PerKeyTTL {
-			// LimitMarkerTTL enables per-key TTL support (Contract #4 §4.3).
-			// Enables AllowMsgTTL on the underlying stream.
-			// NATS requires LimitMarkerTTL >= 1 second.
-			cfg.LimitMarkerTTL = 1 * time.Second
+		if b.MarkerTTL > 0 {
+			// The registry row decides how long the bucket's removal markers
+			// live (how long a key's expiry stays observable); setting the
+			// value at all is what gives the bucket per-key TTL support
+			// (Contract #4 §4.3) — AllowMsgTTL on the underlying stream.
+			cfg.LimitMarkerTTL = b.MarkerTTL
 		}
 
 		kv, err := s.js.CreateOrUpdateKeyValue(ctx, cfg)

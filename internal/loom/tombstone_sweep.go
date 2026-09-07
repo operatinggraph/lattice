@@ -16,9 +16,11 @@ import (
 // delivers, and the deadline durable's handler runs one instance probe per
 // delivery (~1 ms), so at this rate the durable drains faster than the pass
 // feeds it and its pending count stays in single digits. That bound is the point
-// of the pacing rather than politeness: the step-deadline signal Loom's
-// off-stream recovery depends on is a marker that survives one second in the
-// stream, so a durable that lags behind the pass would miss it.
+// of the pacing rather than politeness: a genuine step-deadline expiry arrives on
+// that same durable and is delivered in order behind whatever the pass has
+// already queued, so an unpaced pass would delay the off-stream recovery signal
+// by the length of its own backlog — and the pass is sized by the bucket's
+// legacy population, which is unbounded here.
 const legacySweepInterval = 10 * time.Millisecond
 
 // legacySweepPublishTimeout bounds one conversion publish. A stalled ack must

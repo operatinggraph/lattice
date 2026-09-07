@@ -29,10 +29,13 @@ func newLoomConn(t *testing.T) *substrate.Conn {
 }
 
 // newLoomStateStore returns a stateStore bound to a provisioned loom-state KV
-// bucket. LimitMarkerTTL mirrors bootstrap/primordial.go's real provisioning
-// and is a prerequisite, not a convenience: every stateStore removal is a
-// purge carrying tombstoneTTL, and a bucket without AllowMsgTTL rejects a
-// message TTL header outright ("message TTL disabled").
+// bucket. LimitMarkerTTL is a prerequisite, not a convenience: every
+// stateStore removal is a purge carrying tombstoneTTL, and a bucket without
+// AllowMsgTTL rejects a message TTL header outright ("message TTL disabled").
+// The value here is the server floor rather than the real bucket's window
+// (bootstrap.LoomStateMarkerTTL, which sizes how long an expiry stays
+// observable to loom-deadline) — nothing in these tests reads an expiry as a
+// signal, so what they need from the bucket is the capability, not the window.
 func newLoomStateStore(ctx context.Context, t *testing.T) *stateStore {
 	t.Helper()
 	conn := newLoomConn(t)

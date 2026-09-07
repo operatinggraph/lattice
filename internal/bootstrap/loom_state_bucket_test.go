@@ -52,6 +52,14 @@ func TestLoomStateBucket_Provisioned(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, info.Config.AllowMsgTTL, "loom-state must be provisioned TTL-capable")
 
+	// The marker lifetime is loom-state's alone: a deadline.<id> expiry is the
+	// only signal Loom has that a step was rejected or lost, and this is the
+	// window in which loom-deadline can still be handed it after an outage.
+	// Every other platform bucket holds the server floor because nothing reads
+	// its expiries.
+	require.Equal(t, bootstrap.LoomStateMarkerTTL, info.Config.SubjectDeleteMarkerTTL,
+		"loom-state's expiry markers must live bootstrap.LoomStateMarkerTTL")
+
 	// AllowAtomicPublish: loom-state's writer is Loom's per-transition
 	// AtomicBatch (Contract #10 §10.3); without this flag Conn.AtomicBatch on
 	// loom-state is rejected. The flag must survive an idempotent re-provision.

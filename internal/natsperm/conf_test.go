@@ -1450,8 +1450,8 @@ func TestFacetHealthKVWriteVector(t *testing.T) {
 	url := startServerFromConf(t)
 
 	boot := connectAs(t, url, "bootstrap")
-	// health-kv is PerKeyTTL in bootstrap.PlatformBuckets() (LimitMarkerTTL on
-	// the backing stream) — mirror that here, unlike the plain `provision`
+	// health-kv carries a MarkerTTL in bootstrap.PlatformBuckets() (LimitMarkerTTL
+	// on the backing stream) — mirror that here, unlike the plain `provision`
 	// helper other subtests use, so KVPutWithTTL below has a TTL-capable
 	// bucket to write into.
 	provCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

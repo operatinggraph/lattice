@@ -27,8 +27,8 @@ func newHealthTestConn(t *testing.T) (*substrate.Conn, context.Context) {
 	t.Cleanup(cancel)
 
 	js := conn.JetStream()
-	// TTL-capable, mirroring how bootstrap provisions health-kv (PlatformBuckets
-	// PerKeyTTL ⇒ LimitMarkerTTL, primordial.go): the heartbeat is written with
+	// TTL-capable, mirroring how bootstrap provisions health-kv (the registry
+	// row's MarkerTTL ⇒ LimitMarkerTTL, primordial.go): the heartbeat is written with
 	// a per-key TTL, so a fixture bucket without it would reject every write for
 	// a reason the real bucket never has.
 	_, err = js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{

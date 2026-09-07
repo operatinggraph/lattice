@@ -815,9 +815,9 @@ func TestResultsBucketMatchesPlatformRegistry(t *testing.T) {
 		if b.Name != wire.ResultsBucket {
 			continue
 		}
-		if !b.PerKeyTTL {
-			t.Error("model-results must be PerKeyTTL: every key the runner writes is TTL'd, " +
-				"and KVCreateWithTTL silently degrades to a durable write without it")
+		if b.MarkerTTL == 0 {
+			t.Error("model-results must declare a MarkerTTL: every key the runner writes is TTL'd, " +
+				"and KVCreateWithTTL silently degrades to a durable write without per-key TTL support")
 		}
 		if b.Owner != wire.ServiceName {
 			t.Errorf("model-results owner: want %q, got %q", wire.ServiceName, b.Owner)

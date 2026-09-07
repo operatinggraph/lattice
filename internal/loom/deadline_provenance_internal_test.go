@@ -435,3 +435,39 @@ func TestDeadlineArmed_PropagatesGenuineGetFailure(t *testing.T) {
 	require.Error(t, err, "a genuine read failure must not read as an absent arm")
 	require.False(t, armed)
 }
+
+// TestWithDefaults_ClampsTheDeadlineArmBothWays pins the bounds every deadline
+// arm is held between, and each bound's reason.
+//
+// Below: NATS refuses a per-message TTL under one second outright
+// (parseMessageTTL, nats-server/server/stream.go:5342-5351), and the arm rides
+// inside the transition's all-or-nothing batch — so a sub-second value fails
+// every transition rather than merely losing a marker.
+//
+// Above: an expiry is delivered as a marker that stands for the loom-state
+// bucket's marker TTL, and the probe that marker wakes reads the op tracker's
+// presence as its evidence — so arm plus window must finish well inside the
+// tracker's own life or the probe fails a healthy instance. MaxDeadlineArm is
+// what stops a deployment's own value from crossing that, and bootstrap's
+// TestLoomStateMarkerTTL_FitsInsideTheTrackerLifetime asserts the ceiling
+// against the window it has to fit beside.
+func TestWithDefaults_ClampsTheDeadlineArmBothWays(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"unset takes the default", 0, 60 * time.Second},
+		{"sub-second clamps up to the TTL floor", 500 * time.Millisecond, time.Second},
+		{"a value in range is kept", 5 * time.Minute, 5 * time.Minute},
+		{"beyond the ceiling clamps down", 25 * time.Hour, MaxDeadlineArm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{StepTimeout: tc.in, CreateTaskTimeout: tc.in}
+			c.withDefaults()
+			require.Equal(t, tc.want, c.StepTimeout, "StepTimeout")
+			require.Equal(t, tc.want, c.CreateTaskTimeout, "CreateTaskTimeout")
+		})
+	}
+}
