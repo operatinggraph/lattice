@@ -617,3 +617,5 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-26 · `b153d120` · [Bootstrap] re-bootstrap-stranded-grants CLOSED — revocation CLI + reserved-name guards (both mint paths); lens residue detect-only; 4 cold reviews, one HIGH found+fixed
 - 2026-08-26 · `8d039bdb` · [Contracts] six 🔭 contract-text flags adjudicated — #2 + #10 amendments ratified as public contracts; #9 timing + three #2 clauses rejected as implementation prose
 - 2026-08-29 · `bcc2681` · [Pkgmgr] descriptor-declared kv.Links walks SHIPPED — the fourth declaration surface end to end, cafe's 8 ops declaring through it, 7 baseline rows retired; 3 cold reviews, 1 BLOCKING severed hop + 4 MAJOR closed
+- 2026-09-03 · `3017eac3` · [Refractor] a lens Output edit re-activates the lens in place — ownership-tested purge, refusal by construction, scoped health clear; live round trip on cafeStaleTabSettlement
+- 2026-09-03 · `7e2ef6b2` · [lease-signing] a background check stays valid 30 days (not 5 min) and the op-meta targets are labeled — the runaway re-check loop stops; leaseApplicationComplete narrows to 7 labels

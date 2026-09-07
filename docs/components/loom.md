@@ -341,6 +341,29 @@ marker when an age limit empties a subject, which would make every removal marke
 The value is thin (`setAt`, observability only) — the handler reconstructs from
 `instance.<instanceId>`.
 
+**The bucket's marker TTL is that signal's delivery window, and `loom-state` is the only bucket where it
+is one.** A `MaxAge` marker is itself a message with its own TTL — the stream's
+`subject_delete_marker_ttl`, set from the registry row's `MarkerTTL`
+(`internal/bootstrap/platform_buckets.go`) — and a durable consumer only ever replays what the stream
+still holds. So the window in which Loom can learn a step was rejected or lost is exactly that value:
+`loom-state` carries **one hour**, where every other per-key-TTL bucket carries the server's one-second
+floor, because those buckets' expiries are read by presence and never as an event. The hour is bounded
+above by the probe's own evidence — the 24 h `vtx.op.<requestId>` tracker — so that a marker delivered
+after a restart is still judged against a tracker that exists; see
+[`platform-bucket-marker-ttl-design.md`](../../_bmad-output/implementation-artifacts/platform-bucket-marker-ttl-design.md)
+§3.2. The per-key TTLs in the bucket are unaffected by that value only because a KV bucket's
+`MaxMsgsPerSubject` is 1, which exempts it from the server's rule that a shorter per-message TTL is
+raised to the marker TTL — an exemption the bootstrap gates assert rather than assume.
+
+An expiry is not confined to the failure path: a creation-deadline that expires while the dispatch was
+fine simply stands, so roughly one marker per in-flight async step sits on `deadline.*` for the
+window's length. Two things follow. Listings are unaffected — `instance.`-prefixed reads filter
+server-side, and `IgnoreDeletes` drops markers from the rest — so the enumeration ceiling is
+untouched. And a rebuilt `DeliverAll` `loom-deadline` durable replays a window's worth of genuine
+expiries rather than a second's: safe, because a replayed marker is at most a window old against 24 h
+of tracker and `deadlineArmed` short-circuits any whose instance has re-armed, but it is volume the
+one-second era never produced.
+
 **The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
 recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
 not an oversight: the record's presence is the dedup guard that collapses a re-emitted trigger for the same
@@ -573,3 +596,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   things to audit. Minted: the 2026-09-04 deadline-provenance fire. Check:
   `TestHandleDeadline_ActsOnTheExpiryAndNotOnARemoval`,
   `TestOnDeadline_APresentDeadlineKeyMeansALaterStepRearmed`.
+- **A constant whose only enforcement is a test of three constants is not enforced.** The deadline
+  window's soundness bound reads `maxDeadlineArm + markerTTL < TrackerTTL`, and it was gated by a test
+  that hardcoded `maxDeadlineArm` — while `StepTimeout` and `CreateTaskTimeout` were exported fields
+  carrying only a lower clamp. A deployment raising either past the tracker's life would turn the
+  deadline probe against healthy instances, silently, with the gate still green. Minted: the marker-TTL
+  fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in `withDefaults`
+  (`TestWithDefaults_ClampsTheDeadlineArmBothWays`), and the bootstrap gate computes the invariant from
+  that constant instead of restating its value.

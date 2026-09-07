@@ -80,6 +80,16 @@ presence). Verified live, file:line, 2026-09-07.
 `KV-Operation` removal headers, not on `MaxAge` — a client delete/purge it sees is published by
 Loom itself and is not marker-TTL-gated.
 
+**The table above is a census of TTL'd KEYS, not of every durable on these buckets** — read it as
+"which expiries are consumed", which is the question that sets the value. Three further durables run
+on `core-kv` and were checked separately (added 2026-09-07 by the cold pass): objectmanager's cascade
+(`objectmanager/cascade.go:70`, `DeliverAll`, filter `$KV.core-kv.vtx.*.*` — which does match the
+3-segment tracker key and so does receive its expiry markers), the outbox consumer
+(`processor/outbox/consumer.go:50`, filter `vtx.op.*.events`), and Refractor's lens source
+(`refractor/lens/corekv_source.go:726`). All three ack an empty body without acting, and `core-kv`
+keeps `MinMarkerTTL` regardless, so none is affected — but a later fire re-using this section to
+choose another bucket's value must start from the durables, not from this table.
+
 **So the per-bucket split is not a hedge — it is the census.** One bucket needs a window; five need
 the floor, and a longer marker lifetime on `core-kv` (the graph store) would be pure retained cost.
 
@@ -162,11 +172,32 @@ from its source.
 
 ## 5. Cost
 
-`loom-state` retains one hour of expiry markers instead of one second. Each is a headers-only
-message on a subject that would otherwise have dropped; steady-state population is one hour of
-deadline expiries. Against the bucket's own enumeration ceiling (the ratified
-`loom-instance-enumeration-bounding-design.md` puts the wall near 22k instances) this is noise, and
-markers are excluded from `ListKeys` by `IgnoreDeletes`.
+*Corrected 2026-09-07 by the cold pass — the first draft of this section implied expiries are a
+rare-failure population. They are not.*
+
+An expiry is **not** confined to the failure path. `onUserTaskDeadline` and `onExternalTaskDeadline`
+both leave the expired creation-deadline standing, un-re-armed, when the dispatch committed normally
+(`engine.go:1481-1487`, `1546-1553`) — so every userTask whose human takes longer than
+`CreateTaskTimeout`, and every externalTask whose bridge exceeds it, mints a `deadline.<instanceId>`
+marker on the healthy path. The steady-state marker population is therefore roughly **one subject per
+in-flight async step**, held for an hour rather than a second.
+
+That is still a bounded, cheap population — each marker is a headers-only message on a subject that
+would otherwise have dropped, and it is self-expiring — but two consequences follow and both were
+checked rather than assumed:
+
+- **Enumeration is unaffected.** `ListInstances` (`control.go:109`) and the health count
+  (`health.go:101`) filter server-side on `instance.`, which cannot match `deadline.*`; `KVGetMulti`
+  takes explicit key lists; `KVListTombstones` returns DELETE-op entries only, and nats.go maps
+  `Nats-Marker-Reason` to `KeyValuePurge` (`jetstream/kv.go:968-971`), so a `MaxAge` marker is neither
+  listed nor swept; `ListKeys`/`ListKeysFiltered` carry `IgnoreDeletes`. The
+  `loom-instance-enumeration-bounding-design.md` ceiling is untouched.
+- **A rebuilt `loom-deadline` durable replays more.** It is `DeliverAll` (`engine.go:389`), so a
+  rebuild now replays up to an hour of genuine `MaxAge` markers instead of a second's worth. This
+  stays safe — a replayed marker is at most an hour old against 24 h of tracker, and `deadlineArmed`
+  (`engine.go:1401`) short-circuits one whose instance re-armed — but the volume, not the outcome, is
+  what changed, and `docs/components/loom.md`'s claim about a rebuilt durable is written against the
+  new value.
 
 ## 6. Contract surface — none
 
@@ -182,12 +213,24 @@ the window in which its signal survives grows. No frozen-contract edit is staged
   `📐 needs designer pass · no-pattern: an armed/disarmed deadline fact on the instance record,
   readable across redrive/replay`. This fire's §3.2 invariant is what keeps the gap out of reach at
   the chosen value; it does not close it.
-- **`internal/loom/engine.go:171-175`'s comment is inexact.** It says a sub-second `StepTimeout`
-  *"would not arm a marker"* because `loom-state is provisioned LimitMarkerTTL >= 1s`. The floor
-  applies to the **marker's** TTL, not to a per-key TTL, and on a `MaxMsgsPer == 1` bucket a
-  sub-second per-key TTL expires on time and does arm a marker (`stream.go:6890-6897`). The clamp is
-  still right — a sub-second step deadline is not a deadline — but the reason stated is not the
-  mechanism. Corrected in the same fire (the code is untouched; only the comment).
+- **~~`internal/loom/engine.go:171-175`'s comment is inexact.~~ — WITHDRAWN 2026-09-07, the claim in
+  this bullet was itself the error.** It asserted that on a `MaxMsgsPer == 1` bucket a sub-second
+  per-key TTL *"expires on time and does arm a marker"*, citing `stream.go:6890-6897`. That cite is
+  the TTL-*raising* rule and does not govern here. The governing code is `parseMessageTTL`
+  (`server/stream.go:5342-5351`): **any `Nats-TTL` below one second is refused outright** with
+  `NewJSMessageTTLInvalidError()` (err_code 10165) — unconditionally, with no `MaxMsgsPer` exception
+  and no dependence on the bucket's marker TTL. `substrate` renders the header as `ttl.String()`
+  (`kv.go:358`, `batch.go:219`), so the value reaches that check verbatim; the cold pass confirmed all
+  three write paths (`KVPutWithTTL`, `KVCreateWithTTL`, `AtomicBatch`) fail at 500 ms on a
+  `History = 1`, one-hour-marker bucket.
+
+  The original comment's **conclusion was right and its consequence understated**: the deadline arm
+  rides inside `transition`'s all-or-nothing AtomicBatch, so a sub-second `StepTimeout` does not
+  degrade the deadline — it fails **every** transition and wedges Loom. The clamp comment is rewritten
+  to that mechanism (the code is untouched), which is also what `engine.go:86-87` and `:98` have said
+  all along. **The lesson is the fire's, not the builder's:** a design that corrects an existing
+  comment must verify the correction against the vendor source as hard as it verifies the change —
+  §1's table did that for every claim the *feature* rests on and not for this one.
 
 ## 8. Fire brief (Phase 0, compiled 2026-09-07 — the committed brief for this item)
 
@@ -226,3 +269,54 @@ change to what a deadline *means* or to the probe's logic.
 
 **Dossier — "Review keeps catching" for the touched components:** `docs/components/bootstrap.md` and
 `docs/components/loom.md` entries are copied into the builder's brief at spawn time.
+
+## 9. Close — what the reviews found, and the second unit they surfaced
+
+**The cold adversarial pass returned one BLOCKING finding, and it was against this design, not the
+build** (§7, withdrawn above): the design "corrected" a true comment using the wrong vendor rule. The
+build had faithfully implemented the error. Classification: **design-gap**, and the sharpest lesson of
+the fire — §1's vendor table was built for every claim the *feature* rests on, and the one claim the
+design made about *existing* code was the only one that never went through it.
+
+Findings by class: design-gap ×3 (the §7 error; §5's cost framing, which implied expiries are a
+rare-failure population when a healthy long-running userTask mints one; §2/§4 presented as a consumer
+census when they are a TTL'd-key census). Implementation-bug ×0. Convention ×1 (a test name encoding
+the prior value — the no-history rule, in a permanent identifier). Test-robustness ×2 (a wall-clock
+margin caught at lead review before it could redden CI, and a 2× discriminator widened at the cold
+pass). Brief-gap ×1 (the touch list was compile-driven, so two `PerKeyTTL` references surviving only
+in *comments* were missed).
+
+**Second unit — the every-boot `AllowAtomicPublish` window.** The cold pass, checking whether a live
+stack really picks the new value up in place, found that `nats.go`'s `prepareKeyValueConfig`
+(`jetstream/kv.go:668-690`) does not carry `AllowAtomicPublish`, so every `CreateOrUpdateKeyValue`
+against an existing bucket **clears** it before `enableAtomicPublish` re-sets it. Confirmed
+independently against the pinned server: `true` after provisioning, `false` immediately after an
+identical re-provision. `ProvisionBuckets` runs on every boot and documents itself as leaving existing
+buckets unchanged, so on a live deployment there is a window each boot in which every Loom
+`transition` and every Processor commit batch fails with *"atomic publish is disabled"*.
+
+Pre-existing and not introduced here — and fixed in this run rather than filed, because it is a defect
+in the same function this fire changes (§4: "pre-existing" is not an excuse). The fix converges by
+reading first: an existing bucket whose live config already matches its registry row is not written at
+all, so an idempotent re-run stops issuing the update that causes the flap, while a genuine change —
+this fire's raised `MarkerTTL` among them — still lands. It ships as its own commit.
+
+## 10. Dossier entries this fire mints
+
+For `docs/components/bootstrap.md`:
+
+- **A provisioning call that is "idempotent" still WRITES, and a write drops whatever the config type
+  cannot express.** `CreateOrUpdateKeyValue` rebuilds a `StreamConfig` from `KeyValueConfig` alone, so
+  every re-provision clears `AllowAtomicPublish` — a flag that exists only because the KV config type
+  has no field for it — and re-sets it a call later. Minted: this fire's cold pass, while checking
+  whether a raised `MarkerTTL` lands in place. Check: the re-provision tests asserting no stream update
+  is issued when the live config already matches the registry row.
+
+For `docs/components/loom.md`:
+
+- **A constant whose only enforcement is a test of three constants is not enforced.** The marker
+  window's soundness bound was written as `maxDeadlineArm + window < TrackerTTL` and gated by a test
+  that hardcoded `maxDeadlineArm`, while `StepTimeout` was an exported field with only a lower clamp —
+  so a deployment could violate the invariant silently and the gate stayed green. Minted: this fire's
+  cold pass. Check: `MaxDeadlineArm` clamps both arms in `withDefaults`, and the bootstrap gate
+  computes the invariant from that constant rather than restating it.

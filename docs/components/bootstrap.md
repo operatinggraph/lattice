@@ -99,6 +99,15 @@ lives in packages (`rbac-domain`, `identity-domain`), not here: the kernel stays
   `SeedPrimordial` probes the op-tracker key first and skips the whole batch if it already exists.
 - **All-or-nothing seeding.** The primordial batch is one `AtomicBatch` — a partial crash can never
   leave a half-seeded kernel visible to the Processor.
+- **A bucket's marker TTL is a registry decision, not a constant.** `PlatformBucket.MarkerTTL` is the
+  lifetime of the marker the server leaves on a subject when one of the bucket's keys is removed — i.e.
+  the window in which a consumer can still observe that the key expired — and a non-zero value is what
+  gives the bucket per-key TTL support at all (Contract #4 §4.3). Only `loom-state` has a consumer that
+  reads an expiry as a signal, so only `loom-state` carries a real window; every other row holds
+  `MinMarkerTTL`, the shortest lifetime the server accepts. The server holds the value in no
+  immutability set, so `CreateOrUpdateKeyValue` raises it on an existing stream in place and a changed
+  window lands on the next boot without recreating the bucket. See
+  [`platform-bucket-marker-ttl-design.md`](../../_bmad-output/implementation-artifacts/platform-bucket-marker-ttl-design.md).
 - **Deterministic output.** A fixed `BootstrapTime` + the stable NanoID set from
   `lattice.bootstrap.json` make every successful run produce byte-identical primordial envelopes.
 - **The explicit-flag readiness skip.** `-skip-ready-wait` is a CLI flag, never an env var — the one
@@ -234,3 +243,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   because the fire brief's own gotcha copy did not re-run the check on the NEW scan it was adding. Check:
   every new listing this component adds gets its OWN live candidate count and its OWN boot-path placement
   decision — a sibling scan inherits nothing from its neighbor's prior cost analysis.
+- **A provisioning call that is "idempotent" still WRITES, and a write drops whatever the config type
+  cannot express.** `CreateOrUpdateKeyValue` rebuilds a `StreamConfig` from the `KeyValueConfig` alone
+  (`nats.go/jetstream/kv.go`'s `prepareKeyValueConfig`), so every re-provision of an existing bucket
+  clears `AllowAtomicPublish` — a flag that exists only because the KV config type has no field for it —
+  and `enableAtomicPublish` re-sets it a call later, leaving a per-boot window in which every Loom
+  transition and Processor commit batch fails. Minted: the marker-TTL fire's cold pass, found while
+  checking whether a raised value lands on a live stream in place. Check: an existing bucket whose live
+  config already matches its registry row is not written at all — the re-provision tests assert no
+  stream update is issued.
