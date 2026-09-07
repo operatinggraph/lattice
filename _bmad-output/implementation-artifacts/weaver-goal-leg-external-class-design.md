@@ -311,25 +311,28 @@ because the suppression gate runs before the leg is bound.* Per leg, after scopi
 - leg `refreshBgcheck` (E), `bgcheckValidUntil` null: the column is the §10.3 in-flight fact; `staleMark` reads
   `!inflight` ⇒ fresh reclaim only once the prior call concluded without success (rows 3 / 4b), suppressed while
   healthy (4a), stuck if lost-after-accept (4c — unchanged).
-  **Amended 2026-09-07 (build):** "suppressed while healthy (4a)" holds on lane 1 and the sweep's mark leg, and
-  **not** on the leg-advance path: `advanceReleasedLeg` goes straight to `planGap` with no suppression gate
-  (reached from the sweep's release, which precedes that gate). A second vendor call is therefore reachable
-  there while the column reads true. Pre-existing, exposed by this build, and filed as its own row — the
-  suppression-gates-a-non-dispatch class below.
+  **Amended 2026-09-07 (build):** "suppressed while healthy (4a)" was true of lane 1 and the sweep's mark leg
+  only. `advanceReleasedLeg` reaches `planGap` with no suppression gate of its own, and the sweep's mark leg
+  reached it above that leg's gate — so a second vendor call was dispatchable while the column read true. The
+  build closes it: the advance is now gated at that site, the release is not. See the ordering rule below.
 - legs H, `bgcheckValidUntil` present: the column reads false whatever stray instance is in flight ⇒ the human
   legs dispatch and reclaim exactly as today (row 6).
   **Struck 2026-09-07 (build) — the backstop named here covers a state that cannot occur.** The original text
-  argued that the lane-1 suppression gate skips `releaseCompletedLeg` (which lives inside `dispatchGap`) but that
-  the sweep's release runs before its own gate, "so even in the one state where the column is true a completed
-  `refreshBgcheck` leg is released by the sweep." That state is unreachable: the column is true only when
-  `bgcheckValidUntil` is null, and `refreshBgcheck`'s sole declared effect is that column being **present**, so
-  whenever the column is true that leg's effect is by construction unmet and there is nothing to release. The leg
-  that actually needs releasing in the column-true quadrant is a **human** one, pinned before the lapse — and lane
-  1 cannot release it, because its suppression arm `continue`s above `dispatchGap`. What that defers is the
-  completed leg's own bookkeeping, not the chain: with the window null the planner's next leg is `refreshBgcheck`
-  (equal-cost tie-break on the joined refs), which is correctly suppressed either way. The sweep's mark-leg
-  reclaim releases it a mark-lease later. The sweep's **count** leg gates above its release too
-  (`reconciler.go:719` precedes `:782`), so the mark leg is the only site that already has the ordering right.
+  argued that the sweep's release runs before its own gate, "so even in the one state where the column is true a
+  completed `refreshBgcheck` leg is released by the sweep." That state is unreachable: the column is true only
+  when `bgcheckValidUntil` is null, and `refreshBgcheck`'s sole declared effect is that column being **present**,
+  so whenever the column is true that leg's effect is by construction unmet and there is nothing to release. The
+  leg that actually needs releasing in the column-true quadrant is a **human** one, pinned before the lapse.
+
+  **The ordering rule the build settled, which replaces that backstop (2026-09-07).** *A release is not a
+  dispatch, so the suppression gate must not withhold it; an ADVANCE is a dispatch, so the gate must.* Declaring
+  this column is what made the distinction matter, because it is what makes `renewalComplete` suppress at all.
+  All four seams now honour it: lane 1 releases from its suppressed arm (`releaseSuppressedLeg`), the sweep's
+  count leg releases inside its own gate — the only reader holding the count revision a markless release takes
+  its mutex on — the sweep's mark leg still releases unconditionally but now gates the advance that follows, and
+  the exhausted arm takes the same boundary inside `escalateExhaustedGap`. None of the suppressed paths advance:
+  the next leg is dispatched by whichever delivery finds the suppression lifted, which is guaranteed to arrive
+  because `inflight_<g>` is a column on this very row and a change to it is a row write.
 - **The static-target overlap** (`leaseApplicationComplete.missing_bgcheck` re-opening on the same lapse): with the
   scoped column, while `bgcheckValidUntil` is null the renewal suppresses on the static target's in-flight check
   and vice versa (`inflight_bgcheck` reads the renewal's instance too — same fan). The double-dispatch itself is

@@ -532,6 +532,20 @@ gap is actually on. `renewalComplete` is the reference: `inflight_renewalComplet
 `(bgInflight > 0) AND (bgcheckValidUntil = null)`, so `setTerms` and `signRenewal` dispatch normally
 once a current check exists.
 
+**A release is not a dispatch, so the suppression gate does not withhold it — an ADVANCE is, so the
+gate holds that.** `inflight_<g>` says what may be STARTED. That a pinned leg's declared effects now
+hold in the row is a fact about a leg that has already RUN, true whatever else is in flight over the
+same fan — and a gap can suppress on a remediation belonging to a different chain entirely, since one
+lens fan projects a sibling target's dispatch too. Withholding the boundary there defers it to whatever
+reader comes back: for a marked gap that is a whole mark lease away, and for a markless one it is
+nobody. So every seam records it — lane 1 from its suppressed arm (`releaseSuppressedLeg`), the sweep's
+count leg inside its own gate (the only reader holding the count revision a markless release takes its
+mutual exclusion on), the sweep's mark leg unconditionally, and the exhausted arm inside
+`escalateExhaustedGap`. What none of them do while suppressed is **advance**: `advanceReleasedLeg`
+reaches `planGap` and `fireEpisode`, so an ungated advance re-dispatches the very call the column is
+suppressing on. The next leg waits for whichever delivery finds the suppression lifted, and one is
+guaranteed — `inflight_<g>` is a column on this row, so a change to it is a row write.
+
 ---
 
 ## Planner-mandate effect bookkeeping — `__effect` (Contract #10 §10.3/§10.8, Fire 2)
@@ -1450,9 +1464,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   and an `error`-severity issue stranded that way pins the whole component `unhealthy` through a freeze,
   with nothing the operator can do to clear it. Minted three times in one item (2026-08-25): the registry
   and freeze gates sat above the gap-close reconcile, the corrupt-body READ sat below the freeze, and an
-  `entityKey` guard sat above an orphan-column arm. Check: label every arm guard / act / retire, then
-  assert each retire is still reachable with every guard's condition true — destruction is an act and
-  stays below the gates, reading is not.
+  `entityKey` guard sat above an orphan-column arm. Minted a fourth time 2026-09-07, at three seams at
+  once: the DISPATCH-SUPPRESSION gate (`inflight_<g>`) sat above the leg-boundary release in lane 1 and
+  in the sweep's count leg, while the sweep's mark leg had the release above its gate but the ADVANCE
+  that follows it above the gate too. Both halves are the same mis-labelling — a release is a retire and
+  belongs above the guard, an advance is an act and belongs below it — and the split only became
+  observable when a package declared the column that makes a goal target suppress at all. Check: label
+  every arm guard / act / retire, then assert each retire is still reachable with every guard's
+  condition true — destruction is an act and stays below the gates, reading is not, and a seam that both
+  records a boundary and dispatches from it is TWO arms that the gate must separate, never one.
 - **A fact ends by more routes than the one you are editing — enumerate the LEGS, not just the verb** —
   and the leg you are not looking at is usually the only one that runs for a quiet row. Two levels of the
   same class. *Teardown routes:* the issue families are prefix-keyed below the target, so a route that
