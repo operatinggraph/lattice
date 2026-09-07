@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-09-03 · `689eb0c0` · [lease-signing] TombstoneSupersededLeaseServiceInstance (ownership-checked, operator-only) + purge of 12,245 superseded background checks on the dev stack, 0 rejected
 - 2026-09-03 · `cf897d71` · [Refractor] personal-lens derivation licence SHIPPED — edges, cap-read closure, licence + single-instance gate, multi-walk union; edgeCatalog 3/min→25 msg/s
 - 2026-09-02 · `d6960bda` · [Refractor/Weaver/packages] expiry is a recorded fact — MarkExpired records the lapse per target, 14 lenses read the marker and no `$now`; 4 cold reviews, 1 BLOCKING + 7 MAJOR closed; per-anchor payoff 📐 filed
 - 2026-09-02 · `27250d12` · [CI] main un-reddened — the client-only OptionalReads census pin moved 3→2 after cafe's staff Settle stopped templating its lease
