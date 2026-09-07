@@ -438,10 +438,13 @@ func TestRenewalComplete_InflightIsLegScoped(t *testing.T) {
 			"a concluded-without-success check is not in flight -> the leg may be retried")
 	})
 
-	// (iv) The undeclared-vs-false vector. With no instance at all the column
-	// must still project a real false: an absent column reads to Weaver's guard
-	// as "this target declares no in-flight companion", which is what makes
-	// staleMark refuse to reclaim anything on the gap.
+	// (iv) The real-false vector. With no instance at all the count folds over
+	// an empty set, and what it folds TO matters: Refractor writes every
+	// declared BodyColumn into the envelope, nil included, and Weaver reads an
+	// absent-or-nil column as a readable false. staleMark answers !false, so a
+	// column that ever went null would hand the external leg an unconditional
+	// fresh-claimId reclaim with no in-flight protection at all — the failure
+	// direction is fail-OPEN, not fail-closed.
 	t.Run("no instance at all", func(t *testing.T) {
 		f := newLensFixture(t)
 		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
@@ -450,6 +453,39 @@ func TestRenewalComplete_InflightIsLegScoped(t *testing.T) {
 		require.Len(t, rows, 1)
 		require.Equal(t, false, rows[0].Values["inflight_renewalComplete"],
 			"a declared false, not an omitted column — the empty count must fold to a real boolean")
+	})
+
+	// (v) The vendorRef term. An instance the adapter never accepted carries no
+	// .dispatch, and §10.3's in-flight fact is presence-based on exactly that
+	// marker — so this is a check that is NOT outstanding and the leg may be
+	// retried. Without this vector the term is inert: every other vector either
+	// seeds .dispatch or seeds no instance at all.
+	t.Run("instance the adapter never accepted", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+		f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
+		f.edge(t, "providedTo", "bg1", "tina")
+
+		v := f.projectRenewalComplete(t, "rn")[0].Values
+		require.Equal(t, false, v["inflight_renewalComplete"],
+			"no .dispatch marker means the vendor never took the call — nothing is in flight to wait on")
+	})
+
+	// (vi) The class term. The providedTo fan carries EVERY service instance a
+	// tenant has, not just background checks — leaseApplicationComplete counts
+	// payInflight over this identical binding — so without the class predicate a
+	// payment in flight would suppress the renewal's whole gap, human legs
+	// included, for a fact that has nothing to do with this chain.
+	t.Run("a payment in flight is not this gap's remediation", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+		f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
+		f.aspect(t, "pay1", "dispatch", "dispatch", map[string]any{"vendorRef": "vendor-ref-2", "adapter": "collectPayment"})
+		f.edge(t, "providedTo", "pay1", "tina")
+
+		v := f.projectRenewalComplete(t, "rn")[0].Values
+		require.Equal(t, false, v["inflight_renewalComplete"],
+			"a payment on the same tenant is not the background check this gap's external leg is waiting on")
 	})
 }
 
