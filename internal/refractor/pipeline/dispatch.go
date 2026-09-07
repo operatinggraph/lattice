@@ -201,7 +201,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, rs ruleState, msg substra
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
 
-	results, enumeratedActors, scope, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted)
+	results, enumeratedActors, scope, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted, msg.Sequence)
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -264,6 +264,10 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, rs ruleState
 // the same CDC event with no cross-consumer ordering guarantee, so applying
 // it here first is what guarantees the re-execute always reads a consistent
 // edge set — a tombstone's re-execute can never still see the removed edge.
+// The event carries its message's backing-stream sequence, so the index can
+// tell this pipeline's view of the link apart from a newer one another writer
+// already applied; when it declines the write, the edge set the re-execute then
+// reads is the newer one, which is the answer this arm wanted either way.
 func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
 	type1, id1, linkName, type2, id2, ok := substrate.ParseLinkKey(key)
 	if !ok {
@@ -293,7 +297,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 		}
 		isDeleted, _ = linkProps["isDeleted"].(bool)
 	}
-	for _, evt := range adjacency.EventsForLink(key, type1, id1, linkName, type2, id2, isDeleted) {
+	for _, evt := range adjacency.EventsForLink(key, type1, id1, linkName, type2, id2, isDeleted, msg.Sequence) {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
 			slog.Error("pipeline: plain link reprojection: adjacency build",
 				"ruleId", p.ruleID, "entityId", key, "err", err)

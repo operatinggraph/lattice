@@ -577,7 +577,7 @@ func TestBuild_SelfLinkCollapsesInTheDocumentAndSplitsOnceMarked(t *testing.T) {
 	// one entry to two — knowingly, in the direction of the correct one.
 	hub := nanoID(t, "sfd")
 	key := seedLink(t, coreKV, "identity", hub, "supervises", "identity", hub, false)
-	for _, evt := range adjacency.EventsForLink(key, "identity", hub, "supervises", "identity", hub, false) {
+	for _, evt := range adjacency.EventsForLink(key, "identity", hub, "supervises", "identity", hub, false, 0) {
 		require.NoError(t, adjacency.Build(ctx, adjKV, evt))
 	}
 

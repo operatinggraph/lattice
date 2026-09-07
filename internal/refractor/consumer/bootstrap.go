@@ -343,6 +343,13 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg substrate.Message) su
 		return substrate.Term
 	}
 
+	// Stamp the event's ordering position from the transport, after the
+	// unmarshal and never from it: the index refuses an edge write that is
+	// staler than what it already holds, and the sequence is what that verdict
+	// is made against. Taking it from the body would let a message name its own
+	// floor and so promote itself over the events it must lose to.
+	evt.Seq = msg.Sequence
+
 	// Skip non-edge entries (node-only records carry no NodeID for the adjacency index).
 	if evt.NodeID == "" {
 		return substrate.Ack
@@ -407,8 +414,11 @@ func (b *Bootstrapper) processLinkEnvelope(ctx context.Context, msg substrate.Me
 	}
 
 	// Emit both directional events. The link key serves as a unique EdgeID per
-	// Decision #1 (Contract #1 link keys are globally unique).
-	for _, evt := range adjacency.EventsForLink(key, srcType, srcID, linkName, dstType, dstID, isDeleted) {
+	// Decision #1 (Contract #1 link keys are globally unique) — which is also
+	// why the message's backing-stream sequence rides along: a link key is
+	// reused across a revoke → re-grant, so the sequence is the only thing that
+	// tells the index which version of that one EdgeID it is being handed.
+	for _, evt := range adjacency.EventsForLink(key, srcType, srcID, linkName, dstType, dstID, isDeleted, msg.Sequence) {
 		if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
 			if substrate.IsInvalidKeyError(buildErr) {
 				slog.Error("adjacency bootstrap: link bridge: build: unwritable key — discarding",

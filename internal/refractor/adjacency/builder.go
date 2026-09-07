@@ -28,12 +28,44 @@ type EdgeEntry struct {
 	Direction   string `json:"direction"`
 	OtherNodeID string `json:"otherNodeId"`
 	OtherType   string `json:"otherType,omitempty"`
+
+	// Seq is the Core KV backing-stream sequence of the event that wrote this
+	// entry, and therefore the ordering floor the entry defends: an event
+	// carrying a lower sequence is a staler view of the same edge and is
+	// refused (see upsertEdge). Zero for an entry written by a path that
+	// carries no sequence, which is a floor no event can fall below — so an
+	// unsequenced entry behaves exactly like an unguarded one.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // AdjValue is the JSON structure stored at key adj.<nodeId> in the Adjacency KV.
 type AdjValue struct {
 	Edges []EdgeEntry `json:"edges"`
+
+	// Removals is the ordering floor of the edges this node does NOT hold:
+	// EdgeID → the sequence of the removal that dropped it. A stored entry
+	// carries its own floor in EdgeEntry.Seq; an absent one has nowhere to
+	// carry it, and without this map a removal that already landed could not
+	// refuse the stale create that follows it — the revoked edge would come
+	// back. It is deliberately NOT a tombstone entry inside Edges: every reader
+	// of Edges (Neighbors, NeighborsScoped, PrefetchNodes), the overflow degree
+	// accounting and edgesWithoutLinkKeys all treat an entry as a live edge,
+	// and none of them has to learn otherwise for the floor to work.
+	//
+	// Bounded at maxRemovalFloors per node, lowest sequences evicted first.
+	Removals map[string]uint64 `json:"removals,omitempty"`
 }
+
+// maxRemovalFloors bounds Removals per node. A node's whole edge list lives in
+// one KV document, so unbounded auxiliary state is how this index fails (that
+// is what the overflow latch exists for); the floor map has to be bounded for
+// the same reason, and it is bounded by evicting the LOWEST sequences first. A
+// floor's only job is to refuse an event staler than itself, and the stalest
+// floors are the ones whose racing events can no longer be in flight —
+// redelivery is bounded by AckWait × MaxDeliver, and a lens pipeline's lag is
+// bounded by its own consumer. Evicting one re-opens the stale-create window
+// for that single edge, and only after 128 further removals on the same node.
+const maxRemovalFloors = 128
 
 // DirectionMatches compares an EdgeEntry.Direction string ("outbound" /
 // "inbound", the vocabulary this package's Build/Neighbors persist) against
@@ -70,6 +102,20 @@ type CoreKVEvent struct {
 	OtherNodeID string `json:"otherNodeId"` // the other endpoint (bare NodeID)
 	OtherType   string `json:"otherType,omitempty"`
 	IsDeleted   bool   `json:"isDeleted"`
+
+	// Seq is the Core KV backing-stream sequence of the message this event was
+	// derived from — for a NATS KV bucket the backing stream IS the bucket, so
+	// the number is also the KV revision of the link key, per-key monotone by
+	// construction and comparable across every writer of this index, because
+	// all three consume the one Core KV stream.
+	//
+	// `json:"-"` is a correctness tag, not a cosmetic one. The legacy event
+	// path unmarshals a CoreKVEvent straight out of a Core KV message BODY; a
+	// wire-visible field would let that body name its own ordering floor and
+	// so promote itself over the events it must lose to. The sequence is
+	// transport-derived and stamped by the consumer after the unmarshal, which
+	// makes body-chosen ordering unrepresentable.
+	Seq uint64 `json:"-"`
 }
 
 // EventsForLink builds the two directional CoreKVEvents that indexing one
@@ -101,7 +147,13 @@ type CoreKVEvent struct {
 // (bootstrap, the link fan-out's pre-apply, and plain-link reprojection)
 // builds its pair of events from — they see the same link key parsed the
 // same way and must agree on what indexing it means.
-func EventsForLink(key, srcType, srcID, linkName, dstType, dstID string, isDeleted bool) []CoreKVEvent {
+//
+// seq is the Core KV backing-stream sequence of the message the link envelope
+// arrived on, and it is stamped on BOTH directional events: the two endpoints
+// index the same link and must arbitrate it against the same number, or one
+// arm of an edge could keep a version the other has already refused. Callers
+// with no sequence to offer pass 0, which is the floor every event clears.
+func EventsForLink(key, srcType, srcID, linkName, dstType, dstID string, isDeleted bool, seq uint64) []CoreKVEvent {
 	return []CoreKVEvent{
 		{
 			CoreKvKey:   key,
@@ -112,6 +164,7 @@ func EventsForLink(key, srcType, srcID, linkName, dstType, dstID string, isDelet
 			OtherNodeID: dstID,
 			OtherType:   dstType,
 			IsDeleted:   isDeleted,
+			Seq:         seq,
 		},
 		{
 			CoreKvKey:   key,
@@ -122,6 +175,7 @@ func EventsForLink(key, srcType, srcID, linkName, dstType, dstID string, isDelet
 			OtherNodeID: srcID,
 			OtherType:   srcType,
 			IsDeleted:   isDeleted,
+			Seq:         seq,
 		},
 	}
 }
@@ -143,10 +197,43 @@ func Build(ctx context.Context, kv *substrate.KV, evt CoreKVEvent) error {
 		Direction:   evt.Direction,
 		OtherNodeID: evt.OtherNodeID,
 		OtherType:   evt.OtherType,
+		Seq:         evt.Seq,
 	}
 	return upsertEdge(ctx, kv, evt.NodeID, edge, evt.IsDeleted)
 }
 
+// upsertEdge applies one edge event to a node's document under a per-edge
+// ordering floor.
+//
+// The floor exists because a Contract #1 link key IS its own EdgeID: it is
+// stable across a revoke → re-grant, so the identity that makes the index
+// writable is exactly the identity that makes it reorderable. Three writers
+// index the same link with no cross-consumer ordering guarantee (the dedicated
+// bootstrapper, the actor-aware link fan-out's pre-apply, and plain-link
+// reprojection), and a Nak'd message is redelivered behind the messages that
+// were behind it. Both stale directions are reachable and they fail opposite
+// ways: a stale removal deletes a live edge (under-grant), and a stale create
+// resurrects a revoked one (over-grant).
+//
+// So an event applies only if its sequence is at least the floor its EdgeID
+// already carries — the stored entry's own Seq, or, for an edge this node no
+// longer holds, the sequence of the removal that dropped it. A refused event is
+// DECLINED, not failed: nothing is written and the caller acks, because a
+// redelivery would present the same stale event again.
+//
+// The comparison is >=, and the direction is load-bearing. An event with no
+// sequence carries 0, meets a floor of 0, and applies — so every path that does
+// not carry a sequence, and every document written before entries carried one,
+// behaves exactly as an unguarded index would. With > instead, every
+// unsequenced event would stop applying and the index would silently shrink.
+// The guard therefore engages only between two events that both name a real
+// position in the Core KV stream, which is the only population it can order.
+// Equal sequences are one message redelivered, and applying it is idempotent.
+//
+// The floor is recomputed on every CAS pass, from the document that pass read:
+// a concurrent writer's newer entry (or newer removal floor) is part of the
+// state this event must clear, and re-reading it is what keeps two writers
+// racing on one node from each deciding against a stale copy.
 func upsertEdge(ctx context.Context, kv *substrate.KV, nodeID string, edge EdgeEntry, remove bool) error {
 	key := subjects.AdjKey(nodeID)
 
@@ -160,10 +247,13 @@ func upsertEdge(ctx context.Context, kv *substrate.KV, nodeID string, edge EdgeE
 		}
 
 		current := st.doc
+		if edge.Seq < edgeFloor(current, edge.EdgeID) {
+			return nil
+		}
 		if remove {
-			current.Edges = removeEdge(current.Edges, edge.EdgeID)
+			current = removeEdge(current, edge.EdgeID, edge.Seq)
 		} else {
-			current.Edges = upsertEntry(current.Edges, edge)
+			current = upsertEntry(current, edge)
 		}
 
 		data, err := json.Marshal(current)
@@ -230,7 +320,10 @@ func upsertEdge(ctx context.Context, kv *substrate.KV, nodeID string, edge EdgeE
 // latch's success: the mark alone decides how the node is read, so a failure
 // here costs no correctness. It is worth attempting because that body is
 // exactly what a node too large to rewrite cannot shed, and replacing it
-// returns its ~1 MiB to the bucket. But the attempt is made ONCE and never
+// returns its ~1 MiB to the bucket. The replacement document carries neither
+// edges nor removal floors: a marked node's reads enumerate Core KV, which is
+// authoritative and needs no ordering guard, so a floor kept past the latch
+// would only be state nothing consults. But the attempt is made ONCE and never
 // retried: no later Build re-enters this function (they all return at the
 // mark), and nothing sweeps the bucket, so a Put that fails here leaves the
 // oversize body parked until the bucket is next rebuilt. That is a space
@@ -275,24 +368,88 @@ func edgesWithoutLinkKeys(edges []EdgeEntry) int {
 	return n
 }
 
-// upsertEntry adds edge to the list or replaces the existing entry with the same EdgeID.
-func upsertEntry(edges []EdgeEntry, edge EdgeEntry) []EdgeEntry {
-	for i, e := range edges {
-		if e.EdgeID == edge.EdgeID {
-			edges[i] = edge
-			return edges
+// edgeFloor is the ordering floor an event must reach to touch edgeID on this
+// node: the sequence of the entry the node holds for it, or of the removal that
+// dropped it, whichever is higher.
+//
+// Both are consulted rather than one or the other because the two records
+// answer different questions and only their maximum answers "how recent is what
+// I already know about this edge". An entry and a floor coexist only
+// transiently — an applied upsert clears the floor (see upsertEntry) — but a
+// document written by a binary that does not keep floors can present an entry
+// with no floor, and taking the maximum makes that case degrade to the entry's
+// own sequence rather than to nothing.
+func edgeFloor(doc AdjValue, edgeID string) uint64 {
+	floor := doc.Removals[edgeID]
+	for _, e := range doc.Edges {
+		if e.EdgeID == edgeID {
+			if e.Seq > floor {
+				floor = e.Seq
+			}
+			break
 		}
 	}
-	return append(edges, edge)
+	return floor
 }
 
-// removeEdge returns a slice with the entry matching edgeID removed.
-func removeEdge(edges []EdgeEntry, edgeID string) []EdgeEntry {
-	out := edges[:0]
-	for _, e := range edges {
+// upsertEntry adds edge to the list or replaces the existing entry with the
+// same EdgeID, and drops any removal floor that EdgeID carried: the entry now
+// holds the floor in its own Seq, and keeping both would have one edge defended
+// by two numbers that can disagree.
+func upsertEntry(doc AdjValue, edge EdgeEntry) AdjValue {
+	delete(doc.Removals, edge.EdgeID)
+
+	for i, e := range doc.Edges {
+		if e.EdgeID == edge.EdgeID {
+			doc.Edges[i] = edge
+			return doc
+		}
+	}
+	doc.Edges = append(doc.Edges, edge)
+	return doc
+}
+
+// removeEdge drops the entry matching edgeID and records seq as that EdgeID's
+// removal floor, so the create this removal supersedes cannot resurrect the
+// edge if it arrives afterwards.
+//
+// A removal with no sequence (seq == 0) records nothing and stays a pure drop:
+// an event that names no position in the stream makes no ordering claim, and a
+// floor of 0 is indistinguishable from no floor at all. That confines every
+// byte of floor state to the sequenced paths.
+func removeEdge(doc AdjValue, edgeID string, seq uint64) AdjValue {
+	out := doc.Edges[:0]
+	for _, e := range doc.Edges {
 		if e.EdgeID != edgeID {
 			out = append(out, e)
 		}
 	}
-	return out
+	doc.Edges = out
+
+	if seq == 0 {
+		return doc
+	}
+	if doc.Removals == nil {
+		doc.Removals = make(map[string]uint64, 1)
+	}
+	doc.Removals[edgeID] = seq
+	evictStalestFloors(doc.Removals)
+	return doc
+}
+
+// evictStalestFloors trims removals to maxRemovalFloors by dropping the lowest
+// sequences, which are the floors whose racing events can no longer be in
+// flight. Ties break on the EdgeID so the eviction is deterministic — two
+// writers reaching the cap on the same document must shed the same floors, or
+// the surviving set would depend on map iteration order.
+func evictStalestFloors(removals map[string]uint64) {
+	for len(removals) > maxRemovalFloors {
+		stalestID, stalestSeq := "", uint64(0)
+		for id, seq := range removals {
+			if stalestID == "" || seq < stalestSeq || (seq == stalestSeq && id < stalestID) {
+				stalestID, stalestSeq = id, seq
+			}
+		}
+		delete(removals, stalestID)
+	}
 }
