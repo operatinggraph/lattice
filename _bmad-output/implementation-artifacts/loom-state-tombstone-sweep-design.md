@@ -550,6 +550,11 @@ not signals) and its fix is a bucket-provisioning decision with a blast radius o
 (`platform_buckets.go` sets the value in one loop for all six — the Contract #4 tracker's expiry signal has the
 same 1 s window). **Filed as a ★★★ Lattice row** with this paragraph as its grounding; not designed here.
 
+*2026-09-07 — designed and built as [`platform-bucket-marker-ttl-design.md`](platform-bucket-marker-ttl-design.md).
+Its §2 census corrects one clause above: the Contract #4 tracker's expiry is **not** a consumed signal — the
+tracker is read by presence through `lattice.op.status`, so `loom-state` is the only bucket whose marker TTL is
+a delivery window. The value is per-bucket now, and `loom-state`'s is one hour.*
+
 ### 11.2 The deadline probe's evidence is shorter-lived than the wait it backstops
 
 `onUserTaskDeadline` / `onExternalTaskDeadline` decide *rejected-or-lost* from two absences — no tracker
@@ -561,6 +566,11 @@ disarmed running instance among them), or a conversion pass without §3.3's guar
 the probe can read — an armed/disarmed deadline fact on the instance record, with a lifetime across
 redrive/replay — which is a design increment on the cursor's shape, not this fire's. **Filed as a ★★★ Lattice
 row** (`📐 needs designer pass`). This fire's guard closes the instance it would have created.
+
+*2026-09-07 — the row this paragraph claims was never actually on `backlog/lattice.md`; it is filed now
+(`[Loom] The deadline probe's evidence is shorter-lived than the wait it backstops`). The marker-TTL fire
+([`platform-bucket-marker-ttl-design.md`](platform-bucket-marker-ttl-design.md) §3.2) bounds `loom-state`'s
+window at one hour precisely so that raising it cannot reach this gap; it does not close it.*
 
 ## 12. Decomposition for the Steward
 
