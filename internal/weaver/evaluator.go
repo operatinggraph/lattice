@@ -555,7 +555,25 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// impossibility — tests that shorten the mark lease have to keep it well
 	// clear of that turnaround (see asyncConvergeOpts in
 	// internal/leaseconvergence).
-	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, ga)
+	//
+	// The class is taken over the LEG this row would fire, not over the
+	// playbook entry: a planned-mode entry names no Action of its own, so the
+	// entry classifies as "never external" for every goal leg, however external
+	// the leg it pins. The resolution is guarded on the PIN rather than on
+	// `found`, because resolvePlannedAction with an empty pinnedAction routes a
+	// goal gap into resolveGoalAction's fresh branch and runs Synthesize —
+	// planning work this gate must never pay, and never needs to: a mark that
+	// records no action names no leg to classify, and the zero GapAction it
+	// gets confers no stale-reconcile authority. planGap below resolves the
+	// same pin again; that second call is the same pure catalog lookup, and the
+	// sweep's reclaim pays it twice over the same mark for the same reason.
+	leg := GapAction{}
+	if pinnedAction != "" {
+		if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, col, ga, row, pinnedAction); perr == nil {
+			leg = resolved
+		}
+	}
+	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, leg)
 
 	// A live mark means an episode for THIS gap is genuinely in flight, and the
 	// republish set is the one thing that can still be owed against it: whether
@@ -646,7 +664,21 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 // raises nothing; it is logged at Debug (the `why` names the transient
 // unreplayed-pattern case vs. the permanent human-gap one for operators reading
 // the log, but neither is a Health issue).
-func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col string, ga GapAction) bool {
+//
+// The GapAction handed in is the RESOLVED LEG — the dispatch this row would
+// actually fire — never the playbook entry the gap declares. The two differ for
+// exactly the shapes a planned-mode target introduces: a goal gap's entry
+// carries an empty Action by construction (resolvePlannedAction returns an
+// entry that names its own Action unchanged, so an entry that resolves a plan
+// is precisely one that names none), and a candidates gap's entry names none
+// either. Classifying the entry therefore reads EVERY goal leg as "never makes
+// an external call", whatever the leg it resolves to dispatches — the same
+// shape-versus-name defect collapseOnlyReclaim's own argument already resolves
+// one call later at the sweep's reclaim, applied here to the sibling predicate.
+// Each caller hands over the leg it has already resolved, or resolves it once
+// through the pinned catalog lookup; a leg that cannot be resolved for this row
+// arrives as the zero GapAction and confers no stale-reconcile authority.
+func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col string, leg GapAction) bool {
 	g, ok := strings.CutPrefix(col, gapColumnPrefix)
 	if !ok {
 		return false
@@ -654,7 +686,7 @@ func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col st
 	if _, declared := row[inflightColumnPrefix+g]; !declared {
 		return false
 	}
-	external, _, why := e.externalDispatchGap(ga, row)
+	external, _, why := e.externalDispatchGap(leg, row)
 	if !external {
 		e.logger.Debug("weaver: inflight_<g> declared on a non-external gap; honored for "+
 			"suppression, ignored for stale-reconcile ("+why+")",
@@ -685,10 +717,17 @@ func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col st
 // reachable from the SWEEP, which calls staleMark well before planGap (see
 // reconciler.go reclaim) — so a Weaver restart with marks already in
 // weaver-state hits it on every pass until the registry finishes replaying.
-// Lane-1 does not: planGap runs first there and defers the gap on an
-// unresolvable pattern before dispatchGap ever consults staleMark.
+// Lane-1 reaches it too: dispatchGap takes the stale verdict before it plans,
+// so a delivery arriving mid-replay classifies not-external there as well. The
+// consequence is benign in both lanes — an unknown pattern reads not-external,
+// which leaves the found mark treated as live, so the delivery Acks under the
+// anti-storm drop and the sweep reclaims the episode once the spec replays.
 //
-// assignTask and surface never make an external call.
+// assignTask and surface never make an external call. Neither does the zero
+// GapAction, which is what a caller passes for a leg it could not resolve for
+// this row (a pinned ref the catalog no longer holds, a mark recording no
+// action at all): there is no dispatch to have concluded, and the fail-closed
+// answer is the one that keeps the claimId.
 func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external, transient bool, why string) {
 	switch ga.Action {
 	case actionDirectOp, actionProposedOp:
@@ -710,6 +749,8 @@ func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external
 				"userTask step, no steps at all, or a step kind this build does not recognise"
 		}
 		return true, false, ""
+	case "":
+		return false, false, "its plan resolves to no dispatch for this row, so nothing here can have concluded"
 	default:
 		return false, false, "its playbook action " + strconv.Quote(ga.Action) + " never makes an external call"
 	}

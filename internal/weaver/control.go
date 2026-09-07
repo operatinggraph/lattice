@@ -622,12 +622,13 @@ func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, en
 	default:
 		return unreadable(err), true
 	}
-	resolvedAction, _, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
+	leg, _, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
 	if perr != nil {
 		return fmt.Sprintf("its plan resolves no action for this row (%s), so the sweep's re-arm has nothing to "+
 			"fire — a fresh budget would change nothing until the playbook or the row does", perr.msg), false
 	}
-	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+	resolvedAction := leg.Action
+	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, leg)) {
 		if ga.Action == "" {
 			return fmt.Sprintf("its plan resolves to %q, whose artifact may still be open, and the sweep never "+
 				"re-arms a collapse-only gap — a fresh episode would mint a new claimId and duplicate it",

@@ -873,22 +873,27 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// contract-legal declaration. Leave the count to its TTL.
 		return
 	}
-	// The action the collapse-only test is taken over is RESOLVED, not read off
-	// the playbook — but resolved without planning, because the decision must
+	// The leg the two tests below are taken over is RESOLVED, not read off the
+	// playbook — but resolved without planning, because the decision must
 	// precede the plan: planGap consumes an admission token and clears this
 	// gap's standing issues on the strength of a dispatch about to happen,
 	// neither of which may occur for a gap this arm then declines.
-	// resolvedLegAction is exactly that: the leg's dispatch contract type, from
-	// a pure regression over the catalog (or the playbook's own Action, for
-	// every gap that names one). A gap whose plan resolves nothing for this row
-	// would dispatch nothing either, so it is left to a delivery.
-	resolvedAction, resolvedRef, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
+	// resolvedLegAction is exactly that: the dispatch this row would fire, from
+	// a pure regression over the catalog (or the playbook's own entry, for every
+	// gap that names an Action). Both tests read the one resolution and read
+	// different parts of it — collapseOnlyReclaim the leg's dispatch action,
+	// staleMark the leg's whole shape, since a triggerLoom leg's external class
+	// comes from its own Pattern's step kinds and the goal entry that pins it
+	// names neither. A gap whose plan resolves nothing for this row would
+	// dispatch nothing either, so it is left to a delivery.
+	leg, resolvedRef, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
 	if perr != nil {
 		e.logger.Debug("weaver sweep: gap resolves no action for this row; leaving the re-arm to a delivery",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "why", perr.msg)
 		return
 	}
-	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+	resolvedAction := leg.Action
+	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, leg)) {
 		e.logger.Debug("weaver sweep: collapse-only gap; not re-arming a markless episode that may still be open",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", resolvedAction)
 		return
@@ -1211,6 +1216,38 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// class no catalog holds, which is the config error planGap alerts.
 	}
 
+	// A gap's class is decided by the dispatch's SHAPE, never by a name: not by
+	// the action NAME the mark happens to carry — a planned-mode mark records
+	// the leg's own catalog Ref ("setTerms", "signRenewal"), which is not a
+	// dispatch contract type at all, so classifying rec.Action directly would
+	// read every goal leg as not-collapse-only, an unpaced re-fire every sweep
+	// interval each booked as an attempt against a human task nobody has
+	// opened — and not by the playbook ENTRY either, whose Action a goal gap
+	// leaves empty by construction, which would read every goal leg as never
+	// external and so deny an external leg the fresh claimId §10.3 grants it.
+	//
+	// So resolve the PINNED leg once, here, and let both predicates below judge
+	// that same resolution: staleMark classifies the leg's shape (a triggerLoom
+	// leg's class comes from its own Pattern's step kinds) and
+	// collapseOnlyReclaim reads the leg's dispatch action. Resolving without
+	// planning is what makes it both affordable and correct —
+	// resolvePlannedAction's pinned branch is a pure catalog lookup, while
+	// planGap below consumes an admission token and clears the gap's standing
+	// issues, neither of which may happen for a reclaim this block then paces
+	// away. For every gap that names its own Action the resolution returns ga
+	// unchanged, so a static gap resolves to itself and classifies on its own
+	// action. A pinned ref the catalog no longer holds — a re-authored playbook,
+	// or an escalation whose mark pins the reasoning op's own "directOp" —
+	// resolves to a planError: the dispatch action falls back to the mark's
+	// recorded string, and the leg stays zero, which confers no stale-reconcile
+	// authority at all (no resolution, no fresh claimId).
+	leg := GapAction{}
+	dispatchAction := rec.Action
+	if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
+		leg = resolved
+		dispatchAction = resolved.Action
+	}
+
 	// confirmedConcluded mirrors fireEpisode's staleMark (evaluator.go): true
 	// when gapColumn is an EXTERNAL gap (a lens-declared inflight_<g>
 	// companion, currently false) per Contract #10 §10.3 — "External gaps are
@@ -1226,32 +1263,12 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// churn on a still-open human episode; §10.3 already bounds an external
 	// gap's retry by inflight_<g>/maxretries_<g> instead) and the claimId
 	// choice (below the pacing block).
-	confirmedConcluded := e.staleMark(targetID, entityID, row, gapColumn, ga)
+	confirmedConcluded := e.staleMark(targetID, entityID, row, gapColumn, leg)
 
 	// Default per-key TTL backstop for the re-armed mark; widened below for any
 	// paced reclaim, so the mark outlives its own backoff window.
 	markTTL := markTTLBackstopFactor * e.marks.lease
 
-	// A gap's class is decided by the dispatch's SHAPE, never by the action
-	// NAME the mark happens to carry: a planned-mode mark records the leg's
-	// own catalog Ref ("setTerms", "signRenewal"), which is not a dispatch
-	// contract type at all, so classifying rec.Action directly would read
-	// every goal leg as not-collapse-only — an unpaced re-fire every sweep
-	// interval, each one booked as an attempt against a human task nobody has
-	// opened. Resolve the PINNED leg to its dispatch action first, without
-	// planning (resolvePlannedAction's pinned branch is a pure catalog lookup;
-	// planGap below consumes an admission token and clears the gap's standing
-	// issues, neither of which may happen for a reclaim this block then paces
-	// away). For every gap that names its own Action the resolution returns ga
-	// unchanged, so a static gap resolves to its own action and classifies on
-	// that action. A pinned ref the catalog no longer holds — a re-authored
-	// playbook, or an escalation whose mark pins the reasoning op's own
-	// "directOp" — resolves to a planError; those classify on the mark's
-	// recorded action instead.
-	dispatchAction := rec.Action
-	if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
-		dispatchAction = resolved.Action
-	}
 	collapseOnly := collapseOnlyReclaim(dispatchAction, confirmedConcluded)
 
 	// Defense in depth for Contract #10 §10.3's rule that a gap declaring

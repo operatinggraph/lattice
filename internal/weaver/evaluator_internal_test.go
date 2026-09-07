@@ -553,6 +553,14 @@ func TestGapSuppressed_Companions(t *testing.T) {
 // externalTask-only shape lease-signing's backgroundCheck/collectPayment gaps
 // use, whose post-timeout retry depends on reading external here.
 //
+// Every vector here is a LEG — the dispatch a row would actually fire — because
+// that is what staleMark is handed. For a gap that names its own Action the leg
+// IS the playbook entry, which is why the static vectors read as they always
+// have; a planned-mode gap's leg is instead materialized from its catalog entry
+// or its picked candidate (catalogEntryGapAction / candidateGapAction), and the
+// zero GapAction stands for a leg that could not be resolved for this row at
+// all.
+//
 // A non-external gap declaring inflight_<g> is NOT a lens-authoring bug — it is
 // using the column for its sole contract purpose, suppression (honored by
 // gapSuppressed on both legs). It confers no stale-reconcile authority, so
@@ -593,6 +601,21 @@ func TestStaleMark_ExternalDispatchClassifier(t *testing.T) {
 		{"triggerLoom over an unindexed pattern", GapAction{Action: actionTriggerLoom, Pattern: "neverInstalled"}, concluded, false},
 		{"assignTask never dispatches externally", GapAction{Action: actionAssignTask, Operation: "SignLease"}, concluded, false},
 		{"no inflight_<g> declared", GapAction{Action: actionDirectOp}, map[string]any{col: true}, false},
+		// A goal gap's playbook entry names no Action at all, so the leg is
+		// what carries the shape: this is the catalog entry lease-signing's
+		// refreshBgcheck leg is, materialized exactly as resolveGoalAction
+		// materializes it.
+		{"goal leg triggering an externalTask-only pattern", catalogEntryGapAction(ActionCatalogEntry{
+			Ref: "refreshBgcheck", Action: actionTriggerLoom, Pattern: "bgcheckFlow"}), concluded, true},
+		// A candidates gap's picked candidate, the other planned-mode shape the
+		// resolver hands over.
+		{"candidate resolving to directOp", candidateGapAction(GapCandidate{
+			Action: actionDirectOp, Operation: "SetStatus"}), concluded, true},
+		// The leg a caller could not resolve for this row — a pinned ref the
+		// catalog no longer holds, or a mark that records no action. There is no
+		// dispatch to have concluded, so no stale-reconcile authority, and the
+		// claimId is kept.
+		{"a leg that resolved to nothing", GapAction{}, concluded, false},
 	}
 	entityID := testNanoID(t)
 	for i, tc := range cases {
@@ -829,6 +852,81 @@ func TestHandleRow_InflightSuppressesDispatch(t *testing.T) {
 	}
 	if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_x"); err != nil || !found {
 		t.Fatalf("a mark must be created once dispatch resumes (err=%v, found=%v)", err, found)
+	}
+}
+
+// TestHandleRow_GoalLegExternalStaleMarkMintsFreshClaimId is lane-1's half of
+// the rule the sweep's reclaim keeps (TestSweep_GoalLegExternalReclaimMints-
+// FreshClaimID): the stale gate classifies the dispatch the mark's pin RESOLVES
+// to, not the gap's playbook entry, which for a goal gap names no action at all.
+//
+// Lane-1 is the harder half because it takes the stale verdict BEFORE it plans,
+// so the leg has to be resolved for the gate itself. It is resolved from the
+// pin, and only from the pin: a mark that records no action gets the zero
+// GapAction rather than a synthesis, since planning a fresh goal at this gate
+// would run the regression on every redelivery of every goal gap.
+//
+// The vector is a real chain mid-flight: the pinned refreshBgcheck leg's Loom
+// instance is terminal (inflight_x false), its lease has expired, and its own
+// effect has not come to hold — so the episode is a concluded external call that
+// must retry on a FRESH instance, not a live one to leave alone and not a
+// collapse onto the dead one.
+func TestHandleRow_GoalLegExternalStaleMarkMintsFreshClaimId(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureLane1GoalLeg"
+	const gap = "missing_x"
+	const claimID = "Rt7Yu6Ij5Ol4Pk3Mn2B"
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+
+	entityID := testNanoID(t)
+	expired := fixtureMark(targetID, entityID, gap, "refreshBgcheck", pastLease())
+	expired.ClaimID = claimID
+	body, err := json.Marshal(expired)
+	if err != nil {
+		t.Fatalf("marshal the expired mark: %v", err)
+	}
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", markKey(targetID, entityID, gap), body); err != nil {
+		t.Fatalf("seed the expired mark: %v", err)
+	}
+
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant":  "vtx.identity." + testNanoID(t),
+		"inflight_x": false, "maxretries_x": 3,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 1)); dec != substrate.Ack {
+		t.Fatalf("a stale-mark reclaim must Ack, got %v", dec)
+	}
+	op := h.nextOp(t)
+
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil || !found {
+		t.Fatalf("the re-armed mark is missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID == claimID || rec.ClaimID == "" {
+		t.Fatalf("a goal leg over an externalTask-only pattern must re-arm with a FRESH claimId; got %q (seeded %q)",
+			rec.ClaimID, claimID)
+	}
+	if rec.Action != "refreshBgcheck" {
+		t.Fatalf("the re-armed mark's pin = %q, want the leg it already stands on", rec.Action)
+	}
+	payload, _ := op["payload"].(map[string]any)
+	if payload == nil {
+		t.Fatalf("dispatched op has no payload: %v", op)
+	}
+	if got, want := payload["instanceId"], deriveStableInstanceID(targetID, entityID, gap, claimID); got == want {
+		t.Fatalf("instanceId %v collapses onto the terminal instance — the retry would be a no-op", got)
+	}
+	if got, want := payload["instanceId"], deriveStableInstanceID(targetID, entityID, gap, rec.ClaimID); got != want {
+		t.Fatalf("instanceId = %v, want it seeded from the re-armed mark's fresh claimId (%v)", got, want)
 	}
 }
 
