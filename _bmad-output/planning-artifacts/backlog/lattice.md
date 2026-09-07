@@ -65,7 +65,9 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver/Loom/Refractor] Retire the holder-less `control-operator` role** | Decided: its intended holder went to `consoleOperator` (a strict superset) one day after it shipped, two later ratified designs declined to use it, nothing references it. Recipe: `control-authz` version bump; `diffManifest` tombstones the orphans (two-way door); drop the lint allowlist entry. | ★ | XS | 📋 ready · [triage §9](../../../docs/reviews/lattice-designer-triage-2026-08-27.md) |
 | **[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row** | Every catalog row repeats the descriptor vocabulary (~2 KB × 26–97 rows per actor), so one actor's content pass is 50–200 KB of near-identical text; a vocabulary reference per row, or a per-actor vocabulary row, would cut it by an order of magnitude. Measured at the personal-lens delta T7. | ★ | S | 📋 ready · [why](../../implementation-artifacts/personal-lens-delta-publication-design.md) §13 |
 
-| **[Weaver] A goal-mode gap's dispatch shape never reaches `externalDispatchGap`** | Switches on `ga.Action` ([evaluator.go:616](../../../internal/weaver/evaluator.go:616)) — `""` for every goal gap — so `staleMark` never returns true for one; four sites read that: `renewalComplete`'s external `refreshBgcheck` leg always reclaims collapse-only, and `reset-budget` refuses it forever. | ★★ | S–M | 🏗️ owner: claude/bold-newton-kwqpv7 · [design](../../implementation-artifacts/weaver-goal-leg-external-class-design.md) · next: Inc 1 engine |
+
+| **[Weaver] Mechanize the retire-above-guard ordering — no dispatch reachable from an ungated arm** | The dossier's retire/guard class, minted four times, latest at three seams at once. One instance is still open: the mark leg's release+advance sits above the `violating` gate too, so a goal leg completing on a non-violating row still dispatches where lane 1 would not. A gate asserting every `advanceReleasedLeg`/`fireEpisode` is reachable only past its arm's guards would find them all. | ★★ | S–M | 📋 ready · [dossier](../../../docs/components/weaver.md) entry 9 |
+| **[Weaver] A markless goal gap with attempts booked and no `escalatedAt` gets no leg release** | The sweep's markless route is gated on `escalatedAt`, arm (n) on `Count == 0`, and lane 1's `dispatchGap` releases only with a mark — so that shape loses its `__effect` close credit. Self-healing for the chain (the next delivery re-synthesizes and `bookDispatch` restarts the tally); the credit is what is lost. | ★ | S | 📋 ready · found by the goal-leg close pass |
 
 ### Survey log (round-robin rotation)
 
@@ -146,6 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-07 · `5a1de6b` · [Weaver] a gap's external class comes from the leg it RESOLVES to ([design](../../implementation-artifacts/weaver-goal-leg-external-class-design.md))
 - 2026-09-07 · `6d9846a` · [Bootstrap] a converged bucket is no longer rewritten — every boot had reopened the `AllowAtomicPublish` window on core-kv + loom-state
 - 2026-09-07 · `b14b2d8` · [Bootstrap/Loom] the marker TTL is a per-bucket registry decision — loom-state's expiry window 1 s → 1 h ([design](../../implementation-artifacts/platform-bucket-marker-ttl-design.md))
 - 2026-09-07 · `5d92513` · [Refractor] a per-edge sequence floor orders the adjacency index — stale-removal under-grant and stale-create over-grant both closed ([design](../../implementation-artifacts/adjacency-edge-ordering-guard-design.md))
@@ -170,7 +173,6 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-03 · `595ea540` · [Refractor] a `WITH` no longer refuses per-anchor closure: 3 lenses gain the anchor Delete, leaseApplicationsRead licensed, 1 to 22 msg/s ([design](../../implementation-artifacts/with-alias-anchor-closure-design.md))
 - 2026-09-03 · `e5aa6ca2` · [Refractor] `edgeInstances` ~15 s/event → 0.24 s live: gate scope, batched reads, pipelined writes, resolve-then-get ([design](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md))
 - 2026-09-03 · `c76522e` · [CI] leaseconvergence lens-activation wait root-caused (CoreKVSource's serial MaxPrefetch:1 replay) and fixed, 25s→90s — board row 137(b) resolved, full CI green (run 33816206576)
-- 2026-09-03 · `689eb0c0` · [lease-signing] TombstoneSupersededLeaseServiceInstance (ownership-checked, operator-only) + purge of 12,245 superseded background checks on the dev stack, 0 rejected
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 

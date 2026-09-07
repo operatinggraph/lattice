@@ -102,7 +102,7 @@ at once; it is named here so nobody reads this design as a lost-call fix. `reset
 | `reset-budget` (`reArmDeclines`) | `control.go:625-638` | same pair; the `ga.Action == ""` wording branch at `:631` already knows it is a goal gap |
 | `resolvedLegAction` | `strategist.go:492-500` | `resolvePlannedAction(…, "")` and returns `(resolved.Action, actionRef, perr)` — the resolved `GapAction` is computed and **dropped** |
 | `resolvePlannedAction` | `strategist.go:430-468` | non-planned or `Action != ""` ⇒ `ga` unchanged; candidates ⇒ pinned lookup or rank; goal ⇒ `resolveGoalAction` |
-| `resolveGoalAction` | `strategist.go:560-620` | pinned ⇒ catalog lookup (pure); pinned-not-in-catalog ⇒ `planError{unplannable}` (an escalation's `"directOp"` mark, or a re-authored catalog); fresh ⇒ `Synthesize` |
+| `resolveGoalAction` | `strategist.go:560-620` | pinned ⇒ catalog lookup (pure); pinned-not-in-catalog ⇒ `planError{kind: errConfig}` (an escalation's `"directOp"` mark, or a re-authored catalog); fresh ⇒ `Synthesize` |
 | the resolved leg's shape | `catalogEntryGapAction`, `strategist.go:526-540` | carries `Action` **and** `Pattern` — everything `externalDispatchGap` reads |
 | the lint gate | `scripts/lint-weaver-classify-by-shape.go` (CI STRICT, `ci.yml:373`) | gates `collapseOnlyReclaim`'s first argument only; its header parks `externalDispatchGap` "with a designer row" — this is that row |
 | the one planned-mode target | `packages/lease-signing/renewal_targets.go:138` | `renewalComplete`, goal mode, catalog: `refreshBgcheck` (`triggerLoom` · `backgroundCheck`), `verifyGuarantor` / `setTerms` / `signRenewal` (`assignTask`) |
@@ -200,7 +200,7 @@ fresh `claimId` minted (a new attempt, booked against the budget); "collapse" = 
 | 5 | goal, leg E | pinned, in catalog | **undeclared** (the corpus today) | all four | false at guard 1 | **identical** — guard 1 fires before the classifier; this is why Inc 3 exists |
 | 6 | goal, leg H (`setTerms`, `signRenewal`, `verifyGuarantor`) | pinned, in catalog | declared, false | all four | collapse | collapse — `assignTask` is never external; the human task may be open |
 | 7 | goal, fresh (no mark) | `resolvedLegAction` ⇒ `Synthesize` | declared, false | re-arm / `reset-budget` | leg E: refused / declined as collapse-only; leg H: refused | leg E: **re-arm fires, verb accepts** (a fresh instance is exactly what the operator asked for); leg H: unchanged refusal, same message |
-| 8 | goal, pinned ref not in catalog (a re-authored catalog) | `planError{unplannable}` | any | lane-1 / reclaim | collapse (default arm) | collapse — `leg` stays zero ⇒ the new `""` arm ⇒ false. **Fail-closed: no resolution, no fresh claimId.** |
+| 8 | goal, pinned ref not in catalog (a re-authored catalog) | `planError{kind: errConfig}` (corrected 2026-09-07: `unplannable` is set only at `resolveGoalAction`'s fresh `ErrNoPlan`; the reclaim tests `perr == nil`, so the row's verdict is unaffected) | any | lane-1 / reclaim | collapse (default arm) | collapse — `leg` stays zero ⇒ the new `""` arm ⇒ false. **Fail-closed: no resolution, no fresh claimId.** |
 | 9 | goal, escalation mark (`rec.Action == "directOp"`, `EscalatedFrom` set) | not in catalog ⇒ `planError` | any | reclaim | `staleMark` false; `dispatchAction = "directOp"` ⇒ not collapse-only ⇒ unpaced bounded retry, `claimId` preserved | **identical** — the same fallback, the same verdicts (`weaver-escalation-episode-three-doors-design.md` §4.5 keeps this seam as is; the row proves it stays so) |
 | 10 | static gap's escalation mark | `resolvePlannedAction` ⇒ `ga` (Action named) | as the gap declares | reclaim | classified on `ga` | identical (row 1) |
 | 11 | candidates gap (planned mode, `Candidates` set) | pinned candidate / ranked | declared, false | all four | collapse (default arm) | classified on the candidate's shape — a `directOp` candidate reads external. **Zero consumers today** (C4: no `Candidates:` in `packages/`); the shape is in the table because the resolver hands it to the same predicate, and the pin test (§9) carries one vector for it. |
@@ -292,6 +292,18 @@ park the landlord's and the tenant's tasks behind it. Scoping the column to `bgc
 read true only while the check is the thing the chain is waiting on, which is the contract's meaning of the column
 ("a remediation *for this gap* is already in flight") applied to the leg the gap is on.
 
+**Qualified 2026-09-07 (build):** "only while the check is the thing the chain is waiting on" is exact for a
+**fresh** episode — with the window null the planner's first leg is `refreshBgcheck` — and approximate
+mid-chain, where a human leg pinned *before* the lapse is still the pin while the column reads true. The
+scoping delivers what it was adopted for (the bare column's parking of the human legs once a window exists is
+gone, and the lens vector that fails without the conjunct proves it); what it does not deliver is a column that
+tracks the *pinned* leg, which no per-gap column can (§8 row 2). One cost is priced rather than fixed: in the
+`(bgInflight > 0, bgcheckValidUntil ≠ null)` quadrant the scoped column reads false where the bare one read
+true, so if `releaseCompletedLeg` returns false for a non-effect reason — a KV error or a CAS conflict on its
+revision-conditioned mark delete — `staleMark` can mint a fresh `claimId` while a check is genuinely in flight.
+The bare column was immune to that; it is the narrow price of the scoping, and the state self-heals on the next
+pass.
+
 **The authoring rule this fixes in place (goes into `weaver.md` §3.6):** *a `goal` gap's `inflight_<g>` is the
 in-flight fact of its external leg conjoined with that leg's unmet `effects` — never the bare in-flight fact —
 because the suppression gate runs before the leg is bound.* Per leg, after scoping:
@@ -299,17 +311,35 @@ because the suppression gate runs before the leg is bound.* Per leg, after scopi
 - leg `refreshBgcheck` (E), `bgcheckValidUntil` null: the column is the §10.3 in-flight fact; `staleMark` reads
   `!inflight` ⇒ fresh reclaim only once the prior call concluded without success (rows 3 / 4b), suppressed while
   healthy (4a), stuck if lost-after-accept (4c — unchanged).
+  **Amended 2026-09-07 (build):** "suppressed while healthy (4a)" was true of lane 1 and the sweep's mark leg
+  only. `advanceReleasedLeg` reaches `planGap` with no suppression gate of its own, and the sweep's mark leg
+  reached it above that leg's gate — so a second vendor call was dispatchable while the column read true. The
+  build closes it: the advance is now gated at that site, the release is not. See the ordering rule below.
 - legs H, `bgcheckValidUntil` present: the column reads false whatever stray instance is in flight ⇒ the human
-  legs dispatch and reclaim exactly as today (row 6). The lane-1 suppression gate also skips `releaseCompletedLeg`
-  (it lives inside `dispatchGap`, `evaluator.go:443`); the sweep's release runs **before** its suppression gate
-  (`reconciler.go:996` precedes `:1027`), so even in the one state where the column is true a completed
-  `refreshBgcheck` leg is released by the sweep and the chain advances — the backstop the reviewer asked to see
-  named.
+  legs dispatch and reclaim exactly as today (row 6).
+  **Struck 2026-09-07 (build) — the backstop named here covers a state that cannot occur.** The original text
+  argued that the sweep's release runs before its own gate, "so even in the one state where the column is true a
+  completed `refreshBgcheck` leg is released by the sweep." That state is unreachable: the column is true only
+  when `bgcheckValidUntil` is null, and `refreshBgcheck`'s sole declared effect is that column being **present**,
+  so whenever the column is true that leg's effect is by construction unmet and there is nothing to release. The
+  leg that actually needs releasing in the column-true quadrant is a **human** one, pinned before the lapse.
+
+  **The ordering rule the build settled, which replaces that backstop (2026-09-07).** *A release is not a
+  dispatch, so the suppression gate must not withhold it; an ADVANCE is a dispatch, so the gate must.* Declaring
+  this column is what made the distinction matter, because it is what makes `renewalComplete` suppress at all.
+  All four seams now honour it: lane 1 releases from its suppressed arm (`releaseSuppressedLeg`), the sweep's
+  count leg releases inside its own gate — the only reader holding the count revision a markless release takes
+  its mutex on — the sweep's mark leg still releases unconditionally but now gates the advance that follows, and
+  the exhausted arm takes the same boundary inside `escalateExhaustedGap`. None of the suppressed paths advance:
+  the next leg is dispatched by whichever delivery finds the suppression lifted, which is guaranteed to arrive
+  because `inflight_<g>` is a column on this very row and a change to it is a row write.
 - **The static-target overlap** (`leaseApplicationComplete.missing_bgcheck` re-opening on the same lapse): with the
   scoped column, while `bgcheckValidUntil` is null the renewal suppresses on the static target's in-flight check
-  and vice versa (`inflight_bgcheck` reads the renewal's instance too — same fan), so the lapse produces one check
-  rather than two, modulo the `.dispatch`-landing window that already exists. Observed from the two cyphers; the
-  Inc 3 e2e (§9) is where it is proven. The double-dispatch itself is pre-existing and not this design's row.
+  and vice versa (`inflight_bgcheck` reads the renewal's instance too — same fan). The double-dispatch itself is
+  pre-existing and not this design's row.
+  **Amended 2026-09-07 (build):** the claim that "the lapse produces one check rather than two" is withdrawn as
+  unproven. Both targets are blind until the bridge writes `.dispatch.vendorRef`, so a simultaneous lapse still
+  dispatches two checks; the hedge "modulo the `.dispatch`-landing window" was carrying the whole claim.
 
 **Lens test (owned by Inc 3):** `renewal_lenses`' fixture family (`bgcheck_freshness_lens_test.go`,
 `renewals_read_lens_test.go`) gains `TestRenewalComplete_InflightIsLegScoped`: (i) a seeded instance with

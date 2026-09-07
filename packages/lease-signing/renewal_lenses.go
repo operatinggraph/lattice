@@ -69,7 +69,8 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				BodyColumns: []string{
 					"violating", "missing_renewalComplete", "entityKey", "tenant", "landlord",
 					"open", "leaseappAlive", "hasGuarantor", "bgcheckValidUntil",
-					"guarantorVerifiedAt", "termsSetAt", "signedAt", "maxretries_renewalComplete",
+					"guarantorVerifiedAt", "termsSetAt", "signedAt",
+					"inflight_renewalComplete", "maxretries_renewalComplete",
 				},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
@@ -235,6 +236,20 @@ RETURN
 //     with no validUntil folds to null through the THEN branch either way, so
 //     this aggregate needs no explicit null guard (the count in
 //     readinessWithItems does, and carries one).
+//   - inflight_renewalComplete is the §10.3 dispatch-suppression companion of
+//     missing_renewalComplete, and it is LEG-SCOPED: the in-flight fact of the
+//     gap's one external leg (refreshBgcheck — the same presence-based
+//     bgInflight fan leaseApplicationCompleteSpec computes) conjoined with that
+//     leg's unmet effect (bgcheckValidUntil = null). The conjunct is what makes
+//     the column safe over a MIXED catalog. Weaver answers the suppression gate
+//     on this column BEFORE any leg is bound, so the bare in-flight fact would
+//     park the landlord's and the tenant's human legs (verifyGuarantor /
+//     setTerms / signRenewal) behind any background check in flight for the same
+//     tenant — including the static leaseApplicationComplete target's own check,
+//     which fans through the identical providedTo hop. Scoped, the column reads
+//     true only while the check is what the chain is still waiting on, which is
+//     the contract's "a remediation for THIS gap is already in flight" applied
+//     to the leg the gap is on. It pairs with maxretries_renewalComplete below.
 //   - This lens projects NO freshUntil, so it arms no timer. The window it reads
 //     is not its own: it belongs to a background-check instance the walk reaches
 //     across providedTo, and that instance carries its own backgroundCheckFreshness
@@ -276,7 +291,8 @@ WITH
   rn.terms.data.setAt                     AS termsSetAt,
   rn.terms.data.termMonths                AS termsTermMonths,
   rn.renewalSignature.data.signedAt       AS signedAt,
-  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND NOT (inst.freshnessExpiry.data.byTarget.` + BackgroundCheckFreshnessTarget + ` >= inst.outcome.data.validUntil) THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil
+  max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND NOT (inst.freshnessExpiry.data.byTarget.` + BackgroundCheckFreshnessTarget + ` >= inst.outcome.data.validUntil) THEN inst.outcome.data.validUntil ELSE null END) AS bgcheckValidUntil,
+  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -290,6 +306,7 @@ RETURN
   guarantorVerifiedAt,
   termsSetAt,
   signedAt,
+  ((bgInflight > 0) AND (bgcheckValidUntil = null)) AS inflight_renewalComplete,
   6                                       AS maxretries_renewalComplete,
   ((status = 'open') AND leaseappAlive AND NOT (
      (bgcheckValidUntil <> null) AND

@@ -549,8 +549,12 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 //	    escalateExhaustedGap site the mark leg calls — a fresh Augur episode
 //	    where the target escalates "exhausted", else the standing
 //	    GapBudgetExhausted issue;
-//	(m) gap suppressed with a call in flight (inflight_<g>) → return: the lens
-//	    re-projects when the call lands and lane-1 re-delivers;
+//	(m) gap suppressed with a call in flight (inflight_<g>) → record the LEG
+//	    BOUNDARY if the document names a goal leg whose declared effects now
+//	    hold, then return. A release is not a dispatch, and a markless one has
+//	    no other derivation: lane 1 releases only against a mark and the mark
+//	    leg never visits a gap without one. Nothing is dispatched here — the
+//	    lens re-projects when the call lands and lane-1 re-delivers;
 //	(n) everything above passed AND the budget reads exactly 0 AND the gap is
 //	    not collapse-only AND the sweep is warmed up → DISPATCH it as a fresh
 //	    episode. This is the only line in the leg that acts on the world, and
@@ -726,14 +730,47 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			}
+		} else if ga.Goal != nil && count.Leg != "" {
+			// The leg boundary a suppressed gap is still owed. A RELEASE IS NOT
+			// A DISPATCH: the gate above decides only what may be STARTED
+			// (releaseSuppressedLeg's doc, Contract #10 §10.3), while the fact
+			// that this document's pinned leg has its declared effects holding
+			// in the row is a fact about a leg that has already RUN — true
+			// whatever else is in flight over the same fan.
+			//
+			// MARKLESS is what makes the boundary this seam's alone. Lane 1's
+			// suppressed arm releases only against a mark, holding no count
+			// revision it could condition a markless release's writes on; the
+			// sweep's mark leg never visits a gap that has no mark; and the
+			// escalation route below is reached only by a document stamped
+			// `escalatedAt`. This pass holds exactly the revision the markless
+			// branch takes its mutual exclusion on, which is why the release can
+			// be claimed here at all — a concurrent dispatch that booked against
+			// the budget wins that delete instead and this pass abandons,
+			// crediting the leg once.
+			//
+			// Only the release, mirroring the gate's other arm's exclusivity:
+			// escalateExhaustedGap owes the same boundary and takes it over the
+			// real count pair, so an exhausted gap must not be released twice.
+			// No advance and no escalation follow — an advance IS a dispatch and
+			// the gap is still suppressed. Nothing is stranded by waiting: the
+			// release deletes the document, so this leg stops enumerating the
+			// gap, and the suppression can only lift by a write to inflight_<g>
+			// on this very row, which is a delivery lane 1 dispatches the
+			// chain's next leg from.
+			e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, count.Leg, row, 0, entry.Revision)
 		}
 		return
 	}
 	// A markless document stamped `escalatedAt` is an escalation whose mark has
 	// gone — the normal state between paced re-fires, the mark's TTL being
 	// shorter than every backoff step past the second. It is routed HERE: below
-	// the violating and suppression gates, so it never acts where lane 1 would
-	// not and an exhausted gap has already gone to its own door above; and above
+	// the violating and suppression gates, because everything it does is a
+	// DISPATCH — a paced re-fire, or a release and the advance that follows one
+	// — and lane 1 dispatches neither over a suppressed gap. What a suppressed
+	// gap IS owed is its leg boundary, and the gate above takes that in its own
+	// arms: an exhausted gap inside escalateExhaustedGap, a gap with a call in
+	// flight from the markless release beside it. This route sits above
 	// arm (n)'s `Count == 0` test, because an escalation that displaced a leg
 	// left that leg's attempts on the document, and a route below the zero test
 	// would never reach it — a dead claim over a leg would then never retry on a
@@ -873,22 +910,27 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// contract-legal declaration. Leave the count to its TTL.
 		return
 	}
-	// The action the collapse-only test is taken over is RESOLVED, not read off
-	// the playbook — but resolved without planning, because the decision must
+	// The leg the two tests below are taken over is RESOLVED, not read off the
+	// playbook — but resolved without planning, because the decision must
 	// precede the plan: planGap consumes an admission token and clears this
 	// gap's standing issues on the strength of a dispatch about to happen,
 	// neither of which may occur for a gap this arm then declines.
-	// resolvedLegAction is exactly that: the leg's dispatch contract type, from
-	// a pure regression over the catalog (or the playbook's own Action, for
-	// every gap that names one). A gap whose plan resolves nothing for this row
-	// would dispatch nothing either, so it is left to a delivery.
-	resolvedAction, resolvedRef, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
+	// resolvedLegAction is exactly that: the dispatch this row would fire, from
+	// a pure regression over the catalog (or the playbook's own entry, for every
+	// gap that names an Action). Both tests read the one resolution and read
+	// different parts of it — collapseOnlyReclaim the leg's dispatch action,
+	// staleMark the leg's whole shape, since a triggerLoom leg's external class
+	// comes from its own Pattern's step kinds and the goal entry that pins it
+	// names neither. A gap whose plan resolves nothing for this row would
+	// dispatch nothing either, so it is left to a delivery.
+	leg, resolvedRef, perr := e.resolvedLegAction(ctx, target, targetID, entityID, gapColumn, ga, row)
 	if perr != nil {
 		e.logger.Debug("weaver sweep: gap resolves no action for this row; leaving the re-arm to a delivery",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "why", perr.msg)
 		return
 	}
-	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+	resolvedAction := leg.Action
+	if collapseOnlyReclaim(resolvedAction, e.staleMark(targetID, entityID, row, gapColumn, leg)) {
 		e.logger.Debug("weaver sweep: collapse-only gap; not re-arming a markless episode that may still be open",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", resolvedAction)
 		return
@@ -1114,12 +1156,45 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// that satisfied this leg's effect may be the last one for a while).
 	// Dispatch the next leg as a genuinely fresh episode via the SAME
 	// CAS-create path lane-1 uses (fireEpisode's found=false branch)
-	// instead of merely releasing.
+	// instead of merely releasing. The one state where releasing and returning
+	// is nevertheless safe is the suppressed one just below, which has a
+	// guaranteed row write of its own.
 	//
 	// legOf, not the mark's action alone: a gap handed to the reasoning tier
 	// carries its displaced leg on the escalation's own mark, so its boundary
 	// stays testable from this leg too.
 	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, legOf(ga, rec, count), row, markRev, countRev) {
+		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, 0); suppressed {
+			// The ADVANCE is a dispatch, and the gap has a call in flight. The
+			// suppression gate below is the load-bearing skip for exactly that
+			// state — the mark-lease expiry → reclaim is the re-dispatch path a
+			// long-pending external call is actually exposed to — and an advance
+			// taken here jumps it from ABOVE: a fresh episode fired at the vendor
+			// while the previous call is still outstanding, which is the one
+			// thing inflight_<g> exists to prevent.
+			//
+			// The RELEASE above stands regardless. A release is not a dispatch:
+			// the gate governs only what may be STARTED (releaseSuppressedLeg's
+			// doc, Contract #10 §10.3), while a pinned leg whose declared effects
+			// hold in the row is a fact about a leg that has already run. Only
+			// the advance is the gate's business, so only the advance is
+			// conditional.
+			//
+			// The count is asked as ZERO because the release has just deleted the
+			// document: the budget term would be measuring a chain that no longer
+			// exists, and what remains to decide the advance is the inflight term
+			// the row alone carries.
+			//
+			// Nothing is stranded by holding here. The release removed the mark
+			// and the count, so neither sweep leg enumerates this gap any more —
+			// but inflight_<g> is a column of THIS row, so the only thing that can
+			// lift the suppression is a write to the row, and that write is a
+			// lane-1 delivery. It arrives at a gap holding no mark and no pin,
+			// which is a genuinely fresh episode's dispatch, chain advanced.
+			e.logger.Debug("weaver sweep: goal leg released with its advance withheld; the gap has a call in flight",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			return
+		}
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
@@ -1211,6 +1286,49 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// class no catalog holds, which is the config error planGap alerts.
 	}
 
+	// A gap's class is decided by the dispatch's SHAPE, never by a name: not by
+	// the action NAME the mark happens to carry — a planned-mode mark records
+	// the leg's own catalog Ref ("setTerms", "signRenewal"), which is not a
+	// dispatch contract type at all, so classifying rec.Action directly would
+	// read every goal leg as not-collapse-only, an unpaced re-fire every sweep
+	// interval each booked as an attempt against a human task nobody has
+	// opened — and not by the playbook ENTRY either, whose Action a goal gap
+	// leaves empty by construction, which would read every goal leg as never
+	// external and so deny an external leg the fresh claimId §10.3 grants it.
+	//
+	// So resolve the PINNED leg once, here, and let both predicates below judge
+	// that same resolution: staleMark classifies the leg's shape (a triggerLoom
+	// leg's class comes from its own Pattern's step kinds) and
+	// collapseOnlyReclaim reads the leg's dispatch action. Resolving without
+	// planning is what makes it both affordable and correct —
+	// resolvePlannedAction's pinned branch is a pure catalog lookup, while
+	// planGap below consumes an admission token and clears the gap's standing
+	// issues, neither of which may happen for a reclaim this block then paces
+	// away. For every gap that names its own Action the resolution returns ga
+	// unchanged, so a static gap resolves to itself and classifies on its own
+	// action. A pinned ref the catalog no longer holds — a re-authored playbook,
+	// or an escalation whose mark pins the reasoning op's own "directOp" —
+	// resolves to a planError: the dispatch action falls back to the mark's
+	// recorded string, and the leg stays zero, which confers no stale-reconcile
+	// authority at all (no resolution, no fresh claimId).
+	//
+	// The resolution is guarded on the PIN, mirroring lane 1's (dispatchGap):
+	// resolvePlannedAction with an empty pinnedAction routes a goal gap into
+	// resolveGoalAction's FRESH branch and runs Synthesize — planning work this
+	// classification must never pay, and never needs to. A mark that records no
+	// action names no leg to classify, so the honest answer is the zero
+	// GapAction, and the fail-closed one is the same: a synthesized leg the
+	// episode was never pinned to would feed staleMark a dispatch nothing
+	// dispatched, and could mint a fresh claimId over an artifact still open.
+	leg := GapAction{}
+	dispatchAction := rec.Action
+	if rec.Action != "" {
+		if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
+			leg = resolved
+			dispatchAction = resolved.Action
+		}
+	}
+
 	// confirmedConcluded mirrors fireEpisode's staleMark (evaluator.go): true
 	// when gapColumn is an EXTERNAL gap (a lens-declared inflight_<g>
 	// companion, currently false) per Contract #10 §10.3 — "External gaps are
@@ -1226,32 +1344,12 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// churn on a still-open human episode; §10.3 already bounds an external
 	// gap's retry by inflight_<g>/maxretries_<g> instead) and the claimId
 	// choice (below the pacing block).
-	confirmedConcluded := e.staleMark(targetID, entityID, row, gapColumn, ga)
+	confirmedConcluded := e.staleMark(targetID, entityID, row, gapColumn, leg)
 
 	// Default per-key TTL backstop for the re-armed mark; widened below for any
 	// paced reclaim, so the mark outlives its own backoff window.
 	markTTL := markTTLBackstopFactor * e.marks.lease
 
-	// A gap's class is decided by the dispatch's SHAPE, never by the action
-	// NAME the mark happens to carry: a planned-mode mark records the leg's
-	// own catalog Ref ("setTerms", "signRenewal"), which is not a dispatch
-	// contract type at all, so classifying rec.Action directly would read
-	// every goal leg as not-collapse-only — an unpaced re-fire every sweep
-	// interval, each one booked as an attempt against a human task nobody has
-	// opened. Resolve the PINNED leg to its dispatch action first, without
-	// planning (resolvePlannedAction's pinned branch is a pure catalog lookup;
-	// planGap below consumes an admission token and clears the gap's standing
-	// issues, neither of which may happen for a reclaim this block then paces
-	// away). For every gap that names its own Action the resolution returns ga
-	// unchanged, so a static gap resolves to its own action and classifies on
-	// that action. A pinned ref the catalog no longer holds — a re-authored
-	// playbook, or an escalation whose mark pins the reasoning op's own
-	// "directOp" — resolves to a planError; those classify on the mark's
-	// recorded action instead.
-	dispatchAction := rec.Action
-	if resolved, _, perr := e.resolvePlannedAction(ctx, target, targetID, entityID, gapColumn, ga, row, rec.Action); perr == nil {
-		dispatchAction = resolved.Action
-	}
 	collapseOnly := collapseOnlyReclaim(dispatchAction, confirmedConcluded)
 
 	// Defense in depth for Contract #10 §10.3's rule that a gap declaring

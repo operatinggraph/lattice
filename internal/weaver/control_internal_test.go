@@ -1262,6 +1262,74 @@ func TestResetRetryBudget_RefusesACollapseOnlyGap(t *testing.T) {
 	}
 }
 
+// TestResetRetryBudget_ClassifiesAGoalGapByItsResolvedLeg is the same refusal
+// taken over a PLANNED-mode gap, where the shape the verb must classify is not
+// on the playbook entry at all: a goal gap's entry names no action, so the verb
+// resolves the leg the row would fire next and answers over that.
+//
+// The pairing is the standing one — the verb must refuse exactly what the
+// sweep's re-arm permanently declines, and accept what it does not. Here both
+// vectors resolve to the SAME leg, a triggerLoom of an externalTask-only
+// pattern, and only the row's in-flight companion separates them:
+//
+//   - with the vendor call concluded (inflight_<g> false), the re-arm would
+//     mount a genuinely fresh call — §10.3's intended external retry — so the
+//     verb must accept and zero the budget. Classified on the entry instead,
+//     this reads "an action of "" that may still be open" and is refused
+//     forever, which is the operator-facing half of the whole defect;
+//   - with a call still in flight, the re-arm is collapse-only for a real
+//     reason and the refusal stands, carrying the goal-gap wording ("its plan
+//     resolves to ...") rather than the static gap's "it dispatches ...".
+func TestResetRetryBudget_ClassifiesAGoalGapByItsResolvedLeg(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureResetBudgetGoalLeg"
+	const gap = "missing_x"
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.engine.source.mu.Lock()
+	h.engine.source.opMetaByType["SignLease"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+
+	concluded, inFlight := testNanoID(t), testNanoID(t)
+	for entityID, flight := range map[string]bool{concluded: false, inFlight: true} {
+		h.seedCount(t, ctx, targetID, entityID, gap, 2)
+		h.putRow(t, ctx, targetID, entityID, map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+			"applicant":  "vtx.identity." + testNanoID(t),
+			"inflight_x": flight, "maxretries_x": 2,
+		})
+	}
+
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, concluded, gap); err != nil || previous != 2 {
+		t.Fatalf("a goal gap whose leg is an external call must un-park — the re-arm would mount a fresh "+
+			"attempt: got (%d, %v)", previous, err)
+	}
+	if got := h.countValue(t, ctx, targetID, concluded, gap); got != 0 {
+		t.Fatalf("the accepted reset left the budget at %d, want 0", got)
+	}
+
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, inFlight, gap)
+	if err == nil {
+		t.Fatal("a goal gap whose external leg still has a call in flight is collapse-only: re-arming its " +
+			"budget promises a dispatch the sweep will not make")
+	}
+	for _, want := range []string{"its plan resolves to", "collapse-only", actionTriggerLoom} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to name %q", err, want)
+		}
+	}
+	if got := h.countValue(t, ctx, targetID, inFlight, gap); got != 2 {
+		t.Fatalf("the refused reset left the budget at %d, want 2 (nothing written)", got)
+	}
+}
+
 // TestResetRetryBudget_RefusesAnOrphanColumn pins the second shape the sweep's
 // re-arm declines, for the same reason the first one is refused: the leg's
 // orphan-column arm returns without dispatching, so writing a 0 here changes

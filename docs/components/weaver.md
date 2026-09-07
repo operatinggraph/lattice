@@ -513,6 +513,39 @@ Declaring `inflight_<g>` is what makes a `directOp` gap decline the engine's def
 all and `GapBudgetExhausted` becomes unreachable. A lens that wants more headroom than the default
 declares the cap it wants; it does not declare an inert marker.
 
+**A planned-mode gap's class is read from the leg it resolves to, never from its playbook entry.** A
+goal gap's entry carries an empty `Action` by construction, so classifying the entry answers "never
+makes an external call" for every leg it could ever dispatch — including a `triggerLoom` over an
+externalTask-only pattern, which §10.3 governs as External. `staleMark` therefore takes the **resolved
+leg**: the pinned catalog lookup each of its callers already performs, or the zero `GapAction` when the
+pin resolves to nothing, which confers no stale-reconcile authority at all. A gap that names its own
+action resolves to itself, so a static target's verdict is unchanged.
+
+**A `goal` gap's `inflight_<g>` is the in-flight fact of its external leg conjoined with that leg's
+unmet `effects` — never the bare in-flight fact.** The suppression gate reads the column before any leg
+is bound (`gapSuppressionTerms` answers on the column alone, above lane 1's dispatch and above the
+sweep's), so over a mixed catalog a bare column parks the gap's **human** legs behind whatever external
+call happens to be outstanding for the same subject. Scoping the column to the external leg's effect
+being unmet makes it read true only while that call is what the chain is waiting on — which is the
+column's contract meaning ("a remediation *for this gap* is already in flight") applied to the leg the
+gap is actually on. `renewalComplete` is the reference: `inflight_renewalComplete` is
+`(bgInflight > 0) AND (bgcheckValidUntil = null)`, so `setTerms` and `signRenewal` dispatch normally
+once a current check exists.
+
+**A release is not a dispatch, so the suppression gate does not withhold it — an ADVANCE is, so the
+gate holds that.** `inflight_<g>` says what may be STARTED. That a pinned leg's declared effects now
+hold in the row is a fact about a leg that has already RUN, true whatever else is in flight over the
+same fan — and a gap can suppress on a remediation belonging to a different chain entirely, since one
+lens fan projects a sibling target's dispatch too. Withholding the boundary there defers it to whatever
+reader comes back: for a marked gap that is a whole mark lease away, and for a markless one it is
+nobody. So every seam records it — lane 1 from its suppressed arm (`releaseSuppressedLeg`), the sweep's
+count leg inside its own gate (the only reader holding the count revision a markless release takes its
+mutual exclusion on), the sweep's mark leg unconditionally, and the exhausted arm inside
+`escalateExhaustedGap`. What none of them do while suppressed is **advance**: `advanceReleasedLeg`
+reaches `planGap` and `fireEpisode`, so an ungated advance re-dispatches the very call the column is
+suppressing on. The next leg waits for whichever delivery finds the suppression lifted, and one is
+guaranteed — `inflight_<g>` is a column on this row, so a change to it is a row write.
+
 ---
 
 ## Planner-mandate effect bookkeeping — `__effect` (Contract #10 §10.3/§10.8, Fire 2)
@@ -1329,8 +1362,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   a sibling seam guards the same state with a predicate this one skips, prove the skip. Minted a second
   time 2026-09-04: the reclaim fed `collapseOnlyReclaim` the mark's recorded string, which for a goal leg
   is the catalog ref, so every goal leg read not-collapse-only — unpaced, booked, an attempt per re-arm.
-  `scripts/lint-weaver-classify-by-shape.go` (CI, STRICT) now gates that predicate's argument;
-  `staleMark`'s own classifier (`externalDispatchGap` over the playbook entry) is not covered — parked.
+  Minted a third time 2026-09-07: `staleMark`'s own classifier read the playbook entry, whose `Action` is
+  empty for every goal gap, so a goal leg dispatching an externalTask-only `triggerLoom` classified as
+  "never makes an external call" at all four consumers — the reclaim collapsed onto a concluded instance
+  forever and `reset-budget` refused the operator with a wrong reason. `scripts/lint-weaver-classify-by-shape.go`
+  (CI, STRICT) gates both predicates now: rule 1 on `collapseOnlyReclaim`'s action argument, rule 2 on
+  `staleMark`'s leg argument (every binding must come from `resolvePlannedAction` / `resolvedLegAction` or
+  be the zero `GapAction`), and rule 2b holds `externalDispatchGap` to its single caller inside `staleMark`.
 - **Classify by whitelist, not blacklist, when the vocabulary can grow** — "has a userTask step ⇒ parks" reads
   a *parse* miss (zero steps, a drifted envelope, a renamed field, a future fourth step kind) as a confident
   "no", landing on the unsafe side silently. "Every step is a known non-parking kind" fails safe by
@@ -1426,9 +1464,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   and an `error`-severity issue stranded that way pins the whole component `unhealthy` through a freeze,
   with nothing the operator can do to clear it. Minted three times in one item (2026-08-25): the registry
   and freeze gates sat above the gap-close reconcile, the corrupt-body READ sat below the freeze, and an
-  `entityKey` guard sat above an orphan-column arm. Check: label every arm guard / act / retire, then
-  assert each retire is still reachable with every guard's condition true — destruction is an act and
-  stays below the gates, reading is not.
+  `entityKey` guard sat above an orphan-column arm. Minted a fourth time 2026-09-07, at three seams at
+  once: the DISPATCH-SUPPRESSION gate (`inflight_<g>`) sat above the leg-boundary release in lane 1 and
+  in the sweep's count leg, while the sweep's mark leg had the release above its gate but the ADVANCE
+  that follows it above the gate too. Both halves are the same mis-labelling — a release is a retire and
+  belongs above the guard, an advance is an act and belongs below it — and the split only became
+  observable when a package declared the column that makes a goal target suppress at all. Check: label
+  every arm guard / act / retire, then assert each retire is still reachable with every guard's
+  condition true — destruction is an act and stays below the gates, reading is not, and a seam that both
+  records a boundary and dispatches from it is TWO arms that the gate must separate, never one.
 - **A fact ends by more routes than the one you are editing — enumerate the LEGS, not just the verb** —
   and the leg you are not looking at is usually the only one that runs for a quiet row. Two levels of the
   same class. *Teardown routes:* the issue families are prefix-keyed below the target, so a route that

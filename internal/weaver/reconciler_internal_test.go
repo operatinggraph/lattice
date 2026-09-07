@@ -828,6 +828,294 @@ func TestSweep_InflightMarkerIgnoredForUnindexedPattern(t *testing.T) {
 	}
 }
 
+// goalLegExternalTarget is a planned-mode target whose gap plans over the two
+// dispatch shapes a real goal chain mixes: refreshBgcheck triggers a Loom
+// pattern that is externalTask-only — a vendor call concluding on its own
+// outcome, Contract #10 §10.3's External class — and signRenewal assigns a human
+// task, an artifact that may still be open. The chain is ordered (signRenewal
+// cannot apply until the check is fresh), so a fresh synthesis always picks the
+// external leg while a mark may pin either.
+//
+// The gap's own playbook entry names NO action: that is what a goal gap is, and
+// what makes this the shape where classifying the entry instead of the leg reads
+// both legs alike. The catalog is built as a *Target and run through the
+// install-time validation, so its goal and its per-entry pre/effects guards are
+// parsed exactly as a registry load parses them.
+//
+// Two pieces of registry wiring go with it, and a caller needs both: the
+// bgcheckFlow pattern spec (seedPatternSpec with stepKindExternalTask — the
+// step-kind probe is where the external class actually comes from) and an op
+// meta-vertex for SignLease (opMetaByType — assignTask's plan resolves
+// forOperation from it).
+func goalLegExternalTarget(t *testing.T, targetID, gapColumn string) *Target {
+	t.Helper()
+	target := &Target{
+		TargetID: targetID,
+		Mode:     targetModePlanned,
+		Gaps: map[string]GapAction{gapColumn: {
+			Goal: json.RawMessage(`{"allOf":[{"present":"subject.data.bgFresh"},{"present":"subject.data.signed"}]}`),
+			Actions: []ActionCatalogEntry{
+				{
+					Ref: "refreshBgcheck", Action: actionTriggerLoom,
+					Pattern: "bgcheckFlow", Subject: "row.entityKey",
+					Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.bgFresh"}`)},
+				},
+				{
+					Ref: "signRenewal", Action: actionAssignTask, Operation: "SignLease",
+					Assignee: "row.applicant", Target: "row.entityKey",
+					Pre:     json.RawMessage(`{"present":"subject.data.bgFresh"}`),
+					Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.signed"}`)},
+				},
+			},
+		}},
+	}
+	if err := validateTarget(target); err != nil {
+		t.Fatalf("validateTarget: %v", err)
+	}
+	return target
+}
+
+// seedGoalLegFixture seeds goalLegExternalTarget plus one entity's row and an
+// expired mark pinned to pinnedLeg — the state a sweep pass finds when a goal
+// chain's episode outlived its lease. row carries the vector's own companion
+// columns; everything a dispatch needs (entityKey, violating, the open gap, the
+// assignee the human leg reads) is supplied here.
+func seedGoalLegFixture(t *testing.T, ctx context.Context, h *sweepHarness,
+	targetID, gap, pinnedLeg, claimID string, row map[string]any) (entityID, key string) {
+
+	t.Helper()
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID = testNanoID(t)
+	key = markKey(targetID, entityID, gap)
+	full := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant": "vtx.identity." + testNanoID(t),
+	}
+	for k, v := range row {
+		full[k] = v
+	}
+	h.putRow(t, ctx, targetID, entityID, full)
+	m := fixtureMark(targetID, entityID, gap, pinnedLeg, pastLease())
+	m.ClaimID = claimID
+	h.putMark(t, ctx, key, m)
+	return entityID, key
+}
+
+// seedMarklessGoalLegFixture is seedGoalLegFixture's re-arm counterpart: the
+// same catalog and row, but a budget an operator zeroed and NO mark at all —
+// the one state the count leg's re-arm arm (reconciler.go arm (n)) fires on.
+// The budget goes through seedReArmedCount's real increment-then-reset path, so
+// the key the sweep enumerates carries the value shape and revision history
+// ResetRetryBudget leaves.
+//
+// With no mark there is no pin, so which leg the arm judges comes from a fresh
+// synthesis over the row — which is exactly what each vector varies through the
+// goal-state columns it supplies.
+func seedMarklessGoalLegFixture(t *testing.T, ctx context.Context, h *sweepHarness,
+	targetID, gap string, row map[string]any) (entityID string) {
+
+	t.Helper()
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID = testNanoID(t)
+	full := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant": "vtx.identity." + testNanoID(t),
+	}
+	for k, v := range row {
+		full[k] = v
+	}
+	h.putRow(t, ctx, targetID, entityID, full)
+	h.seedReArmedCount(t, ctx, targetID, entityID, gap)
+	return entityID
+}
+
+// TestSweep_GoalLegExternalReclaimMintsFreshClaimID is the reclaim's half of the
+// rule that a gap's external class comes from the dispatch it RESOLVES to. A
+// goal gap's playbook entry names no action, so an entry-classified reclaim
+// reads every leg as "never external" and hands an external leg the
+// claimId-preserving collapse §10.3 reserves for a human artifact — which, with
+// deriveStableInstanceID being claimId-seeded, re-dispatches onto the already
+// terminal Loom instance as a no-op, forever.
+//
+// The four vectors are the states the seam owes, and each one moves for a
+// different reason:
+//
+//   - the external leg with inflight_<g> false is a concluded vendor call, so
+//     the reclaim is a genuinely fresh attempt — a NEW claimId, an attempt
+//     booked against the leg's budget, and no pacing (an external gap with a
+//     usable cap is bounded by the cap, never by the backoff timer);
+//   - the same leg with inflight_<g> TRUE never reaches the classifier at all:
+//     the suppression gate precedes it and leaves the mark untouched;
+//   - the HUMAN leg collapses with its claimId preserved, because assignTask is
+//     never external whatever the row says — three of this catalog's four legs,
+//     and the reason the verdict must be taken over the leg rather than the gap;
+//   - and the vector that declares no inflight_<g> COLUMN — the state the corpus
+//     is in until a lens declares one — fails at staleMark's first guard and
+//     collapses too, though its leg is the external one. It is the omission
+//     vector the fixture rule demands: every other vector supplies a column
+//     production treats as optional, and only this one pins what happens
+//     without it.
+//
+// The last two vectors take the same verdict at the OTHER site that asks it: the
+// count leg's re-arm arm, where an operator's zeroed budget stands over a gap
+// with no mark at all. Nothing there is pinned, so the leg comes from a fresh
+// synthesis over the row — and the arm's collapse-only refusal, being the whole
+// reason it may fire without a claimId to preserve, has to be taken over that
+// leg for the identical reason the reclaim does. The pair moves in opposite
+// directions from one row column: with the check lapsed the plan opens on the
+// external leg and the budget re-arms, and with the check current it opens on
+// the human one and nothing fires.
+func TestSweep_GoalLegExternalReclaimMintsFreshClaimID(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.engine.source.mu.Lock()
+	h.engine.source.opMetaByType["SignLease"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+
+	const gap = "missing_x"
+	declared := map[string]any{"inflight_x": false, "maxretries_x": 3}
+
+	// (1) The external leg, no call in flight: a fresh attempt.
+	const extClaim = "Qw4Er5Ty6Uh7Pn8As9Df"
+	const extTarget = "fixtureGoalLegExternal"
+	extEntity, _ := seedGoalLegFixture(t, ctx, h, extTarget, gap, "refreshBgcheck", extClaim, declared)
+
+	h.pass(ctx)
+	op := h.nextOp(t)
+
+	rec, _, found, err := h.engine.marks.get(ctx, extTarget, extEntity, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID == extClaim || rec.ClaimID == "" {
+		t.Fatalf("a goal leg that triggers an externalTask-only pattern concludes on a vendor outcome, so its "+
+			"reclaim must mint a FRESH claimId; got %q (seeded %q)", rec.ClaimID, extClaim)
+	}
+	payload, _ := op["payload"].(map[string]any)
+	if payload == nil {
+		t.Fatalf("dispatched op has no payload: %v", op)
+	}
+	if got, want := payload["instanceId"], deriveStableInstanceID(extTarget, extEntity, gap, extClaim); got == want {
+		t.Fatalf("instanceId %v collapses onto the terminal attempt's — the retry would be a no-op", got)
+	}
+	if doc := readCount(t, ctx, h.conn, extTarget, extEntity, gap); doc.Count != 1 {
+		t.Fatalf("count document = %+v, want count 1: a fresh vendor call is an attempt against the leg's budget", doc)
+	}
+	if _, suppressed, _, _, _, _ := h.engine.sweep.metrics(); suppressed != 0 {
+		t.Fatalf("reclaimsSuppressed = %d, want 0 — a capped external leg is bounded by its cap, never paced", suppressed)
+	}
+
+	// (2) The same leg with the call still in flight: the suppression gate
+	// answers above the classifier and nothing is touched.
+	const flightClaim = "Zx1Cv2Bn3Mk4Kj5Hg6Fd"
+	const flightTarget = "fixtureGoalLegInflight"
+	flightEntity, flightKey := seedGoalLegFixture(t, ctx, h, flightTarget, gap, "refreshBgcheck", flightClaim,
+		map[string]any{"inflight_x": true, "maxretries_x": 3})
+	before, err := h.conn.KVGet(ctx, "weaver-state", flightKey)
+	if err != nil {
+		t.Fatalf("read the seeded mark: %v", err)
+	}
+
+	h.pass(ctx)
+
+	h.requireNoOp(t)
+	after, err := h.conn.KVGet(ctx, "weaver-state", flightKey)
+	if err != nil || after.Revision != before.Revision {
+		t.Fatalf("a suppressed gap's mark must be left exactly as found (rev %d → %v, err=%v)",
+			before.Revision, after.Revision, err)
+	}
+	if rec, _, _, err := h.engine.marks.get(ctx, flightTarget, flightEntity, gap); err != nil || rec.ClaimID != flightClaim {
+		t.Fatalf("claimId = %v (err=%v), want the seeded %q untouched", rec, err, flightClaim)
+	}
+
+	// (3) The human leg: collapse-only, claimId preserved, no attempt booked.
+	const humanClaim = "Pm2Nk9Xj8Uh7Yg6Tf5Rd"
+	const humanTarget = "fixtureGoalLegHuman"
+	humanEntity, _ := seedGoalLegFixture(t, ctx, h, humanTarget, gap, "signRenewal", humanClaim, declared)
+
+	h.pass(ctx)
+	h.nextOp(t)
+
+	rec, _, found, err = h.engine.marks.get(ctx, humanTarget, humanEntity, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID != humanClaim {
+		t.Fatalf("an assignTask leg's task may still be open, so §10.3 preserves its claimId verbatim: got %q want %q",
+			rec.ClaimID, humanClaim)
+	}
+	if got := h.countValue(t, ctx, humanTarget, humanEntity, gap); got != 0 {
+		t.Fatalf("attempts booked = %d, want 0: a re-dispatch the consumer collapses mounts no attempt", got)
+	}
+
+	// (4) The external leg again, on a row that declares no inflight_<g> at all.
+	const undeclaredClaim = "Lk2Pn6mQrtwzKbcXvP3T"
+	const undeclaredTarget = "fixtureGoalLegUndeclared"
+	undeclaredEntity, _ := seedGoalLegFixture(t, ctx, h, undeclaredTarget, gap, "refreshBgcheck", undeclaredClaim,
+		map[string]any{"maxretries_x": 3})
+
+	h.pass(ctx)
+	h.nextOp(t)
+
+	rec, _, found, err = h.engine.marks.get(ctx, undeclaredTarget, undeclaredEntity, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID != undeclaredClaim {
+		t.Fatalf("a row that never nominated the gap for the external class keeps its claimId whatever its leg "+
+			"dispatches: got %q want %q", rec.ClaimID, undeclaredClaim)
+	}
+
+	// (5) and (6): the re-arm arm, which has no mark to classify from. The arm
+	// is warm-up gated, so the anchor is rewound once for both.
+	h.agePastWarmup()
+
+	// (5) A re-armed budget over a row whose check has lapsed: the synthesis
+	// opens on the external leg, which is re-dispatchable, so the operator's
+	// verb has its effect.
+	const reArmTarget = "fixtureGoalLegReArmExternal"
+	reArmEntity := seedMarklessGoalLegFixture(t, ctx, h, reArmTarget, gap, declared)
+
+	// (6) The same re-armed budget over a row whose check is current: the
+	// synthesis opens on the human leg instead, whose task may still be sitting
+	// on someone's queue — and the claimId that would collapse a re-dispatch
+	// onto it died with the mark. Nothing may fire.
+	const humanReArmTarget = "fixtureGoalLegReArmHuman"
+	humanReArmEntity := seedMarklessGoalLegFixture(t, ctx, h, humanReArmTarget, gap,
+		map[string]any{"inflight_x": false, "maxretries_x": 3, "bgFresh": "2026-09-01T00:00:00Z"})
+
+	h.pass(ctx)
+
+	op = h.nextOp(t)
+	if op["operationType"] == nil {
+		t.Fatalf("the re-armed external leg's op names no operation: %v", op)
+	}
+	if !h.markExists(t, ctx, markKey(reArmTarget, reArmEntity, gap)) {
+		t.Fatal("a re-armed external leg dispatches a FRESH episode, which must hold its own mark")
+	}
+	if got := h.countValue(t, ctx, reArmTarget, reArmEntity, gap); got != 1 {
+		t.Fatalf("re-armed budget = %d, want 1: the operator's verb bought one attempt against the leg", got)
+	}
+
+	// The human leg's vector is what the arm must refuse, and it is refused on
+	// the LEG: its goal gap's own entry names no action at all, so an
+	// entry-classified arm reads it as "not collapse-only" and mints a duplicate
+	// task beside the open one.
+	if h.markExists(t, ctx, markKey(humanReArmTarget, humanReArmEntity, gap)) {
+		t.Fatal("an assignTask leg's markless re-arm would mint a duplicate task: no episode may be created")
+	}
+	if got := h.countValue(t, ctx, humanReArmTarget, humanReArmEntity, gap); got != 0 {
+		t.Fatalf("refused re-arm booked %d attempts, want 0", got)
+	}
+	h.requireNoOp(t)
+}
+
 // TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId is the headline
 // behavior of the classifier, and the reason lease-signing's post-timeout
 // bgcheck retry works: the SAME fixture as the two proofs above, except the
@@ -2450,6 +2738,273 @@ func TestSweep_CountLegEscalatesToAugurWithNoMark(t *testing.T) {
 		t.Fatal("an escalated gap must not also hold the un-escalated standing warning")
 	}
 	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegReleasesAMarklessLegUnderSuppression pins the one derivation
+// of a leg boundary that exists nowhere else. The gap is a goal chain whose
+// pinned leg has concluded — its declared effect holds in the row — and whose
+// mark has already gone, while inflight_<g> is TRUE because the same lens fan
+// projects a remediation of some other chain over this row.
+//
+// Every other reader declines that state by construction: lane 1's suppressed
+// arm releases only against a mark (it holds no count revision to condition a
+// markless release's writes on), and the sweep's mark leg never visits a gap
+// with no mark to enumerate. So if this gate withheld the release too, the
+// boundary would wait for a mark that is never coming back, and the chain's next
+// leg with it.
+//
+// A release is not a dispatch, and this vector asserts both halves: the count
+// document — the release's own mutex, and the only durable record of the leg —
+// is gone, and NOTHING was dispatched. The gap stays suppressed and markless,
+// which is exactly the state lane 1 dispatches the next leg from once the row's
+// in-flight column flips.
+func TestSweep_CountLegReleasesAMarklessLegUnderSuppression(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSuppressedRelease"
+	const gap = "missing_x"
+	const leg = "refreshBgcheck"
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID := testNanoID(t)
+
+	// The row the leg concluded on: bgFresh present is refreshBgcheck's declared
+	// effect, and inflight_x true is the suppression the gate acts on.
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant":  "vtx.identity." + testNanoID(t),
+		"bgFresh":    "2026-09-01T00:00:00Z",
+		"inflight_x": true, "maxretries_x": 3,
+	})
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, leg, true, false, true); err != nil {
+		t.Fatalf("seed leg-scoped dispatch-count: %v", err)
+	}
+	if doc := readCount(t, ctx, h.conn, targetID, entityID, gap); doc.Leg != leg {
+		t.Fatalf("setup: the count document must name the leg; got %+v", doc)
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("setup: this vector requires a markless gap")
+	}
+
+	h.pass(ctx)
+
+	if h.countExists(t, ctx, targetID, entityID, gap) {
+		t.Fatalf("the concluded leg's boundary must be recorded even while the gap is suppressed: "+
+			"the count document (count %d) still stands", h.countValue(t, ctx, targetID, entityID, gap))
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("a release is not a dispatch: the suppressed gap must hold no fresh episode's mark")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegLeavesANonGoalSuppressedGapUntouched is the release's
+// negative control, and it differs from the positive vector in the ONE field
+// that decides the question: the gap declares an action rather than a goal, so
+// it has no legs and no boundary to record. Its count document names a leg all
+// the same — an ordinary directOp chain records the ref it dispatched — which is
+// what keeps the vector honest: nothing but the missing goal declines it.
+//
+// A suppressed non-goal gap must leave the pass exactly as it entered it. Its
+// budget is the state the exhaustion gate will one day measure, and deleting it
+// here would silently forgive a chain's whole spent history.
+func TestSweep_CountLegLeavesANonGoalSuppressedGapUntouched(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSuppressedNonGoal"
+	const gap = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{gap: {Action: actionTriggerLoom, Pattern: "someFlow", Subject: "row.entityKey"}},
+	})
+	entityID := testNanoID(t)
+	row := exhaustedRow(entityID, gap, 3)
+	row["inflight_x"] = true
+	h.putRow(t, ctx, targetID, entityID, row)
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, "someFlowLeg", true, false, false); err != nil {
+		t.Fatalf("seed dispatch-count: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if !h.countExists(t, ctx, targetID, entityID, gap) {
+		t.Fatal("a suppressed gap that declares no goal has no leg boundary to record, so its budget must survive the pass")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, gap); got != 1 {
+		t.Fatalf("dispatch-count = %d, want 1: the pass must not touch a non-goal gap's budget", got)
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, gap)) {
+		t.Fatal("a suppressed gap must not be dispatched")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_MarkLegReleasesWithoutAdvancingUnderSuppression is the mark leg's
+// half of "a release is not a dispatch, but an ADVANCE is". The gap holds an
+// expired mark pinning refreshBgcheck, that leg's declared effect (bgFresh) now
+// holds in the row, and inflight_x is TRUE — the row's own statement that a call
+// is still outstanding over this gap.
+//
+// The boundary is owed: the leg has already run, and the suppression gate governs
+// only what may be STARTED, so the mark and its budget must go. The next leg is
+// not owed at all. Advancing here would plan from the released state and fire a
+// second episode at the vendor while the first call is still in flight — the one
+// outcome inflight_<g> exists to prevent — and it would do so from ABOVE the
+// gate that refuses exactly that a few lines below, where a reclaim of this same
+// gap would be stopped cold.
+//
+// Nothing is stranded by the hold. Both keys are gone, so neither sweep leg
+// enumerates this gap again — but inflight_x is a column of THIS row, so the only
+// thing that can lift the suppression is a write to the row, and that write is a
+// lane-1 delivery, arriving at a markless, pinless gap: a fresh episode, chain
+// advanced. TestSweep_MarkLegReleasesAndAdvancesWithNothingInFlight is the same
+// vector with that one column false, and it dispatches.
+func TestSweep_MarkLegReleasesWithoutAdvancingUnderSuppression(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.engine.source.mu.Lock()
+	h.engine.source.opMetaByType["SignLease"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+
+	const targetID = "fixtureMarkLegSuppressedAdvance"
+	const gap = "missing_x"
+	const claimID = "Hj3Kd4Zx5Cv6Bn7Mq8Ws"
+	entityID, key := seedGoalLegFixture(t, ctx, h, targetID, gap, "refreshBgcheck", claimID,
+		map[string]any{"bgFresh": "2026-09-01T00:00:00Z", "inflight_x": true, "maxretries_x": 3})
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, "refreshBgcheck", true, false, true); err != nil {
+		t.Fatalf("seed leg-scoped dispatch-count: %v", err)
+	}
+
+	h.pass(ctx)
+
+	// The advance first, because it is the half that acts on the world: a second
+	// call against the vendor while the first is outstanding.
+	h.requireNoOp(t)
+	if h.markExists(t, ctx, key) {
+		t.Fatal("the concluded leg's boundary is owed whatever is in flight: the mark must be released, " +
+			"and nothing may have re-marked the gap")
+	}
+	if h.countExists(t, ctx, targetID, entityID, gap) {
+		t.Fatalf("a released leg takes its budget with it; the count document (count %d) still stands",
+			h.countValue(t, ctx, targetID, entityID, gap))
+	}
+}
+
+// TestSweep_MarkLegReleasesAndAdvancesWithNothingInFlight is the control for the
+// vector above, differing in the single column that decides the question:
+// inflight_x reads false, so no call is outstanding and the chain's next leg is a
+// dispatch the gap may take. The release must still happen, and the advance must
+// follow it in the SAME pass — the sweep enumerates marks, so a released gap left
+// markless here would be invisible until an unrelated row write, and none is
+// guaranteed once the write that satisfied this leg's effect has landed.
+func TestSweep_MarkLegReleasesAndAdvancesWithNothingInFlight(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	h.engine.source.mu.Lock()
+	h.engine.source.opMetaByType["SignLease"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+
+	const targetID = "fixtureMarkLegAdvance"
+	const gap = "missing_x"
+	const claimID = "Hj3Kd4Zx5Cv6Bn7Mq9Ws"
+	entityID, _ := seedGoalLegFixture(t, ctx, h, targetID, gap, "refreshBgcheck", claimID,
+		map[string]any{"bgFresh": "2026-09-01T00:00:00Z", "inflight_x": false, "maxretries_x": 3})
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gap, "refreshBgcheck", true, false, true); err != nil {
+		t.Fatalf("seed leg-scoped dispatch-count: %v", err)
+	}
+
+	h.pass(ctx)
+
+	// The advance is a genuinely fresh episode: an op on the wire, and a mark
+	// pinning the NEXT leg (signRenewal, whose precondition the released leg's
+	// effect just satisfied) rather than the released one.
+	h.nextOp(t)
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil || !found {
+		t.Fatalf("the advance must leave a fresh mark: err=%v found=%v", err, found)
+	}
+	if rec.Action != "signRenewal" {
+		t.Fatalf("the fresh mark pins %q, want the chain's next leg signRenewal", rec.Action)
+	}
+	if rec.ClaimID == claimID || rec.ClaimID == "" {
+		t.Fatalf("the advance is a new episode, not the released one re-armed: claimId %q (seeded %q)",
+			rec.ClaimID, claimID)
+	}
+}
+
+// TestSweep_ReclaimOfAnActionlessGoalMarkKeepsItsClaimID pins the reclaim's
+// fail-closed direction for a mark that records no action at all. A goal gap's
+// leg is resolved from the PIN, and a mark with no pin names no leg: resolving
+// one anyway routes the goal gap into a FRESH synthesis, which hands the reclaim
+// a leg the episode was never dispatched on. That synthesized leg would then
+// decide staleMark's external verdict and, through it, mint a fresh claimId over
+// an artifact the original dispatch may still have open — a duplicate, derived
+// from a plan nothing ever fired.
+//
+// The row declares inflight_x (false) and a usable cap, so every other term that
+// could withhold the fresh claimId is out of the way: the mint is gated on the
+// resolution alone, and the seeded claimId surviving the reclaim is the proof
+// that no leg was synthesized for it.
+func TestSweep_ReclaimOfAnActionlessGoalMarkKeepsItsClaimID(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+
+	const targetID = "fixtureActionlessGoalMark"
+	const gap = "missing_x"
+	const claimID = "Tr5Yu6Ae7Pa8Sd9Fg1Hj"
+	h.seedTarget(goalLegExternalTarget(t, targetID, gap))
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, gap)
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		"applicant":  "vtx.identity." + testNanoID(t),
+		"inflight_x": false, "maxretries_x": 3,
+	})
+	m := fixtureMark(targetID, entityID, gap, "", pastLease())
+	m.ClaimID = claimID
+	h.putMark(t, ctx, key, m)
+
+	h.pass(ctx)
+
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID != claimID {
+		t.Fatalf("a mark recording no action names no leg to classify, so the reclaim must preserve its claimId "+
+			"verbatim; got %q (seeded %q)", rec.ClaimID, claimID)
+	}
 }
 
 // TestSweep_CountLegDefersToTheMarkLeg pins WHERE the mark-listed guard sits:
