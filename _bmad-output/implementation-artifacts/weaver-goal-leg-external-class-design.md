@@ -732,3 +732,39 @@ Not touched: the suppression gate's ordering (`gapSuppressionTerms`, `evaluator.
 (rows 9/10 must stay byte-identical); `collapseOnlyReclaim`'s own body; the `proposedOp` recorded
 disagreement (row 14); the install-time validator (§8 row 7); the lost-after-accept limit (§10) — the
 presence-based column's posture, not this fire's. No `docs/contracts/*` edit.
+
+## 15. Close (2026-09-07) — shipped, and what the reviews classified
+
+Merged `428c385`, CI run 34109879154 green (13/13). Increments 1–3 per §11, plus what the fire's four
+cold passes earned. Landing shape: one branch, merged once.
+
+**Deviations from §11, all recorded above where they bite:** the design's own line anchors had all drifted
+(§14.2); `resolvedLegAction` had three callers, not two, the third inert; §3.3 row 8's `planError` kind was
+`errConfig`, not `unplannable`; and §3.5's backstop, its "one check rather than two", and its "suppressed
+while healthy" were falsified and are struck or qualified in place.
+
+**Findings by class** — 4 reviews, 1 BLOCKING (a record defect, not code), 4 MAJOR, 9 MINOR:
+
+- **design-gap (3)** — the leg-scoped column's own price in the `(inflight, window-present)` quadrant; the
+  backstop covering an unreachable state; the release/advance distinction the design never drew. The third
+  is the substantive one and is now the component doc's rule.
+- **implementation-bug (2)** — the sweep's mark leg advancing above its suppression gate (a duplicate vendor
+  call, live the moment the column shipped); the reclaim's hoisted resolution missing lane 1's pin guard.
+- **test-gap (3)** — two cypher terms inert under all four vectors; the markless re-arm site revert-proof
+  green; the gate's own index derivation untested.
+- **gate-defect (2)** — the classify gate read the call's last argument, and rejected `var leg GapAction`.
+- **record-defect (2)** — the design asserting the opposite of the code; a "filed as its own row" claim with
+  no row.
+
+**Routed:** the release-vs-advance class is the dossier's *retire-above-guard* entry, fourth minting — one
+instance stays open (the same advance above the `violating` gate) and rides the row that files the gate to
+mechanize it. The two board rows are that gate and a markless goal gap losing its effect-close credit.
+
+**Two review claims corrected rather than accepted:** the count-leg reorder does not make its doc claim true
+(the marked branch's two writes leave the window open regardless), and MAJOR 1's harm is deferred bookkeeping
+rather than a blocked chain — with the window null the planner's next leg is the external one, correctly
+suppressed either way.
+
+**Not verified here:** the live-stack path. `verify-kernel` and `verify-package-lease-signing` need a stack
+this container cannot bring up (REMOTE.md §3); CI's `stack-gates` job ran both green. `bin/weaver` and
+`bin/lattice` are the binaries this change ships in and need rebuilding wherever a stack is running.
