@@ -359,6 +359,120 @@ func TestRenewalComplete_BgcheckValidUntil_TakesTheLatestUnlapsed(t *testing.T) 
 		"the max folds over UNLAPSED checks only, so the lapsed one never decides the column")
 }
 
+// inflightBgcheck seeds a background-check instance the adapter has accepted —
+// a vendorRef recorded, no outcome yet — which is the presence-based "in flight"
+// this package's in-flight columns all count.
+func inflightBgcheck(t *testing.T, f *lensFixture, name string) {
+	t.Helper()
+	f.vtxWithClass(t, name, "service", "service.backgroundCheck.instance")
+	f.aspect(t, name, "dispatch", "dispatch", map[string]any{"vendorRef": "vendor-ref-1", "adapter": "backgroundCheck"})
+}
+
+// TestRenewalComplete_InflightIsLegScoped pins the shape of
+// inflight_renewalComplete, which is NOT the bare in-flight fact the static
+// target's inflight_bgcheck is. renewalComplete is a goal target over a mixed
+// catalog — refreshBgcheck dispatches externally, verifyGuarantor / setTerms /
+// signRenewal are human tasks — and Weaver answers its suppression gate on this
+// column before it binds a leg. So the column is the in-flight fan conjoined
+// with the external leg's unmet effect (bgcheckValidUntil = null): true only
+// while the check is what the chain is still waiting on.
+//
+// Every vector asserts a REAL Go false rather than require.False, because
+// Weaver's boolColumn reads the value off the row body and an omitted or null
+// column is a different fact from a declared false — the same null-folding
+// lesson renewalCompleteSpec's hasGuarantor term carries.
+func TestRenewalComplete_InflightIsLegScoped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	// (i) A check in flight with no current window is the state the column
+	// exists for: refreshBgcheck is the leg the chain is waiting on, and a
+	// second call against the same vendor must be suppressed.
+	t.Run("in flight with no current check", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+		inflightBgcheck(t, f, "bg1")
+		f.edge(t, "providedTo", "bg1", "tina")
+
+		v := f.projectRenewalComplete(t, "rn")[0].Values
+		require.Nil(t, v["bgcheckValidUntil"], "an undelivered check opens no window")
+		require.Equal(t, true, v["inflight_renewalComplete"],
+			"the external leg is the one the chain is waiting on -> suppress a second dispatch")
+	})
+
+	// (ii) The vector that pins the SCOPING. With a current window the fresh
+	// leg is a human one (setTerms has no pre and the lowest cost), and the
+	// suppression gate reads this column before any leg is bound — so a bare
+	// (bgInflight > 0) here would park the landlord's and the tenant's tasks
+	// behind a stray check running for the same tenant, one the static
+	// leaseApplicationComplete target may well have dispatched.
+	t.Run("in flight beside a current check", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+		completedBgcheck(t, f, "bg1", farFutureValidUntil)
+		f.edge(t, "providedTo", "bg1", "tina")
+		inflightBgcheck(t, f, "bg2")
+		f.edge(t, "providedTo", "bg2", "tina")
+
+		v := f.projectRenewalComplete(t, "rn")[0].Values
+		require.Equal(t, farFutureValidUntil, v["bgcheckValidUntil"], "the completed check holds the window open")
+		require.Equal(t, false, v["inflight_renewalComplete"],
+			"the external leg's effect is already met, so a check still in flight must not suppress the HUMAN legs")
+	})
+
+	// (iii) The payoff state. A check that concluded WITHOUT success is not in
+	// flight, so the reclaim is free to mint a fresh claimId and call the vendor
+	// again, bounded by maxretries_renewalComplete.
+	t.Run("concluded without success", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+		f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
+		f.aspect(t, "bg1", "dispatch", "dispatch", map[string]any{"vendorRef": "vendor-ref-1", "adapter": "backgroundCheck"})
+		f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "failed", "completedAt": "2026-06-01T00:00:00Z"})
+		f.edge(t, "providedTo", "bg1", "tina")
+
+		v := f.projectRenewalComplete(t, "rn")[0].Values
+		require.Nil(t, v["bgcheckValidUntil"], "a failed check opens no window")
+		require.Equal(t, false, v["inflight_renewalComplete"],
+			"a concluded-without-success check is not in flight -> the leg may be retried")
+	})
+
+	// (iv) The undeclared-vs-false vector. With no instance at all the column
+	// must still project a real false: an absent column reads to Weaver's guard
+	// as "this target declares no in-flight companion", which is what makes
+	// staleMark refuse to reclaim anything on the gap.
+	t.Run("no instance at all", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+
+		rows := f.projectRenewalComplete(t, "rn")
+		require.Len(t, rows, 1)
+		require.Equal(t, false, rows[0].Values["inflight_renewalComplete"],
+			"a declared false, not an omitted column — the empty count must fold to a real boolean")
+	})
+}
+
+// TestRenewalComplete_DeclaresTheInflightCompanion pins the DESCRIPTOR half:
+// the cypher's column only reaches Weaver if the output descriptor names it,
+// and staleMark's first guard reads exactly that declaration — an undeclared
+// inflight_<g> makes the predicate answer false before it ever classifies the
+// gap's dispatch. Its maxretries_<g> partner is asserted beside it because
+// §10.3's pair is what a bounded external retry needs; either alone is inert.
+func TestRenewalComplete_DeclaresTheInflightCompanion(t *testing.T) {
+	var cols []string
+	for _, l := range Lenses() {
+		if l.CanonicalName == "renewalComplete" {
+			cols = l.Output.BodyColumns
+		}
+	}
+	require.NotEmpty(t, cols, "renewalComplete must be declared")
+	require.Contains(t, cols, "inflight_renewalComplete",
+		"the suppression/stale companion must be declared, not merely returned by the cypher")
+	require.Contains(t, cols, "maxretries_renewalComplete",
+		"the §10.3 companion pair — the in-flight fact plus the retry cap that bounds the reclaim")
+}
+
 // --- the derived-anchor payoff, statically -----------------------------------
 
 // TestPostgresReadModels_DerivationRefusalReasons pins WHY each of the two

@@ -189,6 +189,21 @@ The same recorded fact is read by the two Postgres read models (through the shar
 None of those anchors could host the marker — they all reach the check across a
 `providedTo` hop — which is exactly why the check hosts it itself.
 
+That same window decides how `renewalComplete` reports a check **in flight**. Its
+`inflight_renewalComplete` companion is `(bgInflight > 0) AND (bgcheckValidUntil = null)`:
+the presence-based in-flight fan `leaseApplicationComplete` already computes, conjoined
+with the unmet effect of the one leg that dispatches externally (`refreshBgcheck`). The
+conjunct is load-bearing because `renewalComplete` is a **goal** target over a mixed
+catalog — one external leg beside three human ones — and Weaver answers the suppression
+gate on the column *before* it binds a leg. The bare in-flight fact would therefore park
+the landlord's terms and the tenant's signature behind any background check running for
+the same tenant, including the static target's own check reached through the identical
+`providedTo` hop. Scoped, the column reads true only while the check is what the chain is
+still waiting on — which is what "a remediation for this gap is already in flight" means
+once the gap has more than one leg. It pairs with `maxretries_renewalComplete` (6): the
+two together are what let an expired episode of a concluded-but-unsuccessful check be
+reclaimed as a genuinely fresh call rather than collapsing back onto the failed instance.
+
 The `bgcheckFreshnessWindow` is a **compile-time** constant baked into the replyOp DDL
 script at package-init time (the value is interpolated into `leaseServiceReplyDDLScript`
 by a package-level `var`, so it cannot be mutated at runtime). The production default
