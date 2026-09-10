@@ -473,6 +473,12 @@ a Lattice fire must not build it. Filed as a **second** Loupe row, distinct from
 **Sequencing, binding rather than advisory:** that row must land **with or before** Inc 2. §11 carries the
 constraint. This is the one place where this design cannot ship its own correctness inside one lane.
 
+**Shipped 2026-09-10 (`dafa7b83`, Loupe lane):** `flowLiveness`'s badge no longer derives "orphaned" from
+bulk `loom.list` absence alone — a "running" row missing from the bulk snapshot now falls back to a per-id
+`InspectInstance` read (`cmd/loupe/flows.go`'s `inspectLoomInstanceStatus`) before badging. The sequencing
+constraint above is satisfied; Inc 2 is unblocked on this leg. (The sibling §2.1 presence-probe defect —
+`weaverArtifactLive` — shipped in the same commit.)
+
 ## 8. Alternatives
 
 **Row 1, as the discipline requires: do not have the thing.**

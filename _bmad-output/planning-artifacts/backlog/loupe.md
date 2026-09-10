@@ -32,10 +32,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 ## Component maintenance
 
-| Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
-| **A Weaver gap's flow artifact reads `Live: true` forever** | `weaverArtifactLive`'s `"flow"` arm returns `err == nil` on a bare presence GET of the Loom cursor, which persists after terminal by design — so every completed/failed Weaver-triggered flow renders live. Its `"task"` arm has the same shape over a soft-tombstoned vertex. | ★★ | XS | 📋 ready · filed by the Lattice designer · [why](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md) §2.1 |
-| **Flows-tab liveness must not read absence from the engine list as orphaned** | `flowLiveness` branches on absence before status, so once the control plane lists only running + failed instances, every completed flow flips from `stale-history` to `orphaned` during lens catch-up. Badge a still-running history row by id (`InspectInstance`), never by list membership. | ★★ | S | 📋 ready · seq: lands before the Loom enumeration fire's Inc 2 · [why](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md) §7.1 |
+Open items only — both prior rows here shipped `dafa7b83` (Done log below).
 
 ## Parked
 
@@ -70,6 +67,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-10 · `dafa7b83` · [Loupe/maint] `weaverArtifactLive` + `flowLiveness` decode Status/isDeleted and fall back to per-id `InspectInstance` instead of bare presence/absence. Tests, live-verified, CI green
 - 2026-08-21 · `2df02bfd` · [Loupe/NL-2] Weaver Studio Describe panel (NL intent → `RequestCapabilityAuthoring`) + Load-into-Author hydration; fixes the Studio apply path (newPackage + resolved lensRef + target-only propose). Tests, CI green
 - 2026-08-21 · `3c185e9b` · [Loupe/maint] `retentionKeyStatus` operator surface — `/api/vault/retention-keys` + Vault page Retention classes panel. Tests, live-verified, CI green
 - 2026-08-21 · `6d34b1d3` · [Loupe/maint] `protectedFlag` — a malformed (non-bool) `targetConfig.protected` now reads as protected, not silently unprotected. Tests, CI green
@@ -100,5 +98,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-18 · `569f06af` · [Loupe/maint] designAhead trio flip — Gateway/Vault/Chronicler `designAhead`→`optional`; down-state "offline", everLive crash→absent-red preserved. Tests, live-verified, CI green
 - 2026-07-18 · `0f292d43` · [Loupe/F16.2] Capability approve+apply — server-side re-validation (Option A) + two-commit F-004 install, closing F16. Embedded-NATS tests; headless-verified. Lead self-review, CI green
 - 2026-07-18 · `d010fe60` · [Loupe/F16.3] AI review console — Augur escalation tab, queue + detail + approve + reject (`#/review/augur`), shares F16.1's card renderer. Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
-- 2026-07-18 · `d37e86b` · [Loupe/F16.1] AI review console — capability queue + detail + reject (`#/review`). Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
-Older entries (F1–F15, F13, F12 inc.3, deploy) rolled to [`archive/loupe-done.md`](archive/loupe-done.md).
+Older entries (F1–F16.1, F13, F12 inc.3, deploy) rolled to [`archive/loupe-done.md`](archive/loupe-done.md).
