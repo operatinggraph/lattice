@@ -958,6 +958,19 @@ on Andrew's next stack cycle — the positive verdict to read is `DerivationArme
 `retractionTransport=diffRetraction-partition` on the heartbeat for `landlordLeaseApplicationsRead`, and a
 `Delete` outcome in the log after withdrawing a co-manager's `manages` link.
 
+**Live close pass (2026-09-10, steward, main checkout).** The running `bin/refractor` predated this fire's
+merge (built 2026-09-05); `make cycle-refractor` relaunched it from `main`. Heartbeat for
+`landlordLeaseApplicationsRead`: `retractionTransport=diffRetraction-partition` from activation,
+`derivationArmed=true` 26 minutes later — the licence's auditor conjunct reads a never-passed auditor as
+stale, so every partition lens is unlicensed from a restart until the divergence audit's first pass reaches
+it (15-minute cadence); an operator reading `derivationArmed=false` inside that window is reading the
+designed fail-closed posture, not a refusal. Then a live `CreateLeaseApplication` (an applicant applying to a
+unit the landlord manages) was in both `read_lease_applications` and `read_landlord_lease_applications`
+within 1 s with `projectionHealthy: true`, and `WithdrawLeaseApplication` tombstoned the landlord row
+(`is_deleted`, `deleted_at` set) on the first poll — the partition-scoped `Delete`, proven through the row
+the withdrawal orphans rather than a `manages` withdrawal. Verticals' landlord-visibility row closes to its
+Done log.
+
 **Closing pass (cumulative, one cold reviewer over the whole item diff) — one BLOCKING, fixed before merge.**
 `partitionArmed` had gained a LIVE conjunct (the audit half) while `rs` is one snapshot per event, and one frame
 asked it at three points (the seed decision, the multi-position producer, the tail). An auditor tick landing

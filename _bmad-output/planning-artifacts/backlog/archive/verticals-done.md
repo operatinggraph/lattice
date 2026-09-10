@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-05 · `13bb0329` · The tenant's Sign renewal button is enabled by their assigned `SignRenewal` task, not the write guard alone — platform half live via Weaver `89b61556` (task assigned 22:09Z, term ends 09-06).
 - 2026-09-05 · `97f4a5cc` · The Care→Wellness referral picker offers only classes that can still be booked (CreateBooking's `submitted < startsAt`), soonest-first — live 48 rows → 3.
 - 2026-09-05 · (re-measure at head) · LoftSpace landlord `SetRenewalTerms` 20/20, 0 timeouts, median 28.5 ms, max 85 — §9 PASS; cause = the fixed Refractor flood days; `step5-latency` tripwire lands with Inc A (lattice lane).
 - 2026-09-05 · (re-measure at head) · Café staff `Charge` 20/20, 0 timeouts, median 86.5 ms, max 193 (resident 41 ms; staff `VoidCharge` ×30 median 55) — §9 PASS, thinnest margin of the three.
