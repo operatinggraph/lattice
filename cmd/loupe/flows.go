@@ -110,6 +110,16 @@ func decodeFlowCols(raw []byte) (flowCols, bool) {
 	return cols, true
 }
 
+// engineInspector resolves the engine's authoritative view of one instance by
+// id — the InspectInstance path, "always answerable while its record exists,
+// whatever its state" (loom-instance-enumeration-bounding-design.md §7.1's
+// closing sentence). computeFlows reaches for it only as a fallback: bulk
+// `loom.list` ABSENCE is never, on its own, grounds for "orphaned" (a
+// bounded list can drop a just-completed instance while the read model is
+// still catching up) — only a miss on the per-id read is. found is false on
+// any read/decode failure, matching the bulk path's best-effort posture.
+type engineInspector func(instanceID string) (status string, found bool)
+
 // computeFlows assembles the Flows-tab rows from the orchestration-history
 // bucket's keys (each key is a bare instanceId per the Fire-2 as-built row
 // key). A row that fails to decode is skipped — a durable read model
@@ -119,9 +129,12 @@ func decodeFlowCols(raw []byte) (flowCols, bool) {
 // reports for it; engineKnown is false when that control read itself failed
 // (§2.5.2: a terminal row is never badged regardless — it is just done — and a
 // "running" row stays unbadged, not falsely "orphaned", when the engine's
-// answer is unavailable). patternName resolves a patternRef to its human
-// name; nil leaves every name empty.
-func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string, engineKnown bool, statusFilter string, patternName func(string) string) []flowRow {
+// answer is unavailable). A "running" row absent from engineStatuses falls
+// back to inspect (nil skips the fallback, e.g. in tests that already supply
+// a complete engineStatuses snapshot) rather than badging orphaned off bulk
+// membership alone. patternName resolves a patternRef to its human name; nil
+// leaves every name empty.
+func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string, engineKnown bool, statusFilter string, patternName func(string) string, inspect engineInspector) []flowRow {
 	rows := make([]flowRow, 0)
 	for _, k := range keys {
 		raw, ok := get(k)
@@ -145,6 +158,11 @@ func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string,
 			FailureReason: cols.FailureReason,
 		}
 		engineStatus, engineHas := engineStatuses[row.InstanceID]
+		if row.Status == "running" && engineKnown && !engineHas && inspect != nil {
+			if st, found := inspect(row.InstanceID); found {
+				engineStatus, engineHas = st, found
+			}
+		}
 		row.Liveness = flowLiveness(row.Status, engineStatus, engineKnown, engineHas)
 		if engineHas {
 			row.EngineStatus = engineStatus
@@ -226,6 +244,34 @@ func readLoomPatternSpec(get kvGetter, patternRef string) *loomPatternSpec {
 		return nil
 	}
 	return &spec
+}
+
+// inspectLoomInstanceStatus issues the per-id `loom.<id>.inspect` control
+// read and decodes just its status — the same reply shape handleFlowDetail
+// decodes inline, factored out so computeFlows' per-id fallback (an
+// engineInspector) can share it. found is false on any subject-build,
+// request, or decode failure, so a control-plane hiccup never fabricates a
+// verdict — the caller's existing bulk-list result stands instead.
+func (s *server) inspectLoomInstanceStatus(ctx context.Context, conn *substrate.Conn, id string) (status string, found bool) {
+	subject, err := mutateSubject("loom", id, "inspect")
+	if err != nil {
+		return "", false
+	}
+	raw, err := s.controlRequest(ctx, conn, subject)
+	if err != nil {
+		return "", false
+	}
+	var reply struct {
+		Instance *struct {
+			Instance struct {
+				Status string `json:"status"`
+			} `json:"instance"`
+		} `json:"instance"`
+	}
+	if json.Unmarshal(raw, &reply) != nil || reply.Instance == nil {
+		return "", false
+	}
+	return reply.Instance.Instance.Status, true
 }
 
 // handleFlowDetail implements GET /api/flows/<instanceId>: one flow's history
@@ -488,7 +534,10 @@ func (s *server) handleHistoryTimeline(w http.ResponseWriter, r *http.Request) {
 // is best-effort: a control-plane read failure still returns the history
 // rows, just with every "running" row left unbadged (liveKnown=false), since
 // the read model is the authoritative list and the live check is enrichment
-// only — an outage must never render as a false "orphaned" verdict.
+// only — an outage must never render as a false "orphaned" verdict. A
+// "running" row the bulk list doesn't carry falls back to a per-id inspect
+// (computeFlows' engineInspector) rather than badging orphaned off bare
+// absence — see loom-instance-enumeration-bounding-design.md §7.1.
 func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -519,8 +568,10 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		engineKnown = true
 	}
 
+	inspect := func(id string) (string, bool) { return s.inspectLoomInstanceStatus(ctx, conn, id) }
+
 	statusFilter := r.URL.Query().Get("status")
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"flows": computeFlows(keys, get, engineStatuses, engineKnown, statusFilter, s.patternNameResolver(ctx, conn)),
+		"flows": computeFlows(keys, get, engineStatuses, engineKnown, statusFilter, s.patternNameResolver(ctx, conn), inspect),
 	})
 }

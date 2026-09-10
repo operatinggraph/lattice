@@ -671,3 +671,47 @@ func TestBuildTargetDetailCarriesDescription(t *testing.T) {
 		t.Errorf("detail description = %q", d.Description)
 	}
 }
+
+// TestFlowCursorLive pins the defect loom-instance-enumeration-bounding-
+// design.md §2.1 names: a loom-state instance cursor persists after terminal
+// by design, so bare presence is not liveness — only a decoded Status of
+// "running" is.
+func TestFlowCursorLive(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+		want bool
+	}{
+		{"running cursor is live", []byte(`{"status":"running"}`), true},
+		{"complete cursor is not live", []byte(`{"status":"complete"}`), false},
+		{"failed cursor is not live", []byte(`{"status":"failed"}`), false},
+		{"malformed body is not live", []byte(`not json`), false},
+		{"empty body is not live", []byte(``), false},
+	}
+	for _, c := range cases {
+		if got := flowCursorLive(c.raw); got != c.want {
+			t.Errorf("%s: flowCursorLive = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestTaskVertexLive pins the sibling defect §2.1 flags but does not pin
+// itself: a task vertex is soft-tombstoned (isDeleted flips, the document
+// stays), so a successful KVGet on it is presence, not liveness.
+func TestTaskVertexLive(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+		want bool
+	}{
+		{"no isDeleted field defaults live", []byte(`{"data":{"status":"open"}}`), true},
+		{"isDeleted false is live", []byte(`{"isDeleted":false,"data":{}}`), true},
+		{"isDeleted true is a tombstone, not live", []byte(`{"isDeleted":true,"data":{}}`), false},
+		{"malformed body is not live", []byte(`not json`), false},
+	}
+	for _, c := range cases {
+		if got := taskVertexLive(c.raw); got != c.want {
+			t.Errorf("%s: taskVertexLive = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

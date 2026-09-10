@@ -43,7 +43,7 @@ func TestComputeFlows(t *testing.T) {
 	}
 
 	t.Run("all rows, poison skipped, newest-started first", func(t *testing.T) {
-		rows := computeFlows(keys, get, engine, true, "", names)
+		rows := computeFlows(keys, get, engine, true, "", names, nil)
 		if len(rows) != 5 {
 			t.Fatalf("want 5 flows (poison entry skipped), got %d: %+v", len(rows), rows)
 		}
@@ -53,7 +53,7 @@ func TestComputeFlows(t *testing.T) {
 	})
 
 	t.Run("status filter limits to one status", func(t *testing.T) {
-		rows := computeFlows(keys, get, engine, true, "failed", names)
+		rows := computeFlows(keys, get, engine, true, "failed", names, nil)
 		if len(rows) != 1 {
 			t.Fatalf("want 1 failed flow, got %d", len(rows))
 		}
@@ -63,20 +63,20 @@ func TestComputeFlows(t *testing.T) {
 	})
 
 	t.Run("the pattern ref resolves to its canonical name", func(t *testing.T) {
-		rows := computeFlows(keys, get, engine, true, "failed", names)
+		rows := computeFlows(keys, get, engine, true, "failed", names, nil)
 		if rows[0].PatternName != "identityOnboarding" {
 			t.Errorf("patternName = %q, want the resolved canonicalName", rows[0].PatternName)
 		}
 		// An unresolvable ref leaves the name empty so the card can fall back
 		// to the raw ref rather than rendering a blank title.
-		blank := computeFlows(keys, get, engine, true, "failed", func(string) string { return "" })
+		blank := computeFlows(keys, get, engine, true, "failed", func(string) string { return "" }, nil)
 		if blank[0].PatternName != "" || blank[0].PatternRef == "" {
 			t.Errorf("unresolved = %+v, want an empty name over a preserved ref", blank[0])
 		}
 	})
 
 	t.Run("liveness reads the engine's status, not its memory of the id", func(t *testing.T) {
-		rows := computeFlows(keys, get, engine, true, "running", names)
+		rows := computeFlows(keys, get, engine, true, "running", names, nil)
 		byID := map[string]flowRow{}
 		for _, r := range rows {
 			byID[r.InstanceID] = r
@@ -101,18 +101,60 @@ func TestComputeFlows(t *testing.T) {
 	})
 
 	t.Run("terminal row is never badged even though Loom still lists it", func(t *testing.T) {
-		rows := computeFlows(keys, get, engine, true, "complete", names)
+		rows := computeFlows(keys, get, engine, true, "complete", names, nil)
 		if len(rows) != 1 || rows[0].Liveness != "" {
 			t.Fatalf("a terminal row must never be badged, got %+v", rows)
 		}
 	})
 
 	t.Run("running row stays unbadged, not falsely orphaned, when the control read failed", func(t *testing.T) {
-		rows := computeFlows(keys, get, nil, false, "running", names)
+		rows := computeFlows(keys, get, nil, false, "running", names, nil)
 		for _, r := range rows {
 			if r.Liveness != "" {
 				t.Errorf("row %q should be unbadged when the engine's answer is unknown, got %q", r.InstanceID, r.Liveness)
 			}
+		}
+	})
+
+	t.Run("a running row absent from the bulk list falls back to a per-id inspect, not bare orphaned", func(t *testing.T) {
+		// "orphan00000000000" is missing from `engine` (the bulk snapshot) —
+		// the defect loom-instance-enumeration-bounding-design.md §7.1 names:
+		// once ListInstances is bounded, a just-completed instance drops out
+		// of the bulk list while its history row still reads "running". The
+		// per-id inspect is Loom's authoritative answer and must win.
+		inspect := func(id string) (string, bool) {
+			if id == "orphan00000000000" {
+				return "complete", true
+			}
+			return "", false
+		}
+		rows := computeFlows(keys, get, engine, true, "running", names, inspect)
+		byID := map[string]flowRow{}
+		for _, r := range rows {
+			byID[r.InstanceID] = r
+		}
+		if got := byID["orphan00000000000"].Liveness; got != livenessStaleHistory {
+			t.Errorf("inspect says Loom finished this instance: liveness = %q, want %q", got, livenessStaleHistory)
+		}
+		if got := byID["orphan00000000000"].EngineStatus; got != "complete" {
+			t.Errorf("engineStatus = %q, want the inspect answer carried through", got)
+		}
+		// A row already present in the bulk list must not pay for an inspect
+		// call at all — the fallback is for absence only.
+		if got := byID["running0000000000"].Liveness; got != livenessLive {
+			t.Errorf("bulk-list hit should not be overridden: liveness = %q, want %q", got, livenessLive)
+		}
+	})
+
+	t.Run("an inspect miss still falls back to orphaned", func(t *testing.T) {
+		inspect := func(id string) (string, bool) { return "", false }
+		rows := computeFlows(keys, get, engine, true, "running", names, inspect)
+		byID := map[string]flowRow{}
+		for _, r := range rows {
+			byID[r.InstanceID] = r
+		}
+		if got := byID["orphan00000000000"].Liveness; got != livenessOrphaned {
+			t.Errorf("inspect also has no record: liveness = %q, want %q", got, livenessOrphaned)
 		}
 	})
 }
