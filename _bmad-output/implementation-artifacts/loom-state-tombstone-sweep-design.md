@@ -572,6 +572,11 @@ row** (`📐 needs designer pass`). This fire's guard closes the instance it wou
 ([`platform-bucket-marker-ttl-design.md`](platform-bucket-marker-ttl-design.md) §3.2) bounds `loom-state`'s
 window at one hour precisely so that raising it cannot reach this gap; it does not close it.*
 
+*2026-09-10 — re-derived: the armed/disarmed fact retires nothing the invariant does not (it is written at the
+first probe, which in the only uncovered scenario — a marker the server mints late after a day-long outage — IS
+the late one). The close is a stale-evidence guard on the fail verdict;
+[`docs/reviews/lattice-designer-triage-2026-09-10.md`](../../docs/reviews/lattice-designer-triage-2026-09-10.md) §3.*
+
 ## 12. Decomposition for the Steward
 
 **One Lattice fire; Inc 1–4 are its parts.** Inc 1 and 2 touch `state.go`'s `transition` from two sides; Inc 3

@@ -213,6 +213,9 @@ the window in which its signal survives grows. No frozen-contract edit is staged
   `📐 needs designer pass · no-pattern: an armed/disarmed deadline fact on the instance record,
   readable across redrive/replay`. This fire's §3.2 invariant is what keeps the gap out of reach at
   the chosen value; it does not close it.
+  *2026-09-10 — the row's mechanism was re-derived and declined (it cannot see a late-minted marker, the one
+  delivery the invariant leaves open); the close is a stale-evidence guard —
+  [`lattice-designer-triage-2026-09-10.md`](../../docs/reviews/lattice-designer-triage-2026-09-10.md) §3.*
 - **~~`internal/loom/engine.go:171-175`'s comment is inexact.~~ — WITHDRAWN 2026-09-07, the claim in
   this bullet was itself the error.** It asserted that on a `MaxMsgsPer == 1` bucket a sub-second
   per-key TTL *"expires on time and does arm a marker"*, citing `stream.go:6890-6897`. That cite is

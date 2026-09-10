@@ -293,6 +293,12 @@ therefore **must** refuse it, and does. **Increment 2 converts `edgeManifestStaf
 which the shared `edgeCatalogTail` (`op` and `role` by name) makes a real mechanism question rather
 than a rename — filed as its own 📐 designer row. §6.1, §6.3, §13 and §14 are amended to match.
 
+*2026-09-10 — the filed row dissolved: the generator never emits the tail, so the tail's names were never the
+obstacle; the two `op` walks are two authorization bases and the own-task one moves to its own
+`ReadGrantDomain` (spike-proven to index the base producer). Verdict + the recorded class fix (a per-stage
+`AnchorVar` rename, if a second package ever collides) in
+[`docs/reviews/lattice-designer-triage-2026-09-10.md`](../../docs/reviews/lattice-designer-triage-2026-09-10.md) §2.*
+
 **Increment 2 narrows the refusal to exactly that case:** a dropped name re-bound at a **non-head**
 position of a pattern whose head is a **carried** variable, where the re-binding pattern is
 **structurally identical** (same relation types, directions, ranges and labels along the path from the

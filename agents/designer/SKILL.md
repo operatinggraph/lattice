@@ -139,6 +139,11 @@ census against it as you would against a stranger's.
   `no-pattern:` names a fact "no increment answers" while the parent's own later increment is the writer of
   that fact; the parent's Inc 3 recorded the task marker its §2.6 said did not exist, and the mechanism
   row dissolved into a predicate edit (live census 52/52). (2026-09-05 · capabilityEphemeral recorded expiry)
+  **Second sighting — a row filed by a fire's CLOSE pass can name the mechanism a SIBLING design already
+  declined.** Grep every in-flight/shipped sibling's alternatives table for the row's `no-pattern:` text, then
+  price the mechanism against the ONE scenario the shipped bound leaves open — a flag written at first probe
+  cannot see a late-minted marker, so its payoff was zero; and "a mechanism, not a rename" was a claim about a
+  tail the generator never emits. Two of two rows, both mine. (2026-09-10 · lattice triage §1)
 - **A "third sighting" / same-class consolidation is a hypothesis about ROOTS, filed from SYMPTOMS.** Before
   designing one mechanism for N rows, run §3.7's payoff column per row against the shared mechanism: which
   rows' *filed* harms does it retire, live, today? Three "an identity no desk can reach" rows had a data
