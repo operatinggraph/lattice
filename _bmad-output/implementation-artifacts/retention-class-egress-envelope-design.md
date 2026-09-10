@@ -46,9 +46,9 @@ the post-fold shape.
   a decrypt with no actor and no purpose is denied for a non-identity holder — is the parent's ratified
   §6.5 posture, and the runtime does not enforce it: the wholesale decrypt RPC checks only that a holder
   key is present, and Loupe's Reveal has followed a class holder "as readily as" an identity since the
-  parent's own Fire 1 item 2 landed (`a4a2ccd9`). Inc 1 builds the refusal where the parent placed it
-  (the RPC). It is building to a ratified design and a committed promise, so I have not made it a fork;
-  strike it if you want it separate.
+  parent's own Fire 1 item 2 landed (`a4a2ccd9`). **Built** (steward, 2026-09-10, `e81914be`): the RPC
+  and Loupe each refuse a non-identity holder — ahead of Inc 1 and independent of F1/F2, because it
+  enforces the committed clause and the parent's ratified §6.5 and so was never a fork.
 - **Blast radius, measured live (§5):** 118 identity envelope rows; the new lens projects **2** rows (the
   sibling status lens over the same anchors projects exactly 2 today); **0** retained aspects are
   egressed by any shipped pattern, so nothing changes behaviour until a package templates one.
@@ -90,7 +90,7 @@ refuted brief built and tested it; the review found its emitted **shape** must c
 | 7 | Every decrypt site resolves the holder from the ciphertext's own `keyId`, which is AEAD associated data — a substituted holder fails the tag | `internal/vault/keyholder.go:34-44` |
 | 8 | `KeyHolderType` exists "for the two egress sites" and returns the vertex-type segment | `keyholder.go:45-61` |
 | 9 | The ref-verified decrypt RPC resolves the holder from `keyId`, recomputes the MAC before any decrypt, delegates to `Vault.Decrypt` — no holder-kind refusal, **no actor field** | `internal/vault/service.go:461-530` |
-| 10 | The **wholesale** decrypt RPC checks only that a holder key is non-empty — no holder-kind refusal; Loupe's Reveal resolves the holder from `keyId` and calls it for any kind | `service.go:255-290`; `cmd/loupe/vault.go:253-285` (since `a4a2ccd9`, 2026-08-08) |
+| 10 | The **wholesale** decrypt RPC refuses a non-identity holder (`ErrRevealDenied`) before touching a key, and Loupe's Reveal refuses the same kind ahead of the round trip, naming the holder — the Reveal clause enforced 2026-09-10 (`e81914be`), open since `a4a2ccd9` | `service.go` `handleDecrypt`; `cmd/loupe/vault.go` `handleVaultDecrypt` |
 | 11 | The Vault's shred gate is `envelope.Shredded` OR the backend's in-memory set, checked **before** the empty-`WrappedDEK` check; a lens row must therefore carry `shredded` | `internal/vault/local.go:398-404`; lens comment `lenses.go:189-210` |
 | 12 | `ShredRetentionClassKey` rewrites the class `.piiKey` with `shredded: true` (placeholder carrying `keyId: holder` when never minted) | `packages/privacy-base/shred_retention_class_key.go:176-230` |
 | 13 | The MAC input covers `ct.KeyID`, so custody is authenticated, not re-derived, at unwrap | parent §8.9; `internal/vault/refmac.go` |
@@ -425,7 +425,7 @@ adapter's params, and ships the step has decided three times, in the three place
 | Refuse egress once the record's *subject* is erased | the snapshot must carry a `subjectKey`, and the mint must read that identity's `.piiKey` — one internal `KVGet`, fail-closed only | the subject is caller-supplied (parent §3.3), and it inverts the class's meaning for a contract record | a class whose obligation is to the fact, not the person, needing egress |
 | Route retained egress through the purpose RPC (parent tail (c), `decryptretained`) | a second decrypt path for the bridge | the purpose is already in the declaration and the MAC; tail (c) is for actor-carrying operator reveal, a different consumer | an operator reveal / audit export of a retained record |
 
-### 6.1 The *Reveal* clause is unenforced — Inc 1 builds it where the parent placed it
+### 6.1 The *Reveal* clause — enforced 2026-09-10 (`e81914be`), ahead of Inc 1
 
 The parent's §6.5 said: *"Increment 1's posture: refuse, structurally … Loupe's Reveal already refuses a
 non-identity anchor … [its] reason must be re-derived: it becomes a keyId-based refusal."* Fire 1 item 2
@@ -435,11 +435,15 @@ wholesale RPC it calls tests only that a holder key is present. The committed co
 denial the runtime does not make — fail-open at the operator console, for exactly the records the parent
 said have "no data subject whose grant scopes the disclosure".
 
-The fix is three lines at the enforcement point the parent named: `handleDecrypt` refuses
-`KeyHolderType(in.KeyHolderKey) != "identity"` with a typed error, Loupe surfaces it and its comment is
-rewritten to the parent's re-derived reason. No contract change — the clause already says it. It belongs
-in Inc 1 because it is the same seam (the holder-kind gates), and because §6's argument is only honest if
-the *other* decrypt path is what the contract says it is.
+**Built** (`e81914be`), at the enforcement point the parent named: `handleDecrypt` refuses
+`KeyHolderType(in.KeyHolderKey) != "identity"` with the typed `ErrRevealDenied` before any key is touched
+(so a shredded class answers the same way and the refusal tells nothing about a class's key state); Loupe
+refuses the kind ahead of the round trip with a 403 naming the holder, maps the RPC's error to 403, and its
+comment carries the parent's re-derived reason; `docs/components/vault.md` gains the failure-mode row. No
+contract change — the clause already said it. Shipped separately from Inc 1 because it depends on neither
+F1 nor F2; Inc 1 still re-sources the two egress gates (§3.2) and leaves this refusal's predicate as it
+is — the Reveal rule admits an identity alone, whatever custody kinds the envelope table comes to serve.
+§6's argument now rests on the other decrypt path being what the contract says it is.
 
 ## 7. Contract surface — text of record (lands with the build's commit)
 
@@ -603,9 +607,9 @@ objection, run back against my own shape: my design supplies no subject at all, 
 **Inc 1 — the primitive (Lattice lane, S–M, one fire). Posture-changing: full review depth.**
 `privacy-base` lens + bucket + version; `vault.KeyHolderKinds`; Processor gate re-sourced; bridge bucket
 table + `fetchLiveEnvelope(bucket)`; §3.5 (a) docGen top-level `tenantName` read and (b) nested-marker
-refusal; §6.1 wholesale-RPC refusal + Loupe comment; the contract clauses (§7.1 a–c, §7.2) with the
+refusal; the contract clauses (§7.1 a–c, §7.2) with the
 commit, and §7.1(d) with whichever option Andrew picks; the doc table below; **every test in §10** (all
-owned here). No `seq:`.
+owned here). No `seq:`. §6.1's refusal shipped separately (`e81914be`) and is not in this increment.
 
 **Inc 2 — the consumer (Verticals lane; the existing `verticals.md` row, unblocked by Inc 1).** The
 refuted brief's steps 4–5 as built and tested — sensitive `.tenantName` on the leaseapp under a retention
@@ -617,12 +621,12 @@ brief's "absence problem" section requires (7 live signed applications at the ti
 comment rewritten. Not designed here; named so its owner is unambiguous and its shape is not re-refuted.
 
 **Doc table (Inc 1):** `docs/components/vault.md:136` (the failure-mode row: "names a holder kind with no
-envelope projection"; add the wholesale-RPC non-identity refusal); `docs/components/bridge.md` In/Out
+envelope projection"; the wholesale-RPC refusal row is in, `e81914be`); `docs/components/bridge.md` In/Out
 table (a second lens read model; the nested-marker refusal under "Failure modes");
 `packages/privacy-base/lenses.go:25-37` (the `RetentionKeyStatusBucket` comment now also names its
 envelope sibling); `internal/vault/keyholder.go:45-53` and the two gate comments (the reason changes
 from "the lens enumerates identity holders alone" to "the kind has no envelope projection");
-`cmd/loupe/vault.go:253-257` (the "as readily as" comment becomes the parent's re-derived reason).
+`cmd/loupe/vault.go` (the "as readily as" comment became the parent's re-derived reason in `e81914be`).
 
 ## 13. Adversarial pass (run this fire, cold reviewer, security plane; findings folded)
 

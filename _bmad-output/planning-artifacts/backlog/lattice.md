@@ -148,6 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-10 · `e81914be` · [Vault/Loupe] the Reveal rule enforced — a non-identity holder is refused at the decrypt RPC, its unwrap sibling and Loupe's Reveal ([design](../../implementation-artifacts/retention-class-egress-envelope-design.md))
 - 2026-09-07 · `5a1de6b` · [Weaver] a gap's external class comes from the leg it RESOLVES to ([design](../../implementation-artifacts/weaver-goal-leg-external-class-design.md))
 - 2026-09-07 · `6d9846a` · [Bootstrap] a converged bucket is no longer rewritten — every boot had reopened the `AllowAtomicPublish` window on core-kv + loom-state
 - 2026-09-07 · `b14b2d8` · [Bootstrap/Loom] the marker TTL is a per-bucket registry decision — loom-state's expiry window 1 s → 1 h ([design](../../implementation-artifacts/platform-bucket-marker-ttl-design.md))
@@ -172,7 +173,6 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-03 · `a5f4ef2e` · [Loom/Substrate] `loom-state` removals are TTL'd purges, 61,731 legacy tombstones swept at start, `redrive` over a removed token fixed, gate `checkLoomStateDelete`
 - 2026-09-03 · `595ea540` · [Refractor] a `WITH` no longer refuses per-anchor closure: 3 lenses gain the anchor Delete, leaseApplicationsRead licensed, 1 to 22 msg/s ([design](../../implementation-artifacts/with-alias-anchor-closure-design.md))
 - 2026-09-03 · `e5aa6ca2` · [Refractor] `edgeInstances` ~15 s/event → 0.24 s live: gate scope, batched reads, pipelined writes, resolve-then-get ([design](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md))
-- 2026-09-03 · `c76522e` · [CI] leaseconvergence lens-activation wait root-caused (CoreKVSource's serial MaxPrefetch:1 replay) and fixed, 25s→90s — board row 137(b) resolved, full CI green (run 33816206576)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
