@@ -139,6 +139,12 @@ census against it as you would against a stranger's.
   `no-pattern:` names a fact "no increment answers" while the parent's own later increment is the writer of
   that fact; the parent's Inc 3 recorded the task marker its §2.6 said did not exist, and the mechanism
   row dissolved into a predicate edit (live census 52/52). (2026-09-05 · capabilityEphemeral recorded expiry)
+- **A "third sighting" / same-class consolidation is a hypothesis about ROOTS, filed from SYMPTOMS.** Before
+  designing one mechanism for N rows, run §3.7's payoff column per row against the shared mechanism: which
+  rows' *filed* harms does it retire, live, today? Three "an identity no desk can reach" rows had a data
+  repair, a doctrine split and an existing recovery path as roots; the shared `mintedAtSite` retired only the
+  zero-instance one. The tell: the consolidation names the *shape* of the fix ("records the workplace it was
+  minted at"), not a mechanism the rows share. (2026-09-10 · verticals triage §1)
 - **"No live consumer / no live victim" is a census nobody ran — run it, keyed on the mechanism, before the
   dead-scaffolding test** (whose input it is). A row grounded on the one lens the harness saw hid fourteen
   hand-authored lenses paying the same cross product, `capabilityEphemeral` and `myTasks` among them. When the

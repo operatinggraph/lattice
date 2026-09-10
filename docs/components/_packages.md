@@ -274,7 +274,17 @@ to the substrate directly. The flow:
    The step-8 `vtx.meta.*` invalidation fires in-commit, so a class the package
    just declared is usable immediately on the running Processor — no restart.
 5. **Auto-discovery.** The Refractor picks up new Lens meta-vertices via its
-   `vtx.meta.>` watch and begins projecting.
+   `vtx.meta.>` watch and begins projecting. **Expect a first-dispatch lag when a Weaver
+   target, its op and the op's grant install together over rows that already exist:** the target's rows
+   and the grant's capability-kv row are two lens projections of the same commit (and the target's
+   registration is a direct Core-KV watch, faster than either), with no ordering between them, and
+   Weaver's actuator is fire-and-forget (it never sees the Processor's `AuthDenied` reply). Rows that
+   dispatch before the grant projects sit under their §10.3 mark until the sweep reclaims them at lease
+   expiry (`MarkLease`, 30 min by default) and re-dispatches; nothing is lost. To clear it at once —
+   safe right after such an install, when every live mark is a denied first attempt — `Revoke` the
+   target then `Enable` it: `Revoke` deletes the target's in-flight marks and durable, `Enable` recreates
+   the durable and every row re-delivers markless. `ReplayTarget` alone does not help (a live mark takes
+   the anti-storm Ack). Triage record: `docs/reviews/verticals-designer-triage-2026-09-10.md` §5.
 
 Each install also writes a `vtx.package.<NanoID>` vertex with a `.manifest`
 aspect carrying the full manifest JSON — the uninstall-time recovery handle that
