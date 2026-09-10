@@ -1736,18 +1736,48 @@ func (s *server) weaverEntity(w http.ResponseWriter, r *http.Request, targetID, 
 	s.writeJSON(w, http.StatusOK, detail)
 }
 
+// flowCursorLive decodes a loom-state instance cursor and reports whether
+// Loom still considers it running. The cursor persists after terminal by
+// design (Contract #10 §10.3), so a successful KVGet is presence, not
+// liveness — only a decoded Status of "running" is.
+func flowCursorLive(raw []byte) bool {
+	var cur struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal(raw, &cur) == nil && cur.Status == "running"
+}
+
+// taskVertexLive decodes a vtx.task.<id> root and reports whether it is a
+// live (non-tombstoned) vertex. A tombstone retains the prior document and
+// only flips isDeleted (the Processor's commit path), so a successful KVGet
+// is presence, not liveness, here either.
+func taskVertexLive(raw []byte) bool {
+	var env struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	return json.Unmarshal(raw, &env) == nil && !env.IsDeleted
+}
+
 // weaverArtifactLive checks the derived id against the engine's live state. A
 // task is a Core KV vertex; a Loom instance lives in loom-state under its own
 // `instance.<id>` cursor record (Contract #10 §10.3) — an operational-bucket
-// read under the same inspector charter the marks are read under.
+// read under the same inspector charter the marks are read under. Both KV
+// reads only prove presence; flowCursorLive/taskVertexLive decode the record
+// to answer liveness itself.
 func (s *server) weaverArtifactLive(ctx context.Context, conn *substrate.Conn, a *weaverArtifact) bool {
 	switch a.Kind {
 	case "task":
-		_, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, "vtx.task."+a.ID)
-		return err == nil
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, "vtx.task."+a.ID)
+		if err != nil {
+			return false
+		}
+		return taskVertexLive(entry.Value)
 	case "flow":
-		_, err := conn.KVGet(ctx, bootstrap.LoomStateBucket, "instance."+a.ID)
-		return err == nil
+		entry, err := conn.KVGet(ctx, bootstrap.LoomStateBucket, "instance."+a.ID)
+		if err != nil {
+			return false
+		}
+		return flowCursorLive(entry.Value)
 	}
 	return false
 }
