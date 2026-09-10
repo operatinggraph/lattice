@@ -367,7 +367,7 @@ function isOpTracker(key) {
 // renderSealedBody paints a sensitive aspect's default sealed state — the
 // "encrypted at rest" line, a Reveal button, and the raw ciphertext envelope
 // collapsed underneath (it's not secret, just unreadable). Reveal calls the
-// audited POST /api/vault/decrypt proxy; a shredded identity's key renders
+// logged POST /api/vault/decrypt proxy; a shredded identity's key renders
 // "permanently unreadable" instead of plaintext (F12 §3.2/§3.3 — the
 // crypto-shred guarantee, visible right here). aspectKey is re-passed to a
 // "hide" affordance so re-sealing never needs a second fetch of the (still
@@ -416,7 +416,7 @@ function renderSealedBody(bodyEl, aspectKey, ctData) {
     bodyEl.innerHTML = "";
     const revealedLine = el("div", "revealed-line");
     revealedLine.appendChild(el("span", "badge revealed", "⚠ revealed"));
-    revealedLine.appendChild(el("span", "muted small", "this reveal is audited"));
+    revealedLine.appendChild(el("span", "muted small", "this reveal is logged"));
     const hideBtn = el("button", "sealed-hide", "hide");
     revealedLine.appendChild(hideBtn);
     bodyEl.appendChild(revealedLine);

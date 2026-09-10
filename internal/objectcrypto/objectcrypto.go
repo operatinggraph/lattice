@@ -139,7 +139,7 @@ func WrapKey(ctx context.Context, conn *substrate.Conn, identityKey string, env 
 		return vault.Ciphertext{}, fmt.Errorf("parse vault wrapKey reply: %w", err)
 	}
 	if resp.Error != "" {
-		return vault.Ciphertext{}, errors.New(resp.Error)
+		return vault.Ciphertext{}, wireError(resp.Error)
 	}
 	return resp.Ciphertext, nil
 }
@@ -160,7 +160,20 @@ func UnwrapKey(ctx context.Context, conn *substrate.Conn, identityKey string, en
 		return nil, fmt.Errorf("parse vault unwrapKey reply: %w", err)
 	}
 	if resp.Error != "" {
-		return nil, errors.New(resp.Error)
+		return nil, wireError(resp.Error)
 	}
 	return resp.Key, nil
+}
+
+// wireError turns a Vault RPC's error string back into the sentinel it was
+// echoed from, so a caller can errors.Is on the refusals the responder
+// distinguishes on purpose (a shredded holder, a holder that is not an
+// identity) and give each its own answer; any other message stays opaque.
+func wireError(msg string) error {
+	for _, sentinel := range []error{vault.ErrKeyShredded, vault.ErrHolderNotIdentity} {
+		if msg == sentinel.Error() {
+			return sentinel
+		}
+	}
+	return errors.New(msg)
 }

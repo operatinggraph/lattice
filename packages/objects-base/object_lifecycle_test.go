@@ -288,6 +288,27 @@ func TestObject_LiveObjectRequiresContentInReads(t *testing.T) {
 	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("guard2"), "AttachObject", p2, []string{id2, objKey}, processor.OutcomeRejected)
 }
 
+// TestObject_SensitiveGoverningIdentityMustBeAnIdentity pins Contract #3
+// §3.11 at the op that records custody: the same well-formed sensitive attach
+// is accepted under an identity governing key and rejected under a
+// retention-class one — the discriminating pair, so the rejection cannot be a
+// malformed envelope.
+func TestObject_SensitiveGoverningIdentityMustBeAnIdentity(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objgov", Instance: "objgov-1"})
+
+	id := "vtx.identity.AAuserHJKMNPQRSTUVW6"
+	seedIdentity(t, ctx, conn, id, false)
+	sensitiveAttach := func(governing string) map[string]any {
+		return map[string]any{"digest": "SHA-256=govTESTdigestExampleA", "size": 5, "contentType": "application/pdf",
+			"storeName": "s-gov", "targetKey": id, "linkName": "idDocument", "sensitive": true,
+			"governingIdentity": governing,
+			"encryption":        map[string]any{"algo": "AES-256-GCM", "nonce": "bm9uY2U=", "wrappedCEK": "d3JhcHBlZA==", "keyId": governing}}
+	}
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("gov-identity"), "AttachObject", sensitiveAttach(id), []string{id}, processor.OutcomeAccepted)
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("gov-class"), "AttachObject", sensitiveAttach("vtx.retentionclass.RetentionCLassAAAAAA"), []string{id}, processor.OutcomeRejected)
+}
+
 // TestObject_TombstoneEpochCAS_AbortsOnRelink is the #1 build-blocking GC
 // invariant (§20): a re-link landing between orphan-detection and the tombstone
 // commit must abort the reclaim, so the byte-janitor never deletes bytes a live

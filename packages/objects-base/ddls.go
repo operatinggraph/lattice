@@ -611,9 +611,13 @@ def attach_object(state, p):
     encryption_data = None
     if sensitive:
         governing_identity = required_string(p, "governingIdentity")
+        # Blobs remain identity-custodied (Contract #3 §3.11): the recorded
+        # governing key is what ShredIdentityKey's erasure reaches and what the
+        # Vault's object-key RPCs serve, so any other vertex kind is refused
+        # here, at the only point a browser-direct submit cannot route around.
         gov_type, _ = parts_of(governing_identity, "governingIdentity", "")
-        if gov_type == "meta":
-            fail("ProtectedTarget: governingIdentity cannot be a meta/system vertex: " + governing_identity)
+        if gov_type != "identity":
+            fail("InvalidArgument: governingIdentity must be an identity vertex; got " + governing_identity)
         if not hasattr(p, "encryption"):
             fail("InvalidArgument: encryption: required when sensitive is true")
         enc = getattr(p, "encryption")

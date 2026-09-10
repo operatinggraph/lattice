@@ -17,6 +17,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/objectcrypto"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 const (
@@ -261,6 +262,10 @@ func (s *server) handleSensitiveObjectUpload(w http.ResponseWriter, ctx context.
 	}
 	wrapped, err := objectcrypto.WrapKey(ctx, conn, governingIdentity, env, cek)
 	if err != nil {
+		if errors.Is(err, vault.ErrHolderNotIdentity) {
+			s.writeError(w, http.StatusForbidden, "wrap CEK: "+err.Error()+" — a sensitive object is custodied by an identity (Contract #3 §3.11)")
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, "wrap CEK: "+err.Error())
 		return
 	}
@@ -510,6 +515,10 @@ func (s *server) handleSensitiveObjectDecrypt(w http.ResponseWriter, ctx context
 	}
 	cek, err := objectcrypto.UnwrapKey(ctx, conn, doc.Data.GoverningIdentity, env, wrapped)
 	if err != nil {
+		if errors.Is(err, vault.ErrHolderNotIdentity) {
+			s.writeError(w, http.StatusForbidden, "unwrap CEK: "+err.Error()+" — a sensitive object is custodied by an identity (Contract #3 §3.11)")
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, "unwrap CEK: "+err.Error())
 		return
 	}

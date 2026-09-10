@@ -45,12 +45,16 @@ func KeyHolder(ct Ciphertext) (string, error) {
 // KeyHolder — "identity" for a subject-custodied record, "retentionclass" for
 // one whose custody follows a retention obligation instead.
 //
-// It exists for the two egress sites, which can carry a record only as far as
-// their envelope source reaches: the bridge resolves a holder's envelope from
-// the piiKeyEnvelope lens, which enumerates identity holders alone. A holder
-// type that source cannot serve is refused where the operation is authored,
-// with the type named, rather than surfacing later as an envelope that
-// mysteriously never projects.
+// It serves the sites that admit one holder kind only. The two egress gates
+// can carry a record only as far as their envelope source reaches: the bridge
+// resolves a holder's envelope from the piiKeyEnvelope lens, which enumerates
+// identity holders alone, so a holder type that source cannot serve is refused
+// where the operation is authored, with the type named, rather than surfacing
+// later as an envelope that mysteriously never projects. The wholesale decrypt
+// RPC and its console proxy carry neither an actor nor a declared purpose, so
+// the Reveal rule (Contract #3 §3.10) admits an identity holder alone there;
+// the object-key and session-key RPCs serve identity holders by the object
+// plane's own rule (§3.11).
 func KeyHolderType(keyHolderKey string) string {
 	vertexType, _, ok := substrate.ParseVertexKey(keyHolderKey)
 	if !ok {

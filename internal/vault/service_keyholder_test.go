@@ -4,6 +4,12 @@ package vault_test
 // keyId. The ref names WHICH record is being opened and is bound into the MAC;
 // it does not select the key. These tests seal under a holder the ref does not
 // name, so a responder still deriving the holder from the ref cannot pass them.
+//
+// The responder carries no holder-kind gate (its licence is the mint-time
+// declaration, actor and MAC), so the class-held record below is served here
+// by design; the only reason no such ref exists live is the Processor's mint
+// gate (refusableEgressHolder, pinned in internal/processor), which the
+// retention-class egress design lifts on purpose.
 
 import (
 	"context"

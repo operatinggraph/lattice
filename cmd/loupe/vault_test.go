@@ -268,6 +268,15 @@ func TestVaultShreds_BucketMissing(t *testing.T) {
 // test can shred a key mid-scenario.
 func vaultDecryptFixture(t *testing.T) (hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn) {
 	t.Helper()
+	return newVaultDecryptFixture(t, true)
+}
+
+// newVaultDecryptFixture is vaultDecryptFixture with the responder optional:
+// withResponder=false leaves lattice.vault.decrypt unserved, so a test can
+// stand up its own responder and drive Loupe's handling of a reply the real
+// service would not produce for that input.
+func newVaultDecryptFixture(t *testing.T, withResponder bool) (hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn) {
+	t.Helper()
 	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -287,9 +296,11 @@ func vaultDecryptFixture(t *testing.T) (hs *httptest.Server, backend *vault.Loca
 	if err != nil {
 		t.Fatalf("new local backend: %v", err)
 	}
-	svc := vault.NewService(backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := svc.StartNATSListener(ctx, conn.NATS()); err != nil {
-		t.Fatalf("start vault listener: %v", err)
+	if withResponder {
+		svc := vault.NewService(backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err := svc.StartNATSListener(ctx, conn.NATS()); err != nil {
+			t.Fatalf("start vault listener: %v", err)
+		}
 	}
 
 	srv := &server{conn: conn, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), natsTimeout: 5 * time.Second}

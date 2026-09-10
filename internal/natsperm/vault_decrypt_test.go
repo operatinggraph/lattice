@@ -16,9 +16,11 @@ const vaultDecryptSubject = "lattice.vault.decrypt"
 
 // TestVaultDecryptReachability proves the transport gate for the trusted-tool
 // PII decrypt RPC (vault-crypto-shredding-design.md §2.3; Loupe F12 Reveal).
-// The responder does NO caller-level authorization, so this publish allow-list
-// IS the boundary: Loupe — a named trusted plaintext consumer — may reach
-// lattice.vault.decrypt, while an ordinary vertical app may not.
+// The responder does NO caller-level authorization (its refusals — a shredded
+// holder, a holder that is not an identity — are about the record, never the
+// caller), so this publish allow-list IS the boundary: Loupe — a named trusted
+// plaintext consumer — may reach lattice.vault.decrypt, while an ordinary
+// vertical app may not.
 //
 // The Processor hosts the responder in production (it holds the authoritative
 // Vault). Here a processor-seed connection stands in as the responder:

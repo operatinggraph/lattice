@@ -53,10 +53,12 @@ type SessionKey = vaultwire.SessionKey
 // Sentinel errors a Vault backend returns. Callers match on these with
 // errors.Is rather than backend-specific error values.
 var (
-	ErrKeyShredded     = vaultwire.ErrKeyShredded
-	ErrInvalidEnvelope = vaultwire.ErrInvalidEnvelope
-	ErrDecryptFailed   = vaultwire.ErrDecryptFailed
-	ErrRefUnverified   = vaultwire.ErrRefUnverified
+	ErrKeyShredded       = vaultwire.ErrKeyShredded
+	ErrInvalidEnvelope   = vaultwire.ErrInvalidEnvelope
+	ErrDecryptFailed     = vaultwire.ErrDecryptFailed
+	ErrRefUnverified     = vaultwire.ErrRefUnverified
+	ErrRevealDenied      = vaultwire.ErrRevealDenied
+	ErrHolderNotIdentity = vaultwire.ErrHolderNotIdentity
 )
 
 // OpenWithSessionKey AEAD-opens ct under sessionKey — a SessionKey.Key

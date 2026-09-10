@@ -76,6 +76,23 @@ var (
 	// Echoed over the wire and matched via errors.Is, exactly like
 	// ErrKeyShredded.
 	ErrRefUnverified = errors.New("vault: ref unverified")
+	// ErrRevealDenied is returned by the wholesale decrypt RPC responder
+	// (DecryptSubject) when the record's key holder is not an identity. That
+	// RPC carries neither an actor nor a declared purpose, and the Reveal rule
+	// (Contract #3 §3.10) denies such a decrypt for any other holder kind: a
+	// retention-class record has no data subject whose grant scopes its
+	// disclosure, and its sanctioned read path is a read-path-authorized Secure
+	// Lens. Echoed over the wire and matched via errors.Is, like ErrKeyShredded.
+	ErrRevealDenied = errors.New("vault: a decrypt carrying no actor and no purpose is denied for a non-identity key holder")
+	// ErrHolderNotIdentity is returned by the object-key RPC responders
+	// (WrapKeySubject, UnwrapKeySubject) and the session-key responder
+	// (IssueSessionKeySubject) when the key holder is not an identity. Blobs
+	// remain identity-custodied (Contract #3 §3.11) and a session key is an
+	// identity's own DEK handed to its personal-lens session, so neither has a
+	// non-identity holder to serve — and an unwrap IS a decrypt, so serving one
+	// for a retention-class holder would be the Reveal refusal's bypass under
+	// another subject. Echoed over the wire and matched via errors.Is.
+	ErrHolderNotIdentity = errors.New("vault: key holder is not an identity")
 )
 
 // NewGCM constructs an AES-GCM AEAD from key (must be a valid AES key length).

@@ -83,7 +83,7 @@ func TestBridgeVaultDecryptWholesaleDenied(t *testing.T) {
 func TestVaultDecryptRefAppsDenied(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
-	assertDeniedPublish(t, url, vaultDecryptRefSubject, []string{"clinic-app", "loftspace-app"})
+	assertDeniedPublish(t, url, vaultDecryptRefSubject, []string{"clinic-app", "loftspace-app", "loupe"})
 }
 
 // TestBridgeCoreKVReadIsolation proves the read-side half of the egress grant

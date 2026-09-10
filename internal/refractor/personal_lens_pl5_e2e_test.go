@@ -94,7 +94,7 @@ func TestPersonalLens_PL5_E2E_ShreddedIdentitySessionKeyDenied(t *testing.T) {
 	t.Cleanup(svcCancel)
 	require.NoError(t, svc.StartNATSListener(svcCtx, h.conn.NATS()))
 
-	identityKey := "identity-pl5-shred"
+	identityKey := "vtx.identity.PL5ShredMeAAAAAAAAAA"
 	env, err := backend.CreateIdentityKey(h.ctx, identityKey)
 	require.NoError(t, err)
 
@@ -115,6 +115,7 @@ func TestPersonalLens_PL5_E2E_ShreddedIdentitySessionKeyDenied(t *testing.T) {
 	require.NoError(t, err)
 	var deniedResp vault.IssueSessionKeyResponse
 	require.NoError(t, json.Unmarshal(reply.Data, &deniedResp))
-	require.NotEmpty(t, deniedResp.Error)
+	// The denial must be the shred itself, not the holder-kind gate ahead of it.
+	require.Equal(t, vault.ErrKeyShredded.Error(), deniedResp.Error)
 	require.Empty(t, deniedResp.Key)
 }

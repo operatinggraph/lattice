@@ -44,7 +44,7 @@ or not a well-formed vertex key is refused, with no fallback to the anchor. The 
 |------|------|------|
 | `Vault` (interface) | `internal/vault/vault.go` | `CreateIdentityKey` / `Encrypt` / `Decrypt` / `ShredKey` — the contract every backend implements |
 | `LocalBackend` | `internal/vault/local.go` | The shipped backend (design §2.5, "Path A"): a single master KEK (env/file-sourced, never in Core KV) wraps a random per-holder AES-256-GCM DEK. A 5-minute TTL cache holds *unwrapped* DEKs in memory for the steady-state hot path; an in-memory deny-list (`shredded`) is what makes `ShredKey` stick. |
-| `Service` | `internal/vault/service.go` | A NATS Services responder (`lattice.vault.decrypt`) exposing `Decrypt` to trusted-tool callers (Loupe) that hold an `Envelope` + `Ciphertext` from their own Core-KV inspector reads but not the master KEK itself. |
+| `Service` | `internal/vault/service.go` | One `micro.Service` hosting five RPCs: `lattice.vault.decrypt` (the trusted-tool plaintext reveal, Loupe), `lattice.vault.wrapkey` / `unwrapkey` (object-CEK envelope wrapping, Loupe + `loftspace-app` via `internal/objectcrypto`), `lattice.vault.issuesessionkey` (a personal-lens session key; no transport grant today) and `lattice.vault.decryptref` (the bridge's MAC-verified egress unwrap). Callers hold an `Envelope` + `Ciphertext` from their own reads, never the master KEK. Every endpoint but `decryptref` serves identity holders only. |
 
 `keyHolderKey` is cryptographically bound into both `Encrypt` and `Decrypt` as AEAD associated data —
 presenting the right `Envelope` under the wrong holder fails closed (`ErrInvalidEnvelope`), it does
@@ -96,7 +96,10 @@ failure blocks the other:
 | Direction | Contract | Notes |
 |-----------|----------|-------|
 | In | commit-path step 4 (hydrate) / step 6.5 (encrypt) calls, `internal/processor` | decrypt-on-read / encrypt-on-write for a sensitive aspect, against the caller-supplied `piiKey` `Envelope` |
-| In | `lattice.vault.decrypt` NATS Services RPC | trusted-tool (Loupe) plaintext reads; request carries `identityKey` + `Envelope` + `Ciphertext`, response is `{plaintext}` or a generic (non-identifying) `{error}` |
+| In | `lattice.vault.decrypt` NATS Services RPC | trusted-tool (Loupe) plaintext reads; request carries `identityKey` + `Envelope` + `Ciphertext`, response is `{plaintext}` or a generic (non-identifying) `{error}`; identity holders only (the Reveal rule, Contract #3 §3.10) |
+| In | `lattice.vault.wrapkey` / `lattice.vault.unwrapkey` NATS Services RPCs | object-CEK envelope wrapping under an identity's DEK (`internal/objectcrypto`; Loupe + `loftspace-app` hold the grant); an unwrap is a decrypt, so both refuse a non-identity holder (`ErrHolderNotIdentity`) — blobs remain identity-custodied (Contract #3 §3.11), which `AttachObject` enforces where custody is recorded |
+| In | `lattice.vault.issuesessionkey` NATS Services RPC | hands an identity's DEK to its personal-lens session for a bounded TTL (Personal Lens Fire 5); identity holders only; no component holds a transport grant to it today |
+| In | `lattice.vault.decryptref` NATS Services RPC | the bridge's egress unwrap: the MAC over `{ref, requestId, ciphertext}` is verified before any decrypt and the holder comes from the ciphertext's own `keyId`; the mint-time declaration, engine actor and MAC are the actor and purpose the Reveal rule asks for, so no holder-kind gate sits here |
 | In | `events.privacy.keyShredded` (via `internal/privacyworker`) | triggers `ShredKey` on the Processor's authoritative instance |
 | In | Secure-Lens projection pipeline, `internal/refractor/pipeline/secure.go` | decrypt-at-projection against the Refractor's own instance |
 | Out | `health.vault.<instance>` heartbeat (hosted by the Processor) | `backend`, cumulative `vault_calls_total` / encrypt / shred counters, DEK-cache + shredded-set gauges (Contract #5 §5.4 Vault baseline) |
@@ -134,6 +137,9 @@ failure blocks the other:
 | `Envelope` presented under the wrong `keyHolderKey` | `ErrInvalidEnvelope` — fails closed, never silently decrypts under the wrong holder |
 | Ciphertext's `keyId` absent or not a well-formed vertex key | `ErrInvalidEnvelope` (`vault.KeyHolder`) — refused with no fallback to the aspect's anchor |
 | A `$sensitiveRef` egress marker names a non-`identity` key holder | refused where authored (`internal/processor/sensitive_decrypt.go`) and again by the bridge (`internal/bridge/egress.go`) — the `piiKeyEnvelope` lens the bridge resolves a live envelope from enumerates identity holders only |
+| The wholesale decrypt RPC (`lattice.vault.decrypt`) is asked to open a record whose key holder is not an identity | `ErrRevealDenied`, surfaced as-is — the RPC carries no actor and no declared purpose, so the Reveal rule (Contract #3 §3.10) denies it before any key is touched, and a shredded retention class answers the same way; Loupe reports it as 403 naming the holder. The sanctioned read path is a read-path-authorized Secure Lens, whose in-process decrypt is untouched |
+| `wrapkey` / `unwrapkey` asked for a key holder that is not an identity | `ErrHolderNotIdentity`, surfaced as-is before any key is touched — an unwrap is a decrypt, so this is the Reveal refusal's sibling on the object plane; both real callers pass the object's governing identity, and Loupe reports the refusal as 403 |
+| `issuesessionkey` asked for a key holder that is not an identity | `ErrHolderNotIdentity` — a session key is an identity's own DEK for its personal-lens session; no component holds a transport grant to the endpoint today |
 | Secure Lens configured with no Vault backend | Refractor logs an error and does not activate that lens, rather than projecting unfillable plaintext-shaped columns |
 | Backend panic inside the decrypt RPC handler | recovered; caller gets a generic `{error}` reply, full detail logged server-side |
 
@@ -164,3 +170,29 @@ reset + a live e2e against a running stack are the last Vault Fire 5b gate (dest
 dev stack — see `vault-crypto-shredding-design.md`). `ShredRetentionClassKey` — the verb that
 destroys a `retentionClass`-custodied DEK — is built (`packages/privacy-base`), and `pkgmgr` installs
 that custody kind (`internal/pkgmgr/custodyscope.go`).
+
+---
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A refusal added at one RPC leaves its siblings on the same responder ungated.** One `micro.Service`
+  registers five endpoints, and two of them (`unwrapkey`, `decryptref`) reach the same `Vault.Decrypt`
+  the gated one does. Minted: the Reveal-rule refusal at `lattice.vault.decrypt` was bypassable by the
+  same Loupe credential over `lattice.vault.unwrapkey`, which delegates to `Decrypt` and takes a
+  `Ciphertext` that cannot tell a wrapped CEK from a sensitive aspect's bytes. Check: enumerate every
+  endpoint `StartNATSListener` registers and state, per endpoint, which holder kinds it admits and why;
+  `TestService_WrapUnwrapKey_NonIdentityHolder_Denied` pins the bypass shape.
+- **A console pre-check makes the RPC-side branch unreachable — and unlogged.** When the console is the
+  sole holder of a grant, its own early refusal is the only signal a probe ever leaves; the Processor's
+  Warn behind it can never fire. Minted: Loupe's Reveal refused a class-held record with a bare 403 and
+  no log line. Check: every refusal at a proxy that short-circuits an RPC logs at the proxy, and the
+  RPC-side mapping is driven by a stub responder (`TestVaultDecrypt_SurfacesTheRPCRefusal`).
+- **A new wire sentinel needs its mapping at every proxy site, not the one under review.** Minted:
+  `ErrHolderNotIdentity` surfaced as 403 from Reveal and as 502 ("the platform is broken") from the
+  object read/upload proxies. Check: `internal/objectcrypto.wireError` turns known sentinels back into
+  sentinels; grep every `objectcrypto.`/`vault.DecryptSubject` caller for an `errors.Is` on each one.
+

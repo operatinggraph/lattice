@@ -206,7 +206,9 @@ func aspectCiphertext(data map[string]any) (vault.Ciphertext, error) {
 // consumer of the lattice.vault.decrypt RPC; this handler proxies a single
 // aspect's decrypt, never batches, and never writes (P2 intact). A shredded
 // identity's key reports {"shredded":true} rather than an error, so the UI
-// can render "permanently unreadable" instead of a generic failure.
+// can render "permanently unreadable" instead of a generic failure. A record
+// whose key a retention class holds is refused with 403 (the Reveal rule
+// below) and never decrypted.
 func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
@@ -251,13 +253,28 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Custody is resolved from the ciphertext, not from the aspect key the
-	// caller supplied, so the reveal follows a record whose DEK is held by a
-	// retention class as readily as one held by its anchoring identity. It also
-	// means the key this handler fetches is the one the record itself names —
-	// the aspect key selects WHICH record, never which key opens it.
+	// caller supplied: the aspect key selects WHICH record, the ciphertext's
+	// keyId names the key that opens it, so the key this handler fetches is
+	// the one the record itself names.
 	keyHolderKey, err := vault.KeyHolder(ct)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, req.AspectKey+": "+err.Error())
+		return
+	}
+	// That holder is then held to the Reveal rule (Contract #3 §3.10): this
+	// console's decrypt carries neither an actor nor a declared purpose, so it
+	// opens identity-custodied records only. A record whose DEK a retention
+	// class holds has no data subject whose grant scopes the disclosure; its
+	// sanctioned read path is a read-path-authorized Secure Lens, and a
+	// purpose-carrying reveal is a surface this console does not have. The
+	// Vault RPC refuses the same holder kind on its own side; refusing here
+	// spares the round trip and names the holder in the reason.
+	// This console is the only holder of the decrypt grant, so a refusal made
+	// here is the only signal such a probe ever leaves — it is logged, like the
+	// RPC's own refusal would be.
+	if holderType := vault.KeyHolderType(keyHolderKey); holderType != "identity" {
+		s.logger.Warn("loupe: reveal denied — key holder is not an identity", "aspectKey", req.AspectKey, "keyHolderKey", keyHolderKey, "holderType", holderType)
+		s.writeError(w, http.StatusForbidden, req.AspectKey+": its key is held by "+keyHolderKey+" (a "+holderType+" holder, not an identity) — a reveal carrying no declared purpose is denied for a retained record; read it through its Secure Lens")
 		return
 	}
 
@@ -298,6 +315,11 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 			s.writeJSON(w, http.StatusOK, map[string]any{"shredded": true})
 			return
 		}
+		if resp.Error == vault.ErrRevealDenied.Error() {
+			s.logger.Warn("loupe: reveal denied by the vault", "aspectKey", req.AspectKey, "keyHolderKey", keyHolderKey)
+			s.writeError(w, http.StatusForbidden, req.AspectKey+": "+resp.Error)
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, resp.Error)
 		return
 	}
@@ -309,6 +331,9 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "vault decrypt RPC: empty reply")
 		return
 	}
+	// A reveal is an operator reading a person's data in the clear; the log
+	// line is what the FE's "this reveal is logged" promises.
+	s.logger.Info("loupe: sensitive aspect revealed", "aspectKey", req.AspectKey, "keyHolderKey", keyHolderKey)
 	s.writeJSON(w, http.StatusOK, map[string]any{"plaintext": json.RawMessage(resp.Plaintext)})
 }
 

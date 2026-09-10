@@ -47,16 +47,16 @@ func TestService_Decrypt_RoundTrip(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.ReveaLHoLderAAAAAAAA")
 	require.NoError(t, err)
-	ct, err := backend.Encrypt(context.Background(), "identity-1", env, []byte("123-45-6789"))
+	ct, err := backend.Encrypt(context.Background(), "vtx.identity.ReveaLHoLderAAAAAAAA", env, []byte("123-45-6789"))
 	require.NoError(t, err)
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendDecrypt(t, nc, vault.DecryptRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.ReveaLHoLderAAAAAAAA",
 		Envelope:     env,
 		Ciphertext:   ct,
 	})
@@ -74,22 +74,24 @@ func TestService_Decrypt_ShreddedIdentity_Denied(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.ShredHoLderAAAAAAAAA")
 	require.NoError(t, err)
-	ct, err := backend.Encrypt(context.Background(), "identity-1", env, []byte("pii"))
+	ct, err := backend.Encrypt(context.Background(), "vtx.identity.ShredHoLderAAAAAAAAA", env, []byte("pii"))
 	require.NoError(t, err)
-	require.NoError(t, backend.ShredKey(context.Background(), "identity-1"))
+	require.NoError(t, backend.ShredKey(context.Background(), "vtx.identity.ShredHoLderAAAAAAAAA"))
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendDecrypt(t, nc, vault.DecryptRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.ShredHoLderAAAAAAAAA",
 		Envelope:     env,
 		Ciphertext:   ct,
 	})
 
-	require.NotEmpty(t, resp.Error)
+	// The refusal must be the shred, not the holder-kind gate ahead of it: a
+	// malformed identity key would also be refused, for the wrong reason.
+	assert.Equal(t, vault.ErrKeyShredded.Error(), resp.Error)
 	assert.Empty(t, resp.Plaintext)
 }
 
@@ -106,6 +108,46 @@ func TestService_Decrypt_MissingIdentityKey_Rejected(t *testing.T) {
 
 	resp := sendDecrypt(t, nc, vault.DecryptRequest{})
 	require.NotEmpty(t, resp.Error)
+}
+
+// TestService_Decrypt_NonIdentityHolder_Denied pins the Reveal rule (Contract
+// #3 §3.10): the wholesale RPC carries no actor and no purpose, so a record
+// sealed under any holder that is not an identity is refused with
+// ErrRevealDenied before a key is touched — a shredded retention class answers
+// the same way, so the refusal tells nothing about the class's key state, and
+// a holder that is not even a vertex key is refused rather than admitted.
+func TestService_Decrypt_NonIdentityHolder_Denied(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	backend, err := vault.NewLocalBackend(make([]byte, 32), "v1")
+	require.NoError(t, err)
+	svc := vault.NewService(backend, nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	for _, tc := range []struct {
+		name   string
+		holder string
+		shred  bool
+	}{
+		{name: "live retention-class holder", holder: "vtx.retentionclass.RetentionCLassAAAAAA"},
+		{name: "shredded retention-class holder", holder: "vtx.retentionclass.RetentionShredAAAAAA", shred: true},
+		{name: "holder that is not a vertex key", holder: "identity-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, err := backend.CreateIdentityKey(ctx, tc.holder)
+			require.NoError(t, err)
+			ct, err := backend.Encrypt(ctx, tc.holder, env, []byte("retained"))
+			require.NoError(t, err)
+			if tc.shred {
+				require.NoError(t, backend.ShredKey(ctx, tc.holder))
+			}
+			resp := sendDecrypt(t, nc, vault.DecryptRequest{KeyHolderKey: tc.holder, Envelope: env, Ciphertext: ct})
+			assert.Equal(t, vault.ErrRevealDenied.Error(), resp.Error)
+			assert.Empty(t, resp.Plaintext)
+		})
+	}
 }
 
 func TestService_StartNATSListener_DoubleStartRejected(t *testing.T) {
@@ -161,7 +203,7 @@ func TestService_WrapUnwrapKey_RoundTrip(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.BLobHoLderAAAAAAAAAA")
 	require.NoError(t, err)
 
 	svc := vault.NewService(backend, nil)
@@ -169,7 +211,7 @@ func TestService_WrapUnwrapKey_RoundTrip(t *testing.T) {
 
 	cek := []byte("0123456789abcdef0123456789abcdef") // 32 bytes (a per-object CEK)
 	wrapResp := sendWrapKey(t, nc, vault.WrapKeyRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.BLobHoLderAAAAAAAAAA",
 		Envelope:     env,
 		Key:          cek,
 	})
@@ -177,7 +219,7 @@ func TestService_WrapUnwrapKey_RoundTrip(t *testing.T) {
 	assert.NotEqual(t, cek, wrapResp.Ciphertext.CT, "wrapped CEK must not equal the plaintext CEK")
 
 	unwrapResp := sendUnwrapKey(t, nc, vault.UnwrapKeyRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.BLobHoLderAAAAAAAAAA",
 		Envelope:     env,
 		Wrapped:      wrapResp.Ciphertext,
 	})
@@ -194,22 +236,23 @@ func TestService_UnwrapKey_ShreddedIdentity_Denied(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.BLobHoLderAAAAAAAAAA")
 	require.NoError(t, err)
 	cek := []byte("0123456789abcdef0123456789abcdef")
-	wrapped, err := backend.WrapKey(context.Background(), "identity-1", env, cek)
+	wrapped, err := backend.WrapKey(context.Background(), "vtx.identity.BLobHoLderAAAAAAAAAA", env, cek)
 	require.NoError(t, err)
-	require.NoError(t, backend.ShredKey(context.Background(), "identity-1"))
+	require.NoError(t, backend.ShredKey(context.Background(), "vtx.identity.BLobHoLderAAAAAAAAAA"))
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendUnwrapKey(t, nc, vault.UnwrapKeyRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.BLobHoLderAAAAAAAAAA",
 		Envelope:     env,
 		Wrapped:      wrapped,
 	})
-	require.NotEmpty(t, resp.Error)
+	// The refusal must be the shred, not the holder-kind gate ahead of it.
+	assert.Equal(t, vault.ErrKeyShredded.Error(), resp.Error)
 	assert.Empty(t, resp.Key)
 }
 
@@ -221,14 +264,44 @@ func TestService_WrapKey_MissingKey_Rejected(t *testing.T) {
 	kek := make([]byte, 32)
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.BLobHoLderAAAAAAAAAA")
 	require.NoError(t, err)
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
-	resp := sendWrapKey(t, nc, vault.WrapKeyRequest{KeyHolderKey: "identity-1", Envelope: env})
+	resp := sendWrapKey(t, nc, vault.WrapKeyRequest{KeyHolderKey: "vtx.identity.BLobHoLderAAAAAAAAAA", Envelope: env})
 	require.NotEmpty(t, resp.Error)
+}
+
+// TestService_WrapUnwrapKey_NonIdentityHolder_Denied pins the object plane's
+// holder rule (Contract #3 §3.11) at both RPCs — and, for unwrap, the bypass it
+// closes: an unwrap is a decrypt, so a sensitive aspect's ciphertext sealed
+// under a retention-class holder, presented to UnwrapKeySubject under that
+// holder, must be refused exactly as DecryptSubject refuses it.
+func TestService_WrapUnwrapKey_NonIdentityHolder_Denied(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	backend, err := vault.NewLocalBackend(make([]byte, 32), "v1")
+	require.NoError(t, err)
+	svc := vault.NewService(backend, nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	const holder = "vtx.retentionclass.RetentionCLassAAAAAA"
+	env, err := backend.CreateIdentityKey(ctx, holder)
+	require.NoError(t, err)
+
+	wrapResp := sendWrapKey(t, nc, vault.WrapKeyRequest{KeyHolderKey: holder, Envelope: env, Key: []byte("0123456789abcdef0123456789abcdef")})
+	assert.Equal(t, vault.ErrHolderNotIdentity.Error(), wrapResp.Error)
+	assert.Empty(t, wrapResp.Ciphertext.CT)
+
+	retained, err := backend.Encrypt(ctx, holder, env, []byte("chart note"))
+	require.NoError(t, err)
+	unwrapResp := sendUnwrapKey(t, nc, vault.UnwrapKeyRequest{KeyHolderKey: holder, Envelope: env, Wrapped: retained})
+	assert.Equal(t, vault.ErrHolderNotIdentity.Error(), unwrapResp.Error)
+	assert.Empty(t, unwrapResp.Key)
 }
 
 func TestService_WrapKey_MissingIdentityKey_Rejected(t *testing.T) {
@@ -274,14 +347,14 @@ func TestService_IssueSessionKey_ReturnsTheDEK(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.SessionHoLderAAAAAAA")
 	require.NoError(t, err)
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendIssueSessionKey(t, nc, vault.IssueSessionKeyRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.SessionHoLderAAAAAAA",
 		Envelope:     env,
 		AspectScope:  "lease",
 		TTLSeconds:   60,
@@ -292,7 +365,7 @@ func TestService_IssueSessionKey_ReturnsTheDEK(t *testing.T) {
 
 	// The issued key is the same DEK Decrypt uses under the hood — an Edge
 	// holding it can open a ciphertext delta locally with plain AES-GCM.
-	directDEK, err := backend.IssueSessionKey(context.Background(), "identity-1", env, "lease", time.Minute)
+	directDEK, err := backend.IssueSessionKey(context.Background(), "vtx.identity.SessionHoLderAAAAAAA", env, "lease", time.Minute)
 	require.NoError(t, err)
 	assert.Equal(t, directDEK.Key, resp.Key)
 }
@@ -310,19 +383,41 @@ func TestService_IssueSessionKey_ShreddedIdentity_Denied(t *testing.T) {
 	backend, err := vault.NewLocalBackend(kek, "v1")
 	require.NoError(t, err)
 
-	env, err := backend.CreateIdentityKey(context.Background(), "identity-1")
+	env, err := backend.CreateIdentityKey(context.Background(), "vtx.identity.SessionHoLderAAAAAAA")
 	require.NoError(t, err)
-	require.NoError(t, backend.ShredKey(context.Background(), "identity-1"))
+	require.NoError(t, backend.ShredKey(context.Background(), "vtx.identity.SessionHoLderAAAAAAA"))
 
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendIssueSessionKey(t, nc, vault.IssueSessionKeyRequest{
-		KeyHolderKey: "identity-1",
+		KeyHolderKey: "vtx.identity.SessionHoLderAAAAAAA",
 		Envelope:     env,
 		TTLSeconds:   60,
 	})
-	require.NotEmpty(t, resp.Error)
+	// The refusal must be the shred, not the holder-kind gate ahead of it.
+	assert.Equal(t, vault.ErrKeyShredded.Error(), resp.Error)
+	assert.Empty(t, resp.Key)
+}
+
+// TestService_IssueSessionKey_NonIdentityHolder_Denied: only an identity has
+// a personal-lens session to hand its DEK to; a retention-class holder is
+// refused before any key is touched.
+func TestService_IssueSessionKey_NonIdentityHolder_Denied(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	backend, err := vault.NewLocalBackend(make([]byte, 32), "v1")
+	require.NoError(t, err)
+	svc := vault.NewService(backend, nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	const holder = "vtx.retentionclass.RetentionCLassAAAAAA"
+	env, err := backend.CreateIdentityKey(ctx, holder)
+	require.NoError(t, err)
+	resp := sendIssueSessionKey(t, nc, vault.IssueSessionKeyRequest{KeyHolderKey: holder, Envelope: env, AspectScope: "lease", TTLSeconds: 60})
+	assert.Equal(t, vault.ErrHolderNotIdentity.Error(), resp.Error)
 	assert.Empty(t, resp.Key)
 }
 

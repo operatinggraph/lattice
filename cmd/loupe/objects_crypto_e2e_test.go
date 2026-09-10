@@ -147,7 +147,7 @@ func TestSensitiveObjectGet_DefaultServesCiphertext(t *testing.T) {
 	hs, backend, conn := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	plaintext := []byte("this is the applicant's signed lease PDF bytes")
-	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.tenant1", plaintext, "application/pdf")
+	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.TenantAAAAAAAAAAAAA1", plaintext, "application/pdf")
 
 	res, err := hs.Client().Get(hs.URL + "/api/objects/" + oid)
 	if err != nil {
@@ -177,7 +177,7 @@ func TestSensitiveObjectGet_DecryptTrue_RoundTrip(t *testing.T) {
 	hs, backend, conn := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	plaintext := []byte("this is the applicant's signed lease PDF bytes")
-	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.tenant2", plaintext, "application/pdf")
+	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.TenantAAAAAAAAAAAAA2", plaintext, "application/pdf")
 
 	res, err := hs.Client().Get(hs.URL + "/api/objects/" + oid + "?decrypt=true")
 	if err != nil {
@@ -209,9 +209,9 @@ func TestSensitiveObjectGet_ShreddedIdentity_PermanentlyUndecryptable(t *testing
 	hs, backend, conn := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	plaintext := []byte("applicant's SSN scan bytes")
-	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.shredme", plaintext, "image/jpeg")
+	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.ShredMeAAAAAAAAAAAAA", plaintext, "image/jpeg")
 
-	if err := backend.ShredKey(ctx, "vtx.identity.shredme"); err != nil {
+	if err := backend.ShredKey(ctx, "vtx.identity.ShredMeAAAAAAAAAAAAA"); err != nil {
 		t.Fatalf("shred key: %v", err)
 	}
 
@@ -256,14 +256,14 @@ func TestSensitiveObject_MultiPartyIndependentShred(t *testing.T) {
 	hs, backend, conn := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	plaintext := []byte("the same signed lease PDF bytes, held by both parties")
-	landlordOID := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.landlord1", plaintext, "application/pdf")
-	tenantOID := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.tenant3", plaintext, "application/pdf")
+	landlordOID := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.LandLordAAAAAAAAAAA1", plaintext, "application/pdf")
+	tenantOID := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.TenantAAAAAAAAAAAAA3", plaintext, "application/pdf")
 
 	if landlordOID == tenantOID {
 		t.Fatalf("identical bytes under two governing identities collapsed to one oid (%s) — cross-identity dedup must not happen for sensitive objects", landlordOID)
 	}
 
-	if err := backend.ShredKey(ctx, "vtx.identity.landlord1"); err != nil {
+	if err := backend.ShredKey(ctx, "vtx.identity.LandLordAAAAAAAAAAA1"); err != nil {
 		t.Fatalf("shred landlord: %v", err)
 	}
 
@@ -307,7 +307,7 @@ func TestSensitiveObjectGet_DemoMode_RevealRefused(t *testing.T) {
 	_, backend, conn := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	plaintext := []byte("this is the applicant's signed lease PDF bytes")
-	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.tenant2", plaintext, "application/pdf")
+	oid := putSensitiveObjectDirect(t, ctx, conn, backend, "vtx.identity.TenantAAAAAAAAAAAAA2", plaintext, "application/pdf")
 
 	demo := &server{
 		conn: conn, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

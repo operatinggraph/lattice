@@ -70,7 +70,10 @@ const handlerTimeout = 5 * time.Second
 // caller supplies everything the Vault needs to decrypt — its own
 // keyHolderKey, the Envelope from that holder's piiKey aspect, and the
 // Ciphertext from the sensitive aspect's data — since the Vault itself holds
-// no durable per-holder state beyond the master KEK.
+// no durable per-holder state beyond the master KEK. The holder must be an
+// identity: the request carries neither an actor nor a declared purpose, and
+// the Reveal rule (Contract #3 §3.10) denies such a decrypt for any other
+// holder kind (ErrRevealDenied).
 type DecryptRequest struct {
 	// KeyHolderKey is the Go field name; the wire name stays "identityKey"
 	// deliberately unchanged.
@@ -271,6 +274,18 @@ func (s *Service) handleDecrypt(req micro.Request) {
 		s.respond(req, DecryptResponse{Error: "vault: identityKey required"})
 		return
 	}
+	// Reveal rule (Contract #3 §3.10): this RPC carries neither an actor nor a
+	// declared purpose, so it opens identity-custodied records only. A
+	// retention-class holder has no data subject whose grant scopes the
+	// disclosure; its sanctioned read path is a read-path-authorized Secure
+	// Lens, whose decryptor calls Vault.Decrypt in-process and never arrives
+	// here. The kind is checked before any key is touched — the refusal is
+	// structural, so it also never tells whether such a class is shredded.
+	if holderType := KeyHolderType(in.KeyHolderKey); holderType != "identity" {
+		s.logger.Warn("vault: decrypt request denied — key holder is not an identity", "keyHolderKey", in.KeyHolderKey, "holderType", holderType)
+		s.respond(req, DecryptResponse{Error: ErrRevealDenied.Error()})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
@@ -330,6 +345,14 @@ func (s *Service) handleWrapKey(req micro.Request) {
 		s.respondWrapKey(req, WrapKeyResponse{Error: "vault: key required"})
 		return
 	}
+	// Blobs remain identity-custodied (Contract #3 §3.11): an object's CEK is
+	// wrapped under its governing identity's DEK and nothing else, so a holder
+	// of any other kind is refused before a key is touched.
+	if holderType := KeyHolderType(in.KeyHolderKey); holderType != "identity" {
+		s.logger.Warn("vault: wrapKey request denied — key holder is not an identity", "keyHolderKey", in.KeyHolderKey, "holderType", holderType)
+		s.respondWrapKey(req, WrapKeyResponse{Error: ErrHolderNotIdentity.Error()})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
@@ -377,6 +400,17 @@ func (s *Service) handleUnwrapKey(req micro.Request) {
 	}
 	if in.KeyHolderKey == "" {
 		s.respondUnwrapKey(req, UnwrapKeyResponse{Error: "vault: identityKey required"})
+		return
+	}
+	// An unwrap is a decrypt under another subject (the backend's UnwrapKey
+	// delegates to Decrypt, and a Ciphertext carries nothing that tells a
+	// wrapped CEK from a sensitive aspect's bytes), so it is held to the same
+	// holder kind as handleDecrypt: identity only — the object plane's own rule
+	// (Contract #3 §3.11) and the Reveal rule (§3.10) agree here. Refused before
+	// any key is touched, so a shredded class answers the same way.
+	if holderType := KeyHolderType(in.KeyHolderKey); holderType != "identity" {
+		s.logger.Warn("vault: unwrapKey request denied — key holder is not an identity", "keyHolderKey", in.KeyHolderKey, "holderType", holderType)
+		s.respondUnwrapKey(req, UnwrapKeyResponse{Error: ErrHolderNotIdentity.Error()})
 		return
 	}
 
@@ -428,6 +462,14 @@ func (s *Service) handleIssueSessionKey(req micro.Request) {
 		s.respondIssueSessionKey(req, IssueSessionKeyResponse{Error: "vault: identityKey required"})
 		return
 	}
+	// A session key is the holder's own DEK, handed to that identity's
+	// personal-lens session for a bounded TTL; only an identity has such a
+	// session, so any other holder kind is refused before a key is touched.
+	if holderType := KeyHolderType(in.KeyHolderKey); holderType != "identity" {
+		s.logger.Warn("vault: issueSessionKey request denied — key holder is not an identity", "keyHolderKey", in.KeyHolderKey, "holderType", holderType)
+		s.respondIssueSessionKey(req, IssueSessionKeyResponse{Error: ErrHolderNotIdentity.Error()})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
@@ -470,6 +512,14 @@ func (s *Service) respondIssueSessionKey(req micro.Request, resp IssueSessionKey
 // gate, DEK unwrap, and AAD check all apply identically, so a shredded
 // identity is refused even with a genuinely valid MAC. Same panic-recovery +
 // generic-error-detail posture as handleDecrypt.
+//
+// No holder-kind gate sits here, unlike handleDecrypt: the licence for an
+// egress ref is granted at mint — the operation's egress declaration for a
+// named adapter, the emitting engine's actor, and the Processor's MAC — which
+// is the actor and purpose the Reveal rule (Contract #3 §3.10) asks for. And
+// the Processor refuses to mint a ref for a non-identity holder
+// (refusableEgressHolder), so no valid class-held ref reaches this responder
+// until the retention-class egress design admits one.
 func (s *Service) handleDecryptRef(req micro.Request) {
 	defer func() {
 		if r := recover(); r != nil {
