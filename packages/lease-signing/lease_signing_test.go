@@ -109,6 +109,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "DecideLeaseApplication", Scope: "any"},
 			{OperationType: "SetApplicantProfile", Scope: "any"},
 			{OperationType: "BackfillLeaseTerms", Scope: "any"},
+			{OperationType: "ReassignLeaseUnit", Scope: "any"},
 			{OperationType: "OpenRenewal", Scope: "any"},
 			{OperationType: "SetRenewalTerms", Scope: "any"},
 			{OperationType: "VerifyGuarantor", Scope: "any"},

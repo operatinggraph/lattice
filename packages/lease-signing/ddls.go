@@ -94,7 +94,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -168,7 +168,20 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"(never a payload field, the leaseapp_unit resolver's forgery-resistance rationale) and writes " +
 			"{requestedRent: unit.listing.rentAmount} onto .terms, preserving any moveInDate/leaseTermMonths " +
 			"already present; no-ops cleanly if requestedRent is already set (mirrors BackfillPatientRegistration's " +
-			"own already-present no-op, clinic-domain).",
+			"own already-present no-op, clinic-domain). " +
+			"ReassignLeaseUnit{leaseAppKey, newUnitKey} is operator-granted (never person-facing) and re-points a live " +
+			"application's appliesToUnit link to a different unit — the repair for a lease whose unit was tombstoned " +
+			"(TombstoneLocation does not cascade; the SetMenuItemLocation / ReassignSession repair shape), and an " +
+			"ordinary move of a live application besides. It resolves the application's CURRENT appliesToUnit link and " +
+			"its applicant's applicationFor link itself (never payload fields), tombstones the old link CAS-guarded on " +
+			"its own revision (two concurrent re-points to different units RevisionConflicts rather than leaving two " +
+			"live links), and creates-or-revives lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. It re-keys the " +
+			"per-(applicant, unit) duplicate-application guard for the NEW pair — CreateLeaseApplication's own three-way " +
+			"alive/absent/tombstoned block — and FREES (tombstones) the VACATED (applicant, oldUnit) guard: the guard's " +
+			"contract is at most one live application per (applicant, unit), so a moved lease no longer justifies holding " +
+			"the pair it left, and a later re-apply or a move back to that unit must not collide with its own stale guard. " +
+			"No-ops cleanly when the application already applies to newUnitKey. Emits " +
+			"leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -177,7 +190,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months (CreateLeaseApplication; required when moveInDate is supplied)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent (CreateLeaseApplication; optional, only with moveInDate). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
-			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), or backfill (BackfillLeaseTerms); required, validated alive."},` +
+			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), or re-point at a different unit (ReassignLeaseUnit); required, validated alive."},` +
+			`"newUnitKey":{"type":"string","description":"vtx.unit.<NanoID> of the unit to re-point the application's appliesToUnit link at (ReassignLeaseUnit; required, validated alive). The operator repair for an application whose unit was tombstoned."},` +
 			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
 			`"annualIncome":{"type":"number","description":"The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE — stored in the .profile aspect (underwritingRecord retention class), NEVER projected; only the derived incomeToRentMet boolean reaches the read model."},` +
@@ -201,7 +215,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseTermMonths":       "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":         "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent. The caller lists it in ContextHint.Reads.",
+			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey. The caller lists it in ContextHint.Reads.",
+			"newUnitKey":            "Full vtx.unit.<NanoID> key of the unit ReassignLeaseUnit re-points the application at (required, validated alive). The operator names the unit directly — the application's OWN appliesToUnit / applicationFor links, never payload fields, are what the op reads to find the CURRENT unit and the applicant.",
 			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE: stored in the .profile aspect, custodied on the package's underwritingRecord retention class (RetentionClasses) rather than the applicant's identity, and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it into the non-sensitive .applicationSignals aspect, and only that boolean reaches the read model.",
 			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
 			"employerName":          "The applicant's employer name (SetApplicantProfile; optional). SENSITIVE — stored in the .profile aspect, never projected.",
@@ -313,6 +328,23 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"present. No-ops if requestedRent is already set. Operator-only. Rejects a non-existent application " +
 					"(UnknownLeaseApplication), one whose unit is no longer live (UnitNoLongerAvailable), or a unit carrying " +
 					"no listed rent to backfill from (NoRentSource).",
+			},
+			{
+				Name:    "ReassignLeaseUnit — repair a lease whose unit was tombstoned",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "newUnitKey": "vtx.unit.<liveUnitNanoID>"},
+				ExpectedOutcome: "Resolves the application's CURRENT appliesToUnit link and its applicationFor applicant itself " +
+					"(never payload fields). Tombstones the old link CAS-guarded on its own revision, and creates-or-revives " +
+					"lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. Re-keys the per-(applicant, unit) duplicate-application " +
+					"guard for the NEW pair (alive → DuplicateApplication; absent → create; tombstoned → revive), and FREES " +
+					"(tombstones) the VACATED (applicant, oldUnit) guard. No-ops (zero mutations) if the application already applies to newUnitKey. " +
+					"Emits leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}. Every mutation is relational (no write " +
+					"ever touches the leaseapp vertex or one of its aspects), so primaryKey is the NEW appliesToUnit link " +
+					"itself, not leaseAppKey (the reply-constraint requires primaryKey within the committed write footprint — " +
+					"the AssignUnitOwner link-as-primaryKey shape, loftspace-domain/ownership.go); a no-op returns no " +
+					"primaryKey at all. Operator-only. Rejects a non-existent " +
+					"application (UnknownLeaseApplication) or unit (UnknownUnit), one carrying no live appliesToUnit or " +
+					"applicationFor link (InvalidState), or a newUnitKey the applicant already has a live application on " +
+					"(DuplicateApplication).",
 			},
 		},
 		Effects: map[string][]json.RawMessage{

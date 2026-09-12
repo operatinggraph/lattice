@@ -121,6 +121,8 @@ read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	PromoteWaitlistedBookings	vtx.session.<id>.seat1
 read	PromoteWaitlistedBookings	vtx.session.<id>.seat2
 read	PromoteWaitlistedBookings	vtx.session.<id>.seat3
+# ReassignLeaseUnit: guard key built from the applicant a walk resolves; link-shaped, category 3.
+read	ReassignLeaseUnit	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
 read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
 read	ReleaseOrphanedBooking	vtx.session.<id>.schedule

@@ -29,6 +29,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	SignRenewal                     → operator
 //	CancelRenewal                   → operator
 //	CancelRenewal (self)            → consumer
+//	ReassignLeaseUnit               → operator
 //
 // The orchestrator-submitted ops are operator-driven (the same operator-grant
 // idiom service-domain / orchestration-base use):
@@ -158,6 +159,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "BackfillLeaseTerms",
 			Scope:         "any",
 			Note:          "Grants the operator alone the right to backfill requestedRent onto an approved lease application that carries none — dispatched automatically by leaseRentSettlement's missing_terms gap (semantic-contracts), and runnable by hand; never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "ReassignLeaseUnit",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to re-point a lease application's appliesToUnit link — the repair for a lease whose unit was tombstoned (TombstoneLocation does not cascade; the SetMenuItemLocation / ReassignSession repair shape); a tenancy's unit is never a front-desk call.",
 			GrantsTo:      []string{"operator"},
 		},
 		{
@@ -440,6 +447,55 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The guard link being freed may already be tombstoned.
 				OptionalReads: []string{
 					"lnk.identity.{payload.applicant:id}.appliedToUnit.unit.{payload.unit:id}",
+				},
+			},
+		},
+		{
+			OperationType: "ReassignLeaseUnit",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Move an application to another unit",
+				ShortLabel:  "Move unit",
+				Description: "Re-point a lease application at a different unit — the repair for one whose unit was retired.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Move application",
+				Group:       "Operator repairs",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the application to re-point."},` +
+				`"newUnitKey":{"type":"string","title":"New unit","x-entityRef":"unit","description":"vtx.unit.<NanoID> of the unit to re-point the application at."}},` +
+				`"required":["leaseAppKey","newUnitKey"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application being re-pointed.",
+				"newUnitKey":  "The unit the application should apply to instead. A dead unit is the repair case; a live unit is an ordinary move.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class: "leaseapp",
+				// standing, not "self": this op carries no scope=self grant
+				// (operator-only repair), so it has no authContext target to
+				// bind — the CorrectAppointmentStatus posture (clinic-domain).
+				AuthContext: "standing",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads: []string{
+					"{payload.leaseAppKey}",
+					"{payload.newUnitKey}",
+				},
+				// The new pair's duplicate-application guard is absent on the
+				// common case (the applicant has never applied to this unit
+				// before), so it can never be a required read.
+				OptionalReads: []string{
+					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.newUnitKey:id}",
+				},
+				// The script resolves the CURRENT appliesToUnit target and the
+				// applicant's applicationFor endpoint itself (never payload
+				// fields, the leaseapp_unit resolver's own forgery-resistance
+				// rationale), so a descriptor-driven client walks both here
+				// rather than trusting a payload-templated hub it cannot form
+				// ahead of dispatch.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
 				},
 			},
 		},

@@ -179,10 +179,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 24; got != want {
+	if got, want := len(Package.Permissions), 25; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 14; got != want {
+	if got, want := len(Package.OpMetas), 15; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -267,6 +267,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"DecideLeaseApplication", "any"}, {"DecideLeaseApplication", "self"},
 		{"SetApplicantProfile", "any"}, {"SetApplicantProfile", "self"},
 		{"BackfillLeaseTerms", "any"},
+		{"ReassignLeaseUnit", "any"},
 		{"OpenRenewal", "any"},
 		{"SetRenewalTerms", "any"}, {"SetRenewalTerms", "self"},
 		{"VerifyGuarantor", "any"}, {"VerifyGuarantor", "self"},

@@ -294,6 +294,7 @@ func main() {
 	fmt.Printf("==> menu item:       %s (Croissant, $3.50)\n", croissantKey)
 	reapDuplicateMenuItems(ctx, conn, adminKey, unitKey, map[string]bool{latteKey: true, croissantKey: true})
 	backfillMenuItemLocations(ctx, conn, adminKey, unitKey)
+	backfillLeaseUnits(ctx, conn, adminKey, unitKey)
 
 	// --- Wellness: studio + bookable session ---------------------------------
 
@@ -439,6 +440,85 @@ func backfillMenuItemLocations(ctx context.Context, conn *substrate.Conn, adminK
 				OptionalReads: []string{linkKey(key, "servedAt", unitKey)},
 			})
 		fmt.Printf("==> relocated menu item: %s -> %s\n", key, unitKey)
+	}
+}
+
+// backfillLeaseUnits re-points every live leaseapp whose appliesToUnit target
+// is a tombstoned "12 Classic Demo Ave" duplicate (reapDuplicateListings'
+// own predicate) back onto the live canonical unitKey via ReassignLeaseUnit.
+// A lease outlives the unit the reap tombstoned from under it, and the front
+// desk's authz_anchors walk binds no building through a dead appliesToUnit
+// target, so the applicant is unnameable — the same "X outlived its place"
+// repair shape backfillMenuItemLocations closes for a menu item. Idempotent:
+// a lease whose unit is still alive, or whose dead unit isn't one of this
+// seed's own duplicates, or whose applicant already holds a live application
+// on the canonical unit, is left alone.
+func backfillLeaseUnits(ctx context.Context, conn *substrate.Conn, adminKey, unitKey string) {
+	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
+	must(err, "list lnk.leaseapp. keys")
+	canonicalUnitID := strings.TrimPrefix(unitKey, "vtx.unit.")
+	for _, link := range links {
+		idx := strings.Index(link, ".appliesToUnit.unit.")
+		if idx < 0 || !alive(ctx, conn, link) {
+			continue
+		}
+		appID := strings.TrimPrefix(link[:idx], "lnk.leaseapp.")
+		leaseAppKey := "vtx.leaseapp." + appID
+		deadUnitID := link[idx+len(".appliesToUnit.unit."):]
+		deadUnitKey := "vtx.unit." + deadUnitID
+
+		if !alive(ctx, conn, leaseAppKey) || alive(ctx, conn, deadUnitKey) {
+			continue
+		}
+
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, deadUnitKey+".address")
+		if err != nil {
+			fmt.Printf("==> left alone: %s (unit %s is dead but not a 12 Classic Demo Ave duplicate)\n", leaseAppKey, deadUnitKey)
+			continue
+		}
+		var addrAspect struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				Line1 string `json:"line1"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &addrAspect); err != nil || addrAspect.IsDeleted || addrAspect.Data.Line1 != "12 Classic Demo Ave" {
+			fmt.Printf("==> left alone: %s (unit %s is dead but not a 12 Classic Demo Ave duplicate)\n", leaseAppKey, deadUnitKey)
+			continue
+		}
+
+		applicantPrefix := "lnk.leaseapp." + appID + ".applicationFor.identity."
+		appLinks, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, applicantPrefix)
+		must(err, "list "+applicantPrefix+" keys")
+		var applicantID string
+		for _, al := range appLinks {
+			if alive(ctx, conn, al) {
+				applicantID = strings.TrimPrefix(al, applicantPrefix)
+				break
+			}
+		}
+		if applicantID == "" {
+			fmt.Printf("==> left alone: %s (no live applicationFor applicant found)\n", leaseAppKey)
+			continue
+		}
+
+		guardKey := "lnk.identity." + applicantID + ".appliedToUnit.unit." + canonicalUnitID
+		if alive(ctx, conn, guardKey) {
+			fmt.Printf("==> left alone: %s (applicant already holds a live application on %s)\n", leaseAppKey, unitKey)
+			continue
+		}
+
+		submitOp(ctx, conn, adminKey, "ReassignLeaseUnit", "leaseapp",
+			map[string]any{"leaseAppKey": leaseAppKey, "newUnitKey": unitKey},
+			&processor.ContextHint{
+				Reads:         []string{leaseAppKey, unitKey},
+				OptionalReads: []string{linkKey(leaseAppKey, "appliesToUnit", unitKey)},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: leaseAppKey, Relation: "appliesToUnit", Direction: "out"},
+					{Hub: leaseAppKey, Relation: "applicationFor", Direction: "out"},
+				},
+			})
+		fmt.Printf("==> re-pointed lease: %s (%s -> %s)\n", leaseAppKey, deadUnitKey, unitKey)
 	}
 }
 

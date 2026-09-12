@@ -82,6 +82,29 @@ def make_link_tombstone(key, source, target, cls, local_name):
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": {}}}
 
+def make_link_tombstone_occ(key, source, target, cls, local_name, expected_revision):
+    # Soft-delete a live link, CAS-guarded on its own revision. Two concurrent
+    # re-points of the same source to different targets both read the same
+    # live link and both try to retire it — the second RevisionConflicts
+    # (fail closed) rather than leaving the source with two live links of the
+    # same relation.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": True,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": {}},
+            "expectedRevision": expected_revision}
+
+def make_link_create_or_revive(key, source, target, cls, local_name):
+    # read-posture: (d) declared optionalReads at ReassignLeaseUnit dispatch —
+    # an absent link (the pairing has never been used before) is the common
+    # case, never a required read.
+    existing = kv.Read(key)
+    if existing != None and not existing.isDeleted:
+        fail("InvalidState: " + key + " is already live — this should have been tombstoned first")
+    if existing != None:
+        return make_link_revive_occ(key, source, target, cls, local_name, existing.revision)
+    return make_link(key, source, target, cls, local_name, {})
+
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
         return nanoid.new()
@@ -1011,6 +1034,116 @@ def execute(state, op):
                    "data": {"leaseAppKey": app_key, "unit": unit}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
+
+    if ot == "ReassignLeaseUnit":
+        # Operator repair for an application whose unit died out from under
+        # it (TombstoneLocation does not cascade — the SetMenuItemLocation /
+        # ReassignSession repair shape), and an ordinary move of a live
+        # application to a different unit besides. Re-points appliesToUnit
+        # and re-keys the per-(applicant, unit) duplicate-application guard:
+        # the guard's contract is "at most one live application per
+        # (applicant, unit)", so a moved lease VACATES its old pair — that
+        # guard is freed (tombstoned) alongside the new pair's guard going
+        # live, or a later re-apply / return to the old unit would collide
+        # with a guard nothing about that pair still justifies.
+        lease_app_key = required_string(p, "leaseAppKey")
+        _, app_id = parts_of(lease_app_key, "leaseAppKey", "leaseapp")
+        if not vertex_alive(state, lease_app_key):
+            fail("UnknownLeaseApplication: " + lease_app_key)
+
+        new_unit = required_string(p, "newUnitKey")
+        _, new_unit_id = parts_of(new_unit, "newUnitKey", "unit")
+        if not vertex_alive(state, new_unit):
+            fail("UnknownUnit: " + new_unit)
+
+        # The application's CURRENT appliesToUnit link. Needs the whole link
+        # struct (key + revision), not just the target, so this is inlined
+        # rather than reusing leaseapp_unit().
+        # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp
+        # carries exactly one appliesToUnit link (required at
+        # CreateLeaseApplication), so this is never a keyspace scan.
+        page, _ = kv.Links(lease_app_key, "appliesToUnit", "out", None, LEASEAPP_UNIT_PAGE_LIMIT)
+        current = None
+        for lk in page:
+            if not lk.isDeleted:
+                current = lk
+        if current == None:
+            fail("InvalidState: ReassignLeaseUnit: " + lease_app_key + " carries no live appliesToUnit link")
+
+        # Already there — accept harmlessly rather than reject, the same
+        # no-op posture the repair's shipped precedents use for a repeat
+        # repair. An empty response omits primaryKey — the reply-constraint
+        # requires primaryKey to lie within the write footprint (Contract #3),
+        # and a no-op commits none (AssignUnitOwner's own already-managed
+        # no-op, loftspace-domain/ownership.go).
+        if current.targetVertex == new_unit:
+            return {"mutations": [], "events": [], "response": {}}
+
+        # The applicant, from the application's OWN applicationFor link —
+        # never a payload field. NOT required to be alive: the repair must
+        # work for any lease, including one whose applicant has since been
+        # removed.
+        # read-posture: (e) relation=applicationFor epoch=none -- a leaseapp
+        # carries exactly one applicationFor link (required at
+        # CreateLeaseApplication), so this is never a keyspace scan.
+        app_page, _ = kv.Links(lease_app_key, "applicationFor", "out", None, LEASEAPP_UNIT_PAGE_LIMIT)
+        applicant = None
+        for lk in app_page:
+            if not lk.isDeleted:
+                applicant = lk.targetVertex
+        if applicant == None:
+            fail("InvalidState: ReassignLeaseUnit: " + lease_app_key + " carries no live applicationFor link")
+        _, applicant_id = parts_of(applicant, "applicant", "identity")
+
+        old_unit = current.targetVertex
+        _, old_unit_id = parts_of(old_unit, "oldUnit", "unit")
+
+        # Per-(applicant, new unit) duplicate-application guard — the same
+        # three-way block CreateLeaseApplication runs on a first apply
+        # (guard logic there).
+        guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + new_unit_id
+        # read-posture: (e) per-candidate follow-up read off the
+        # applicationFor enumeration above (data-derived key).
+        guard = kv.Read(guard_key)
+        if guard != None and not guard.isDeleted:
+            fail("DuplicateApplication: applicant " + applicant + " already has a live application for unit " + new_unit)
+        if guard != None:
+            guard_mut = make_link_revive_occ(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", guard.revision)
+        else:
+            guard_mut = make_link(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", {})
+
+        # The VACATED (applicant, old unit) guard: the pair the lease no
+        # longer applies to, once this commits. Freed unconditionally when
+        # alive — the guard is per LIVE pair, so nothing about the old pair
+        # still justifies holding it once the lease has moved on.
+        old_guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + old_unit_id
+        # read-posture: (e) per-candidate follow-up read off the
+        # appliesToUnit + applicationFor enumerations above (data-derived key).
+        old_guard = kv.Read(old_guard_key)
+        old_guard_muts = []
+        if old_guard != None and not old_guard.isDeleted:
+            old_guard_muts = [make_link_tombstone_occ(old_guard_key, applicant, old_unit, "appliedToUnit", "appliedToUnit", old_guard.revision)]
+
+        new_applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + new_unit_id
+        mutations = [
+            # Revision-pinned: two concurrent re-points to different units
+            # must not both land, or the leaseapp ends up with two live
+            # appliesToUnit links — the second CAS fails with
+            # RevisionConflicts instead.
+            make_link_tombstone_occ(current.key, lease_app_key, old_unit, "appliesToUnit", "appliesToUnit", current.revision),
+            make_link_create_or_revive(new_applies_to_lnk, lease_app_key, new_unit, "appliesToUnit", "appliesToUnit"),
+            guard_mut,
+        ] + old_guard_muts
+        events = [{"class": "leaseapp.unitReassigned",
+                   "data": {"leaseAppKey": lease_app_key, "oldUnitKey": old_unit, "newUnitKey": new_unit}}]
+        # primaryKey is the NEW appliesToUnit link, not leaseAppKey: every
+        # mutation here is relational (no write ever touches the leaseapp
+        # vertex or one of its aspects), and the reply-constraint requires
+        # primaryKey to lie within the committed write footprint (Contract
+        # #3) — the same link-as-primaryKey shape AssignUnitOwner returns for
+        # its own link-only mutation (loftspace-domain/ownership.go).
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": new_applies_to_lnk}}
 
     if ot == "SetApplicantProfile":
         # The applicant's qualification profile — the data a landlord decides on.
