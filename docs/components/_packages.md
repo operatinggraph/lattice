@@ -246,6 +246,27 @@ Field semantics:
   zero-line manifest diff, defeating the one construct whose whole purpose is
   being the reviewable statement of it.
 
+## Identity claim custody — the registrar holds the secret (accepted doctrine)
+
+A front-desk actor who mints an identity (`CreateUnclaimedIdentity`) mints its claim secret client-side,
+Lattice stores only the hash, and the ceremony shows the secret to the desk once to hand over — the
+walk-in flow the Gateway claim design ratified (2026-07-06: "the app hands `s` to the prospect out of
+band"). That registrar holds the secret by design, and the same custody carries into binding an
+**existing** chart to a fresh unclaimed identity (clinic `BindPatientIdentity`): a staffer who kept the
+secret could claim the login and read what the patient's own login reads — for the clinic, the encounter
+note plaintext the desk's own grants deliberately exclude. **Andrew, 2026-09-12: the trust model is
+accepted for a bound chart as it is for registration; the stakes change, the model does not.** What
+contains it: a claim runs under the raw credential and refuses one already bound to another identity, so
+the abuse needs a fresh credential and leaves three durable traces — the identity's `createdBy` (the
+minter), the `identifiedBy` link's provenance (the binder), and the claiming credential in
+`credentialindex`. The desk's reach is one chart, and never beyond what that patient's login reads. What
+the platform owes is the **undo**: today `UnbindPatientIdentity` and `RotateClaimKey` both require the
+identity still `unclaimed`, so a rogue-claimed login cannot be repaired — filed as its own row (an
+operator unbind of a claimed identity, credential unlink, re-issue to the patient, provenance-checked).
+Narrowing the desk (operator-only bind for charts with history) and out-of-band delivery of the secret
+were priced and not taken: the first breaks the front-desk Connect-a-login ceremony for exactly the
+returning patients it serves; the second replaces a doctrine that keeps Lattice out of the delivery.
+
 ## Installation semantics
 
 Install and uninstall route **through the Processor** as the two primordial

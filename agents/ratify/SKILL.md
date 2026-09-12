@@ -52,6 +52,11 @@ The designs may have been authored by a different model/session. Re-verify, don'
   a SYMPTOM (the hard-delete/hasBooking case). Read banners FIRST; they supersede bodies.
 - **Cross-design overlap**: grep the other 📐/🏗️ designs for the same seam; two designs on one seam →
   present jointly, simpler one wins.
+- **A "trust-model call" row: grep the ratified designs for the same posture before treating it as open** —
+  it is often already doctrine (the desk holding the claim secret was ratified in the Gateway walk-in flow), and
+  the new row changes the *stakes*, not the model. Then ask what a rogue act **leaves behind** (`createdBy`,
+  link provenance, `credentialindex`) and what the **undo** is: the deliverable is usually the repair path,
+  not a new refusal (clinic `BindPatientIdentity`, 2026-09-12: no operator undo existed).
 - **Standing rules**: fewer-larger fires (collapse decompositions; coupled-ships-together); lane splits
   (cmd/loupe/** = Loupe lane — display fires move there); dead-scaffolding (no build without a consumer);
   fail-closed defaults on any new boundary.
