@@ -516,10 +516,11 @@ func (s *Service) respondIssueSessionKey(req micro.Request, resp IssueSessionKey
 // No holder-kind gate sits here, unlike handleDecrypt: the licence for an
 // egress ref is granted at mint — the operation's egress declaration for a
 // named adapter, the emitting engine's actor, and the Processor's MAC — which
-// is the actor and purpose the Reveal rule (Contract #3 §3.10) asks for. And
-// the Processor refuses to mint a ref for a non-identity holder
-// (refusableEgressHolder), so no valid class-held ref reaches this responder
-// until the retention-class egress design admits one.
+// is the actor and purpose the Reveal rule (Contract #3 §3.10) asks for. Egress
+// is therefore licensed for every holder kind by the declaration rather than by
+// the holder's custody, and a ref this responder verifies was minted under one:
+// the Processor admits only a holder kind the egress boundary can serve
+// (refusableEgressHolder, vault.KeyHolderKinds).
 func (s *Service) handleDecryptRef(req micro.Request) {
 	defer func() {
 		if r := recover(); r != nil {

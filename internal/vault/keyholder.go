@@ -41,20 +41,38 @@ func KeyHolder(ct Ciphertext) (string, error) {
 	return ct.KeyID, nil
 }
 
+// KeyHolderKinds is the closed set of key-holder vertex types custody can
+// resolve to (Contract #3 §3.10: identity, retentionClass) — the two kinds
+// internal/pkgmgr admits at install (custodyscope.go). A ciphertext naming any
+// other kind was not written by the Processor's commit path.
+func KeyHolderKinds() []string { return []string{"identity", "retentionclass"} }
+
+// IsKeyHolderKind reports whether vertexType is one of KeyHolderKinds — the
+// predicate the two external-egress gates share, so the Processor's answer at
+// mint and the bridge's at unwrap are one value read twice rather than two
+// literals that can drift.
+func IsKeyHolderKind(vertexType string) bool {
+	for _, kind := range KeyHolderKinds() {
+		if vertexType == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // KeyHolderType returns the vertex-type segment of a key holder key resolved by
 // KeyHolder — "identity" for a subject-custodied record, "retentionclass" for
 // one whose custody follows a retention obligation instead.
 //
-// It serves the sites that admit one holder kind only. The two egress gates
-// can carry a record only as far as their envelope source reaches: the bridge
-// resolves a holder's envelope from the piiKeyEnvelope lens, which enumerates
-// identity holders alone, so a holder type that source cannot serve is refused
-// where the operation is authored, with the type named, rather than surfacing
-// later as an envelope that mysteriously never projects. The wholesale decrypt
-// RPC and its console proxy carry neither an actor nor a declared purpose, so
-// the Reveal rule (Contract #3 §3.10) admits an identity holder alone there;
-// the object-key and session-key RPCs serve identity holders by the object
-// plane's own rule (§3.11).
+// It serves the sites that admit some holder kinds and not others. The two
+// egress gates admit exactly the kinds that have a live envelope projection
+// (KeyHolderKinds): a third kind is refused at mint with the kind named,
+// rather than left to decay into an envelope that never projects — an absence
+// the boundary cannot tell from a lagging lens. The wholesale decrypt RPC and
+// its console proxy carry neither an actor nor a declared purpose, so the
+// Reveal rule (Contract #3 §3.10) admits an identity holder alone there; the
+// object-key and session-key RPCs serve identity holders by the object plane's
+// own rule (§3.11).
 func KeyHolderType(keyHolderKey string) string {
 	vertexType, _, ok := substrate.ParseVertexKey(keyHolderKey)
 	if !ok {
