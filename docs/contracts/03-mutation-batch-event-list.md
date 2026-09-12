@@ -189,8 +189,10 @@ it was written under.
 two kinds are two clocks: `ShredIdentityKey` destroys a person's DEK and makes every aspect custodied by
 that person unrecoverable, while a record custodied by a retention class **survives** — it becomes
 pseudonymized (retained, with its subject's direct identifiers unrecoverable) rather than erased. A
-retained record must not duplicate its subject's direct identifiers, or the subject's erasure is defeated
-by that duplication. Conversely `ShredRetentionClassKey` makes every record in that class unrecoverable
+retained record must not duplicate its subject's direct identifiers beyond those the retention obligation
+itself requires: a contract record keeps its parties' names for as long as the contract must be kept; a
+record whose obligation is to the fact and not the person carries none. Duplication past that line defeats
+the subject's erasure. Conversely `ShredRetentionClassKey` makes every record in that class unrecoverable
 regardless of any subject's erasure state.
 
 **Erasure must reach the read models.** A key destruction is not complete when the key is destroyed; it is

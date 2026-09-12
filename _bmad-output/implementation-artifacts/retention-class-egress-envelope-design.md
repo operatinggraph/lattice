@@ -1,9 +1,16 @@
 # Retention-class egress — the bridge serves every key-holder kind custody can name
 
-**Status: 📐 awaiting-Andrew (ratification).** Designer fire 2026-09-03 · Winston. Two things need Andrew:
-a **product/privacy call** (§6, F1) and a **frozen-contract change** (§7: four clauses in Contract #3, one
-in Contract #10, plus F2 — a sentence the demand contradicts). Per the 2026-09-01 exception, the contract
-text lands with the build's commit; its text of record is §7. **Nothing is staged in the tree.**
+**Status: ✅ Andrew-ratified 2026-09-12 — build-ready (Inc 1, Lattice lane; Inc 2 is the verticals row, unblocked
+when Inc 1 ships).** Designer fire 2026-09-03 · Winston. Ratification session 2026-09-12 (Andrew): **F1 = yes on
+both widenings** (erasure survival and anchor reach — a retained record's egress licence follows its class; the
+licence is the declaration + the engine actor + the MAC, §6); **F2 = option B** — §7.1(d)'s narrowed sentence is
+doctrine, true today, and is **committed to Contract #3 §3.10 in the ratification commit**; **§7.1(a)–(c) and §7.2
+are ratified as text of record** and land with Inc 1's commit (they assert behaviour the runtime does not have yet;
+held out of the tree until then, per the 2026-09-01 exception). Winston's adjudications at the table: the
+Processor's mint gate stays, re-sourced to the closed set (§9 row 10 not taken); the nested-marker refusal stands
+as a fail-closed boundary. DD at ratification: both refusals, the identity-only lens, the contract sentences and
+the Processor gate re-verified after the stored-class write-gate fix rounds; censuses re-run (two classes, zero
+templating patterns, 120 identity envelope keys / 2 class rows live).
 **Board row:** `[bridge] Egress-unwrap serves identity-custodied sensitive aspects only — a retention-class
 holder's $sensitiveRef permanently fails` (`backlog/lattice.md`, ★★, S–M).
 **Parent:** `retention-class-key-custody-design.md` §11 deferred tail (a) — *"Retained-class egress refs …
@@ -489,20 +496,22 @@ be.
 (The clause's existing denial is built by §6.1 in the same fire, so the appended sentence lands on a
 promise that is then true.)
 
-**(d) Lines 190-193 — F2, Andrew's call.** Current:
+**(d) Lines 190-193 — F2. Decided: option B (Andrew, 2026-09-12); COMMITTED to the contract in the ratification
+commit — the only §7 edit in the tree ahead of the build, because it is doctrine that is true today
+(`underwritingParties` already lives under it).** Was:
 
 > A retained record must not duplicate its subject's direct identifiers, or the subject's erasure is
 > defeated by that duplication.
 
-Option B (recommended):
+Option B (ratified, committed):
 
 > A retained record must not duplicate its subject's direct identifiers beyond those the retention
 > obligation itself requires: a contract record keeps its parties' names for as long as the contract must
 > be kept; a record whose obligation is to the fact and not the person carries none. Duplication past
 > that line defeats the subject's erasure.
 
-Option A keeps the sentence; then the tenant-name snapshot (and the shipped `underwritingParties`
-names) are non-conformant, and the verticals row closes as *won't-fix at the contract*.
+Option A (not taken) would have kept the sentence; the tenant-name snapshot and the shipped `underwritingParties`
+names would then have been non-conformant, and the verticals row would have closed *won't-fix at the contract*.
 
 ### 7.2 Contract #10 §10.5 — `docs/contracts/10-orchestration-loom.md` lines 111-113
 
