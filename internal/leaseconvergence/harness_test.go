@@ -129,6 +129,11 @@ type harnessConfig struct {
 	// JetStream durable, so a second source would work too, it's just
 	// unnecessary here.
 	extraLenses []string
+	// extraPackages are installed by installChain AFTER the real chain, so a
+	// test-only fixture package (an op the shipped corpus has no consumer for)
+	// lands on top of the same graph every other test runs against, and the
+	// Refractor's lens activation still boots once, unchanged.
+	extraPackages []pkgmgr.Definition
 }
 
 // harnessOpt mutates the harnessConfig before the stack boots.
@@ -273,7 +278,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	require.NoError(t, opStatusSvc.StartNATSListener(ctx, nc))
 
 	// --- install the real chain via the real InstallPackage op path (ops.meta).
-	h.installChain()
+	h.installChain(hc.extraPackages...)
 
 	// --- Refractor: activate the leaseApplicationComplete lens + its actorAggregate
 	// projection through the production wiring (CoreKVSource watch +
@@ -374,11 +379,12 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 
 // installChain installs rbac → identity → orchestration-base → service-domain →
 // lease-signing via the real InstallPackage op path (the installer publishes to
-// ops.meta; the meta-lane Processor commits each atomic batch).
-func (h *harness) installChain() {
+// ops.meta; the meta-lane Processor commits each atomic batch). Any extra
+// package is installed last, on top of the full chain.
+func (h *harness) installChain(extra ...pkgmgr.Definition) {
 	installer := testutil.NewInstaller(h.conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = testutil.StandardRoleIDs()
-	for _, pkg := range []pkgmgr.Definition{
+	for _, pkg := range append([]pkgmgr.Definition{
 		rbacdomain.Package,
 		identitydomain.Package,
 		privacybase.Package,
@@ -388,7 +394,7 @@ func (h *harness) installChain() {
 		orchestrationbase.Package,
 		servicedomain.Package,
 		leasesigning.Package,
-	} {
+	}, extra...) {
 		res, err := installer.Install(h.ctx, pkg)
 		require.NoErrorf(h.t, err, "install %s", pkg.Name)
 		require.NotNil(h.t, res)
