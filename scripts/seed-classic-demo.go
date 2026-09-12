@@ -365,6 +365,17 @@ func linkKey(source, relation, target string) string {
 // studio's slot-claim aspect keys, mirroring wellness-domain's slot_cells +
 // slot_cellcode Starlark helpers (strip '-'/':' and lowercase) so this
 // dispatcher can declare them, script-read-posture-design.md §13.
+// slotTaken reports whether any of the hub's slot cells over [start, end) is
+// live — the same cells CreateAppointment claims, read ahead of the submit.
+func slotTaken(ctx context.Context, conn *substrate.Conn, hub string, start, end time.Time) bool {
+	for _, key := range slotClaimKeys(hub, start, end) {
+		if alive(ctx, conn, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func slotClaimKeys(hub string, start, end time.Time) []string {
 	var keys []string
 	for cur := start; cur.Before(end); cur = cur.Add(15 * time.Minute) {
@@ -639,6 +650,15 @@ func backfillClinicForwardSchedule(ctx context.Context, conn *substrate.Conn, ad
 		apptID := substrate.DeriveNanoID("classic-demo-appointment-forward", day.Format("2006-01-02"))
 		apptKey := "vtx.appointment." + apptID
 		if alive(ctx, conn, apptKey) {
+			continue
+		}
+		// The provider's 10:00 cells may already be claimed by an appointment
+		// this seed did not mint (a recurring visit series booked through the
+		// clinic app claims the same hour daily). CreateAppointment would
+		// refuse with SlotConflict and halt the whole seed, so a taken slot
+		// is skipped: the day view it exists to populate is populated already.
+		if slotTaken(ctx, conn, providerKey, startsAt, endsAt) {
+			fmt.Printf("==> left alone: forward appointment %s (%s already booked for the provider)\n", day.Format("2006-01-02"), startsAt.Format(time.RFC3339))
 			continue
 		}
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",

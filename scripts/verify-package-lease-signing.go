@@ -122,7 +122,7 @@ func main() {
 	fmt.Printf("verify-package-lease-signing: scanning %d Core KV keys...\n", len(allKeys))
 
 	ddlChecks := []ddlCheck{
-		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms"}},
+		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit"}},
 		{canonical: "applicantProfile", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
