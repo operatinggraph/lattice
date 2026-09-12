@@ -1,6 +1,14 @@
 # Weaver targets — `missing_* ⊆ gaps` gets a holder on every path a target reaches a running Weaver
 
-**State: `📐 awaiting-Andrew (ratification)` — 2026-09-06, after the §13 adversarial pass (3 BLOCKING + 8 MAJOR folded).**
+**State: ✅ Andrew-ratified 2026-09-11 — Inc 1 + Inc 2 build-ready as ONE fire; Inc 3 ratified and SEQUENCED behind a
+named trigger (§11).** Ratification session 2026-09-11 (Andrew): the §6 clause is ratified as text of record (it lands
+with Inc 2's commit, held out of the tree until then); the Weaver-side verdict stays a `warning`, never a refusal of the
+target (decision kept); **Inc 3 is not built now** — Inc 1+2 close every path a bad binding can *enter*, and Inc 3's
+exclusive payoff is earlier detection of a lens edited after its target armed (the row-level `GapWithoutPlaybook` raise
+already catches it at the first violating row) plus a dangling binding after a cross-package lens uninstall (zero such
+bindings today). **Revive trigger for Inc 3:** a post-arm lens edit or a cross-package `lensRef` binding observed on a
+running stack (the row-level raise is the sensor), or Loupe taking the issue family. Designed 2026-09-06, after the §13
+adversarial pass (3 BLOCKING + 8 MAJOR folded); DD at ratification re-ran census 1 (still zero debt at 32/15/33/52).
 **Board row:** `[Pkgmgr] An AI-authored weaverTarget artifact has no static holder of missing_* ⊆ gaps` (lattice.md,
 Component maintenance). **Filed:** the close of the row-8 build (`e96f9126`, 2026-08-29). **Designer:** Winston,
 2026-09-06, grounded at `ed55c166`. **Size:** M · **Imp:** ★★ · **Owner after ratification:** the Lattice Steward,
@@ -59,7 +67,7 @@ sentence checked in code:
 
 | Path a `meta.weaverTarget` reaches a running Weaver | Holder of `missing_* ⊆ gaps` today | Evidence |
 |---|---|---|
-| A compiled package through CI | **the lint** (STRICT, `ci.yml:346`) | run 2026-09-06: `clean — 30 target(s) across 14 package(s); 31 weaver-targets lens(es) read, 50 gap column(s) checked …, 0 exempt` |
+| A compiled package through CI | **the lint** (STRICT, `ci.yml:346`) | run 2026-09-06: `clean — 30 target(s) across 14 package(s); 31 weaver-targets lens(es) read, 50 gap column(s) checked …, 0 exempt`; re-run at ratification 2026-09-11: `32 target(s) across 15 package(s); 33 lens(es); 52 column(s); 0 exempt` — still zero debt |
 | A compiled package installed locally (`make reinstall-package`, `lattice-pkg apply`) with no CI run | **none** | the installer's gap rules are the key convention (`orchestrationguard.go:185`) and the `inflight_/maxretries_` companion pair (`:230`, `:454`); no subset rule exists in `internal/pkgmgr` (census 7) |
 | A **capability artifact** — Loupe weaver-author (`cmd/loupe/weaverauthor.go:179`, human, live); the review console's fresh verdict (`cmd/loupe/review.go:597`, refuses approval on invalid at `:650`); the CLI (`cmd/lattice/capability/capability.go:317`) | **none** | `validateWeaverTargetArtifact` (`capabilitymaterializer.go:601-627`): "LensRef resolution … is a build-time concern, not checked here"; the artifact Definition carries no lens, so `validateAll` sees nothing to compare. At apply, `resolveLensRef` (`build.go:587-598`) passes any NanoID-shaped ref through **verbatim, unchecked for existence**; `validateGapCompanionPair` skips a ref that "names no lens in this batch" (`:439-446`) |
 | The bridge's AI author (`cmd/bridge/main.go:288`; `internal/bridge/capability_author.go:32` authors `weaverTarget` only; dormant behind `BRIDGE_CAPABILITY_AUTHOR=real`) | **existence yes, subset no** | the adapter resolves the model's canonicalName against the live installed catalog and refuses an unknown name (`capability_author.go:1250-1262`; the model may only name a lens by canonicalName, `capability_author_prompt.go:374-379`), so the `lensRef` it records exists; it never reads that lens's columns, and the verdict call passes `nil, nil` |
@@ -149,7 +157,7 @@ the package boundary is what is preserved, not the link size (§7 row 8).
 
 | # | Census | Command | Result |
 |---|---|---|---|
-| 1 | corpus debt against the invariant | `go run ./scripts/lint-gap-column-declaration.go` | `clean — 30 target(s) across 14 package(s); 31 weaver-targets lens(es) read, 50 gap column(s) checked …; 0 exempt` ⇒ **zero migration debt; the install refusal is blocking from day one**. The lint also flags an empty `LensRef` as a finding, so no package target is unbound |
+| 1 | corpus debt against the invariant | `go run ./scripts/lint-gap-column-declaration.go` | 2026-09-06: `clean — 30 target(s) across 14 package(s); 31 weaver-targets lens(es) read, 50 gap column(s) checked …; 0 exempt`; 2026-09-11 (ratification): `32 / 15 / 33 / 52 / 0 exempt` ⇒ **zero migration debt; the install refusal is blocking from day one** (the build's Phase 0 re-pins whatever the count is that day). The lint also flags an empty `LensRef` as a finding, so no package target is unbound |
 | 2 | NanoID-shaped `LensRef` literals in packages | `grep -rhn "LensRef:" packages --include='*.go' \| grep -v _test \| grep -c '"[A-Za-z0-9_-]\{20\}"'` | **2** — `clinic-reminders/targets.go:32` (`appointmentReminders`), `augur/targets.go:19` (`augurDispatchPending`); both same-package canonical names, resolved by the map before the NanoID passthrough |
 | 3 | lens canonical names that pass `IsValidNanoID` | 20-char names from `CanonicalName: "…"` literals, filtered by the alphabet (the reviewer ran `keys.IsValidNanoID` itself) | **3 of 11**: `appointmentReminders`, `augurDispatchPending`, `capUpgradeRosterLens` |
 | 4 | validator callers (each needs the resolver wired) | `grep -rn "ValidateCapabilityArtifact(" --include='*.go' cmd internal \| grep -v _test` minus the definition | **5**: `cmd/bridge/main.go:288`, `cmd/lattice/capability/capability.go:317`, `cmd/loupe/weaverauthor.go:179`, `:192`, `cmd/loupe/review.go:597` |
@@ -425,7 +433,7 @@ increment waits on an absent consumer.
 
 **Migration.** Zero corpus debt (census 1) ⇒ the install refusal is blocking from the first build. Existing installed
 targets are untouched (no reprojection, no reinstall); the Weaver's first boot after Inc 3 evaluates every installed
-pair and is expected to raise nothing on the dev stack (the lint's 50/50).
+pair and is expected to raise nothing on the dev stack (the lint's 52/52 at 2026-09-11).
 
 **Compatibility.** `ValidateCapabilityArtifact`'s signature changes (five callers + doubles, census 4/5) — a
 compile-time migration, no wire change. `SpecLabels`/`LabelFacts` gain a field (additive). `Config` for `NewEngine`
@@ -438,8 +446,8 @@ tighten (§4.3 step 3). Contract #5 emission gains three codes.
   query through both and comparing keys (one derivation, proven, not asserted).
 - `lenscolumns`: table test over every §2 row including the three unreadable shapes; `nil` parse ⇒ `ErrUnreadable`,
   never empty; branches-over-rule precedence; `Gaps` prefix filter.
-- lint: `gapColumnsOf` delegation keeps the corpus counts (31 lenses read, 50 columns — must not drop); self-test
-  unchanged in verdicts.
+- lint: `gapColumnsOf` delegation keeps the corpus counts (33 lenses read, 52 columns at 2026-09-11 — must not drop;
+  re-pin at Phase 0); self-test unchanged in verdicts.
 - pkgmgr validator (the dossier's mandated shape: drive `ValidateCapabilityArtifact`, not the rule): nil resolver ⇒
   invalid with the exact nil wording; `found=false`; aggregate declared/undeclared; plain declared/undeclared; a
   `surface` entry satisfies; a wrong-class id ⇒ `found=false`; the lookalike `appointmentReminders` as `lensRef` with
@@ -485,10 +493,10 @@ tighten (§4.3 step 3). Contract #5 emission gains three codes.
 |---|---|---|---|
 | **1 — one derivation** | `full.LabelFacts.Columns` + `(*CompiledRule).ReturnColumns()` sharing the executor's naming; `pkgmgr.SpecLabels.Columns`; the six wrappers/doubles; new `internal/lenscolumns` (whitelist of §2); `declaredRowBodyColumns` and the lint's `gapColumnsOf` delegate to it for the actorAggregate branch (corpus counts re-pinned) | the `full`, `lenscolumns` and lint tests of §9 | neutral (no behaviour change) |
 | **2 — the holders** | `InstalledLensResolver` + the validator rule; five callers wired (composite in Loupe Check reading root class + spec, live constructor in review/CLI, composition-root closure in bridge); `Installer.preflightLive` on `Install` and `Apply` (existence + readability + subset + companion pair for out-of-batch lenses; runs under `DryRun`); `ErrLensBindingRefused` mapped in Loupe; `lint-conventions` pins (validator sixth argument; `NewInstaller` finding text); **the §6 clause lands in `10-orchestration-weaver.md` in this commit** | the pkgmgr validator + installer tests, the e2e, the lint pins | **posture-changing** (a new install refusal; contract-adjacent ⇒ the Steward's full adversarial depth per its §4) |
-| **3 — the closed-set verdict** | Weaver `lensClass` routed + indexed, `Config.ReturnColumns` injected at `cmd/weaver` with a new `NewEngine` sanctioned-caller pin, `evaluateBinding`, the three issue codes, `docs/components/weaver.md` §health table + the Health-KV schema doc | the `registry_source_internal_test` vectors | neutral for dispatch; new Health emission (`degraded` while a fault stands) |
+| **3 — the closed-set verdict** — **SEQUENCED, not in the first fire (Andrew, 2026-09-11)** | Weaver `lensClass` routed + indexed, `Config.ReturnColumns` injected at `cmd/weaver` with a new `NewEngine` sanctioned-caller pin, `evaluateBinding`, the three issue codes, `docs/components/weaver.md` §health table + the Health-KV schema doc | the `registry_source_internal_test` vectors | neutral for dispatch; new Health emission (`degraded` while a fault stands). **Trigger:** a post-arm lens edit or a cross-package `lensRef` binding observed live (the row-level raise is the sensor), or Loupe taking the issue family; until then the post-edit path's holder is the row-level `GapWithoutPlaybook` raise, which §10.8 already promises |
 
-Increments 1→2→3 are sequential (2 and 3 consume 1; 3 does not depend on 2 but its verdict is only meaningful once
-the install bound exists, so it ships last). Review depth stays the Steward's sizing.
+Increments 1→2 ship as one fire (2 consumes 1). Inc 3 consumes 1 and is meaningful only once the install bound exists;
+it waits for its trigger above. Review depth stays the Steward's sizing.
 
 ## 12. Checklist walk (§2.3)
 
