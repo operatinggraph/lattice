@@ -1,7 +1,12 @@
 # Background-check supersession is a convergence rule — the older completed check retires through Weaver, never through the reply op
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-09-06 · Winston · one cold adversarial pass
-run and folded (§13)
+**Status: ✅ Andrew-ratified 2026-09-11 — build-ready.** Designer fire 2026-09-06 · Winston · one cold adversarial pass
+run and folded (§13) · ratification session 2026-09-11 (Andrew): decision 1 **ratified** (history is a record at rest);
+**decision 4 added at ratification — the op mints `lnk.service.<new>.supersedes.service.<old>`** ("new supersedes
+old", Contract #1 §1.1: the later-arriving vertex is the source) in the same batch as the tombstones, so the history at
+rest is walkable by key and not only recoverable from the event stream (§4.3 d, §4.4, §5 row 3, §11.2 vii–viii); the
+§8 "bare vertex keys" touch-up is **not wanted** (Andrew) — the design builds to §10.8 as written; DD corrections
+(op coordinates, version target `0.31.29`) folded the same day
 **Board row:** `[lease-signing] Supersede a background check automatically when its successor completes`
 (lattice.md, ★★ / M) · **Parent:** [bgcheck-runaway-and-broad-filter-design.md](bgcheck-runaway-and-broad-filter-design.md)
 §2 row D, §5 "(D) the durable rule", §6 (the op + the Andrew-authorized purge, shipped `689eb0c0`).
@@ -37,6 +42,14 @@ Contract #10 §10.8 `directOp`, both existing).
    never retires them. One residual the flip re-arms is stated in §6 and is dormant today: an **AI-authored**
    weaverTarget could also drive this op, because lease-signing is not a platform-protected package — bounded to
    "retire a genuinely superseded owned check at a moment of its choosing", and behind `BRIDGE_CAPABILITY_AUTHOR`.
+4. **The successor links to the predecessor — decided at ratification (Andrew, 2026-09-11).** The op mints
+   `lnk.service.<new>.supersedes.service.<old>` (source = the live successor, target = the retiring predecessor) in
+   the same batch as the three tombstones. Direction and name follow the standing house rule (Contract #1 §1.1:
+   later-arriving vertex is the source; the sentence test reads *new supersedes old*), and a **link**, not a data
+   field — the semantic-contracts `SupersedeClause` precedent records `supersededBy` as data on the old clause
+   (`packages/semantic-contracts/scripts.go:244-247`), which the house rule (relationships are links, never `data`
+   refs) does not carry forward. Live lenses cannot chain through it (a tombstoned target is filtered from every
+   walk — exactly "at rest"); Loupe's inspector, an audit, or a future retention pass follows it by key. §4.3 (d).
 3. **Observation, not a decision this design needs (§11.4).** With Fire 1's 30-day window, `missing_bgcheck`
    stays armed for every application whose unit is **not yet leased, or** whose landlord decision is approved
    (`lenses.go:959`, both disjuncts), so each such applicant is re-checked at the vendor every 30 days for as
@@ -61,10 +74,10 @@ record is the product question the design must answer."*
 
 | Clause | Verdict |
 |---|---|
-| "the primitive exists … operator-driven, ownership-checked" | Confirmed: `packages/lease-signing/scripts.go:195-339` (seven dispatcher-declared reads; refuses `primordialActor["loom"]` and `["weaver"]`, `:215-216`). **Ownership is proven for the older instance only** — the successor is checked alive / same class / completed / later / same subject, never for its `instanceOf` (`:257-317`); §4.3 records this as a shipped residual and the lens closes it on Weaver's path. |
+| "the primitive exists … operator-driven, ownership-checked" | Confirmed: `packages/lease-signing/scripts.go:1474-1640` — the tombstone arm of `leaseServiceInstanceDDLScript` (`:1297-1641`); seven dispatcher-declared reads; refuses `primordialActor["loom"]` and `["weaver"]`, `:1494-1495`. **Ownership is proven for the older instance only** — the successor is checked alive / same class / completed / later / same subject, never for its `instanceOf` (`:1512-1600`); §4.3 records this as a shipped residual and the lens closes it on Weaver's path. |
 | "the durable rule needs the **reply op** to find the prior instance" | **Refuted as a premise (§3).** The reply op cannot know the *subject*: the bridge posts `{externalRef, status, result}` only (`internal/bridge/dispatch.go:245-249`), attaches no `contextHint.reads` unless `replyOpReads` lists the op (`:85-98` — two Augur/capability ops, not this one), and the op is deliberately read-free (`scripts.go:344-362`). "At reply time" names a moment, not a mechanism. |
 | "without a live enumeration" | Honoured. The only enumeration that would find a prior instance is the subject's inbound `providedTo` fan — the population that reached 3,637 on one identity (§7.1) — and every batched shape of it was refuted on the pinned substrate ([kv-links-listing-leg-collapse-design.md](kv-links-listing-leg-collapse-design.md) §4). No enumeration anywhere here: the fact is projected by a lens (P5); every key the op reads is declared or derived (§4.3). |
-| "one live instance per subject per pattern" | Delivered for the **completed background-check population minted by this package** (§5). Failed and in-flight instances are not superseded — the op refuses them (`scripts.go:279-285`) and a failed verdict is the record `declined_bgcheck` reads (`lenses.go:967`). Payment instances are out of scope by construction: `missing_payment` closes permanently on the first completed payment (`payComplete > 0`), so they never accumulate. |
+| "one live instance per subject per pattern" | Delivered for the **completed background-check population minted by this package** (§5). Failed and in-flight instances are not superseded — the op refuses them (`scripts.go:1556-1564`) and a failed verdict is the record `declined_bgcheck` reads (`lenses.go:967`). Payment instances are out of scope by construction: `missing_payment` closes permanently on the first completed payment (`payComplete > 0`), so they never accumulate. |
 | "`SupersedeClause` is the shape precedent" | Not the shape here. `SupersedeClause` mints a replacement inside one op that knows both keys because the caller names the clause. Here the successor is minted by Loom's instanceOp with no knowledge of the predecessor, and both complete asynchronously through a read-free bridge reply. The precedent that fits is **convergence lens + `directOp`** — `staleUserTasks → CancelTask` (`targets.go:170-180`). |
 | "a product answer on check history" | Answered above ("For Andrew" 1) and in §4.4. |
 
@@ -72,18 +85,18 @@ record is the product question the design must answer."*
 
 | Fact | Where |
 |---|---|
-| The instance is minted by Loom's externalTask instanceOp with `{instanceKey, subjectKey, adapter, replyOp, params}`; root data `{}`; `instanceOf` link to this DDL's meta; `providedTo` link to the applicant. | `scripts.go:112-193`; `patterns.go` (`backgroundCheck`, subject `identity`) |
+| The instance is minted by Loom's externalTask instanceOp with `{instanceKey, subjectKey, adapter, replyOp, params}`; root data `{}`; `instanceOf` link to this DDL's meta; `providedTo` link to the applicant. | `scripts.go:1391-1473` (the `CreateLeaseServiceInstance` arm); `patterns.go` (`backgroundCheck`, subject `identity`) |
 | Weaver's `triggerLoom` hands Loom `{patternRef, subjectKey, instanceId}` — no prior-instance knowledge reaches the pattern. | `internal/weaver/strategist.go:198-210` |
-| The reply op is bridge-submitted, payload-only, read-free; stamps `.outcome{status, completedAt, validUntil}` create-only; `completedAt = time.rfc3339_utc(op.submittedAt)`. | `scripts.go:344-472`; `internal/bridge/dispatch.go:85-98, 245-249` |
+| The reply op is bridge-submitted, payload-only, read-free; stamps `.outcome{status, completedAt, validUntil}` create-only; `completedAt = time.rfc3339_utc(op.submittedAt)`. | `scripts.go:1642-1778` (`leaseServiceReplyDDLScript`; `completedAt` at `:1708`); `internal/bridge/dispatch.go:85-98, 245-249` |
 | **`rfc3339_utc` formats with `time.RFC3339` — whole seconds.** Two replies committing in one second stamp equal `completedAt`. | `internal/starlarksandbox/modules.go:81` |
 | The readiness fan reads **every** `providedTo` instance of the applicant, no WHERE, and counts fresh completed bgchecks; `renewalComplete` re-derives the same fan. | `lenses.go:815-818`; `renewal_lenses.go:266-279` |
 | `backgroundCheckFreshness` is instance-anchored, one hop, `EmptyBehavior: delete`; its target declares **no gaps** so its timer leg runs on every delivery. | `lenses.go:853-866, 150-162`; `targets.go:182-200` |
 | **A fired `@at` reads the row back; a retracted row is a soft-tombstone body, so the "absent row" drop is never taken; `currentFreshUntil` finds no `freshUntil` and the firing proceeds to submit `MarkExpired`.** | `internal/weaver/temporal.go:260-302, 342-358`; `internal/refractor/pipeline/sweep.go:290` |
-| The shipped op: seven REQUIRED reads; guards in order; bare tombstones of root + two links; event `lease.serviceInstanceSuperseded`. Recency guard is `not (succ_completed_at > inst_completed_at)` — a tie refuses. | `scripts.go:195-339` (`:287-296`); descriptor `ddls.go:596-725` |
+| The shipped op: seven REQUIRED reads; guards in order; bare tombstones of root + two links; event `lease.serviceInstanceSuperseded`. Recency guard is `not (succ_completed_at > inst_completed_at)` — a tie refuses. | `scripts.go:1474-1640` (recency guard `:1566-1575`); descriptor `ddls.go:596-725` |
 | The op's grant is `operator` / `Scope:"any"`; Weaver and Loom hold `operator`. | `permissions.go:86-90`; `internal/bootstrap/primordial.go:488-494` |
 | `derive_reads(op)` — Contract #2 §2.5 class (g): pure, payload-only, merged at the head of step 4; `ddl` and `state` are **failing** bindings there. A derived key the envelope also declares keeps the envelope's disposition. | `internal/processor/derive_reads.go:83-125, 170-180, 314-316, 539-541`; precedents `clinic-domain/ddls.go:2660`, `objects-base`, `wellness-domain`, `identity-domain`, `cafe-ledger`, `identity-hygiene` |
 | An update/tombstone of a key hydrated at step 4 is conditioned on that revision (Contract #3 §3.2). | `internal/processor/commit_path.go:455-460, 662-672` |
-| Weaver `directOp`: `params` are `row.<column>` templates plus an injected `expectedRevision`; `reads`/`optionalReads` are `row.<column>` or `row.<column>.<aspect>`; any string column value passes install (`orchestrationguard.go:383-385`) and load (`registry.go:840-846`); `Class` names the DDL. | `internal/weaver/strategist.go:295-360, 879-937`; precedent `targets.go:170-180` |
+| Weaver `directOp`: `params` are `row.<column>` templates plus an injected `expectedRevision`; `reads`/`optionalReads` are `row.<column>` or `row.<column>.<aspect>`; any string column value passes install (`internal/pkgmgr/orchestrationguard.go`, the row-template presence check) and load (`internal/weaver/registry.go:107-127`); none of the three seams tests the resolved value for a `vtx.` prefix (re-verified at ratification, 2026-09-11); `Class` names the DDL. | `internal/weaver/strategist.go:295-360, 879-937`; precedent `targets.go:170-180` |
 | A `directOp` gap with neither companion column falls back to a 3-**dispatch** budget then raises `GapBudgetExhausted`; Weaver publishes fire-and-forget and consumes no reply, so the issue carries no rejection reason — the requestId is logged at submit. | `docs/contracts/10-orchestration-weaver.md:69-76`; `internal/weaver/actuator.go:113-117`; `evaluator.go:659, 745, 2023` |
 | Marks and the per-(entity, column) count are level-cleared on any delivery whose `missing_<col>` is not true, and swept by the deletion leg on a tombstone; `deleteDispatchCount` on close. | `internal/weaver/evaluator.go:61-70, 109, 1282` |
 | **An actorAggregate lens receives an aspect CDC event as a fan-out unless its patterns cannot bind the aspect's parent type** — binding `meta` makes every `vtx.meta.*` aspect write a seed; a package install/upgrade rewrites each DDL meta's aspects. | `internal/refractor/pipeline/dispatch.go:78-86`; `internal/pkgmgr/build.go:126-146` |
@@ -235,23 +248,39 @@ annotations become `# read-posture: (a) reads — derived server-side by this sc
 clinic form, `ddls.go:2601`); the seventh keeps its dispatcher wording.
 
 **(b) The recency guard gains the tie-break** the lens applies: `succ_completed_at > inst_completed_at`, **or**
-equal and `superseded_by > instance_key` (`scripts.go:295-296`). The two rules must be textually the same
+equal and `superseded_by > instance_key` (`scripts.go:1574-1575`). The two rules must be textually the same
 predicate; the pinned lens test's tie vectors (§11.2) are the drift detector.
 
-**(c) The actor guard admits Weaver.** `scripts.go:215-216` becomes: refuse `op.actor == primordialActor["loom"]`
+**(c) The actor guard admits Weaver.** `scripts.go:1494-1495` becomes: refuse `op.actor == primordialActor["loom"]`
 only, with the comment rewritten (Weaver is the durable submitter through the §4.2 target; an operator or trusted
 tool stays admitted; Loom mints and never retires). `TestTombstoneSupersededLeaseServiceInstance_PlatformEngineDenied`
 splits into Loom-refused and Weaver-accepted vectors. **Shipped residual, unchanged by this design:** the op does
-not prove the *successor's* ownership (`scripts.go:257-317`) — an operator could name a same-class instance from
+not prove the *successor's* ownership (`scripts.go:1512-1600`) — an operator could name a same-class instance from
 another type authority as `supersededBy`. Weaver never can (the lens re-binds `(m)`); closing it for the operator
 path needs an eighth declared read the lens cannot project (§4.1), so it stays a documented operator-path residual
 in the descriptor text rather than a mechanism.
 
+**(d) The successor links to the predecessor (ratification decision 4).** One more mutation in the same batch:
+`make_link("lnk.service." + succ_handle + ".supersedes.service." + inst_handle, superseded_by, instance_key,
+"supersedes", "supersedes", {})` — source the live successor, target the predecessor being tombstoned three
+mutations earlier in the same batch. Both keys are already hydrated and validated by the guards above, so the link
+adds no read. Two things the build pins rather than assumes: (i) **the write gate** — the DDL declares no key
+patterns; governance resolves through the source vertex's `instanceOf` type authority (`scripts.go:1421-1428`), and
+the successor's `instanceOf` resolves to this DDL on Weaver's path by the lens's `(newer)-[:instanceOf]->(m)` conjunct
+and on the operator path is *not* proven (§4.3 c's residual) — so the gate, not the guard, is what refuses a
+foreign-owned successor from sourcing the link; the test asserts the refusal names the gate; (ii) **same-batch
+endpoint liveness** — `step6_validate.go` carries no endpoint-liveness rule for link creation that this fire could
+find, so a link whose target is tombstoned in the same batch commits; a test proves it and a comment on the
+mutation list says the order inside the batch is not load-bearing. The `duplicateOf` link identity-domain mints
+between two identities (`identity-domain/ddls.go:1348`) is the same-type-link precedent. The link is a fourth
+mutation the descriptor's `Description` must name, and `lease.serviceInstanceSuperseded`'s payload stays as
+is (the event names the same pair).
+
 Descriptor `Description`/`Examples` (`ddls.go:596-725`) and the permission `Note` (`permissions.go:88`) are
 rewritten to the new contract (one dispatcher-declared read; Weaver-or-operator submitter; the tie rule; the
 successor-ownership residual). The stale comment at `scripts.go:1281` ("Template-less (no instanceOf)" — the op
-mints `instance_of_lnk` at `:163`) is corrected in the same touch. `manifest.yaml` + `package.go`:
-`0.31.27 → 0.31.28` (`lint-package-version`).
+mints `instance_of_lnk` at `:1428-1442`) is corrected in the same touch. `manifest.yaml` + `package.go`:
+`0.31.28 → 0.31.29` (`lint-package-version`; the manifest moved to `0.31.28` with `df509ba1` on 2026-09-07, after this design was written).
 
 ### 4.4 Read path, write path, orchestration, precedents
 
@@ -260,8 +289,9 @@ mints `instance_of_lnk` at `:163`) is corrected in the same touch. `manifest.yam
   under the existing `operator` grant.
 - **Orchestration:** a Weaver convergence target with a `directOp` gap — level-triggered, idempotent by
   reprojection, budgeted, loud on exhaustion. No Loom pattern, no `@at`, no reply-op change.
-- **History posture:** body-preserving tombstone at rest + `lease.serviceInstanceSuperseded` on `core-events`;
-  invisible to every live lens. Loupe's Core KV inspector still reads the retired body.
+- **History posture:** body-preserving tombstone at rest, reachable from the live successor by the
+  `supersedes` link (new → old, §4.3 d), + `lease.serviceInstanceSuperseded` on `core-events`; invisible to
+  every live lens. Loupe's Core KV inspector reads the retired body and follows the link by key.
 
 ## 5. State-lifetime table (rows; the OUTCOME column is the test-vector list for §11.2)
 
@@ -269,7 +299,7 @@ mints `instance_of_lnk` at `:163`) is corrected in the same touch. `manifest.yam
 |---|---|---|---|---|
 | 1 | A in flight (no `.outcome`) | none | — | untouched |
 | 2 | A completed; S has no other owned completed bgcheck | **none** (second MATCH binds nothing → zero rows) | — | A is the current check; no standing row, no delivery |
-| 3 | A completed at T1; B (owned, same class) completed at T2 > T1 | row, `supersededBy: B` | op(A, B, S) | A's root + 2 links tombstoned; A's freshness row and this row retract; readiness/renewal fans read B only. **Timer residue:** if A's `@at` was still armed (B completed *before* A's window lapsed — an operator re-run or a tie; on the ordinary path A lapsed first, which is what minted B, so the timer is already spent), it fires up to 30 days later, finds the freshness row's tombstone body (`temporal.go:262` is not taken), submits `MarkExpired` against A's tombstoned root, which the marker DDL's required root read refuses — **one rejected, fire-and-forget op, no retry**. Priced as acceptable; the platform-side fix (clear the schedule on a tombstone delivery) is not this package's to build and has no other consumer. |
+| 3 | A completed at T1; B (owned, same class) completed at T2 > T1 | row, `supersededBy: B` | op(A, B, S) | A's root + 2 links tombstoned and `lnk.service.<B>.supersedes.service.<A>` minted in the same batch; A's freshness row and this row retract; readiness/renewal fans read B only. **Timer residue:** if A's `@at` was still armed (B completed *before* A's window lapsed — an operator re-run or a tie; on the ordinary path A lapsed first, which is what minted B, so the timer is already spent), it fires up to 30 days later, finds the freshness row's tombstone body (`temporal.go:262` is not taken), submits `MarkExpired` against A's tombstoned root, which the marker DDL's required root read refuses — **one rejected, fire-and-forget op, no retry**. Priced as acceptable; the platform-side fix (clear the schedule on a tombstone delivery) is not this package's to build and has no other consumer. |
 | 4 | The mirror of 3 — B's own row | none (nothing later than B) | — | B stays |
 | 5 | A completed; B **failed** later | none | — | A stays current; `declined_bgcheck` is `bgFailed>0 AND freshBgComplete=0`, a fresh A keeps the application converged; a lapsed A re-opens `missing_bgcheck` as today |
 | 6 | A **failed**; B completed later | none (anchor: completed only) | — | A persists as the declined record; the op would refuse it anyway |
@@ -423,7 +453,7 @@ OPERATOR NOTE names its single failure mode); row 6's absence was re-verified by
 
 ### 11.1 Migration / adoption
 `make reinstall-package PKG=packages/lease-signing` on a running stack: the lens hot-reloads, the target
-registers, the DDL script upgrades in place (`0.31.28`). No wipe, no restart, no backfill. **Cost of the install
+registers, the DDL script upgrades in place (`0.31.29`). No wipe, no restart, no backfill. **Cost of the install
 itself:** the DDL metas' aspect rewrites (`build.go:126-146`) seed the new lens's fan from the
 `leaseServiceInstance` meta over its live `instanceOf` inbound edges — every live owned instance (seven today),
 once per rewritten aspect, ~4 aspects → ~30 two-hop evaluations; the 12,245 tombstoned instances are unreachable
@@ -437,7 +467,13 @@ population this rule bounds.
   malformed payload derives nothing and rejects `InvalidArgument` from `execute`; (iv) Weaver's actor accepted,
   Loom's refused (split of `_PlatformEngineDenied`); (v) **tie vectors**: equal `completedAt` with
   `supersededBy > instanceKey` accepted, the reverse refused `NotSuperseded`; (vi) every existing negative vector
-  unchanged.
+  unchanged; (vii) **the `supersedes` link**: after a successful run `lnk.service.<new>.supersedes.service.<old>` is
+  live with `sourceVertex` = the successor and `targetVertex` = the tombstoned predecessor, class `supersedes`, and
+  the link's own tombstone is *not* among the three (mutation test: reorder the link ahead of / behind the root
+  tombstone in the batch and the outcome is identical — same-batch endpoint liveness is not load-bearing);
+  (viii) **write gate**: a successor whose `instanceOf` resolves to a foreign type authority is refused by the
+  gate when it tries to source the link (the operator-path residual of §4.3 c now fails closed at the gate, and the
+  test asserts the refusal is the gate's, not a guard's).
 - **Inc 2 (lens + target):** `lens_cypher_test.go` — §7.3 (b)+(c) as one pinned test over the real fixture (rows
   1–9b of §5 including 8b's foreign-meta successor under a same-named meta); the six corpus census pins re-read;
   `lint-gap-column-declaration`; an ephemeral-stack e2e (`lease_signing_test.go` shape): seed A completed T1 and B
@@ -472,7 +508,7 @@ op's successor-ownership residual (§4.3 c); and the Loom `instance.<id>` cursor
 
 | Inc | Content | Posture | Green |
 |---|---|---|---|
-| **1** | `scripts.go`: `derive_reads` + local `optional_string`, tie-break, actor guard, annotations, the `:1281` comment; `ddls.go` descriptor text + Examples; `permissions.go` Note; version `0.31.28`; tests §11.2 (i–vi) | **Posture-changing** (an engine actor admitted to a tombstoning op; §6 is the argument, incl. the authored-target residual) — the Steward sizes review depth | `go test ./packages/lease-signing/ -run TombstoneSuperseded -count=1`, `lint-conventions`, `lint-package-version`, `verify-package-lease-signing` |
+| **1** | `scripts.go`: `derive_reads` + local `optional_string`, tie-break, actor guard, the `supersedes` link (§4.3 d), annotations, the `:1281` comment; `ddls.go` descriptor text + Examples; `permissions.go` Note; version `0.31.29`; tests §11.2 (i–vi) | **Posture-changing** (an engine actor admitted to a tombstoning op; §6 is the argument, incl. the authored-target residual) — the Steward sizes review depth | `go test ./packages/lease-signing/ -run TombstoneSuperseded -count=1`, `lint-conventions`, `lint-package-version`, `verify-package-lease-signing` |
 | **2** | `lenses.go` lens + output descriptor; `targets.go` target; census pins; pinned lens test + mutation tests; e2e; live close | Package content | `go test ./packages/lease-signing/ ./internal/refractor/ -run 'Census|Lens|Cypher|Superseded' -count=1`, `lint-gap-column-declaration`, `lint-lens-anchors`, `lint-board`; `make reinstall-package` + the §11.2 live close |
 
 Inc 2 depends on Inc 1 (the target's one-key `Reads` needs the derivation; the lens's tie rule needs the op's).
