@@ -132,6 +132,26 @@ live proof = the seed backfill on the dev stack, then `read_cafe_identities` for
 (46 → 46 + the repaired leases' applicants) and the two debtors named in the arrears grid.
 **Size S · `📋 ready` · Winston-adjudicated.**
 
+### `ReassignLeaseUnit` fire brief (build note, 2026-09-12)
+
+Compressed S brief; scope = the verdict above, verbatim. Censuses re-run live at selection: **10**
+`missingLocation:true` rows in `cafe-lease-workplaces` (matches); writers of `appliesToUnit`: 1 create, 0
+tombstone, 0 re-point — `WithdrawLeaseApplication` leaves the link in place
+([scripts.go:994](../../packages/lease-signing/scripts.go)), so the grounding's ":994 tombstones it" was a
+mis-read with no consequence for the shape. Touch-list (verified): `scripts.go` helpers :34-86 + a new
+`make_link_tombstone_occ` / `make_link_create_or_revive` (the wellness :1949 shape); `leaseapp_unit` :417
+for the `(e)` enumeration idiom; the CreateLeaseApplication guard three-way :607-622 copied verbatim;
+`ddls.go:97` PermittedCommands; `permissions.go` grant beside `BackfillLeaseTerms` :158 and op-meta beside
+`WithdrawLeaseApplication` :400; `package.go:92` + `manifest.yaml` version; `seed-classic-demo.go`
+`backfillLeaseUnits` beside `backfillMenuItemLocations` :420, called after it. Deviations from the verdict,
+decided at the brief: (1) the OLD link's tombstone is revision-pinned to the enumerated link's `.revision`
+(the dossier's shared-vertex repoint class — two concurrent re-points to different units would otherwise
+leave two live `appliesToUnit` links); (2) the seed backfill re-points only leases whose dead unit's
+`.address.line1` is `12 Classic Demo Ave` (the reap's own predicate) and skips a lease whose applicant
+already holds a live guard on the canonical unit, printing both — `submitOp` is fatal on rejection, and a
+backfill that halts the seed on its first `DuplicateApplication` repairs nothing. Non-goals: no lens edit,
+no FE, no `TombstoneLocation` refusal, no console-operator grant (no repair op carries one).
+
 ## 3. Wellness — "A guest's debt outlives the booking that made them visible"
 
 **Filed (33901636, residual of `8731eac5`):** lease-less coverage comes from `wellnessBookers` (live
