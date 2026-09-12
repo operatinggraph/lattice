@@ -158,6 +158,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"providerIdentityReadGrants":     {plane: planeAuth, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
 	"providerSites":                  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"renewalsRead":                   {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
+	"retentionClassKeyEnvelope":      {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"retentionKeyStatus":             {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"shredStatus":                    {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"staffReadGrants":                {plane: planeAuth, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},

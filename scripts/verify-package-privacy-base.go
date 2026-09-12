@@ -18,9 +18,10 @@
 //	  (vertexType), privacy.dedupFootprintSwept (eventType), erasure
 //	  (aspectType), sealIdentityForErasureComplete (vertexType),
 //	  privacy.erasureCompleted (eventType)
-//	4 lenses (meta.lens), each with a .canonicalName + .bucket aspect:
+//	5 lenses (meta.lens), each with a .canonicalName + .bucket aspect:
 //	  shredStatus (privacy-shreds), retentionKeyStatus
 //	  (privacy-retention-keys), piiKeyEnvelope (privacy-pii-key-envelopes),
+//	  retentionClassKeyEnvelope (privacy-retention-key-envelopes),
 //	  identityErasureResidue (weaver-targets)
 //	1 identityErasureComplete meta.weaverTarget over the identityErasureResidue
 //	  lens, with its 5 gap actions: missing_credentialResidue → directOp
@@ -103,6 +104,7 @@ var privacyLensChecks = []lensCheck{
 	{canonical: "shredStatus", bucket: "privacy-shreds"},
 	{canonical: "retentionKeyStatus", bucket: "privacy-retention-keys"},
 	{canonical: "piiKeyEnvelope", bucket: "privacy-pii-key-envelopes"},
+	{canonical: "retentionClassKeyEnvelope", bucket: "privacy-retention-key-envelopes"},
 	{canonical: "identityErasureResidue", bucket: "weaver-targets"},
 }
 
@@ -289,7 +291,7 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// 2. 4 lenses: class, isDeleted, canonicalName aspect, bucket aspect.
+	// 2. 5 lenses: class, isDeleted, canonicalName aspect, bucket aspect.
 	// -------------------------------------------------------------------------
 	lensIDByCanonical := map[string]string{}
 	for _, lc := range privacyLensChecks {

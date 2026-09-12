@@ -24,7 +24,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 13; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 4; got != want {
+	if got, want := len(Package.Lenses), 5; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 5; got != want {
@@ -78,6 +78,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"shredStatus", ShredStatusBucket},
 		{"retentionKeyStatus", RetentionKeyStatusBucket},
 		{"piiKeyEnvelope", PiiKeyEnvelopeBucket},
+		{"retentionClassKeyEnvelope", RetentionKeyEnvelopeBucket},
 		{"identityErasureResidue", "weaver-targets"},
 	}
 	if len(wantLenses) != len(Package.Lenses) {
