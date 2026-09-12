@@ -657,3 +657,107 @@ from "the lens enumerates identity holders alone" to "the kind has no envelope p
 Confirmed unchanged by the pass: ledger #1–3, #7–9, #11–15, #17–20, #24, #27–31; the class-shred rebuild
 fan-out does not reach a plain envelope lens; P5/P2 untouched; a never-minted-then-shredded class returns
 `ErrKeyShredded` (permanent) because the shred check precedes the empty-`WrappedDEK` check.
+
+## 14. Inc 1 fire brief (build note, 2026-09-12 — Lattice Steward, fire branch `claude/relaxed-rubin-lwk60f`)
+
+**1. Scope sentence (verbatim, §12 Inc 1).** *"`privacy-base` lens + bucket + version; `vault.KeyHolderKinds`;
+Processor gate re-sourced; bridge bucket table + `fetchLiveEnvelope(bucket)`; §3.5 (a) docGen top-level
+`tenantName` read and (b) nested-marker refusal; the contract clauses (§7.1 a–c, §7.2) with the commit …; the doc
+table below; every test in §10."* Green bar: every §10 test green; `lint-package-version` + all
+`scripts/lint-*.go` green; the nine corpus-census pins (now 13 files) green; CI green on `main`.
+
+**2. Verified touch-list (checked live 2026-09-12; two scouts + lead).** All §1 ledger citations hold except:
+`privacy-base` is at **0.15.8** (manifest.yaml:2, package.go:48 `Version`), not 0.15.7 → bump to **0.16.0**;
+C6's "nine" census files are **13** `*census*_test.go` in `internal/refractor` — 8 pin plain lenses by name
+(`anchor_hopindex`, `branch_decomposition_corpus_census_pins`, `grouping_reduction`, `label_derivation`,
+`plain_partition`, `plain_retraction_transport`, `plain_scanroot`, `plain_with_alias_closure`) and each needs a
+`retentionClassKeyEnvelope` entry mirroring its `piiKeyEnvelope` row.
+- `packages/privacy-base/lenses.go:23` (`PiiKeyEnvelopeBucket`), `:25-36` (bucket comment), `:79-132` (`Lenses()`),
+  `:189-219` (`piiKeyEnvelope` + comment); `package.go:48`; `manifest.yaml:2`; `package_test.go:27,77-82`
+  (`wantLenses`); `lens_cypher_test.go:92-138`; `scripts/verify-package-privacy-base.go:102-107`; `Makefile`
+  verify-package-privacy-base comment ("the 4 lenses").
+- `internal/vault/keyholder.go:34-61` (`KeyHolderType` + comment naming the lens as the reason).
+- `internal/processor/sensitive_decrypt.go:246-258` (mint arm), `:369-392` (`refusableEgressHolder`);
+  `sensitive_decrypt_keyid_test.go:148-190`.
+- `internal/bridge/egress.go:14-19` (bucket literal), `:125-164` (`unwrapEgressParams`, top-level only — **no nested
+  scan exists today**), `:166-194` (`resolveSensitiveRef` refusal), `:254-271` (`fetchLiveEnvelope`);
+  `docgen_adapter.go:26-32` (`docGenParams` from `RawParams`), `:41-59` (`docGenFields.TenantName` — read from the
+  nested `doc` only), `:229-236` (Tenant line + Applicant fallback); `egress_test.go:20-135` (helpers:
+  `egressTestConn`, `provisionEnvelopeBucket`, `startTestVault`, `seedSensitiveAspect`, `mintRefMAC`,
+  `sensitiveRefParam`), `:220-237` ("non-identity key holder"), `:656-700` (happy path); `dispatch.go:222-228`.
+- `internal/natsperm/bridge_egress_test.go:137-139` (last assertion of `TestBridgeCoreKVReadIsolation`).
+- `internal/leaseconvergence` (build tag `leaseshortwindow`, **not** in `go test ./...`): `harness_test.go:378-395`
+  (`installChain`), `:416-500` (`startRefractor` — `want` map + `extraLenses` + `runFlatLensPipeline` for
+  `piiKeyEnvelope`), `:605` (`submitOp` takes the actor), `:644` (`seedApplicant`);
+  `renewal_convergence_test.go:256` (`SetApplicantProfile` payload precedent); `sensitive_param_egress_test.go`
+  (the three egress arms to mirror).
+- Contracts: `docs/contracts/03-mutation-batch-event-list.md:173-175` (a), `:239-242` (b), the *Reveal* paragraph
+  `:244-249` (c); `docs/contracts/10-orchestration-loom.md:111,113` (§7.2). §7.1(d) is already committed (`7191c70`).
+- Docs: `docs/components/vault.md:130-144` (failure-mode table), `bridge.md:224-236` (In/Out), `:260-268`
+  (Failure modes).
+
+**3. Precedents to mirror.** Lens: `piiKeyEnvelope` (`lenses.go:189-219`) with the label swapped — pin the
+equality in `lens_cypher_test.go`. Closed set: `internal/pkgmgr/custodyscope.go:33-40` names the two kinds.
+Bucket-by-kind table: `Config`'s bucket-default literals in `internal/bridge` (the `egress.go:14-19` comment's
+own rule). Test-only cross-package pin: any `internal/*_test.go` importing `packages/privacy-base`
+(`internal/leaseconvergence/harness_test.go:66`); `go list -deps` confirms no cycle (privacy-base imports nothing
+under `internal/bridge`). Nested-marker scan: `detectSensitiveRef` (`egress.go:92-106`) applied recursively over
+`json.RawMessage` objects/arrays, depth-bounded. docGen: `fake_background_check.go:68` reads `req.Params`.
+Processor negative-with-positive-vector: `sensitive_decrypt_keyid_test.go:148-190` pair. E2E fixture package:
+an inline `pkgmgr.Definition` in a `_test.go` (`internal/unroutedconvergence/unroutedconvergence_test.go:106`
+installs one; `lease-signing/scripts.go:1298` splices `orchestrationbase.ResolveSubjectParamsHelper`;
+`scripts.go:1391-1470` is the instanceOp shape — actor guard, `resolve_subject_params`, `external.<adapter>`
+event). **Why a fixture and not the shipped consumer:** `CreateLeaseServiceInstance` pins its subject to an
+identity (`scripts.go:1406`) and `CreateLeaseDocInstance` assembles `doc` itself with no `resolve_subject_params`
+(`leasedoc_scripts.go:224-271`) — every class-custodied aspect (C2) lives on a leaseapp/appointment, so no shipped
+op can template one top-level before Inc 2.
+
+**4. Increment order + green checks.**
+- **Inc A (mechanical · sonnet)** — lens `retentionClassKeyEnvelope` + `RetentionKeyEnvelopeBucket =
+  "privacy-retention-key-envelopes"` + comment; `0.16.0` in both places; `package_test.go`, `lens_cypher_test.go`
+  (label-swap equality pin), `verify-package-privacy-base.go`, Makefile comment; the 8 census entries.
+  Green: `go test ./packages/privacy-base/ && go test ./internal/refractor/ -run 'Census|Corpus|Pins'` and
+  `DIFF_BASE=$(git merge-base HEAD origin/main) go run ./scripts/lint-package-version.go`.
+- **Inc B (posture-changing · opus)** — `vault.KeyHolderKinds()`/`IsKeyHolderKind`; Processor gate re-sourced +
+  comment; test flipped to *admitted* (asserting the marker's `keyId` is the class holder) + negative for a kind
+  outside the set with its positive vector; bridge `envelopeBucketFor` + `fetchLiveEnvelope(ctx, bucket, key)` +
+  refusal wording "no envelope source for holder kind %q" + nested-marker permanent refusal + docGen
+  `req.Params["tenantName"]` ahead of `doc.TenantName`; tests: positive class unwrap (row seeded in the new bucket),
+  unknown kind `vtx.foo.<id>` permanent naming the kind, shredded class permanent, nested marker permanent with a
+  top-level positive control, table-equals-`KeyHolderKinds()` + bucket-literal pin (test-only import), docGen both
+  arms; natsperm mirror for the new bucket. Green: `go test ./internal/vault/ ./internal/bridge/ ./internal/processor/
+  -run 'Egress|Sensitive|KeyHolder' ./internal/natsperm/ -run 'Bridge'`.
+- **Inc C (e2e · opus)** — `internal/leaseconvergence/class_egress_test.go` (tag `leaseshortwindow`): fixture
+  package with one Loom-guarded op over a leaseapp subject that `resolve_subject_params` its params and emits
+  `external.backgroundCheck`; harness projects the new lens (mirror the `piiKeyEnvelope` flat pipeline);
+  `SetApplicantProfile` seeds `.profile` (class-custodied) with a known `employerName`; arm 1: top-level
+  `"employer": "subject.profile.data.employerName"` → `bgFake.LastParams(handle)["employer"]` is the plaintext and
+  the durable event body carries `$sensitiveRef` with the class holder's `keyId`; arm 2: the same aspect templated
+  inside a nested value → the vendor is never called across the observation window (mirror the FabricatedRef arm).
+  Green: `go test -tags leaseshortwindow ./internal/leaseconvergence/ -run 'ClassEgress' -count=1 -p 1 -v`.
+- **Inc D (lead)** — contracts §7.1(a–c) + §7.2 verbatim from §7; `vault.md` failure-mode row; `bridge.md` In/Out +
+  Failure modes; `keyholder.go` comment; §3.2's two gate comments; this note's checkpoint.
+- **Close** — full 3-layer adversarial pass over the whole diff (posture-changing, §12), gates:
+  `go build ./... · make vet · golangci-lint run ./... · STRICT=1 lint-conventions/lint-lens-anchors/lint-board ·
+  go test ./... -p 4` with `POSTGRES_TEST_DSN` set · `make test-lease-convergence` · merge → CI.
+
+**5. In-scope gotchas.** Package content edit ⇒ manifest + `Version` bump (CLAUDE.md). `internal/leaseconvergence`
+is build-tagged — `go test ./...` never compiles it; run it by tag. Postgres-gated refractor tests are falsely
+green without `POSTGRES_TEST_DSN`. The bridge must not import `packages/` in non-test code. A lens row must carry
+`shredded` (ledger #11). No changelog comments. Dossier entries copied in: **bridge** — an e2e that builds its own
+bridge engine registers its own adapters; a reference fake's output is read by a human. **vault** — a refusal added
+at one RPC leaves its siblings ungated; a console pre-check makes the RPC-side branch unreachable; a new wire
+sentinel needs mapping at every proxy site. **processor** — a gate's negative test must first prove its positive
+vector reaches the gate. Standing checklist #3 binds Inc B hardest: prove each new refusal by reverting it.
+
+**6. Adjacent finds.** None filed. The version drift (0.15.7 → 0.15.8) and the "4 lenses" Makefile comment are
+absorbed into Inc A. Scout A's claim that the nested-marker refusal already exists was false (it is greenfield);
+scout B's claim that no `Version` constant exists was false (`package.go:48`) — both caught at the gate.
+
+**7. Non-goals.** Inc 2 (the leaseapp `.tenantName` snapshot, `leaseDocument` step templating, the backfill —
+verticals lane). The Processor gate's deletion (§9 row 10, not taken). The purpose RPC (parent tail (c)). Any
+change to `piiKeyEnvelope`, the MAC, the ref-verified RPC, the Refractor, or `handleDecrypt`'s Reveal refusal.
+
+**Scope-diff gate:** every touch above traces to the scope sentence; the fixture package is the §10 "test-package
+fixture", not a new consumer. Dependencies: none declared (`seq:` dropped at §13 #2); §6.1 shipped (`e81914be`)
+and is untouched here — re-verified both ways.
