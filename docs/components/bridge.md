@@ -269,7 +269,7 @@ Crash points and their recovery:
 | Never-completing external call | Loom's `externalTask` per-step deadline (§10.6) is the backstop on the *waiting* side — the bridge itself does not wedge Loom |
 | Poison event | head-of-line blocks the `external` consumer only (domain-scoped blast radius) |
 | A `$sensitiveRef` names a holder kind with no envelope projection | permanent unwrap failure naming the kind → the terminal `replyOp` posts a failed outcome (converge, never park); the Processor refuses the same kind at mint, so the bridge's refusal is the second gate on one closed set, not the only one |
-| A `$sensitiveRef` sits inside a nested param value | permanent unwrap failure naming the param — the unwrap substitutes at the top level of `params` only, and a nested marker would otherwise ride to the vendor as ciphertext + MAC inside `RawParams`; a consumer templates a sensitive field at the top level (the background-check and docGen shapes) |
+| A `$sensitiveRef` sits inside a nested param value, or a param nests past the eight levels the scan walks, or `params` is not a JSON object at all | permanent unwrap failure naming the param — the unwrap substitutes at the top level of a `params` object only, and a marker anywhere else would otherwise ride to the vendor as ciphertext + MAC inside `RawParams`; a truncated scan is refused too, since it establishes nothing about what lies below. A consumer templates a sensitive field at the top level (the background-check and docGen shapes) |
 
 ---
 
