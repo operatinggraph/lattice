@@ -362,10 +362,23 @@ RETURN
 // engine has no date-arithmetic builtin, clinic-reminders/visitseries.go's
 // own finding) and carried forward unchanged by Charge/VoidCharge.
 //
+// What decides "stale" is a recorded FACT, not a clock: this lens is itself
+// the convergence target the @at it arms fires against, so it reads its own
+// entry under `byTarget.<StaleTabSettlementTarget>` in the freshnessExpiry
+// marker (MarkExpired, orchestration-base/mark_expired.go) — the
+// unroutedTasksSpec / staleAssignedTasksSpec idiom
+// (orchestration-base/lenses.go), a target reading the key the
+// timer that fired against it was told to write.
+//
 // freshUntil arms a one-shot @at at staleAt while the tab is still open and
-// the deadline is still ahead; once it passes, missing_settle opens — the
-// violating row itself drives dispatch from there, the pastDueAppointments
-// idiom, not a repeated timer wake-up. `status = 'open'` is the only
+// no lapse of THIS deadline has landed yet; once the marker lands,
+// missing_settle opens — the violating row itself drives dispatch from
+// there, the pastDueAppointments idiom, not a repeated timer wake-up. An
+// already-past staleAt with no marker yet still projects freshUntil =
+// staleAt verbatim, arming an overdue @at rather than leaving the tab
+// unarmed forever; a marker whose recorded instant falls short of a later
+// staleAt (the deadline moved out past a prior fire) reads unlapsed and
+// re-arms with no clearing write. `status = 'open'` is the only
 // terminal-state check needed: unlike an appointment's three-way status, a
 // tab is only ever open or settled, and Settle/SettleStaleTab both flip it
 // the same way, so a legitimate staff Settle at any point (even racing the
@@ -374,18 +387,22 @@ RETURN
 //
 // missing_staleat is the second, independent gap: an OPEN tab whose
 // .status carries NO staleAt at all (every tab opened before this feature
-// shipped) compares false against both '>' and '<=' in full-engine
-// compareAny, so missing_settle alone can never see it — such a tab was
-// previously invisible to the whole convergence, forever. missing_staleat
-// dispatches BackfillTabStaleAt (ddls.go), which computes the same
-// openedAt + 24h OpenTab would have written; the NEXT convergence cycle
-// then re-evaluates missing_settle against the now-present value like any
-// other tab.
+// shipped) leaves the marker comparison and every ordering test against
+// staleAt resolving false or null, so missing_settle alone can never see
+// it — such a tab would be invisible to the whole convergence, forever.
+// missing_staleat dispatches BackfillTabStaleAt (ddls.go), which computes
+// the same openedAt + 24h OpenTab would have written; the NEXT convergence
+// cycle then re-evaluates missing_settle against the now-present value like
+// any other tab. (freshUntil's CASE takes its THEN branch for this row too
+// — NOT (marker >= null) is NOT false — but the column still comes out
+// null, because THEN t.status.data.staleAt is itself null.)
 //
 // maxretries_settle bakes the retry cap (maxSettleRetries, retry_budget.go)
 // into the row as a constant, the wellness-domain/lenses.go precedent
 // (orphanedBookingSettlementSpec) — built once at package init via
-// fmt.Sprintf, no literal '%' in the cypher body.
+// fmt.Sprintf, splicing the target id (StaleTabSettlementTarget above — the
+// §10.8 TargetID the byTarget read compares against) and the retry cap; no
+// literal '%' in the cypher body.
 var staleTabSettlementSpec = fmt.Sprintf(`MATCH (t:tab {key: $actorKey})
 RETURN
   t.key AS actorKey,
@@ -394,15 +411,15 @@ RETURN
   t.status.data.value AS status,
   t.status.data.openedAt AS openedAt,
   t.status.data.staleAt AS staleAt,
-  CASE WHEN (t.status.data.value = 'open') AND (t.status.data.staleAt > $now) THEN t.status.data.staleAt ELSE null END AS freshUntil,
-  ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now)) AS missing_settle,
+  CASE WHEN (t.status.data.value = 'open') AND NOT (t.freshnessExpiry.data.byTarget.%[1]s >= t.status.data.staleAt) THEN t.status.data.staleAt ELSE null END AS freshUntil,
+  ((t.status.data.value = 'open') AND (t.freshnessExpiry.data.byTarget.%[1]s >= t.status.data.staleAt)) AS missing_settle,
   ((t.status.data.value = 'open') AND (t.status.data.staleAt = null)) AS missing_staleat,
   (
-    ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now))
+    ((t.status.data.value = 'open') AND (t.freshnessExpiry.data.byTarget.%[1]s >= t.status.data.staleAt))
     OR ((t.status.data.value = 'open') AND (t.status.data.staleAt = null))
   ) AS violating,
-  %d AS maxretries_settle
-`, maxSettleRetries)
+  %[2]d AS maxretries_settle
+`, StaleTabSettlementTarget, maxSettleRetries)
 
 // cafeIdentitiesReadSpec projects one row per NAMED identity — the roster
 // cafe-app resolves the signed-in actor's own name against. The WHERE keeps
