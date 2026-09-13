@@ -59,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-13 · `ee354831` · Vertical-apps dossier censused — a `rentCurrency` stored XSS, 4 secret-losing ceremony catches, 5 stale-render writes fixed; four classes gated ([census](../../../docs/reviews/verticals-dossier-census-2026-09-13.md)).
 - 2026-09-13 · `64ee009c` · Three twice-seen `_packages.md` dossier classes become CI gates — `lint-link-target-count`, the retry-cap rule in `lint-gap-column-declaration`, `lint-loupe-console-grants` (one live gap pinned); dossier 14 → 12.
 - 2026-09-13 · `7d9111b7` · Café's FE gates reach their siblings — wellness `esc()` escapes both quotes, goja-pinned; the `KNOWN_CATALOG_OPS` coverage test lands in wellness + clinic as a closed-set classifier; two dossier classes retire.
 - 2026-09-13 · `3658dadb` · A kernel root is not a member — `CreateBooking`/`JoinWaitlist` refuse a `data.protected` booker (`ProtectedBooker`) before any slot cell lands on its hub; 0.27.1 refreshed live, both ops refuse the admin.
@@ -83,8 +84,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-06 · `28259217` · A recurring class is called off in one act — `wellnessSessions` projects `seriesKey`; `TombstoneSessionSeries` cancels every still-upcoming occurrence at the confirmed studio; 52 occurrences in 36 ms.
 - 2026-09-06 · `656fc802` · The 24h class reminder shows where it was sent — `wellnessBookings` projects `reminderSentAt`, My Classes + roster badge it; `TombstoneSession`'s op-meta now declares its required reads.
 - 2026-09-06 · `ef12f478` · `wellnessMemberAccounts` anchors on the identity it keys on — per-anchor seeding/retraction, `DiffRetraction` dropped, five refractor pins moved to closed/derivation; live 6 rows → 6.
-- 2026-09-06 · `eca8a407` · An automated refund is recorded as money handed back — third `refund` reason on the ledger enum, passed by `wellnessRefundSettlement`, refused on a self-scoped credit, badged "(refunded)".
-- 2026-09-06 · `859e7503` · The New-instructor form is offered only to the operator hat that can submit it — `/api/staff-hats` reports `isOperator`, the FE gates the form and admits an operator-only session to Studios.
-- 2026-09-06 · `e0c1b99c` · A waitlisted member is seated the moment their class has room — `wellnessWaitlistPromotion` target → `PromoteWaitlistedBookings` (all promotable, lowest slot first); live: capacity 1→3 seated the waitlist in 4 s.
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*

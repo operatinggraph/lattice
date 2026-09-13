@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `eca8a407` · An automated refund is recorded as money handed back — third `refund` reason on the ledger enum, passed by `wellnessRefundSettlement`, refused on a self-scoped credit, badged "(refunded)".
+- 2026-09-06 · `859e7503` · The New-instructor form is offered only to the operator hat that can submit it — `/api/staff-hats` reports `isOperator`, the FE gates the form and admits an operator-only session to Studios.
+- 2026-09-06 · `e0c1b99c` · A waitlisted member is seated the moment their class has room — `wellnessWaitlistPromotion` target → `PromoteWaitlistedBookings` (all promotable, lowest slot first); live: capacity 1→3 seated the waitlist in 4 s.
 - 2026-09-06 · `6b913413` · A follow-up documented without a target date leads the clinic worklist until one is set — never auto-addressed, "Set date" opens the documentation modal; live: Riley Chen's 7 August visits surface.
 - 2026-09-05 · `d49f77ed` · Clinic self-pay cap's `.balance` is hydrated by the script's own `derive_reads`; legacy replay only for a self-pay, after the ownership proof; whole-cents money (found by the café unit, fixed same run).
 - 2026-09-05 · `e01be391` · A house-tab payment can never exceed what is owed — every `CreditCafeAccount` leg capped against a platform-hydrated `.balance` cache (clinic mirror + `derive_reads`); refusals proven live.
