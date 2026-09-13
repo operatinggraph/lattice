@@ -341,3 +341,156 @@ RETURN
 		"marker >= nil must be FALSE — no stored deadline, no gap")
 	require.Equal(t, true, noDeadline[0].Values["fresh"])
 }
+
+// The walked-node inline-OPTIONAL-MATCH-WHERE shape: an OPTIONAL MATCH binds
+// a non-anchor ("walked") node, and the clause's OWN governing WHERE reads an
+// aspect off THAT walked node inside NOT (walked.someAspect.data.f >=
+// walked.data.g). Every case above reads a walked node's aspect either
+// inside collect() (:91-126) or reads a 4-deep aspect chain off the ANCHOR
+// (:151-343); none puts a walked node's aspect inside the OPTIONAL MATCH's
+// own filtering WHERE, which is a different evaluator path — executor.go's
+// applyMatch evaluates the WHERE per expansion row and, when the walked
+// node's one real match is filtered out, null-restores the pattern
+// variable rather than dropping the anchor row (executor.go's applyMatch,
+// the OPTIONAL-MATCH-WHERE null-restore branch). The four cases below are
+// the four states a governing WHERE of this shape can see for one walked
+// node: the marker present and at/after the deadline (excluded), present
+// and before the deadline (kept), the marker aspect absent entirely (kept —
+// the deliberate fail-direction: an unmarked node stays included until the
+// marker lands), and the marker present but the deadline field itself
+// absent (kept). compareAny's nil-false (values.go:170-203) is what makes
+// both absence cases keep the row rather than error.
+
+// TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_ExcludesLapsedRow
+// pins the exclusion arm: the walked node's aspect field is at or after the
+// governing leaf, so the inner comparison is true, NOT(true) is false, and
+// the WHERE filters the walked node's only real match — leaving it
+// null-restored rather than carried into the RETURN.
+func TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_ExcludesLapsedRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+	putVertex(t, reg, coreKV, "task1", "task", map[string]any{
+		"data": map[string]any{"status": "open", "expiresAt": expiryMarkerDeadline},
+	})
+	putAspect(t, reg, coreKV, "task1", "freshnessExpiry", map[string]any{"expiredAt": expiryMarkerLapsed})
+	putEdge(t, reg, adjKV, "assignedTo", "task1", "alice")
+
+	results := parseExec(t, `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open' AND NOT (task.freshnessExpiry.data.expiredAt >= task.data.expiresAt)
+RETURN
+  identity.key AS anchor,
+  task.key AS taskKey
+`, ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1, "the anchor row survives even though its only walked candidate is filtered")
+	require.Nil(t, results[0].Values["taskKey"],
+		"a walked node whose aspect field is at or after the governing leaf must be excluded: "+
+			"NOT(f >= g) is false, so the OPTIONAL MATCH null-restores task instead of carrying it into the RETURN")
+}
+
+// TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowBelowDeadline
+// pins the kept arm with both fields present: the walked node's aspect field
+// is strictly before the governing leaf, so the inner comparison is false,
+// NOT(false) is true, and the walked node's real match survives the WHERE.
+func TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowBelowDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+	putVertex(t, reg, coreKV, "task1", "task", map[string]any{
+		"data": map[string]any{"status": "open", "expiresAt": expiryMarkerLapsed},
+	})
+	putAspect(t, reg, coreKV, "task1", "freshnessExpiry", map[string]any{"expiredAt": expiryMarkerDeadline})
+	putEdge(t, reg, adjKV, "assignedTo", "task1", "alice")
+
+	results := parseExec(t, `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open' AND NOT (task.freshnessExpiry.data.expiredAt >= task.data.expiresAt)
+RETURN
+  identity.key AS anchor,
+  task.key AS taskKey
+`, ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, vtxKey(reg, "task1"), results[0].Values["taskKey"],
+		"a walked node whose aspect field is strictly before the governing leaf must be kept: NOT(f >= g) is true")
+}
+
+// TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowWithNoMarker_DeliberateFailDirection
+// pins the deliberate fail-direction: the walked node carries no marker
+// aspect at all, so the aspect hop binds nil, nil >= g is false (compareAny's
+// nil-false), NOT(false) is true, and the walked node is kept — an unmarked
+// node stays included rather than being excluded by its own absence.
+func TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowWithNoMarker_DeliberateFailDirection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+	putVertex(t, reg, coreKV, "task1", "task", map[string]any{
+		"data": map[string]any{"status": "open", "expiresAt": expiryMarkerDeadline},
+	})
+	// No freshnessExpiry aspect written: nothing has ever marked this walked node.
+	putEdge(t, reg, adjKV, "assignedTo", "task1", "alice")
+
+	results := parseExec(t, `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open' AND NOT (task.freshnessExpiry.data.expiredAt >= task.data.expiresAt)
+RETURN
+  identity.key AS anchor,
+  task.key AS taskKey
+`, ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, vtxKey(reg, "task1"), results[0].Values["taskKey"],
+		"DELIBERATE FAIL-DIRECTION: a walked node with no marker aspect at all binds nil at that hop; "+
+			"nil >= g is false, NOT(false) is true, so the node stays included rather than being excluded by its own absence")
+}
+
+// TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowWithDeadlineFieldAbsent
+// pins the other absence direction: the walked node's marker aspect is
+// present but the governing leaf itself is absent, so f >= nil is false
+// (compareAny's nil-false on the other operand), NOT(false) is true, and the
+// walked node is kept.
+func TestAspectExpr_WalkedNodeOptionalMatchWhere_NegatedGE_KeepsRowWithDeadlineFieldAbsent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+	// task1's data carries status but no expiresAt field at all.
+	putVertex(t, reg, coreKV, "task1", "task", map[string]any{
+		"data": map[string]any{"status": "open"},
+	})
+	putAspect(t, reg, coreKV, "task1", "freshnessExpiry", map[string]any{"expiredAt": expiryMarkerLapsed})
+	putEdge(t, reg, adjKV, "assignedTo", "task1", "alice")
+
+	results := parseExec(t, `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open' AND NOT (task.freshnessExpiry.data.expiredAt >= task.data.expiresAt)
+RETURN
+  identity.key AS anchor,
+  task.key AS taskKey
+`, ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
+		adjKV, coreKV)
+
+	require.Len(t, results, 1)
+	require.Equal(t, vtxKey(reg, "task1"), results[0].Values["taskKey"],
+		"a walked node whose governing leaf field is absent must be kept: f >= nil is false, NOT(false) is true")
+}
