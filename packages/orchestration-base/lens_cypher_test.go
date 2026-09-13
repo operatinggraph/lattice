@@ -14,9 +14,15 @@ package orchestrationbase
 // unroutedTasks and staleAssignedTasks are convergence targets, so each reads
 // its OWN byTarget entry (a sibling's fire is not its lapse).
 // capabilityEphemeral is an observer with no entry of its own, so it reads
-// `expiredAt`, the entity-wide maximum — any recorded instant at or after the
-// task's deadline proves the task expired, whichever target fired. myTasks
-// reads no deadline at all, by its own doc comment's reasoning.
+// `expiredAt`, the entity-wide maximum — any instant WEAVER recorded there at
+// or after the task's deadline proves the task expired, whichever target
+// fired, because the temporal lane copies the row's own freshUntil into the
+// timer payload and reads no clock. An `operator` may also submit MarkExpired
+// (permissions.go) and the script cannot clamp the instant it is handed, so a
+// future one is recordable; it can only ever DENY, and it denies permanently
+// — nothing lowers or clears expiredAt, and the fold carries it across a
+// tombstone-and-revive. myTasks reads no deadline at all, by its own doc
+// comment's reasoning.
 //
 //   - QUEUED, NO RECORDED LAPSE: not violating; freshUntil = expiresAt (arms the
 //     @at timer) — still time to claim it.
@@ -316,6 +322,13 @@ func TestMyTasks_ExpiredButOpen_StillProjected(t *testing.T) {
 // CompleteTask/CancelTask — expiresAt alone is not a valid liveness proxy
 // once status has moved off 'open'. The marker is present too, so the row
 // proves status ALONE closes it rather than leaning on the deadline half.
+//
+// Two further state-table rows reduce to vectors already here rather than
+// needing their own: a `cancelled` task is this row (the WHERE compares
+// status to the literal 'open', so every non-open value is one case), and a
+// task revived at its ORIGINAL deadline is the recorded-lapse row — the
+// revive does not touch the marker, whose expiredAt is still at or after that
+// deadline, so the grant stays retracted until a new deadline outruns it.
 func TestCapabilityEphemeral_CompletedTask_NotProjected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -435,16 +448,23 @@ func TestCapabilityEphemeral_DeadlineMovedEarlier_Retracted(t *testing.T) {
 		"the recorded fire is after the new deadline, so it IS a lapse of it")
 }
 
-// TestCapabilityEphemeral_ClaimedAfterTheLapse_ForeignTargetEntryRetracts is the
-// window the entity-wide maximum closes. ClaimTask admits a lapsed queued task
-// (ddls.go checks status='open' only), so a task can carry the unroutedTasks
-// fire from its time in the queue and then become a direct assignment whose own
-// staleAssignedTasks @at has not come round yet. The grant must be retracted on
-// the instant that IS recorded: this lens is nobody's target, so a fire under
-// any target id is a lapse it must honour.
+// TestCapabilityEphemeral_ClaimedAfterTheLapse_ForeignTargetEntryRetracts pins
+// that a fire recorded under a FOREIGN target id still retracts. ClaimTask
+// admits a lapsed queued task (ddls.go checks status='open' only), so a task
+// can carry the unroutedTasks fire from its time in the queue and then become a
+// direct assignment whose own staleAssignedTasks @at has not come round yet.
+// This lens is nobody's target, so a fire under any target id is a lapse it
+// honours, and the grant goes on the instant that IS recorded.
 //
-// Reading a per-arm byTarget entry instead would leave the grant listed for
-// that whole interval.
+// The narrow claim, stated exactly: the maximum closes this window only in the
+// order seeded here — the unroutedTasks fire landed BEFORE the claim. Claim
+// first and there is nothing to close: the unroutedTasks row is gone when the
+// timer fires, handleFiredTimer drops the firing on the absent row, no entry is
+// written, and the maximum and a per-arm read both wait for staleAssignedTasks'
+// own overdue @at. What decides the field is not this window but the coupling a
+// per-arm read would take on: arm 1/2 reading staleAssignedTasks and arm 3
+// unroutedTasks is a claim about three WHERE clauses staying aligned with two
+// other lenses' populations forever.
 func TestCapabilityEphemeral_ClaimedAfterTheLapse_ForeignTargetEntryRetracts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -487,6 +507,40 @@ func TestCapabilityEphemeral_MarkerWithEmptyByTarget_Retracted(t *testing.T) {
 
 	f.requireNotGranted(t, "bob", "task1",
 		"a marker carrying only expiredAt still records a fire at or after the deadline — the observer honours it")
+}
+
+// TestCapabilityEphemeral_MarkerWithByTargetButNoExpiredAt_Granted is the third
+// absence vector, and the one that fails OPEN. The marker carries a byTarget
+// entry at the deadline but no expiredAt field at all, so the field this lens
+// reads binds nil, `nil >= deadline` is false, NOT(false) is true, and the
+// grant stays listed even though a per-target reader would call the task
+// lapsed.
+//
+// MarkExpired cannot produce this shape — its script writes expiredAt and
+// byTarget in one document, every branch — but the freshnessExpiry aspect DDL's
+// InputSchema requires NEITHER field, so the shape is admissible to the graph
+// and the engine's answer to it is worth pinning rather than assuming. The
+// direction is the deliberate one: an observer that cannot see the field it
+// reads keeps granting and leaves the refusal to the Processor's lookup-time
+// check, rather than retracting on an absence.
+func TestCapabilityEphemeral_MarkerWithByTargetButNoExpiredAt_Granted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	const expiresAt = "2026-06-20T12:00:00Z"
+	f.vtx(t, "bob", "identity", nil)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": expiresAt})
+	f.edge(t, "assignedTo", "task1", "bob")
+	// Written directly: recordLapse always derives an expiredAt from the
+	// entries, which is the whole point — this shape is not one it can make.
+	f.aspect(t, "task1", "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"byTarget": map[string]any{StaleAssignedTasksTarget: expiresAt},
+	})
+
+	f.requireGranted(t, "bob", "task1",
+		"a marker with no expiredAt binds nil at the field this lens reads, and no deadline is at or after nil — "+
+			"the observer keeps granting rather than retracting on an absence")
 }
 
 // TestCapabilityEphemeral_ExpiresAtNeverWritten_Granted is the NEVER-WRITTEN
@@ -587,6 +641,16 @@ func TestCapabilityEphemeral_EveryArmReadsTheRecordedLapse(t *testing.T) {
 // arms the @at at the task's own deadline. A future WHERE edit on either target
 // that strands one of these arms fails here, by arm name, instead of silently
 // leaving that arm's grants un-retractable.
+//
+// What it witnesses and what it does not: three fixture tasks, one per arm, so
+// it catches a SHAPE-narrowing edit on either target (a changed relation, a
+// required match this arm's task cannot satisfy). It would miss a
+// PROPERTY-conditioned narrowing these three fixtures happen to satisfy — a new
+// clause on a field they all carry. The universal claim rests on the cyphers
+// rather than on the fixtures: arm 1's and arm 2's task binding is
+// character-for-character staleAssignedTasksSpec's `(t:task)-[:assignedTo]->`,
+// and arm 3's is unroutedTasksSpec's `(t:task)-[:queuedFor]->`, so every task
+// either lens can bind is one the matching target binds too.
 func TestCapabilityEphemeral_EveryArmsTaskIsCoveredByARoutingShapeTarget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -885,12 +949,13 @@ func TestStaleAssignedTasks_SiblingTargetLapseDoesNotOpenThisGap(t *testing.T) {
 	require.Equal(t, "2026-07-01T12:00:00Z", v["freshUntil"], "and it does not disarm this target's timer either")
 }
 
-// TestTaskDeadlineLenses_ReferenceNoClockParameter is the structural half of the
-// conversion, asserted on the compiled cyphers rather than on any one row: a lens
-// that reads $now or $projectedAt projects a clock reading the sweep's deep
-// verify cannot compare, which is the divergence this conversion removes. On
-// capabilityEphemeral that divergence is the one in the corpus whose escalation
-// reaches `error`, since its rows are the auth plane's.
+// TestTaskDeadlineLenses_ReferenceNoClockParameter is the structural pin,
+// asserted on the compiled cyphers rather than on any one row: a lens that
+// reads $now or $projectedAt projects a clock reading the sweep's deep verify
+// cannot compare, so two passes over an unchanged graph disagree and the sweep
+// heals a projection nothing broke. On capabilityEphemeral such a divergence is
+// the one in the corpus whose escalation reaches `error`, since its rows are the
+// auth plane's.
 //
 // Every lens this package declares is here: the two task-deadline convergence
 // targets, the auth-plane observer, and myTasks, which projects a deadline

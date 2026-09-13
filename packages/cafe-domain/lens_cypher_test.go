@@ -481,6 +481,39 @@ func TestCafeStaleTabSettlement_SiblingTargetLapseDoesNotOpenThisGap(t *testing.
 	require.Equal(t, false, v["violating"])
 }
 
+// TestCafeStaleTabSettlement_MarkerWithNoByTargetMapReadsUnlapsed pins the
+// shape a marker written before byTarget existed carries: `expiredAt` alone,
+// which says that SOMETHING lapsed on this tab and never which target. A
+// convergence target must not answer for a sibling's fire, so the four-hop read
+// of its own entry resolves to nil, compareAny answers false, and the tab reads
+// unlapsed with its timer still armed — the same reading
+// TestUnroutedTasks_MarkerWithNoByTargetMapReadsUnlapsed pins on
+// orchestration-base's half.
+//
+// It is the absence vector the sibling-target test cannot stand in for: that
+// one has a byTarget map with the wrong key in it, this one has no map at all,
+// and a read that defaulted to expiredAt would pass the first and fail here.
+func TestCafeStaleTabSettlement_MarkerWithNoByTargetMapReadsUnlapsed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "legacymarkertab", "tab")
+	f.aspect(t, "legacymarkertab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
+	})
+	// Written directly rather than through recordLapse: that helper always
+	// derives a byTarget map, and this shape is precisely the one without it.
+	f.aspect(t, "legacymarkertab", "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": "2099-01-01T00:00:00Z",
+	})
+
+	v := f.valuesAtStale(t, "legacymarkertab")
+	require.Equal(t, false, v["missing_settle"], "a marker with no byTarget map names no target and lapses nothing here")
+	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "and it does not disarm this target's timer either")
+	require.Equal(t, false, v["violating"])
+}
+
 // TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt proves
 // a legitimate staff Settle at any point permanently converges the gate:
 // Settle's status_data rewrite drops staleAt entirely (ddls.go), and

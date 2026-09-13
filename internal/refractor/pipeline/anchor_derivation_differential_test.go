@@ -390,8 +390,12 @@ func TestDerivation_Differential_VertexAndAspect(t *testing.T) {
 }
 
 // ephemeralDiffSpec is the shipped capabilityEphemeral pattern
-// (packages/orchestration-base), reduced to the two branches that bind: the
-// direct assignment and the role-queue fan-out. It is the lens §4.7's 3b names
+// (packages/orchestration-base), carrying all three of its branches — the
+// direct assignment, the reportsTo manager delegation, and the role-queue
+// fan-out — with the collect() bodies reduced to the columns this differential
+// compares. All three are here because each is a separate route from a TASK
+// back to an actor, and the retraction a marker write drives is exactly that
+// walk run backwards. It is the lens §4.7's 3b names
 // as the reason the derivation exists — broad-filtered and non-exhaustive, so
 // Increments 1 and 2 cannot narrow it at all, and its targets are UNLABELED
 // positions that only a node-seeded walk can reach. It is a hand-kept
@@ -404,11 +408,15 @@ MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
   WHERE task.data.expiresAt > $now
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
+OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)<-[:assignedTo]-(task2:task)
+  WHERE task2.data.expiresAt > $now
+OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)
   WHERE task3.data.expiresAt > $now
 OPTIONAL MATCH (task3)-[:scopedTo]->(tgt3)
 RETURN identity.key AS actorKey,
   collect(DISTINCT {taskKey: task.key, target: tgt.key, ref: tgt.data.ref}) AS direct,
+  collect(DISTINCT {taskKey: task2.key, target: tgt2.key, ref: tgt2.data.ref}) AS delegated,
   collect(DISTINCT {taskKey: task3.key, target: tgt3.key, ref: tgt3.data.ref}) AS queued
 `
 
@@ -421,15 +429,17 @@ func TestDerivation_Differential_CapabilityEphemeral(t *testing.T) {
 	f := newDiffFixture(t, ephemeralDiffSpec)
 	ctx := context.Background()
 
-	for _, n := range []string{"alice", "bob", "carol"} {
+	for _, n := range []string{"alice", "bob", "carol", "manager", "report"} {
 		f.vertex(n, "identity", map[string]any{"name": n})
 	}
 	f.vertex("ops", "role", map[string]any{"name": "ops"})
 	live := map[string]any{"expiresAt": "2030-01-01T00:00:00Z"}
 	f.vertex("t1", "task", live)
 	f.vertex("t2", "task", live)
+	f.vertex("t3", "task", live)
 	f.vertex("bk1", "booking", map[string]any{"ref": "b1"})
 	f.vertex("bk2", "booking", map[string]any{"ref": "b2"})
+	f.vertex("bk3", "booking", map[string]any{"ref": "b3"})
 
 	f.applyLink("holdsRole", "alice", "ops", false)
 	f.applyLink("holdsRole", "bob", "ops", false)
@@ -437,10 +447,48 @@ func TestDerivation_Differential_CapabilityEphemeral(t *testing.T) {
 	f.applyLink("scopedTo", "t1", "bk1", false)
 	f.applyLink("queuedFor", "t2", "ops", false)
 	f.applyLink("scopedTo", "t2", "bk2", false)
+	// The delegation arm: t3 is the REPORT's task, and the manager inherits it
+	// through reportsTo — so the manager's row binds a task nothing links to it
+	// directly.
+	f.applyLink("reportsTo", "report", "manager", false)
+	f.applyLink("assignedTo", "t3", "report", false)
+	f.applyLink("scopedTo", "t3", "bk3", false)
 
 	rs := f.p.ruleState()
 	require.True(t, rs.anchorHops.Complete,
 		"capabilityEphemeral must be derivable: %s", rs.anchorHops.Incomplete)
+
+	// --- the RETRACTION transport, once per arm ---------------------------
+	//
+	// MarkExpired writes an ASPECT on the TASK; this lens is anchored on the
+	// IDENTITY. Every arm's actor therefore has to be reachable from the task
+	// the marker lands on, or that arm's grants are never retracted by the
+	// write that records their lapse — and the e2e, which seeds one direct
+	// assignment, reaches only the first of the three.
+	//
+	// deriveAnchorsForAspect derives from the aspect's PARENT VERTEX and never
+	// looks at its localName, so these are the same derivations the pipeline
+	// runs on a real freshnessExpiry write, with no marker needed in the
+	// fixture.
+	directAnchors, ok, err := f.p.deriveAnchorsForAspect(ctx, rs, f.key("t1")+".freshnessExpiry")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, directAnchors, f.key("carol"),
+		"arm 1: a marker on a directly assigned task must derive its assignee")
+
+	delegatedAnchors, ok, err := f.p.deriveAnchorsForAspect(ctx, rs, f.key("t3")+".freshnessExpiry")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, delegatedAnchors, f.key("manager"),
+		"arm 2: a marker on a REPORT's task must derive the MANAGER — the manager holds the grant through "+
+			"the reportsTo 2-hop, so a derivation that stops at the assignee leaves the inherited grant standing")
+
+	queuedAnchors, ok, err := f.p.deriveAnchorsForAspect(ctx, rs, f.key("t2")+".freshnessExpiry")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Subset(t, queuedAnchors, []string{f.key("alice"), f.key("bob")},
+		"arm 3: a marker on a QUEUED task must derive EVERY holder of the queued role — the fan-out grants "+
+			"them all, so retracting one holder's copy and not another's is the same bug as retracting none")
 
 	// A vertex event on an UNLABELED pattern position, two chains deep.
 	before := f.snapshot()

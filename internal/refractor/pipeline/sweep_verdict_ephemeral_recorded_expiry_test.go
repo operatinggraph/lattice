@@ -24,6 +24,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 const (
@@ -62,7 +63,7 @@ func seedSweepEphemeralGrant(t *testing.T, coreKV, adjKV *substrate.KV, withMark
 	if withMarker {
 		writeSweepAspect(t, coreKV, taskKey, "freshnessExpiry", "freshnessExpiry", map[string]any{
 			"expiredAt": sweepEndsAt,
-			"byTarget":  map[string]any{"staleAssignedTasks": sweepEndsAt},
+			"byTarget":  map[string]any{orchestrationbase.StaleAssignedTasksTarget: sweepEndsAt},
 		})
 	}
 	// task = source, identity = target (Contract #1 §1.1).
@@ -131,8 +132,94 @@ func TestSweepVerdict_EphemeralGrantIsAPureFunctionOfTheSubgraph(t *testing.T) {
 
 		require.Equal(t, []string{taskKey}, realGrants(projectAtInstant(t, spec, actorKey, sweepBefore, adjKV, coreKV)))
 		require.Equal(t, []string{taskKey}, realGrants(projectAtInstant(t, spec, actorKey, sweepAfter, adjKV, coreKV)),
-			"with no lapse recorded the grant is still LISTED past its own deadline — the clock-reading form "+
-				"dropped it here, and this is the divergence the conversion removes (the delivery axis stays "+
-				"closed at the Processor's lookup-time expiresAt check)")
+			"with no lapse recorded the grant is LISTED past its own deadline at both instants — a clock-reading "+
+				"form drops it at the later one, which is the divergence this lens does not have (the delivery "+
+				"axis stays closed at the Processor's lookup-time expiresAt check)")
 	})
+}
+
+// ephemeralClockReadingSpec is the three-arm shipped pattern with the deadline
+// verdict taken from the CLOCK instead of the recorded lapse. It exists to
+// measure the comparator: without it the two tests above are satisfied just as
+// well by a lens with nothing time-dependent in it, or by a classifyDivergence
+// that has stopped comparing.
+const ephemeralClockReadingSpec = `
+MATCH (identity:identity {key: $actorKey})
+
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open' AND task.data.expiresAt > $now
+OPTIONAL MATCH (task)-[:forOperation]->(op)
+OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
+
+OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)<-[:assignedTo]-(task2:task)
+  WHERE task2.data.status = 'open' AND task2.data.expiresAt > $now
+OPTIONAL MATCH (task2)-[:forOperation]->(op2)
+OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
+
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)
+  WHERE task3.data.status = 'open' AND task3.data.expiresAt > $now
+OPTIONAL MATCH (task3)-[:forOperation]->(op3)
+OPTIONAL MATCH (task3)-[:scopedTo]->(tgt3)
+
+RETURN
+  identity.key AS actorKey,
+  collect(DISTINCT {
+    source: "task",
+    taskKey: task.key,
+    operationType: op.data.operationType,
+    target: tgt.key,
+    expiresAt: task.data.expiresAt
+  }) + collect(DISTINCT {
+    source: "task",
+    taskKey: task2.key,
+    operationType: op2.data.operationType,
+    target: tgt2.key,
+    expiresAt: task2.data.expiresAt
+  }) + collect(DISTINCT {
+    source: "task",
+    taskKey: task3.key,
+    operationType: op3.data.operationType,
+    target: tgt3.key,
+    expiresAt: task3.data.expiresAt
+  }) AS ephemeralGrants
+`
+
+// TestSweepVerdict_EphemeralClockReadingFormStillDiverges is the DISCRIMINATION
+// half. It runs the same fixture and the same two instants against a
+// clock-reading form of this lens; classifyDivergence must answer
+// divergenceContent, and the grants column must be the thing that moved — on an
+// unchanged graph, with no write between the two passes.
+//
+// The fixture carries NO marker here: the clock form has no marker to read, and
+// the population it disagrees about is precisely the open-and-lapsed task.
+func TestSweepVerdict_EphemeralClockReadingFormStillDiverges(t *testing.T) {
+	kvs := newTestKVs(t, "SWEEPEPHADJC", "SWEEPEPHCOREC")
+	adjKV, coreKV := kvs[0], kvs[1]
+	actorKey := seedSweepEphemeralGrant(t, coreKV, adjKV, false)
+	taskKey := substrate.VertexKey("task", sweepEphTaskID)
+
+	stored := projectAtInstant(t, ephemeralClockReadingSpec, actorKey, sweepBefore, adjKV, coreKV)
+	recomputed := projectAtInstant(t, ephemeralClockReadingSpec, actorKey, sweepAfter, adjKV, coreKV)
+
+	require.Equal(t, divergenceContent, classifyDivergence(stored, recomputed, nil),
+		"a clock-reading form must diverge over an unchanged graph — otherwise the agreement asserted in "+
+			"the sibling tests is satisfied by a fixture with nothing time-dependent in it, or by a "+
+			"comparator that compares nothing")
+
+	realGrants := func(row map[string]any) []string {
+		grants, _ := row["ephemeralGrants"].([]any)
+		var keys []string
+		for _, g := range grants {
+			m, _ := g.(map[string]any)
+			if tk, ok := m["taskKey"].(string); ok && tk != "" {
+				keys = append(keys, tk)
+			}
+		}
+		return keys
+	}
+	require.Equal(t, []string{taskKey}, realGrants(stored),
+		"before the deadline the clock form lists the grant")
+	require.Empty(t, realGrants(recomputed),
+		"after it the same form drops the grant on the clock alone, with no write to the graph between "+
+			"the two passes — that flip is what escalates to `error` on this lens's plane")
 }

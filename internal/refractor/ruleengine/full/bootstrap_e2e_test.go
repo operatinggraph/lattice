@@ -199,7 +199,7 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	})
 	putAspect(t, reg, coreKV, "taskexpired", "freshnessExpiry", map[string]any{
 		"expiredAt": past,
-		"byTarget":  map[string]any{"staleAssignedTasks": past},
+		"byTarget":  map[string]any{orchestrationbase.StaleAssignedTasksTarget: past},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "taskexpired", "alice")
 	putEdge(t, reg, adjKV, "forOperation", "taskexpired", "opAdmin")
@@ -231,11 +231,10 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	type grant struct{ op, target string }
 	projectGrants := func(actor string) map[string]grant {
 		actorKey := vtxKey(reg, actor)
-		params := map[string]any{
-			"actorKey":    actorKey,
-			"now":         time.Now().UTC().Format(time.RFC3339),
-			"projectedAt": time.Now().UTC().Format(time.RFC3339),
-		}
+		// The cypher is read straight off the result values here, with no
+		// envelope wrapping, so it needs neither a clock nor a projectedAt
+		// stamp — and supplying either would pin only the supplied case.
+		params := map[string]any{"actorKey": actorKey}
 		out, err := eng.ExecuteWith(context.Background(), cr,
 			ruleengine.EventContext{Parameters: params}, adjKV, coreKV)
 		require.NoError(t, err, "capabilityEphemeral query must execute")
@@ -332,7 +331,7 @@ func TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow(t *testing.T) {
 	})
 	putAspect(t, reg, coreKV, "daveexpired", "freshnessExpiry", map[string]any{
 		"expiredAt": past,
-		"byTarget":  map[string]any{"staleAssignedTasks": past},
+		"byTarget":  map[string]any{orchestrationbase.StaleAssignedTasksTarget: past},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "daveexpired", "dave")
 	putEdge(t, reg, adjKV, "forOperation", "daveexpired", "opAdmin")
@@ -344,11 +343,7 @@ func TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow(t *testing.T) {
 
 	for _, actor := range []string{"carol", "dave"} {
 		actorKey := vtxKey(reg, actor)
-		params := map[string]any{
-			"actorKey":    actorKey,
-			"now":         time.Now().UTC().Format(time.RFC3339),
-			"projectedAt": time.Now().UTC().Format(time.RFC3339),
-		}
+		params := map[string]any{"actorKey": actorKey}
 		out, err := eng.ExecuteWith(context.Background(), cr,
 			ruleengine.EventContext{Parameters: params}, adjKV, coreKV)
 		require.NoError(t, err)
