@@ -264,3 +264,75 @@ findings folded as §4.4, §5.1's memo shape, §5.2's clinic-reminders entry.
 measured live, and refuted on the span-proportional axis without a third draft. **The surviving design
 contains only content verified by the two passes or by direct vendor/measurement grounding; the
 adjudication gate is discharged.**
+
+### Inc A fire brief (build note, 2026-09-13)
+
+**1. Scope sentence (verbatim, §8).** *"cafe-domain `leaseapp_unit` memo (function-local, threaded) +
+enumeration-count test + version bump"* — green bar: `go build ./...`, `make vet`, `golangci-lint run`,
+`go test` on cafe-domain + processor, `lint-package-version`, all `scripts/lint-*.go`.
+
+**2. Verified touch-list (checked live at `72470a7`).**
+- `packages/cafe-domain/ddls.go:863-886` — `def leaseapp_unit(lease_key)`: `vertex_live` read → one
+  `kv.Links(lease_key, "appliesToUnit", "out")` → `vertex_live(unit)`. Single copy in the file (the
+  second script from `:1516` has no `leaseapp_unit`).
+- `packages/cafe-domain/ddls.go:1165` and `:1195` — the two `Charge` sites, same `existing.data.get("leaseAppKey")`
+  by construction (`existing` bound once at `:1157`). Design cited `:1129-1131` / `:1159-1161`; rotted by +36 lines,
+  same code. The other three sites (`:1013` OpenTab, `:1256` VoidCharge, `:1309` Settle) each call once.
+- `packages/cafe-domain/package.go:94` `Version: "0.12.3"` + `manifest.yaml:2` — bump to `0.12.4` (both;
+  `TestPackage_ManifestMatchesDefinition` pins them together).
+- `packages/cafe-domain/workplace_confinement_test.go` — the new vector lands here (staff topology + cap doc
+  already exist: `wcStaffCapDoc` `:54`, `seedWorkplaceTopology` `:81`, `createMenuItem` `integration_test.go:1842`).
+
+**3. Precedents to mirror.**
+- Test observable: `packages/clinic-domain/withprovider_listing_test.go:20-65` (`capturedScriptReads` observer,
+  channel-woken `waitFor`) + `:82-108` (`ExtraScriptReadObservers` via `testutil.PipelineConfig`
+  `internal/testutil/pipeline.go:277`; asserts `ListCalls` beside `len(Enumerations)`). `ListCalls` counts
+  issued listings exactly (`internal/processor/script_read_record.go:113-127`).
+- Staff Charge with `menuItemKey`: `integration_test.go:2376-2405` (`TestCharge_Staff_CatalogItemDerivesAmount`,
+  runs as the operator); the confined-staff shape is `workplace_confinement_test.go:243-260` (Charge as
+  `wcStaffKey` needs the `wcStaffCapDoc` Charge grant — present).
+- Memo shape: no Starlark memo precedent in `packages/` — greenfield by design (§5.1 names the shape: a dict
+  created inside `execute`'s Charge arm and threaded as a parameter; NEVER a module-level dict — the pinned
+  go.starlark.net leaves module globals unfrozen by accident, and `Validate` is Init-only).
+
+**4. Increment order + green checks.**
+1. `leaseapp_unit(lease_key, memo=None)`: `if memo != None and lease_key in memo: return memo[lease_key]`;
+   store the resolved value (INCLUDING `None` — a broken/withdrawn chain answers the same `None` at both sites
+   today, and both sites already fail closed on it: `enforce_workplace` skips a `None` candidate `:826`,
+   `location_covers` denies `:739`). Charge arm: `unit_memo = {}` before `:1165`; pass it at `:1165` and `:1195`.
+   The other three sites stay unchanged (single call each; a default arg keeps their signature).
+2. `TestWorkplace_ChargeCatalogItemListsAppliesToUnitOnce` in `workplace_confinement_test.go`: staff at A,
+   tab on lease A, item served at building A, Charge with `menuItemKey` as `wcStaffKey` → Accepted (positive
+   vector first, its `Rejected` sibling at building B in the same test); observer asserts exactly ONE
+   `{appliesToUnit, out}` member in `Enumerations` and `ListCalls == N` where N is measured and each listing is
+   named in the assertion message. Revert-proof: with the memo removed the test must fail on `N+1`.
+3. Version bump 0.12.3 → 0.12.4 (`package.go` + `manifest.yaml`).
+   ```sh
+   go test ./packages/cafe-domain/ -count=1
+   go test ./internal/processor/ -run 'Starlark|Derive|ReadRecord|ScriptRead' -count=1
+   go run ./scripts/lint-package-version.go       # local mode: tree vs HEAD
+   STRICT=1 go run ./scripts/lint-conventions.go
+   go run ./scripts/lint-package-standard.go
+   make vet && golangci-lint run ./...
+   ```
+
+**5. In-scope gotchas.** Package content edit ⇒ manifest + `Version` bump (CLAUDE.md). No new `kv.Read`/`kv.Links`
+(read-posture unchanged; the drift ratchet only fires on new undeclared reads). `leaseapp_unit` is not a pinned
+helper (`lint-package-standard.go:447-450`) — no digest/floor moves. Never memoize across executions.
+Dossier (`docs/components/_packages.md`): no entry names this shape; nearest is *"A guard's OCC rests on whoever
+writes its read declaration"* — inapplicable (no declaration or OCC change). Standing checklist
+(`agents/fire-brief-template.md`): (1) new state needs a LIFETIME — the memo's is one `execute` call, created in
+the Charge arm, never carried; (2) every census is a premise — re-count the two sites live (done, `:1165`/`:1195`);
+(3) a negative test needs its positive proven first, every fix proven by revert; (4) removal needs a transport AND
+an observer — n/a, nothing removed; (5) one deterministic key, one writer — n/a; (6) precedent may carry debt —
+the clinic observer precedent is the same processor surface, verified.
+
+**6. Adjacent finds.** None in the touched lines. §6's paced live probe needs the PO's loaded Mac stack
+(attended; `agents/steward/REMOTE.md` §3) — recorded as the item's pending live observation, not filed.
+
+**7. Non-goals.** No hoist (§9 pass 1: the `location_covers` short-circuit hazard); no other package's
+`leaseapp_unit` (lease-signing's `scripts.go:440` is a different copy with single-call sites); none of §5.2's
+recorded hazards; no `kv` module change; no wall-budget change.
+
+**Scope-diff gate:** every touch above traces to the §8 Inc A row; nothing widened; the only declared dependency
+(the `ListCalls` counter, `authority-walk-wall-unit-cost-design.md` §4.1) is verified shipped both ways.
