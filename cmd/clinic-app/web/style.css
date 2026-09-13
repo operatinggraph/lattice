@@ -127,6 +127,12 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
   text-transform: uppercase;
   color: var(--text-dim);
 }
+.appts-section-sub {
+  grid-column: 1 / -1;
+  margin: -2px 0 2px;
+  font-size: 12px;
+  color: var(--yellow);
+}
 
 .card {
   background: var(--bg-raised);
@@ -184,6 +190,7 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .badge.completed { color: var(--text-dim); border-color: var(--border); }
 .badge.cancelled { color: var(--red); border-color: var(--red); }
 .badge.noshow { color: var(--yellow); border-color: var(--yellow); }
+.badge.conflict { color: var(--red); border-color: var(--red); }
 
 .badge.followup-overdue { color: var(--red); border-color: var(--red); }
 .badge.followup-soon { color: var(--yellow); border-color: var(--yellow); }

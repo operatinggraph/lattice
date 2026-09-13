@@ -34,6 +34,7 @@ const state = {
   myEncountersPending: {}, // appointmentKey -> the note this session just wrote via submitEncounter, held here until a loadMyEncounters fetch reflects it. Keeps a corrected note from regressing to the pre-correction row an in-flight projection can still return.
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
+  rescheduleQueue: [], // clinic-wide worklist of booked, non-terminal appointments a provider's time-off now overlaps (loadFollowups joins /api/staff/appointments against state.providers)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
   mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
   mySeriesProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-visit-series
@@ -53,6 +54,8 @@ const state = {
   hoursProvider: null, // the provider key the draft is scoped to (reset on change)
   timeOffDraft: [], // SetProviderTimeOff ranges being edited (seeded from the provider's current ranges)
   timeOffProvider: null, // the provider key the time-off draft is scoped to (re-seeded on change)
+  timeOffAppts: [], // the selected provider's appointments feed (whichever the signed-in hat can read), for the draft-ranges conflict preview
+  timeOffApptsProvider: undefined, // the provider key state.timeOffAppts was fetched for — re-fetched only when the selection moves on
   slotApptCache: {}, // providerKey -> existing appointments, for the booking slot picker (invalidated on book)
   slotPatientApptCache: {}, // patientKey -> the patient's appointments across all providers (cross-provider double-book exclusion; invalidated on book)
   slotCalAnchor: null, // UTC-midnight Date for the 1st of the month shown in the booking calendar (null → current UTC month)
@@ -1571,6 +1574,7 @@ function renderAvailEditors() {
   renderHoursDraft();
   timeOffDraftForSelectedProvider();
   renderTimeOffDraft();
+  loadTimeOffApptsForSelectedProvider();
 }
 
 // renderProviderEditForm mounts SetProviderProfile's descriptor form for the
@@ -2020,8 +2024,41 @@ function timeOffDraftForSelectedProvider() {
     state.timeOffDraft = p && Array.isArray(p.timeOff)
       ? p.timeOff.map((r) => ({ from: r.from, to: r.to, reason: r.reason }))
       : [];
+    // A provider switch invalidates whatever appointments feed was fetched
+    // for the PREVIOUS selection — loadTimeOffApptsForSelectedProvider
+    // re-fetches for the new one; until it lands, the conflict preview shows
+    // nothing rather than the old provider's bookings.
+    state.timeOffAppts = [];
+    state.timeOffApptsProvider = undefined;
   }
   return prov;
+}
+
+// loadTimeOffApptsForSelectedProvider fetches the appointments feed the
+// signed-in hat can read, once per selected provider, so renderTimeOffDraft's
+// conflict preview can tell which booked visits the draft ranges would put in
+// conflict. A bound provider hat (not operator) can only read
+// /api/my-schedule; every other hat reads /api/staff/appointments — both
+// return {appointments:[...]} in the same row shape. Any fetch error degrades
+// silently: the preview is a convenience ahead of Save, not a gate — the op
+// itself is the authority on whether a range may be saved.
+async function loadTimeOffApptsForSelectedProvider() {
+  const prov = state.timeOffProvider;
+  if (!prov || prov === state.timeOffApptsProvider) return;
+  const path = isProvider() && !isOperatorHat() ? "/api/my-schedule" : "/api/staff/appointments";
+  let appts;
+  try {
+    const data = await appGet(path);
+    appts = data.appointments || [];
+  } catch (_) {
+    appts = [];
+  }
+  // The selection may have moved on while the fetch was in flight — never
+  // land a stale roster against a provider that is no longer selected.
+  if (state.timeOffProvider !== prov) return;
+  state.timeOffApptsProvider = prov;
+  state.timeOffAppts = appts;
+  renderTimeOffDraft();
 }
 
 function renderTimeOffDraft() {
@@ -2033,25 +2070,60 @@ function renderTimeOffDraft() {
     p.className = "muted";
     p.textContent = "No time-off — this provider has no blocked dates.";
     list.appendChild(p);
+  } else {
+    state.timeOffDraft.forEach((r, i) => {
+      const row = document.createElement("div");
+      row.className = "hours-row";
+      const label = document.createElement("span");
+      label.textContent = timeOffRangeLabel(r) + (r.reason ? ` · ${r.reason}` : "");
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "ghost danger";
+      rm.textContent = "Remove";
+      rm.addEventListener("click", () => {
+        state.timeOffDraft.splice(i, 1);
+        renderTimeOffDraft();
+      });
+      row.appendChild(label);
+      row.appendChild(rm);
+      list.appendChild(row);
+    });
+  }
+  renderTimeOffConflictPreview();
+}
+
+// renderTimeOffConflictPreview shows, under the draft list, which of the
+// selected provider's booked appointments the DRAFT ranges (not yet saved,
+// state.timeOffDraft) would put in conflict — the same timeOffConflict
+// predicate the Follow-ups reschedule worklist and the appointment card badge
+// both read, so this preview's count never disagrees with what the worklist
+// picks up once the draft is actually saved.
+function renderTimeOffConflictPreview() {
+  const el = $("#timeoff-conflicts");
+  if (!el) return;
+  const prov = state.timeOffProvider;
+  const mine = (state.timeOffAppts || []).filter((a) => a.providerKey === prov);
+  const hits = mine
+    .filter((a) => timeOffConflict(a, state.timeOffDraft))
+    .sort((a, b) => (a.startsAt < b.startsAt ? -1 : a.startsAt > b.startsAt ? 1 : 0));
+  el.innerHTML = "";
+  if (!prov || hits.length === 0) {
+    el.hidden = true;
     return;
   }
-  state.timeOffDraft.forEach((r, i) => {
-    const row = document.createElement("div");
-    row.className = "hours-row";
-    const label = document.createElement("span");
-    label.textContent = timeOffRangeLabel(r) + (r.reason ? ` · ${r.reason}` : "");
-    const rm = document.createElement("button");
-    rm.type = "button";
-    rm.className = "ghost danger";
-    rm.textContent = "Remove";
-    rm.addEventListener("click", () => {
-      state.timeOffDraft.splice(i, 1);
-      renderTimeOffDraft();
-    });
-    row.appendChild(label);
-    row.appendChild(rm);
-    list.appendChild(row);
+  el.hidden = false;
+  const summary = document.createElement("div");
+  summary.textContent =
+    `${hits.length} booked appointment${hits.length === 1 ? "" : "s"} fall${hits.length === 1 ? "s" : ""} ` +
+    "inside these dates — they will need a reschedule call:";
+  el.appendChild(summary);
+  const ul = document.createElement("ul");
+  hits.forEach((a) => {
+    const li = document.createElement("li");
+    li.textContent = `${a.patientName || shortKey(a.patientKey)} · ${fmtWhen(a.startsAt, a.endsAt)}`;
+    ul.appendChild(li);
   });
+  el.appendChild(ul);
 }
 
 function addTimeOffRange() {
@@ -2135,6 +2207,36 @@ function refreshTimeOffWarning() {
     el.textContent = `Heads up: ${p.name} is on time-off then (${timeOffRangeLabel(hit)}). The booking will be rejected.`;
     el.hidden = false;
   }
+}
+
+// timeOffConflict returns the FIRST time-off range that overlaps a booked
+// appointment, mirroring the op's own time_off_overlap conjunct by conjunct:
+// half-open overlap (a range's from is strictly before the appointment's
+// endsAt AND the appointment's startsAt is strictly before the range's to),
+// so an appointment ending exactly at a range's from — or starting exactly at
+// its to — does not conflict. Only a non-terminal appointment can conflict: a
+// completed, cancelled, or no-show visit already happened or was resolved, so
+// it needs no reschedule call. Returns null when nothing overlaps, when the
+// appointment's own times don't parse, or when ranges is absent/empty/holds
+// only malformed entries. Deliberately self-contained (no state/DOM/other app
+// function reference) so a lifted-declaration test can evaluate the shipped
+// predicate on its own.
+function timeOffConflict(a, ranges) {
+  const ACTIVE = ["scheduled", "confirmed", "checkedIn"];
+  if (!a || ACTIVE.indexOf(a.status) === -1) return null;
+  if (!Array.isArray(ranges) || ranges.length === 0) return null;
+  const start = new Date(a.startsAt);
+  const end = new Date(a.endsAt);
+  if (isNaN(start) || isNaN(end)) return null;
+  for (const r of ranges) {
+    if (!r || typeof r !== "object") continue;
+    if (typeof r.from !== "string" || typeof r.to !== "string") continue;
+    const from = new Date(r.from);
+    const to = new Date(r.to);
+    if (isNaN(from) || isNaN(to)) continue;
+    if (from < end && start < to) return r;
+  }
+  return null;
 }
 
 // ---- Available-slot picker ----
@@ -3078,6 +3180,17 @@ async function loadFollowups() {
   const requested = all.filter((a) => a.followUpRequested);
   for (const f of requested) f._addressed = hasLaterVisit(f, all);
   state.followups = requested;
+
+  // The reschedule-call join needs each appointment's provider's .timeOff
+  // ranges (state.providers, /api/providers) — loadProviders runs at boot,
+  // but a session that reaches Follow-ups before that first load resolves (or
+  // a hat with no roster yet) must not silently read an empty roster as "no
+  // provider is ever on time-off".
+  if (state.providers.length === 0) await loadProviders();
+  state.rescheduleQueue = all
+    .filter((a) => timeOffConflict(a, (providerByKey(a.providerKey) || {}).timeOff))
+    .sort((a, b) => (a.startsAt !== b.startsAt ? (a.startsAt < b.startsAt ? -1 : 1) : (a.appointmentKey < b.appointmentKey ? -1 : 1)));
+
   renderFollowups();
 }
 
@@ -3135,19 +3248,49 @@ function renderFollowups() {
   const empty = $("#followups-empty");
   grid.innerHTML = "";
 
+  // The reschedule-call worklist leads the tab, ahead of the requested-
+  // follow-up groups below: a provider's time-off overlapping a booked visit
+  // is discovered by the sweep the same way a stale follow-up is, but it is
+  // the more time-sensitive of the two (the provider is already unavailable).
+  const queue = state.rescheduleQueue;
+  if (queue.length > 0) {
+    const head = document.createElement("div");
+    head.className = "appts-section-head";
+    head.textContent = `Needs a reschedule call — provider time off · ${queue.length}`;
+    grid.append(head);
+
+    // An already-past appointment inside the provider's time-off never gets
+    // auto no-showed (MarkPastDueNoShow no-ops on the same overlap), so it
+    // would otherwise sit invisibly in whatever status it was booked at —
+    // surface it ahead of the still-upcoming ones so it isn't missed.
+    const past = queue.filter((a) => isPast(a.startsAt));
+    const upcoming = queue.filter((a) => !isPast(a.startsAt));
+    if (past.length > 0) {
+      const sub = document.createElement("div");
+      sub.className = "appts-section-sub";
+      sub.textContent =
+        "Already passed — the auto no-show sweep never marks a visit inside the provider's time off, so these stay open until resolved";
+      grid.append(sub);
+    }
+    for (const a of past.concat(upcoming)) {
+      grid.append(renderApptCard(a, { cancelable: true, showProvider: false, onDone: loadFollowups }));
+    }
+  }
+  const reschedulePrefix = queue.length > 0 ? `${queue.length} to reschedule · ` : "";
+
   if (state.followups.length === 0) {
-    empty.hidden = false;
+    empty.hidden = queue.length > 0;
     empty.textContent = "No follow-ups requested yet. Document a completed visit and tick “Follow-up needed”.";
-    $("#followups-summary").textContent = "";
+    $("#followups-summary").textContent = queue.length > 0 ? `${queue.length} to reschedule` : "";
     return;
   }
 
   const filter = ($("#followups-filter") && $("#followups-filter").value) || "outstanding";
   const rows = state.followups.filter((f) => filter === "all" || !f._addressed);
   if (rows.length === 0) {
-    empty.hidden = false;
+    empty.hidden = queue.length > 0;
     empty.textContent = "No outstanding follow-ups — every requested follow-up has a later visit booked.";
-    $("#followups-summary").textContent = `0 of ${state.followups.length}`;
+    $("#followups-summary").textContent = `${reschedulePrefix}0 of ${state.followups.length}`;
     return;
   }
   empty.hidden = true;
@@ -3172,7 +3315,7 @@ function renderFollowups() {
 
   const n = rows.length;
   const suffix = filter === "all" ? "" : ` of ${state.followups.length}`;
-  $("#followups-summary").textContent = `${n} follow-up${n === 1 ? "" : "s"}${suffix}`;
+  $("#followups-summary").textContent = `${reschedulePrefix}${n} follow-up${n === 1 ? "" : "s"}${suffix}`;
 }
 
 function renderFollowupCard(f) {
@@ -4464,6 +4607,22 @@ function renderApptCard(a, opts) {
   badge.className = "badge " + statusClass(a.status);
   badge.textContent = a.status || "—";
   actions.append(badge);
+
+  // A provider time-off range now covering this booked visit — never shown on
+  // the patient's own self-service card (opts.asSelf), since telling a patient
+  // to reschedule is a front-desk call, not a self-service action. Uses the
+  // same timeOffConflict predicate the Availability editor's preview and the
+  // Follow-ups reschedule worklist both read, so the badge and the worklist
+  // membership never disagree about what conflicts.
+  if (!opts.asSelf) {
+    const conflict = timeOffConflict(a, (providerByKey(a.providerKey) || {}).timeOff);
+    if (conflict) {
+      const conflictBadge = document.createElement("span");
+      conflictBadge.className = "badge conflict";
+      conflictBadge.textContent = "Provider away · " + timeOffRangeLabel(conflict) + " — reschedule";
+      actions.append(conflictBadge);
+    }
+  }
 
   // onDone reloads whichever grid this card is rendering into — My
   // Appointments/staff Schedule (loadAppts, the historical default) or, when a

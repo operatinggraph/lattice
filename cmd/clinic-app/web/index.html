@@ -200,7 +200,7 @@
         </select>
         <span id="followups-summary" class="summary"></span>
       </div>
-      <p class="hint followups-lead">Every documented visit that requested a follow-up, clinic-wide. Anything still needing a target date leads, then overdue. “Book follow-up” drops you into the Book tab pre-filled with the patient and provider.</p>
+      <p class="hint followups-lead">Every documented visit that requested a follow-up, clinic-wide. A provider's time-off that now overlaps a booked visit leads the list, ahead of the follow-up groups. Anything still needing a target date leads those, then overdue. “Book follow-up” drops you into the Book tab pre-filled with the patient and provider.</p>
       <div id="followups" class="grid" aria-live="polite"></div>
       <div id="followups-empty" class="empty" hidden></div>
     </section>
@@ -277,6 +277,7 @@
           <h3>🌴 Time-off</h3>
           <p class="hint">Block the provider's date ranges (vacation, holidays, out sick). A booking that overlaps a blackout is rejected, even inside their availability hours. Whole-day ranges, in UTC.</p>
           <div id="timeoff-list" class="hours-list" aria-live="polite"></div>
+          <p class="hint warn" id="timeoff-conflicts" hidden></p>
           <div class="field-row">
             <div class="field">
               <label for="timeoff-from">From</label>
