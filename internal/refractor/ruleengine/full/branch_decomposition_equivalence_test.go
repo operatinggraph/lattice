@@ -1311,9 +1311,10 @@ func TestBranchDecomposition_CapRefusesTheProductAndAdmitsTheBranches(t *testing
 		Prefix: "cap_", Tasks: 50, Reports: 30, TasksPerReport: 1, Roles: 1, QueuedPerRole: 50,
 	})
 	spec := corpusSpec(t, "capabilityEphemeral")
+	// No $now — this lens's deadline verdict is a recorded fact on the task,
+	// and every corpus task here is unmarked.
 	params := ruleengine.EventContext{Parameters: map[string]any{
 		"actorKey": corpus.actorKey,
-		"now":      time.Now().UTC().Format(time.RFC3339),
 	}}
 
 	const lowCap = 50_000

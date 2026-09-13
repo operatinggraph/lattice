@@ -144,10 +144,18 @@ func rolesLensSpec(t *testing.T) string {
 // behaviors of the orchestration-base capabilityEphemeral lens:
 //
 //	task1 ─[assignedTo]─> alice (future expiry)          → granted (direct, alice)
-//	taskexpired ─[assignedTo]─> alice (past expiry)       → filtered (expired)
+//	taskexpired ─[assignedTo]─> alice (past expiry, lapse RECORDED) → filtered
+//	taskexpiredUnmarked ─[assignedTo]─> alice (past expiry, NO marker) → granted
 //	task2 ─[assignedTo]─> bob (future expiry)             → granted (direct, bob)
 //	alice ─[reportsTo]─> bob   → bob (manager) inherits alice's task1 (downward
 //	                            delegation); alice does NOT inherit bob's task2.
+//
+// The two past-expiry tasks are the pair that says what "expired" means to this
+// lens: a lapse RECORDED on the task in its freshnessExpiry marker, not a clock
+// reading. The marked one is filtered; the unmarked one is deliberately still
+// listed — the projection axis stays open until the routing-shape target's @at
+// fires, and the Processor's own lookup-time expiresAt check is what denies it
+// (step3_auth_capability.go).
 //
 // Each grant is LINK-sourced: operationType ← forOperation→op,
 // target ← scopedTo→target, expiresAt ← task root scalar (Contract #10
@@ -169,6 +177,7 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	putVertex(t, reg, coreKV, "doc1", "doc", nil)
 	putVertex(t, reg, coreKV, "doc2", "doc", nil)
 	putVertex(t, reg, coreKV, "doc3", "doc", nil)
+	putVertex(t, reg, coreKV, "doc4", "doc", nil)
 
 	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 	past := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
@@ -181,13 +190,30 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	putEdge(t, reg, adjKV, "forOperation", "task1", "opDelete")
 	putEdge(t, reg, adjKV, "scopedTo", "task1", "doc1")
 
-	// taskexpired — direct assignment, PAST expiry (must be filtered).
+	// taskexpired — direct assignment, PAST expiry with the lapse RECORDED by
+	// its routing-shape target's @at (must be filtered). expiredAt is the
+	// entity-wide maximum this lens reads; byTarget carries the same instant
+	// under the target that fired, which is what a real MarkExpired commits.
 	putVertex(t, reg, coreKV, "taskexpired", "task", map[string]any{
 		"data": map[string]any{"status": "open", "expiresAt": past},
+	})
+	putAspect(t, reg, coreKV, "taskexpired", "freshnessExpiry", map[string]any{
+		"expiredAt": past,
+		"byTarget":  map[string]any{"staleAssignedTasks": past},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "taskexpired", "alice")
 	putEdge(t, reg, adjKV, "forOperation", "taskexpired", "opAdmin")
 	putEdge(t, reg, adjKV, "scopedTo", "taskexpired", "doc2")
+
+	// taskexpiredUnmarked — the same past expiry with NO marker at all: the
+	// fire has not landed. Asserted PRESENT below, which is the fail-direction
+	// this lens chooses on purpose (listed here, denied at dispatch).
+	putVertex(t, reg, coreKV, "taskexpiredUnmarked", "task", map[string]any{
+		"data": map[string]any{"status": "open", "expiresAt": past},
+	})
+	putEdge(t, reg, adjKV, "assignedTo", "taskexpiredUnmarked", "alice")
+	putEdge(t, reg, adjKV, "forOperation", "taskexpiredUnmarked", "opAdmin")
+	putEdge(t, reg, adjKV, "scopedTo", "taskexpiredUnmarked", "doc4")
 
 	// task2 — assigned to bob; alice reports to bob (2-hop delegation).
 	putVertex(t, reg, coreKV, "task2", "task", map[string]any{
@@ -242,9 +268,19 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	require.Equal(t, "delete", g1.op, "task1 operationType must be link-sourced from opDelete")
 	require.Equal(t, vtxKey(reg, "doc1"), g1.target, "task1 target must be link-sourced from scopedTo")
 
-	// taskexpired filtered out.
+	// taskexpired filtered out — the lapse is recorded on it.
 	_, expiredPresent := aliceGrants[vtxKey(reg, "taskexpired")]
-	require.False(t, expiredPresent, "alice ephemeralGrants must NOT include the expired task")
+	require.False(t, expiredPresent,
+		"alice ephemeralGrants must NOT include a task whose lapse is recorded at or after its own deadline")
+
+	// taskexpiredUnmarked still listed — the deliberate fail-direction. Nothing
+	// has recorded a lapse of this deadline, so the lens has no fact saying it
+	// passed; the Processor refuses the grant at lookup time instead.
+	_, unmarkedPresent := aliceGrants[vtxKey(reg, "taskexpiredUnmarked")]
+	require.True(t, unmarkedPresent,
+		"DELIBERATE FAIL-DIRECTION: a past-deadline task with NO recorded lapse stays LISTED in "+
+			"ephemeralGrants — the projection axis is open until the marker lands, and the lookup-time "+
+			"expiresAt check (step3_auth_capability.go) is what closes the delivery axis")
 
 	// alice (subordinate) must NOT inherit bob's (manager's) task — no upward
 	// privilege escalation (Contract #6 §6.6, Contract #1 §1.1).
@@ -271,7 +307,7 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 
 // TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow proves the A3 absence
 // mechanism at the cypher level: an actor with NO live task (no task at all,
-// or only expired tasks) produces a row whose ephemeralGrants collect carries
+// or only tasks whose lapse is recorded) produces a row whose ephemeralGrants collect carries
 // only degenerate (null-taskKey) artifacts — zero REAL grants. The envelope
 // wrapper turns that into a delete (covered by the capabilityenv unit tests),
 // so cap.ephemeral.<actor> is hard-deleted → step-3 reads absent →
@@ -283,8 +319,8 @@ func TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow(t *testing.T) {
 	adjKV, coreKV := startExecKVs(t)
 	reg := newFixtureRegistry()
 
-	// Two grant-less actors: carol (no tasks at all) and dave (only an
-	// expired task). Neither must yield a real grant.
+	// Two grant-less actors: carol (no tasks at all) and dave (one task whose
+	// lapse is recorded). Neither must yield a real grant.
 	putVertex(t, reg, coreKV, "carol", "identity", map[string]any{"name": "carol"})
 	putVertex(t, reg, coreKV, "dave", "identity", map[string]any{"name": "dave"})
 	putVertex(t, reg, coreKV, "opAdmin", "meta", map[string]any{"data": map[string]any{"operationType": "admin"}})
@@ -293,6 +329,10 @@ func TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow(t *testing.T) {
 	past := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
 	putVertex(t, reg, coreKV, "daveexpired", "task", map[string]any{
 		"data": map[string]any{"status": "open", "expiresAt": past},
+	})
+	putAspect(t, reg, coreKV, "daveexpired", "freshnessExpiry", map[string]any{
+		"expiredAt": past,
+		"byTarget":  map[string]any{"staleAssignedTasks": past},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "daveexpired", "dave")
 	putEdge(t, reg, adjKV, "forOperation", "daveexpired", "opAdmin")

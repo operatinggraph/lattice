@@ -425,14 +425,35 @@ RETURN
 //	target        ← (task)-[:scopedTo]->(t),        t.key
 //	expiresAt     ← task.data.expiresAt (scalar on the task root)
 //
-// This replaces the bootstrap cypher's old field reads
-// (task.data.grantedOperationType / task.data.targetKey — the corrected
-// anti-pattern). The grant *field shape* {source, taskKey, operationType,
-// target, expiresAt} is unchanged (§6.6's table lists no status field, and
+// The task root carries no grantedOperationType / targetKey fields of its
+// own — a relationship stored as a key in data is the Contract #1 anti-pattern.
+// The grant *field shape* {source, taskKey, operationType, target, expiresAt}
+// is Contract #6 §6.6's (its table lists no status field, and
 // this lens's WHERE narrowing which rows exist to match against does not
 // widen or alter §6.6's own Processor-side check — `expiresAt > now` at
 // lookup time stays literally true unmodified). Only live grants are
-// projected: `task.data.status = 'open' AND task.data.expiresAt > $now`.
+// projected: the task is `status = 'open'` AND no lapse of its own deadline
+// has been recorded on it.
+//
+// The deadline half reads a RECORDED FACT, never a clock. Every open task
+// this lens can bind is the anchor of one of the two task-anchored Weaver
+// targets — staleAssignedTasks for a direct assignment, unroutedTasks for a
+// role queue, and an open task carries exactly one of those two routing links
+// — so each such task already projects freshUntil = expiresAt, arms an @at at
+// its own deadline, and gets the fire recorded on it by MarkExpired in the
+// freshnessExpiry marker aspect.
+//
+// This lens is an OBSERVER of that lapse rather than a convergence target: it
+// owns no byTarget entry, so it reads `expiredAt`, the marker's entity-wide
+// maximum — the latest instant ANY target lapsed on this task. Every instant
+// that reaches that field is a deadline a scheduled message was delivered
+// for, so a recorded instant at or after expiresAt proves the task expired
+// whichever target fired. The predicate is negated so the absent cases stay
+// granted: an unmarked task's marker hop binds nil, a nil ordering comparison
+// is false, and NOT(false) keeps the row — an open task whose fire has not
+// landed yet is LISTED here and DENIED at the Processor's own lookup-time
+// `expiresAt > now` check, which is where the temporal verdict belongs.
+//
 // Both terms are load-bearing: CompleteTask/CancelTask (ddls.go
 // transition_task) flip status but deliberately carry expiresAt forward
 // unchanged (so a completed task's original grant window stays legible for
@@ -443,12 +464,17 @@ RETURN
 // `cap.ephemeral.<actor>` key) and the `ephemeralGrants` array. Anchored on
 // the bound identity (not the unbound task label) so reprojection traverses
 // adjacency from the actor instead of scanning every task.
-const capabilityEphemeralSpec = `
+//
+// Built once at package init: the marker aspect's local name is spliced from
+// freshnessExpiryAspectDDL, the one constant the aspect-type DDL is declared
+// under, so the aspect this cypher reads and the aspect MarkExpired writes
+// cannot drift apart. The cypher carries no literal '%'.
+var capabilityEphemeralSpec = fmt.Sprintf(`
 MATCH (identity:identity {key: $actorKey})
 
 // --- direct assignments ---
 OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
-  WHERE task.data.status = 'open' AND task.data.expiresAt > $now
+  WHERE task.data.status = 'open' AND NOT (task.%[1]s.data.expiredAt >= task.data.expiresAt)
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 
@@ -456,7 +482,7 @@ OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 // identity is the manager; each report reportsTo identity, so identity
 // inherits the tasks assigned to its reports (downward delegation).
 OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)<-[:assignedTo]-(task2:task)
-  WHERE task2.data.status = 'open' AND task2.data.expiresAt > $now
+  WHERE task2.data.status = 'open' AND NOT (task2.%[1]s.data.expiredAt >= task2.data.expiresAt)
 OPTIONAL MATCH (task2)-[:forOperation]->(op2)
 OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 
@@ -469,7 +495,7 @@ OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 // up via the direct assignedTo branch above -- the grant narrows through
 // ordinary reprojection, no bespoke revocation.
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)
-  WHERE task3.data.status = 'open' AND task3.data.expiresAt > $now
+  WHERE task3.data.status = 'open' AND NOT (task3.%[1]s.data.expiredAt >= task3.data.expiresAt)
 OPTIONAL MATCH (task3)-[:forOperation]->(op3)
 OPTIONAL MATCH (task3)-[:scopedTo]->(tgt3)
 
@@ -494,4 +520,4 @@ RETURN
     target: tgt3.key,
     expiresAt: task3.data.expiresAt
   }) AS ephemeralGrants
-`
+`, freshnessExpiryAspectDDL)

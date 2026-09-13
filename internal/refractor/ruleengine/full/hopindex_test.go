@@ -101,18 +101,24 @@ func TestAnchorHopIndex_UnrelatedRelationBindsNothing(t *testing.T) {
 // The shipped capabilityEphemeral (packages/orchestration-base/lenses.go),
 // abridged only by dropping the RETURN's collect() bodies — the pattern
 // sources, which are all this derivation reads, are verbatim.
+//
+// This is a hand-kept COPY, and no corpus census sees it: the census pins
+// enumerate the installed corpus through pkgregistry, so an edit to the shipped
+// spec leaves this constant modelling a cypher nobody ships, with every
+// assertion below still green. Keep it in step by hand whenever that lens's
+// pattern sources or WHERE clauses move.
 const shippedCapabilityEphemeral = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
-  WHERE task.data.expiresAt > $now
+  WHERE NOT (task.freshnessExpiry.data.expiredAt >= task.data.expiresAt)
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)<-[:assignedTo]-(task2:task)
-  WHERE task2.data.expiresAt > $now
+  WHERE NOT (task2.freshnessExpiry.data.expiredAt >= task2.data.expiresAt)
 OPTIONAL MATCH (task2)-[:forOperation]->(op2)
 OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)
-  WHERE task3.data.expiresAt > $now
+  WHERE NOT (task3.freshnessExpiry.data.expiredAt >= task3.data.expiresAt)
 OPTIONAL MATCH (task3)-[:forOperation]->(op3)
 OPTIONAL MATCH (task3)-[:scopedTo]->(tgt3)
 RETURN

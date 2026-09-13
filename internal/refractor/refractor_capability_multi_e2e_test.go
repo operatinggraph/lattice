@@ -309,8 +309,10 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	})
 	// Task root data is scalars only {status, expiresAt} — NO
 	// grantedOperationType/targetKey fields. The granted operationType +
-	// target are LINK-sourced (forOperation→op, scopedTo→target). Use a
-	// far-future expiresAt so the `task.expiresAt > $now` predicate holds.
+	// target are LINK-sourced (forOperation→op, scopedTo→target). No
+	// freshnessExpiry marker is written on the task, so capabilityEphemeral's
+	// `NOT (freshnessExpiry.data.expiredAt >= expiresAt)` reads unlapsed and
+	// the grant projects.
 	taskExpiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 	writeVertex(taskKey, "task", map[string]any{
 		"status":    "open",

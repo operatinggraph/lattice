@@ -50,10 +50,11 @@ func TestCapabilityEphemeralLens_QueuedRoleFanOut_GrantsHolder(t *testing.T) {
 	cr, err := eng.Parse(body)
 	require.NoError(t, err, "literal capabilityEphemeral cypher must parse")
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	// No $now: the lens reads the recorded lapse, and a fixture that supplied a
+	// clock anyway would pin only the supplied case. projectedAt stays — the
+	// envelope wrapper stamps it on the row.
 	params := map[string]any{
 		"actorKey":    holderKey,
-		"now":         now,
 		"projectedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 	out, err := eng.ExecuteWith(context.Background(), cr,
@@ -117,7 +118,6 @@ func TestCapabilityEphemeralLens_QueuedRoleFanOut_NonHolderGetsNoGrant(t *testin
 
 	params := map[string]any{
 		"actorKey":    nonHolderKey,
-		"now":         time.Now().UTC().Format(time.RFC3339),
 		"projectedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 	out, err := eng.ExecuteWith(context.Background(), cr,
@@ -180,7 +180,6 @@ func TestCapabilityEphemeralLens_ClaimTask_GrantNarrowsToClaimant(t *testing.T) 
 	runFor := func(actorKey string) (envRow map[string]any, envErr error) {
 		params := map[string]any{
 			"actorKey":    actorKey,
-			"now":         time.Now().UTC().Format(time.RFC3339),
 			"projectedAt": time.Now().UTC().Format(time.RFC3339),
 		}
 		out, err := eng.ExecuteWith(context.Background(), cr,
