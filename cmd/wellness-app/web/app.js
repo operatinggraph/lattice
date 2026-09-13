@@ -378,16 +378,22 @@ function applyHatGating() {
 
 // ---- formatting --------------------------------------------------------
 
-// esc renders an untrusted string as text inside the innerHTML templates
-// below. Class, studio and instructor names are operator/staff-entered free
-// text (CreateStudio/CreateSession take a required_string with no charset
+// esc renders one untrusted string safe at BOTH interpolation sites this
+// file uses: element text inside the innerHTML templates below, and a quoted
+// attribute value (`<option value="…">`, `data-attend="…"`) built by string
+// concatenation. Class, studio and instructor names are operator/staff-entered
+// free text (CreateStudio/CreateSession take a required_string with no charset
 // restriction), and the schedule that carries them is public-read — so an
 // unescaped name would be stored XSS in this app's own origin, where
-// /api/session/refresh hands out the caller's raw Gateway bearer.
+// /api/session/refresh hands out the caller's raw Gateway bearer. The quote
+// characters carry the attribute site: a value containing `"` must not be
+// able to close the attribute it sits in and open an event handler beside it.
+// Escaping all five is safe for text content too — a browser renders the
+// entities back to the literal characters — so there is one helper, not two.
 function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s == null ? "" : String(s);
-  return d.innerHTML;
+  const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  const str = s === null || s === undefined ? "" : String(s);
+  return str.replace(/[&<>"']/g, (c) => map[c]);
 }
 
 function shortKey(key) {
@@ -602,12 +608,14 @@ async function loadMembers() {
 // session. Mirrors clinic-app/web/app.js's own loadOpCatalog.
 //
 // KNOWN_CATALOG_OPS lists every operationType this app ever reads off
-// opCatalogCache (grep for `opCatalogCache\.` / `opCatalogCache\[` — keep
-// this in sync when a new descriptor-driven form is added) — passed as
-// `?types=` so the server point-reads just these rows instead of the whole
-// cross-vertical bucket (~100 ops from every installed package, unrelated to
-// wellness). A name missing here simply never appears in the cache, the same
-// "not offered" outcome as a package that hasn't declared the op yet.
+// opCatalogCache — passed as `?types=` so the server point-reads just these
+// rows instead of the whole cross-vertical bucket (~100 ops from every
+// installed package, unrelated to wellness). A name missing here simply never
+// appears in the cache, the same "not offered" outcome as a package that
+// hasn't declared the op yet — a silent failure, so
+// TestKnownCatalogOpsCoversEveryCacheRead (op_catalog_test.go) reads this
+// file and fails the build when a cache read (dotted, bracketed, or the
+// submitBillingEntry call-site literal behind `[opType]`) has no entry.
 const KNOWN_CATALOG_OPS = [
   "CreateInstructor", "SetInstructorProfile", "WellnessDebitAccount", "WellnessCreditAccount", "CreateUnclaimedIdentity",
 ];
@@ -1030,8 +1038,7 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
   // (seriesKey, lenses.go). A member browsing the grid otherwise sees a weekly
   // class as N indistinguishable one-offs and cannot tell that booking one is
   // not booking the run. The count comes from the grid's own rows, so it is
-  // whatever THIS list can see; the whole line is text (esc() is a text-node
-  // escaper — nothing here goes into an attribute).
+  // whatever THIS list can see.
   const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(seriesCountKey(se)) || 0 : 0;
   const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
   return (
@@ -1415,9 +1422,8 @@ async function loadRoster() {
       for (const se of upcoming) addOption(select, se);
       if (past.length) {
         const group = document.createElement("optgroup");
-        // A label is an attribute; setting the property (not markup) is what
-        // keeps a class name out of quoted attribute text — esc() here is a
-        // text-node escaper and would not make one safe.
+        // A label is an attribute; setting the property (not markup) means
+        // no class name is ever interpolated into attribute text at all.
         group.label = "Past classes";
         for (const se of past) addOption(group, se);
         select.appendChild(group);

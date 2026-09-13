@@ -490,12 +490,14 @@ function rejectionMessage(reply) {
 // `[opType]` lookup below (KNOWN_CATALOG_OPS) — so it can safely narrow.
 //
 // KNOWN_CATALOG_OPS lists every operationType this app ever reads off
-// state.opCatalog (grep for `state\.opCatalog` — keep this in sync when a
-// new descriptor-driven form is added) — passed as `?types=` so the server
-// point-reads just these rows instead of the whole cross-vertical bucket
-// (~100 ops from every installed package, unrelated to clinic). A name
-// missing here simply never appears in the cache, the same "not offered"
-// outcome as a package that hasn't declared the op yet.
+// state.opCatalog — passed as `?types=` so the server point-reads just these
+// rows instead of the whole cross-vertical bucket (~100 ops from every
+// installed package, unrelated to clinic). A name missing here simply never
+// appears in the cache, the same "not offered" outcome as a package that
+// hasn't declared the op yet — a silent failure, so
+// TestKnownCatalogOpsCoversEveryCacheRead (op_catalog_test.go) reads this
+// file and fails the build when a catalog read (dotted, bracketed, or the
+// submitLedgerEntry call-site literal behind `[opType]`) has no entry.
 const KNOWN_CATALOG_OPS = [
   "AssignProviderSite", "CreateProvider", "SetProviderProfile", "StartVisitSeries",
   "ClinicDebitAccount", "ClinicCreditAccount", "CorrectAppointmentStatus", "CreateUnclaimedIdentity",
