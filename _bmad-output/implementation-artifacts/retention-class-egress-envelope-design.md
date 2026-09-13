@@ -834,3 +834,95 @@ mechanism that makes it true (the fire branch's first commit is the contract tex
 
 **Neighbours on ship:** `verticals.md`'s lease-tenant-name row is `🚧 blocked-on:` this row and is now unblocked
 (Inc 2, §12) — that lane's steward flips it; this fire writes only `lattice.md`.
+
+## 15. Inc 2 fire brief (build note, 2026-09-13 — Vertical Steward; the consumer)
+
+**1. Scope sentence (verbatim, §12 Inc 2).** *"The refuted brief's steps 4–5 as built and tested — sensitive
+`.tenantName` on the leaseapp under a retention class — with one correction the review found:
+`"tenantName": "subject.tenantName.data.value"` goes at the top level of the `leaseDocument` step's `Params`
+(beside `"family"`), not into `doc`, because the unwrap is top-level and the adapter reads the name from
+`req.Params` (§3.5 a). Plus the backfill the brief's "absence problem" section requires (7 live signed
+applications at the time; consider the `EgressAbsenceTolerant` descriptor floor before writing an op), and
+`leasedoc_scripts.go:224-232`'s comment rewritten."* Green bar: `go test ./packages/lease-signing/...` +
+`make test-lease-convergence` green with the new arms; every `scripts/lint-*.go` STRICT; `lint-package-version`;
+`make verify-package-lease-signing` against the running stack; CI green on `main`; the executed lease rendered
+live names its tenant.
+
+**2. Decisions (Winston, decide-don't-defer).**
+- **The absence problem closes with the descriptor floor, not a backfill op.** `applyDescriptorFloor`
+  (`internal/processor/descriptor_floor.go:140-155`) marks a floored egress key `EgressAbsenceTolerant`, and step 4
+  (`step4_hydrate.go:484`) records its absence known-absent instead of `HydrationMiss` — the platform mechanism
+  §12 named. So `CreateLeaseDocInstance`'s op-meta (`permissions.go:855`, today a bare engine leg) gains
+  `Dispatch{OptionalReads: ["{payload.subjectKey}.tenantName"]}` (+ an `InputSchema` declaring `subjectKey`
+  required, which `lint-package-standard`'s `checkReadTemplates` demands of any `{payload.<f>}.<aspect>` template),
+  and the instanceOp script omits the `tenantName` param when the aspect is absent. A signed application with no
+  snapshot then renders exactly as it does today (bare key), never a rejected docGen. A backfill op would snapshot
+  names onto the 7 legacy signed applications whose documents nothing regenerates (`missing_leaseDoc` fires only
+  while no completed docGen outcome exists — `targets.go:125`); a snapshot no reader reaches is dead scaffolding
+  (the refuted brief's own reason for reverting the snapshot half), so none is built. Revive: a document
+  regeneration verb.
+- **A new retention class `executedLeaseRecord`** (P7Y, `EraseOnExpiry`, Description naming `.tenantName` alone) —
+  never `underwritingRecord`, whose Description enumerates the financial-qualification aspects only (the refuted
+  brief's population-separation argument stands). Contract #3 §3.10 option B (ratified) is what makes a contract
+  record's party name conformant.
+- **`SignLease` snapshots** the applicant's `.name` (`{"value": <name>}`, the shape `subject.tenantName.data.value`
+  reads) as a CreateOnly `.tenantName` aspect on the leaseapp, custodied on the class. Applicant found by the
+  leaseapp's own `applicationFor` walk (mirror `scripts.go:1082-1095`, `# read-posture: (e)`), name by the
+  (e) follow-up `kv.Read(applicant + ".name")` (a live read decrypts under the identity's custody —
+  `starlark_kv.go:468`; SignLease emits no `external.*` event, so the plaintext tracker never bites). Absent /
+  tombstoned / blank name ⇒ no aspect written (the doc degrades to the bare key, as today).
+
+**3. Verified touch-list (checked live 2026-09-13; one haiku scout + lead).**
+- `packages/lease-signing/retention.go:8` (`underwritingRecordRetentionClass`), `:16-50` (`RetentionClasses()`) —
+  add the second class.
+- `packages/lease-signing/ddls.go:78-80` (`aspectDeclarationOnlyScript`), `:388-450` (`profileAspectDDL`, the
+  mirror: `Sensitive: true`, `Custody{Kind: CustodyKindRetentionClass, RetentionClass: …}`), `DDLs()` registration
+  list; `:97` leaseapp `PermittedCommands` already carries `SignLease`. New `tenantNameAspectDDL()`,
+  `PermittedCommands: ["SignLease"]`.
+- `packages/lease-signing/scripts.go:689-750` (`SignLease`) — the snapshot, after the unit gate.
+- `packages/lease-signing/patterns.go:77-86` (`leaseDocument`) — `Params: {"family": "docGen", "tenantName":
+  "subject.tenantName.data.value"}`.
+- `packages/lease-signing/leasedoc_scripts.go:3-29` + `:224-232` (the two comments that state the name is never
+  read — falsified, rewrite), `:273` (`"params": {"family": fam, "leaseAppKey": subject_key, "doc": doc}`) —
+  prepend `orchestrationbase.ResolveSubjectParamsHelper` (the concatenation shape of `scripts.go:1440`), drop the
+  `tenantName` template when `kv.Read(subject_key + ".tenantName")` is `None` (`# read-posture: (f)` declared
+  egressReads by Loom's `inferExternalTaskReads`, `internal/loom/externaltask_params.go:68-82`; absence
+  known-absent via the floor), then `params = resolve_subject_params(raw_params, subject_key)` and set
+  `family` / `leaseAppKey` / `doc` on it. `doc` never carries the name (§3.5 b refuses a nested marker).
+- `packages/lease-signing/leasedoc_ddls.go:73` (Description's `params:{family, leaseAppKey, doc:{…` string).
+- `packages/lease-signing/permissions.go:855` — the `CreateLeaseDocInstance` op-meta: `InputSchema` + `Dispatch`.
+- `packages/lease-signing/manifest.yaml:2` + `package.go:92` — `0.31.29 → 0.32.0`.
+- Pins: `package_test.go:177` (14 DDLs → 15), `:335-349` (`RetentionClasses` count 1 → 2, custody by aspect),
+  `scripts/verify-package-lease-signing.go:124-139` (`ddlCheck` gains `tenantName: ["SignLease"]`).
+- Tests: `lease_signing_test.go:209` is the custody-assertion precedent (`pkgmgr.RetentionClassKey`) — a
+  `SignLease` test asserts `.tenantName` written, ciphertext at rest, `keyId` = the class holder, and the no-name
+  arm writes nothing. `leasedoc_ops_test.go:168,320` flip from "tenantName OMITTED": (a) aspect present + the
+  envelope declaring it under `egressReads` ⇒ the emitted event's `params.tenantName` is a `$sensitiveRef` marker
+  at the top level and `doc` carries none; (b) aspect absent, template present ⇒ accepted with no `tenantName`
+  param — and the mutation test: remove the `Dispatch` block and (b) must fail `HydrationMiss` (proves the floor is
+  what carries it, not a lucky path). `internal/leaseconvergence` (`leaseshortwindow` tag): the real chain —
+  `driveApplicantSteps` signs (`harness_test.go`), Loom dispatches docGen, `bridge.NewFakeDocGen` (`:375`) renders
+  to the object store — assert the rendered bytes carry `Tenant:` = the seeded applicant's name and a `Tenant ID:`
+  line, on the steady-state path (a new test or an assertion in `DrainThenAssert_SteadyState`).
+
+**4. Precedents.** `scripts.go:1440,1578-1587` (resolve helper + embed); `scripts.go:1082-1095` (applicationFor
+walk); `ddls.go:388-450` (class-custodied aspect); `lease_signing_test.go:209` (custody proof); Inc 1's
+`class_egress_test.go:305` (top-level template ⇒ plaintext at the adapter).
+
+**5. Dossier (touched components).** `_packages.md`: *a shared-vertex repoint needs a content-and-revision gate*
+(the `.tenantName` write is CreateOnly on a key the dispatcher never declares — no repoint, no race; state it in
+the test); *a playbook `Params` entry bound to an optional-hop column is a dispatch refusal* (the template names
+the SUBJECT's own aspect, and the floor is what tolerates its absence — the Weaver never binds it). Processor
+dossier: *a gate's negative test must first prove its positive vector reaches the gate* — the floor's mutation
+test above is that shape. `vertical-apps.md`: no FE change; nothing applies.
+
+**6. Gotchas.** `$sensitiveRef` reaches params UNMODIFIED at the TOP LEVEL only (§3.5 b refuses a nested one
+permanently). `Custody` is legal only on `meta.ddl.aspectType`. Every `kv.Read` / `kv.Links` in a package
+script carries a `# read-posture:` annotation or `lint-conventions` warns. The leaseapp DDL script and the
+leasedoc DDL script are separate Starlark blobs — helpers are per-blob. `DIFF_BASE=<base> go run
+./scripts/lint-package-version.go`. MERGED ≠ RUNNING and the §10 rolling order: the local stack still runs
+`privacy-base` 0.15.8, a Sep-10 Processor and a Sep-5 bridge — install `privacy-base` 0.16.0, `make
+cycle-processor`, cycle the bridge (`pkill -x bridge` + `make orchestration`), then `make refresh-loftspace`.
+
+**7. Non-goals.** No bridge / adapter / Loom / Processor change (Inc 1 shipped them). No backfill op (above). No
+regeneration of legacy documents. No change to the landlord party (`d46ab947`).
