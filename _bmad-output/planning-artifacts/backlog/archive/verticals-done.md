@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `beb0fc12` · The desk's class picker leads with what is still to run, past classes behind an optgroup, nothing dropped.
+- 2026-09-06 · `beb0fc12` · A manual charge needs a memo — `post_entry` refuses a ref-less debit without one, the staff descriptor requires it, the FE refuses a blank note like a zero amount.
+- 2026-09-06 · `28259217` · A recurring class is called off in one act — `wellnessSessions` projects `seriesKey`; `TombstoneSessionSeries` cancels every still-upcoming occurrence at the confirmed studio; 52 occurrences in 36 ms.
 - 2026-09-06 · `656fc802` · The 24h class reminder shows where it was sent — `wellnessBookings` projects `reminderSentAt`, My Classes + roster badge it; `TombstoneSession`'s op-meta now declares its required reads.
 - 2026-09-06 · `ef12f478` · `wellnessMemberAccounts` anchors on the identity it keys on — per-anchor seeding/retraction, `DiffRetraction` dropped, five refractor pins moved to closed/derivation; live 6 rows → 6.
 - 2026-09-06 · `eca8a407` · An automated refund is recorded as money handed back — third `refund` reason on the ledger enum, passed by `wellnessRefundSettlement`, refused on a self-scoped credit, badged "(refunded)".

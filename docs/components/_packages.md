@@ -640,7 +640,10 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the
   caller may name the account lets any grant-holder bill ~500 live reads to a stranger's key. Minted: café
   `CreditCafeAccount` (2026-09-05). Check: ask which leg the guard is NOT on, and what runs before the proof that
-  names the target.
+  names the target. Second sighting (clinic `NotYetStarted`, 2026-09-13, caught cold): the clock landed on the
+  first-transition op while the terminal→terminal repair op (`CorrectAppointmentStatus`) reached the same
+  `completed`/`noShow` value with no clock — cancel-then-correct was the side door. The "leg" is every op that
+  writes the guarded VALUE, not every dispatcher of the guarded op: grep the aspect's writers before closing.
 - **A lens that reads a RECORDED fact depends on whoever arms the timer that records it — couple the two
   populations in one fragment, and never host a neighbour's window on an anchor nothing reads.** Two shapes
   in one item (expiry-as-a-recorded-fact, 2026-09-02). (a) `appointmentReminders` closed its gap on
