@@ -179,7 +179,9 @@ leaseapp→unit→manages-landlord. Columns:
 | `entityKey`, `tenant`, `landlord` | keys off the walk | `landlord` = deterministic pick: **min(landlord key)** across manages links (many-landlords is legal; an engine-arbitrary pick would break one-row-per-anchor determinism — §11 B5). v1 semantic: the canonical manager |
 | `open` | root `status == 'open'` | gates the gap + `freshUntil` |
 | `leaseappAlive` | walk | a withdrawn/tombstoned leaseapp must not leave an immortal violating renewal |
-| `hasGuarantor` | applicant `.profile.hasGuarantor` | bool |
+| `hasGuarantor` | the leaseapp's own `.applicationSignals.data.hasGuarantor`, coalesced `= True` (a missing aspect reads as a real `false`, never null) | bool. *Amended 2026-09-13: the aspect is on the LEASEAPP since the three-way profile split (`a04dc6f0`), and `SignRenewal` fails closed `ApplicationSignalsMissing` on its absence — so the planner also reads `signalsSubmittedAt` below* |
+| `signalsSubmittedAt` | the leaseapp's `.applicationSignals.data.submittedAt` (null when no profile was ever submitted) | *added 2026-09-13* — the walk-computed root fact the `submitProfile` leg's effect and the `signRenewal` leg's `pre` meet on; a bool column would read `present` even when `false` |
+| `leaseApp` | the renewed leaseapp's key | *added 2026-09-13* — the `submitProfile` leg's `target` (SetApplicantProfile acts on the application, not the renewal) |
 | `bgcheckValidUntil` | freshest bgcheck outcome, `CASE WHEN validUntil > $now THEN validUntil ELSE null END` | stale projects null (walk-computed row fact); also `freshUntil = CASE WHEN open THEN bgcheckValidUntil ELSE null END` so a mid-chain lapse re-arms only open cycles |
 | `guarantorVerifiedAt` / `termsSetAt` / `signedAt` | renewal aspects | aspect-real |
 | `maxretries_renewalComplete` | literal 6 | **per-leg** retry bound (the count resets at pin-release, §3); without the projected column the budget is inert |
@@ -212,9 +214,10 @@ core authoring rule, §5).
 | `refreshBgcheck` | `triggerLoom backgroundCheck, subject: row.tenant` (the shipped pattern, verbatim) | — | `present subject.data.bgcheckValidUntil` | 2 |
 | `verifyGuarantor` | `assignTask VerifyGuarantor, assignee: row.landlord, target: row.entityKey` | `equals(subject.data.hasGuarantor, true)` | `present subject.guarantorVerification.data.verifiedAt` | 3 |
 | `setTerms` | `assignTask SetRenewalTerms, assignee: row.landlord, target: row.entityKey` | — | `present subject.terms.data.setAt` | 1 |
-| `signRenewal` | `assignTask SignRenewal, assignee: row.tenant, target: row.entityKey` | `allOf( present subject.terms.data.setAt, present subject.data.bgcheckValidUntil, anyOf( equals(subject.data.hasGuarantor,false), present subject.guarantorVerification.data.verifiedAt ) )` | `present subject.signature.data.signedAt` | 1 |
+| `submitProfile` | `assignTask SetApplicantProfile, assignee: row.tenant, target: row.leaseApp` (*added 2026-09-13*) | — | `present subject.data.signalsSubmittedAt` | 1 |
+| `signRenewal` | `assignTask SignRenewal, assignee: row.tenant, target: row.entityKey` | `allOf( present subject.data.signalsSubmittedAt, present subject.terms.data.setAt, present subject.data.bgcheckValidUntil, anyOf( equals(subject.data.hasGuarantor,false), present subject.guarantorVerification.data.verifiedAt ) )` | `present subject.signature.data.signedAt` | 1 |
 
-**`signRenewal`'s `pre` is the goal's full remainder — the terminal-leg rule** (§11 finding B1, the
+**`signRenewal`'s `pre` is the goal's full remainder PLUS the write guard's own absence refusal (`ApplicationSignalsMissing`, amended 2026-09-13: a missing profile coalesces to `hasGuarantor=false`, which satisfies the goal's `anyOf` — so without the `signalsSubmittedAt` conjunct the planner assigns a signing task the op refuses; the `submitProfile` leg is what the search now walks first) — the terminal-leg rule** (§11 finding B1, the
 review's headline): because SignRenewal's commit flips the completion scalar, an under-specified `pre`
 plus the canonical tie-break (`"signRenewal" < "verifyGuarantor"`) would order signing *before*
 verification and close the gap with the guarantor atom permanently unmet. The rider generalizes this
@@ -503,3 +506,71 @@ not filed:
   would have left the dev-loop refresh 502ing the renewals tab (missing `tenant_name` column; hot-reload
   refuses a `secureColumns` change and Refractor pauses fail-closed rather than issuing DDL itself).
   Fixed in the Makefile to match the other three verticals' refresh targets.
+
+## Build note — a tenant with an assigned signing task is refused at the signature (verticals lane, steward fire 2026-09-13)
+
+**Scope sentence (board row, verbatim):** `SignRenewal` fails closed without `.applicationSignals`
+(`renewal_scripts.go:415`); the planner reads the missing profile as `hasGuarantor=false` and assigns the sign
+task (`renewal_targets.go:110`). 5 of 6 live tenancies have no profile. Ready: a `submitProfile` assignTask leg +
+`signalsPresent` column; the inbox self-voices `SetApplicantProfile`.
+
+**Premises re-run live (2026-09-13):** 7 tenancies, 1 with `.applicationSignals` (6 without — the row's 5/6 grew by
+one); every live `.applicationSignals` carries `submittedAt` (1/1; `SetApplicantProfile` writes it unconditionally,
+`scripts.go:1313`); the one open renewal (`renewalComplete.QomdjY7hAGS6mHvN9d2j`) projects `hasGuarantor:false`,
+terms set, bgcheck fresh, unsigned — exactly the shape that plans `signRenewal` today.
+
+**Verified touch-list:**
+- `packages/lease-signing/renewal_lenses.go` — `renewalCompleteSpec` WITH gains
+  `app.applicationSignals.data.submittedAt AS signalsSubmittedAt`, RETURN gains `signalsSubmittedAt` + `leaseApp`
+  (already computed as `leaseAppKey`); `renewalComplete`'s `BodyColumns` gains both (a `row.<col>` template and a
+  root-mapped `pre`/`effects` path both need the body column — `strategist.go:53`, the install row-reachability
+  rule §4.3). Doc comment amended.
+- `packages/lease-signing/renewal_targets.go` — new `submitProfile` action (`assignTask SetApplicantProfile`,
+  `Assignee: row.tenant`, `Target: row.leaseApp`, effect `present subject.data.signalsSubmittedAt`, cost 1);
+  `signRenewal`'s `Pre` gains `present subject.data.signalsSubmittedAt`; the terminal-leg comment names the
+  write guard's `ApplicationSignalsMissing` conjunct. Goal UNCHANGED (a signed renewal implies a submitted
+  profile — the op refuses otherwise — and a goal atom on it would re-open a legacy signed cycle).
+- `packages/lease-signing/lenses.go` — `staleUserTasksSpec` gains a fourth arm:
+  `(opType = 'SetApplicantProfile') AND (sigApp.applicationSignals.data.submittedAt <> null)` — the task's gap can
+  close through the applicant's own scope=self submission (the shipped apply-flow form), which the §10.7
+  auto-complete never sees.
+- `packages/lease-signing/package.go` + `manifest.yaml` — `0.33.1` → `0.34.0`.
+- `packages/lease-signing/permissions.go` — the descriptor-list comment names `SetApplicantProfile` as the fourth
+  assignTask op the renewal catalog binds (its full descriptor already ships).
+- Tests: `lens_unit_test.go` (`renewalComplete` projects `signalsSubmittedAt` null/present + `leaseApp`);
+  `stale_user_tasks_test.go` (positive/negative pair for the new arm); a planner pin over the REAL catalog —
+  signals absent ⇒ plan `[submitProfile, signRenewal]`, present ⇒ `[signRenewal]`;
+  `internal/refractor/*_corpus_census_test.go` re-pinned for the two edited specs.
+- `cmd/loftspace-app/web/app.js` — (a) `openComplete`/`submitComplete` route a `SetApplicantProfile` task to the
+  shipped profile form (`renderProfilePanel`'s fields, `submitProfile`'s self-voiced envelope) mounted in the
+  completion modal, then `completeTask(taskKey)` (the standing-grant retirement path `submitCatalogComplete`
+  already uses); (b) `renewalReady` requires `row.hasGuarantor !== null` (renewalsRead projects it RAW, null ≡
+  no profile — the pinned reading, `renewal_lenses.go:352`), and the tenant's card says so with a button to the
+  profile task when one is assigned. `rotate_offer_test.go`-style goja pin for `renewalReady`.
+
+**Precedents to mirror:** `Target: "row.clauseKey"` (`packages/semantic-contracts/targets.go:105`, a non-anchor
+assignTask target); `bgcheckValidUntil` (a walk-computed root-mapped fact the goal/pre/effects meet on);
+`staleUserTasksSpec`'s three arms; `submitCatalogComplete`'s `completeTask` retirement for non-task-voice ops.
+
+**Increment order + green checks:** (1) package: lens + target + stale arm + tests + bump →
+`go test ./packages/lease-signing/ ./internal/pkgmgr/ ./internal/pkgregistry/ ./internal/refractor/ -count=1`,
+`go run ./scripts/lint-conventions.go`, `DIFF_BASE=<base> go run ./scripts/lint-package-version.go`; (2) FE →
+`go test ./cmd/loftspace-app/ -count=1`, `node --check`, `go run ./scripts/lint-app-op-descriptors.go`; (3) live:
+`make reinstall-package PKG=packages/lease-signing`, cycle `bin/loftspace-app`, watch `renewalComplete.Qomdj…`
+project `signalsSubmittedAt:null`, and a `SetApplicantProfile` task land on the tenant within one mark lease.
+
+**In-scope gotchas:** the leg's `Target` column is reached across the `renews` hop — OPTIONAL in cypher shape
+only (every live renewal has one by construction; `leaseappAlive` gates the gap) — the dossier's optional-hop
+Params class, pinned by the planner test seeding no walk gap; `present` on a bool is always true
+(`planner/state.go:45`) — hence a timestamp column; the mark lease (≤30 min) delays the live re-plan; the
+existing open `SignRenewal` task stays open until signals land (no stale arm for it — it becomes completable, not
+stale). Standing checklist + dossier entries walked (packages: optional-hop params · lens↔op population coupling
+· precedent may carry debt; vertical-apps: sibling-form dead end · op-name lint on `cmd/<app>` edits).
+
+**Adjacent finds:** `SetApplicantProfile`'s descriptor declares `references` as an `integer` count
+(`permissions.go`) while the script consumes an array of strings — the generic catalog form would submit a shape
+the op rejects; absorbed here as its own unit if the descriptor path is exercised, else fixed with the FE
+increment (the shipped form bypasses the descriptor).
+
+**Non-goals:** changing `SetApplicantProfile`'s ownership guard to admit the task path (the self-voiced form is the
+ratified shape; the stale arm retires the task); a goal atom for the profile; `renewalsRead` columns.
