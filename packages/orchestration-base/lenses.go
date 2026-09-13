@@ -446,12 +446,25 @@ RETURN
 // This lens is an OBSERVER of that lapse rather than a convergence target: it
 // owns no byTarget entry, so it reads `expiredAt`, the marker's entity-wide
 // maximum — the latest instant ANY target lapsed on this task. Every instant
-// that reaches that field is a deadline a scheduled message was delivered
-// for, so a recorded instant at or after expiresAt proves the task expired
-// whichever target fired. The predicate is negated so the absent cases stay
-// granted: an unmarked task's marker hop binds nil, a nil ordering comparison
-// is false, and NOT(false) keeps the row — an open task whose fire has not
-// landed yet is LISTED here and DENIED at the Processor's own lookup-time
+// WEAVER records there is a deadline a scheduled message was delivered for
+// (its temporal lane copies the row's own freshUntil into the payload and
+// never reads a clock), so a Weaver-recorded instant at or after expiresAt
+// proves the task expired whichever target fired.
+//
+// Weaver is not the only writer. MarkExpired is also granted to `operator` at
+// scope any (permissions.go), and the script normalises expiredAt without
+// clamping it against a clock it does not have, so an operator can record a
+// FUTURE instant. The direction is a denial only — the recorded instant can
+// retract a grant, never confer one — and it is irreversible: the fold keeps
+// the maximum over byTarget and the marker's own standing value, no operation
+// lowers or clears expiredAt, and even a tombstone-and-revive carries it
+// forward, so that task's grant stays retracted until its deadline is moved
+// past the recorded instant.
+//
+// The predicate is negated so the absent cases stay granted: an unmarked
+// task's marker hop binds nil, a nil ordering comparison is false, and
+// NOT(false) keeps the row — an open task whose fire has not landed yet is
+// LISTED here and DENIED at the Processor's own lookup-time
 // `expiresAt > now` check, which is where the temporal verdict belongs.
 //
 // Both terms are load-bearing: CompleteTask/CancelTask (ddls.go
