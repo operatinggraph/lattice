@@ -1,6 +1,7 @@
 # The batched-read primitive the confinement-walk row asks for does not exist favorably on the pinned substrate — a refutation record, one safe dedup, and named revive economics
 
-**Status: ✅ RATIFIED (Winston-adjudicated, per the 2026-08-20 delegation) — no fork, no frozen-contract
+**Status: ✅ BUILT — Inc A shipped `06dea92` (2026-09-13); the §6 paced live probe is the one pending observation
+(attended, Mac-only). Ratified Winston-adjudicated per the 2026-08-20 delegation — no fork, no frozen-contract
 edit; two adversarial passes run, both folded (§9)** · Designer fire 2026-09-01 · Winston
 **Board row:** `[Processor] A correctly-bounded confinement walk still blows the wall — no batched-read
 primitive exists` (lattice.md, ★★ / S–M) · **Relates:** `verticals.md` — *Every front-desk POS write fails
@@ -207,6 +208,13 @@ remains at S/M cost. The 250 ms wall firing on that op under a saturated dev hos
 suite on one box) is then a **host-capacity signal, not a script-cost signal**, in the same family as
 the resident path's own 2/20 and the "suite reddens under parallel load" board row (owner: Whetstone).
 
+**One window the memo narrows, in the fail-open direction (close review, 2026-09-13):** un-memoized, a tombstone
+landing on the lease or unit *between* the two sites made site 2 answer `None` and `location_covers` deny;
+memoized, site 2 reuses the live unit site 1 saw. The same tombstone landing one instruction later — after site 2,
+before commit — already produced the identical ALLOW, because these class-(e) live reads are not OCC-conditioned
+at step 8; the memo makes the two predicates agree on one snapshot instead of two and shrinks an unclosed window
+rather than opening one. Recorded, not fixed: closing it is the shelved round-trip-collapse Fire 2 snapshot.
+
 **Acceptance + revive economics (owned by the Inc A build fire):** re-run the PO's paced 20-op probe
 (staff Charge vs resident, same host, 1/s) after Inc A on a loaded stack. If staff still misses parity
 by more than the load story explains, THAT probe — not a quiet bench — is the phase-0 evidence for
@@ -336,3 +344,34 @@ recorded hazards; no `kv` module change; no wall-budget change.
 
 **Scope-diff gate:** every touch above traces to the §8 Inc A row; nothing widened; the only declared dependency
 (the `ListCalls` counter, `authority-walk-wall-unit-cost-design.md` §4.1) is verified shipped both ways.
+
+### Inc A close note (2026-09-13)
+
+**Shipped `06dea92`** — `leaseapp_unit(lease_key, memo=None)`; `unit_memo = {}` in the Charge arm, threaded to
+both sites; cafe-domain 0.12.3 → 0.12.4. Pinned by `TestWorkplace_ChargeCatalogItemListsAppliesToUnitOnce`:
+`ListCalls == 5` on the staff-confined catalog Charge (holdsRole · appliesToUnit once · worksAt_covers containedIn ·
+servedAt · location_covers containedIn), revert-proven at 6 with the memo bypassed. Staff POS Charge with
+`menuItemKey`: −1 listing per execution (§3.1's "−4 RTs" counted the listing plus its value leg and the two
+`vertex_live` reads the memo also skips).
+
+**Deviation from the brief:** one file outside the touch-list — `internal/testutil/read_drift_baseline.txt` gained
+three `Charge` rows (two `worksAt` link follow-ups, the link-discovered `vtx.building.<id> containedIn out` hub),
+category-3 by the file's own taxonomy and shape-identical to the `OpenTab` / `VoidCharge` rows for the same guard.
+Cause, and the fire's real find: **no test had ever driven `Charge` as a confined staff actor** — every prior Charge
+vector ran as the operator, whose `actor_holds_operator` short-circuit returns before the worksAt walk — so the
+guard's own reads had never been measured for this op. Fixed here (the new vector is that test); the class is
+recorded in `docs/components/_packages.md`'s dossier.
+
+**Review record (cold, opus): no blocking / major.** Verified: no verdict moves in any of the four Charge arms
+(`None` memoized at site 1 is denied by both consumers; `!= None` guards, not truthiness); no cross-execution leak
+(fresh thread + `Init` per `Run`, recorder per hydrate); baseline rows category-3 and bounded to cafe-domain's
+`Charge`; N=5 derived independently; `leaseapp_unit` unpinned, `vertex_live`'s digest untouched. Minors: (M1) the
+memo comment's premise — module globals *are* re-created per `Init`; the hazard is the freeze fault on a bump —
+trimmed to the freeze argument (convention); (M2) the TOCTOU narrowing above (design residual, recorded in §6);
+(M3) the `Enumerations` assertion pins nothing the counter does not — kept, it documents the set-vs-counter
+distinction (review-over-reach). Classification: 1 convention · 1 design-residual · 1 coverage class (new dossier
+entry) · 1 review-over-reach.
+
+**Neighbors:** `verticals.md`'s café *front-desk POS writes fail about half the time* row is `🚧 blocked-on` this row
+— its platform half is refuted (§4) and its addressable share shipped here; the verticals steward flips it and
+owns the §6 paced probe on the loaded Mac stack, which no remote fire can run.

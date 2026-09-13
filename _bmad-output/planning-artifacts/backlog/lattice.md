@@ -133,7 +133,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **Suite reddens under parallel load, in packages the change never touched** | Rotating across unit-1/2 + convergence. Two open: (a) `substrate.Connect`'s 2s no-retry handshake, ~45 sites; (c) a wall-clock DEADLINE read as correctness — two shapes remain (a 20s lens wait, a 5s Resume-drain in `TestSupervisor_PendingForConsumer`). (b) `found=map[...]` leaseconvergence lens-wait starvation FIXED — root cause is CoreKVSource's serial MaxPrefetch:1 replay (~20 events, each a network round trip); 25s→90s. | ★★★ | M | 🏗️ owner: Whetstone · next: root-cause (a) or (c) |
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Thirteen parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` + `internal/refractor` each their own job; each job carries its own Go build cache (`.github/actions/go-toolchain`). | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `8f202dd` · next: unit-refractor is the pole; split its subtree |
 | **No gate can observe the 250ms production script wall** | `internal/testutil`'s `init()` assigns `processor.DefaultScriptWallBudget = 5s`, so all 24 packages linking it — cafe-domain's own `workplace_confinement_test.go` included — exercise their DDLs at 20× the budget the running Processor enforces. A walk that blows the wall live is green in CI; twice now it shipped and only live PO discovery found it (`0bda5e71`, `b997ff2a`). | ★★ | S | 📋 ready · owner: Whetstone |
-| **A correctly-bounded confinement walk still blows the wall — no batched-read primitive exists** | Re-derived: staff Charge is 20–23 live RTs (doubled `leaseapp_unit` walk); all three batched substrate transports refuted against the pinned server on load axes quiet benches can't see — the primitive is refuted, not unbuilt. Build: café memo + paced live probe. | ★★ | S | 🏗️ building · owner: claude/relaxed-rubin-zfk834 · [design](../../implementation-artifacts/kv-links-listing-leg-collapse-design.md) · next: Inc A café memo + test |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -142,6 +141,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-13 · `06dea92` · [Processor/cafe-domain] batched-read primitive refuted; a Charge resolves its tab's unit once — `leaseapp_unit` memo ([design](../../implementation-artifacts/kv-links-listing-leg-collapse-design.md))
 - 2026-09-13 · `8f202dd` · [CI] each job keeps its own Go build cache — one shared setup-go key had left twelve jobs recompiling the tree cold every run
 - 2026-09-13 · `77feaa3` · [Refractor/Processor] `capabilityEphemeral` reads the recorded lapse — the last `$now` leaves the lens corpus, censused ([design](../../implementation-artifacts/capability-ephemeral-recorded-expiry-design.md))
 - 2026-09-13 · `5a9c3ca` · [Weaver/Augur] the planner mandate's Fire 9 — plan-shaped proposals dispatched leg by leg + the promotion proposal; Fires 1–9 built ([design](../../implementation-artifacts/weaver-planner-mandate-design.md))
@@ -166,8 +166,6 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-05 · `1225c84c` · [CI] split `internal/refractor` off unit-1 into its own job (unit-refractor) — CI wall-clock 235s avg → 188s, full green
 - 2026-09-05 · `424e2740` · [Refractor] Secure plain lenses audit under a mask + retract by derivation; the neighbour-retraction transport gate ([design](../../implementation-artifacts/secure-plain-lens-retraction-and-audit-design.md))
 - 2026-09-05 · `89b61556` · [Weaver] an exhausted goal gap re-plans at its leg boundary; the budget books attempts, the escalation books nothing and is paced ([design](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md))
-- 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is ONE counted entry per (target, gap column); refused raises paced, overflow windowed ([design](../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
-- 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 

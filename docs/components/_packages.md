@@ -601,6 +601,13 @@ mechanizes it (name the gate, strike the entry).
   which `.state` values the script refuses and whether the caller could name themselves.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
 
+- **A confinement guard tested only as the operator has never run** — `actor_holds_operator` returns before the
+  worksAt walk, so a suite whose every vector for an op runs as the operator measures none of that op's guard reads
+  and cannot see a doubled walk on the staff path. Minted: café `Charge` (2026-09-13) — the first staff-confined
+  Charge vector surfaced three read-drift rows every sibling op already carried. Check: every op that calls
+  `require_workplace` / `enforce_workplace` has one vector as a non-operator staff actor; an op with the guard and no
+  `read <Op> lnk.identity.<id>.worksAt.*` baseline row is the tell.
+
 - **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
   `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
   label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
