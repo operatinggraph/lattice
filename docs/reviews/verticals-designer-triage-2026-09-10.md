@@ -96,8 +96,11 @@ Shape (mirrors `ReassignSession`'s studio branch, [wellness-domain/ddls.go:3195-
   applicant; on `lnk.identity.<a>.appliedToUnit.unit.<new>` copy `CreateLeaseApplication`'s three-way block
   verbatim ([scripts.go:596-620](../../packages/lease-signing/scripts.go)): alive → `DuplicateApplication`
   (the applicant already has a live application there — refuse, the operator withdraws one first); absent →
-  create; tombstoned → `make_link_revive_occ`. The old pair's guard link stays: a dead unit accepts no
-  application, and the guard's contract is per live pair.
+  create; tombstoned → `make_link_revive_occ`. The vacated (applicant, old unit) guard is FREED (tombstoned,
+  revision-pinned) — the guard's contract is per live pair, and a lease that moved on no longer justifies
+  holding the pair it left. *(Amended at build, 2026-09-12: the verdict as ratified left the old guard
+  standing; the build's own A→B→A case collided with the lease's stale guard — `DuplicateApplication`
+  against itself — so an ordinary move blocked both re-apply and return.)*
 - Event `lease.unitReassigned {leaseAppKey, oldUnitKey, newUnitKey}`; response `{primaryKey: leaseAppKey}`.
 - Op-meta: `Dispatch.Enumerations` `{payload.leaseAppKey} appliesToUnit out` + `applicationFor out`;
   `OptionalReads` for the new link + guard keys; descriptor with two `x-entityRef` pickers (lease, unit).
@@ -151,6 +154,17 @@ leave two live `appliesToUnit` links); (2) the seed backfill re-points only leas
 already holds a live guard on the canonical unit, printing both — `submitOp` is fatal on rejection, and a
 backfill that halts the seed on its first `DuplicateApplication` repairs nothing. Non-goals: no lens edit,
 no FE, no `TombstoneLocation` refusal, no console-operator grant (no repair op carries one).
+
+**Close (2026-09-12).** Shipped `6ae40061` (op + tests + seed backfill) · `bfbe5470` (the `verify-package-lease-signing`
+op-list pin — CI's stack-gates job, outside `go test ./...`, reddened `main` once; the seed skips a provider
+slot a visit series already holds) · `5b379b42` (the seed had halted at `OpenTab` since cafe-domain's
+`LeaseNotApproved` landed 2026-08-29 — it now converges on the unit's existing approved tenancy). Live:
+`missingLocation:true` 10 → 0; every re-pointed applicant anchors on the Riverside building; a front-desk
+staffer reads 58 names (46 on 2026-09-04). Findings classified: design-gap ×1 (the stale vacated guard — an
+instance of the standing checklist's "new state needs a lifetime", the guard link's lifetime on a move was never
+tabled; no new dossier class); brief-gap ×1 (the verify-package pin — now named in `CLAUDE.md`'s gate list);
+pre-existing ×2 (seed), fixed in the batch. Payload `primaryKey` is the new link (the reply constraint requires
+it inside the write footprint; `AssignUnitOwner` precedent); a no-op returns no `primaryKey`.
 
 ## 3. Wellness — "A guest's debt outlives the booking that made them visible"
 

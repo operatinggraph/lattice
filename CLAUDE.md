@@ -137,6 +137,10 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
     reach: `make test-control-plane-authz`, `make test-*-convergence`, the `leaseshortwindow`,
     `augurconvergence` and `unroutedconvergence` tags. Adding a method to an engine/service interface
     reaches all of them.
+  - **A package with a `scripts/verify-package-<pkg>.go` pins its DDLs' `PermittedCommands` lists there** — CI's
+    `stack-gates` job runs it against a live stack, so it never runs under `go test ./...`; a new op that is not
+    added to the script's `ddlCheck` reddens `main` on `command count=N want N-1` from a fully green local run
+    (2026-09-12, `ReassignLeaseUnit`). `make verify-package-<pkg>` against the running stack is the local gate.
   - **`packages/` content edits must bump the manifest version AND the `Version` constant mirroring it**
     — an unchanged version makes a semantic change invisible to a running stack, because a plain install
     no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`.
