@@ -161,28 +161,52 @@ func main() {
 	backfillBareListings(ctx, conn, adminKey)
 	backfillUnownedListings(ctx, conn, adminKey, consumerRoleKey)
 
-	salt, err := substrate.NewNanoID()
-	must(err, "generate consumer email salt")
-	claimSum := mustSHA256Hex("classic-demo-consumer-" + salt)
-	consumerReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{
-			"name":         "Classic Demo Resident " + salt[:8],
-			"email":        "resident-" + salt[:8] + "@dev.lattice.local",
-			"claimKeyHash": claimSum,
-		}, nil)
-	consumerKey := consumerReply.PrimaryKey
-	fmt.Printf("==> resident:        %s\n", consumerKey)
+	// The tenancy the café tab below opens against. OpenTab refuses a lease
+	// its landlord has not approved, approval needs the applicant's signature,
+	// and SignLease refuses a unit already leased to someone else — so on a
+	// stack where the demo unit is leased the tenancy is REUSED (its applicant
+	// is the resident), and only a still-available unit mints a fresh
+	// resident + application, signs it, and approves it.
+	consumerKey, leaseAppKey := ensureApprovedTenancy(ctx, conn, adminKey, unitKey)
+	if consumerKey == "" {
+		salt, err := substrate.NewNanoID()
+		must(err, "generate consumer email salt")
+		claimSum := mustSHA256Hex("classic-demo-consumer-" + salt)
+		consumerReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+			map[string]any{
+				"name":         "Classic Demo Resident " + salt[:8],
+				"email":        "resident-" + salt[:8] + "@dev.lattice.local",
+				"claimKeyHash": claimSum,
+			}, nil)
+		consumerKey = consumerReply.PrimaryKey
+		fmt.Printf("==> resident:        %s\n", consumerKey)
 
-	submitOp(ctx, conn, adminKey, "AssignRole", "",
-		map[string]any{"actorKey": consumerKey, "roleKey": consumerRoleKey},
-		&processor.ContextHint{Reads: []string{consumerKey, consumerRoleKey}})
-	fmt.Printf("==> assigned:        %s holds consumer (%s)\n", consumerKey, consumerRoleKey)
+		submitOp(ctx, conn, adminKey, "AssignRole", "",
+			map[string]any{"actorKey": consumerKey, "roleKey": consumerRoleKey},
+			&processor.ContextHint{Reads: []string{consumerKey, consumerRoleKey}})
+		fmt.Printf("==> assigned:        %s holds consumer (%s)\n", consumerKey, consumerRoleKey)
 
-	leaseReply := submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
-		map[string]any{"applicant": consumerKey, "unit": unitKey},
-		&processor.ContextHint{Reads: []string{consumerKey, unitKey}})
-	leaseAppKey := leaseReply.PrimaryKey
-	fmt.Printf("==> lease app:       %s\n", leaseAppKey)
+		leaseReply := submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
+			map[string]any{"applicant": consumerKey, "unit": unitKey},
+			&processor.ContextHint{Reads: []string{consumerKey, unitKey}})
+		leaseAppKey = leaseReply.PrimaryKey
+		fmt.Printf("==> lease app:       %s\n", leaseAppKey)
+		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
+			map[string]any{"leaseAppKey": leaseAppKey},
+			&processor.ContextHint{Reads: []string{leaseAppKey}, OptionalReads: []string{leaseAppKey + ".decision"}})
+		submitOp(ctx, conn, adminKey, "DecideLeaseApplication", "leaseapp",
+			map[string]any{"leaseAppKey": leaseAppKey, "decision": "approved"},
+			&processor.ContextHint{
+				Reads: []string{leaseAppKey},
+				OptionalReads: []string{
+					leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
+				},
+			})
+		fmt.Printf("==> lease decided:   %s (signed, approved)\n", leaseAppKey)
+	} else {
+		fmt.Printf("==> resident:        %s (existing tenancy)\n", consumerKey)
+		fmt.Printf("==> lease app:       %s (approved)\n", leaseAppKey)
+	}
 
 	// --- Clinic: patient + provider + appointment ----------------------------
 
@@ -266,13 +290,21 @@ func main() {
 
 	// --- Café: tab opened against the same lease ------------------------------
 
-	tabReply := submitOp(ctx, conn, adminKey, "OpenTab", "tab",
-		map[string]any{"leaseAppKey": leaseAppKey},
-		&processor.ContextHint{
-			Reads:         []string{leaseAppKey},
-			OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
-		})
-	fmt.Printf("==> tab:             %s (open)\n", tabReply.PrimaryKey)
+	// One open tab per lease (OpenTabAlreadyExists): a tenancy reused from a
+	// prior run may already hold one, in which case that tab is the demo's.
+	tabKey := openTabKey(ctx, conn, leaseAppKey)
+	if tabKey == "" {
+		tabReply := submitOp(ctx, conn, adminKey, "OpenTab", "tab",
+			map[string]any{"leaseAppKey": leaseAppKey},
+			&processor.ContextHint{
+				Reads:         []string{leaseAppKey},
+				OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
+			})
+		tabKey = tabReply.PrimaryKey
+		fmt.Printf("==> tab:             %s (open)\n", tabKey)
+	} else {
+		fmt.Printf("==> tab:             %s (already open)\n", tabKey)
+	}
 	reapGhostLeases(ctx, conn, adminKey)
 	reapVerifyTenantLease(ctx, conn)
 
@@ -348,7 +380,7 @@ func main() {
 	fmt.Printf("    lease app:   %s\n", leaseAppKey)
 	fmt.Printf("    listing:     %s\n", unitKey)
 	fmt.Printf("    appointment: %s\n", apptKey)
-	fmt.Printf("    tab:         %s\n", tabReply.PrimaryKey)
+	fmt.Printf("    tab:         %s\n", tabKey)
 	fmt.Printf("    studio:      %s\n", studioKey)
 	fmt.Printf("    session:     %s\n", sessionKey)
 }
@@ -357,6 +389,71 @@ func main() {
 // source--relation-->target triple, mirroring seed-showcase.go's helper of
 // the same name (each seed script is a standalone `go run` file, so the
 // helper is not shared).
+// ensureApprovedTenancy finds a live, signed, landlord-approved application
+// on unitKey and returns its applicant and key, or ("", "") when the unit
+// carries none and a fresh one must be minted. Keys are scanned in order so
+// a rerun lands on the same tenancy.
+func ensureApprovedTenancy(ctx context.Context, conn *substrate.Conn, adminKey, unitKey string) (string, string) {
+	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
+	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
+	must(err, "list lnk.leaseapp. keys")
+	sort.Strings(links)
+	for _, link := range links {
+		if !strings.HasSuffix(link, ".appliesToUnit.unit."+unitID) || !alive(ctx, conn, link) {
+			continue
+		}
+		appID := strings.TrimPrefix(strings.TrimSuffix(link, ".appliesToUnit.unit."+unitID), "lnk.leaseapp.")
+		leaseAppKey := "vtx.leaseapp." + appID
+		if !alive(ctx, conn, leaseAppKey) || !alive(ctx, conn, leaseAppKey+".signature") {
+			continue
+		}
+		if aspectString(ctx, conn, leaseAppKey+".decision", "value") != "approved" {
+			continue
+		}
+		applicantPrefix := "lnk.leaseapp." + appID + ".applicationFor.identity."
+		appLinks, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, applicantPrefix)
+		must(err, "list "+applicantPrefix+" keys")
+		for _, al := range appLinks {
+			if alive(ctx, conn, al) {
+				return "vtx.identity." + strings.TrimPrefix(al, applicantPrefix), leaseAppKey
+			}
+		}
+	}
+	return "", ""
+}
+
+// openTabKey returns the lease's live open tab (the tab the .cafeOpenTab guard
+// aspect names), or "" when the lease has none.
+func openTabKey(ctx context.Context, conn *substrate.Conn, leaseAppKey string) string {
+	guardKey := leaseAppKey + ".cafeOpenTab"
+	if !alive(ctx, conn, guardKey) {
+		return ""
+	}
+	tabKey := aspectString(ctx, conn, guardKey, "tabKey")
+	if tabKey == "" || !alive(ctx, conn, tabKey) {
+		return ""
+	}
+	return tabKey
+}
+
+// aspectString reads one string field out of a live aspect's data, "" when
+// the aspect is absent, dead, or carries no such string.
+func aspectString(ctx context.Context, conn *substrate.Conn, key, field string) string {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		IsDeleted bool           `json:"isDeleted"`
+		Data      map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil || doc.IsDeleted {
+		return ""
+	}
+	v, _ := doc.Data[field].(string)
+	return v
+}
+
 func linkKey(source, relation, target string) string {
 	return "lnk." + strings.TrimPrefix(source, "vtx.") + "." + relation + "." + strings.TrimPrefix(target, "vtx.")
 }
