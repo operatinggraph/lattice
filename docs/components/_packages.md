@@ -260,9 +260,18 @@ contains it: a claim runs under the raw credential and refuses one already bound
 the abuse needs a fresh credential and leaves three durable traces — the identity's `createdBy` (the
 minter), the `identifiedBy` link's provenance (the binder), and the claiming credential in
 `credentialindex`. The desk's reach is one chart, and never beyond what that patient's login reads. What
-the platform owes is the **undo**: today `UnbindPatientIdentity` and `RotateClaimKey` both require the
-identity still `unclaimed`, so a rogue-claimed login cannot be repaired — filed as its own row (an
-operator unbind of a claimed identity, credential unlink, re-issue to the patient, provenance-checked).
+the platform owes is the **undo**, and it is identity-domain's operator-only `RevokeIdentityClaim`: it
+reverses a secret-claim in one batch — every bound credential unlinked (its `boundTo` link and
+`credentialindex` vertex tombstoned, one `identity.unbound` per credential so the Gateway's
+credential-bindings row drops), the identity back to `unclaimed`, a fresh caller-minted claim secret
+armed, an armed link secret and the consumer grant retired — and leaves the chart's `identifiedBy` in
+place, so the real patient claims the same identity. It is provenance-checked before it writes: only an
+identity that carries a *tombstoned* `.claimKey` (minted unclaimed, claimed by secret — never a
+Gateway-provisioned credential identity) is admitted, the binding array and the live `boundTo` set must
+agree exactly, and each credential's index must name this identity; the `identity.claimRevoked` event
+records which credentials were cut and when they had bound. The clinic app offers it to the operator hat
+as "Reset login" on a patient with a connected identity; `UnbindPatientIdentity` (the mis-connected-chart
+repair) and `RotateClaimKey` (the lost-secret re-issue) keep their `unclaimed`-only guards.
 Narrowing the desk (operator-only bind for charts with history) and out-of-band delivery of the secret
 were priced and not taken: the first breaks the front-desk Connect-a-login ceremony for exactly the
 returning patients it serves; the second replaces a doctrine that keeps Lattice out of the delivery.
@@ -558,7 +567,16 @@ mechanizes it (name the gate, strike the entry).
   the owner is dead. Declare per-arm, from the dispatcher's own classification, and make the residual race
   fail closed and loudly. Minted: `TombstoneOrphanedCredentialIndex`'s owner-array rewrite (2026-08-23) —
   nine tests fell to the unconditional declaration. Check: for any `optionalReads` naming a `Sensitive:
-  true` aspect, ask which arm reaches it with the holder's key already destroyed.
+  true` aspect, ask which arm reaches it with the holder's key already destroyed. **Second sighting
+  (2026-09-13), on the timing axis:** deriving `{target}.credentialBinding` for `ClaimIdentity` (so a
+  re-claim after `RevokeIdentityClaim` could CAS the tombstone) made a claimed target pay an envelope
+  read + decrypt an unclaimed one never pays — the claimed-vs-wrong-key gap NFR-S6 had equalized, measured
+  at +0.08–0.12 ms with CIs excluding zero; and a claimed-then-shredded target faulted at hydration instead
+  of counting `erased`. Closed by writing the binding with the unconditioned `update` idiom instead of
+  reading it. Check, on any timing-uniform path: a sensitive aspect whose PRESENCE is the state being
+  hidden is never declared or derived — write it blind. Mechanized as an instrument, not a gate:
+  `claim_timing_probe_test.go`'s already-claimed fixture is now a real secret-claimed identity with a live
+  binding, so the probe measures the production shape.
 - **An engine-recognized companion column whose name does not match its gap is silently dead** — the engine
   derives the name from the gap key (`missing_<g>` → `maxretries_<g>`/`inflight_<g>`), finds nothing, and
   falls back to its default; no gate, test or projection notices, and the package's own doc keeps claiming

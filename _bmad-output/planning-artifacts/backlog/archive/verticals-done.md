@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-05 · `42c8eae8` · The desk is shown the claim secret it mints for a new patient (clinic) or guest (wellness) — the shared ceremony overlay on an accepted `CreateUnclaimedIdentity` reply; proven in-browser.
+- 2026-09-05 · `8731eac5` · A called-off class releases every booking it strands — the orphan lens drops the aspect-anchor conjunct, the release op enumerates `forSession`/`bookedBy`; both legacy $25 fees refunded live.
 - 2026-09-05 · `8731eac5` · A guest is visible to the desk of the class they booked — new booking-anchored `wellnessBookers` lens unioned into every front-desk confinement; live: member list, `/api/ledger`, arrears grid (3 → 4 debtors).
 - 2026-09-05 · `13bb0329` · The tenant's Sign renewal button is enabled by their assigned `SignRenewal` task, not the write guard alone — platform half live via Weaver `89b61556` (task assigned 22:09Z, term ends 09-06).
 - 2026-09-05 · `97f4a5cc` · The Care→Wellness referral picker offers only classes that can still be booked (CreateBooking's `submitted < startsAt`), soonest-first — live 48 rows → 3.

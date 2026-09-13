@@ -156,8 +156,14 @@ posture; `ViaCookie` is what a per-user surface checks so a fallback session can
 
 `handleDevLogin` resolves the credential to the identity it is **bound to** via the Gateway's whoami
 beat, so signing in with a linked credential opens *that* identity's world; the persona fence applies to
-the resolved identity, not just the credential typed in. `handleRefresh` deliberately does not re-run
-that resolution — it renews an already-open session, a decision refresh never revisits.
+the resolved identity, not just the credential typed in. `handleRefresh` re-runs that resolution for a
+session opened through a **bound** credential (`cred_id` present and distinct from the subject) and
+re-mints for whatever the credential resolves to *now* — the resolved identity, or the raw credential
+once its binding is gone (identity-domain's `RevokeIdentityClaim` cuts every credential off a claimed
+identity; `UnlinkCredential` and the erasure sweep retire one). The Gateway resolves a credential per
+request, but a session token minted with `sub = U` carries `U` until it is re-minted, so this step is
+what bounds a revoked credential's open session to one refresh interval. A session opened as the
+identity itself has nothing to re-resolve.
 
 ---
 
@@ -165,3 +171,23 @@ that resolution — it renews an already-open session, a decision refresh never 
 
 The kit reports no health of its own; each adopting app owns its `health.<app>.<instance>` card
 (Contract #5).
+
+---
+
+## Review keeps catching (dossier)
+
+The recurring review-finding classes for the session kit — fire briefs copy the applicable entries into
+part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
+(`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
+mechanizes it.
+
+- **A revocation's transport must be traced through every seam that MINTS a principal, not only the
+  per-request resolver** — the Gateway re-reads the credential-bindings bucket on each call, but a session
+  cookie carries the identity it resolved to at login and every refresh re-minted it unread, so a revoked
+  credential's open tab kept acting as the real person for as long as it refreshed. Minted: clinic
+  rogue-claim undo (`RevokeIdentityClaim`, 2026-09-13), caught cold as BLOCKING while the op's own
+  comment claimed the cut-off was immediate. Check: for any new revocation / unbind / repoint of a
+  credential→identity binding, list every place a token or session subject is minted from that binding
+  (login, refresh, service-actor mint) and name which one re-resolves and at what cadence; the residual
+  goes in the op's comment, never "at the next request".
+
