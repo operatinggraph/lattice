@@ -17,9 +17,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 )
 
 // seedAspect writes an aspect envelope directly into the harness Core bucket
@@ -242,6 +244,259 @@ func TestLeaseDocInstance_ManagedUnit_ResolvesLandlordKey(t *testing.T) {
 	}
 	if got, _ := doc["landlordKey"].(string); got != landlordKey {
 		t.Fatalf("doc.landlordKey = %q, want %q", got, landlordKey)
+	}
+}
+
+// TestLeaseDocInstance_TenantNamePresent_EmitsSensitiveRefTopLevel: the
+// leaseDocument pattern's real shape — payload.params carries
+// "tenantName": "subject.tenantName.data.value" alongside family, and the
+// envelope declares the templated key under ContextHint.EgressReads exactly
+// as Loom's inferExternalTaskReads would (internal/loom/externaltask_params.go)
+// — over a SIGNED application whose applicant has a real .name, so SignLease
+// already snapshotted .tenantName. The op must accept, and the emitted
+// event's params.tenantName must be a $sensitiveRef marker at the TOP LEVEL
+// (never inside doc{}) carrying field "value" — the shape the bridge's
+// docGen adapter opens at the egress boundary (retention-class-egress-
+// envelope-design.md §3.5(a)).
+func TestLeaseDocInstance_TenantNamePresent_EmitsSensitiveRefTopLevel(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "docinsttenant")
+
+	applicantKey := mintNamedIdentity(t, ctx, conn, cp, cons, "docTenantIdent1", "Alice Tenant")
+	appKey, _ := signedDocGenApp(t, ctx, conn, cp, cons, applicantKey)
+
+	// SignLease already snapshotted .tenantName (applicant carries a real
+	// .name) — confirm the fixture actually has it before proving the egress
+	// path, so a failure below is about the egress path, not the fixture.
+	if !keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf("fixture error: appKey must carry .tenantName after signing a named applicant")
+	}
+
+	handle := "dgTenantHandAbCdEfGh"
+	instReqID := testutil.GenReqID("docInstTenant01")
+	env := &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseDocInstance",
+		Actor:         bootstrap.LoomIdentityKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseDocInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
+			`","adapter":"docGen","replyOp":"RecordLeaseDocOutcome","params":{"family":"docGen","tenantName":"subject.tenantName.data.value"}}`),
+		ContextHint: &processor.ContextHint{
+			Reads:       []string{appKey},
+			EgressReads: []string{appKey + ".tenantName"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	ev := findEmittedEvent(t, ctx, conn, instReqID, "external.docGen")
+	params, _ := ev["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("external event params missing: %v", ev)
+	}
+	if got, _ := params["family"].(string); got != "docGen" {
+		t.Fatalf("params.family = %q, want docGen", got)
+	}
+	if got, _ := params["leaseAppKey"].(string); got != appKey {
+		t.Fatalf("params.leaseAppKey = %q, want %q", got, appKey)
+	}
+	tn, _ := params["tenantName"].(map[string]any)
+	if tn == nil {
+		t.Fatalf("params.tenantName missing or not an object: %v", params["tenantName"])
+	}
+	sref, _ := tn["$sensitiveRef"].(map[string]any)
+	if sref == nil {
+		t.Fatalf("params.tenantName must be a $sensitiveRef marker, got %v", tn)
+	}
+	if got, _ := sref["field"].(string); got != "value" {
+		t.Fatalf("params.tenantName.$sensitiveRef.field = %q, want %q", got, "value")
+	}
+	if got, _ := sref["ref"].(string); got != appKey+".tenantName" {
+		t.Fatalf("params.tenantName.$sensitiveRef.ref = %q, want %q", got, appKey+".tenantName")
+	}
+	if _, present := sref["ciphertext"]; !present {
+		t.Fatalf("params.tenantName.$sensitiveRef must carry ciphertext, got %v", sref)
+	}
+	doc, _ := params["doc"].(map[string]any)
+	if doc == nil {
+		t.Fatalf("params.doc missing: %v", params)
+	}
+	if _, present := doc["tenantName"]; present {
+		t.Fatalf("doc.tenantName must NEVER be set — the marker lives at the top level of params only, got %v", doc["tenantName"])
+	}
+}
+
+// TestLeaseDocInstance_TenantNameTemplatedButAbsent_DroppedNotFailed: the SAME
+// templated payload/egressReads as above, over a SIGNED application whose
+// applicant carries no live .name (seedApplicant — no CreateUnclaimedIdentity,
+// so SignLease wrote no .tenantName snapshot). The dispatch must still be
+// ACCEPTED — the descriptor floor (CreateLeaseDocInstance's Dispatch.
+// OptionalReads, permissions.go) tolerates the egress key's absence — and the
+// emitted params must carry no "tenantName" key at all (dropped before
+// resolve_subject_params ever sees it, leasedoc_scripts.go), matching a
+// signed application's pre-existing degrade.
+func TestLeaseDocInstance_TenantNameTemplatedButAbsent_DroppedNotFailed(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "docinstnoname")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBdocnonameXtHJKMNPQ")
+	appKey, _ := signedDocGenApp(t, ctx, conn, cp, cons, applicantKey)
+
+	if keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf("fixture error: appKey must carry no .tenantName for an unnamed applicant")
+	}
+
+	handle := "dgNoNameHandAbCdEfGh"
+	instReqID := testutil.GenReqID("docInstNoName01")
+	env := &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseDocInstance",
+		Actor:         bootstrap.LoomIdentityKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseDocInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
+			`","adapter":"docGen","replyOp":"RecordLeaseDocOutcome","params":{"family":"docGen","tenantName":"subject.tenantName.data.value"}}`),
+		ContextHint: &processor.ContextHint{
+			Reads:       []string{appKey},
+			EgressReads: []string{appKey + ".tenantName"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	ev := findEmittedEvent(t, ctx, conn, instReqID, "external.docGen")
+	params, _ := ev["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("external event params missing: %v", ev)
+	}
+	if _, present := params["tenantName"]; present {
+		t.Fatalf("params.tenantName must be dropped when the aspect is absent, got %v", params["tenantName"])
+	}
+	if got, _ := params["family"].(string); got != "docGen" {
+		t.Fatalf("params.family = %q, want docGen", got)
+	}
+	doc, _ := params["doc"].(map[string]any)
+	if doc == nil {
+		t.Fatalf("params.doc missing: %v", params)
+	}
+}
+
+// leaseSigningPackageWithoutDocInstanceDispatch returns a COPY of the real
+// leasesigning.Package (production code untouched) whose CreateLeaseDocInstance
+// op-meta carries no Dispatch block, at the given (higher) version. Every other
+// field is the shipped Definition verbatim, so re-installing it is a pure
+// in-place upgrade of the one op-meta under test — never a partial Definition
+// that would read the omitted fields as "retire everything else" (Apply's
+// whole-Definition convergence semantics, internal/pkgmgr/apply.go).
+func leaseSigningPackageWithoutDocInstanceDispatch(t *testing.T, version string) pkgmgr.Definition {
+	t.Helper()
+	def := leasesigning.Package
+	def.Version = version
+	metas := make([]pkgmgr.OpMetaSpec, len(def.OpMetas))
+	copy(metas, def.OpMetas)
+	found := false
+	for i, m := range metas {
+		if m.OperationType == "CreateLeaseDocInstance" {
+			m.Dispatch = nil
+			metas[i] = m
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("CreateLeaseDocInstance op-meta not found in leasesigning.Package")
+	}
+	def.OpMetas = metas
+	return def
+}
+
+// TestLeaseDocInstance_TenantNameAbsent_FloorMutation_RejectsHydrationMiss is
+// the MECHANISM proof the declaration-only tests above cannot give: it
+// installs the modified Definition above (Dispatch: nil on
+// CreateLeaseDocInstance, so the descriptor floor never fires) over the real
+// lease-signing install already in this harness, then drives the EXACT same
+// payload/egressReads arm (b) above exercises. Absent the floor, the
+// templated-but-missing tenantName egress key is a REQUIRED read the envelope
+// declares under EgressReads, so step 4 hydrate rejects it HydrationMiss
+// instead of letting the script degrade — proving the Dispatch block is what
+// carries the tolerance, not a lucky path.
+func TestLeaseDocInstance_TenantNameAbsent_FloorMutation_RejectsHydrationMiss(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst.RoleIDs = map[string]string{
+		"operator":     bootstrap.RoleOperatorID,
+		"consumer":     lsConsumerRoleID,
+		"frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"),
+		"backOfHouse":  pkgmgr.RoleID("identity-domain", "backOfHouse"),
+		"provider":     pkgmgr.RoleID("identity-domain", "provider"),
+	}
+	modified := leaseSigningPackageWithoutDocInstanceDispatch(t, "0.32.1")
+	// Apply submits UpgradePackage over ops.meta and awaits a reply; the
+	// original install's meta pipeline (setupLeaseEnv/installLeaseDeps) is
+	// already stopped by now, so this test starts its own, exactly like
+	// installLeaseDeps did, and stops it before driving the default-lane op
+	// below (its own consumer/pipeline).
+	stopMeta := testutil.RunMetaInstallPipeline(t, ctx, conn)
+	res, err := inst.Apply(ctx, modified, pkgmgr.ApplyOptions{})
+	stopMeta()
+	if err != nil {
+		t.Fatalf("Apply modified lease-signing (CreateLeaseDocInstance Dispatch removed): %v", err)
+	}
+	if res.Action != "upgrade" {
+		t.Fatalf("Apply action = %q, want upgrade (a same-shape, higher-version in-place update)", res.Action)
+	}
+
+	// A CommitPath's op-meta descriptor cache is a SNAPSHOT taken once at
+	// construction (internal/processor/ddl_cache.go: "Caller MUST invoke
+	// Refresh once before the cache is queried" — no live watch). Building
+	// the scratch pipeline HERE, after the Apply above, is what makes it see
+	// the modified (Dispatch-less) op-meta; a pipeline built earlier would
+	// keep serving the real op-meta's floor from its own stale snapshot,
+	// masking the very absence this test exists to prove.
+	cp, cons := newLeasePipeline(t, ctx, conn, "docfloormut")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBdocFLoorMutXHJKMNP")
+	appKey, _ := signedDocGenApp(t, ctx, conn, cp, cons, applicantKey)
+	if keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf("fixture error: appKey must carry no .tenantName for an unnamed applicant")
+	}
+
+	handle := "dgFLrMutHandCdEfGhJK"
+	instReqID := testutil.GenReqID("docFloorMut0001")
+	env := &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseDocInstance",
+		Actor:         bootstrap.LoomIdentityKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseDocInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
+			`","adapter":"docGen","replyOp":"RecordLeaseDocOutcome","params":{"family":"docGen","tenantName":"subject.tenantName.data.value"}}`),
+		ContextHint: &processor.ContextHint{
+			Reads:       []string{appKey},
+			EgressReads: []string{appKey + ".tenantName"},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected (the floor is gone; the envelope's required egress key is genuinely absent)", outcome)
+	}
+	if reply.Error == nil {
+		t.Fatalf("rejected reply carries no error")
+	}
+	msg := reply.Error.Message
+	if !strings.Contains(msg, "HydrationMiss") {
+		t.Fatalf("rejection = %q, want a HydrationMiss (proves the Dispatch floor, not a lucky path, tolerated absence before)", msg)
+	}
+	wantKey := appKey + ".tenantName"
+	if !strings.Contains(msg, wantKey) {
+		t.Fatalf("rejection = %q, want it to name the missing key %q", msg, wantKey)
 	}
 }
 

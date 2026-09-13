@@ -434,7 +434,19 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 	// the onboarding pattern (leaseApplicationComplete surfaces the column but
 	// dispatches nothing for it), so without it activated no RecordIdentityPII
 	// task is ever created and every convergence run stalls on the PII gap.
-	want := map[string]bool{"leaseApplicationComplete": true, "applicantOnboarding": true, "piiKeyEnvelope": true}
+	//
+	// retentionClassKeyEnvelope is likewise not optional: lease-signing's
+	// leaseDocument pattern unconditionally templates "tenantName", and
+	// SignLease snapshots .tenantName -- custodied on the executedLeaseRecord
+	// RETENTION CLASS, not on any identity -- onto every signed application
+	// whose applicant has a name to snapshot, which the harness's seeded
+	// applicant always does. Every docGen dispatch therefore resolves a
+	// $sensitiveRef over that class holder, and the bridge's egress unwrap
+	// resolves it from THIS lens's envelope bucket (privacy-base/lenses.go
+	// retentionKeyEnvelopeSpec), the class-holder analog of piiKeyEnvelope
+	// above. Without it active, every docGen call fails permanently after 5
+	// delivery attempts ("bucket not found").
+	want := map[string]bool{"leaseApplicationComplete": true, "applicantOnboarding": true, "piiKeyEnvelope": true, "retentionClassKeyEnvelope": true}
 	for _, n := range extraLenses {
 		want[n] = true
 	}
@@ -882,6 +894,47 @@ func (h *harness) serviceOutcomes(applicantID string) (handles []string) {
 		}
 	}
 	return handles
+}
+
+// docGenServiceKeyFor returns the vtx.service.<handle> claim vertex providedTo
+// the LEASEAPP (not the applicant — the docGen triad's providedTo target is
+// the application itself, leasedoc_ddls.go), discriminated by envelope class
+// service.docGen.instance. Empty if none exists yet.
+func (h *harness) docGenServiceKeyFor(appID string) string {
+	keys, err := h.conn.KVListKeys(h.ctx, bootstrap.CoreKVBucket)
+	if errors.Is(err, context.Canceled) || substrate.IsConnectionError(err) {
+		return ""
+	}
+	require.NoError(h.t, err)
+	var candidates []string
+	for _, k := range keys {
+		// providedTo link: lnk.service.<handle>.providedTo.leaseapp.<appID>
+		_, srcID, name, targetType, dstID, ok := substrate.ParseLinkKey(k)
+		if !ok || name != "providedTo" || targetType != "leaseapp" || dstID != appID {
+			continue
+		}
+		svcKey := "vtx.service." + srcID
+		if h.vertexClass(svcKey) == "service.docGen.instance" {
+			candidates = append(candidates, svcKey)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	// More than one docGen claim providedTo this application (a raced or
+	// re-triggered dispatch): the KV listing order is not meaningful, so pick
+	// the one whose .outcome is actually completed rather than the first one
+	// KVListKeys happens to return.
+	for _, svcKey := range candidates {
+		outcome := h.aspectData(svcKey, "outcome")
+		if outcome != nil && outcome["status"] == "completed" {
+			return svcKey
+		}
+	}
+	return ""
 }
 
 // countOutcomeAspects returns how many vtx.service.<handle>.outcome aspects exist

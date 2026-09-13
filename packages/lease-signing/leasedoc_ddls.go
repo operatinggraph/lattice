@@ -60,20 +60,26 @@ func leaseDocInstanceDDL() pkgmgr.DDLSpec {
 		Description: "ExternalTask instanceOp DDL for executed-lease document generation (Contract #10 §10.5). The op " +
 			"Loom submits for the leaseDocument pattern's externalTask step: payload {instanceKey (the bare handle Loom " +
 			"minted), subjectKey (the signed vtx.leaseapp.<NanoID> the document is about), adapter, replyOp, " +
-			"params:{family: docGen}}. It validates the subject application is alive AND signed (kv.Read of the " +
-			".signature aspect — an unsigned application fails with NO claim and NO dispatch), prepends the " +
-			"package-chosen claim-vertex type `service` → vtx.service.<handle>, and mints the claim vertex: root data {} " +
-			"(D5), envelope class service.docGen.instance (P7), an instanceOf link to this DDL's own meta-vertex (the " +
-			"write-gate type authority) and a providedTo link to the subject LEASEAPP (the document is about the " +
-			"application, not the applicant — the convergence lens fans out across this link). It then assembles the " +
-			"document fields Processor-side (the §10.5 linked-vertex read: kv.Links walks applicationFor → the applicant " +
-			"identity and appliesToUnit → the leased unit; kv.Read loads the identity's .name (decrypt-on-read supplies " +
-			"the plaintext value), the unit's .address/.listing, and the application's own .terms/.signature) and emits " +
+			"params:{family: docGen, tenantName?: subject.tenantName.data.value}}. It validates the subject application " +
+			"is alive AND signed (kv.Read of the .signature aspect — an unsigned application fails with NO claim and NO " +
+			"dispatch), prepends the package-chosen claim-vertex type `service` → vtx.service.<handle>, and mints the " +
+			"claim vertex: root data {} (D5), envelope class service.docGen.instance (P7), an instanceOf link to this " +
+			"DDL's own meta-vertex (the write-gate type authority) and a providedTo link to the subject LEASEAPP (the " +
+			"document is about the application, not the applicant — the convergence lens fans out across this link). It " +
+			"then assembles the document fields Processor-side (the §10.5 linked-vertex read: kv.Links walks " +
+			"applicationFor → the applicant identity and appliesToUnit → the leased unit; kv.Read loads the unit's " +
+			".address/.listing and the application's own .terms/.signature) and resolves params.tenantName " +
+			"(orchestration-base's resolve_subject_params, " +
+			"TOP LEVEL, never into doc{}) — a $sensitiveRef marker over the SUBJECT's OWN .tenantName aspect the docGen " +
+			"adapter opens at the bridge's egress boundary; dropped from the resolved params when the application " +
+			"carries no .tenantName snapshot (SignLease writes none when the applicant had no live .name at signing) — " +
+			"the op-meta's descriptor floor tolerates that absence rather than failing the dispatch. It then emits " +
 			"the external.docGen event via its own transactional outbox (body {instanceKey, adapter, replyOp, " +
-			"dispatchOp: RecordServiceDispatch, externalRef, idempotencyKey, params:{family, leaseAppKey, doc:{…the " +
-			"resolved fields…}}}) — the vendor receives real field values and never touches the graph or a lens. A " +
-			"missing OPTIONAL field (an unnamed applicant, an absent listing economics field, no .terms) is omitted from " +
-			"doc{} and the vendor's renderer degrades exactly as the display path does.",
+			"dispatchOp: RecordServiceDispatch, externalRef, idempotencyKey, params:{family, leaseAppKey, tenantName? " +
+			"($sensitiveRef marker, omitted when absent), doc:{…the resolved fields…}}}) — the vendor receives real " +
+			"field values and never touches the graph or a lens. A missing OPTIONAL field (an unnamed applicant, an " +
+			"absent listing economics field, no .terms) is omitted from doc{} and the vendor's renderer degrades " +
+			"exactly as the display path does.",
 		Script: leaseDocInstanceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"instanceKey":{"type":"string","description":"The BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.service. → vtx.service.<handle>. Required."},` +

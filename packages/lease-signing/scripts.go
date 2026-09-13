@@ -732,13 +732,55 @@ def execute(state, op):
         if unit_status == "leased" and decision_value != "approved":
             fail("UnitNoLongerAvailable: unit " + unit_key + " is already leased to another applicant; application " + app_key + " was not the one approved")
 
+        # Snapshot the tenant's name onto the lease at the moment it becomes an
+        # executed contract: a signed lease is a legal document that names its
+        # tenant, and Contract #3 §3.10 makes that conformant ("a contract
+        # record keeps its parties' names for as long as the contract must be
+        # kept") -- unlike the live .name on the applicant's own identity, this
+        # copy is custodied on the executedLeaseRecord retention class, so it
+        # survives the applicant's own ShredIdentityKey. The applicant, from
+        # the application's OWN applicationFor link -- never a payload field.
+        # read-posture: (e) relation=applicationFor epoch=none -- a leaseapp
+        # carries exactly one applicationFor link (required at
+        # CreateLeaseApplication), so this is never a keyspace scan.
+        app_page, _ = kv.Links(app_key, "applicationFor", "out", None, LEASEAPP_UNIT_PAGE_LIMIT)
+        applicant = None
+        for lk in app_page:
+            if not lk.isDeleted:
+                applicant = lk.targetVertex
+        tenant_name_mutations = []
+        if applicant != None:
+            # The decrypt needs the applicant identity's live, un-shredded
+            # .piiKey -- probe it FIRST, because kv.Read of a SENSITIVE aspect
+            # FAILS (ScriptFailed) rather than degrading when the key envelope
+            # is shredded, and a shredded key envelope stays PRESENT with
+            # data.shredded=true (privacy-base's ShredIdentityKey updates it
+            # in place rather than deleting it) -- so presence alone is not
+            # enough, the probe must also check the flag.
+            # read-posture: (e) per-candidate follow-up read off the
+            # applicationFor enumeration above (data-derived key).
+            pii_key_node = kv.Read(applicant + ".piiKey")
+            pii_key_live = pii_key_node != None and not pii_key_node.isDeleted
+            shredded = pii_key_live and pii_key_node.data.get("shredded")
+            if pii_key_live and not shredded:
+                # read-posture: (e) per-candidate follow-up read off the
+                # applicationFor enumeration above (data-derived key).
+                name_node = kv.Read(applicant + ".name")
+                if name_node != None and not name_node.isDeleted:
+                    name_val = name_node.data.get("value")
+                    if name_val != None and type(name_val) == type("") and len(name_val.strip()) > 0:
+                        tenant_name_mutations = [make_aspect(app_key, "tenantName", "tenantName", {"value": name_val.strip()})]
+        # Absent, tombstoned, or blank name, a crypto-shredded applicant, or no
+        # applicant at all: write nothing. The executed-lease document degrades
+        # to the bare applicant key.
+
         # The signature is a fact in an aspect (D5); the application root stays
         # {}. signedAt is the op's own timestamp, normalized to canonical UTC so
         # a downstream lexical compare is sound.
         signed_at = time.rfc3339_utc(op.submittedAt)
         mutations = [
             make_aspect(app_key, "signature", "signature", {"signedAt": signed_at}),
-        ]
+        ] + tenant_name_mutations
         events = [{"class": "leaseapp.leaseSigned",
                    "data": {"leaseAppKey": app_key}}]
         return {"mutations": mutations, "events": events,

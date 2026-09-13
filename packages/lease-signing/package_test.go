@@ -131,14 +131,17 @@ func TestPackage_TaskLegDescriptorsNameTheTaskPath(t *testing.T) {
 	}
 }
 
-// TestPackage_EngineLegsStayBare is the complement: the externalTask legs exist
-// so forOperation resolves, not to be rendered. Giving one a descriptor would
-// offer a client a form for an op no human submits.
+// TestPackage_EngineLegsStayBare is the complement: the externalTask legs
+// exist so forOperation resolves, not to be rendered — none carries
+// Presentation, so none is ever offered to a person. CreateLeaseDocInstance
+// is the one exception to BARE (below), not to un-rendered: it carries an
+// InputSchema + Dispatch so the descriptor floor can tolerate its
+// subject's .tenantName being absent, but still no Presentation.
 func TestPackage_EngineLegsStayBare(t *testing.T) {
 	engineLegs := []string{
 		"CreateLeaseServiceInstance",
 		"RecordLeaseServiceOutcome", "RecordServiceDispatch",
-		"CreateLeaseDocInstance", "RecordLeaseDocOutcome",
+		"RecordLeaseDocOutcome",
 	}
 	byOp := map[string]pkgmgr.OpMetaSpec{}
 	for _, m := range Package.OpMetas {
@@ -152,6 +155,49 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 		if m.Presentation != nil || m.InputSchema != "" || m.Dispatch != nil {
 			t.Fatalf("%s: expected a bare forOperation meta, got a descriptor: %+v", op, m)
 		}
+	}
+}
+
+// TestPackage_CreateLeaseDocInstanceFloorsTenantNameAbsence pins the one
+// engine leg that is NOT bare: CreateLeaseDocInstance carries no
+// Presentation (never offered to a person — Loom's relay actor is the only
+// submitter, guarded in the DDL script itself), but does carry an InputSchema
+// (guaranteeing subjectKey is present, which is what makes the Dispatch
+// template below well-formed per lint-package-standard's checkReadTemplates)
+// and a Dispatch declaring {payload.subjectKey}.tenantName as an
+// OptionalRead — the descriptor floor that makes a signed application with
+// no .tenantName snapshot render instead of failing HydrationMiss.
+func TestPackage_CreateLeaseDocInstanceFloorsTenantNameAbsence(t *testing.T) {
+	var m pkgmgr.OpMetaSpec
+	found := false
+	for _, om := range Package.OpMetas {
+		if om.OperationType == "CreateLeaseDocInstance" {
+			m = om
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("CreateLeaseDocInstance: op-meta missing")
+	}
+	if m.Presentation != nil {
+		t.Fatalf("CreateLeaseDocInstance: Presentation must be nil — it is never offered to a person")
+	}
+	if m.InputSchema == "" {
+		t.Fatalf("CreateLeaseDocInstance: InputSchema must be declared — it is what guarantees subjectKey for the Dispatch template below")
+	}
+	if m.Dispatch == nil {
+		t.Fatalf("CreateLeaseDocInstance: Dispatch must be declared")
+	}
+	wantOptional := "{payload.subjectKey}.tenantName"
+	found = false
+	for _, r := range m.Dispatch.OptionalReads {
+		if r == wantOptional {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("CreateLeaseDocInstance: Dispatch.OptionalReads = %v, want to contain %q", m.Dispatch.OptionalReads, wantOptional)
 	}
 }
 
@@ -173,7 +219,7 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 14; got != want {
+	if got, want := len(Package.DDLs), 15; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 9; got != want {
@@ -210,6 +256,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"underwritingParties", "meta.ddl.aspectType"},
 		{"applicationSignals", "meta.ddl.aspectType"},
 		{"decidedProfileSnapshot", "meta.ddl.aspectType"},
+		{"tenantName", "meta.ddl.aspectType"},
 		{"leaseServiceInstance", "meta.ddl.vertexType"},
 		{"leaseServiceReply", "meta.ddl.vertexType"},
 		{"leaseServiceDispatch", "meta.ddl.vertexType"},
@@ -312,12 +359,15 @@ func TestPackage_LeaseApplicationCompleteEscalatesExhaustedToAugur(t *testing.T)
 // regression guard for the underwriting-record custody posture (mirrors
 // clinic-domain's TestPackage_EncounterAspectIsSensitiveAndCustodied): both
 // .profile and .underwritingParties must declare Sensitive + a retentionClass
-// Custody naming underwritingRecord, and the package must declare exactly
-// that retention class with the eraseOnExpiry policy. A silent loss of either
-// — Sensitive flipping back to false, or Custody being dropped/retargeted —
-// would fall back to committing the applicant's raw financials or the
-// guarantor/co-applicant's identifiers as PLAINTEXT (Sensitive false), or
-// reject at install (Custody naming an undeclared class).
+// Custody naming underwritingRecord, and .tenantName must declare Sensitive +
+// a retentionClass Custody naming the SEPARATE executedLeaseRecord class — the
+// package must declare exactly those two retention classes, both
+// eraseOnExpiry. A silent loss of either — Sensitive flipping back to false,
+// or Custody being dropped/retargeted — would fall back to committing the
+// applicant's raw financials, the guarantor/co-applicant's identifiers, or
+// the executed lease's tenant name as PLAINTEXT (Sensitive false), collapse
+// the two classes' distinct populations into one (RetentionClass
+// misdirected), or reject at install (Custody naming an undeclared class).
 func TestPackage_ProfileAndUnderwritingPartiesAreSensitiveAndCustodied(t *testing.T) {
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -343,21 +393,44 @@ func TestPackage_ProfileAndUnderwritingPartiesAreSensitiveAndCustodied(t *testin
 		}
 	}
 
-	if got := len(Package.RetentionClasses); got != 1 {
-		t.Fatalf("expected exactly 1 retention class, got %d", got)
+	tn, ok := byName["tenantName"]
+	if !ok {
+		t.Fatalf("missing tenantName aspectType DDL")
 	}
-	rc := Package.RetentionClasses[0]
-	if rc.CanonicalName != "underwritingRecord" {
-		t.Fatalf("retention class CanonicalName = %q, want %q", rc.CanonicalName, "underwritingRecord")
+	if !tn.Sensitive {
+		t.Fatalf("tenantName must be Sensitive (it carries the executed lease's party name)")
 	}
-	if rc.Policy != pkgmgr.RetentionPolicyEraseOnExpiry {
-		t.Fatalf("retention class Policy = %q, want %q", rc.Policy, pkgmgr.RetentionPolicyEraseOnExpiry)
+	if tn.Custody.Kind != pkgmgr.CustodyKindRetentionClass {
+		t.Fatalf("tenantName Custody.Kind = %q, want %q", tn.Custody.Kind, pkgmgr.CustodyKindRetentionClass)
 	}
-	if rc.RetentionPeriod == "" {
-		t.Fatalf("retention class RetentionPeriod must be declared (it is declarative, but an unstated schedule is unauditable)")
+	if tn.Custody.RetentionClass != "executedLeaseRecord" {
+		t.Fatalf("tenantName Custody.RetentionClass = %q, want %q (NOT underwritingRecord — a different obligation and population)", tn.Custody.RetentionClass, "executedLeaseRecord")
 	}
-	if rc.Description == "" {
-		t.Fatalf("retention class Description must be declared")
+	if len(tn.PermittedCommands) != 1 || tn.PermittedCommands[0] != "SignLease" {
+		t.Fatalf("tenantName PermittedCommands = %v, want [SignLease]", tn.PermittedCommands)
+	}
+
+	if got := len(Package.RetentionClasses); got != 2 {
+		t.Fatalf("expected exactly 2 retention classes, got %d", got)
+	}
+	rcByName := map[string]pkgmgr.RetentionClassSpec{}
+	for _, rc := range Package.RetentionClasses {
+		rcByName[rc.CanonicalName] = rc
+	}
+	for _, name := range []string{"underwritingRecord", "executedLeaseRecord"} {
+		rc, ok := rcByName[name]
+		if !ok {
+			t.Fatalf("missing retention class %q", name)
+		}
+		if rc.Policy != pkgmgr.RetentionPolicyEraseOnExpiry {
+			t.Fatalf("retention class %s Policy = %q, want %q", name, rc.Policy, pkgmgr.RetentionPolicyEraseOnExpiry)
+		}
+		if rc.RetentionPeriod == "" {
+			t.Fatalf("retention class %s RetentionPeriod must be declared (it is declarative, but an unstated schedule is unauditable)", name)
+		}
+		if rc.Description == "" {
+			t.Fatalf("retention class %s Description must be declared", name)
+		}
 	}
 }
 

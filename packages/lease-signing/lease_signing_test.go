@@ -206,7 +206,16 @@ func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string
 // DEK cache / shredded-set is per-instance, not the key material).
 func lsDecryptAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, aspectKey string) map[string]any {
 	t.Helper()
-	holderKey := pkgmgr.RetentionClassKey("lease-signing", "underwritingRecord")
+	return lsDecryptAspectUnderClass(t, ctx, conn, aspectKey, "underwritingRecord")
+}
+
+// lsDecryptAspectUnderClass is lsDecryptAspect, parameterized on the
+// retention-class canonicalName the aspect is custodied under — the
+// executedLeaseRecord class's .tenantName is a SEPARATE holder from
+// underwritingRecord's .profile / .underwritingParties / .decidedProfileSnapshot.
+func lsDecryptAspectUnderClass(t *testing.T, ctx context.Context, conn *substrate.Conn, aspectKey, retentionClass string) map[string]any {
+	t.Helper()
+	holderKey := pkgmgr.RetentionClassKey("lease-signing", retentionClass)
 	envEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, holderKey+".piiKey")
 	if err != nil {
 		t.Fatalf("KVGet %s: %v", holderKey+".piiKey", err)
@@ -1915,7 +1924,14 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 		SubmittedAt:   "2026-06-18T16:00:00Z",
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+				{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, signEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1947,6 +1963,163 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 
 	// keep the identity-domain dependency reference resolved.
 	_ = identitydomain.Package
+}
+
+// TestSignLease_SnapshotsTenantName_EncryptedAtRest: an applicant with a real
+// .name (minted via CreateUnclaimedIdentity, so the read SignLease performs is
+// a genuine decrypt-on-read, not a fixture) gets a .tenantName aspect written
+// at signing — ciphertext at rest (the raw KV doc carries no plaintext name,
+// only {ct, nonce, keyId}), keyId naming the executedLeaseRecord retention
+// class (a DIFFERENT holder from .profile's underwritingRecord), and the
+// decrypted value reproducing {"value": <name>} — the shape
+// subject.tenantName.data.value reads downstream.
+func TestSignLease_SnapshotsTenantName_EncryptedAtRest(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "signtenant")
+
+	applicantKey := mintNamedIdentity(t, ctx, conn, cp, cons, "signTenant0001", "Alice Tenant")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+
+	if keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf(".tenantName aspect must not exist before SignLease")
+	}
+
+	signEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signtenant0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-18T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+				{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, signEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// Ciphertext at rest: the raw doc carries {ct, nonce, keyId}, no plaintext
+	// "value" field, and keyId names the executedLeaseRecord holder.
+	rawDoc := readDoc(t, ctx, conn, appKey+".tenantName")
+	rawData, _ := rawDoc["data"].(map[string]any)
+	if _, present := rawData["value"]; present {
+		t.Fatalf(".tenantName must be ciphertext at rest, got plaintext data: %v", rawData)
+	}
+	wantHolder := pkgmgr.RetentionClassKey("lease-signing", "executedLeaseRecord")
+	if got, _ := rawData["keyId"].(string); got != wantHolder {
+		t.Fatalf(".tenantName keyId = %q, want %q (the executedLeaseRecord holder, NOT underwritingRecord)", got, wantHolder)
+	}
+
+	decrypted := lsDecryptAspectUnderClass(t, ctx, conn, appKey+".tenantName", "executedLeaseRecord")
+	if got, _ := decrypted["value"].(string); got != "Alice Tenant" {
+		t.Fatalf("decrypted .tenantName.value = %q, want %q", got, "Alice Tenant")
+	}
+}
+
+// TestSignLease_NoApplicantName_WritesNoTenantNameAspect: an applicant with no
+// live .name aspect at all (the seedApplicant fixture, which seeds only
+// {state: claimed} — no CreateUnclaimedIdentity, no .name) still signs
+// successfully, and SignLease writes NO .tenantName aspect — the
+// executed-lease document degrades to the bare applicant key.
+func TestSignLease_NoApplicantName_WritesNoTenantNameAspect(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "signnoname")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBsignnoname1tHJKMNP")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+
+	signEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signnoname0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-18T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+				{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, signEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf(".tenantName must not be written when the applicant carries no live .name, got one")
+	}
+	// The signature still committed: signing degrades gracefully rather than
+	// failing outright when there is no name to snapshot.
+	if !keyExists(t, ctx, conn, appKey+".signature") {
+		t.Fatalf(".signature must still be written even when .tenantName is not")
+	}
+}
+
+// TestSignLease_ShreddedApplicant_SignsWithoutTenantName: ShredIdentityKey
+// submitted against the applicant BEFORE SignLease (the sign grant is still
+// live -- Weaver does not retract a dispatched task on a later shred). A
+// shredded identity's .piiKey aspect stays PRESENT with data.shredded=true
+// (privacy-base updates it in place rather than deleting it), so a plain
+// presence check is not enough: kv.Read of the SENSITIVE .name aspect itself
+// raises (ScriptFailed) once the key material is gone. SignLease's .piiKey
+// probe must catch this before ever reading .name, so the op still ACCEPTS
+// and writes .signature; it writes no .tenantName. Drives a REAL
+// ShredIdentityKey through the SAME Vault instance backing the applicant's
+// encrypted .name, mirroring TestLeaseDocInstance_ShreddedApplicant_OmitsNameNoFailure.
+func TestSignLease_ShreddedApplicant_SignsWithoutTenantName(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "signshred", Instance: "ls-signshred", Vault: v,
+	})
+	urgentCP, urgentCons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "signshredurg", Instance: "ls-signshredurg", Vault: v,
+		FilterSubjects: []string{"ops.urgent"},
+	})
+
+	applicantKey := mintNamedIdentity(t, ctx, conn, cp, cons, "signShredIdent1", "Shredded Signer")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+
+	submitShredIdentityKey(t, ctx, conn, urgentCP, urgentCons, applicantKey, "signShredOp0001")
+
+	signEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signshredsig01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-18T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+				{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, signEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if !keyExists(t, ctx, conn, appKey+".signature") {
+		t.Fatalf(".signature must be written even for a crypto-shredded applicant")
+	}
+	if keyExists(t, ctx, conn, appKey+".tenantName") {
+		t.Fatalf(".tenantName must not be written for a crypto-shredded applicant")
+	}
 }
 
 // setUnitLeasedStatus overwrites unitKey's .listing aspect with status:leased
@@ -2011,7 +2184,15 @@ func TestSignLease_RejectsUnitLeasedToRival(t *testing.T) {
 		SubmittedAt:   "2026-08-27T16:00:00Z",
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			// The unit-availability re-check walks appliesToUnit before the
+			// rejection fires; applicationFor is never reached.
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -2043,7 +2224,15 @@ func TestSignLease_RejectsTombstonedUnit(t *testing.T) {
 		SubmittedAt:   "2026-08-27T16:00:00Z",
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			// leaseapp_unit walks appliesToUnit before checking the target
+			// unit's liveness; applicationFor is never reached.
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -2122,7 +2311,14 @@ func signLease(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}, OptionalReads: []string{leaseAppKey + ".decision"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{leaseAppKey},
+			OptionalReads: []string{leaseAppKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: leaseAppKey, Relation: "appliesToUnit", Direction: "out"},
+				{Hub: leaseAppKey, Relation: "applicationFor", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

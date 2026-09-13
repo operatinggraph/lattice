@@ -6,14 +6,16 @@
 // Connects to a running Lattice NATS instance and checks that the lease-signing
 // package has been correctly installed. Asserts:
 //
-//	14 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
+//	15 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
 //	  WithdrawLeaseApplication/DecideLeaseApplication/SetApplicantProfile/
 //	  BackfillLeaseTerms);
 //	  applicantProfile / underwritingParties / applicationSignals (aspectType —
 //	  the three-way split SetApplicantProfile writes, up to one batch);
 //	  decidedProfileSnapshot (aspectType — the fair-housing preservation record
 //	  DecideLeaseApplication CREATE-ONLY-stamps on the FIRST decision of either
-//	  value); the externalTask wrapper triad
+//	  value); tenantName (aspectType — the executed lease's party-name
+//	  snapshot SignLease CREATE-ONLY-stamps at signing); the externalTask
+//	  wrapper triad
 //	  leaseServiceInstance/leaseServiceReply/leaseServiceDispatch (vertexType) +
 //	  leaseServiceOutcome/leaseServiceDispatchMarker (aspectType); the docGen
 //	  triad leaseDocInstance/leaseDocReply (vertexType) + leaseDocOutcome
@@ -24,7 +26,10 @@
 //	vertex exists, its .retentionPolicy names the class + policy, and all
 //	three sensitive aspect DDLs' .sensitive is true with .custody naming that
 //	holder key — the same shape as clinic-domain's clinicalRecord chain
-//	(retention-class-key-custody-design.md Fire 2 item 2). applicationSignals
+//	(retention-class-key-custody-design.md Fire 2 item 2). The SEPARATE
+//	executedLeaseRecord retention class + the same custody chain it confers on
+//	.tenantName alone (a different obligation and population from
+//	underwritingRecord). applicationSignals
 //	is asserted the OPPOSITE: no .sensitive, no .custody — the split's whole
 //	point (the three shipped lenses read it directly, unencrypted).
 //	1 package vertex + manifest aspect (name=lease-signing).
@@ -127,6 +132,7 @@ func main() {
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "decidedProfileSnapshot", class: "meta.ddl.aspectType", ops: []string{"DecideLeaseApplication"}},
+		{canonical: "tenantName", class: "meta.ddl.aspectType", ops: []string{"SignLease"}},
 		{canonical: "leaseServiceInstance", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseServiceInstance", "TombstoneSupersededLeaseServiceInstance"}},
 		{canonical: "leaseServiceReply", class: "meta.ddl.vertexType", ops: []string{"RecordLeaseServiceOutcome"}},
 		{canonical: "leaseServiceDispatch", class: "meta.ddl.vertexType", ops: []string{"RecordServiceDispatch"}},
@@ -252,6 +258,64 @@ func main() {
 					kind, holder, pkgmgr.CustodyKindRetentionClass, holderKey))
 			} else {
 				ok(ddlKey + ".custody names the underwritingRecord holder")
+			}
+		}
+	}
+
+	// The executedLeaseRecord retention class + the custody it confers on the
+	// executed lease's tenant-name snapshot (.tenantName) — a SEPARATE class
+	// from underwritingRecord (different obligation, different population).
+	// Same failure mode as above: a diff-apply that drops the holder vertex
+	// or the .custody aspect leaves .tenantName Sensitive with no resolvable
+	// holder, and SignLease would fail closed the moment it tries to snapshot
+	// a name.
+	execHolderKey := pkgmgr.RetentionClassKey("lease-signing", "executedLeaseRecord")
+	if env, err := pkgverify.GetEnvelope(ctx, coreKV, execHolderKey); err != nil {
+		fail(execHolderKey, fmt.Sprintf("executedLeaseRecord retention-class holder missing: %v", err))
+	} else if cls, _ := env["class"].(string); cls != pkgmgr.RetentionClassVertexType {
+		fail(execHolderKey+" class", fmt.Sprintf("got %q want %q", cls, pkgmgr.RetentionClassVertexType))
+	} else {
+		ok("executedLeaseRecord retention-class holder exists: " + execHolderKey)
+	}
+	execPolicyKey := execHolderKey + ".retentionPolicy"
+	if env, err := pkgverify.GetEnvelope(ctx, coreKV, execPolicyKey); err != nil {
+		fail(execPolicyKey, fmt.Sprintf("missing: %v", err))
+	} else {
+		data, _ := env["data"].(map[string]any)
+		name, _ := data["canonicalName"].(string)
+		policy, _ := data["policy"].(string)
+		if name != "executedLeaseRecord" || policy != pkgmgr.RetentionPolicyEraseOnExpiry {
+			fail(execPolicyKey, fmt.Sprintf("canonicalName=%q policy=%q want %q / %q",
+				name, policy, "executedLeaseRecord", pkgmgr.RetentionPolicyEraseOnExpiry))
+		} else {
+			ok(execPolicyKey + " declares executedLeaseRecord / " + pkgmgr.RetentionPolicyEraseOnExpiry)
+		}
+	}
+
+	if ddlKey, found := ddlKeyByCanonical["tenantName"]; !found {
+		fail("tenantName custody", "DDL not found above; skipping custody assertions")
+	} else {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, ddlKey+".sensitive"); err != nil {
+			fail(ddlKey+".sensitive", fmt.Sprintf("missing — tenantName would commit as plaintext: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			if v, _ := data["value"].(bool); !v {
+				fail(ddlKey+".sensitive", "value=false — tenantName would commit as plaintext")
+			} else {
+				ok(ddlKey + ".sensitive=true")
+			}
+		}
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, ddlKey+".custody"); err != nil {
+			fail(ddlKey+".custody", fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			kind, _ := data["kind"].(string)
+			holder, _ := data["holderKey"].(string)
+			if kind != pkgmgr.CustodyKindRetentionClass || holder != execHolderKey {
+				fail(ddlKey+".custody", fmt.Sprintf("kind=%q holderKey=%q want %q / %q",
+					kind, holder, pkgmgr.CustodyKindRetentionClass, execHolderKey))
+			} else {
+				ok(ddlKey + ".custody names the executedLeaseRecord holder")
 			}
 		}
 	}

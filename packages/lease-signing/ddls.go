@@ -32,6 +32,13 @@ import (
 //     / .applicationSignals data maps so the record of what the landlord
 //     actually saw at decision time survives a later SetApplicantProfile
 //     re-submission.
+//   - `tenantName` — the executed-lease party-name aspect-type DDL SignLease
+//     write-gates (the leaseapp vertexType script owns the write). SENSITIVE,
+//     custodied on its OWN executedLeaseRecord retention class (a different
+//     obligation and population from underwritingRecord). CREATE-ONLY-stamped
+//     once, at signing, snapshotting the applicant identity's own .name;
+//     absent when the applicant had no live .name to snapshot. See
+//     RetentionClasses().
 //   - `leaseServiceInstance` — CreateLeaseServiceInstance, the externalTask
 //     instanceOp Loom submits: mints the claim vertex vtx.service.<handle>,
 //     records its family + the providedTo link, and emits external.<adapter>.
@@ -72,6 +79,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		underwritingPartiesAspectDDL(),
 		applicationSignalsAspectDDL(),
 		decidedProfileSnapshotAspectDDL(),
+		tenantNameAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -246,7 +254,11 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
 				ExpectedOutcome: "Validates the application is alive, then re-verifies (independent of the dispatched grant) that the applied-to " +
 					"unit is still live and either not leased or leased on THIS application's own approved decision. Writes the .signature aspect " +
-					"{signedAt: <op.submittedAt, canonical UTC>} on the application (root data stays {} — D5). Emits leaseapp.leaseSigned{leaseAppKey}. " +
+					"{signedAt: <op.submittedAt, canonical UTC>} on the application (root data stays {} — D5). Also snapshots the applicant's " +
+					"identity's own .name onto a CREATE-ONLY .tenantName aspect (SENSITIVE, custodied on the executedLeaseRecord retention " +
+					"class) when a live, non-blank name is available; writes no .tenantName when the applicant has no live applicationFor " +
+					"link, no live .name, a blank name, or a crypto-shredded identity (ShredIdentityKey) — signing still succeeds, and the " +
+					"executed-lease document degrades to the bare applicant key. Emits leaseapp.leaseSigned{leaseAppKey}. " +
 					"Returns primaryKey. Rejects a non-existent application, one already signed (the .signature CreateOnly guard), or one whose unit " +
 					"is now tombstoned or already leased to a different applicant (UnitNoLongerAvailable).",
 			},
@@ -620,6 +632,59 @@ func decidedProfileSnapshotAspectDDL() pkgmgr.DDLSpec {
 					"applicationSignals":  map[string]any{"employmentVerified": true, "referenceCount": 2},
 				},
 				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.decidedProfileSnapshot, written CREATE-ONLY by DecideLeaseApplication on the first decision, DEK custodied on the SAME underwritingRecord retention-class holder as .profile. Never re-written by a later decision or SetApplicantProfile re-submission. Never projected by any lens.",
+			},
+		},
+	}
+}
+
+// tenantNameAspectDDL declares the .tenantName aspect (class tenantName) — the
+// applicant's display name as it stood at signing, snapshotted by SignLease
+// from the applicant identity's own .name (the leaseapp vertexType DDL owns
+// the script). Declaration-only.
+//
+// SENSITIVE, custodied on the executedLeaseRecord retention class
+// (RetentionClasses) — a SEPARATE class from underwritingRecord: a signed
+// lease's party name is a different obligation from the financial-
+// qualification record underwritingRecord's own Description scopes to
+// (.profile / .underwritingParties / .decidedProfileSnapshot), and folding an
+// unrelated obligation into that class would blur the population-separation
+// discipline that class's own Description argues for. After ShredIdentityKey
+// on the applicant, the executed lease still names its tenant, pseudonymized
+// against the applicant's other directly-identifying aspects (Contract #3
+// §3.10: "a contract record keeps its parties' names for as long as the
+// contract must be kept").
+func tenantNameAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "tenantName",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SignLease"},
+		Sensitive:         true,
+		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: executedLeaseRecordRetentionClass},
+		Description: "Executed-lease tenant-name aspect (lease-signing). Stored as vtx.leaseapp.<NanoID>.tenantName " +
+			"(class tenantName) = {value} — the applicant's display name as it stood at signing, snapshotted by " +
+			"SignLease from the applicant identity's own .name (walked via the leaseapp's own applicationFor link) " +
+			"the moment the application is signed. SENSITIVE, custodied on the executedLeaseRecord retention-class " +
+			"holder (RetentionClasses), NOT the applicant's identity: the executed lease is a legal document naming " +
+			"its tenant, so the name outlives the applicant's own erasure request — after ShredIdentityKey the lease " +
+			"still names its tenant, pseudonymized. CREATE-ONLY, written once by SignLease: no op ever re-writes it, " +
+			"so a later change to the applicant's own .name does not retroactively alter the name an already-executed " +
+			"lease carries. Absent when the applicant identity had no live, non-blank .name at signing, when the " +
+			"application carries no live applicant link, or when the applicant identity was crypto-shredded " +
+			"(ShredIdentityKey) before signing — the executed-lease document then degrades to the bare applicant " +
+			"key. Read via the shipped declared-egress path (subject.tenantName.data.value, the leaseDocument " +
+			"pattern's Params) at " +
+			"CreateLeaseDocInstance — never a plaintext read. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"value": "The applicant's display name, as it stood at signing. Never projected by any lens; reachable only through the declared sensitive-egress path.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "executed-lease tenant-name aspect",
+				Payload:         map[string]any{"value": "Alice Smith"},
+				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.tenantName, written CREATE-ONLY by SignLease, DEK custodied on the executedLeaseRecord retention-class holder. Never projected by any lens; egressed only via the declared subject.tenantName.data.value path.",
 			},
 		},
 	}

@@ -7,9 +7,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // aspect DDLs' Custody names.
 const underwritingRecordRetentionClass = "underwritingRecord"
 
-// RetentionClasses returns the package's one retention-class key holder: the
+// executedLeaseRecordRetentionClass is the canonicalName of the retention-class
+// key holder the .tenantName aspect DDL's Custody names.
+const executedLeaseRecordRetentionClass = "executedLeaseRecord"
+
+// RetentionClasses returns the package's two retention-class key holders: the
 // underwritingRecord class the .profile / .underwritingParties /
-// .decidedProfileSnapshot aspects' Custody names (mirrors
+// .decidedProfileSnapshot aspects' Custody names, and the executedLeaseRecord
+// class the .tenantName aspect's Custody names (mirrors
 // clinic-domain/retention.go — a package's own list of key holders,
 // addressable by canonicalName from any DDL this same package ships).
 func RetentionClasses() []pkgmgr.RetentionClassSpec {
@@ -46,6 +51,24 @@ func RetentionClasses() []pkgmgr.RetentionClassSpec {
 				"leaseApplicationsRead, landlordLeaseApplicationsRead) read directly. No Secure Lens exists over this " +
 				"class in this fire — the retained fields are captured + custodied, not yet decrypted back to any " +
 				"reader.",
+		},
+		{
+			CanonicalName:   executedLeaseRecordRetentionClass,
+			Policy:          pkgmgr.RetentionPolicyEraseOnExpiry,
+			RetentionPeriod: "P7Y",
+			Description: "Holds the applicant's tenant name as it stood at signing (.tenantName, snapshotted by SignLease " +
+				"from the applicant identity's own .name) — the party name an executed lease document must render. A " +
+				"SEPARATE class from underwritingRecord, deliberately: underwritingRecord's Description enumerates the " +
+				"financial-qualification aspects alone (.profile / .underwritingParties / .decidedProfileSnapshot), a " +
+				"different population and a different obligation — mixing the signed contract's party name into that " +
+				"class would blur the population-separation discipline underwritingRecord's own Description argues for. " +
+				"The obligation this class binds the package to (Contract #3 §3.10: \"a contract record keeps its " +
+				"parties' names for as long as the contract must be kept\"): a signed lease is a legal document naming " +
+				"its tenant, so the name outlives the applicant's own erasure request — after ShredIdentityKey on the " +
+				"applicant, the executed lease still names its tenant, pseudonymized against the applicant's other " +
+				"directly-identifying aspects. RetentionPeriod is DECLARATIVE: no automatic expiry timer exists yet, so " +
+				"P7Y states the controller's schedule rather than arming one. Destruction is the operator-driven " +
+				"ShredRetentionClassKey, and it reaches only records written under this declaration.",
 		},
 	}
 }

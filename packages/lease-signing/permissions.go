@@ -845,6 +845,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// to THIS application (unit leased to a rival, or tombstoned)
 				// before honoring an already-dispatched grant, scripts.go.
 				OptionalReads: []string{"{payload.leaseAppKey}.decision"},
+				// The script resolves both the applied-to unit (leaseapp_unit,
+				// the re-verification above) and the applicant (to snapshot
+				// .tenantName) via the application's OWN links, never a
+				// payload field -- the same forgery-resistance rationale as
+				// ReassignLeaseUnit's own walks, which this mirrors exactly.
+				// A descriptor-driven client walks both here rather than
+				// trusting a payload-templated hub it cannot form ahead of
+				// dispatch.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
+				},
 			},
 		},
 		// Engine legs — externalTask instanceOp/replyOp/dispatchOp — that
@@ -852,7 +864,36 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},
-		{OperationType: "CreateLeaseDocInstance"},
+		{
+			// Also an engine leg (operator/Scope:"any", granted above to
+			// Loom's relay actor alone via the script's own actor-guard) — no
+			// Presentation: it is never offered to a person, so S1's
+			// descriptorGaps / lint-package-standard's checkReadTemplates
+			// human-facing gate does not apply. InputSchema exists here only
+			// so `required` can GUARANTEE subjectKey is present, which is
+			// what lets Dispatch below template a key around it
+			// (lint-package-standard's checkReadTemplates: a template built
+			// around a payload field nothing guarantees present is an
+			// authoring error).
+			OperationType: "CreateLeaseDocInstance",
+			InputSchema: `{"type":"object","properties":` +
+				`{"instanceKey":{"type":"string"},"subjectKey":{"type":"string"},"adapter":{"type":"string"},` +
+				`"replyOp":{"type":"string"},"params":{"type":"object"}},` +
+				`"required":["instanceKey","subjectKey","adapter","replyOp"]}`,
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				// tenantName is a SUBJECT-own aspect the leaseDocument
+				// pattern templates into egressReads (Loom's
+				// inferExternalTaskReads), so it is a floored egress key, not
+				// a floored plain read (descriptor_floor.go's precedence
+				// note 3): its PRESENCE still authors a $sensitiveRef the
+				// same as an undeclared op would, and only its ABSENCE
+				// becomes tolerant (EgressAbsenceTolerant) instead of
+				// HydrationMiss — a signed application with no .tenantName
+				// snapshot renders the bare applicant key, rather than
+				// failing the whole dispatch.
+				OptionalReads: []string{"{payload.subjectKey}.tenantName"},
+			},
+		},
 		{OperationType: "RecordLeaseDocOutcome"},
 	}
 }

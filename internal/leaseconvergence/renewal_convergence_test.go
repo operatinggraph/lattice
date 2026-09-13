@@ -143,7 +143,13 @@ func (h *harness) approveWithTenancy(appKey, applicantKey, unitKey string) {
 
 	signReply := h.submitOp("SignLease", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"leaseAppKey": appKey,
-	}, &processor.ContextHint{Reads: []string{appKey}})
+	}, &processor.ContextHint{
+		Reads: []string{appKey},
+		Enumerations: []processor.EnumerationHint{
+			{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+			{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+		},
+	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, signReply.Status, "SignLease: %+v", signReply.Error)
 
 	decideReply := h.submitOp("DecideLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{

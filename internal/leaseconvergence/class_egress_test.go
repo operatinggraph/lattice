@@ -27,10 +27,14 @@ import (
 // aspect (.profile, custodied on lease-signing's underwritingRecord retention
 // class) can be templated at the top level of the params.
 //
-// No shipped op can do that: CreateLeaseServiceInstance pins its subject to an
-// identity and CreateLeaseDocInstance assembles its document params itself with
-// no resolve_subject_params, so the live chain for a retention-class holder has
-// no consumer in the shipped corpus for this test to drive.
+// The TOP-LEVEL case now has a shipped consumer too (CreateLeaseDocInstance,
+// via the leaseDocument pattern's "tenantName": "subject.tenantName.data.value"
+// template), but the NESTED case below (`nest` set) does not: leasedoc_scripts.go
+// templates tenantName at the top level of params only and never nests it into
+// doc{}, by design (retention-class-egress-envelope-design.md §3.5(a)/(b)), so
+// this fixture stays the only consumer in the shipped corpus that can drive a
+// nested marker for TestLeaseConvergence_ClassEgress_NestedTemplate_NeverReachesVendor
+// below.
 //
 // `nest` selects the second mode: the params resolve at the top level exactly as
 // in mode one, and the resolved map — markers and all — is then emitted one
@@ -281,14 +285,13 @@ func (h *harness) watchBridgeReply(externalRef string) *bridgeReplyWatch {
 	return w
 }
 
-// classEgressHarness boots the standard all-engines harness with the
-// retentionClassKeyEnvelope lens projected (the bridge's envelope read model for
-// a retention-class holder) and the fixture package installed after the real
-// chain.
+// classEgressHarness boots the standard all-engines harness (the
+// retentionClassKeyEnvelope lens -- the bridge's envelope read model for a
+// retention-class holder -- is part of its default set, startRefractor) with
+// the fixture package installed after the real chain.
 func classEgressHarness(t *testing.T) *harness {
 	t.Helper()
 	return newHarness(t,
-		withExtraLenses("retentionClassKeyEnvelope"),
 		withExtraPackages(classEgressFixturePackage()))
 }
 

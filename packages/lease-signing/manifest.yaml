@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.29
+version: 0.32.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -64,6 +64,8 @@ declares:
     - canonicalName: applicationSignals
       class: meta.ddl.aspectType
     - canonicalName: decidedProfileSnapshot
+      class: meta.ddl.aspectType
+    - canonicalName: tenantName
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType
@@ -233,5 +235,8 @@ declares:
     - operationType: RecordLeaseDocOutcome
   retentionClasses:
     - canonicalName: underwritingRecord
+      policy: eraseOnExpiry
+      retentionPeriod: P7Y
+    - canonicalName: executedLeaseRecord
       policy: eraseOnExpiry
       retentionPeriod: P7Y

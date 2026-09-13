@@ -3,6 +3,8 @@
 package leaseconvergence_test
 
 import (
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +41,13 @@ func (h *harness) driveApplicantSteps(appKey, applicantKey string) {
 
 	signReply := h.submitOp("SignLease", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"leaseAppKey": appKey,
-	}, &processor.ContextHint{Reads: []string{appKey}})
+	}, &processor.ContextHint{
+		Reads: []string{appKey},
+		Enumerations: []processor.EnumerationHint{
+			{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+			{Hub: appKey, Relation: "applicationFor", Direction: "out"},
+		},
+	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, signReply.Status, "SignLease: %+v", signReply.Error)
 }
 
@@ -177,6 +185,35 @@ func TestLeaseConvergence_DrainThenAssert_SteadyState(t *testing.T) {
 	// exactly one charge each on the Fake adapters, and exactly two .outcome aspects.
 	require.Equal(t, 2, h.countOutcomeAspects(applicantID),
 		"exactly two service outcomes (one bgcheck + one payment) recorded via the bridge")
+
+	// The executed-lease document the live bridge rendered actually names its
+	// tenant: SignLease snapshotted .tenantName from the seeded applicant's own
+	// .name ("Lease Applicant", harness.seedApplicant), the leaseDocument
+	// pattern templated it at the top level of the docGen step's params, and
+	// FakeDocGen's renderer reads it from the unwrapped flat params ahead of
+	// doc.Applicant (docgen_adapter.go renderLeaseDocument). By this point in
+	// the test missing_leaseDoc/missing_leaseDocAttach are already asserted
+	// false (assertSteadyState's gapColumns), so the claim's .outcome aspect
+	// and the anchored bytes both exist.
+	svcKey := h.docGenServiceKeyFor(appID)
+	require.NotEmptyf(t, svcKey, "a docGen service instance must be providedTo leaseapp %s", appID)
+	outcome := h.aspectData(svcKey, "outcome")
+	require.NotNilf(t, outcome, "%s.outcome aspect must carry the docGen outcome", svcKey)
+	require.Equal(t, "completed", outcome["status"], "docGen outcome status")
+	storeName, _ := outcome["storeName"].(string)
+	require.NotEmpty(t, storeName, "docGen outcome must carry the anchored artifact's storeName")
+
+	rc, _, err := h.conn.ObjectGet(h.ctx, bootstrap.CoreObjectsBucket, storeName)
+	require.NoError(t, err, "ObjectGet the rendered executed-lease artifact")
+	body, err := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	require.NoError(t, err)
+	content := string(body)
+
+	require.Truef(t, strings.Contains(content, "Tenant:") && strings.Contains(content, "Lease Applicant"),
+		"the rendered document must carry a Tenant line naming the seeded applicant's name (\"Lease Applicant\"); content:\n%s", content)
+	require.Truef(t, strings.Contains(content, "Tenant ID:") && strings.Contains(content, applicantKey),
+		"the rendered document must carry a Tenant ID line naming the applicant key %s; content:\n%s", applicantKey, content)
 }
 
 // TestLeaseConvergence_ListingLeasedOnApproval proves the listing-status-on-approval

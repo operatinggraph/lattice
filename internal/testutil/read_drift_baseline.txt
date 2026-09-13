@@ -208,8 +208,8 @@ walk	BackfillAppointmentSite	vtx.appointment.<id> atSite out
 walk	BackfillAppointmentSite	vtx.appointment.<id> withProvider out
 walk	BackfillAppointmentSite	vtx.provider.<id> practicesAt out
 # BackfillLeaseTerms resolves its unit the same way SignLease/DecideLeaseApplication
-# already do (leaseapp_unit(), scripts.go) — mirrors SignLease's own undeclared
-# walk below; an operator-only manual repair op with no OpMeta/Dispatch descriptor.
+# do (leaseapp_unit(), scripts.go); an operator-only manual repair op with no
+# OpMeta/Dispatch descriptor to declare the walk in.
 walk	BackfillLeaseTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	BackfillVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	BackfillVisitSeriesSite	vtx.visitseries.<id> atSite out
@@ -348,7 +348,6 @@ walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> withProvider out
 walk	Settle	vtx.leaseapp.<id> appliesToUnit out
 walk	SettleStaleTab	vtx.tab.<id> chargedTo out
-walk	SignLease	vtx.leaseapp.<id> appliesToUnit out
 walk	StartVisitSeries	vtx.building.<id> containedIn out
 walk	StartVisitSeries	vtx.provider.<id> practicesAt out
 walk	TombstoneSession	vtx.building.<id> containedIn out

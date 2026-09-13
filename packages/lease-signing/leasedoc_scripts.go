@@ -1,5 +1,9 @@
 package leasesigning
 
+import (
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
+)
+
 // leaseDocInstanceDDLScript is the docGen externalTask instanceOp. It mirrors
 // leaseServiceInstanceDDLScript's claim-minting mechanics (vtx.service.<handle>,
 // envelope class + instanceOf type authority, providedTo convergence link,
@@ -17,17 +21,28 @@ package leasesigning
 //     never touches the graph or a lens. Absent optional fields are omitted
 //     from doc{}; the vendor's renderer degrades exactly as the display path
 //     does (an unnamed applicant renders by bare key, an unmanaged unit names
-//     no landlord). The applicant's and landlord's .name aspects are
-//     deliberately NOT read here (sensitive-param-egress design §3.6's
-//     emission guard): a link-discovered sensitive aspect has no
-//     contextHint.egressReads declaration path (Loom cannot pre-declare a key
-//     this DDL only resolves at execute time via live_link_target /
-//     live_link_source), so a plaintext read here would be structurally
-//     rejected as sensitive-plaintext-into-external-event. The vendor renders
-//     both parties by their bare identity key (the same degrade this DDL
-//     already used for a shredded/unprovisioned applicant) until a follow-on
-//     extends egress-safe reads to link-discovered aspects.
+//     no landlord). The landlord's .name is deliberately NOT read here — only
+//     the landlord's bare key resolves: a link-discovered sensitive aspect
+//     has no contextHint.egressReads declaration path (Loom cannot
+//     pre-declare a key this DDL only resolves at execute time via
+//     live_link_target / live_link_source), so a plaintext read here would
+//     be structurally rejected as sensitive-plaintext-into-external-event.
+//
+// The TENANT's name is different: SignLease snapshots it onto the SUBJECT
+// itself (the leaseapp's own SENSITIVE .tenantName aspect, custodied on the
+// executedLeaseRecord retention class — scripts.go's SignLease branch), so
+// it IS a subject-own aspect Loom's inferExternalTaskReads can pre-declare
+// under contextHint.egressReads, exactly like backgroundCheck's subject.name/
+// subject.dob templates. The leaseDocument pattern's Params therefore
+// templates "tenantName": "subject.tenantName.data.value" at the TOP LEVEL
+// (never into doc{} — the unwrap substitutes markers at the top level of
+// params only, and the docGen adapter reads tenantName from the unwrapped
+// map, retention-class-egress-envelope-design.md §3.5(a)); this DDL resolves
+// it via orchestration-base's resolve_subject_params, dropping the template
+// first when the application carries no .tenantName snapshot (absent —
+// tolerated by the descriptor floor — rather than a failed dispatch).
 const leaseDocInstanceDDLScript = `
+` + orchestrationbase.ResolveSubjectParamsHelper + `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -221,16 +236,16 @@ def execute(state, op):
         applicant = live_link_target(subject_key, "applicationFor")
         if applicant != None:
             doc["applicant"] = applicant
-            # tenantName is deliberately NOT assembled here: the identity's
-            # display name is a sensitive aspect, and this key is discovered
-            # at execute time from the applicationFor link — Loom cannot
-            # pre-declare it in contextHint.egressReads, so a plaintext
-            # kv.Read/aspect_data of it is rejected by the commit-path
-            # emission guard (sensitive-param-egress design §3.6: no
-            # sensitive plaintext may reach an external.* event). The vendor
-            # renders a nameless document (the same degrade this DDL already
-            # used for a shredded/unprovisioned applicant) until a follow-on
-            # extends egress-safe reads to link-discovered aspects.
+            # The applicant identity's own .name is NOT read here: it is
+            # discovered at execute time from the applicationFor link, and
+            # Loom cannot pre-declare a link-discovered key in
+            # contextHint.egressReads, so a plaintext kv.Read/aspect_data of
+            # it would be rejected by the commit-path emission guard (no
+            # sensitive plaintext may reach an external.* event). The TENANT
+            # name the vendor actually renders comes from a different path
+            # below (params.tenantName, the leaseapp's OWN .tenantName
+            # snapshot) — this doc["applicant"] bare key is what a nameless
+            # render still falls back to when that snapshot is absent.
 
         unit = live_link_target(subject_key, "appliesToUnit")
         if unit != None:
@@ -255,11 +270,51 @@ def execute(state, op):
         put_number(doc, "termsLeaseTermMonths", terms, "leaseTermMonths")
         put_number(doc, "termsRequestedRent", terms, "requestedRent")
 
+        # tenantName resolves through orchestration-base's shared helper,
+        # exactly like leaseServiceInstanceDDLScript resolves backgroundCheck's
+        # name/dob: the leaseDocument pattern templates it as
+        # "subject.tenantName.data.value" at the TOP LEVEL of Params, Loom's
+        # inferExternalTaskReads declares subject_key + ".tenantName" under
+        # contextHint.egressReads, and step 4 hydrates it as a $sensitiveRef
+        # marker the docGen adapter opens at the bridge's egress boundary —
+        # never plaintext here. A signed application carrying no .tenantName
+        # snapshot must not fail the dispatch (SignLease already degraded to
+        # no snapshot for exactly this case), so the template is dropped
+        # BEFORE resolution when the aspect key reads absent. A TOMBSTONED
+        # .tenantName is never something this branch has to handle: hydrating
+        # a deleted sensitive aspect under egressReads is refused at step 4
+        # (sensitive_decrypt.go, "read deleted sensitive aspect") before the
+        # op's script ever runs, so a tombstoned snapshot is a refused
+        # dispatch, by design, not a case this script degrades. The drop is
+        # keyed on the value actually being the template — a literal
+        # "tenantName" param (never emitted by the shipped pattern, but not
+        # this script's business to assume) is passed through unresolved
+        # rather than probed or dropped.
+        raw_params = dict(p.params) if hasattr(p, "params") and p.params != None else {}
+        tenant_name_template = raw_params.get("tenantName")
+        if type(tenant_name_template) == type("") and tenant_name_template.startswith("subject."):
+            # read-posture: (f) declared in contextHint.egressReads by Loom's
+            # inferExternalTaskReads (internal/loom/externaltask_params.go);
+            # its ABSENCE is known-absent via the op-meta's descriptor floor
+            # (OptionalReads), so a signed application with no snapshot still
+            # renders.
+            tenant_name_node = kv.Read(subject_key + ".tenantName")
+            if tenant_name_node == None:
+                raw_params.pop("tenantName")
+        params = resolve_subject_params(raw_params, subject_key)
+        # family_of already validated + trimmed fam; re-pin it post-resolve so
+        # a caller's untrimmed family value can never diverge from the
+        # validated one (mirrors leaseServiceInstanceDDLScript).
+        params["family"] = fam
+        params["leaseAppKey"] = subject_key
+        params["doc"] = doc
+
         # Emit the external.<adapter> event off this op's transactional outbox.
         # The bare handle is the opaque correlation token (instanceKey ==
         # externalRef == idempotencyKey). dispatchOp is the shared pending-marker
         # op the bridge posts if its adapter returns Pending; params carry the
-        # resolved doc fields to the vendor.
+        # resolved doc fields plus the (possibly $sensitiveRef-marked)
+        # top-level tenantName to the vendor.
         event_data = {
             "instanceKey":    handle,
             "adapter":        adapter,
@@ -267,7 +322,7 @@ def execute(state, op):
             "dispatchOp":     "RecordServiceDispatch",
             "externalRef":    handle,
             "idempotencyKey": handle,
-            "params":         {"family": fam, "leaseAppKey": subject_key, "doc": doc},
+            "params":         params,
         }
         events = [{"class": "external." + adapter, "data": event_data}]
         return {"mutations": mutations, "events": events,

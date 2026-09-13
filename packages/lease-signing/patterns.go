@@ -28,7 +28,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     parks for the bridge's RecordLeaseDocOutcome. The vendor adapter renders
 //     the executed-lease artifact and writes its bytes to the object store;
 //     the anchor (AttachObject) is a separate Weaver directOp off the
-//     missing_leaseDocAttach gap, not a pattern step.
+//     missing_leaseDocAttach gap, not a pattern step. tenantName is
+//     subject-templated at the TOP LEVEL of Params (subject.tenantName.data.
+//     value) — the leaseapp's own SENSITIVE .tenantName aspect, resolved to a
+//     $sensitiveRef marker the bridge's docGen adapter opens at the egress
+//     boundary (retention-class-egress-envelope-design.md §3.5(a)); absent
+//     when the application carries no snapshot, tolerated by the descriptor
+//     floor rather than failing the dispatch.
 //
 // The Adapter names (backgroundCheck, stripe, docGen) match the bridge's
 // registered adapters (cmd/bridge/main.go).
@@ -82,7 +88,17 @@ func LoomPatterns() []pkgmgr.LoomPatternSpec {
 				Adapter:    "docGen",
 				InstanceOp: "CreateLeaseDocInstance",
 				ReplyOp:    "RecordLeaseDocOutcome",
-				Params:     map[string]any{"family": "docGen"},
+				// tenantName is subject-templated at the TOP LEVEL of Params,
+				// beside family -- never into doc -- because the unwrap
+				// substitutes markers at the top level of params only and the
+				// docGen adapter reads tenantName from the unwrapped map
+				// (retention-class-egress-envelope-design.md §3.5(a)). The
+				// leaseapp's own .tenantName aspect is SENSITIVE, so Loom's
+				// inferExternalTaskReads declares it under egressReads, not
+				// reads, and CreateLeaseDocInstance drops the template when
+				// the aspect is absent (the descriptor floor tolerates that
+				// absence at hydrate) rather than failing the dispatch.
+				Params: map[string]any{"family": "docGen", "tenantName": "subject.tenantName.data.value"},
 			}},
 		},
 	}
