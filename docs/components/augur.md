@@ -101,13 +101,15 @@ hidden operational state:
 
 ```
 vtx.augurProposal.<NanoID>
-  .gap        { targetId, entityId, gapColumn, trigger }
-  .proposed   { action, params }
+  .gap        { targetId, entityId, gapColumn, trigger, model }
+              # trigger ∈ { unplannable, exhausted, promotion }
+  .proposed   { action, params, steps }  # steps: the ordered plan (≤ 8); action/params mirror steps[0]
   .rationale  { text }
-  .confidence { score }                 # 0..1, self-reported by the model
+  .confidence { score }                 # 0..1, self-reported by the model (1.0 on a promotion)
   .provenance { model, promptHash, catalogHash, reasonedAt }
-  .review     { state, reviewedAt, dispatchedAt }
+  .review     { state, invalidReason, reviewedAt, dispatchedAt, leg }
               # state ∈ { pending, approved, rejected, dispatched, invalid, superseded }
+              # leg = legs dispatched so far; approved stays until leg == len(steps)
 
 lnk.augurProposal.<id>.forCandidate.<type>.<entityId>
 lnk.augurProposal.<id>.forTarget.meta.<weaverTargetId>
@@ -116,6 +118,16 @@ lnk.augurProposal.<id>.reviewedBy.identity.<reviewerId>   # stamped on approve /
 
 Operators read proposals through the `augur-proposals` lens read-model (P5); Loupe, the inspector
 exception, may read the vertex directly.
+
+A **plan-shaped** proposal (several steps) dispatches leg by leg: each leg is one `augurDispatch`
+episode under a leg-scoped requestId, the `RecordProposalDispatch` flip advances `review.leg`, and the
+proposal flips `dispatched` on the last leg; legs are ordered, each fires at most once, and a leg's
+success is not verified by the dispatch (a rejected leg leaves the origin gap violating, which
+re-escalates). A **promotion** proposal is Weaver-authored (no model call): a `mode:"planned"` gap
+whose `__effect` window for one actionRef is complete with every episode closed makes Weaver submit
+`RecordPromotionProposal` once per (target, gap, actionRef); its candidate is the target's own meta
+vertex, its action `promotePlaybook`, and it is never dispatched — an approval is a human-ratified
+recommendation to promote the chain to a static playbook entry.
 
 ---
 
@@ -139,8 +151,9 @@ The frozen surface is an **additive, opt-in `augur` block** on the Weaver target
 ```
 
 A target with **no `augur` block** behaves exactly as before — it fails closed on an unplannable gap.
-The rest is package data: the `augur` package declares the proposal vertex DDL, the four operations
-(`CreateAugurReasoningClaim`, `RecordProposal`, `ReviewProposal`, `RecordProposalDispatch`), the
+The rest is package data: the `augur` package declares the proposal vertex DDL, the five operations
+(`CreateAugurReasoningClaim`, `RecordProposal`, `ReviewProposal`, `RecordProposalDispatch`,
+`RecordPromotionProposal`), the
 `augur-proposals` read lens, the `augurDispatch` convergence target, and the reasoning pattern. The
 bridge `augur` adapter is bridge-registry config. No kernel change.
 
@@ -170,6 +183,8 @@ bridge `augur` adapter is bridge-registry config. No kernel change.
 | Proposal-scoped deterministic requestId (collapse-only under reclaim) | ✅ Built |
 | Autonomy dial (`augur.autoApply` allow-list + confidence gate) | 🔒 Designed, parsed + validated, **Andrew-gated** — human-in-the-loop ships until ratified |
 | `exhausted`-trigger escalation (spent retry budget → L3) | ✅ Built — shares `augurEscalation` and the `escalateGap` seam with `unplannable`; released at the leg boundary or on an un-park; wired in `lease-signing` (screening gaps) |
+| Plan-shaped proposals — ordered `steps`, validated per step, dispatched leg by leg under leg-scoped requestIds | ✅ Built — `.review.leg` is the program counter; the mark pins the leg (`proposalLeg`) and releases when the row's `dispatchLeg` passes it, at lane 1 and at the sweep |
+| Playbook-promotion proposal — a clean, full `__effect` window on a planned gap's actionRef → `RecordPromotionProposal` into the review queue | ✅ Built — Weaver-authored, once per (target, gap, actionRef), never dispatched; no production goal-mode target exists yet, so it is fixture-exercised |
 
 **What ships today:** a stuck, unplannable gap becomes a reasoned, human-reviewed proposal that, once
 approved, dispatches through the existing Weaver machinery. **Zero autonomous mutation** under the
