@@ -59,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-13 · `64ee009c` · Three twice-seen `_packages.md` dossier classes become CI gates — `lint-link-target-count`, the retry-cap rule in `lint-gap-column-declaration`, `lint-loupe-console-grants` (one live gap pinned); dossier 14 → 12.
 - 2026-09-13 · `7d9111b7` · Café's FE gates reach their siblings — wellness `esc()` escapes both quotes, goja-pinned; the `KNOWN_CATALOG_OPS` coverage test lands in wellness + clinic as a closed-set classifier; two dossier classes retire.
 - 2026-09-13 · `3658dadb` · A kernel root is not a member — `CreateBooking`/`JoinWaitlist` refuse a `data.protected` booker (`ProtectedBooker`) before any slot cell lands on its hub; 0.27.1 refreshed live, both ops refuse the admin.
 - 2026-09-13 · `fc2c1f68` · 15 appointments carry no site — `BackfillAppointmentSite` counts LIVE sites (a `practicesAt` link to a tombstoned building is not a second site); 0.34.26 refreshed live, the replay backfilled all 15.
