@@ -509,3 +509,60 @@ func TestCryptoSha256NanoID_Deterministic(t *testing.T) {
 		}
 	}
 }
+
+// --- time.rfc3339_add_months ---
+
+// TestTimeRFC3339AddMonths_ClampsAndCarries pins calendar-month addition: the
+// year/month advance, the day-of-month clamps to the target month's length
+// (never a rollover), the clock time survives, the result is canonical UTC,
+// and a negative count subtracts.
+func TestTimeRFC3339AddMonths_ClampsAndCarries(t *testing.T) {
+	mod := timeModule()
+	fn, err := mod.Attr("rfc3339_add_months")
+	if err != nil || fn == nil {
+		t.Fatalf("time.rfc3339_add_months attr: %v", err)
+	}
+	thread := &starlarklib.Thread{Name: "test"}
+	cases := []struct {
+		in     string
+		months int
+		want   string
+	}{
+		{"2026-01-31T17:01:31Z", 1, "2026-02-28T17:01:31Z"},        // clamps, never rolls into March
+		{"2028-01-31T00:00:00Z", 1, "2028-02-29T00:00:00Z"},        // leap year keeps the 29th
+		{"2026-01-31T00:00:00Z", 2, "2026-03-31T00:00:00Z"},        // computed from the origin, no drift through February
+		{"2025-09-06T17:01:31Z", 12, "2026-09-06T17:01:31Z"},       // a 12-month lease term
+		{"2026-05-31T23:09:08Z", 4, "2026-09-30T23:09:08Z"},        // May 31 + 4 = Sep 30
+		{"2026-11-15T08:00:00Z", 3, "2027-02-15T08:00:00Z"},        // year carry
+		{"2026-03-31T00:00:00Z", -1, "2026-02-28T00:00:00Z"},       // negative subtracts, clamps
+		{"2026-01-15T00:00:00Z", -1, "2025-12-15T00:00:00Z"},       // negative year carry
+		{"2026-06-04T23:00:00+09:00", 0, "2026-06-04T14:00:00Z"},   // offset normalized to UTC
+		{"2026-06-04T14:00:00.123456Z", 1, "2026-07-04T14:00:00Z"}, // fractional dropped
+	}
+	for _, tc := range cases {
+		res, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(tc.in), starlarklib.MakeInt(tc.months)}, nil)
+		if err != nil {
+			t.Fatalf("time.rfc3339_add_months(%q, %d): %v", tc.in, tc.months, err)
+		}
+		got, _ := res.(starlarklib.String)
+		if string(got) != tc.want {
+			t.Fatalf("time.rfc3339_add_months(%q, %d) = %q, want %q", tc.in, tc.months, string(got), tc.want)
+		}
+	}
+}
+
+// TestTimeRFC3339AddMonths_Rejects pins the two argument-shape refusals: a
+// non-RFC3339 instant and a non-integer month count.
+func TestTimeRFC3339AddMonths_Rejects(t *testing.T) {
+	mod := timeModule()
+	fn, _ := mod.Attr("rfc3339_add_months")
+	thread := &starlarklib.Thread{Name: "test"}
+	for _, bad := range []string{"not-a-time", "2026-06-04", ""} {
+		if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(bad), starlarklib.MakeInt(1)}, nil); err == nil {
+			t.Fatalf("time.rfc3339_add_months(%q, 1) expected error", bad)
+		}
+	}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String("2026-06-04T14:00:00Z"), starlarklib.String("1")}, nil); err == nil {
+		t.Fatal("time.rfc3339_add_months(s, \"1\") expected error for a string month count")
+	}
+}

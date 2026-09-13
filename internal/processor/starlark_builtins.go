@@ -135,12 +135,15 @@ func cryptoModule() *starlarkstruct.Struct {
 //   - time.rfc3339_add(s, duration) → s parsed as RFC3339, advanced by a Go
 //     duration string (time.ParseDuration, e.g. "720h", "90s"), re-emitted in
 //     canonical UTC form. A negative duration ("-1h") subtracts.
+//   - time.rfc3339_add_months(s, months) → s advanced by a whole number of
+//     calendar months, the day-of-month clamped to the target month's length
+//     (Jan 31 + 1 = Feb 28/29), clock time preserved; canonical UTC form.
 //   - time.weekday(s) → int 0..6, the UTC weekday of s (Sunday=0 … Saturday=6,
 //     matching Go's time.Weekday).
 //   - time.seconds_of_day(s) → int 0..86399, the UTC seconds-since-midnight of
 //     s (h*3600 + m*60 + sec).
 //
-// All four are internal/starlarksandbox.TimeBuiltins — pure (deterministic,
+// All five are internal/starlarksandbox.TimeBuiltins — pure (deterministic,
 // no I/O, no wall-clock read): the output is a function of the input
 // string(s) only, the host clock is never consulted. The canonical form
 // matches the format the Refractor populates `$now` with

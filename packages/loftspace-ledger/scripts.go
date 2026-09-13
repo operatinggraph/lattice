@@ -2,14 +2,16 @@ package loftspaceledger
 
 import "fmt"
 
-// recurringChargePeriod is the validity span DebitAccount stamps onto a
-// period="monthly" clause's .status.chargeValidUntil as
-// chargeValidUntil = postedAt + recurringChargePeriod (a Go duration string,
-// time.ParseDuration form) — the Fire V3 recurring-clause analog of
-// lease-signing's bgcheckFreshnessWindow (freshness_window.go). Baked into
+// RecurringChargePeriod is the validity span DebitAccount stamps onto an
+// UNTERMED period="monthly" clause's .status.chargeValidUntil as
+// chargeValidUntil = postedAt + RecurringChargePeriod (a Go duration string,
+// time.ParseDuration form) — the recurring-clause analog of lease-signing's
+// bgcheckFreshnessWindow (freshness_window.go). A clause whose .terms carry
+// validFrom/validUntil never uses it: its due dates walk the calendar-month
+// anniversary grid from validFrom (see the script). Baked into
 // transactionDDLScript at package-init time via fmt.Sprintf, same pattern as
 // leaseServiceReplyDDLScript.
-const recurringChargePeriod = "720h"
+const RecurringChargePeriod = "720h"
 
 // accountDDLScript handles LoftspaceCreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
@@ -396,6 +398,27 @@ def vertex_alive(state, key):
 SELF_CREDIT_PAGE_LIMIT = 50
 SELF_CREDIT_MAX_PAGES = 10
 
+def period_index(valid_from, due):
+    # The index k of the calendar-month period of a termed clause that a
+    # recorded due date belongs to: the LARGEST k >= 0 with
+    # rfc3339_add_months(valid_from, k) <= due. Anniversaries are always
+    # computed from valid_from (never by iterating +1 month), so Jan 31 ->
+    # Feb 28 -> Mar 31 never drifts. year/month arithmetic on the canonical
+    # RFC3339 strings gives the candidate; day-of-month clamping can put the
+    # candidate one step off in either direction, so it is corrected once.
+    if due == None or due < valid_from:
+        return 0
+    k = (int(due[0:4]) - int(valid_from[0:4])) * 12 + (int(due[5:7]) - int(valid_from[5:7]))
+    if k < 0:
+        k = 0
+    if time.rfc3339_add_months(valid_from, k) > due:
+        k = k - 1
+    elif time.rfc3339_add_months(valid_from, k + 1) <= due:
+        k = k + 1
+    if k < 0:
+        k = 0
+    return k
+
 def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -523,11 +546,30 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
                 fail("AmountMismatch: payload amountCents disagrees with clause " + clause_key + "'s authoritative amountCents")
             amount_cents = clause_amount
 
-            # period (Fire V3): the clauseSatisfaction playbook always
-            # templates row.period alongside clauseRef, so a Weaver-dispatched
-            # charge always carries it; a hand-submitted clauseRef with no
-            # period falls through to the Fire V1/V2 one-time-completion path.
+            # period: the clauseSatisfaction playbook always templates
+            # row.period alongside clauseRef, so a Weaver-dispatched charge
+            # always carries it; a hand-submitted clauseRef with no period
+            # falls through to the one-time-completion path.
             clause_period = optional_string(p, "period")
+
+            # The clause's term (validFrom/validUntil on .terms, both or
+            # neither) and its recorded due date (.status.chargeValidUntil).
+            # Read from the clause's own record, like amountCents above,
+            # never from the payload. CreateClause writes .status
+            # unconditionally, so a termed clause whose .status is not in
+            # state was dispatched without declaring it (the playbook lists
+            # it as an OptionalRead): a due date read from nothing would
+            # rewind the clause to its first period and re-bill every period
+            # since, so that fails closed. An untermed clause never reads
+            # the due date and keeps accepting the bare declaration.
+            clause_valid_from = state[terms_key].data.get("validFrom")
+            clause_valid_until = state[terms_key].data.get("validUntil")
+            status_key = clause_key + ".status"
+            clause_due = None
+            if status_key in state and vertex_alive(state, status_key):
+                clause_due = state[status_key].data.get("chargeValidUntil")
+            elif clause_valid_from != None:
+                fail("InvalidState: clause " + clause_key + "'s .status was not hydrated; a termed clause's charge must declare it in optionalReads")
 
     tx_id = nanoid.new()
     tx_key = "vtx.transaction." + tx_id
@@ -559,18 +601,17 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
         mutations.append(make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}))
 
-        # clauseValidUntil is stamped UNCONDITIONALLY, regardless of which
+        # chargeValidUntil is stamped UNCONDITIONALLY, regardless of which
         # branch below fires. .terms.data.period exists but is deliberately
-        # not read here (only amountCents is, above, for money provenance) —
-        # clause_period stays a caller-supplied signal, not a verified one;
-        # cross-checking it is out of scope for the amountCents fix and the
-        # unconditional stamp below already closes the dangerous mismatch
-        # direction for free (see next paragraph). A hand-submitted
-        # DebitAccount (this is an ordinary operator-granted op, not
-        # Weaver-exclusive) could in principle pass a period that disagrees
-        # with the clause's real archetype. Always stamping chargeValidUntil
-        # closes the dangerous direction of that mismatch for free: the
-        # clauseSatisfaction lens's monthly gate (lenses.go) reads ONLY
+        # not read here (only amountCents and the term are, above, for
+        # provenance) — clause_period stays a caller-supplied signal, not a
+        # verified one; the unconditional stamp below already closes the
+        # dangerous mismatch direction for free (see next paragraph). A
+        # hand-submitted DebitAccount (this is an ordinary operator-granted
+        # op, not Weaver-exclusive) could in principle pass a period that
+        # disagrees with the clause's real archetype. Always stamping
+        # chargeValidUntil closes the dangerous direction of that mismatch:
+        # the clauseSatisfaction lens's monthly gate (lenses.go) reads ONLY
         # chargeValidUntil, never the state field, so a genuinely-monthly
         # clause re-arms correctly even if clause_period was wrong/omitted
         # here — the alternative (never stamping it) would leave such a
@@ -579,24 +620,48 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         # clause stamped as if monthly) is harmless: the oneTime gate is
         # chargeCount/authorizedBy-link-driven and never reads
         # chargeValidUntil at all.
-        charge_valid_until = time.rfc3339_add(posted_at, %q)
-        if clause_period == "monthly":
-            # Fire V3 recurring clause: re-arm chargeValidUntil, never
-            # complete. This IS the clauseSatisfaction lens's convergence gate
-            # for a monthly clause (mirrors lease-signing's bgcheck-freshness
-            # validUntil pattern) — unlike the one-time case below, this write
-            # is load-bearing, not just audit.
+        #
+        # Which instant is stamped depends on whether the clause carries a
+        # term. UNTERMED: postedAt + the recurring window, the legacy
+        # cadence. TERMED: the due dates walk the calendar-month anniversary
+        # grid from validFrom — this charge bills the period whose start is
+        # the recorded due date (the lens opened the gap because a recorded
+        # lapse reached it), so the next due is the anniversary after it,
+        # computed from validFrom each time so the day-of-month never
+        # drifts. A first charge (no recorded due, or one before validFrom)
+        # bills period 0. A lapse whose period would start at or after
+        # validUntil bills nothing: the lens never opens that gap once the
+        # due date lies on the grid, so this is the fail-closed backstop.
+        term_exhausted = False
+        if clause_valid_from != None:
+            k = period_index(clause_valid_from, clause_due)
+            period_start = time.rfc3339_add_months(clause_valid_from, k)
+            if clause_valid_until != None and period_start >= clause_valid_until:
+                fail("TermExhausted: clause " + clause_key + "'s next period starts at " + period_start + ", at or after its validUntil " + clause_valid_until)
+            charge_valid_until = time.rfc3339_add_months(clause_valid_from, k + 1)
+            if clause_valid_until != None and charge_valid_until >= clause_valid_until:
+                term_exhausted = True
+        else:
+            charge_valid_until = time.rfc3339_add(posted_at, %q)
+        if clause_period == "monthly" and not term_exhausted:
+            # Recurring clause: re-arm chargeValidUntil, never complete. This
+            # IS the clauseSatisfaction lens's convergence gate for a monthly
+            # clause (mirrors lease-signing's bgcheck-freshness validUntil
+            # pattern) — unlike the one-time case below, this write is
+            # load-bearing, not just audit.
             mutations.append({"op": "update", "key": clause_key + ".status",
                                "document": {"class": "clauseStatus", "isDeleted": False,
                                             "vertexKey": clause_key, "localName": "status",
                                             "data": {"state": "active", "chargeValidUntil": charge_valid_until}}})
         else:
-            # Fixed/one-time clause bookkeeping: mark it completed (audit/display
-            # only — the clauseSatisfaction lens's convergence gate is the
-            # authorizedBy link itself, not this status, so this write is
-            # UNCONDITIONED — see the design's R3). chargeValidUntil rides
-            # along here too (see the note above); the lens never reads it
-            # for a non-monthly clause.
+            # Fixed/one-time clause bookkeeping, and a termed monthly clause
+            # whose final period this charge bills: mark it completed
+            # (audit/display only — the clauseSatisfaction lens's convergence
+            # gate is the authorizedBy link for a oneTime clause and the
+            # due-date-vs-validUntil comparison for a termed one, never this
+            # status — see the design's R3). chargeValidUntil rides along
+            # here too (see the note above): for the termed case it is the
+            # instant the term ends, which the lens reads as "no period left".
             mutations.append({"op": "update", "key": clause_key + ".status",
                                "document": {"class": "clauseStatus", "isDeleted": False,
                                             "vertexKey": clause_key, "localName": "status",
@@ -623,4 +688,4 @@ def execute(state, op):
         return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)
-`, recurringChargePeriod)
+`, RecurringChargePeriod)

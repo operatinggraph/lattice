@@ -9,8 +9,9 @@ import (
 
 // checkPlaybookColumnsMatchLens is the §10.2↔§10.8 seam assertion (mirroring
 // TestLeaseSigning_PlaybookColumnsMatchLens): every row.<col> token the named
-// weaverTarget's playbook templates is a member of its own lens's
-// BodyColumns, and every gaps key is a missing_* column that lens projects.
+// weaverTarget's playbook templates — params, reads, optionalReads and each
+// enumeration's hub — is a member of its own lens's BodyColumns, and every
+// gaps key is a missing_* column that lens projects.
 // Shared by every per-target test below — the package now declares two
 // targets (clauseSatisfaction, leaseRentSettlement), so each test selects its
 // own by TargetID rather than assuming there is exactly one (the trap a
@@ -65,6 +66,10 @@ func checkPlaybookColumnsMatchLens(t *testing.T, targetID string) {
 			templated = append(templated, v)
 		}
 		templated = append(templated, ga.Reads...)
+		templated = append(templated, ga.OptionalReads...)
+		for _, en := range ga.Enumerations {
+			templated = append(templated, en.Hub)
+		}
 		for _, v := range templated {
 			if !strings.HasPrefix(v, "row.") {
 				continue

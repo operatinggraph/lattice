@@ -15,6 +15,9 @@ package semanticcontracts
 //     (never conditioned, or the target vertex tombstoned) suppresses it.
 //   - JUDGMENT: an assigned inspector with no .inspection aspect yet is
 //     violating (missing_inspection); recording the inspection converges it.
+//   - TERMED MONTHLY: a clause carrying validFrom/validUntil bills one period
+//     per calendar month inside the term, from a recorded lapse at each due
+//     date, and nothing outside it; an untermed clause keeps the untermed rule.
 
 import (
 	"context"
@@ -64,17 +67,28 @@ func (f *bcFixture) aspect(t *testing.T, ownerName, local, class string, data ma
 	require.NoError(t, err)
 }
 
+// edge indexes one link the way the live adjacency consumers do: the
+// Contract #1 link key is built from each endpoint's vertex type and parsed
+// back with substrate.ParseLinkKey, and the two directional entries come from
+// adjacency.EventsForLink — so the OtherType a walk rebuilds the endpoint's
+// key from is the link key's type segment, exactly as in production. A
+// fixture that stamped OtherType from its own type map would let a lens walk
+// bind through a link whose key names the wrong type, which live never does.
 func (f *bcFixture) edge(t *testing.T, name, fromName, toName string) {
 	t.Helper()
-	ctx := context.Background()
 	fromID, toID := f.ids[fromName], f.ids[toName]
 	fromType, toType := f.types[fromID], f.types[toID]
-	linkKey := "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID
-	edgeID := name + "_" + fromID + "_" + toID
-	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
-		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType}))
-	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
-		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
+	f.edgeByKey(t, "lnk."+fromType+"."+fromID+"."+name+"."+toType+"."+toID)
+}
+
+// edgeByKey indexes a link from its full Contract #1 key alone.
+func (f *bcFixture) edgeByKey(t *testing.T, linkKey string) {
+	t.Helper()
+	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(linkKey)
+	require.Truef(t, ok, "not a Contract #1 link key: %s", linkKey)
+	for _, evt := range adjacency.EventsForLink(linkKey, srcType, srcID, linkName, dstType, dstID, false, 1) {
+		require.NoError(t, adjacency.Build(context.Background(), f.adjKV, evt))
+	}
 }
 
 // projectAt runs the anchored clauseSatisfaction spec for one clause. NO clock
@@ -564,7 +578,7 @@ func TestLeaseRentSettlement_ApprovedNoTerms_MissingTermsRow(t *testing.T) {
 	require.Equal(t, false, v["missing_account"], "missing_account never opens while requestedRent is still null")
 	require.Equal(t, false, v["missing_clause"], "missing_clause never opens while requestedRent is still null")
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["requestedRentCents"], "no requestedRent to convert — the CASE WHEN keeps this column null rather than erroring the row")
+	require.Nil(t, v["termRentCents"], "no requestedRent to convert — the CASE WHEN keeps this column null rather than erroring the row")
 }
 
 // TestLeaseRentSettlement_ApprovedTermsWithoutRent_MissingTermsRow pins the
@@ -586,7 +600,7 @@ func TestLeaseRentSettlement_ApprovedTermsWithoutRent_MissingTermsRow(t *testing
 	require.Equal(t, false, v["missing_account"])
 	require.Equal(t, false, v["missing_clause"])
 	require.Equal(t, true, v["violating"])
-	require.Nil(t, v["requestedRentCents"])
+	require.Nil(t, v["termRentCents"])
 }
 
 // TestLeaseRentSettlement_ApprovedWithTermsNoAccount_MissingAccountUnchanged
@@ -605,7 +619,7 @@ func TestLeaseRentSettlement_ApprovedWithTermsNoAccount_MissingAccountUnchanged(
 	require.Equal(t, true, v["missing_account"], "requestedRent present + no ledgerAccount")
 	require.Equal(t, false, v["missing_clause"], "missing_clause never opens before the account exists")
 	require.Equal(t, true, v["violating"])
-	require.Equal(t, 150000.0, v["requestedRentCents"])
+	require.Equal(t, 150000.0, v["termRentCents"], "no renewal rent recorded — the term's rent is requestedRent, in cents")
 }
 
 // TestLeaseRentSettlement_NotApproved_NoTerms_NoRow — an undecided lease
@@ -620,4 +634,366 @@ func TestLeaseRentSettlement_NotApproved_NoTerms_NoRow(t *testing.T) {
 
 	rows := f.projectLeaseAt(t, "undecidedlease")
 	require.Empty(t, rows, "an undecided lease never projects, terms or no terms")
+}
+
+// mkTermedClause seeds one period=monthly computational clause carrying a
+// term, with the given recorded due date (empty = never charged), linked to a
+// charged account.
+func (f *bcFixture) mkTermedClause(t *testing.T, name, validFrom, validUntil, chargeValidUntil string) {
+	t.Helper()
+	f.vtx(t, name, "clause")
+	f.aspect(t, name, "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 240000.0,
+		"period": "monthly", "validFrom": validFrom, "validUntil": validUntil})
+	status := map[string]any{"state": "active"}
+	if chargeValidUntil != "" {
+		status["chargeValidUntil"] = chargeValidUntil
+	}
+	f.aspect(t, name, "status", "clauseStatus", status)
+	f.vtx(t, name+"_acct", "account")
+	f.edge(t, "chargesTo", name, name+"_acct")
+}
+
+const (
+	termFrom  = "2026-09-08T00:00:00Z"
+	termUntil = "2027-09-08T00:00:00Z"
+	termDue1  = "2026-10-08T00:00:00Z"
+	termDue11 = "2027-08-08T00:00:00Z"
+)
+
+// TestClauseSatisfaction_Termed_NotStarted — a termed clause with no recorded
+// due and no lapse: nothing is due before the term starts, and freshUntil
+// projects validFrom so Weaver's @at fires the start lapse. A clock-reading
+// form would charge this clause (validFrom is in the past of any suite run);
+// the recorded-fact form waits for the marker.
+func TestClauseSatisfaction_Termed_NotStarted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termnew", termFrom, termUntil, "")
+
+	v := f.projectAt(t, "termnew")[0].Values
+	require.Equal(t, false, v["missing_charge"], "no lapse has reached validFrom — nothing is due yet")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, termFrom, v["freshUntil"], "the first due date arms the temporal lane")
+	require.Equal(t, termFrom, v["validFrom"])
+	require.Equal(t, termUntil, v["validUntil"])
+}
+
+// TestClauseSatisfaction_Termed_StartLapseOpensFirstPeriod — the @at fired at
+// validFrom and recorded that instant: the first period is due (>= holds with
+// equality, MarkExpired records the scheduled instant), no timer re-armed.
+func TestClauseSatisfaction_Termed_StartLapseOpensFirstPeriod(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termstart", termFrom, termUntil, "")
+	f.recordLapse(t, "termstart", map[string]string{ClauseSatisfactionTarget: termFrom})
+
+	v := f.projectAt(t, "termstart")[0].Values
+	require.Equal(t, true, v["missing_charge"], "the recorded lapse reached validFrom — the first period is due")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestClauseSatisfaction_Termed_ChargedWaitsForNextAnniversary — DebitAccount
+// billed the first period and stamped the next due (validFrom + 1 month); the
+// start lapse the marker still carries has been outrun, so nothing is due and
+// freshUntil re-arms on the recorded due.
+func TestClauseSatisfaction_Termed_ChargedWaitsForNextAnniversary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termcharged", termFrom, termUntil, termDue1)
+	f.recordLapse(t, "termcharged", map[string]string{ClauseSatisfactionTarget: termFrom})
+
+	v := f.projectAt(t, "termcharged")[0].Values
+	require.Equal(t, false, v["missing_charge"], "the lapse at validFrom does not reach the second period's due")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, termDue1, v["freshUntil"], "the next anniversary arms the temporal lane")
+	require.Equal(t, termDue1, v["chargeValidUntil"])
+}
+
+// TestClauseSatisfaction_Termed_LastPeriodDue — the recorded due is the last
+// period's start and the lapse reached it: due (periodStart < validUntil).
+func TestClauseSatisfaction_Termed_LastPeriodDue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termlast", termFrom, termUntil, termDue11)
+	f.recordLapse(t, "termlast", map[string]string{ClauseSatisfactionTarget: termDue11})
+
+	v := f.projectAt(t, "termlast")[0].Values
+	require.Equal(t, true, v["missing_charge"], "the twelfth period starts inside the term")
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestClauseSatisfaction_Termed_FinalPeriodBilledArmsNothing — the final
+// charge stamped chargeValidUntil = validUntil: no period is left, nothing is
+// due, and no timer is armed (a lapse recorded there could open nothing).
+func TestClauseSatisfaction_Termed_FinalPeriodBilledArmsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termdone", termFrom, termUntil, termUntil)
+	f.recordLapse(t, "termdone", map[string]string{ClauseSatisfactionTarget: termDue11})
+
+	v := f.projectAt(t, "termdone")[0].Values
+	require.Equal(t, false, v["missing_charge"], "the due has reached validUntil — the term is fully billed")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"], "a fully billed term arms no timer")
+}
+
+// TestClauseSatisfaction_Termed_LapsePastValidUntilBillsNothing — a lapse
+// recorded at or after the term's end, with the due sitting at validUntil,
+// bills nothing: the inside-the-term conjunct fails closed even though the
+// lapse comparison holds.
+func TestClauseSatisfaction_Termed_LapsePastValidUntilBillsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkTermedClause(t, "termover", termFrom, termUntil, termUntil)
+	f.recordLapse(t, "termover", map[string]string{ClauseSatisfactionTarget: "2027-10-01T00:00:00Z"})
+
+	v := f.projectAt(t, "termover")[0].Values
+	require.Equal(t, false, v["missing_charge"], "no period starts at or after validUntil")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestMintClause_GovernsLinkKeyNamesTheLeaseappType pins the link key
+// CreateClause writes to the lease's Contract #1 vertex type (leaseapp). The
+// adjacency index derives a walk's far endpoint from the link key's type
+// segment and the engine rebuilds vtx.<type>.<id> from it, so a key spelled
+// `governs.lease.` binds from the lease side only (its source segment,
+// `clause`, is right) and never from the clause side — while every fixture
+// here, which builds its keys from the vertex type, would still pass.
+func TestMintClause_GovernsLinkKeyNamesTheLeaseappType(t *testing.T) {
+	require.Contains(t, clauseDDLScript, `".governs.leaseapp."`,
+		"mint_clause must write lnk.clause.<id>.governs.leaseapp.<id>")
+	require.NotContains(t, clauseDDLScript, `".governs.lease."`,
+		"the legacy target segment is what BackfillClauseTerm repairs, never what mint_clause writes")
+}
+
+// mkRentLease seeds an approved leaseapp with an agreed rent, a ledger
+// account and the given .tenancy (nil = none) — the shape on which only
+// missing_clause can still be open.
+func (f *bcFixture) mkRentLease(t *testing.T, name string, requestedRent float64, tenancy map[string]any) {
+	t.Helper()
+	f.mkApprovedLeaseWithTerms(t, name, requestedRent)
+	f.vtx(t, name+"_acct", "account")
+	f.aspect(t, name, "ledgerAccount", "ledgerAccount", map[string]any{"accountKey": "vtx.account." + f.ids[name+"_acct"]})
+	if tenancy != nil {
+		f.aspect(t, name, "tenancy", "tenancy", tenancy)
+	}
+}
+
+// mkRentClause seeds an unconditioned monthly clause governing the lease,
+// termed from validFrom when non-empty.
+func (f *bcFixture) mkRentClause(t *testing.T, name, leaseName, validFrom, validUntil string) {
+	t.Helper()
+	f.vtx(t, name, "clause")
+	terms := map[string]any{"kind": "computational", "conditioned": false, "amountCents": 250000.0, "period": "monthly"}
+	if validFrom != "" {
+		terms["validFrom"] = validFrom
+		terms["validUntil"] = validUntil
+	}
+	f.aspect(t, name, "terms", "clauseTerms", terms)
+	f.edge(t, "governs", name, leaseName)
+}
+
+const (
+	origStart = "2025-09-08T00:00:00Z"
+	origEnd   = "2026-09-08T00:00:00Z"
+	renewEnd  = "2027-09-08T00:00:00Z"
+)
+
+// TestLeaseRentSettlement_OriginalTerm_NoClause_MissingClause — an approved
+// lease with rent, account and a never-renewed tenancy and no clause: the
+// gap opens, and the dispatch's term columns are the original term at the
+// agreed rent.
+func TestLeaseRentSettlement_OriginalTerm_NoClause_MissingClause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "origlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+
+	v := f.projectLeaseAt(t, "origlease")[0].Values
+	require.Equal(t, true, v["missing_clause"])
+	require.Equal(t, false, v["missing_term"], "no clause at all — nothing to term")
+	require.Nil(t, v["untermedClauseKey"])
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, origStart, v["termStart"], "never renewed — the term starts at leaseStart")
+	require.Equal(t, origStart, v["leaseStart"])
+	require.Equal(t, origEnd, v["leaseEnd"])
+	require.Equal(t, 250000.0, v["termRentCents"])
+}
+
+// TestLeaseRentSettlement_Renewed_OnlyOriginalClause_MissingClause — a
+// signed renewal recorded termStart (= the old leaseEnd) and rentAmount, and
+// the only clause is the original term's: the renewed term has no clause, so
+// the gap opens with the renewed term and rent as its template columns.
+func TestLeaseRentSettlement_Renewed_OnlyOriginalClause_MissingClause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "renewlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": renewEnd, "termStart": origEnd, "rentAmount": 2600.0})
+	f.mkRentClause(t, "renewlease_orig", "renewlease", origStart, origEnd)
+
+	v := f.projectLeaseAt(t, "renewlease")[0].Values
+	require.Equal(t, true, v["missing_clause"], "the original clause's validFrom is not the renewed term's start")
+	require.Equal(t, origEnd, v["termStart"], "the renewed term starts where the original ended")
+	require.Equal(t, renewEnd, v["leaseEnd"])
+	require.Equal(t, 260000.0, v["termRentCents"], "the renewal's rent, in cents")
+}
+
+// TestLeaseRentSettlement_Renewed_UntermedClause_GapShut — the same renewed
+// lease whose clause is still untermed (a legacy clause BackfillClauseTerm
+// has not yet reached): the untermed count keeps the gap shut, so a renewal
+// can never double-cover a period.
+func TestLeaseRentSettlement_Renewed_UntermedClause_GapShut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "renewuntermed", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": renewEnd, "termStart": origEnd, "rentAmount": 2600.0})
+	f.mkRentClause(t, "renewuntermed_legacy", "renewuntermed", "", "")
+
+	v := f.projectLeaseAt(t, "renewuntermed")[0].Values
+	require.Equal(t, false, v["missing_clause"], "an untermed clause holds the gap shut until it is termed")
+	require.Equal(t, true, v["missing_term"], "and is itself the gap: the lease has a tenancy to term it from")
+	require.Equal(t, "vtx.clause."+f.ids["renewuntermed_legacy"], v["untermedClauseKey"], "the BackfillClauseTerm param is the untermed clause")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseRentSettlement_Renewed_RenewalClausePresent_Converged — the
+// renewed term's own clause exists (validFrom = termStart): converged, with
+// the original term's clause still alongside it.
+func TestLeaseRentSettlement_Renewed_RenewalClausePresent_Converged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "renewdone", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": renewEnd, "termStart": origEnd, "rentAmount": 2600.0})
+	f.mkRentClause(t, "renewdone_orig", "renewdone", origStart, origEnd)
+	f.mkRentClause(t, "renewdone_renewal", "renewdone", origEnd, renewEnd)
+
+	v := f.projectLeaseAt(t, "renewdone")[0].Values
+	require.Equal(t, false, v["missing_clause"], "a clause whose validFrom equals termStart covers the current term")
+	require.Equal(t, false, v["missing_term"], "both clauses carry their terms")
+	require.Nil(t, v["untermedClauseKey"], "max() over an all-null CASE is null")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestLeaseRentSettlement_NoTenancy_NeverMintsAClause — an approved lease
+// with rent and account but no .tenancy has no term to mint a clause for:
+// missing_clause stays false (the dispatch would otherwise carry null
+// validFrom/validUntil templates, which Weaver refuses).
+func TestLeaseRentSettlement_NoTenancy_NeverMintsAClause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "notenancylease", 2500, nil)
+
+	v := f.projectLeaseAt(t, "notenancylease")[0].Values
+	require.Equal(t, false, v["missing_terms"])
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, false, v["missing_clause"], "no tenancy — no term to cover")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["termStart"])
+	require.Nil(t, v["leaseEnd"])
+}
+
+// TestLeaseRentSettlement_OriginalTerm_OtherClausesNeverSuppress — a one-time
+// fee and a conditioned monthly fee on the same lease are not the rent
+// clause: the gap stays open.
+func TestLeaseRentSettlement_OriginalTerm_OtherClausesNeverSuppress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "otherlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.vtx(t, "otherlease_fee", "clause")
+	f.aspect(t, "otherlease_fee", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 4500.0, "period": "oneTime"})
+	f.edge(t, "governs", "otherlease_fee", "otherlease")
+	f.vtx(t, "otherlease_pet", "clause")
+	f.aspect(t, "otherlease_pet", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": true, "amountCents": 5000.0, "period": "monthly", "validFrom": origStart, "validUntil": origEnd})
+	f.edge(t, "governs", "otherlease_pet", "otherlease")
+
+	v := f.projectLeaseAt(t, "otherlease")[0].Values
+	require.Equal(t, true, v["missing_clause"], "neither a one-time fee nor a conditioned fee is the rent clause")
+}
+
+// TestLeaseRentSettlement_UntermedClause_MissingTermViaLegacyLinkKey is the
+// migration vector, seeded with the link key shape the live legacy clauses
+// carry (`governs.lease.<id>`, the target segment naming a type no vertex
+// has): the inbound walk from the lease resolves the clause from the key's
+// SOURCE segment, so the untermed clause is found, missing_term opens with
+// it as the dispatch param, and missing_clause stays shut. This is why the
+// gap lives on the lease anchor.
+func TestLeaseRentSettlement_UntermedClause_MissingTermViaLegacyLinkKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "legacylink", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.vtx(t, "legacylink_clause", "clause")
+	f.aspect(t, "legacylink_clause", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 250000.0, "period": "monthly"})
+	f.edgeByKey(t, "lnk.clause."+f.ids["legacylink_clause"]+".governs.lease."+f.ids["legacylink"])
+
+	v := f.projectLeaseAt(t, "legacylink")[0].Values
+	require.Equal(t, true, v["missing_term"], "the legacy-keyed link is walked from the lease side")
+	require.Equal(t, "vtx.clause."+f.ids["legacylink_clause"], v["untermedClauseKey"])
+	require.Equal(t, false, v["missing_clause"], "the untermed clause holds missing_clause shut — the two gaps are exclusive")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseRentSettlement_UntermedClause_NoTenancy_NoMissingTerm — an
+// untermed clause on a lease with no .tenancy has nothing to be termed from:
+// missing_term stays shut and the clause keeps the untermed cadence.
+func TestLeaseRentSettlement_UntermedClause_NoTenancy_NoMissingTerm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "untermednoten", 2500, nil)
+	f.mkRentClause(t, "untermednoten_clause", "untermednoten", "", "")
+
+	v := f.projectLeaseAt(t, "untermednoten")[0].Values
+	require.Equal(t, "vtx.clause."+f.ids["untermednoten_clause"], v["untermedClauseKey"], "the clause is found")
+	require.Equal(t, false, v["missing_term"], "but there is no tenancy to term it from")
+	require.Equal(t, false, v["missing_clause"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestLeaseRentSettlement_UntermedClause_OtherClausesNotCandidates — a
+// one-time fee and a conditioned monthly fee, both untermed, are not rent
+// clauses: neither is a missing_term candidate.
+func TestLeaseRentSettlement_UntermedClause_OtherClausesNotCandidates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "othersuntermed", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "othersuntermed_rent", "othersuntermed", origStart, origEnd)
+	f.vtx(t, "othersuntermed_fee", "clause")
+	f.aspect(t, "othersuntermed_fee", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 4500.0, "period": "oneTime"})
+	f.edge(t, "governs", "othersuntermed_fee", "othersuntermed")
+	f.vtx(t, "othersuntermed_pet", "clause")
+	f.aspect(t, "othersuntermed_pet", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": true, "amountCents": 5000.0, "period": "monthly"})
+	f.edge(t, "governs", "othersuntermed_pet", "othersuntermed")
+
+	v := f.projectLeaseAt(t, "othersuntermed")[0].Values
+	require.Equal(t, false, v["missing_term"])
+	require.Nil(t, v["untermedClauseKey"])
+	require.Equal(t, false, v["missing_clause"])
+	require.Equal(t, false, v["violating"])
 }

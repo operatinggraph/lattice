@@ -512,13 +512,17 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 		putEdge(t, reg, adjKV, "scopedTo", tk, onbActor)
 	}
 	// leaseExpiry reads the tenancy aspect (no backfill — an application without
-	// one never enters that lens) and leaseRentSettlement the ledger account.
-	// Its cycle gate is a recorded lapse, not a clock: the freshnessExpiry marker
-	// carries the instant the leaseExpiry target's own @at fired, and without an
-	// entry at or after renewalOpensAt the gap column stays false and this lens's
-	// differential witness would compare two folded-empty branches.
+	// one never enters that lens) and leaseRentSettlement the ledger account and
+	// the tenancy's term (leaseStart + leaseEnd — its missing_clause gate needs
+	// both, so without leaseStart the column would read false whether or not the
+	// rent-clause branch folded anything, and the witness below would witness
+	// nothing). Its cycle gate is a recorded lapse, not a clock: the
+	// freshnessExpiry marker carries the instant the leaseExpiry target's own
+	// @at fired, and without an entry at or after renewalOpensAt the gap column
+	// stays false and this lens's differential witness would compare two
+	// folded-empty branches.
 	putAspect(t, reg, coreKV, app, "tenancy", map[string]any{
-		"leaseEnd": "2020-01-01T00:00:00Z", "renewalOpensAt": "2019-12-01T00:00:00Z",
+		"leaseStart": "2019-01-01T00:00:00Z", "leaseEnd": "2020-01-01T00:00:00Z", "renewalOpensAt": "2019-12-01T00:00:00Z",
 	})
 	putAspect(t, reg, coreKV, app, "freshnessExpiry", map[string]any{
 		"expiredAt": "2019-12-01T00:00:00Z",
@@ -988,8 +992,9 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 			content: func(row map[string]any) int { return boolsTrue(row, "missing_renewalCycle") }},
 		{name: "leaseRentSettlement", spec: corpusSpec(t, "leaseRentSettlement"), anchor: c.leaseAppKey,
 			evidence: func(t *testing.T, row map[string]any) {
-				// missing_clause is false only when rentClauseCount > 0, which is
-				// the governs branch.
+				// The seeded tenancy carries leaseStart + leaseEnd, so
+				// missing_clause is false only when the governs branch found the
+				// (untermed) rent clause: untermedClauseCount > 0.
 				boolEvidence(t, row, "missing_clause", false, "rent-clause")
 			},
 			content: func(row map[string]any) int {

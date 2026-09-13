@@ -3,11 +3,14 @@ package semanticcontracts
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `clause`
-// (CreateClause, InspectPremises, SupersedeClause) plus its four aspect-type
-// declarations (clauseProse, clauseTerms, clauseStatus, clauseInspection).
-// SupersedeClause (Fire V4 self-amendment) writes prose/terms/status on the
-// NEW clause exactly like CreateClause, plus a status update on the AMENDED
-// clause — so clauseProse/clauseTerms/clauseStatus each permit it too.
+// (CreateClause, InspectPremises, SupersedeClause, BackfillClauseTerm) plus
+// its four aspect-type declarations (clauseProse, clauseTerms, clauseStatus,
+// clauseInspection). SupersedeClause (Fire V4 self-amendment) writes
+// prose/terms/status on the NEW clause exactly like CreateClause, plus a
+// status update on the AMENDED clause — so clauseProse/clauseTerms/
+// clauseStatus each permit it too. BackfillClauseTerm updates terms (the
+// term) and status (the normalized due date) on an existing clause, so
+// clauseTerms/clauseStatus permit it.
 // clauseStatus also permits DebitAccount — the cross-package write
 // loftspace-ledger's DebitAccount makes to mark a fixed/one-time clause
 // completed (the objectLiveness → TombstoneObject precedent: a package's
@@ -32,7 +35,10 @@ func clauseDDL() pkgmgr.DDLSpec {
 		// SupersedeClause (Fire V4) mints a replacement clause (CreateClause's
 		// shape, plus clauseKey naming the one it amends) and tombstones the
 		// amended clause's root — the anchor-tombstone retraction precedent.
-		PermittedCommands: []string{"CreateClause", "InspectPremises", "SupersedeClause"},
+		// BackfillClauseTerm acts on an existing monthly clause (updates its
+		// .terms and .status, root untouched) — the leaseRentSettlement
+		// playbook's missing_term directOp.
+		PermittedCommands: []string{"CreateClause", "InspectPremises", "SupersedeClause", "BackfillClauseTerm"},
 		Description: "Semantic-contract clause DDL. Vertex shape: vtx.clause.<NanoID>, class=clause, root data = {} " +
 			"(minimal, D5 — the provision text and terms are aspects). CreateClause{leaseAppKey, kind?, prose, " +
 			"accountKey?, amountCents?, period?, rateCents?, periodDays?, daysOccupied?, inspectorKey?, " +
@@ -49,9 +55,25 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"behaves exactly like a flat one-time fee thereafter — proration is a one-time-only archetype (period " +
 			"must be oneTime). `period` (computational only) is \"oneTime\" (default, one charge ever) or " +
 			"\"monthly\" (Fire V3 recurring): a monthly clause re-arms after each charge via the .status aspect's " +
-			"chargeValidUntil (~30d, DebitAccount-stamped) — the clauseSatisfaction lens treats it as due again once " +
-			"chargeValidUntil lapses, mirroring the lease-signing bgcheck-freshness pattern (validUntil decay, not a " +
-			"stored transaction count). Either kind may carry an optional conditionedOnKey (any live vertex, e.g. a " +
+			"chargeValidUntil (DebitAccount-stamped) — the clauseSatisfaction lens treats it as due again once a " +
+			"recorded lapse reaches chargeValidUntil, mirroring the lease-signing bgcheck-freshness pattern " +
+			"(validUntil decay, not a stored transaction count). A monthly clause may carry a TERM — validFrom + " +
+			"validUntil (both or neither; canonical RFC3339 UTC; validUntil > validFrom; refused on a oneTime " +
+			"clause): it then bills one charge per calendar-month period of [validFrom, validUntil), the first due " +
+			"at validFrom and each next due on the anniversary of validFrom (DebitAccount computes it from " +
+			"validFrom each time, so Jan 31 → Feb 28 → Mar 31 never drifts), none before validFrom and none for a " +
+			"period starting at or after validUntil, after which it completes. A monthly clause minted WITHOUT a " +
+			"term keeps the untermed ~30d cadence — unless it governs a lease that has a .tenancy, in which case " +
+			"the leaseRentSettlement lens opens missing_term and BackfillClauseTerm{clauseKey, leaseAppKey} stamps " +
+			"validFrom = tenancy.leaseStart and validUntil = tenancy.termStart (a renewed lease: the legacy clause " +
+			"covers the original term only) else tenancy.leaseEnd, moves the recorded chargeValidUntil onto the " +
+			"term's anniversary grid (absent or before validFrom → validFrom; inside the term → the start of the " +
+			"period containing it, capped at validUntil), and re-keys a governs link spelled with the legacy " +
+			"`governs.lease.` target segment to `governs.leaseapp.` (the Contract #1 vertex type; the same " +
+			"document under the new key, the old key tombstoned). AlreadyTermed refuses a clause that already " +
+			"carries a term, so the backfill and its link repair run exactly once per clause. Either kind may " +
+			"carry an optional " +
+			"conditionedOnKey (any live vertex, e.g. a " +
 			"pet record): CreateClause writes the conditionedOn link (clause→that vertex) generically from its own " +
 			"key-shape (vtx.<type>.<id>); the clauseSatisfaction lens only opens the gap while that link is live, so " +
 			"tombstoning the condition stops the fee/inspection without touching the clause. Writes the governs " +
@@ -70,6 +92,9 @@ func clauseDDL() pkgmgr.DDLSpec {
 			`"accountKey":{"type":"string","description":"vtx.account.<NanoID> this clause charges (required + validated alive when kind=computational)."},` +
 			`"amountCents":{"type":"number","description":"The flat one-time (or recurring-per-period) charge amount in integer cents, when kind=computational and no rateCents/periodDays/daysOccupied proration trio is supplied (required, must be > 0, in that case)."},` +
 			`"period":{"type":"string","description":"computational only: \"oneTime\" (default) or \"monthly\" (Fire V3 recurring fee). A prorated clause (rateCents/periodDays/daysOccupied) must be oneTime."},` +
+			`"validFrom":{"type":"string","description":"Optional (monthly only, together with validUntil): RFC3339 start of the clause's term — the first period's due date. Normalized to canonical UTC. Refused on a oneTime clause or without validUntil."},` +
+			`"validUntil":{"type":"string","description":"Optional (monthly only, together with validFrom): RFC3339 end of the clause's term, exclusive; must be after validFrom. No period starting at or after it is ever billed."},` +
+			`"clauseKey":{"type":"string","description":"SupersedeClause: vtx.clause.<NanoID> of the live clause being amended. BackfillClauseTerm: the live untermed monthly clause to stamp a term onto."},` +
 			`"rateCents":{"type":"number","description":"Fire V3 proration: the full-period rate in integer cents (e.g. a $50/month fee = 5000). Supplied together with periodDays+daysOccupied INSTEAD of amountCents; the clause's amountCents is then computed as (rateCents*daysOccupied)/periodDays, exact integer floor division. computational + period=oneTime only."},` +
 			`"periodDays":{"type":"number","description":"Fire V3 proration: the number of days in the full period the rateCents is denominated over (e.g. 30). Required together with rateCents/daysOccupied."},` +
 			`"daysOccupied":{"type":"number","description":"Fire V3 proration: the number of days actually occupied this partial period (required <= periodDays, together with rateCents/periodDays)."},` +
@@ -84,7 +109,10 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"prose":            "The legal paragraph a signer agreed to. Stored verbatim on the .prose aspect; never interpreted — the machine terms are the separate .terms aspect.",
 			"accountKey":       "Full vtx.account.<NanoID> key of the ledger account this clause charges. CreateClause validates it is alive and writes the chargesTo link (clause→account); the account key also flows into the clauseSatisfaction lens as the directOp target.",
 			"amountCents":      "The flat charge amount in integer cents when no proration trio is supplied; required (kind=computational), must be a positive number. Stored on the .terms aspect and flows type-preserved into the DebitAccount directOp's amountCents param when the clause is unsatisfied.",
-			"period":           "computational only: \"oneTime\" (default) or \"monthly\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once.",
+			"period":           "computational only: \"oneTime\" (default) or \"monthly\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once — on its term's anniversary grid when it carries validFrom/validUntil.",
+			"validFrom":        "Optional, monthly only, with validUntil: the term's start (RFC3339, canonicalized to UTC). Stored on .terms; the clauseSatisfaction lens bills the first period once a recorded lapse reaches it, and DebitAccount computes every later due date from it.",
+			"validUntil":       "Optional, monthly only, with validFrom: the term's exclusive end (RFC3339, canonicalized to UTC; must be after validFrom). Stored on .terms; no period starting at or after it is billed, and the clause completes once its next due reaches it.",
+			"clauseKey":        "SupersedeClause: full vtx.clause.<NanoID> key of the live clause being amended. BackfillClauseTerm: the live, untermed, monthly computational clause to stamp a term onto (AlreadyTermed if it has one).",
 			"rateCents":        "Fire V3 proration input: the full-period rate in integer cents. Combined with periodDays+daysOccupied to compute amountCents once, at creation, in exact Starlark bignum integer arithmetic (no float division). Stored on .terms for audit alongside the computed amountCents.",
 			"periodDays":       "Fire V3 proration input: days in the full period rateCents is denominated over. Stored on .terms for audit.",
 			"daysOccupied":     "Fire V3 proration input: days actually occupied this partial period; must be positive and at most periodDays. Stored on .terms for audit.",
@@ -149,6 +177,46 @@ func clauseDDL() pkgmgr.DDLSpec {
 					"non-violating with freshUntil=chargeValidUntil (arming Weaver's temporal lane) until it lapses, " +
 					"at which point missing_charge re-opens and the next period's charge fires — indefinitely, " +
 					"never reaching status=completed.",
+			},
+			{
+				Name: "CreateClause — a monthly rent clause with a term",
+				Payload: map[string]any{
+					"leaseAppKey": "vtx.leaseapp.<NanoID>",
+					"accountKey":  "vtx.account.<NanoID>",
+					"prose":       "Monthly rent per the signed lease agreement.",
+					"amountCents": 240000,
+					"period":      "monthly",
+					"validFrom":   "2026-09-08T00:00:00Z",
+					"validUntil":  "2027-09-08T00:00:00Z",
+				},
+				ExpectedOutcome: "As the monthly example, plus .terms.validFrom/validUntil (canonical UTC). The " +
+					"clauseSatisfaction lens projects freshUntil=validFrom and NOT violating (nothing is due before " +
+					"the term starts); the @at Weaver arms fires at validFrom, MarkExpired records the lapse, and " +
+					"missing_charge opens for the first period. DebitAccount posts it and stamps chargeValidUntil = " +
+					"validFrom + 1 month (the second period's due, on the anniversary grid); the lens re-arms on " +
+					"that instant, and so on until the next due would reach validUntil, at which point the final " +
+					"charge marks the clause completed and nothing further is billed. Twelve charges in total for " +
+					"this one-year term, never thirteen.",
+			},
+			{
+				Name: "BackfillClauseTerm — term a legacy monthly clause from its lease's tenancy",
+				Payload: map[string]any{
+					"clauseKey":   "vtx.clause.<NanoID>",
+					"leaseAppKey": "vtx.leaseapp.<NanoID>",
+				},
+				ExpectedOutcome: "Validates the clause is alive, monthly, computational and untermed (AlreadyTermed " +
+					"otherwise — a second submission is refused, so the backfill runs once) and that the lease's " +
+					".tenancy is present with leaseStart/leaseEnd (declared reads; the clause's .status is an " +
+					"OptionalRead). Updates .terms in place — every existing key kept — adding validFrom = " +
+					"tenancy.leaseStart and validUntil = tenancy.termStart when the lease has been renewed, else " +
+					"tenancy.leaseEnd. Moves .status.chargeValidUntil onto the term's grid: absent or before " +
+					"validFrom → validFrom; inside the term → the start of the calendar-month period containing " +
+					"it, capped at validUntil. Walks the clause's own governs links (one, by construction) and " +
+					"re-keys one spelled `governs.lease.` to `governs.leaseapp.` (create under the new key, " +
+					"tombstone the old). Emits clause.termed{clauseKey, leaseAppKey, validFrom, validUntil, " +
+					"chargeValidUntil}. leaseRentSettlement then closes missing_term, and clauseSatisfaction " +
+					"re-arms freshUntil at the normalized due — a past instant fires at once, so a clause already " +
+					"inside its term bills its current period immediately.",
 			},
 			{
 				Name: "CreateClause — a prorated first-month amenity fee (Fire V3)",
@@ -218,24 +286,32 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clauseTerms",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateClause", "SupersedeClause"},
+		PermittedCommands: []string{"CreateClause", "SupersedeClause", "BackfillClauseTerm"},
 		Description: "The clause's machine terms — what 'fulfillment' means digitally. Stored as " +
-			"vtx.clause.<NanoID>.terms (class clauseTerms) = {kind, conditioned, amountCents?, period, basis?, " +
-			"rateCents?, periodDays?, daysOccupied?}, kind ∈ {computational, judgment}. Non-sensitive. " +
+			"vtx.clause.<NanoID>.terms (class clauseTerms) = {kind, conditioned, amountCents?, period, validFrom?, " +
+			"validUntil?, basis?, rateCents?, periodDays?, daysOccupied?}, kind ∈ {computational, judgment}. " +
+			"Non-sensitive. " +
 			"computational (Fire V1, default) carries amountCents; judgment (Fire V2) carries no amountCents — its " +
 			"gate is the requiresInspectionBy link + the clauseInspection aspect, not a charge. `conditioned` is " +
 			"true iff CreateClause received a conditionedOnKey — an explicit flag (not inferred from the " +
 			"conditionedOn link's liveness) because a tombstoned condition TARGET makes the lens's optional match " +
 			"resolve null exactly like \"never conditioned\" would; only this flag lets the lens tell the two " +
 			"apart. `period` (Fire V3) is \"oneTime\" (default) or \"monthly\" (computational only) — the " +
-			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count. When " +
+			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count. A monthly " +
+			"clause's TERM is `validFrom`/`validUntil` (both or neither, canonical RFC3339 UTC, validUntil > " +
+			"validFrom): the lens bills one period per calendar month of [validFrom, validUntil) and DebitAccount " +
+			"computes each next due date from validFrom; absent, the clause is untermed and bills on the ~30d " +
+			"cadence — until BackfillClauseTerm stamps the term from the governed lease's .tenancy " +
+			"(leaseRentSettlement's missing_term gap), the one write to this aspect after creation, which preserves " +
+			"every other key. When " +
 			"amountCents was computed by proration (Fire V3), `basis`=\"daysOccupied\" and rateCents/periodDays/ " +
 			"daysOccupied carry the inputs verbatim, for audit only (the lens never re-derives amountCents — it " +
-			"was computed once, at creation). Written exactly once by CreateClause, atomically alongside the " +
-			"clause vertex it belongs to. Declaration-only: no op handler of its own.",
+			"was computed once, at creation). Written by CreateClause (or SupersedeClause minting the replacement " +
+			"clause), atomically alongside the clause vertex it belongs to; updated only by BackfillClauseTerm. " +
+			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":{"kind":{"type":"string"},"conditioned":{"type":"boolean"},` +
-			`"amountCents":{"type":"number"},"period":{"type":"string"},"basis":{"type":"string"},` +
+			`"amountCents":{"type":"number"},"period":{"type":"string"},"validFrom":{"type":"string"},"validUntil":{"type":"string"},"basis":{"type":"string"},` +
 			`"rateCents":{"type":"number"},"periodDays":{"type":"number"},"daysOccupied":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
@@ -243,6 +319,8 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"conditioned":  "True iff CreateClause received a conditionedOnKey. The clauseSatisfaction lens's conditioning gate reads this flag, not the link's liveness.",
 			"amountCents":  "The charge amount in integer cents — either the flat CreateClause payload value, or (Fire V3) the once-computed prorated result. Absent for kind=judgment.",
 			"period":       "\"oneTime\" (default) or \"monthly\" (Fire V3, computational only). The clauseSatisfaction lens's missing_charge gate branches on this column.",
+			"validFrom":    "Monthly only, with validUntil: the term's start, canonical RFC3339 UTC — the first period's due date and the origin of every later anniversary. Absent on an untermed clause (leaseRentSettlement's missing_term gap, when the lease has a .tenancy).",
+			"validUntil":   "Monthly only, with validFrom: the term's exclusive end, canonical RFC3339 UTC. No period starting at or after it is billed.",
 			"basis":        "Fire V3: \"daysOccupied\" when amountCents was proration-computed; absent for a flat charge.",
 			"rateCents":    "Fire V3 proration audit: the full-period rate in cents, verbatim from CreateClause. Absent for a flat charge.",
 			"periodDays":   "Fire V3 proration audit: days in the full period. Absent for a flat charge.",
@@ -263,6 +341,11 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause terms aspect — recurring monthly (Fire V3)",
 				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 1500, "period": "monthly"},
 				ExpectedOutcome: "Stored as vtx.clause.<NanoID>.terms; the clauseSatisfaction lens re-opens missing_charge each period via .status.chargeValidUntil rather than a one-time chargeCount check.",
+			},
+			{
+				Name:            "clause terms aspect — recurring monthly with a term",
+				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 240000, "period": "monthly", "validFrom": "2026-09-08T00:00:00Z", "validUntil": "2027-09-08T00:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.clause.<NanoID>.terms by CreateClause (or added to an untermed clause's existing terms by BackfillClauseTerm); the clauseSatisfaction lens bills one period per calendar month of [validFrom, validUntil), none outside it.",
 			},
 			{
 				Name:            "clause terms aspect — prorated (Fire V3)",
@@ -310,8 +393,9 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		// authorizing charge — a cross-package write, the objectLiveness →
 		// TombstoneObject precedent. SupersedeClause (Fire V4) both creates the
 		// new clause's status (active, exactly like CreateClause) and marks the
-		// amended clause's status superseded.
-		PermittedCommands: []string{"CreateClause", "DebitAccount", "SupersedeClause"},
+		// amended clause's status superseded. BackfillClauseTerm moves an
+		// untermed clause's recorded due date onto its new term's grid.
+		PermittedCommands: []string{"CreateClause", "DebitAccount", "SupersedeClause", "BackfillClauseTerm"},
 		Description: "The clause's lifecycle state. Stored as vtx.clause.<NanoID>.status (class clauseStatus) = " +
 			"{state, completedAt?, chargeValidUntil?, supersededAt?, supersededBy?}, state ∈ {active, completed, " +
 			"superseded}. Non-sensitive. Created active by CreateClause (or SupersedeClause minting the replacement " +
@@ -321,18 +405,24 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"root tombstone, not this state) (an UNCONDITIONED update in every case). For a period=oneTime clause: state → " +
 			"completed + completedAt stamped — audit/display bookkeeping only, since the clauseSatisfaction " +
 			"lens's convergence gate for that case derives from the authorizedBy transaction link, not this aspect " +
-			"(see the design's R3). For a period=monthly clause (Fire V3): state STAYS active (a recurring clause " +
-			"never completes) and chargeValidUntil is (re-)stamped to completedAt + ~30d — here the field IS the " +
-			"convergence gate the lens reads (mirrors the lease-signing bgcheck-freshness validUntil pattern): " +
-			"missing_charge re-opens once chargeValidUntil lapses, and the lens projects it back out as freshUntil " +
-			"to arm Weaver's temporal lane for the next re-open.",
+			"(see the design's R3). For a period=monthly clause (Fire V3): state STAYS active and chargeValidUntil " +
+			"is (re-)stamped to the NEXT due date — postedAt + ~30d for an untermed clause, or, for a clause whose " +
+			".terms carry validFrom/validUntil, the next anniversary of validFrom (computed from validFrom each " +
+			"time, never drifting) — here the field IS the convergence gate the lens reads (mirrors the " +
+			"lease-signing bgcheck-freshness validUntil pattern): missing_charge re-opens once a recorded lapse " +
+			"reaches chargeValidUntil, and the lens projects it back out as freshUntil to arm Weaver's temporal " +
+			"lane for the next re-open. A termed clause whose next due reaches validUntil is marked completed by " +
+			"that final charge (chargeValidUntil = validUntil, which the lens reads as no period left). " +
+			"BackfillClauseTerm moves an untermed clause's chargeValidUntil onto its new term's grid (absent or " +
+			"before validFrom → validFrom; inside the term → the start of the period containing it, capped at " +
+			"validUntil), keeping every other key.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{"state":{"type":"string"},"completedAt":{"type":"string"},"chargeValidUntil":{"type":"string"},"supersededAt":{"type":"string"},"supersededBy":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"state":            "active (CreateClause, and every monthly recharge) or completed (DebitAccount, period=oneTime clauses only) or superseded (SupersedeClause, Fire V4, on the amended clause).",
 			"completedAt":      "RFC3339 timestamp DebitAccount stamps when it marks a oneTime clause completed. Absent while active or for monthly clauses.",
-			"chargeValidUntil": "Fire V3: RFC3339 timestamp DebitAccount (re-)stamps on every charge of a period=monthly clause (completedAt + ~30d). The clauseSatisfaction lens's recurring convergence gate and the projected freshUntil column both read this field. Absent for period=oneTime clauses.",
+			"chargeValidUntil": "RFC3339 due date of a period=monthly clause's NEXT charge: DebitAccount (re-)stamps it on every charge — postedAt + ~30d for an untermed clause, the next anniversary of .terms.validFrom for a termed one (= validUntil after the final period's charge); BackfillClauseTerm moves it onto a newly stamped term's grid. The clauseSatisfaction lens's recurring convergence gate and the projected freshUntil column both read this field. Absent for period=oneTime clauses and for a monthly clause never charged.",
 			"supersededAt":     "Fire V4: RFC3339 timestamp SupersedeClause stamps on the amended clause's status. Audit only — the row-retraction signal is the root tombstone, not this field.",
 			"supersededBy":     "Fire V4: the replacement clause's full vtx.clause.<NanoID> key. Audit only, same caveat as supersededAt.",
 		},
@@ -346,6 +436,11 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause status aspect — recharged (Fire V3 recurring)",
 				Payload:         map[string]any{"state": "active", "chargeValidUntil": "2026-08-01T12:00:00Z"},
 				ExpectedOutcome: "Updated (op:update, unconditioned) by DebitAccount when clauseRef names a period=monthly clause — stays active, re-arms chargeValidUntil ~30 days out.",
+			},
+			{
+				Name:            "clause status aspect — due date moved onto a backfilled term's grid",
+				Payload:         map[string]any{"state": "active", "chargeValidUntil": "2026-09-08T00:00:00Z"},
+				ExpectedOutcome: "Updated by BackfillClauseTerm on an untermed monthly clause whose lease's tenancy starts 2026-09-08: a recorded due before validFrom (or none) becomes validFrom; one inside the term becomes the start of the period containing it. state and every other key are kept.",
 			},
 			{
 				Name:            "clause status aspect — superseded (Fire V4)",

@@ -60,6 +60,18 @@ Installed packages:
   (`applicantRosterRead` is a protected-Postgres Secure Lens — the identity
   name decrypts at projection time, Contract #3 §3.10). Introduces no new
   vertex type.
+- `loftspace-ledger` + `semantic-contracts` — the append-only lease ledger
+  (`account` / `transaction`, `LoftspaceCreateAccount` / `DebitAccount` /
+  `CreditAccount`, the `ledgerHistory` / `leaseAccounts` Lenses) and the
+  Executable Paper package that bills it: a `clause` vertex per provision
+  (`CreateClause` / `SupersedeClause` / `InspectPremises` / `BackfillClauseTerm`),
+  the `clauseSatisfaction` convergence target (one `DebitAccount` per period,
+  gated on a recorded lapse reaching the clause's due date and the due date
+  lying inside its `.terms.validFrom`/`validUntil` term; the due dates walk the
+  calendar-month grid from `validFrom`) and the `leaseRentSettlement` bootstrap
+  (agreed rent → account → a rent clause per tenancy term: the original term
+  from `.tenancy.leaseStart`, each signed renewal's from its recorded
+  `termStart`/`rentAmount`; a legacy untermed clause is termed from the lease).
 
 **Clinic vertical** (the 2nd reference vertical / forcing function for PHI +
 recurring schedules):
@@ -526,6 +538,10 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
 (`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
 mechanizes it (name the gate, strike the entry).
 
+Retired: *a lens MATCH edit is a corpus edit* — `internal/refractor/*_corpus_census_test.go` (branch decomposition,
+sibling groups, label set, grouping key, walk scope, hop index) fail by lens name on any `Spec` edit; run
+`go test ./internal/refractor/ -run 'Corpus|Census' -count=1` before merge and re-pin deliberately.
+
 - **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
   returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
   refused for every erased subject even though the shredded envelope stays PRESENT with `data.shredded=true`.
@@ -607,15 +623,6 @@ mechanizes it (name the gate, strike the entry).
   Charge vector surfaced three read-drift rows every sibling op already carried. Check: every op that calls
   `require_workplace` / `enforce_workplace` has one vector as a non-operator staff actor; an op with the guard and no
   `read <Op> lnk.identity.<id>.worksAt.*` baseline row is the tell.
-
-- **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
-  `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
-  label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
-  `lint-lens-anchors` or the app tests notices. Minted: café `cafeLedgerHistory` refund columns (2026-09-05) — CI
-  reddened on three pins after a green local run of every package gate. Check: any edit to a lens `Spec` runs
-  `go test ./internal/refractor/ -run 'TestCorpus|Census' -count=1` before merge and re-pins deliberately, stating
-  in the commit why each verdict moved.
-
 - **A guard's OCC rests on whoever writes its read declaration.** `contextHint` is submitter-supplied and never
   enforced, so a cap that reads a maintained aspect declared only in a descriptor's `optionalReads` is hydrated —
   and its bare update revision-conditioned — only for callers who repeat the declaration; a caller that omits it
@@ -650,9 +657,35 @@ mechanizes it (name the gate, strike the entry).
   (`wellnessWaitlistPromotion` counted `status = booked` while `PromoteWaitlistedBookings` read seat cells —
   a class that ran and was rescheduled opened a gap the op could only decline, `GapBudgetExhausted` forever;
   2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
-
-## Related contracts Second sighting 2026-09-13: `capabilityEphemeral`'s population-coverage pin landed fixture-based; the
+  Second sighting 2026-09-13: `capabilityEphemeral`'s population-coverage pin landed fixture-based; the
   shipped-spec fragment pin (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment`) is the shape.
+- **A recorded value is read as the FACT it records, never as a proxy for the event it was derived from — and
+  a hydrated aspect's absence is two facts, not one.** Two shapes in one item (rent-clause term, 2026-09-13,
+  both caught cold). (a) `BackfillClauseTerm` re-gridded a clause's recorded DUE (`chargeValidUntil`, always
+  `postedAt + 720h`) by "the period containing the due", which for a 31-day period whose charge posted on its
+  first day is the period already billed — an immediate double charge on two live tenants had the install
+  slipped 18 days; the fix inverts the stamp exactly (`due − window`) and re-grids the CHARGE instant. Check: for
+  any migration or normalization of a recorded timestamp, name the event it was derived from and the exact
+  derivation, and invert that — never re-interpret the derived value; pin a vector whose derived value and source
+  event fall in different periods. (b) `DebitAccount` read `.status ∉ state` as "never charged" (period 0), but
+  `CreateClause` writes `.status` unconditionally, so absence can only mean the dispatcher never declared the
+  OptionalRead — a pre-upgrade envelope would have rewound a period-5 clause and the lens catch-up re-billed five
+  periods. Check: for every `key in state` test on an OptionalRead whose absence carries a benign meaning, prove
+  the key can be absent for a live vertex; if its writer always creates it, absence means undeclared → fail
+  closed, and the negative vector submits the envelope WITHOUT the declaration.
+- **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from — a segment that names
+  the wrong vertex type binds nothing from that side while binding fine from the other.** `mint_clause` wrote
+  `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires: the lease-anchored inbound
+  walk (`srcType = clause`, correct) counted the clause, so every test and the live gap converged, and a
+  clause-anchored `(c)-[:governs]->(l:leaseapp)` designed in this fire could never have bound on the six live
+  clauses (`adjacency/store.go` `OtherType: dstType`). Found by the builder, whose fixture had built keys from the
+  vertex type — the `edge` fixture now goes through `substrate.ParseLinkKey` + `adjacency.EventsForLink` so
+  `OtherType` comes from the KEY as live. Check: a package test pins the literal link-key string each `make_link`
+  writes against the target's `vtx.<type>` (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType` is the
+  shape), and a lens fixture never derives a link's endpoint type from anything but the key.
+
+## Related contracts
+
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.
 - **Contract #8** ([package-install](/docs/contracts/08-package-install.md)) — the `InstallPackage` / `UninstallPackage` op payload + guardrail contract.
 - **Contract #6** §6.2 — Capability KV envelope shape (reached via Lens projection, never written directly).

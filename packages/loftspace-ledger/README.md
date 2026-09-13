@@ -58,9 +58,14 @@ credit) client-side, so concurrent debits/credits never race a read-modify-write
 
 `DebitAccount`'s optional `clauseRef` additionally writes the `authorizedBy` audit link
 (transaction → clause) and updates the clause's `.status` — `completed` for a one-time clause, or
-`chargeValidUntil` re-armed (`recurringChargePeriod = 720h`, `scripts.go`) for a `period: monthly`
-clause (Fire V3) — the `semantic-contracts` Executable Paper package's canonical `directOp` consumer
-of this ledger.
+`chargeValidUntil` re-armed for a `period: monthly` clause — the `semantic-contracts` Executable
+Paper package's canonical `directOp` consumer of this ledger. `chargeValidUntil` is the clause's next
+due date: for a clause whose `.terms` carry `validFrom`/`validUntil` (a rent clause) the due dates walk
+the calendar-month anniversary grid from `validFrom` — each charge bills the period starting at the
+recorded due (read as an OptionalRead on `.status`) and records the next anniversary, computed from
+`validFrom` every time so the day-of-month never drifts; the charge whose next due reaches `validUntil`
+marks the clause `completed`, and a due already at `validUntil` is refused (`TermExhausted`). An
+untermed monthly clause keeps the `postedAt + RecurringChargePeriod` (720h) cadence.
 
 ## Where the ledger is surfaced
 

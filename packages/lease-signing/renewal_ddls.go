@@ -62,7 +62,7 @@ func renewalDDL() pkgmgr.DDLSpec {
 			"opened without one). " +
 			"SetRenewalTerms{renewalKey, rentAmount, termMonths} is the landlord's rent-adjustment leg: validates " +
 			"rentAmount > 0, termMonths is a whole number (InvalidTermMonths otherwise — a fractional value would " +
-			"otherwise be silently truncated by SignRenewal's later add_months call, which casts months to int " +
+			"otherwise be silently truncated by SignRenewal's later time.rfc3339_add_months call, which casts months to int " +
 			"internally), and " +
 			"termMonths >= ceil(renewalWindow in months) (a term shorter than the renewal " +
 			"window would open the NEXT cycle the instant this one signs — monthly rollover is out of scope), " +
@@ -87,7 +87,10 @@ func renewalDDL() pkgmgr.DDLSpec {
 			"verified leaseApp's .applicationSignals says hasGuarantor=true and .guarantorVerification is absent. On success it " +
 			"writes .renewalSignature {signedAt}, flips the renewal root status to complete, and — in the SAME batch — " +
 			"extends the LEASEAPP's .tenancy: leaseEnd += terms.termMonths (calendar months), renewalOpensAt " +
-			"recomputed as leaseEnd - renewalWindow (the CreateAppointment multi-vertex-write precedent). The " +
+			"recomputed as leaseEnd - renewalWindow, termStart = the previous leaseEnd (where the renewed term " +
+			"begins — the original term's rent clause runs to exactly here) and rentAmount = terms.rentAmount " +
+			"(the rent agreed for the renewed term, dollars; the semantic-contracts leaseRentSettlement lens " +
+			"reads both to mint the renewal's own rent clause) — the CreateAppointment multi-vertex-write precedent. The " +
 			"leaseapp key is taken from the LIVE renews link (never trusted from a payload field) — a link-" +
 			"verified cross-vertex write, the Withdraw precedent. " +
 			"CancelRenewal{renewalKey, reason?} is the landlord's terminal decline: rejects when .renewalSignature is " +
@@ -152,8 +155,9 @@ func renewalDDL() pkgmgr.DDLSpec {
 					"verified leaseApp's .applicationSignals says hasGuarantor=true and .guarantorVerification is absent. On success, writes " +
 					".renewalSignature {signedAt}, sets the renewal root status=complete, and — verifying leaseApp against " +
 					"the LIVE renews link and applicant against that leaseapp's LIVE applicationFor link — extends that " +
-					"leaseapp's .tenancy: leaseEnd += terms.termMonths (calendar months), renewalOpensAt recomputed. Both " +
-					"writes commit in the SAME batch. Returns primaryKey.",
+					"leaseapp's .tenancy: leaseEnd += terms.termMonths (calendar months), renewalOpensAt recomputed, " +
+					"termStart = the previous leaseEnd, rentAmount = terms.rentAmount. Both writes commit in the SAME " +
+					"batch. Returns primaryKey.",
 			},
 			{
 				Name:    "CancelRenewal — landlord declines to renew",

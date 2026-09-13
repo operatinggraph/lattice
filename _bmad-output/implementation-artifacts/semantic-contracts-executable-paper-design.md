@@ -170,7 +170,10 @@ data in aspects:
 
 **Links** (each reads "source relation target"; the clause is the later-arriving vertex on install, so it is
 the **source**):
-- `lnk.clause.<cid>.governs.lease.<lid>` — the clause governs a lease (state-bound execution).
+- `lnk.clause.<cid>.governs.leaseapp.<lid>` — the clause governs a lease (state-bound execution). *(2026-09-13: the
+  target-type segment names the vertex type, `leaseapp`, per Contract #1 — the adjacency index derives a walk's far
+  endpoint from that segment, so a key spelled `governs.lease.` can be walked from the lease side only. The six live
+  clauses carry the `lease` spelling; `BackfillClauseTerm` re-keys each as it terms it.)*
 - `lnk.clause.<cid>.chargesTo.account.<aid>` — the clause debits this ledger account.
 - `lnk.clause.<cid>.conditionedOn.<targetType>.<tid>` *(optional)* — a conditioned fee (e.g. `…conditionedOn.pet.<pid>`); absent link ⇒ unconditional.
 - `lnk.transaction.<txid>.authorizedBy.clause.<cid>` — **written by `DebitAccount`**; the audit chain of custody. (`transaction` is later-arriving ⇒ source.)
@@ -683,25 +686,38 @@ charges are reversed.
   `lapsedAt >= validFrom` holds with equality on the start lapse.
 - **`DebitAccount` computes the next due on the anniversary grid, never `postedAt + 720h`, for a termed
   clause.** With `k` = the period index of the recorded due (`chargeValidUntil`, read via a new
-  `row.clauseKey.status` OptionalRead; absent or before `validFrom` ⇒ `k = 0`), the next due is
+  `row.clauseKey.status` OptionalRead — a termed clause whose `.status` was not hydrated is refused, since a due
+  read from nothing would rewind it to period 0; absent or before `validFrom` ⇒ `k = 0`), the next due is
   `validFrom + (k+1) months` — computed from `validFrom` each time, so Jan 31 → Feb 28 → Mar 31 never drifts
   — and the clause is marked `completed` when that next due reaches `validUntil`. A lapse that would bill a
   period starting at or after `validUntil` fails `TermExhausted` (defense; unreachable once 13.2.4 has run).
   Calendar-month addition becomes a sandbox builtin, `time.rfc3339_add_months(s, n)` (day-of-month clamps,
   the semantics lease-signing's hand-rolled `add_months` already has) — a fourth pure `TimeBuiltins` member
   beside `rfc3339_add`; the two lease-signing copies switch to it, and no package keeps a hand-kept copy.
-- **Legacy clauses are termed by a gap, not a migration.** `clauseSatisfaction` walks
-  `OPTIONAL MATCH (c)-[:governs]->(l:leaseapp)` and projects `leaseStart`/`termStart`/`leaseEnd` from
-  `l.tenancy`; the new gap `missing_term` (monthly, `validFrom = null`, tenancy present) dispatches
-  `BackfillClauseTerm{clauseKey, leaseAppKey}` — Reads the clause + `.terms` + the lease + `.tenancy`,
-  OptionalReads `.status`. The op stamps `validFrom = leaseStart`, `validUntil = tenancy.termStart` if the
-  lease was renewed (the legacy clause covers the ORIGINAL term only) else `leaseEnd`, and **normalizes the due
-  date** to the anniversary grid: `chargeValidUntil := clamp(periodStart_containing(chargeValidUntil), validFrom,
-  validUntil)`. The monthly charge arm is suppressed while `missing_term` is open (`validFrom <> null OR
-  leaseStart = null`), so a legacy clause never posts one more 720h charge in the seconds before its term lands.
-  Live consequence, per clause (the design's own census, §13.5): Priya's `vigBJ…` and the two May-31 leases
-  re-arm at a past anniversary and bill their current period at once; Jordan's `kaZpA…` normalizes to
-  `validUntil` and stops.
+- **Legacy clauses are termed by a gap, not a migration — on the LEASE anchor.** *(Amended 2026-09-13 at build:
+  the six live clauses' governs links are keyed `governs.lease.<lid>`, and the adjacency index derives a walk's far
+  endpoint from the key's type segment, so `clauseSatisfaction` could never walk `(c)-[:governs]->(l:leaseapp)` on
+  them; the inbound walk from the lease resolves the clause from the source segment, which is right on both
+  shapes.)* `leaseRentSettlement` projects `untermedClauseKey = max(CASE WHEN monthly AND unconditioned AND
+  validFrom = null THEN c.key ELSE null END)` (max() skips nulls; one clause per pass, the gap re-opens for the
+  next) and the gap `missing_term = untermedClauseKey <> null AND leaseStart <> null AND leaseEnd <> null`
+  dispatches `BackfillClauseTerm{clauseKey: untermedClauseKey, leaseAppKey}` — Reads the clause + `.terms` + the
+  lease + `.tenancy`, OptionalReads `.status`, Enumerations the clause's outbound `governs` walk. `missing_term`
+  and `missing_clause` are exclusive by construction (the untermed count holds `missing_clause` shut). The op
+  stamps `validFrom = leaseStart`, `validUntil = tenancy.termStart` if the lease was renewed (the legacy clause
+  covers the ORIGINAL term only) else `leaseEnd`, **normalizes the due date** to the anniversary grid — the last
+  charge's instant is recovered exactly as `chargeValidUntil − RecurringChargePeriod` (the untermed branch's
+  only stamp form), and the new due is the anniversary after the period containing it, `validFrom` when
+  that instant is pre-term or absent, capped at `validUntil` (a due at the end marks the clause `completed`);
+  normalizing from the DUE rather than the charge would re-bill a 31-day period whose charge posted in its
+  first day (cold review, 2026-09-13) — and **re-keys a
+  `governs.lease.` link** to `governs.leaseapp.` (same document under the Contract #1 key, legacy key tombstoned) —
+  once per clause, since a second submission is `AlreadyTermed`. `clauseSatisfaction` carries no tenancy columns;
+  an untermed clause keeps the untermed arm until the term lands. Live consequence, per clause (the design's own
+  census, §13.5, walked by hand at review): Priya's `vigBJ…` re-arms at 2026-09-08 (past) and bills her first
+  period at once; `oo4Xh…` re-arms at 09-28, the two May-31 leases at 09-30 and `3VM7…` at 10-01 (all future —
+  their last untermed charge already covered the current period); Jordan's `kaZpA…` normalizes to `validUntil`,
+  is marked `completed`, and stops.
 - **A renewal mints its own clause through the lens, not through `SignRenewal`.** `SignRenewal` records the
   renewed term on the lease — `.tenancy` gains `termStart` (= the previous `leaseEnd`) and `rentAmount` (the
   renewal's `.terms.rentAmount`, dollars like `requestedRent`). `leaseRentSettlement` projects
@@ -786,3 +802,35 @@ ever written by a renewal, and its absence means "the original term").
 transactions; 1 renewal vertex, `status: open` (no renewal has ever been signed, so no lease carries a
 `termStart`). Approved leaseapps without `.tenancy`: 0 (`fuW7…` is tombstoned). Over-charges by the term rule:
 4 (listed in 13.2). Re-run: `nats … kv ls core-kv | grep -E '^vtx\.clause\.[^.]+$' | wc -l` → 6.
+
+### 13.6 Close note (Vertical Steward, 2026-09-13) — SHIPPED `67799a7d`, CI green
+
+Built in full in one fire, no persistent worktree (`steward-verticals-clause-term`, merged and deleted). Live
+landing from the main checkout: `bin/processor` + `bin/gateway` cycled (the new builtin), the three packages
+diff-applied (`loftspace-ledger` 0.5.1→0.6.0, `lease-signing` 0.32.0→0.33.0, `semantic-contracts`
+0.4.8→0.5.0). The first `BackfillClauseTerm` dispatches landed one second before the `operator` grant's
+`cap.role-by-operation` row projected (the documented install lag, `_packages.md` §5) and were `AuthDenied`;
+`lattice weaver revoke` + `enable leaseRentSettlement` cleared the marks and all six clauses termed within 20 s,
+each with its due on the grid and its `governs` link re-keyed (six `governs.leaseapp.` live, six `governs.lease.`
+tombstoned). Observed per clause, matching §13.2's corrected walk: `vigBJ…` (Priya) re-armed at 09-08, the `@at`
+fired at once, one $2,400 charge posted for [09-08, 10-08) and the due moved to 10-08; `oo4Xh…` 09-28, `9LcU…` and
+`RiDMS…` 09-30, `3VM7…` 10-01, all `freshUntil` armed and not violating; `kaZpA…` (Jordan) capped at its
+`validUntil` and marked `completed`, no timer. Four operator `CreditAccount` reversals posted as the primordial
+operator (the Loupe operator actor holds `consoleOperator` + `consumer`, whose `CreditAccount` grant is
+`scope=self`): Priya −$4,800 (owes $2,400 for her first period), `pbCxp…` −$2,100, Jordan −$2,050. Every ledger
+row reads back through `loftspace-ledger-history`; `make verify-kernel` passes against the live stack.
+
+Review classification (one cold opus pass over the whole diff + the lead's review): **implementation-bug ×2**,
+both BLOCKING/SHOULD-FIX and closed before merge — the due-normalization double bill (the derived due was
+re-gridded instead of the charge instant it was derived from) and the unhydrated-`.status`-as-never-charged
+rewind — filed as one `_packages.md` dossier entry; **design-gap ×1** — the clause-anchored `governs` walk the
+brief designed could never bind on the live keys (`governs.lease.`), found by the builder's fixture change, shape
+amended mid-fire to the lease-anchored gap + link repair, filed as a second dossier entry; **doc ×2** — §13.2's
+per-clause live claim was wrong for two clauses and the `missing_term` attribution went stale in three comments,
+both fixed in the commit. The `_packages.md` dossier retired *a lens MATCH edit is a corpus edit* (mechanized by
+the refractor corpus census tests) and stands at 13 entries — one over its cap for the next close pass to fold.
+
+Not built, by design: under-billing catch-up for the three clauses minted late; mid-month proration; an FE
+surface (the ledger already shows every charge with its clause prose). Residual for the running stack: `loom`,
+`bridge`, `loupe`, `facet` and the four vertical apps link the new builtin but never execute it; their binaries
+are rebuilt in `bin/` and their running processes are the pre-fire builds.

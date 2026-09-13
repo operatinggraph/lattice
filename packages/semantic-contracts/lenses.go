@@ -23,10 +23,10 @@ const ClauseSatisfactionTarget = "clauseSatisfaction"
 const LeaseRentSettlementTarget = "leaseRentSettlement"
 
 // Lenses returns the package's Lens declarations: `clauseSatisfaction` (§10.2
-// actorAggregate covering all archetypes through Fire V3 — fixed/one-time,
-// conditioned, judgment, recurring monthly, and prorated computational
+// actorAggregate covering every archetype — fixed/one-time, conditioned,
+// judgment, recurring monthly (termed or not), and prorated computational
 // clauses) and `leaseRentSettlement` (the lease → account → clause bootstrap
-// chain feeding it).
+// chain feeding it, one rent clause per lease term).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -41,7 +41,7 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "clause",
 				OutputKeyPattern: ClauseSatisfactionTarget + ".{actorSuffix}",
 				BodyColumns: []string{"violating", "missing_charge", "missing_inspection", "entityKey", "clauseKey",
-					"accountKey", "amountCents", "inspectorKey", "period", "chargeValidUntil", "freshUntil"},
+					"accountKey", "amountCents", "inspectorKey", "period", "chargeValidUntil", "validFrom", "validUntil", "freshUntil"},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
 				Freshness:     "auto",
@@ -58,10 +58,11 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: LeaseRentSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_terms", "missing_account", "missing_clause", "entityKey", "leaseAppKey", "accountKey", "requestedRentCents"},
-				EmptyBehavior:    "delete",
-				KeyColumn:        "entityId",
-				Freshness:        "auto",
+				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "entityKey", "leaseAppKey", "accountKey",
+					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey"},
+				EmptyBehavior: "delete",
+				KeyColumn:     "entityId",
+				Freshness:     "auto",
 			},
 		},
 	}
@@ -71,7 +72,8 @@ func Lenses() []pkgmgr.LensSpec {
 // approved, signed lease application (DecideLeaseApplication's own
 // approve-readiness floor already requires the signature, scripts.go)
 // projects a row and needs an agreed rent, then a ledger account, then a
-// recurring monthly rent clause, in three independent gap columns —
+// recurring monthly rent clause for its CURRENT term — and any monthly clause
+// it already has minted without a term gets one — in four gap columns:
 // `missing_account`/`missing_clause` mirror cafe-domain's tabSettlement
 // missing_account → missing_charge shape exactly (lenses.go), except the
 // second gap here mints a CLAUSE, not a charge, because rent's actual
@@ -91,42 +93,89 @@ func Lenses() []pkgmgr.LensSpec {
 //     reads — no link walk needed, mirroring cafe-domain's
 //     l.cafeLedgerAccount.data.accountKey read). Weaver dispatches
 //     LoftspaceCreateAccount{leaseAppKey} (loftspace-ledger, targets.go).
-//   - `missing_clause` — requestedRent and the account both exist and no
-//     LIVE unconditioned monthly clause governs this lease yet
-//     (count(DISTINCT CASE WHEN ...) collapses the fan to a single existence
-//     check, the clauseSatisfaction/objectLiveness idiom — lease-signing's
-//     own freshBgComplete/payComplete columns use the identical
+//   - `missing_clause` — requestedRent, the account and the lease's
+//     .tenancy (leaseStart + leaseEnd, DecideLeaseApplication's first-approve
+//     stamp) all exist, and no LIVE unconditioned monthly clause governs
+//     this lease's CURRENT term yet: none whose .terms.validFrom equals
+//     termStart, and none still untermed (count(DISTINCT CASE WHEN ...)
+//     collapses each fan to a single existence check, the
+//     clauseSatisfaction/objectLiveness idiom — lease-signing's own
+//     freshBgComplete/payComplete columns use the identical
 //     count(DISTINCT CASE WHEN ... THEN key ELSE null END) shape). The
 //     period=monthly + conditioned<>true filter is deliberate, not
 //     incidental: it is what lets this gate distinguish the auto-minted rent
 //     clause from any OTHER clause a landlord might separately install on the
 //     same lease (a one-time move-in fee, a conditioned pet fee) — those must
 //     never suppress rent billing. Weaver dispatches
-//     CreateClause{leaseAppKey, accountKey, amountCents: requestedRentCents,
-//     period: "monthly", prose: <literal>} (this package).
+//     CreateClause{leaseAppKey, accountKey, amountCents: termRentCents,
+//     period: "monthly", validFrom: termStart, validUntil: leaseEnd, prose:
+//     <literal>} (this package).
+//   - `missing_term` — the lease's .tenancy (leaseStart + leaseEnd) exists
+//     and an unconditioned monthly clause governing it carries no term
+//     (.terms.validFrom null): untermedClauseKey is that clause's key —
+//     max(CASE WHEN ... THEN c.key ELSE null END), max() skipping nulls (the
+//     clinic-ledger `max(tx.key)` dispatch-param precedent), so with several
+//     untermed clauses one is termed per pass and the gap re-opens for the
+//     next. Weaver dispatches BackfillClauseTerm{clauseKey: untermedClauseKey,
+//     leaseAppKey} (this package), which stamps validFrom/validUntil from the
+//     tenancy, moves the recorded due date onto the term's anniversary grid,
+//     and re-keys a legacy `governs.lease.` link to `governs.leaseapp.`.
+//     This gap lives HERE, on the lease anchor, because the inbound governs
+//     walk resolves the clause from the link's source-type segment, which is
+//     `clause` on both key shapes; the clause-anchored lens could never walk
+//     a legacy link outbound (see clauseSatisfactionSpec). missing_term and
+//     missing_clause are mutually exclusive by construction: an untermed
+//     clause makes untermedClauseCount non-zero, which holds missing_clause
+//     shut, and missing_clause requires untermedClauseCount = 0, which makes
+//     untermedClauseKey null.
+//
+// The term the rent clause covers is the lease's CURRENT one. termStart is
+// l.tenancy.data.termStart — the renewed term's start, which SignRenewal
+// records as the previous leaseEnd — or, for a lease never renewed,
+// leaseStart; leaseEnd is the current term's end either way. A signed
+// renewal therefore opens missing_clause again (the original clause's
+// validFrom is the old start, not termStart), and the clause it mints covers
+// [old leaseEnd, new leaseEnd) at the renewal rent — the original clause
+// stays live and expires by its own validUntil, so two clauses govern one
+// lease, each converging alone. The untermed count is the migration guard:
+// a legacy clause minted before terms existed carries no validFrom, and
+// counting it keeps this gap shut until this lens's own missing_term
+// has stamped its term, so a renewal can never double-cover a
+// period. The gate's leaseStart <> null / leaseEnd <> null conjuncts are what
+// let every templated param be non-null whenever it dispatches (Weaver
+// refuses a row.<col> param that resolves null).
 //
 // `missing_account` and `missing_clause` each carry the `requestedRent <>
 // null` conjunct so neither ever dispatches while the rent is still missing
 // — the missing_terms remediation runs first, alone, and only once it
 // converges do the account/clause gaps see a non-null requestedRent and open.
 //
-// requestedRent is a plain DOLLAR figure, like every other rent-shaped field
-// in LoftSpace (unit.listing.rentAmount, cmd/loftspace-app/web/app.js's
-// "$"+rentAmount display) — but every ledger amount (CreateClause's
-// amountCents, DebitAccount's amountCents) is integer CENTS. The ×100
-// conversion has to happen here, in the lens (the full engine's arithmetic
-// BinaryOp, executor.go numericOp) — Weaver's GapActionSpec Params only ever
+// termRent is the current term's rent in DOLLARS: l.tenancy.data.rentAmount
+// when a renewal has recorded one, else requestedRent — a plain dollar
+// figure, like every other rent-shaped field in LoftSpace
+// (unit.listing.rentAmount, cmd/loftspace-app/web/app.js's "$"+rentAmount
+// display) — but every ledger amount (CreateClause's amountCents,
+// DebitAccount's amountCents) is integer CENTS. The ×100 conversion has to
+// happen here, in the lens (the full engine's arithmetic BinaryOp,
+// executor.go numericOp) — Weaver's GapActionSpec Params only ever
 // substitute a row column verbatim or a literal (strategist.go resolveParam),
-// never compute one — so requestedRentCents is the only column the
-// missing_clause dispatch may template as amountCents; templating the raw
-// requestedRent column would underbill by 100x. The conversion is guarded by
-// a CASE WHEN: the full engine's numericOp errors on a nil operand rather
-// than propagating null (unlike arithmetic in openCypher proper), so a bare
-// `requestedRent * 100` would fail evaluation of the whole row — not just the
-// column — for every missing_terms lease; the CASE WHEN keeps
-// requestedRentCents null on that row instead, and the missing_clause
-// conjunct above means CreateClause is never dispatched against a null
-// amountCents in any case.
+// never compute one — so termRentCents is the only column the missing_clause
+// dispatch may template as amountCents; templating a raw dollar column would
+// underbill by 100x. The conversion is guarded by a CASE WHEN: the full
+// engine's numericOp errors on a nil operand rather than propagating null
+// (unlike arithmetic in openCypher proper), so a bare `termRent * 100` would
+// fail evaluation of the whole row — not just the column — for every
+// missing_terms lease; the CASE WHEN keeps termRentCents null on that row
+// instead, and the missing_clause conjunct above means CreateClause is never
+// dispatched against a null amountCents in any case.
+//
+// Null table (equalsAny: null = null is TRUE, null <> x is TRUE; compareAny
+// fails closed on nil): a lease with no .tenancy has termStart null, so an
+// untermed clause's null validFrom counts as ITS term clause — harmless,
+// since missing_clause already requires leaseStart <> null and never opens
+// on such a lease; and missing_term requires the same, so an untermed clause
+// on a tenancy-less lease stays on the untermed cadence, which is
+// clauseSatisfaction's own rule for it.
 const leaseRentSettlementSpec = `MATCH (l:leaseapp {key: $actorKey})
 OPTIONAL MATCH (l)<-[:governs]-(c:clause)
 WITH
@@ -134,18 +183,29 @@ WITH
   l.decision.data.value AS decision,
   l.terms.data.requestedRent AS requestedRent,
   l.ledgerAccount.data.accountKey AS accountKey,
-  count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) THEN c.key ELSE null END) AS rentClauseCount
+  l.tenancy.data.leaseStart AS leaseStart,
+  l.tenancy.data.leaseEnd AS leaseEnd,
+  coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart) AS termStart,
+  coalesce(l.tenancy.data.rentAmount, l.terms.data.requestedRent) AS termRent,
+  count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart)) THEN c.key ELSE null END) AS termClauseCount,
+  count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseCount,
+  max(CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseKey
 WHERE (decision = 'approved')
 RETURN
   entityKey AS actorKey,
   entityKey,
   entityKey AS leaseAppKey,
   accountKey,
-  (CASE WHEN requestedRent = null THEN null ELSE (requestedRent * 100) END) AS requestedRentCents,
+  leaseStart,
+  termStart,
+  leaseEnd,
+  untermedClauseKey,
+  (CASE WHEN termRent = null THEN null ELSE (termRent * 100) END) AS termRentCents,
   (requestedRent = null) AS missing_terms,
   ((requestedRent <> null) AND (accountKey = null)) AS missing_account,
-  ((requestedRent <> null) AND (accountKey <> null) AND (rentClauseCount = 0)) AS missing_clause,
-  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (rentClauseCount = 0))) AS violating
+  ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) AS missing_clause,
+  ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) AS missing_term,
+  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null))) AS violating
 `
 
 // clauseSatisfactionSpec is the one-row-per-clause satisfaction cypher (§3.2
@@ -154,23 +214,32 @@ RETURN
 // or an inspector link (judgment)):
 //
 //   - `missing_charge` — true while the clause charges an account, is either
-//     unconditioned or its conditionedOn target is still live, and no
-//     transaction `authorizedBy` it exists yet. count(t.key) collapses the
-//     fan to a single existence check.
+//     unconditioned or its conditionedOn target is still live, and a charge
+//     is due: for a oneTime clause, no transaction `authorizedBy` it exists
+//     yet (count(t.key) collapses the fan to a single existence check); for
+//     a monthly clause, the term rule below.
 //     "Conditioned" is a `terms.conditioned` data flag set at CreateClause
 //     time (not inferred from link/target liveness — a tombstoned
 //     conditionedOn TARGET makes condKey resolve null exactly like "never
 //     conditioned" would, so only an explicit flag can tell them apart; the
 //     flag is true only when CreateClause received a conditionedOnKey). The
-//     gate reads `conditioned <> true`, not `conditioned = false`: a
-//     pre-this-fire clause's `.terms` aspect has no `conditioned` key at all
-//     (Fire V1's shape), so `conditioned` resolves to null — `null = false`
-//     is false (equalsAny only equals nil to nil), which would wrongly
-//     collapse the whole OR to false and permanently suppress the charge for
-//     every legacy clause. `<> true` correctly treats both `false` and
-//     absent (null) as "not conditioned."
+//     gate reads `conditioned <> true`, not `conditioned = false`: a clause
+//     whose `.terms` aspect has no `conditioned` key at all resolves
+//     `conditioned` to null — `null = false` is false (equalsAny only equals
+//     nil to nil), which would wrongly collapse the whole OR to false and
+//     permanently suppress the charge for every such clause. `<> true`
+//     correctly treats both `false` and absent (null) as "not conditioned."
 //   - `missing_inspection` — true while the clause has an assigned inspector
 //     (judgment) and no .inspection aspect has been written yet.
+//
+// A monthly clause minted without a term is termed by leaseRentSettlement's
+// missing_term gap (above), not here: this lens is anchored on the clause,
+// and a clause reaches its lease only through its own outbound governs link,
+// whose key's target-type segment is what the adjacency index rebuilds the
+// far endpoint from — so the legacy links spelled `governs.lease.` can be
+// walked from the lease side (source type `clause`, correct) but never from
+// the clause side. The lease-anchored lens walks the inbound hop that works
+// on both key shapes.
 //
 // Null comparisons use the shipped `= null` / `<> null` idiom (lease-signing
 // precedent), not `IS NULL`/`IS NOT NULL`: this grammar's
@@ -194,43 +263,61 @@ RETURN
 // authorizing transaction exists, the gap flips false and STAYS false (the
 // row lingers non-violating, which is harmless).
 //
-// Fire V3 (recurring + proration):
+// The monthly rule (`period` is c.terms.data.period, always present — every
+// CreateClause stamps it; period<>'monthly' keeps the chargeCount=0 check
+// above, period='monthly' takes this arm):
 //
-//   - `period` (c.terms.data.period, always present — every CreateClause
-//     stamps it) branches missing_charge's gate in two mutually exclusive
-//     ways. period<>'monthly' (oneTime, the default) keeps the exact Fire
-//     V1/V2 chargeCount=0 check above. period='monthly' instead mirrors
-//     lease-signing's bgcheck-freshness pattern: the gate is
-//     `chargeValidUntil = null OR a recorded lapse reaching chargeValidUntil`
-//     — a freshness decay read off c.status.data.chargeValidUntil (DebitAccount
-//     re-stamps it on every recurring charge), not a transaction count. This
-//     is why a monthly clause's .status aspect is NOT purely audit like the
-//     oneTime case (see clauseStatusAspectTypeDDL) — chargeValidUntil is the
-//     actual convergence signal for that archetype.
-//   - The lapse is a FACT on the clause, not a clock reading: when the @at this
-//     lens arms fires, MarkExpired records the instant in the clause's
-//     freshnessExpiry marker under this target's own key, and `lapsedAt` is
-//     that entry, carried through the aggregating WITH as a scalar beside
-//     chargeValidUntil. Both operands of the comparison are stored graph data,
-//     so the row is a pure function of the subgraph and two projections at
-//     different wall-clock instants over the same graph agree. compareAny
-//     answers false when either operand is nil, so a clause no timer has fired
-//     on reads unlapsed — and the explicit `chargeValidUntil = null` arm is
-//     what still opens the gap for a monthly clause that has never been
-//     charged and so has no window at all.
+//   - Every operand is stored graph data, never a clock reading. The term is
+//     the clause's own .terms.validFrom/validUntil (both or neither). The
+//     recorded due date is c.status.data.chargeValidUntil — DebitAccount
+//     re-stamps it on every recurring charge: the next anniversary of
+//     validFrom for a termed clause, postedAt + ~30d for an untermed one —
+//     which is why a monthly clause's .status aspect is NOT purely audit like
+//     the oneTime case (see clauseStatusAspectTypeDDL). The lapse is a FACT on
+//     the clause: when the @at this lens arms fires, MarkExpired records the
+//     scheduled instant in the clause's freshnessExpiry marker under this
+//     target's own key, and `lapsedAt` is that entry. So the row is a pure
+//     function of the subgraph, and two projections at different wall-clock
+//     instants over the same graph agree.
+//   - `periodStart` is the due date whose lapse bills the period
+//     [periodStart, periodStart + 1 month): chargeValidUntil when one is
+//     recorded, else validFrom (a termed clause never charged is due at its
+//     start). It is computed in the aggregating WITH as a per-anchor scalar
+//     beside the two columns it derives from.
+//   - The charge is DUE when a recorded lapse reaches periodStart
+//     (`lapsedAt >= periodStart`; MarkExpired records the scheduled instant,
+//     so the start lapse holds with equality) — or, the untermed arm, when
+//     neither a due date nor a term exists (`chargeValidUntil = null AND
+//     validFrom = null`: an untermed clause never charged is due at once —
+//     the untermed cadence, unchanged for a clause nothing terms). compareAny
+//     answers false when either operand is nil, so a clause no timer has
+//     fired on reads unlapsed, and a termed clause with no recorded due waits
+//     for the lapse at validFrom rather than charging on the null.
+//   - AND the period lies INSIDE the term: `validUntil = null OR periodStart
+//     < validUntil`. A clause whose recorded due has reached validUntil has
+//     billed its last period; a lapse recorded at or after that bills
+//     nothing, and the row simply stops violating.
 //   - `freshUntil` arms Weaver's temporal lane (internal/weaver/temporal.go)
 //     the same way lease-signing's bgcheck does: while no recorded lapse
-//     reaches a monthly clause's chargeValidUntil, freshUntil projects that
-//     same instant so an @at fires right when it lapses (nothing else would
-//     CDC-trigger a re-read at that moment); once the lapse is recorded (or
-//     for a oneTime clause, always) freshUntil is null — no timer armed,
-//     chargeCount/gap-driven dispatch owns it instead. A chargeValidUntil
-//     already in the past is projected VERBATIM, so the overdue @at fires at
-//     once and records the lapse that opens the gap.
+//     reaches periodStart and periodStart is inside the term, freshUntil
+//     projects periodStart so an @at fires right when it lapses (nothing else
+//     would CDC-trigger a re-read at that moment); once the lapse is recorded
+//     (or for a oneTime clause, always, or once the term is fully billed)
+//     freshUntil is null — no timer armed. A periodStart already in the past
+//     is projected VERBATIM, so the overdue @at fires at once and records the
+//     lapse that opens the gap — this is how a not-yet-started termed clause
+//     arms its first charge at validFrom, and how a legacy clause
+//     BackfillClauseTerm re-armed at a past anniversary bills its current
+//     period at once.
 //   - Proration needs NO lens change at all: a prorated clause's amountCents
 //     was computed ONCE by CreateClause (exact Starlark bignum integer
 //     arithmetic, ddls.go) and stored like any flat fee, so it flows through
 //     the existing oneTime chargeCount=0 gate unchanged.
+//
+// validFrom/validUntil and periodStart ride through the aggregating WITH as
+// per-anchor scalars (one .terms and one .status aspect per clause), so the
+// row's grouping key widens only by values every row of a group already
+// agrees on, and the non-DISTINCT count(t.key) product is untouched.
 //
 // Built with fmt.Sprintf so the target id comes from the constant the
 // WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
@@ -251,7 +338,10 @@ WITH
   c.terms.data.amountCents AS amountCents,
   c.terms.data.conditioned AS conditioned,
   c.terms.data.period AS period,
+  c.terms.data.validFrom AS validFrom,
+  c.terms.data.validUntil AS validUntil,
   c.status.data.chargeValidUntil AS chargeValidUntil,
+  CASE WHEN c.status.data.chargeValidUntil = null THEN c.terms.data.validFrom ELSE c.status.data.chargeValidUntil END AS periodStart,
   c.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   c.inspection.data.completed AS inspectionCompleted,
   count(t.key) AS chargeCount
@@ -264,17 +354,24 @@ RETURN
   inspectorKey,
   period,
   chargeValidUntil,
+  validFrom,
+  validUntil,
   ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
    (((period <> 'monthly') AND (chargeCount = 0))
-    OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (lapsedAt >= chargeValidUntil))))
+    OR ((period = 'monthly')
+        AND (((chargeValidUntil = null) AND (validFrom = null)) OR (lapsedAt >= periodStart))
+        AND ((validUntil = null) OR (periodStart < validUntil))))
   ) AS missing_charge,
   ((inspectorKey <> null) AND (inspectionCompleted = null)) AS missing_inspection,
-  CASE WHEN (period = 'monthly') AND (chargeValidUntil <> null) AND NOT (lapsedAt >= chargeValidUntil)
-       THEN chargeValidUntil ELSE null END AS freshUntil,
+  CASE WHEN (period = 'monthly') AND (periodStart <> null) AND NOT (lapsedAt >= periodStart)
+            AND ((validUntil = null) OR (periodStart < validUntil))
+       THEN periodStart ELSE null END AS freshUntil,
   (
     ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
      (((period <> 'monthly') AND (chargeCount = 0))
-      OR ((period = 'monthly') AND ((chargeValidUntil = null) OR (lapsedAt >= chargeValidUntil)))))
+      OR ((period = 'monthly')
+          AND (((chargeValidUntil = null) AND (validFrom = null)) OR (lapsedAt >= periodStart))
+          AND ((validUntil = null) OR (periodStart < validUntil)))))
     OR ((inspectorKey <> null) AND (inspectionCompleted = null))
   ) AS violating
 `, ClauseSatisfactionTarget)
