@@ -65,3 +65,28 @@ pickup path):
   nothing.
 - Dispatch is **human-in-the-loop** (a proposal dispatches only after `ReviewProposal{approve}`); the
   `autoApply` autonomy boundary is unchanged (Andrew-gated).
+
+### Plan-shaped proposals + the promotion proposal (the planner mandate's Augur floor, §10.8)
+
+- **A proposal MAY be plan-shaped**: the structured output carries an ordered `steps` list (each
+  `{action, params}` from the same escalation vocabulary; **at most 8**), recorded on `.proposed` as
+  `steps` with `action`/`params` mirroring `steps[0]`; a single-action proposal is the one-step case.
+  The record-time and approval-time validation legs run **per step** (vocabulary · default-deny scope to
+  the escalated candidate); one failing step stores the whole proposal `invalid`, naming the step.
+- **An approved plan dispatches leg by leg on the `augurDispatch` target**: `.review.leg` counts the
+  legs dispatched; the row projects `dispatchLeg`, Weaver materialises `steps[dispatchLeg]` after the
+  dispatch-time re-validation, fires it under a **leg-scoped** proposal requestId, and the
+  `RecordProposalDispatch` flip (carrying `leg`; refused when it does not equal `review.leg`) advances
+  the counter — the proposal stays `approved` while legs remain and flips `dispatched` on the last. A
+  leg that fails re-validation flips the whole proposal `invalid`; no partial plan continues. Legs are
+  **ordered** — the next is published only after the previous leg's flip re-projected the row — and
+  each dispatches **at most once**; a leg's success is not verified by the dispatch (a rejected leg
+  leaves the origin gap violating, which re-escalates and a fresh proposal supersedes).
+- **A promotion proposal** is Weaver-authored, never model-authored: when a `mode:"planned"` gap's
+  `__effect` window (§10.3) for one actionRef holds a full window with every episode closed, Weaver
+  submits **`RecordPromotionProposal`** (package op, Weaver-actor only) once per (target, gap,
+  actionRef) — a `vtx.augurproposal` with `.gap.trigger = "promotion"`, its candidate the target's
+  own meta vertex, `.proposed.action = "promotePlaybook"` carrying `{targetId, gapColumn, actionRef,
+  window, closed}` — into the same review queue. It is **never dispatched**: the `augurDispatch` row
+  projects `violating = false` for it in every state; an approval records a human-ratified
+  recommendation that the package author promote the chain to a static playbook entry.
