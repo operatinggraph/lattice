@@ -6,18 +6,25 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=identity, .permittedCommands (10 ops),
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (11 ops),
 //	               .description, .script,
 //	               .inputSchema, .outputSchema, .fieldDescription, .examples
 //	  Each aspect also validated for correct vertexKey + localName envelope fields.
 //	7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
 //	  credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
 //	  aspect with value=true
-//	9 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
+//	11 of the 15 permission vertices (vtx.permission.<NanoID>) the package
+//	  installs — the identity DDL's own ops: CreateUnclaimedIdentity,
 //	  UpdateIdentityState, ClaimIdentity, RotateClaimKey, RecordIdentityPII,
 //	  ProvisionConsumerIdentity, InitiateCredentialLink, CompleteCredentialLink,
-//	  UnlinkCredential
-//	16 grantedBy link keys:
+//	  UnlinkCredential, ReconcileCredentialBinding, RevokeIdentityClaim.
+//	  NOT asserted here: the 4 permissions the package's other DDL files
+//	  install — UnbindIdentityCredentials and TombstoneOrphanedCredentialIndex
+//	  (the erasure-plane verbs, permissions.go) and RevokeActor / UnrevokeActor
+//	  (revocation.go) — each operator-only; their scripts' own colocated tests
+//	  cover them and this script asserts only the identity DDL's surface.
+//	18 of the package's 22 grantedBy link keys (the 4 unasserted permissions
+//	  hold one operator grant each):
 //	  CreateUnclaimedIdentity   → operator, frontOfHouse, backOfHouse
 //	  UpdateIdentityState       → operator
 //	  ClaimIdentity             → consumer
@@ -27,6 +34,8 @@
 //	  InitiateCredentialLink    → consumer
 //	  CompleteCredentialLink    → consumer
 //	  UnlinkCredential          → consumer
+//	  ReconcileCredentialBinding → operator
+//	  RevokeIdentityClaim       → operator
 //	5 role vertices (consumer, frontOfHouse, backOfHouse, provider — user-facing;
 //	  identityProvisioner — system-only) seeded by PreInstall hook (vtx.role.<NanoID>)
 //	1 identityIndexHint Lens meta-vertex (vtx.meta.<NanoID>) with class=meta.lens
@@ -35,7 +44,9 @@
 //	1 package vertex (vtx.package.<NanoID>)
 //	1 package manifest aspect with name=identity-domain
 //
-// Total target: ~93 OK lines.
+// Total target: ~100 OK lines (the counts above are what the script walks;
+// the DDL count of 18 and the lens count of 4 declared in package.go are
+// likewise only partially asserted — one DDL, one lens).
 //
 // Exit 0: all assertions pass.
 // Exit 1: one or more assertions failed.
@@ -66,15 +77,17 @@ const (
 
 // grantTarget maps operationType → expected grantee canonical names.
 var identityGrantTargets = map[string][]string{
-	"CreateUnclaimedIdentity":   {"operator", "frontOfHouse", "backOfHouse"},
-	"UpdateIdentityState":       {"operator"},
-	"ClaimIdentity":             {"consumer"},
-	"RotateClaimKey":            {"operator", "frontOfHouse", "backOfHouse"},
-	"RecordIdentityPII":         {"operator", "frontOfHouse", "backOfHouse"},
-	"ProvisionConsumerIdentity": {"identityProvisioner", "operator"},
-	"InitiateCredentialLink":    {"consumer"},
-	"CompleteCredentialLink":    {"consumer"},
-	"UnlinkCredential":          {"consumer"},
+	"CreateUnclaimedIdentity":    {"operator", "frontOfHouse", "backOfHouse"},
+	"UpdateIdentityState":        {"operator"},
+	"ClaimIdentity":              {"consumer"},
+	"RotateClaimKey":             {"operator", "frontOfHouse", "backOfHouse"},
+	"RecordIdentityPII":          {"operator", "frontOfHouse", "backOfHouse"},
+	"ProvisionConsumerIdentity":  {"identityProvisioner", "operator"},
+	"InitiateCredentialLink":     {"consumer"},
+	"CompleteCredentialLink":     {"consumer"},
+	"UnlinkCredential":           {"consumer"},
+	"ReconcileCredentialBinding": {"operator"},
+	"RevokeIdentityClaim":        {"operator"},
 }
 
 var identityExpectedOps = []string{
@@ -88,6 +101,7 @@ var identityExpectedOps = []string{
 	"CompleteCredentialLink",
 	"UnlinkCredential",
 	"ReconcileCredentialBinding",
+	"RevokeIdentityClaim",
 }
 
 var identityOpScopes = map[string]string{
@@ -101,6 +115,7 @@ var identityOpScopes = map[string]string{
 	"CompleteCredentialLink":     "self",
 	"UnlinkCredential":           "self",
 	"ReconcileCredentialBinding": "any",
+	"RevokeIdentityClaim":        "any",
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.

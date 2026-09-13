@@ -17,15 +17,22 @@
 //     per MATCHED subject — and is the gap
 //     nfr-s6-release-quantum-payload-design.md §6.3 accepts as a statistical
 //     channel against a confirmation oracle.
-//   - already-claimed: a live, claimed identity whose `.claimKey` aspect is
-//     tombstoned. `.claimKey` is declared in the op's floored read set and
-//     step 4 hydrates every declared key up front regardless of which script
-//     branch eventually decides the outcome (starlark_kv.go's kvModule doc:
-//     "a key declared in contextHint.reads is hydrated at step 4"), and
-//     decryptSensitiveDoc's `doc.IsDeleted` arm performs the same
-//     readPiiKeyEnvelope round trip and AEAD open the live arm performs
-//     before scrubbing the body (sensitive_decrypt.go), so a tombstoned
-//     sensitive aspect costs what a live one costs.
+//   - already-claimed: a REAL secret-claimed identity — created unclaimed
+//     and claimed through ClaimIdentity with a second credential, so its
+//     `.credentialBinding`, credentialindex and boundTo are live exactly as
+//     in production and its `.claimKey` is tombstoned. `.claimKey` is
+//     declared in the op's floored read set and step 4 hydrates every
+//     declared key up front regardless of which script branch eventually
+//     decides the outcome (starlark_kv.go's kvModule doc: "a key declared in
+//     contextHint.reads is hydrated at step 4"), and decryptSensitiveDoc's
+//     `doc.IsDeleted` arm performs the same readPiiKeyEnvelope round trip and
+//     AEAD open the live arm performs before scrubbing the body
+//     (sensitive_decrypt.go), so a tombstoned sensitive aspect costs what a
+//     live one costs. The live binding is what makes this instrument able to
+//     see a read the claim path has no business hydrating: a sensitive aspect
+//     only a CLAIMED target carries costs an envelope KVGet plus a decrypt on
+//     this cause and nothing on wrong-key, and a synthetic fixture with no
+//     binding cannot show that.
 //   - wrong-key: a live, unclaimed identity with a LIVE `.claimKey` aspect.
 //     Step 4 hydrates it through the same envelope KVGet + AEAD decrypt path,
 //     and the script hashes the submitted secret and runs
@@ -195,14 +202,23 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 
 	absentTarget := "vtx.identity." + probeNanoID(t)
 
-	// Mirrors TestClaimIdentity_AlreadyClaimed_GenericError (claim_test.go)
-	// exactly: state=claimed AND a tombstoned .claimKey. Rejects via the
-	// script's own current_state=="claimed" gate (ddls.go), which answers
+	// A real secret-claimed identity: created unclaimed and claimed through
+	// ClaimIdentity, so state=claimed, the .claimKey is tombstoned, and
+	// .credentialBinding / credentialindex / boundTo are live exactly as in
+	// production — a synthetic state+spent-claimKey seed carries no binding
+	// and cannot see a read that only a claimed target pays for. Claimed as
+	// secondCredActorKey, NOT the consumerActorKey every timed sample submits
+	// as: a credential already bound elsewhere is refused
+	// credential-already-bound ahead of invalid-key, which would send the
+	// wrong-key cause down a branch it is not meant to measure. Rejects via
+	// the script's own current_state=="claimed" gate (ddls.go), which answers
 	// before the secret is ever compared — the wrong-state counter is what
 	// proves that below.
-	alreadyClaimedTarget := "vtx.identity." + probeNanoID(t)
-	seedDirectIdentity(t, ctx, conn, alreadyClaimedTarget, "claimed", "")
-	seedSpentClaimKeyAspect(t, ctx, conn, alreadyClaimedTarget, sha256HexOf("probe-already-claimed-seed-secret"))
+	alreadyClaimedTarget, alreadyClaimedSecret := createIdentityAndGetKeys(t, ctx, conn, cpOn, consOn, testutil.GenReqID("ProbeAlrClmCr0"))
+	seedIdentityCapDoc(t, ctx, conn, secondCredActorKey, "ClaimIdentity")
+	testutil.PublishOp(t, conn, erasureClaimEnv(testutil.GenReqID("ProbeAlrClmCl0"), secondCredActorKey, alreadyClaimedTarget, alreadyClaimedSecret))
+	testutil.DriveOne(t, ctx, cpOn, consOn, processor.OutcomeAccepted)
+	assertDocLive(t, ctx, conn, alreadyClaimedTarget+".credentialBinding", "the already-claimed fixture must carry the binding a real claim writes")
 
 	// A live, unclaimed identity with a LIVE claimKey aspect — created through
 	// a real CreateUnclaimedIdentity op (createIdentityAndGetKeys), not seeded

@@ -18,9 +18,11 @@ var consumerRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
 
 // DDLs returns the package's DDL meta-vertex declarations:
 //   - `identity` (meta.ddl.vertexType) — handles CreateUnclaimedIdentity,
-//     UpdateIdentityState, ClaimIdentity, RecordIdentityPII. State machine:
-//     unclaimed → claimed; merged is set only by identity-hygiene's
-//     MergeIdentity.
+//     UpdateIdentityState, ClaimIdentity, RecordIdentityPII, and the rest of
+//     the identity DDL's PermittedCommands. State machine: unclaimed →
+//     claimed; merged is set only by identity-hygiene's MergeIdentity; the
+//     one path back from claimed to unclaimed is RevokeIdentityClaim, the
+//     operator repair that unlinks every credential in the same batch.
 //   - `ssn`, `dob`, `name`, `email`, `phone`, `claimKey`,
 //     `credentialBinding` (meta.ddl.aspectType, sensitive) — declare the
 //     identity domain's sensitive PII aspect types. Marking them sensitive=true
@@ -63,6 +65,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"CompleteCredentialLink",
 				"UnlinkCredential",
 				"ReconcileCredentialBinding",
+				"RevokeIdentityClaim",
 			},
 			Description: "Identity domain DDL. " +
 				"Vertex shape: vtx.identity.<NanoID>, class=identity. " +
@@ -119,15 +122,27 @@ func DDLs() []pkgmgr.DDLSpec {
 				"(credential-not-provisioned): the index names its credential in its own body and can therefore " +
 				"assert one that has no vertex, and the pre-link corpus this op exists to converge is the " +
 				"population most likely to contain them — without the check the repair path would publish " +
-				"exactly the dangling edges the bind paths refuse.",
+				"exactly the dangling edges the bind paths refuse. " +
+				"RevokeIdentityClaim: the operator-only undo for a claim made by the wrong person — unlinks EVERY " +
+				"credential bound to a claimed identity (tombstones each boundTo link and live credentialindex, " +
+				"emits identity.unbound per credential so the Gateway's credential-bindings bucket drops the row), " +
+				"tombstones .credentialBinding and .linkKey and the consumer holdsRole grant, returns .state to " +
+				"unclaimed and arms a fresh caller-minted claimKeyHash for the real person; the vertex, its " +
+				"name/contact aspects and every link into it from other packages stay untouched. Refuses " +
+				"(ClaimRevokeRejected) no-target, wrong-state (an unclaimed identity is RotateClaimKey's job), " +
+				"merged, erased, not-secret-claimed (no .claimKey was ever minted — a Gateway-provisioned " +
+				"credential identity is its own credential, and arming a secret on it is not a repair), " +
+				"claim-key-drift, nothing-to-revoke, plane-inconsistent (the credentials array and the live " +
+				"boundTo links must agree exactly — run ReconcileCredentialBinding first), owner-mismatch (a live " +
+				"credentialindex names another owner) and too-many-credentials (never partial).",
 			Script: identityDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
 				`"email":{"type":"string","description":"Email address, case-insensitive normalized. At least one of email/phone required."},` +
 				`"phone":{"type":"string","description":"Phone number, E.164 digits only. At least one of email/phone required."},` +
-				`"claimKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted claim secret (CreateUnclaimedIdentity, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
+				`"claimKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted claim secret (CreateUnclaimedIdentity, RotateClaimKey, RevokeIdentityClaim — required on each). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
 				`"claimKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for claimKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
-				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — target identity for UpdateIdentityState, RecordIdentityPII, and ReconcileCredentialBinding (where it is the owner the credentialindex vertex must already record)."},` +
+				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — target identity for UpdateIdentityState, RecordIdentityPII, RotateClaimKey, RevokeIdentityClaim, and ReconcileCredentialBinding (where it is the owner the credentialindex vertex must already record)."},` +
 				`"newState":{"type":"string","enum":["claimed"],"description":"Target state for UpdateIdentityState. Only unclaimed→claimed is permitted."},` +
 				`"claimKey":{"type":"string","description":"One-time-use claim key plaintext (ClaimIdentity). Its sha256 must match the stored hash."},` +
 				`"targetIdentityKey":{"type":"string","description":"vtx.identity.<NanoID> of the unclaimed identity to claim (ClaimIdentity)."},` +
@@ -147,7 +162,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"name":               "Person's display name. Required on CreateUnclaimedIdentity. Stored as sensitive aspect.",
 				"email":              "Email address. Stored lowercase-normalized. Used as a deduplication index key.",
 				"phone":              "Phone number. Stored as E.164 digit string. Used as a deduplication index key.",
-				"claimKeyHash":       "Lowercase hex sha256 of the client-minted claim secret. Required on CreateUnclaimedIdentity. Stored verbatim; Lattice never holds the plaintext.",
+				"claimKeyHash":       "Lowercase hex sha256 of the client-minted claim secret. Required on CreateUnclaimedIdentity, RotateClaimKey and RevokeIdentityClaim. Stored verbatim; Lattice never holds the plaintext.",
 				"claimKeyAlgo":       "Hash algorithm for claimKeyHash. Optional; defaults to sha256 (the only accepted value).",
 				"identityKey":        "Full vtx.identity.<NanoID> key of an existing identity vertex.",
 				"newState":           "Desired state after UpdateIdentityState. State machine: unclaimed → claimed only.",
@@ -191,6 +206,18 @@ func DDLs() []pkgmgr.DDLSpec {
 					ExpectedOutcome: "Overwrites the identity's .claimKey aspect with the new hash. Rejects a " +
 						"claimed/merged/tombstoned identity (InvalidStateTransition) — only an unclaimed identity " +
 						"has a secret worth rotating.",
+				},
+				{
+					Name:    "RevokeIdentityClaim — operator undoes a claim made by the wrong person",
+					Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>", "claimKeyHash": "<sha256-hex-of-a-new-client-minted-secret>"},
+					ExpectedOutcome: "Every credential bound to the claimed identity is unlinked (boundTo link + live " +
+						"credentialindex tombstoned, identity.unbound emitted per credential), .credentialBinding, " +
+						".linkKey and the consumer holdsRole grant are tombstoned, .state returns to unclaimed and " +
+						".claimKey is armed with the new hash; identity.claimRevoked lists the credentials cut off. " +
+						"The identity vertex, its PII aspects and every inbound link from other packages (a clinic " +
+						"chart's identifiedBy) are untouched, so the real person claims the same identity with the " +
+						"new secret. Rejects (ClaimRevokeRejected) an unclaimed, merged, erased or never-secret-claimed " +
+						"identity, and any identity whose credentials array and live boundTo links disagree.",
 				},
 				{
 					Name:    "InitiateCredentialLink — U arms a link secret for a second credential",
@@ -664,6 +691,26 @@ def credential_index_mutation(cred_index_key, existing, actor_key, identity_key,
         return {"op": "update", "key": cred_index_key, "document": doc, "expectedRevision": existing.revision}
     return {"op": "create", "key": cred_index_key, "document": doc}
 
+def credential_binding_first_write(binding_key, existing, identity_key, data):
+    # CompleteCredentialLink's Scenario-B first write of an identity's
+    # credentialBinding, whose dispatchers declare the key
+    # (identityceremony.CompleteCredentialLinkContextHint) so a revision is in
+    # hand. RevokeIdentityClaim tombstones this aspect, so the key can be
+    # present-but-tombstoned; a blind create asserts revision 0 and would
+    # RevisionConflict there. Same revive-on-CAS idiom as
+    # credential_index_mutation: a tombstone revives via an update pinned to
+    # the revision it was read at; a truly absent key still gets a plain
+    # CreateOnly create. A LIVE binding is not revived over -- it keeps the
+    # create, whose revision-0 assertion conflicts, because a live credential
+    # set the caller read as absent is drift, not a link to complete.
+    # (ClaimIdentity does not use this: its target's binding is deliberately
+    # unhydrated, so it writes an unconditioned update -- see that branch.)
+    doc = {"class": "credentialBinding", "vertexKey": identity_key,
+           "localName": "credentialBinding", "isDeleted": False, "data": data}
+    if existing != None and hasattr(existing, "isDeleted") and existing.isDeleted:
+        return {"op": "update", "key": binding_key, "document": doc, "expectedRevision": existing.revision}
+    return {"op": "create", "key": binding_key, "document": doc}
+
 def read_state(state, identity_key):
     aspect_key = identity_key + ".state"
     if aspect_key in state:
@@ -835,6 +882,12 @@ def require_live_role(role_key):
         fail("UnknownRole: " + role_key)
 
 def validate_state_transition(current, new):
+    # UpdateIdentityState's table. claimed -> unclaimed is deliberately NOT in
+    # it: a bare state flip that leaves the credential plane in place is the
+    # fail-open shape -- the claimed credentials would keep resolving to an
+    # identity that reads as unclaimed and re-claimable. RevokeIdentityClaim is
+    # the only path back, and it writes .state itself after sweeping every
+    # bound credential in the same atomic batch.
     if current == None:
         fail("InvalidStateTransition: <missing> -> " + str(new))
     allowed = {
@@ -962,6 +1015,46 @@ def credential_bound_to_mutation(credential_actor_key, owner_identity_key, bound
            "localName": "boundTo", "data": {"boundAt": bound_at}}
     return {"op": "update", "key": credential_bound_to_key(credential_actor_key, owner_identity_key),
             "document": doc}
+
+def validate_claim_key_hash(p):
+    # The single definition of what a submitted claimKeyHash may be, shared by
+    # every branch that arms a claim secret (CreateUnclaimedIdentity,
+    # RotateClaimKey, RevokeIdentityClaim): 64 lowercase hex characters, and
+    # sha256 the only algorithm -- claimKeyAlgo defaults to it when absent.
+    # Lattice stores the hash verbatim and never sees the plaintext, so this
+    # shape check is the whole of what the platform can assert about it.
+    # Returns (hash, algo).
+    claim_key_hash = p.claimKeyHash if hasattr(p, "claimKeyHash") else None
+    if claim_key_hash == None or type(claim_key_hash) != type("") or len(claim_key_hash) == 0:
+        fail("InvalidArgument: claimKeyHash: required non-empty lowercase hex sha256")
+    if len(claim_key_hash) != 64:
+        fail("InvalidArgument: claimKeyHash: must be 64-char lowercase hex sha256")
+    for ch in claim_key_hash.elems():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            fail("InvalidArgument: claimKeyHash: must be lowercase hex")
+    claim_key_algo = p.claimKeyAlgo if hasattr(p, "claimKeyAlgo") else None
+    if claim_key_algo == None or claim_key_algo == "":
+        claim_key_algo = "sha256"
+    if claim_key_algo != "sha256":
+        fail("InvalidArgument: claimKeyAlgo: only sha256 is supported")
+    return claim_key_hash, claim_key_algo
+
+def consumer_grant_key(identity_key):
+    # The consumer holdsRole grant ClaimIdentity upserts on the identity it
+    # claims and RevokeIdentityClaim tombstones on the identity it un-claims:
+    # a deterministic link key off the identity and the package's own pinned
+    # role literal, so both branches and derive_reads name the one key.
+    return ("lnk.identity." + identity_id(identity_key) +
+            ".holdsRole.role." + "__EXPECTED_CONSUMER_ROLE_KEY__"[len("vtx.role."):])
+
+# RevokeIdentityClaim's credential sweep bounds. The walk is the identity's
+# INBOUND boundTo links -- one per credential ever bound to it, tombstones
+# included, since a soft delete stays in the keyspace and kv.Links keeps
+# returning it -- so the page budget is sized for a person, not a hub: four
+# pages of fifty is two hundred bindings, live or spent, and an identity past
+# that is refused whole rather than repaired in part.
+CLAIM_REVOKE_PAGE_LIMIT = 50
+CLAIM_REVOKE_MAX_PAGES = 4
 
 # Fixed-length stand-ins the claim and credential-link branches hash and
 # compare against when the real operands are absent, so both crypto calls run
@@ -1128,8 +1221,36 @@ def derive_reads(op):
                 # package's own pinned role literal -- derivable here for
                 # exactly the reason it was left underived before: no browser
                 # client can compute it, but the package can.
-                keys.append("lnk.identity." + identity_id(target) +
-                            ".holdsRole.role." + "__EXPECTED_CONSUMER_ROLE_KEY__"[len("vtx.role."):])
+                keys.append(consumer_grant_key(target))
+                # The target's .credentialBinding is deliberately NOT derived
+                # here. It is sensitive: on a claimed target hydrating it costs
+                # an envelope KVGet plus a decrypt, on an unclaimed one nothing,
+                # and that difference is measurable on the wire -- the exact
+                # claimed-vs-unclaimed timing separation NFR-S6 forbids
+                # (claim_timing_probe_test.go). It would also fault a
+                # claimed-then-shredded target at hydration instead of letting
+                # the erasure gate count it. ClaimIdentity writes the binding
+                # with an unconditioned update instead (see the branch).
+        return {"optionalReads": keys}
+
+    if ot == "RevokeIdentityClaim":
+        # Everything this branch touches beyond the dispatcher's three required
+        # reads (the vertex, .state, .credentialBinding -- opmetas.go). All
+        # optional, each for its own reason: .claimKey is PRESENT-BUT-TOMBSTONED
+        # on the population this verb exists for and absent on the one it
+        # refuses, so its absence is an outcome the script names rather than a
+        # hydration fault; .linkKey and the consumer grant are tombstoned only
+        # if live, and most identities carry no armed link secret; the erasure
+        # gate keys are absent on every identity nobody is erasing.
+        #
+        # Guarded by the same grammar predicate the branch's own no-target check
+        # uses, so a malformed key is refused with that word rather than
+        # surfacing as DeriveReadsInvalid before the script runs.
+        identity_key = getattr(p, "identityKey", None)
+        if not is_identity_vertex_key(identity_key):
+            return {}
+        keys = [identity_key + ".claimKey", identity_key + ".linkKey", consumer_grant_key(identity_key)]
+        keys += erasure_gate_keys([identity_key])
         return {"optionalReads": keys}
 
     if ot == "UnlinkCredential":
@@ -1207,19 +1328,7 @@ def execute(state, op):
         if email == None and phone == None:
             fail("InvalidArgument: email or phone: at least one required")
 
-        claim_key_hash = p.claimKeyHash if hasattr(p, "claimKeyHash") else None
-        if claim_key_hash == None or type(claim_key_hash) != type("") or len(claim_key_hash) == 0:
-            fail("InvalidArgument: claimKeyHash: required non-empty lowercase hex sha256")
-        if len(claim_key_hash) != 64:
-            fail("InvalidArgument: claimKeyHash: must be 64-char lowercase hex sha256")
-        for ch in claim_key_hash.elems():
-            if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
-                fail("InvalidArgument: claimKeyHash: must be lowercase hex")
-        claim_key_algo = p.claimKeyAlgo if hasattr(p, "claimKeyAlgo") else None
-        if claim_key_algo == None or claim_key_algo == "":
-            claim_key_algo = "sha256"
-        if claim_key_algo != "sha256":
-            fail("InvalidArgument: claimKeyAlgo: only sha256 is supported")
+        claim_key_hash, claim_key_algo = validate_claim_key_hash(p)
 
         name_index_key = identity_index_key("name", normalize_name(name))
 
@@ -1652,12 +1761,22 @@ def execute(state, op):
         # (mirrors ProvisionConsumerIdentity, §11.5 R2): no caller input names
         # the role, so there is nothing to steer.
         consumer_role_key = "__EXPECTED_CONSUMER_ROLE_KEY__"
-        consumer_role_id = consumer_role_key[len("vtx.role."):]
-        target_id = target_identity_key[len("vtx.identity."):]
-        consumer_grant_key = "lnk.identity." + target_id + ".holdsRole.role." + consumer_role_id
+        grant_key = consumer_grant_key(target_identity_key)
 
         mutations = [
-            {"op": "create", "key": target_identity_key + ".credentialBinding",
+            # An UNCONDITIONED update, never a create, and never a hydrated
+            # CAS either -- the same idiom credential_bound_to_mutation uses
+            # for the boundTo link. An update materially creates an absent key
+            # and revives the tombstone RevokeIdentityClaim leaves, which is
+            # the path the revoke exists to reopen; a create asserts revision 0
+            # and would refuse the real person's claim forever. It is not
+            # declared and read for a revision because the aspect is sensitive
+            # and its hydration cost differs between a claimed and an
+            # unclaimed target (derive_reads records why). The serialization
+            # point is .state: declared, pinned to its hydrated revision, and
+            # flipped by every path that changes what this binding may say, so
+            # a racing claim conflicts there.
+            {"op": "update", "key": target_identity_key + ".credentialBinding",
              "document": {"class": "credentialBinding", "vertexKey": target_identity_key,
                           "localName": "credentialBinding", "isDeleted": False,
                           "data": {"actorKey": actor_key, "boundAt": observed_at,
@@ -1685,7 +1804,7 @@ def execute(state, op):
             # person able to act at all, and its dispatchers include browser
             # clients that cannot compute the deterministic role key a declared
             # read would require.
-            {"op": "update", "key": consumer_grant_key,
+            {"op": "update", "key": grant_key,
              "document": {"class": "holdsRole", "isDeleted": False,
                           "sourceVertex": target_identity_key, "targetVertex": consumer_role_key,
                           "localName": "holdsRole", "data": {}}},
@@ -1727,19 +1846,7 @@ def execute(state, op):
         if current_state != "unclaimed":
             fail("InvalidStateTransition: RotateClaimKey requires state=unclaimed, got " + str(current_state))
 
-        new_hash = p.claimKeyHash if hasattr(p, "claimKeyHash") else None
-        if new_hash == None or type(new_hash) != type("") or len(new_hash) == 0:
-            fail("InvalidArgument: claimKeyHash: required non-empty lowercase hex sha256")
-        if len(new_hash) != 64:
-            fail("InvalidArgument: claimKeyHash: must be 64-char lowercase hex sha256")
-        for ch in new_hash.elems():
-            if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
-                fail("InvalidArgument: claimKeyHash: must be lowercase hex")
-        new_algo = p.claimKeyAlgo if hasattr(p, "claimKeyAlgo") else None
-        if new_algo == None or new_algo == "":
-            new_algo = "sha256"
-        if new_algo != "sha256":
-            fail("InvalidArgument: claimKeyAlgo: only sha256 is supported")
+        new_hash, new_algo = validate_claim_key_hash(p)
 
         # .claimKey is declared Reads: an unclaimed identity always has one
         # (created together with the vertex by CreateUnclaimedIdentity, tombstoned
@@ -1762,6 +1869,251 @@ def execute(state, op):
         return {
             "mutations": mutations,
             "events": [],
+            "response": {"primaryKey": identity_key},
+        }
+
+    if ot == "RevokeIdentityClaim":
+        # The operator undo for a claim made by the wrong person. The registrar
+        # who mints an identity holds its claim secret by doctrine
+        # (docs/components/_packages.md, "Identity claim custody"), so a
+        # staffer who kept one can claim the login with a fresh credential and
+        # read what the real person's login reads. RotateClaimKey and the
+        # verticals' unbind verbs all require state==unclaimed, so without this
+        # branch that abused state is unrepairable. It reverses the claim in
+        # one batch: every bound credential is unlinked, the identity returns
+        # to unclaimed, and a fresh caller-minted secret is armed for the real
+        # person. The identity vertex, its name/contact aspects and every link
+        # INTO it from other packages (a clinic chart's identifiedBy) are
+        # untouched, so the person claims the same identity, not a new one.
+        #
+        # Operator-only (permissions.go): the registrar who may have kept the
+        # secret is exactly the staff role this verb has to sit above.
+        def fail_revoke(outcome):
+            fail("ClaimRevokeRejected: " + outcome)
+
+        # The vertex and .state are the dispatcher's declared reads. A
+        # malformed key is refused on the same grammar derive_reads applies,
+        # so the two never disagree about which keys were hydrated.
+        identity_key = getattr(p, "identityKey", None)
+        if not is_identity_vertex_key(identity_key):
+            fail_revoke("no-target")
+        if not vertex_alive(state, identity_key):
+            fail_revoke("no-target")
+
+        # Only a CLAIMED identity has a claim to revoke. An unclaimed one is
+        # RotateClaimKey's job -- its secret is re-issued, there is nothing to
+        # unlink -- and a merged one is frozen: its credentials were repointed
+        # to the survivor by MergeIdentity and belong to that identity now.
+        current_state = read_state(state, identity_key)
+        if current_state == "merged":
+            fail_revoke("merged")
+        if current_state != "claimed":
+            fail_revoke("wrong-state")
+
+        # Erasure gate (erasure-orchestration-design.md §6), the same as
+        # ClaimIdentity's: this branch arms a fresh claim secret and revives
+        # the .claimKey aspect -- a new erasable representation of the person
+        # -- and a sealed or shredded subject may acquire none. The
+        # credential-plane sweep for an erased subject is
+        # UnbindIdentityCredentials' job, not this verb's.
+        if write_path_closed(identity_key):
+            fail_revoke("erased")
+
+        # The fingerprint of the exact population this verb exists for. Only an
+        # identity minted UNCLAIMED (CreateUnclaimedIdentity) and claimed by
+        # secret ever carried a .claimKey, and ClaimIdentity TOMBSTONES it
+        # rather than removing it -- so present-but-tombstoned is what a
+        # secret-claimed identity looks like. A Gateway-provisioned credential
+        # identity (ProvisionConsumerIdentity) or a Scenario-B owner never had
+        # one: revoking those would arm a claim secret on a vertex that IS its
+        # own credential, which is not a repair of anything. A tombstoned
+        # sensitive aspect is hydrated with an empty body and no decrypt
+        # (internal/processor/sensitive_decrypt.go), so the check reads
+        # isDeleted only. Live on a claimed identity is aspect drift -- the
+        # claim that set the state should have spent it -- and a drifted
+        # identity is refused rather than guessed at.
+        claim_key_aspect_key = identity_key + ".claimKey"
+        claim_key_aspect = state[claim_key_aspect_key] if claim_key_aspect_key in state else None
+        if claim_key_aspect == None:
+            fail_revoke("not-secret-claimed")
+        if not (hasattr(claim_key_aspect, "isDeleted") and claim_key_aspect.isDeleted):
+            fail_revoke("claim-key-drift")
+
+        # .credentialBinding is a required read: sensitive, decrypted at
+        # hydration under the owner's DEK, which is alive for a claimed
+        # identity (the erasure gate above is what makes that so -- a shredded
+        # owner faults at hydration, and the refusal is the correct direction).
+        # Absent or tombstoned here is a claimed identity with no recorded
+        # credential set, and there is nothing to revoke.
+        binding_key = identity_key + ".credentialBinding"
+        binding = state[binding_key] if binding_key in state else None
+        if binding == None or (hasattr(binding, "isDeleted") and binding.isDeleted):
+            fail_revoke("nothing-to-revoke")
+        binding_data = binding.data if binding.data != None else {}
+        bound = binding_data.get("credentials")
+        if bound == None or type(bound) != type([]):
+            first_actor = binding_data.get("actorKey")
+            if first_actor != None:
+                bound = [{"actorKey": first_actor, "boundAt": binding_data.get("boundAt")}]
+            else:
+                bound = []
+        if len(bound) == 0:
+            fail_revoke("nothing-to-revoke")
+        bound_by_actor = {}
+        for entry in bound:
+            actor = entry.get("actorKey") if type(entry) == type({}) else None
+            if type(actor) != type("") or not is_identity_vertex_key(actor):
+                # An entry naming no credential is one the link plane cannot
+                # have an edge for; the two planes cannot agree, and this verb
+                # never guesses which one is right.
+                fail_revoke("plane-inconsistent")
+            bound_by_actor[actor] = entry
+
+        # The replacement secret, validated exactly as every other branch that
+        # arms one, before any enumeration is spent on a payload the branch
+        # would refuse anyway.
+        new_hash, new_algo = validate_claim_key_hash(p)
+
+        # The credential sweep: every LIVE inbound boundTo link on the
+        # identity, paginated, and refused whole if the walk cannot reach its
+        # end -- a partial revoke would leave a credential that still resolves
+        # to an identity reading as unclaimed and re-claimable.
+        live_links = []
+        cursor = None
+        exhausted = False
+        for _page in range(CLAIM_REVOKE_MAX_PAGES):
+            # read-posture: (e) relation=boundTo epoch=none (a credential bound
+            # concurrently with this sweep is the claim path racing the revoke:
+            # ClaimIdentity refuses a claimed target and CompleteCredentialLink
+            # appends to the very .credentialBinding this batch tombstones under
+            # its hydrated revision, so either the racing bind loses at step 3
+            # or this batch conflicts at step 8 and re-runs against the new
+            # set; neither commits on top of the other)
+            page, cursor = kv.Links(identity_key, "boundTo", "in", cursor, CLAIM_REVOKE_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                live_links.append(lk)
+            if cursor == None:
+                exhausted = True
+                break
+        if not exhausted:
+            fail_revoke("too-many-credentials")
+
+        # The two planes must agree EXACTLY before an operator repair rewrites
+        # both. An array entry with no live link, or a live link whose source
+        # the array does not name, is a binding one plane recorded and the
+        # other did not -- ReconcileCredentialBinding converges that, one
+        # credential at a time, with the index as its authority. This verb
+        # never guesses which plane is right.
+        linked_by_actor = {}
+        for lk in live_links:
+            linked_by_actor[lk.sourceVertex] = lk
+        for actor in bound_by_actor:
+            if actor not in linked_by_actor:
+                fail_revoke("plane-inconsistent")
+        for actor in linked_by_actor:
+            if actor not in bound_by_actor:
+                fail_revoke("plane-inconsistent")
+
+        # The credentialindex is the authority on which identity a credential
+        # resolves to (ReconcileCredentialBinding's posture), so a live index
+        # naming a DIFFERENT owner is not this identity's binding to cut, and
+        # the batch refuses rather than tombstoning it blind. Every index is
+        # read before any mutation is built, so a refusal here leaves nothing
+        # half-decided.
+        index_by_actor = {}
+        for lk in live_links:
+            credential_key = lk.sourceVertex
+            index_key = credential_index_key(credential_key)
+            # read-posture: (e) per-candidate follow-up read off the boundTo
+            # enumeration above (data-derived key -- the credential is unknown
+            # until the walk names it).
+            idx = kv.Read(index_key)
+            if idx != None and not idx.isDeleted:
+                idx_data = idx.data if idx.data != None else {}
+                if idx_data.get("identityKey") != identity_key:
+                    fail_revoke("owner-mismatch")
+                index_by_actor[credential_key] = idx
+
+        mutations = []
+        events = []
+        revoked = []
+        for lk in live_links:
+            credential_key = lk.sourceVertex
+            idx = index_by_actor.get(credential_key)
+            if idx != None:
+                # Only a LIVE index is tombstoned: tombstoning an absent or
+                # already-tombstoned key is not a repair, and the pin below
+                # would have nothing to condition on.
+                mutations.append({"op": "tombstone", "key": credential_index_key(credential_key),
+                                  "expectedRevision": idx.revision})
+            mutations.append({"op": "tombstone", "key": lk.key, "expectedRevision": lk.revision})
+            # identity.unbound is what makes the Gateway's credential-bindings
+            # materializer (internal/gateway/credential_bindings_materializer.go)
+            # DELETE the bucket row. The Gateway resolves the binding per
+            # request, so a raw-credential bearer stops resolving to this
+            # identity as soon as that row is gone. The residual is the app
+            # session: an app-session token minted with sub=<this identity>
+            # carries it until it is re-minted, and the app-session kit
+            # (internal/appsession) re-resolves the credential at each refresh
+            # -- so an open session degrades to the raw credential at its next
+            # refresh, at most one session TTL later, not at the next request.
+            events.append({"class": "identity.unbound", "data": {
+                "identityKey": identity_key,
+                "actorKey": credential_key,
+            }})
+            revoked.append({"actorKey": credential_key,
+                            "boundAt": bound_by_actor[credential_key].get("boundAt")})
+
+        # PINNED to the revision hydration observed. The whole judgement above
+        # -- which credentials to cut, which planes agree -- rests on the
+        # binding as it was read, and a CompleteCredentialLink landing between
+        # hydrate and commit appends an entry this batch never saw. Carrying
+        # the read's own revision makes the decision and the write atomic: the
+        # racing append conflicts the batch, which re-hydrates and re-judges.
+        # The per-credential tombstones above carry the same discipline off
+        # their own reads, since enumeration-discovered keys are never in the
+        # step-4 snapshot for the default pin to condition from.
+        mutations.append({"op": "tombstone", "key": binding_key, "expectedRevision": binding.revision})
+        mutations.append({"op": "update", "key": identity_key + ".state",
+                          "document": {"class": "state", "vertexKey": identity_key,
+                                       "localName": "state", "isDeleted": False,
+                                       "data": {"value": "unclaimed"}}})
+        # An update on the tombstoned key revives it, the same idiom
+        # ClaimIdentity's holdsRole upsert relies on; the key is hydrated
+        # (derive_reads), so the revive commits conditioned on the tombstone's
+        # own revision.
+        mutations.append({"op": "update", "key": claim_key_aspect_key,
+                          "document": {"class": "claimKey", "vertexKey": identity_key,
+                                       "localName": "claimKey", "isDeleted": False,
+                                       "data": {"hash": new_hash, "algo": new_algo}}})
+        # An armed link secret must not outlive the claim it belonged to: the
+        # rogue could otherwise hand a second credential in through it after
+        # the real person claims. UNCONDITIONAL, not gated on the hydrated
+        # aspect being live: InitiateCredentialLink writes this key
+        # unconditioned and touches nothing this batch pins, so a secret armed
+        # between this op's hydrate and its commit would survive a
+        # presence-gated tombstone. Tombstoning an absent key writes a
+        # bodiless {key, isDeleted:true} (internal/processor/step8_commit.go),
+        # which CompleteCredentialLink reads as no secret, and a later
+        # InitiateCredentialLink's unconditioned update writes over it.
+        mutations.append({"op": "tombstone", "key": identity_key + ".linkKey"})
+        # Restores the minted-unclaimed shape: the consumer grant is what the
+        # claim conferred, and ClaimIdentity's upsert revives it on the real
+        # claim.
+        grant_key = consumer_grant_key(identity_key)
+        if vertex_alive(state, grant_key):
+            mutations.append({"op": "tombstone", "key": grant_key})
+
+        events.append({"class": "identity.claimRevoked", "data": {
+            "identityKey": identity_key,
+            "credentials": revoked,
+        }})
+
+        return {
+            "mutations": mutations,
+            "events": events,
             "response": {"primaryKey": identity_key},
         }
 
@@ -1952,11 +2304,9 @@ def execute(state, op):
         ]
 
         if binding_absent:
-            mutations.append({"op": "create", "key": binding_key,
-                "document": {"class": "credentialBinding", "vertexKey": target_identity_key,
-                             "localName": "credentialBinding", "isDeleted": False,
-                             "data": {"actorKey": actor_key, "boundAt": observed_at,
-                                      "credentials": [new_entry]}}})
+            mutations.append(credential_binding_first_write(binding_key, existing_binding, target_identity_key,
+                                                            {"actorKey": actor_key, "boundAt": observed_at,
+                                                             "credentials": [new_entry]}))
         else:
             existing_data = existing_binding.data if existing_binding.data != None else {}
             existing_credentials = existing_data.get("credentials")

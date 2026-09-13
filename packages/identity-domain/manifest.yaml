@@ -1,10 +1,13 @@
 name: identity-domain
-version: 0.20.11
+version: 0.21.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
   RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
   CompleteCredentialLink, UnlinkCredential, ReconcileCredentialBinding,
+  RevokeIdentityClaim — the operator-only undo for a claim made by the wrong
+  person, which unlinks every bound credential, returns the identity to
+  unclaimed and arms a fresh claim secret for the real person —
   UnbindIdentityCredentials — the erasure plane's credential sweep, submitted
   only by the orchestration service actors — and
   TombstoneOrphanedCredentialIndex, the operator-run cleanup for a
@@ -110,6 +113,9 @@ declares:
     - operationType: ReconcileCredentialBinding
       scope: any
       grantsTo: [operator]
+    - operationType: RevokeIdentityClaim
+      scope: any
+      grantsTo: [operator]
     - operationType: TombstoneOrphanedCredentialIndex
       scope: any
       grantsTo: [operator]
@@ -122,6 +128,7 @@ declares:
   opMetas:
     - operationType: CreateUnclaimedIdentity
     - operationType: RotateClaimKey
+    - operationType: RevokeIdentityClaim
     - operationType: ClaimIdentity
     - operationType: RecordIdentityPII
     - operationType: UnlinkCredential

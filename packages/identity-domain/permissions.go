@@ -15,6 +15,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	InitiateCredentialLink (self) → consumer
 //	CompleteCredentialLink (self) → consumer
 //	UnlinkCredential (self)       → consumer
+//	ReconcileCredentialBinding    → operator
+//	RevokeIdentityClaim           → operator
 //
 // Scope `self` for ClaimIdentity is enforced at step 3 (auth), before the
 // script ever runs: an existence gate (the actor must already hold some
@@ -109,6 +111,13 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the right to converge one credential's boundTo link onto its credentialindex vertex — the repair verb for a binding whose edge is missing, including every binding made before the link type existed. Reaches nothing the index does not already assert: the payload's owner must equal the one the index records, and a tombstoned index rejects rather than reviving an unlinked credential.",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RevokeIdentityClaim",
+			Scope:         "any",
+			Note: "Authorizes the operator alone to undo a claim made by the wrong person: every credential bound to a CLAIMED identity is unlinked, the identity returns to unclaimed, and a fresh caller-minted claim secret is armed for the real person. Operator-only by construction rather than by caution: the registrar who mints an identity holds its claim secret by doctrine (docs/components/_packages.md, \"Identity claim custody\"), so the front-desk roles that hold CreateUnclaimedIdentity and RotateClaimKey are exactly the roles a rogue claim comes from, and this verb has to sit above them. The surface is a vertical app's operator hat; being granted to `operator` by this package does NOT make it console-callable — cmd/loupe runs as the scoped consoleOperator whose grants live in the console-operator package. " +
+				"Reaches only a secret-claimed identity: the script refuses one that never carried a .claimKey (a Gateway-provisioned credential identity is its own credential, and arming a secret on it is not a repair), one whose credentials array and live boundTo links disagree (ReconcileCredentialBinding converges that first), and any credential whose index names another owner.",
+			GrantsTo: []string{"operator"},
 		},
 		{
 			OperationType: "TombstoneOrphanedCredentialIndex",

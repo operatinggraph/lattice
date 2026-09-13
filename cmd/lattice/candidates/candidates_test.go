@@ -116,6 +116,13 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 	boundToLink := "lnk.identity.credentiaLIDCandMrg1.boundTo.identity." + secondaryID
 	seedEdgeVertex(t, ctx, conn, boundToLink)
 
+	// A tombstoned link — the consumer grant RevokeIdentityClaim retracts, or
+	// a RevokeRole'd role — stays in the keyspace and is listed by name, but
+	// MergeIdentity's trust gate rejects EdgeNotFound on it, so it must not
+	// be handed over.
+	revokedGrant := "lnk.identity." + secondaryID + ".holdsRole.role.consumerR0001"
+	seedTombstonedEdge(t, ctx, conn, revokedGrant)
+
 	edges, err := enumerateSecondaryEdges(ctx, conn, secondaryID)
 	if err != nil {
 		t.Fatalf("enumerateSecondaryEdges: %v", err)
@@ -139,6 +146,23 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 		if got[excluded] {
 			t.Errorf("script-handled link %s must be excluded from the merge edge set, got %v", excluded, edges)
 		}
+	}
+	if got[revokedGrant] {
+		t.Errorf("tombstoned link %s must be excluded from the merge edge set — the script's trust gate rejects it EdgeNotFound; got %v", revokedGrant, edges)
+	}
+}
+
+func seedTombstonedEdge(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
+	t.Helper()
+	doc := map[string]interface{}{
+		"key":       key,
+		"class":     "lnk",
+		"isDeleted": true,
+		"data":      map[string]interface{}{},
+	}
+	data, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key, data); err != nil {
+		t.Fatalf("seed tombstoned edge %s: %v", key, err)
 	}
 }
 

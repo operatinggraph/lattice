@@ -652,10 +652,19 @@ type refreshResponse struct {
 // handleRefresh implements POST /api/session/refresh — the sliding-session
 // renewal endpoint. It verifies the current cookie with RefreshGrace
 // tolerance (wider than every other session-gated request's strict default),
-// then mints a fresh token for the SAME identity and re-sets the cookie. It
-// deliberately does NOT re-run login's credential-binding resolution — that
-// resolves WHICH identity a login opens, a decision a refresh of an
-// already-open session never revisits.
+// then mints a fresh token and re-sets the cookie.
+//
+// A session opened through a BOUND credential (cred_id present and distinct
+// from the subject) re-runs login's credential-binding resolution before it
+// is re-minted, and is re-minted for whatever the credential resolves to NOW.
+// The binding is revocable — identity-domain's RevokeIdentityClaim cuts every
+// credential off a claimed identity — and the Gateway resolves it per
+// request, but a session token minted with sub=U carries U until it is
+// re-minted; without this step a revoked credential's open session would
+// renew as U forever. Re-resolving here bounds that residual to one refresh
+// interval: at its next refresh the session degrades to the raw credential,
+// exactly the identity login would open for it today. A session opened as
+// the identity itself has nothing to re-resolve and refreshes as before.
 func (m *Manager) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		m.writeError(w, http.StatusMethodNotAllowed, "POST required")
@@ -687,10 +696,54 @@ func (m *Manager) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		m.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
 		return
 	}
-	// A refresh mints a fresh token for the same session, so it must carry
-	// forward whichever credential the ORIGINAL login recorded — dropping it
-	// here would make "this sign-in" silently stop matching on next refresh.
-	token, exp, err := m.cfg.Signer.MintWithCredential(actor.Subject, actor.CredentialID)
+	subject := actor.Subject
+	if actor.CredentialID != "" && actor.CredentialID != actor.Subject {
+		// The same beat as login: mint the raw credential's own token, ask
+		// the Gateway what it is bound to, and open THAT identity's world.
+		credToken, _, merr := m.cfg.Signer.Mint(actor.CredentialID)
+		if merr != nil {
+			m.writeError(w, http.StatusInternalServerError, "mint credential token: "+merr.Error())
+			return
+		}
+		resolved, rerr := m.resolveActorIdentity(r.Context(), credToken)
+		switch {
+		case rerr != nil:
+			// Fail OPEN to the raw credential, as login does: an unresolved
+			// binding grants nothing extra, it just refreshes as the
+			// credential itself.
+			m.cfg.Logger.Error(m.cfg.AppName+": credential-binding resolve failed; refreshing as the raw credential", "actor", actor.CredentialID, "error", rerr)
+			subject = actor.CredentialID
+		case resolved == "" || resolved == actor.CredentialID:
+			// The credential no longer resolves to anyone else — its binding
+			// was revoked or unlinked since login. The session it opened
+			// degrades to the credential's own world.
+			m.cfg.Logger.Info(m.cfg.AppName+": bound credential no longer resolves; refreshing as the raw credential", "credential", actor.CredentialID, "was", actor.Subject)
+			subject = actor.CredentialID
+		default:
+			// The persona fence applies to the identity the refreshed session
+			// opens, as at login — a binding repointed since login must not
+			// become a side door.
+			if !m.personaAllowed(resolved) {
+				m.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
+				return
+			}
+			subject = resolved
+		}
+	}
+	// A refresh that still opens a bound identity carries forward the
+	// credential the ORIGINAL login recorded — dropping it would make "this
+	// sign-in" silently stop matching on next refresh. A session that has
+	// degraded to the raw credential is minted the way login mints one: the
+	// credential IS the subject, so there is no distinct provenance to carry.
+	var (
+		token string
+		exp   time.Time
+	)
+	if subject == actor.CredentialID {
+		token, exp, err = m.cfg.Signer.Mint(subject)
+	} else {
+		token, exp, err = m.cfg.Signer.MintWithCredential(subject, actor.CredentialID)
+	}
 	if err != nil {
 		m.writeError(w, http.StatusInternalServerError, "mint refreshed session token: "+err.Error())
 		return

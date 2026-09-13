@@ -1,8 +1,9 @@
 // Package identitydomain is the identity-domain Capability Package. It
 // provides CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity,
 // RotateClaimKey, RecordIdentityPII, ProvisionConsumerIdentity,
-// InitiateCredentialLink, CompleteCredentialLink, and UnlinkCredential
-// operations.
+// InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential,
+// ReconcileCredentialBinding and RevokeIdentityClaim operations, plus the
+// erasure-plane and revocation ops declared in their own files.
 //
 // Install via `lattice-pkg install packages/identity-domain`. The install
 // is ONE atomic commit routed through the Processor (Story 1.5.5):
@@ -30,7 +31,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "identity-domain",
-	Version:     "0.20.11",
+	Version:     "0.21.0",
 	Description: "Identity vertex creation, claim, and state-machine management, plus ProvisionConsumerIdentity — the Gateway's idempotent authenticated-touch auto-provisioning op, which mints a consumer identity for an actor it has never seen and completes the consumer grant for one whose vertex some other path already created (real-actor-write-auth-e2e Phase 1).",
 	Depends:     []string{"rbac-domain"},
 	DDLs:        DDLs(),

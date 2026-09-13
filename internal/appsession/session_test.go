@@ -740,14 +740,22 @@ func TestHandleRefresh_ValidCookieRotatesTokenAndCookie(t *testing.T) {
 	require.Equal(t, identity, actor.Subject)
 }
 
-// TestHandleRefresh_PreservesCredentialID pins that a refresh carries forward
-// the ORIGINAL login's credential provenance rather than collapsing it to the
-// identity — dropping it here would make "this sign-in" (account-settings)
-// silently stop matching as soon as a session's sliding refresh fires.
-func TestHandleRefresh_PreservesCredentialID(t *testing.T) {
+// refreshBoundSession refreshes a session minted for identity via credential
+// against a Gateway whose /v1/actor answers with actorStub, returning the
+// verified actor of the fresh token (or nil with the HTTP status when the
+// refresh was refused). Every bound-credential refresh test differs only in
+// what the Gateway now says the credential resolves to.
+func refreshBoundSession(t *testing.T, identity, credential string, personas []Persona, actorStub http.HandlerFunc) (*auth.VerifiedActor, int) {
+	t.Helper()
 	signer := testSigner(t)
-	m := refreshTestManager(t, signer, nil)
-	identity, credential := testNanoID(t), testNanoID(t)
+	var presented []string
+	m := refreshTestManager(t, signer, func(c *Config) {
+		c.Personas = personas
+		c.GatewayURL = newActorStub(t, func(w http.ResponseWriter, r *http.Request) {
+			presented = append(presented, r.Header.Get("Authorization"))
+			actorStub(w, r)
+		})
+	})
 	oldToken, _, err := signer.MintWithCredential(identity, credential)
 	require.NoError(t, err)
 
@@ -755,14 +763,122 @@ func TestHandleRefresh_PreservesCredentialID(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, RefreshPath, nil)
 	r.AddCookie(&http.Cookie{Name: testCookieName, Value: oldToken})
 	m.handleRefresh(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	if w.Code != http.StatusOK {
+		return nil, w.Code
+	}
+	// The re-resolution must present the CREDENTIAL's own token, the way
+	// login does — asking the Gateway about the session's current subject
+	// would answer with the identity the session already assumes.
+	require.Len(t, presented, 1, "a bound-credential refresh re-resolves exactly once")
+	presentedActor, err := m.cfg.Authn.Authenticate(context.Background(), strings.TrimPrefix(presented[0], "Bearer "))
+	require.NoError(t, err)
+	require.Equal(t, credential, presentedActor.Subject, "the Gateway must be asked about the raw credential")
 
+	var body refreshResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	require.Equal(t, body.Token, cookieNamed(w.Result(), testCookieName).Value)
+	actor, err := m.cfg.Authn.Authenticate(context.Background(), body.Token)
+	require.NoError(t, err)
+	return &actor, w.Code
+}
+
+// TestHandleRefresh_BoundCredentialStillResolvingKeepsIdentity pins the
+// ordinary bound-session refresh: the credential still resolves to the same
+// identity, so the fresh token carries the same subject AND the ORIGINAL
+// login's credential provenance — dropping it would make "this sign-in"
+// (account-settings) silently stop matching as soon as the sliding refresh
+// fires.
+func TestHandleRefresh_BoundCredentialStillResolvingKeepsIdentity(t *testing.T) {
+	identity, credential := testNanoID(t), testNanoID(t)
+	actor, code := refreshBoundSession(t, identity, credential, nil, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"actorId":         "vtx.identity." + credential,
+			"resolvedActorId": "vtx.identity." + identity,
+		})
+	})
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, identity, actor.Subject)
+	require.Equal(t, credential, actor.CredentialID)
+}
+
+// TestHandleRefresh_RevokedBindingDegradesToCredential is the undo's last
+// mile: after identity-domain's RevokeIdentityClaim (or an unlink) the
+// credential no longer resolves to the identity, and the session it opened
+// must stop being that identity at its next refresh — re-minted for the raw
+// credential, the world login would open for it today, with no provenance to
+// carry because the credential IS the subject.
+func TestHandleRefresh_RevokedBindingDegradesToCredential(t *testing.T) {
+	identity, credential := testNanoID(t), testNanoID(t)
+	actor, code := refreshBoundSession(t, identity, credential, nil, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"actorId":         "vtx.identity." + credential,
+			"resolvedActorId": "vtx.identity." + credential,
+		})
+	})
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, credential, actor.Subject, "a revoked binding's session must not renew as the identity it no longer resolves to")
+	// No distinct provenance: the verifier reads a token with no cred_id
+	// claim as credential == subject, which is also what keeps the NEXT
+	// refresh from re-resolving a session that is now the credential's own.
+	require.Equal(t, credential, actor.CredentialID)
+}
+
+// TestHandleRefresh_ResolveFailureFailsOpenToTheCredential mirrors login's
+// deny-safe fallback: an erroring Gateway refreshes the session as the raw
+// credential (which grants nothing extra) rather than refusing the refresh or
+// renewing the identity unchecked.
+func TestHandleRefresh_ResolveFailureFailsOpenToTheCredential(t *testing.T) {
+	identity, credential := testNanoID(t), testNanoID(t)
+	actor, code := refreshBoundSession(t, identity, credential, nil, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, credential, actor.Subject)
+}
+
+// TestHandleRefresh_RepointedBindingIsFenced: a binding that now resolves to
+// an identity outside the persona list must not become a side door at
+// refresh any more than at login.
+func TestHandleRefresh_RepointedBindingIsFenced(t *testing.T) {
+	identity, credential, elsewhere := testNanoID(t), testNanoID(t), testNanoID(t)
+	_, code := refreshBoundSession(t, identity, credential,
+		[]Persona{{ID: identity, Label: "Riley"}, {ID: credential, Label: "Riley's phone"}},
+		func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"actorId":         "vtx.identity." + credential,
+				"resolvedActorId": "vtx.identity." + elsewhere,
+			})
+		})
+	require.Equal(t, http.StatusForbidden, code)
+}
+
+// TestHandleRefresh_SelfSessionDoesNotResolve: a session opened as the
+// identity itself (no cred_id) has no binding to re-check and never asks the
+// Gateway.
+func TestHandleRefresh_SelfSessionDoesNotResolve(t *testing.T) {
+	signer := testSigner(t)
+	asked := false
+	m := refreshTestManager(t, signer, func(c *Config) {
+		c.GatewayURL = newActorStub(t, func(w http.ResponseWriter, _ *http.Request) {
+			asked = true
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+	})
+	identity := testNanoID(t)
+	oldToken, _, err := signer.Mint(identity)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, RefreshPath, nil)
+	r.AddCookie(&http.Cookie{Name: testCookieName, Value: oldToken})
+	m.handleRefresh(w, r)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.False(t, asked, "a self session has no credential binding to re-resolve")
 	var body refreshResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
 	actor, err := m.cfg.Authn.Authenticate(context.Background(), body.Token)
 	require.NoError(t, err)
 	require.Equal(t, identity, actor.Subject)
-	require.Equal(t, credential, actor.CredentialID)
 }
 
 // TestHandleRefresh_GraceWindowAcceptsRecentlyExpiredToken proves the

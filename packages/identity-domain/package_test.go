@@ -54,10 +54,10 @@ func TestPackage_DDLsAndOps(t *testing.T) {
 	if identity.Class != "meta.ddl.vertexType" {
 		t.Fatalf("identity DDL class = %q, want meta.ddl.vertexType", identity.Class)
 	}
-	if got := len(identity.PermittedCommands); got != 10 {
-		t.Fatalf("identity permittedCommands: got %d, want 10 "+
+	if got := len(identity.PermittedCommands); got != 11 {
+		t.Fatalf("identity permittedCommands: got %d, want 11 "+
 			"(CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey, RecordIdentityPII, ProvisionConsumerIdentity, "+
-			"InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential, ReconcileCredentialBinding)", got)
+			"InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential, ReconcileCredentialBinding, RevokeIdentityClaim)", got)
 	}
 }
 
@@ -164,9 +164,10 @@ func TestPackage_DependsOnRbacDomain(t *testing.T) {
 // standing grant for this op at all. A standing descriptor sends no authContext
 // and step 3 refuses it.
 //
-// The two staff ceremony ops are "standing" for the mirror reason: both are
-// scope=any grants to frontOfHouse/backOfHouse/operator with no relationship
-// to any target, so there is no authContext for the client to populate.
+// The three staff ceremony ops are "standing" for the mirror reason: each is
+// a scope=any grant (frontOfHouse/backOfHouse/operator for the two re-issue
+// paths, operator alone for RevokeIdentityClaim) with no relationship to any
+// target, so there is no authContext for the client to populate.
 //
 // UnlinkCredential is "self", and its payload target is a DIFFERENT value from
 // its envelope target — the session identity authorizes, the row names the
@@ -178,9 +179,10 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 		"RecordIdentityPII":       "task",
 		"CreateUnclaimedIdentity": "standing",
 		"RotateClaimKey":          "standing",
+		"RevokeIdentityClaim":     "standing",
 		"UnlinkCredential":        "self",
 	}
-	// The five FULL descriptors, plus the one dispatch-only entry pinned by
+	// The six FULL descriptors, plus the one dispatch-only entry pinned by
 	// TestPackage_DispatchOnlyOpMetaCarriesTheFloorOnly below. The two counts
 	// are stated separately because they are different promises: a full
 	// descriptor says a client can submit this op from the descriptor alone, a
@@ -229,6 +231,23 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	}
 	if !strings.Contains(byOp["RotateClaimKey"].InputSchema, `"x-entityRef":"identity"`) {
 		t.Error("RotateClaimKey: identityKey must declare an x-entityRef picker — it is what makes the op completable once unclaimed identities are projected, with no change here")
+	}
+	// RevokeIdentityClaim takes RotateClaimKey's call — target + picker — and
+	// gates visibility on the row's KIND rather than its claim state: nothing
+	// projects claim state for a staff row (the script's claimed-only guard is
+	// that authority), but a credential is itself an identity-typed row and
+	// facet's Sign-in-methods pane would otherwise offer a destructive
+	// "Reset login" on each sign-in method. `row_kind == identity` is the
+	// mirror of UnlinkCredential's `row_kind == credentialBinding`, and a
+	// credential-binding row never satisfies it.
+	if d := byOp["RevokeIdentityClaim"].Dispatch; d.TargetField != "identityKey" || d.TargetType != "identity" {
+		t.Errorf("RevokeIdentityClaim: targetField %q/targetType %q, want identityKey/identity", d.TargetField, d.TargetType)
+	}
+	if v := byOp["RevokeIdentityClaim"].Dispatch.VisibleWhen; v == nil || v.Field != "row_kind" || v.Equals != "identity" {
+		t.Errorf("RevokeIdentityClaim: VisibleWhen = %+v, want row_kind == identity — without it the op is offered on every credential row", v)
+	}
+	if got, want := strings.Join(byOp["RevokeIdentityClaim"].Dispatch.Reads, ","), "{payload.identityKey},{payload.identityKey}.state,{payload.identityKey}.credentialBinding"; got != want {
+		t.Errorf("RevokeIdentityClaim: Reads = %q, want %q — the script's three required reads; .claimKey and the rest are derive_reads' (class g)", got, want)
 	}
 	if d := byOp["RecordIdentityPII"].Dispatch; d.TargetField == "" || d.TargetType != "identity" {
 		t.Errorf("RecordIdentityPII: targetField %q/targetType %q, want a field typed identity so the task's scopedTo fills it", d.TargetField, d.TargetType)
@@ -359,6 +378,7 @@ func TestPackage_CeremonyOpsCarryDescriptorNotExemption(t *testing.T) {
 	wantCeremonyField := map[string]string{
 		"CreateUnclaimedIdentity": "claimKeyHash",
 		"RotateClaimKey":          "claimKeyHash",
+		"RevokeIdentityClaim":     "claimKeyHash",
 	}
 	seen := map[string]bool{}
 	for _, m := range Package.OpMetas {
@@ -478,6 +498,11 @@ func TestPackage_RotateClaimKeyWithheldUntilUnclaimedRow(t *testing.T) {
 // gets no descriptor at all, not a bare one. A bare entry would still mint a
 // vtx.meta vertex and occupy forOperation's flat operationType index for no
 // caller's benefit.
+//
+// RevokeIdentityClaim is operator-only and is NOT in this list: a person
+// triggers it (an operator wearing a vertical app's operator hat), and its
+// descriptor is what renders the mint-and-reveal ceremony for the replacement
+// secret — the same call clinic-domain makes for UnbindPatientIdentity.
 func TestPackage_NoDescriptorForOperatorOnlyOps(t *testing.T) {
 	for _, m := range Package.OpMetas {
 		switch m.OperationType {

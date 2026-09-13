@@ -496,6 +496,7 @@ function rejectionMessage(reply) {
 const KNOWN_CATALOG_OPS = [
   "AssignProviderSite", "CreateProvider", "SetProviderProfile", "StartVisitSeries",
   "ClinicDebitAccount", "ClinicCreditAccount", "CorrectAppointmentStatus", "CreateUnclaimedIdentity",
+  "RevokeIdentityClaim",
 ];
 let opCatalogPromise = null;
 async function loadOpCatalog() {
@@ -687,6 +688,7 @@ function nameForPatient(key) {
 function renderPatientContact() {
   const el = $("#patient-contact");
   renderConnectLogin();
+  renderResetLogin();
   if (!el) return;
   const m = state.patients.find((p) => p.patientKey === state.patient);
   if (!m) {
@@ -1141,6 +1143,159 @@ async function submitConnectLogin(ev) {
   } finally {
     submit.disabled = false;
   }
+}
+
+// resetLoginOfferable is the pure predicate behind the "Reset login" button —
+// the operator's undo for a claim made by the wrong person
+// (identity-domain's RevokeIdentityClaim). It touches neither state nor the
+// DOM, so it can be lifted out of the shipped app.js and run standalone by a
+// goja test the same way loftspace-app's rotateOfferable is (rotate_offer_test.go).
+// `row` is a roster row (selectedPatientRow()'s return value); `isOperator` is
+// the caller's own isOperatorHat() answer. Gated on the operator hat, not
+// front-desk: the registrar who may have kept the claim secret is exactly the
+// staff role this verb has to sit above (permissions.go), so front-of-house
+// never gets the button. Not gated on the identity's own claim state — the op
+// carries no VisibleWhen (nothing projects claim state for a staff row today;
+// opmetas.go), so the script's own wrong-state guard is the authority and this
+// predicate only asks whether there is an identity to act on at all.
+function resetLoginOfferable(row, isOperator) {
+  return !!isOperator && !!row && !!row.identityKey;
+}
+
+// resettingIdentities holds the identity keys with an in-flight
+// RevokeIdentityClaim ceremony, the same re-entrancy shape
+// loftspace-app/web/app.js's rotatingIdentities uses for RotateClaimKey:
+// added before the first await, removed the instant the submit settles
+// either way, so a repaint mid-flight (loadPatients runs on success) never
+// hands back a freshly-enabled button for a row already mid-submit.
+const resettingIdentities = new Set();
+
+// renderResetLogin shows the "Reset login" button next to Connect-a-login
+// only where resetLoginOfferable allows it for the patient currently in
+// context — re-run everywhere renderConnectLogin is, since the two share both
+// triggers (a hat that just changed, a patient selection that just changed).
+function renderResetLogin() {
+  const btn = $("#reset-login");
+  if (!btn) return;
+  const m = selectedPatientRow();
+  btn.hidden = !resetLoginOfferable(m, isOperatorHat());
+  if (!btn.hidden) btn.disabled = resettingIdentities.has(m.identityKey);
+}
+
+// openResetLogin runs the RevokeIdentityClaim ceremony for the patient
+// currently in context: cut off every credential bound to their identity,
+// return it to unclaimed, and mint a replacement one-time secret. Confirms by
+// naming the patient rather than asking "are you sure" — the failure mode is
+// resetting the wrong person's login, and undoing that means the real person
+// was already locked out once for nothing.
+//
+// Goes through the same catalog descriptor + shared renderer path every other
+// migrated op in this app uses (submitCatalogOp, never a hand-built envelope
+// naming this op's type directly) so the ceremony (minting the replacement
+// secret, showing it once) and the ClaimRevokeRejected vocabulary stay the
+// descriptor's, not a re-derivation here.
+async function openResetLogin(btn) {
+  const m = selectedPatientRow();
+  if (!m || !m.identityKey) return;
+  const identityKey = m.identityKey;
+  if (resettingIdentities.has(identityKey)) return;
+  const label = m.name || shortKey(identityKey);
+  if (
+    !confirm(
+      "Reset the login for " + label + "? Every sign-in on this login is cut off immediately, " +
+        "and a replacement one-time secret will be shown once — hand it to the person the identity belongs to.",
+    )
+  ) {
+    return;
+  }
+
+  resettingIdentities.add(identityKey);
+  if (btn) btn.disabled = true;
+  const release = () => {
+    resettingIdentities.delete(identityKey);
+    if (btn) btn.disabled = false;
+  };
+
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    release();
+    toast("Could not reset the login: " + e.message, "err");
+    return;
+  }
+  // context.row carries the descriptor's own visibleWhen column
+  // (row_kind === "identity", packages/identity-domain/opmetas.go): a roster
+  // row IS a person, never one of their sign-in methods — the credential
+  // rows facet's Sign-in-methods pane projects are the ones that gate
+  // withholds this destructive verb from. It asserts what the row is, not
+  // the identity's claim state, which nothing projects for staff.
+  const row = (state.opCatalog || {}).RevokeIdentityClaim;
+  const handle =
+    row && renderOpForm(row, { target: identityKey, row: { row_kind: "identity" } }, document.createElement("div"));
+  if (!handle) {
+    release();
+    toast("This action can't be completed here — try Loupe.", "err");
+    return;
+  }
+
+  let envelope, reveal;
+  try {
+    ({ envelope, reveal } = await handle.submit());
+  } catch (e) {
+    release();
+    toast(e.message || String(e), "err");
+    return;
+  }
+
+  let reply;
+  try {
+    reply = await submitCatalogOp(envelope);
+  } catch (e) {
+    // submitOp threw rather than replying with a status: the request may
+    // never have reached the Processor, or it may have committed and the
+    // failure happened on the way back — every sign-in on this login can
+    // already be cut off with the replacement secret never shown. Say so
+    // rather than asserting the write did not land (openRotateClaimKey's own
+    // wording for the same ambiguity).
+    release();
+    toast(
+      "Could not confirm the reset reached the server — it may have landed, in which case every " +
+        "sign-in on this login is already cut off and the replacement secret was never shown. Check " +
+        "the roster, and issue a fresh one if it did.",
+      "err",
+    );
+    return;
+  }
+  release();
+
+  if (reply && reply.status === "rejected") {
+    toast(resetLoginRejectionMessage(rejectionMessage(reply) || "rejected"), "err");
+    return;
+  }
+  toast("Login reset — every sign-in was cut off.", "ok");
+  setTimeout(loadPatients, 700);
+  revealCeremonySecret(reveal, reply);
+}
+
+// resetLoginRejectionMessage maps a RevokeIdentityClaim rejection to
+// operator-readable text. wrong-state means the identity was never claimed —
+// RotateClaimKey, not this verb, is the fix; not-secret-claimed means the
+// identity never carried a claim secret at all (a Gateway-provisioned
+// credential identity, not one the desk minted) and this verb refuses to
+// touch it.
+// Everything else (merged, erased, claim-key-drift, ...) is a guard this
+// button's own predicate cannot predict, so it passes the descriptor's own
+// wording through unchanged.
+function resetLoginRejectionMessage(msg) {
+  if (msg.indexOf("wrong-state") !== -1) {
+    return "This login was never claimed — nothing to reset; re-issue its secret instead.";
+  }
+  if (msg.indexOf("not-secret-claimed") !== -1) {
+    return "This login was not created by the desk; it cannot be reset here.";
+  }
+  return "Could not reset the login — " + msg;
 }
 
 // ---- Providers (booking picker + inline add) ----
@@ -5200,7 +5355,10 @@ function applyHatGating() {
   if (np) np.hidden = !fd;
   // The connect ceremony rides the same hat as New-patient, but also needs the
   // selected row's own state — renderConnectLogin owns both conditions.
+  // Reset login rides the operator hat instead (resetLoginOfferable), so it
+  // needs its own call rather than sharing this one's fd/prov/op locals.
   renderConnectLogin();
+  renderResetLogin();
   const chargeBtn = $("#ledger-charge");
   if (chargeBtn) chargeBtn.hidden = !fd;
   const waiveBtn = $("#ledger-waive");
@@ -5291,6 +5449,7 @@ function init() {
   $("#patient-form").addEventListener("submit", submitNewPatient);
 
   $("#connect-login").addEventListener("click", openConnectLogin);
+  $("#reset-login").addEventListener("click", () => openResetLogin($("#reset-login")));
   $("#connect-cancel").addEventListener("click", closeConnectLogin);
   $("#connect-overlay").addEventListener("click", (e) => {
     if (e.target === $("#connect-overlay")) closeConnectLogin();

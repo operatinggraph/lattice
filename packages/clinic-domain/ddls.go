@@ -1803,8 +1803,12 @@ def execute(state, op):
         # Unbinding it would tombstone the .patientClaim and move the name off the
         # login its holder authenticates with, leaving a live person's account
         # nameless and re-claimable by the next bind. The wrong-login mistake this
-        # op repairs is caught at the desk, long before the person claims anything;
-        # once claimed, the fix is a conversation, not a mutation.
+        # op repairs is caught at the desk, long before the person claims anything.
+        # A claimed login the WRONG person holds is identity-domain's
+        # RevokeIdentityClaim to repair: operator-only, it cuts off every
+        # credential bound to the identity, returns it to unclaimed, and arms a
+        # fresh secret -- the chart stays bound to it throughout, so the real
+        # patient ends up claiming the very login this op left in place.
         require_unclaimed_identity(state, identity_key, "IdentityClaimed")
 
         # The name comes BACK. .name is SENSITIVE, so a declared read is decrypted

@@ -445,16 +445,17 @@ func TestErasureGate_DeriveReadsCoversBothPositions(t *testing.T) {
 		t.Fatalf("cannot locate derive_reads in the identity script (derive=%d execute=%d)", deriveIdx, executeIdx)
 	}
 	derive := script[deriveIdx:executeIdx]
-	// Two call sites: the ClaimIdentity/CompleteCredentialLink arm and the
-	// ReconcileCredentialBinding arm. Each passes BOTH link positions, so a
-	// derivation that silently dropped the actor half would have to delete an
-	// argument this assertion also reads.
-	if n := strings.Count(derive, "erasure_gate_keys("); n != 2 {
-		t.Fatalf("derive_reads calls erasure_gate_keys %d time(s), want 2 (the claim/link arm and the reconcile arm)", n)
+	// Three call sites: the ClaimIdentity/CompleteCredentialLink arm and the
+	// ReconcileCredentialBinding arm, each passing BOTH link positions, and
+	// the RevokeIdentityClaim arm, which gates the one identity it re-arms a
+	// secret on. A derivation that silently dropped the actor half would have
+	// to delete an argument this assertion also reads.
+	if n := strings.Count(derive, "erasure_gate_keys("); n != 3 {
+		t.Fatalf("derive_reads calls erasure_gate_keys %d time(s), want 3 (the claim/link arm, the reconcile arm and the revoke arm)", n)
 	}
-	for _, want := range []string{"erasure_gate_keys([target, op.actor])", "erasure_gate_keys([identity_key, credential_actor_key])"} {
+	for _, want := range []string{"erasure_gate_keys([target, op.actor])", "erasure_gate_keys([identity_key, credential_actor_key])", "erasure_gate_keys([identity_key])"} {
 		if !strings.Contains(derive, want) {
-			t.Fatalf("derive_reads is missing %q — one of the two gated link positions would fall back to a live Core KV read on every call", want)
+			t.Fatalf("derive_reads is missing %q — a gated position would fall back to a live Core KV read on every call", want)
 		}
 	}
 	// Both of the gate's conditions are hydrated, not just the marker. The

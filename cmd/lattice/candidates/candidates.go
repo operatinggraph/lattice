@@ -4,6 +4,7 @@ package candidates
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -291,6 +292,14 @@ maintained by the script itself (both declared, not part of the edge list).`,
 // inside one atomic batch — and its plain `create` on the rewritten key dies
 // on a RevisionConflict whenever that key is a tombstone the credential loop
 // deliberately revives.
+//
+// Tombstoned links are dropped, and it takes a read per key to know: a key
+// listing returns every link that was EVER written, and a soft delete stays
+// in the keyspace — a consumer grant RevokeIdentityClaim tombstoned, a role
+// RevokeRole retracted. MergeIdentity's trust gate reads every edge it is
+// handed and rejects EdgeNotFound on a tombstone, so listing one here would
+// make every merge of such a secondary un-submittable. Bounded by the
+// secondary's own degree; an identity holds few links.
 func enumerateSecondaryEdges(ctx context.Context, conn *substrate.Conn, secondaryID string) ([]string, error) {
 	excludedClass := map[string]bool{"duplicateOf": true, "indexes": true, "boundTo": true}
 	var edges []string
@@ -309,6 +318,13 @@ func enumerateSecondaryEdges(ctx context.Context, conn *substrate.Conn, secondar
 				if len(parts) != 6 || excludedClass[parts[3]] {
 					continue
 				}
+				live, err := linkIsLive(ctx, conn, k)
+				if err != nil {
+					return nil, err
+				}
+				if !live {
+					continue
+				}
 				edges = append(edges, k)
 			}
 			if next == "" {
@@ -318,6 +334,28 @@ func enumerateSecondaryEdges(ctx context.Context, conn *substrate.Conn, secondar
 		}
 	}
 	return edges, nil
+}
+
+// linkIsLive reads one link document and reports whether it is present and
+// not tombstoned. A key the listing named but the read cannot find (a hard
+// delete between the two) is simply not live; any other read failure is
+// surfaced, because a merge submitted over a partial edge set is worse than
+// no merge.
+func linkIsLive(ctx context.Context, conn *substrate.Conn, key string) (bool, error) {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read %s: %w", key, err)
+	}
+	var doc struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		return false, fmt.Errorf("decode %s: %w", key, err)
+	}
+	return !doc.IsDeleted, nil
 }
 
 // rewrittenEdgeKeys computes, for each edge touching secondary, the link key

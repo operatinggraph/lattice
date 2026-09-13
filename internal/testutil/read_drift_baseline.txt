@@ -141,6 +141,13 @@ read	ResolveWorkOrder	lnk.identity.<id>.worksAt.building.<id>
 read	ResolveWorkOrder	lnk.identity.<id>.worksAt.unit.<id>
 read	ResumeVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	RetireMenuItem	lnk.identity.<id>.worksAt.building.<id>
+# RevokeIdentityClaim reads each swept credential's credentialindex vertex as
+# the (e) follow-up on its boundTo walk (identity-domain/ddls.go): the index
+# key is a sha256NanoID of the credential the walk discovered, so its vertex
+# root is not the walked endpoint and the guard's discovered-root arm cannot
+# admit it, and no dispatcher can name it up front. Category 3; the same shape
+# MergeIdentity's row records.
+read	RevokeIdentityClaim	vtx.credentialindex.<id>
 read	SetAppointmentSite	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentSite	lnk.provider.<id>.identifiedBy.identity.<id>
 read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>

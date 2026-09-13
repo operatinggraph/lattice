@@ -9,6 +9,11 @@ Identity vertex creation, claim, and state-machine management.
   - `UpdateIdentityState`     (grants → operator)
   - `ClaimIdentity` (scope=self, grants → consumer)
   - `RotateClaimKey` (grants → frontOfHouse, backOfHouse, operator — staff re-issue of a lost claim secret, R4)
+  - `RevokeIdentityClaim` (grants → operator only — the undo for a claim made by
+    the wrong person: unlinks every bound credential, returns the identity to
+    `unclaimed`, arms a fresh caller-minted claim secret; refuses an identity
+    that never carried a `.claimKey`, and any whose credentials array and live
+    `boundTo` links disagree)
   - `RecordIdentityPII` (grants → frontOfHouse, backOfHouse, operator)
 - DDLs `ssn` and `dob` (class `meta.ddl.aspectType`, `sensitive: true`) —
   the two applicant-PII aspect types (see "Sensitive PII aspects" below).

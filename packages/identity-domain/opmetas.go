@@ -9,7 +9,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // written once the vocabulary has settled against the corpus rather than ahead
 // of it.
 //
-// Five ops carry a FULL descriptor; two carry a stated `[no-op-meta: <code> — …]`
+// Six ops carry a FULL descriptor; two carry a stated `[no-op-meta: <code> — …]`
 // exemption in their permission Note (permissions.go) instead. That split is
 // not a shortcut: a full descriptor is a machine-readable PROMISE that a client
 // holding only these fields can build a valid Contract #2 envelope, and an op
@@ -44,7 +44,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // The two that remain exempt are exempt for reasons a ceremony field does not
 // touch: both submit as a different actor than the client authenticated as.
 //
-// Dispatch.Class is "identity" on all five submittable ops — the owning
+// RevokeIdentityClaim is operator-only, and it carries a descriptor anyway,
+// for the reason clinic-domain's UnbindPatientIdentity does: a PERSON triggers
+// it — an operator wearing a vertical app's operator hat, repairing a claim
+// made by the wrong person — and the descriptor is what lets that hat render
+// the ceremony (mint the replacement secret, show it once) without a bespoke
+// form. The ops that carry no descriptor at all (UpdateIdentityState,
+// ProvisionConsumerIdentity, the revocation pair) are the ones no human
+// dispatches.
+//
+// Dispatch.Class is "identity" on all six submittable ops — the owning
 // vertexType DDL's own CanonicalName, never a vertical name. The dispatch-only
 // entry deliberately omits it; that omission is what keeps a client from
 // offering the op, and it is load-bearing rather than an oversight.
@@ -52,7 +61,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Each Reads list is the live dispatcher's, verified against the script branch
 // it feeds: cmd/facet/claim.go for ClaimIdentity, the onboarding userTask
 // (packages/lease-signing/patterns.go) for RecordIdentityPII, and the DDL's
-// own RotateClaimKey branch for the re-issue path.
+// own RotateClaimKey and RevokeIdentityClaim branches for the re-issue and
+// revoke paths, which have no cmd/<app> submitter yet.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -179,6 +189,95 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.identityKey}",
 					"{payload.identityKey}.state",
 					"{payload.identityKey}.claimKey",
+				},
+			},
+		},
+		{
+			OperationType: "RevokeIdentityClaim",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Reset a claimed login",
+				ShortLabel:  "Reset login",
+				Description: "Undo a claim made by the wrong person: cut off every sign-in bound to this identity, return it to unclaimed, and hand the real person a fresh one-time secret.",
+				Icon:        "key",
+				// "destructive" is the vocabulary's dangerous tone
+				// (pkgmgr.OpPresentationSpec: primary | neutral | destructive;
+				// cmd/facet/web/app.js's toneClass renders exactly those).
+				Tone:        "destructive",
+				SubmitLabel: "Reset login",
+				Group:       "Identity",
+			},
+			// identityKey is the dispatch target AND an x-entityRef picker,
+			// the same pair RotateClaimKey declares and for the same reason:
+			// nothing projects an `identity` entity today, so the target gate
+			// withholds the op behind a card where no identity row exists,
+			// and the picker is what makes it completable the moment a lens
+			// projects identities for the operator hat, with no change here.
+			InputSchema: `{"type":"object","properties":` +
+				`{"identityKey":{"type":"string","x-entityRef":"identity","title":"Identity","description":"The claimed identity whose sign-ins are being cut off."},` +
+				`"claimKeyHash":{"type":"string","title":"Replacement claim secret hash","description":"sha256 of the replacement claim secret the client mints. Never typed."}},` +
+				`"required":["identityKey","claimKeyHash"]}`,
+			FieldDescriptions: map[string]string{
+				"identityKey":  "Whose login to reset. Every credential currently signed in to it stops working; the identity itself, its details and its records stay.",
+				"claimKeyHash": "Filled by this device. The replacement secret is the only way back into this identity, and it is shown to you once.",
+			},
+			Ceremony: &pkgmgr.OpCeremonySpec{
+				MintedSecretHashField: "claimKeyHash",
+				RevealTitle:           "The replacement claim secret — shown once",
+				RevealHelp: "Every sign-in on this login was just cut off, and this secret is the only way " +
+					"back in. Give it to the person the identity belongs to, and to nobody else: Lattice " +
+					"stored only its hash, so this screen is the one time it exists.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "identity",
+				AuthContext: "standing",
+				TargetField: "identityKey",
+				TargetType:  "identity",
+				// VisibleWhen gates on what the row IS, not on claim state.
+				// Nothing projects claim state for a staff row today, so a
+				// condition like RotateClaimKey's `unclaimed == true` would
+				// name a column no row carries and withhold the op everywhere
+				// for the wrong reason; the script's state guard is the
+				// authority for that (an unclaimed target is refused
+				// wrong-state). What DOES need gating is the entity kind: a
+				// credential is itself a vtx.identity vertex, and facet's
+				// Sign-in-methods pane offers every identity-typed descriptor
+				// on each credential row (opVisibleForRow admits a nil
+				// declaration), so without this a destructive "Reset login"
+				// is offered against one of a person's own sign-in methods.
+				// The mirror of UnlinkCredential's `row_kind ==
+				// credentialBinding`: a row passing `{row_kind: "identity"}`
+				// asserts that it is a PERSON's row — a staff roster entry,
+				// not one of their sign-in methods — which is a fact the
+				// rendering FE can honestly supply as a section constant
+				// (renderOpForm's context.row), where the claim state is not.
+				// A credential-binding row never satisfies it.
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{
+					Field:  "row_kind",
+					Equals: "identity",
+				},
+				//
+				// The script branch's own required reads: the target vertex,
+				// its state (the claimed-only guard), and .credentialBinding —
+				// sensitive, decrypted at hydration under the owner's DEK,
+				// which a claimed identity has. Required rather than optional
+				// because absence is a wiring fault here, not an outcome the
+				// ceremony adjudicates: an operator naming an identity with no
+				// binding is refused nothing-to-revoke off a tombstone, and a
+				// shredded owner faults at hydration, which is the correct
+				// direction — the erasure plane owns that subject.
+				//
+				// .claimKey, .linkKey, the consumer grant and the erasure gate
+				// keys are class-(g) script-derived keys: the DDL's own
+				// derive_reads declares them, no submitter can or should.
+				Reads: []string{
+					"{payload.identityKey}",
+					"{payload.identityKey}.state",
+					"{payload.identityKey}.credentialBinding",
+				},
+				// The credential sweep: every inbound boundTo link on the
+				// target, paged by the script (CLAIM_REVOKE_PAGE_LIMIT).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.identityKey}", Relation: "boundTo", Direction: "in"},
 				},
 			},
 		},
