@@ -914,10 +914,16 @@ async function submitNewPatient(ev) {
 
   const submit = $("#patient-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before any write left ("build" —
+  // nothing was minted), after one left ("sent" — it may have committed with
+  // no reply read), or after a reply confirmed it ("confirmed" — only the
+  // screen's own tail is at stake). idReply / reveal live outside the try so
+  // the catch can still hand over a secret a CONFIRMED mint produced.
+  let stage = "build";
+  let identityKey = "";
+  let idReply = null;
+  let reveal = null;
   try {
-    let identityKey = "";
-    let idReply = null;
-    let reveal = null;
     if (email || phone) {
       // The reveal wrapper cannot show a secret without the shared module, and
       // a secret nobody can be shown must never be minted — both are readied
@@ -934,12 +940,15 @@ async function submitNewPatient(ev) {
       // identity-domain's own derive_reads computes from this payload
       // (Contract #2 §2.5), so the browser no longer ports sha256NanoID or the
       // package's contact normalization to name them.
+      stage = "sent";
       idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
       const idMsg = rejectionMessage(idReply);
       if (idMsg) {
+        idReply = null;
         toast("Could not create patient — " + idMsg, "err");
         return;
       }
+      stage = "confirmed";
       identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
       const ceremony = (state.opCatalog && state.opCatalog.CreateUnclaimedIdentity && state.opCatalog.CreateUnclaimedIdentity.ceremony) || {};
       reveal = {
@@ -957,6 +966,7 @@ async function submitNewPatient(ev) {
     // read-posture (d): identityKey + ".patientClaim" is a read-before-create dedup
     // guard (claim_identity, ddls.go) — its absence is the common, legitimate case,
     // so it is declared optionalReads, not reads (script-read-posture-design.md §13).
+    stage = "sent";
     const reply = await submitOp(
       "CreatePatient",
       "patient",
@@ -973,6 +983,7 @@ async function submitNewPatient(ev) {
       revealCeremonySecret(reveal, idReply);
       return;
     }
+    stage = "confirmed";
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     closeNewPatient();
     toast("Patient created.", "ok");
@@ -987,7 +998,31 @@ async function submitNewPatient(ev) {
     setTimeout(loadPatients, 700);
     revealCeremonySecret(reveal, idReply);
   } catch (e) {
-    toast("Could not create patient: " + e.message, "err");
+    if (stage === "build") {
+      toast("Could not create patient: " + e.message, "err");
+    } else if (stage === "sent") {
+      // submitOp threw rather than replying with a status: the request may
+      // never have reached the Processor, or it may have committed and the
+      // failure happened on the way back. Say so in the "withheld" vocabulary
+      // (openResetLogin's own wording for the same ambiguity) rather than
+      // asserting the write did not land — and a login the FIRST op already
+      // confirmed still hands over its secret, whatever became of the second.
+      toast(
+        idReply
+          ? "The login was created, but could not confirm the patient record reached the server — it may " +
+              "have landed. Check the roster; if the patient is missing, add them again without a contact and " +
+              "connect this login from the console."
+          : "Could not confirm the new patient reached the server — it may have landed, in which case the " +
+              "patient (and their login, if a contact was given) exists and the one-time secret was never shown. " +
+              "Check the roster, and reset the login for a fresh secret if they are there.",
+        "err",
+      );
+      if (idReply) revealCeremonySecret(reveal, idReply);
+    } else {
+      // Every write is confirmed; only this screen's own tail failed.
+      toast("Patient created, but the screen did not refresh — reload to see them. " + e.message, "err");
+      revealCeremonySecret(reveal, idReply);
+    }
   } finally {
     submit.disabled = false;
   }
@@ -1067,6 +1102,15 @@ async function submitConnectLogin(ev) {
 
   const submit = $("#connect-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before any write left ("build" —
+  // nothing was minted), after one left ("sent" — it may have committed with
+  // no reply read), or after a reply confirmed it ("confirmed"). idReply /
+  // reveal / identityKey live outside the try so the catch can still hand
+  // over a secret a CONFIRMED mint produced, with the key that finds it.
+  let stage = "build";
+  let idReply = null;
+  let reveal = null;
+  let identityKey = "";
   try {
     // Both readied before anything is written: a secret nobody can be shown
     // must never be minted, so a module load failure aborts here rather than
@@ -1080,19 +1124,17 @@ async function submitConnectLogin(ev) {
     if (phone) idPayload.phone = phone;
     // No optionalReads: the dedup identityindex probes are class-(g) keys
     // identity-domain's own derive_reads computes from this payload.
-    const idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
+    stage = "sent";
+    idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
     const idMsg = rejectionMessage(idReply);
     if (idMsg) {
+      idReply = null;
       toast("Could not create the login — " + idMsg, "err");
       return;
     }
-    const identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
-    if (!identityKey) {
-      toast("The login was created but its key did not come back — connect it from the console.", "err");
-      return;
-    }
+    stage = "confirmed";
     const ceremony = (state.opCatalog && state.opCatalog.CreateUnclaimedIdentity && state.opCatalog.CreateUnclaimedIdentity.ceremony) || {};
-    const reveal = {
+    reveal = {
       title: ceremony.revealTitle || "Their claim secret — shown once",
       help:
         ceremony.revealHelp ||
@@ -1100,6 +1142,14 @@ async function submitConnectLogin(ev) {
           "time the secret exists; if it is lost, the identity needs a fresh one issued.",
       plaintext: claimSecret,
     };
+    identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
+    if (!identityKey) {
+      // The mint LANDED; the secret is the person's whatever the console
+      // has to finish by hand.
+      toast("The login was created but its key did not come back — connect it from the console.", "err");
+      revealCeremonySecret(reveal, idReply);
+      return;
+    }
 
     // reads (a): both endpoints are validated alive + class; the identity's
     // .state is what the script's unclaimed-identity confinement rests on (an
@@ -1111,6 +1161,7 @@ async function submitConnectLogin(ev) {
     // optionalReads (d): the two exclusivity guards, probed lazily in-script to
     // pick the rejection message and to supply the revision a released claim is
     // revived at; absent on every first bind.
+    stage = "sent";
     const reply = await submitOp(
       "BindPatientIdentity",
       "patient",
@@ -1136,6 +1187,7 @@ async function submitConnectLogin(ev) {
       revealCeremonySecret(reveal, idReply);
       return;
     }
+    stage = "confirmed";
     closeConnectLogin();
     toast("Login connected.", "ok");
     // The lens may take a moment to reproject the roster row (name moves to the
@@ -1144,7 +1196,32 @@ async function submitConnectLogin(ev) {
     setTimeout(loadPatients, 700);
     revealCeremonySecret(reveal, idReply);
   } catch (e) {
-    toast("Could not connect a login: " + e.message, "err");
+    if (stage === "build") {
+      toast("Could not connect a login: " + e.message, "err");
+    } else if (stage === "sent") {
+      // submitOp threw rather than replying with a status: the request may
+      // never have reached the Processor, or it may have committed and the
+      // failure happened on the way back. Say so in the "withheld"
+      // vocabulary (openResetLogin's own wording for the same ambiguity)
+      // rather than asserting the write did not land — and a login the mint
+      // already confirmed still hands over its secret and its key, which
+      // together are everything the console needs to finish the connection.
+      toast(
+        idReply
+          ? "The login was created, but could not confirm the connection reached the server — it may have " +
+              "landed. Their claim secret still works; check the roster, and finish from the console with " +
+              "identity " + identityKey + " if it is not connected."
+          : "Could not confirm the new login reached the server — it may have landed, in which case a login " +
+              "exists (not yet connected) and its one-time secret was never shown. Check the roster, and " +
+              "issue a fresh secret from the console if it is there.",
+        "err",
+      );
+      if (idReply) revealCeremonySecret(reveal, idReply);
+    } else {
+      // Every write is confirmed; only this screen's own tail failed.
+      toast("Login connected, but the screen did not refresh — reload to see it. " + e.message, "err");
+      revealCeremonySecret(reveal, idReply);
+    }
   } finally {
     submit.disabled = false;
   }
@@ -1524,6 +1601,11 @@ async function submitAssignProviderSite() {
 
   const btn = $("#assign-site-submit");
   btn.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -1532,18 +1614,30 @@ async function submitAssignProviderSite() {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not assign provider to site — " + msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     toast("Provider assigned to site.", "ok");
     renderAssignSiteForm();
     setTimeout(loadSites, 700);
   } catch (e) {
-    toast("Could not assign provider to site: " + e.message, "err");
+    if (!sent) {
+      toast("Could not assign provider to site: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Provider assigned to site, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the write
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — say so rather than inviting a retry of a
+      // write that landed.
+      toast("Could not confirm the assign provider to site reached the server — it may have landed; check before trying again. " + e.message, "err");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -1605,6 +1699,9 @@ async function renderProviderEditForm() {
   try {
     ({ renderOpForm } = await loadDescriptorform());
   } catch (e) {
+    // The failure belongs to the provider this render was asked for; if the
+    // selection moved on meanwhile, the newer render owns the mount.
+    if ($("#avail-provider").value !== prov) return;
     mount.innerHTML = "";
     toast("Could not load the provider-edit form: " + e.message, "err");
     return;
@@ -1639,6 +1736,11 @@ async function saveProviderEdit() {
   }
   const btn = $("#edit-prov-save");
   btn.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -1647,12 +1749,14 @@ async function saveProviderEdit() {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not save provider details — " + msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     toast("Provider details saved.", "ok");
     // Refresh the roster so the picker label (name · specialty) reflects the
@@ -1660,7 +1764,17 @@ async function saveProviderEdit() {
     // just-saved form.
     loadProviders();
   } catch (e) {
-    toast("Could not save provider details: " + e.message, "err");
+    if (!sent) {
+      toast("Could not save provider details: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Provider details saved, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the write
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — say so rather than inviting a retry of a
+      // write that landed.
+      toast("Could not confirm the save provider details reached the server — it may have landed; check before trying again. " + e.message, "err");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -1811,6 +1925,11 @@ async function submitAddProvider() {
 
   const btn = $("#add-provider-submit");
   btn.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -1819,12 +1938,14 @@ async function submitAddProvider() {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not add provider — " + msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     $("#add-provider").open = false;
@@ -1840,7 +1961,17 @@ async function submitAddProvider() {
       }
     }, 700);
   } catch (e) {
-    toast("Could not add provider: " + e.message, "err");
+    if (!sent) {
+      toast("Could not add provider: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Provider added, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the write
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — say so rather than inviting a retry of a
+      // write that landed.
+      toast("Could not confirm the add provider reached the server — it may have landed; check before trying again. " + e.message, "err");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -3666,6 +3797,11 @@ async function submitLedgerEntry(opType, what, reason) {
   const waiveBtn = $("#ledger-waive");
   chargeBtn.disabled = paymentBtn.disabled = true;
   if (waiveBtn) waiveBtn.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // entry may have posted), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let accountKey = state.ledger && state.ledger.accountKey;
     if (!accountKey) accountKey = await openLedgerAccount(state.patient);
@@ -3682,16 +3818,33 @@ async function submitLedgerEntry(opType, what, reason) {
     const handle = renderOpForm(row, context, document.createElement("div"));
     if (!handle) throw new Error("this action is unavailable");
     const { envelope, reveal } = await handle.submit();
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
-    if (msg) throw new Error(msg);
+    if (msg) {
+      // A rejected reply is a CONFIRMED non-commit; "could not" is exact.
+      const err = new Error(msg);
+      err.rejected = true;
+      throw err;
+    }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
     amountInput.value = "";
     memoInput.value = "";
     setTimeout(loadLedger, 700);
   } catch (e) {
-    toast("Could not " + what + " — " + e.message, "err");
+    if (!sent || e.rejected) {
+      toast("Could not " + what + " — " + e.message, "err");
+    } else if (confirmed) {
+      toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the entry
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — money moved once must not be moved
+      // twice, so say so rather than inviting a retry.
+      toast("Could not confirm the " + what + " reached the server — it may have landed; check the ledger before trying again. " + e.message, "err");
+    }
   } finally {
     chargeBtn.disabled = paymentBtn.disabled = false;
     if (waiveBtn) waiveBtn.disabled = false;
@@ -3993,6 +4146,8 @@ async function renderStartSeriesForm() {
   try {
     ({ renderOpForm } = await loadDescriptorform());
   } catch (e) {
+    // A stale render's failure must not clear the form the newer one mounted.
+    if (state.patient !== state.startSeriesPatient) return;
     mount.innerHTML = "";
     toast("Could not load the start-series form: " + e.message, "err");
     return;
@@ -4031,6 +4186,11 @@ async function submitStartSeries() {
 
   const submit = $("#series-start-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -4039,12 +4199,14 @@ async function submitStartSeries() {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast(msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     toast("Recurring visit series started.", "ok");
     $("#start-series").open = false;
@@ -4052,7 +4214,17 @@ async function submitStartSeries() {
     renderStartSeriesForm();
     loadSeries();
   } catch (e) {
-    toast("Could not start series: " + e.message, "err");
+    if (!sent) {
+      toast("Could not start series: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Series started, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the write
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — say so rather than inviting a retry of a
+      // write that landed.
+      toast("Could not confirm the start series reached the server — it may have landed; check before trying again. " + e.message, "err");
+    }
   } finally {
     submit.disabled = false;
   }
@@ -4881,6 +5053,10 @@ async function openCorrectStatus(a, onDone) {
   try {
     ({ renderOpForm } = await loadDescriptorform());
   } catch (e) {
+    // If the operator closed this modal, or reopened it on another
+    // appointment, while the load was out, closing it now would take the
+    // newer modal down with it — the failure was this appointment's alone.
+    if (state.correcting !== a) return;
     toast("Could not load the correction form: " + e.message, "err");
     closeCorrectStatus();
     return;
@@ -4916,6 +5092,11 @@ async function submitCorrectStatus(ev) {
   const onDone = state.correctingOnDone || loadAppts; // captured before close clears it
   const btn = $("#correct-status-submit");
   btn.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -4924,18 +5105,30 @@ async function submitCorrectStatus(ev) {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not correct status — " + msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     closeCorrectStatus();
     toast("Status corrected.", "ok");
     if (onDone) onDone();
   } catch (e) {
-    toast("Could not correct status: " + e.message, "err");
+    if (!sent) {
+      toast("Could not correct status: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Status corrected, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitCatalogOp threw rather than replying with a status: the write
+      // may never have reached the Processor, or may have committed with the
+      // reply lost on the way back — say so rather than inviting a retry of a
+      // write that landed.
+      toast("Could not confirm the correct status reached the server — it may have landed; check before trying again. " + e.message, "err");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -5181,12 +5374,17 @@ async function openWellnessBooking(a) {
       return;
     }
     $("#wellness-submit").disabled = false;
-    sel.innerHTML = sessions
-      .map(
-        (se) =>
-          `<option value="${se.sessionKey}">${se.name || shortKey(se.sessionKey)} — ${fmtWhen(se.startsAt, se.endsAt)}${se.studioName ? " · " + se.studioName : ""}</option>`,
-      )
-      .join("");
+    // Class and studio names are typed by the wellness desk — another
+    // vertical's staff — so they are text nodes, never markup (this app has
+    // no escaper; every other render here builds DOM the same way).
+    sel.innerHTML = "";
+    for (const se of sessions) {
+      const opt = document.createElement("option");
+      opt.value = se.sessionKey;
+      opt.textContent =
+        (se.name || shortKey(se.sessionKey)) + " — " + fmtWhen(se.startsAt, se.endsAt) + (se.studioName ? " · " + se.studioName : "");
+      sel.appendChild(opt);
+    }
   } catch (e) {
     sel.innerHTML = "";
     $("#wellness-session-hint").textContent = "Could not load classes: " + e.message;

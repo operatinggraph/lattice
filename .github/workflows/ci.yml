@@ -19,7 +19,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
-#   lint-static        — golangci + the 21 STRICT scripts/lint-*.go gates,
+#   lint-static        — golangci + the 25 STRICT scripts/lint-*.go gates,
 #                         split off lint-build so the compile/vet half and the
 #                         static-analysis half run in parallel instead of
 #                         serially — lint-build's own wall-clock (Build+Vet+
@@ -409,6 +409,63 @@ jobs:
         # recogniser cannot see. Self-tests on every run and refuses an
         # all-clear over zero examined scripts.
         run: STRICT=1 go run ./scripts/lint-link-target-count.go
+
+      - name: Op-meta required-fields lint (a field the script refuses without is declared required)
+        # A DDL script and its OpMetaSpec are two declarations of one op: the
+        # script refuses at commit, the descriptor is what every
+        # descriptor-driven form renders from. A refusal added to the script
+        # (`required_string(p, "memo")`) while the InputSchema still lists the
+        # field outside `required` renders it optional, and a blank submit
+        # fails with a raw InvalidArgument and no field-level guidance
+        # (wellness manual-charge memo, 2026-09-06). Parses every shipped
+        # script, derives the requirer set from the helpers' own
+        # refuse-on-absence bodies, collects each dispatch block's
+        # UNCONDITIONAL requirements (top level, one helper hop) and fails any
+        # the descriptor neither requires nor fills itself (contextParam /
+        # targetField). Self-tests on every run.
+        run: STRICT=1 go run ./scripts/lint-opmeta-required-fields.go
+
+      - name: Ceremony throw-path lint (a secret-minting submit's catch never asserts the write did not land)
+        # The FE transport throws on any non-OK response, a 5xx after the
+        # Processor committed included; for a ceremony op (an op-meta with a
+        # Ceremony spec — the client shows a minted secret exactly once) the
+        # catch that says "Could not create guest" leaves an identity armed
+        # with a secret nobody holds. Fixed at LoftSpace RotateClaimKey
+        # (2026-09-06); re-sighted at four ceremony catches across three apps
+        # (2026-09-13). Parses each app.js with goja, derives the write
+        # transports from the file (the function passing fetch a non-GET
+        # method, and its callers), and fails a catch on a transport-reaching
+        # try, in a function naming a ceremony op or calling
+        # revealCeremonySecret (the generic descriptor-form dispatchers), whose
+        # wording asserts non-landing without the "may have landed" vocabulary.
+        run: STRICT=1 go run ./scripts/lint-ceremony-throw-path.go
+
+      - name: Stale-render guard lint (a renderer re-checks "am I still current" on every path out of an await)
+        # A renderer captures its subject, awaits, then paints; a newer render
+        # of another subject can start meanwhile, so each carries a staleness
+        # guard — and the guard keeps missing the catch beside the await and
+        # the outer function's own writes (wellness renderRoster, three
+        # clinic catch blocks that clear the mount before the guard,
+        # 2026-09-13; minted at the wellness studio-retired note 2026-09-06).
+        # Parses each app.js with goja: a try followed by `if (<test>) return;`
+        # must open its catch with the same guard, and a function capturing
+        # `const g = ++counter` must re-check `g !== counter` between every
+        # await and the next statement that could paint.
+        run: STRICT=1 go run ./scripts/lint-stale-render-guard.go
+
+      - name: Markup-escaping lint (every value a vertical FE writes into markup is a literal, an escaper call, or derived from those)
+        # The string-building FEs render by concatenating HTML into innerHTML
+        # and escape at most sites; the sites they miss surface one review at
+        # a time — four café panels writing e.message raw, a cross-package
+        # class name, a landlord-typed rentCurrency reaching every applicant's
+        # Browse page through money() (2026-09-13). Parses each app.js with
+        # goja and classifies every innerHTML / outerHTML / insertAdjacentHTML
+        # operand: literal, the file's escaper (derived — the function mapping
+        # "&" to "&amp;"), a file-defined builder whose every return is safe,
+        # numeric formatters, .map/.join chains over safe receivers, locals
+        # fed only by safe values. Anything else fails at its line;
+        # `// markup-safe: <why>` declares a stripped key.
+        run: STRICT=1 go run ./scripts/lint-markup-escaping.go
 
       - name: Loupe console-grants lint (the console submits only ops its role is granted)
         # cmd/loupe runs as the scoped consoleOperator (mechanism B, never

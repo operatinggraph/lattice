@@ -157,7 +157,12 @@ async function opOrThrow(body, what, selfScoped) {
   const reply = await submitOp(body, selfScoped);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
-    throw new Error(`Could not ${what} — ${msg}`);
+    // A rejected reply is a CONFIRMED non-commit, unlike a transport throw
+    // from submitOp (which may follow a commit); the marker lets a ceremony
+    // caller tell the two apart in one catch.
+    const err = new Error(`Could not ${what} — ${msg}`);
+    err.rejected = true;
+    throw err;
   }
   return reply || {};
 }
@@ -927,7 +932,7 @@ async function renderSchedule() {
 }
 
 function domId(key) {
-  return key.replace(/[^a-zA-Z0-9]/g, "");
+  return key.replace(/[^a-zA-Z0-9]/g, ""); // markup-safe: stripped to [a-zA-Z0-9], nothing else survives
 }
 
 // upcomingSeriesCounts tallies, per seriesKey, how many of the sessions in a
@@ -1043,7 +1048,7 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
   const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
   return (
     '<div class="card">' +
-    '<span class="badge ' + (full ? "settled" : "open") + '">' + se.bookedCount + " / " + se.capacity + " seats</span>" +
+    '<span class="badge ' + (full ? "settled" : "open") + '">' + (Number(se.bookedCount) || 0) + " / " + (Number(se.capacity) || 0) + " seats</span>" +
     '<div class="who">' + esc(se.name || "?") + "</div>" +
     '<div class="meta">' + esc(se.missingStudio ? "Studio needs reassignment" : se.studioName || shortKey(se.studioKey)) + "</div>" +
     led +
@@ -1306,7 +1311,7 @@ function myClassCard(b) {
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
-    (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
+    (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     reminderBadge(b) +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
@@ -1462,9 +1467,15 @@ async function renderRoster() {
     const r = await appGet("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey));
     bookings = r.bookings || [];
   } catch (e) {
+    // The staffer may have moved on to another class while this fetch was
+    // out; its failure is not that class's failure.
+    if (generation !== rosterGeneration) return;
     body.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
+  // Every write below paints the class this render was asked for; a newer
+  // render owns the panel now if the selection changed during the fetch.
+  if (generation !== rosterGeneration) return;
   // Marking attendance is the bound instructor's own beat, or front-of-house
   // staff's (workplace-confined, ddls.go SetBookingAttendance) — either way
   // only once the class has begun; SetBookingAttendance answers
@@ -1500,6 +1511,7 @@ async function renderRoster() {
   if (canMark) bindAttendance(sessionKey, mine);
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey, se);
   await renderBookMember(se, bookings, generation);
+  if (generation !== rosterGeneration) return;
   renderCancelClass(sessionKey);
   await renderReassignControl(se, generation);
 }
@@ -1559,6 +1571,7 @@ async function renderBookMember(se, bookings, generation) {
   }
   if (generation !== rosterGeneration) return;
   const seated = new Set(bookings.filter((b) => b.status !== "forfeited").map((b) => b.bookerKey));
+  rosterSeated = seated;
   const free = members.filter((m) => !seated.has(m.bookerKey));
   select.innerHTML = "";
   if (!free.length) {
@@ -1634,6 +1647,13 @@ async function bookGuest() {
 // against (packages/wellness-domain/lenses.go's booking fan-out). Mirrors
 // clinic-app's wirePatientSearch/loadPatients debounce (app.js), 250ms.
 
+// rosterSeated is the set of booker keys holding a live booking or waitlist
+// slot on the class the roster currently shows (renderBookMember's own
+// `seated`, kept for the guest picker) — CreateBooking refuses a second one
+// (DoubleBooked, wellness-domain ddls.go), and the member picker already
+// drops those members, so the guest picker gives the same courtesy.
+let rosterSeated = new Set();
+
 let guestSearchTimer = null;
 function wireGuestSearch() {
   const input = document.getElementById("guest-search");
@@ -1676,8 +1696,18 @@ async function searchGuests(q) {
     const opt = document.createElement("option");
     opt.value = g.identityKey;
     opt.textContent = g.name;
+    if (rosterSeated.has(g.identityKey)) {
+      // Left visible so the staffer sees the person IS found — just already
+      // on this class — rather than a match that silently never appears.
+      opt.disabled = true;
+      opt.textContent = g.name + " — already on this class";
+    }
     select.appendChild(opt);
   }
+  // A disabled first option leaves the select showing an unbookable pick;
+  // land on the first bookable match instead.
+  const firstFree = Array.from(select.options).find((o) => !o.disabled);
+  if (firstFree) select.value = firstFree.value;
 }
 
 function openNewGuest() {
@@ -1725,6 +1755,15 @@ async function submitNewGuest(ev) {
   const phone = document.getElementById("ng-phone").value.trim();
   const submit = document.getElementById("guest-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before the write was handed to the
+  // transport (nothing was sent), after ("sent" — it may have committed with
+  // no reply read), or after the reply confirmed it ("confirmed" — the
+  // reveal is the desk's, whatever the screen did next). reply / reveal live
+  // outside the try so the catch can still hand over a confirmed secret.
+  let submitted = false;
+  let confirmed = false;
+  let reply = null;
+  let reveal = null;
   try {
     // The reveal wrapper cannot show a secret without the shared module, and
     // a secret nobody can be shown must never be minted — both are readied
@@ -1741,13 +1780,15 @@ async function submitNewGuest(ev) {
     // identity-domain's own derive_reads computes from this payload
     // (Contract #2 §2.5), mirroring loftspace-app/clinic-app's own
     // CreateUnclaimedIdentity submits.
-    const reply = await opOrThrow(
+    submitted = true;
+    reply = await opOrThrow(
       { operationType: "CreateUnclaimedIdentity", class: "identity", payload },
       "create the guest",
       false,
     );
+    confirmed = true;
     const ceremony = (opCatalogCache && opCatalogCache.CreateUnclaimedIdentity && opCatalogCache.CreateUnclaimedIdentity.ceremony) || {};
-    const reveal = {
+    reveal = {
       title: ceremony.revealTitle || "Their claim secret — shown once",
       help:
         ceremony.revealHelp ||
@@ -1773,7 +1814,28 @@ async function submitNewGuest(ev) {
     }
     revealCeremonySecret(reveal, reply);
   } catch (e) {
-    toast("Could not create guest: " + e.message, false);
+    if (e.rejected || !submitted) {
+      // A confirmed rejection, or a failure before anything was sent —
+      // nothing was minted, so "could not" is exact.
+      toast("Could not create guest: " + e.message, false);
+    } else if (confirmed) {
+      // The write is confirmed; only this screen's own tail failed, and the
+      // secret is still the guest's to receive.
+      toast("Guest created, but the screen did not update — search for them. " + e.message, false);
+      revealCeremonySecret(reveal, reply);
+    } else {
+      // The transport threw after the write left: the request may never
+      // have reached the Processor, or it may have committed and the
+      // failure happened on the way back — the guest can exist with a
+      // claim secret nobody was shown. Say so in revealCeremonySecret's own
+      // "withheld" vocabulary rather than asserting the write did not land.
+      toast(
+        "Could not confirm the guest reached the server — it may have landed, in which case the guest " +
+          "exists and their one-time claim secret was never shown. Search for them, and issue a fresh " +
+          "one if they are there.",
+        false,
+      );
+    }
   } finally {
     submit.disabled = false;
   }
@@ -2601,7 +2663,7 @@ function rosterCard(b, markable, cancellable) {
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
-    (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
+    (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses
@@ -2627,8 +2689,8 @@ function seatCancelAction(b) {
 // instructor needs is always the OTHER one.
 function attendanceActions(b) {
   const btn = (value, label) =>
-    '<button class="ghost" data-attend="' + esc(b.bookingKey) + '" data-value="' + value + '"' +
-    (b.status === value ? " disabled" : "") + ">" + label + "</button>";
+    '<button class="ghost" data-attend="' + esc(b.bookingKey) + '" data-value="' + esc(value) + '"' +
+    (b.status === value ? " disabled" : "") + ">" + esc(label) + "</button>";
   return '<div class="card-actions">' + btn("attended", "Attended") + btn("noShow", "No-show") + "</div>";
 }
 
@@ -2706,7 +2768,7 @@ async function loadRosterBilling() {
 function arrearsLine(row) {
   const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "?";
   if (row.isOverdue) {
-    const days = row.daysOverdue || 0;
+    const days = Number(row.daysOverdue) || 0;
     return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
   }
   return "Due " + due;

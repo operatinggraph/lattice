@@ -1216,8 +1216,16 @@ async function submitNewApplicant(ev) {
 
   const submit = $("#applicant-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before the write left ("build" —
+  // nothing was minted), after it left ("sent" — it may have committed with
+  // no reply read), or after the reply confirmed it ("confirmed" — the
+  // secret is shown synchronously right after, so only the roster refresh
+  // is at stake).
+  let stage = "build";
+  // The secret lives outside the try so a confirmed mint can still show it
+  // from the catch, whatever the screen did next.
+  const claimSecret = mintClaimSecret();
   try {
-    const claimSecret = mintClaimSecret();
     const claimKeyHash = await sha256Hex(claimSecret);
     const payload = { name, claimKeyHash };
     if (email) payload.email = email;
@@ -1226,19 +1234,39 @@ async function submitNewApplicant(ev) {
     // identity-domain's own derive_reads computes from this payload
     // (Contract #2 §2.5), so the browser no longer ports sha256NanoID or the
     // package's contact normalization to name them.
+    stage = "sent";
     const reply = await submitOp({ operationType: "CreateUnclaimedIdentity", class: "identity", payload });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not create applicant — " + msg, "err");
       return;
     }
+    stage = "confirmed";
     closeNewApplicant();
     // The claim secret is the single copy and is never stored — surface it now
     // or it is gone, and the new applicant can never sign in.
     showClaimSecret(name, claimSecret);
     await loadIdentities();
   } catch (e) {
-    toast("Could not create applicant: " + e.message, "err");
+    if (stage === "build") {
+      toast("Could not create applicant: " + e.message, "err");
+    } else if (stage === "sent") {
+      // submitOp threw rather than replying with a status: the request may
+      // never have reached the Processor, or it may have committed and the
+      // failure happened on the way back — the applicant can exist with a
+      // claim secret nobody was shown. Say so in the "withheld" vocabulary
+      // (openRotateClaimKey's own wording for the same ambiguity) rather than
+      // asserting the write did not land.
+      toast(
+        "Could not confirm the new applicant reached the server — it may have landed, in which case the " +
+          "applicant exists and their one-time claim secret was never shown. Check Applicants & tenants, " +
+          "and re-issue the secret if they are there.",
+        "err",
+      );
+    } else {
+      toast("Applicant created, but the roster did not refresh — reload to see them. " + e.message, "err");
+      showClaimSecret(name, claimSecret);
+    }
   } finally {
     submit.disabled = false;
   }
@@ -1488,7 +1516,13 @@ function renderCard(row) {
 
   const rent = document.createElement("div");
   rent.className = "rent";
-  rent.innerHTML = `${money(L)} <span>/ month</span>`;
+  // money() carries the landlord-typed rentCurrency verbatim, so the amount
+  // is a text node, never markup — every applicant browsing the listing
+  // renders it.
+  rent.textContent = money(L) + " ";
+  const per = document.createElement("span");
+  per.textContent = "/ month";
+  rent.appendChild(per);
 
   const facts = document.createElement("div");
   facts.className = "facts";
@@ -1760,7 +1794,7 @@ function renderApplicationCard(row, highlight) {
   if (typeof row.unitRent === "number") {
     const rent = document.createElement("div");
     rent.className = "rent";
-    rent.innerHTML = `$${row.unitRent.toLocaleString()} <span>/ month</span>`;
+    rent.innerHTML = `$${Number(row.unitRent).toLocaleString()} <span>/ month</span>`;
     head.append(rent);
   }
 
@@ -2502,6 +2536,11 @@ async function submitCatalogComplete(task, desc) {
 
   const submit = $("#complete-submit");
   submit.disabled = true;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it.
+  let sent = false;
+  let confirmed = false;
   try {
     let envelope, reveal;
     try {
@@ -2510,19 +2549,23 @@ async function submitCatalogComplete(task, desc) {
       toast(e.message || String(e), "err");
       return;
     }
+    sent = true;
     const reply = await submitOp(envelope);
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not complete — " + msg, "err");
       return;
     }
+    confirmed = true;
     revealCeremonySecret(reveal, reply);
     // A task-voice op's §10.7 ephemeral grant already closed the task on the
     // same commit (Contract #10 §10.6 auto-complete); every other leg submits
     // under the signed-in identity's own standing grant, so it is retired
     // explicitly through the retained out-of-band CompleteTask path.
     if (desc.dispatch.authContext !== "task") await completeTask(task.taskKey);
-    closeComplete();
+    // Cancel stays live during the submit, so the modal may by now be open on
+    // a different task — close it only if it is still this one's.
+    if (state.currentTask === task) closeComplete();
     toast(handle.descriptor.title + " — done.", "ok");
     if (desc.dispatch.class === "renewal") {
       loadRenewals();
@@ -2533,7 +2576,17 @@ async function submitCatalogComplete(task, desc) {
       loadApplications();
     }
   } catch (e) {
-    toast("Could not complete: " + e.message, "err");
+    if (!sent) {
+      toast("Could not complete: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Completed, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      // submitOp threw rather than replying with a status: the write may
+      // never have reached the Processor, or may have committed with the
+      // reply lost on the way back — a signature or a minted secret is not
+      // something to retry blind, so say so.
+      toast("Could not confirm the completion reached the server — it may have landed; check the task before trying again. " + e.message, "err");
+    }
   } finally {
     submit.disabled = false;
   }

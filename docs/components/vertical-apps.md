@@ -41,8 +41,10 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
 - **A server-side refusal added to one form leaves its sibling form a dead end** — the resident self-pay form
   hides at zero balance and carries `max`; the front-desk form beside it rendered whenever an account existed, so
   the new cap turned a mis-key into a raw `AuthDenied` toast where the sibling form never lets one be typed.
-  Minted: café house-tab payment cap (2026-09-05). Check: when an op gains a server refusal, walk every form that
-  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).
+  Minted: café house-tab payment cap (2026-09-05); second sighting: wellness's guest picker offered a booker the
+  member picker beside it already dropped as seated, dead-ending in `DoubleBooked` (2026-09-13 census). Check: when
+  an op gains a server refusal, walk every form that dispatches it and give each the courtesy its sibling already has
+  (hide / `max` / prefill / disable); the census shape is "ops dispatched from 2+ sites × the script's `fail(`s".
 - **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
   roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
   only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N
@@ -54,20 +56,15 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats
   (2026-09-06). Check: run `lint-app-op-descriptors` on every `cmd/<app>` edit, comments included, and name
   an undescribed op by role, never by literal.
-- **A server refusal added to a script leaves the OpMeta descriptor beside it asserting the old rule** — the DDL's
-  InputSchema and the package's OpMeta are two declarations of one op; a descriptor-driven form then renders the
-  field optional and the submit fails with no field-level guidance. Minted: wellness manual-charge memo (2026-09-06),
-  caught cold. Check: for every new `fail(...)` on a param, grep the op's OpMeta InputSchema + FieldDescription and
-  pin `required` in the opmetas test.
-- **A new DOM write inside a generation-guarded async renderer bypasses the guard** — every existing append re-checks
-  `generation !== rosterGeneration`; a note added later did not, so a class switched mid-fetch lands its note under
-  the wrong roster. Minted: wellness studio-retired note (2026-09-06), caught cold. Check: any append after an
-  `await` in a renderer that owns a generation token re-checks it first.
-- **A transport throw after a destructive or secret-minting submit is narrated as "did not land"** — `api()` throws
-  on any non-OK response, including a 5xx after the Processor committed, so a rotate/refund/tombstone toast that
-  says "could not" may be wrong and the only copy of a minted secret is gone. Minted: LoftSpace RotateClaimKey
-  (2026-09-06), caught cold. Check: the throw path of a ceremony or irreversible op says the write may have landed
-  and what to do next, in the `withheld` vocabulary.
+- **A transport throw after a destructive submit is narrated as "did not land"** — `api()` throws on any
+  non-OK response, including a 5xx after the Processor committed, so a cancel / end-series / ledger-entry toast that
+  says "could not" may be wrong and the desk retries a write that landed (a double charge, a double waive). Minted:
+  LoftSpace RotateClaimKey (2026-09-06). Every ceremony catch and every generic descriptor-form dispatcher (the
+  `revealCeremonySecret` callers) is gated (`lint-ceremony-throw-path`); the hand-built irreversible submits remain:
+  clinic `setStatus` / `endSeries` / `submitRemoveProviderSite`, LoftSpace `UnlinkCredential` /
+  `WithdrawLeaseApplication` / `DecideLeaseApplication` (2026-09-13 census). Check: the throw path of an
+  irreversible op says the write may have landed and what to check, in the `withheld` vocabulary; a money-moving
+  op's catch never invites a bare retry.
 - **A released uniqueness guard invalidates every FE set that assumed it — "one live row per (a, b)" is a claim about
   the guard, not the data.** When an op stops tombstoning a row but still releases the guard that made the pair unique,
   the member can hold the kept row AND a fresh one; every `Map`/`Set` keyed on the pair (an own-status-by-session map,
@@ -75,6 +72,13 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   trying to serve. Minted: wellness `forfeited` booking (2026-09-13) — two sites, one caught cold. Check: when a script
   drops a tombstone, grep the FE for every collection keyed on the guard's pair and decide per site whether the kept
   status is skipped or ranked.
+- **A value reaches markup unescaped because the escaper's callers were never censused** — a test of `esc()` proves
+  nothing about who calls it; four café panels wrote `e.message` raw into the empty-state div, the front-desk card a
+  cross-package class name, and LoftSpace's Browse card a landlord-typed `rentCurrency` through `money()` — a stored
+  XSS every applicant rendered. Minted: café/LoftSpace (2026-09-13 census). Gated for string-building sinks
+  (`lint-markup-escaping`); what remains is the DOM path: a `textContent`/`value` write is safe, an `el.setAttribute
+  ("href"/"src"/"on*", v)` or `new Function` is not. Check: grep the diff for `setAttribute(` / `href =` / `src =` /
+  `insertAdjacentHTML` and prove each value's origin.
 - **A source-scanning test that samples its consumers by regex is an open set — the first read shape the regexes
   don't name passes as "not a read"** — café's catalog-coverage test matched `cache.X` and `cache["X"]`, so
   `cache?.X`, `const { X } = cache`, `cache[kind]` and `loadOpCatalog().then(c => c.X)` all passed with X missing

@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-loupe-console-grants install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2394,6 +2394,57 @@ lint-flag-consumer-census:
 lint-link-target-count:
 	@echo "==> Linting link-target counts for liveness screening..."
 	go run ./scripts/lint-link-target-count.go
+
+## lint-opmeta-required-fields — a payload field a package script refuses
+## without is declared `required` by the op's InputSchema (or filled by the
+## descriptor itself as a contextParam / targetField). The script and the
+## OpMetaSpec are two declarations of one op; a refusal added to one while the
+## other still says optional renders the field optional and fails a blank
+## submit with a raw InvalidArgument (wellness manual-charge memo). Parses every
+## shipped script, derives the requirers from their own refuse-on-absence
+## bodies, reads each dispatch block's unconditional requirements (top level +
+## one helper hop). Self-tests on every run. Advisory by default; STRICT=1
+## exits non-zero.
+lint-opmeta-required-fields:
+	@echo "==> Linting op-meta required fields against script refusals..."
+	go run ./scripts/lint-opmeta-required-fields.go
+
+## lint-ceremony-throw-path — the catch beside a secret-minting submit never
+## asserts the write did not land. The FE transport throws on any non-OK
+## response, a 5xx after the Processor committed included; for a ceremony op
+## (an op-meta with a Ceremony spec) "Could not create guest" leaves an identity
+## armed with a secret nobody holds. Parses each cmd/*-app/web/app.js with goja,
+## derives the write transports from the file, and fails a catch on a
+## transport-reaching try in a ceremony function whose wording asserts
+## non-landing without the "may have landed" vocabulary. Self-tests on every
+## run. Advisory by default; STRICT=1 exits non-zero.
+lint-ceremony-throw-path:
+	@echo "==> Linting ceremony catch wording for the landed-ambiguity vocabulary..."
+	go run ./scripts/lint-ceremony-throw-path.go
+
+## lint-stale-render-guard — a renderer that re-checks "am I still current"
+## after an await does so on every path out of it, the catch included, before
+## anything it paints. Parses each cmd/*-app/web/app.js with goja: a try
+## followed by `if (<test>) return;` must open its catch with the same guard,
+## and a function capturing `const g = ++counter` must re-check `g !== counter`
+## between every await and the next statement that could paint. Self-tests on
+## every run. Advisory by default; STRICT=1 exits non-zero.
+lint-stale-render-guard:
+	@echo "==> Linting async renderers for staleness re-checks on every path..."
+	go run ./scripts/lint-stale-render-guard.go
+
+## lint-markup-escaping — every value a vertical FE writes into markup is a
+## literal, an escaper call, or derived from those. Parses each
+## cmd/*-app/web/app.js with goja and classifies every innerHTML / outerHTML /
+## insertAdjacentHTML operand — literal, the file's escaper (derived: the
+## function mapping "&" to "&amp;"), a file-defined builder whose every return
+## is safe, numeric formatters, .map/.join chains over safe receivers, locals
+## fed only by safe values; anything else fails at its line, and
+## `// markup-safe: <why>` declares a stripped key. Self-tests on every run.
+## Advisory by default; STRICT=1 exits non-zero.
+lint-markup-escaping:
+	@echo "==> Linting markup sinks for unescaped operands..."
+	go run ./scripts/lint-markup-escaping.go
 
 ## lint-loupe-console-grants — every op the console submits under its own
 ## identity is granted to the consoleOperator role at the lane it submits on.

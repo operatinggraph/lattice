@@ -400,7 +400,7 @@ function statementLine(ledger) {
   if (!ledger.dueDate) return "";
   const due = new Date(ledger.dueDate).toLocaleDateString();
   if (ledger.isOverdue) {
-    const days = ledger.daysOverdue || 0;
+    const days = Number(ledger.daysOverdue) || 0;
     const reminder = ledger.reminderSentAt
       ? " · reminder sent " + new Date(ledger.reminderSentAt).toLocaleDateString()
       : " · no reminder sent yet";
@@ -478,7 +478,7 @@ function parseDollars(s) {
 // rentAmount formats a lease's unit rent — a plain dollar amount (not
 // cents, unlike money()'s café-ledger amounts) with its currency code.
 function rentAmount(amount, currency) {
-  return "$" + Number(amount).toFixed(0) + " " + (currency || "");
+  return "$" + Number(amount).toFixed(0) + " " + escapeHtml(currency || "");
 }
 
 function shortKey(key) {
@@ -732,7 +732,7 @@ async function renderPos() {
     tabs = results[0].tabs || [];
     menu = results[1];
   } catch (e) {
-    body.innerHTML = '<div class="empty">' + e.message + "</div>";
+    body.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
   }
   const open = tabs.find((t) => t.status === "open");
@@ -884,7 +884,7 @@ function renderOpenTabCard(tab, items) {
     '<div class="panel">' +
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
-    '<p class="meta">Opened ' + (tab.openedAt || "?") + "</p>" +
+    '<p class="meta">Opened ' + escapeHtml(tab.openedAt || "?") + "</p>" +
     chargeLinesBlock(tab.lines, tab.itemsMemo, tab.tabKey) +
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
@@ -1018,7 +1018,7 @@ async function loadFrontDesk() {
     const r = await appGet("/api/tabs");
     tabs = (r.tabs || []).filter((t) => t.status === "open");
   } catch (e) {
-    grid.innerHTML = '<div class="empty">' + e.message + "</div>";
+    grid.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
   }
   // The unified resident context: join each open tab to the resident's own
@@ -1128,7 +1128,7 @@ function frontDeskBalanceBadge(balance) {
 function frontDeskArrearsLine(row) {
   const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString() : "?";
   if (row.isOverdue) {
-    const days = row.daysOverdue || 0;
+    const days = Number(row.daysOverdue) || 0;
     const reminder = row.reminderSentAt
       ? " · reminder sent " + new Date(row.reminderSentAt).toLocaleDateString()
       : " · no reminder sent yet";
@@ -1172,19 +1172,19 @@ function renderFrontDeskArrears(balances, residentsByLease) {
 }
 
 function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
-  const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, "");
+  const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""); // markup-safe: stripped to [a-zA-Z0-9], nothing else survives
   const balanceBadge = frontDeskBalanceBadge(balance);
   const classBadge = booking
-    ? '<div class="meta">🧘 Booked: ' + (booking.sessionName || "class") + " · " + (booking.startsAt || "?") + "</div>"
+    ? '<div class="meta">🧘 Booked: ' + escapeHtml(booking.sessionName || "class") + " · " + escapeHtml(booking.startsAt || "?") + "</div>"
     : "";
   const leaseLine = lease && lease.unitRent
     ? '<div class="meta">🏠 ' + rentAmount(lease.unitRent, lease.unitCurrency) + "/mo" +
-      (lease.unitLeaseTermMonths ? " · " + lease.unitLeaseTermMonths + "mo term" : "") + "</div>"
+      (lease.unitLeaseTermMonths ? " · " + escapeHtml(lease.unitLeaseTermMonths) + "mo term" : "") + "</div>"
     : "";
   // Existence + time only — never a visit reason (front-desk staff see "a
   // visit is scheduled," not why or with whom).
   const visitBadge = visit
-    ? '<div class="meta">🩺 Visit: ' + (visit.startsAt || "?") + "</div>"
+    ? '<div class="meta">🩺 Visit: ' + escapeHtml(visit.startsAt || "?") + "</div>"
     : "";
   // The lease's applicant, resolved to a name via the protected roster
   // (nameForIdentity) — falls back to the truncated lease key when the
@@ -1196,7 +1196,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
     '<span class="badge open">open</span>' +
     '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
-    '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
+    '<div class="meta">Opened ' + escapeHtml(t.openedAt || "?") + "</div>" +
     balanceBadge +
     chargeLinesBlock(t.lines, t.itemsMemo, null) +
     classBadge +
@@ -1237,7 +1237,7 @@ function menuItemCard(it) {
     '<div class="amount" data-field="amount">' + money(it.priceCents) + "</div>" +
     '<div class="card-actions" data-field="actions">' + relocate +
     '<button type="button" data-edit="' + escapeHtml(it.menuItemKey) +
-    '" data-name="' + escapeHtml(it.name) + '" data-price-cents="' + (it.priceCents || 0) + '">Edit</button>' +
+    '" data-name="' + escapeHtml(it.name) + '" data-price-cents="' + (Number(it.priceCents) || 0) + '">Edit</button>' +
     '<button type="button" class="danger" data-retire="' +
     escapeHtml(it.menuItemKey) +
     '">Retire</button></div>' +
@@ -1277,7 +1277,7 @@ async function loadManageMenu() {
     const data = await appGet("/api/menu");
     items = data.menu || [];
   } catch (e) {
-    body.innerHTML = '<div class="empty">' + e.message + "</div>";
+    body.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
   }
   summary.textContent = items.length + " item" + (items.length === 1 ? "" : "s");
@@ -1422,7 +1422,7 @@ async function renderResident() {
     tabs = results[1];
     menu = results[2];
   } catch (e) {
-    body.innerHTML = '<div class="empty">' + e.message + "</div>";
+    body.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
   }
   const open = (tabs.tabs || []).find((t) => t.status === "open");
@@ -1440,7 +1440,7 @@ async function renderResident() {
   if (open) {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(openDisplayTotal) +
-      '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p>" +
+      '</p><p class="meta">Opened ' + escapeHtml(open.openedAt || "?") + " — not yet settled</p>" +
       chargeLinesBlock(openDisplayLines, open.itemsMemo, null) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
@@ -1474,7 +1474,7 @@ async function renderResident() {
   if (pendingSettled) {
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
-      '</p><p class="meta">Settled ' + (pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
+      '</p><p class="meta">Settled ' + escapeHtml(pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
       chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null) + "</div>"
     );
   }
@@ -1525,11 +1525,11 @@ async function renderResident() {
             // exhausted charge has no refund left to start.
             const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
             return (
-              '<li class="ledger-entry ' + r.type + (r.reversesKey ? " refund" : "") + '">' +
+              '<li class="ledger-entry ' + escapeHtml(r.type) + (r.reversesKey ? " refund" : "") + '">' +
               (r.reversesKey ? '<span class="badge-refund">Refund</span>' : "") +
               (r.type === "debit" ? "+" : "−") + money(r.amountCents) +
               (r.memo ? " — " + escapeHtml(customerMemo(r.memo)) : "") +
-              " (" + r.postedAt + ")" +
+              " (" + escapeHtml(r.postedAt) + ")" +
               (r.reversesKey
                 ? ' <span class="refund-of">reverses the charge of ' +
                   (reversed ? escapeHtml(reversed.postedAt) : "an earlier charge") +
