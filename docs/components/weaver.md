@@ -1487,7 +1487,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   split it by which fact the leg has actually witnessed — a playbook dropping a gap (`orphanColumn`) has
   ended nothing about the row, so it must not clear a latch lane 1 keeps raising at. Check: for every clear
   you add, enumerate every leg that can observe the same fact ending and every leg that can RE-RAISE at
-  that key; put the shared part in one helper both call, and name what each leg witnessed.
+  that key; put the shared part in one helper both call, and name what each leg witnessed. *Credit legs
+  too* (minted 2026-09-13, the promotion ask): the `__effect` close credit has THREE seams — lane-1 gap
+  close, the leg release, the sweep's gap-closed delete — and the brief named two, so a window completed
+  under the sweep would never have proposed; `promotion_hook_census_internal_test.go` now pins that every
+  `recordEffectClose` site asks.
 - **A presence assertion cannot pin a clear whose caller re-raises in the same pass — the STAMP is the
   observable** — `clearClosedMarks` runs before the dispatch that re-raises, so removing a guard clears the
   entry and the next read re-raises it microseconds later: the test sees an entry either way and greens
