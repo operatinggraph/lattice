@@ -137,9 +137,13 @@ func newFakeEngine() *fakeEngine {
 
 func TestLoomList_HappyPath_JSON(t *testing.T) {
 	eng := newFakeEngine()
+	// The engine answers for the actionable set: running instances and failed
+	// ones awaiting a redrive. A completed instance is not in the reply at all —
+	// it is answerable by id through inspect — so the renderer is never handed
+	// one, and this fixture must not invent one.
 	eng.instances = []internalloom.InstanceSummary{
 		{InstanceID: "i1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: "running"},
-		{InstanceID: "i2", PatternRef: "vtx.meta.p2", SubjectKey: "vtx.widget.w2", Cursor: 2, Status: "complete"},
+		{InstanceID: "i2", PatternRef: "vtx.meta.p2", SubjectKey: "vtx.widget.w2", Cursor: 2, Status: "failed", RetryCount: 1},
 	}
 	url := startLoomControlTest(t, eng)
 
@@ -153,7 +157,26 @@ func TestLoomList_HappyPath_JSON(t *testing.T) {
 	assert.Contains(t, out, "i1")
 	assert.Contains(t, out, "i2")
 	assert.Contains(t, out, "running")
-	assert.Contains(t, out, "complete")
+	assert.Contains(t, out, "failed")
+	assert.NotContains(t, out, "complete",
+		"a completed instance is not part of the list's answer")
+}
+
+// TestLoomList_ShortDescribesTheActionableSet pins the help text to what the verb
+// actually answers for: an operator reading "retained terminals" would look here
+// for a completed flow and find nothing.
+func TestLoomList_ShortDescribesTheActionableSet(t *testing.T) {
+	natsURL, outputFmt, actorKey := "", "", ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+	var list *cobra.Command
+	for _, c := range cmd.Commands() {
+		if c.Name() == "list" {
+			list = c
+		}
+	}
+	require.NotNil(t, list, "the loom command must carry a list subcommand")
+	assert.Equal(t, "List actionable Loom instances (running + failed awaiting redrive)", list.Short)
+	assert.Contains(t, list.Long, "read-model concern")
 }
 
 func TestLoomList_Empty_Table(t *testing.T) {

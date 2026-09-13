@@ -289,12 +289,13 @@ func TestPatternNameFrom(t *testing.T) {
 }
 
 func TestLoomInstanceStatuses(t *testing.T) {
-	t.Run("decodes instanceId to status, terminal instances included", func(t *testing.T) {
-		// Loom's list carries finished instances alongside running ones —
-		// which is why the status has to come across with the id.
-		raw := []byte(`{"instances":[{"instanceId":"a","status":"running"},{"instanceId":"b","status":"complete"}]}`)
+	t.Run("decodes instanceId to status, failed instances included", func(t *testing.T) {
+		// Loom's list carries failed instances — terminal, awaiting a redrive —
+		// alongside running ones, which is why the status has to come across
+		// with the id.
+		raw := []byte(`{"instances":[{"instanceId":"a","status":"running"},{"instanceId":"b","status":"failed"}]}`)
 		got := loomInstanceStatuses(raw)
-		if len(got) != 2 || got["a"] != "running" || got["b"] != "complete" {
+		if len(got) != 2 || got["a"] != "running" || got["b"] != "failed" {
 			t.Fatalf("unexpected statuses: %+v", got)
 		}
 	})

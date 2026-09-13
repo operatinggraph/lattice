@@ -229,6 +229,10 @@ type Engine struct {
 	relay      *relay
 	supervisor *substrate.ConsumerSupervisor
 	states     *healthkv.ConsumerStateCache
+	// failedIndex is the surface the failed-index backfill reads and writes
+	// through. It is conn for every production engine; a test replaces it to
+	// observe the requests that one pass makes.
+	failedIndex failedIndexStore
 
 	mu sync.Mutex
 	// domains is the last-applied desired per-domain consumer set, diffed on
@@ -265,14 +269,15 @@ func fingerprintOf(spec substrate.ConsumerSpec) specFingerprint {
 func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 	cfg.withDefaults()
 	e := &Engine{
-		cfg:        cfg,
-		conn:       conn,
-		logger:     cfg.Logger,
-		state:      newStateStore(conn, cfg.LoomStateBucket),
-		relay:      newRelay(conn, cfg.LoomStateBucket, cfg.Logger),
-		supervisor: substrate.NewConsumerSupervisor(conn),
-		states:     healthkv.NewConsumerStateCache(),
-		domains:    make(map[string]specFingerprint),
+		cfg:         cfg,
+		conn:        conn,
+		logger:      cfg.Logger,
+		state:       newStateStore(conn, cfg.LoomStateBucket),
+		relay:       newRelay(conn, cfg.LoomStateBucket, cfg.Logger),
+		supervisor:  substrate.NewConsumerSupervisor(conn),
+		states:      healthkv.NewConsumerStateCache(),
+		failedIndex: conn,
+		domains:     make(map[string]specFingerprint),
 	}
 	e.source = newPatternSource(conn, cfg.CoreKVBucket, cfg.Instance, cfg.Logger)
 	return e
@@ -331,16 +336,29 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 		e.sweepLegacyTombstones(ctx)
 	}()
 
+	// Settle the failed index against the records already in the bucket — every
+	// cursor reading `failed` with no marker beside it — so the redrive queue the
+	// control plane enumerates is complete. Once per bucket lifetime, gated by its
+	// own sentinel, and off the startup path on the same terms as the pass above:
+	// Start never waits on it here, and the engine's context cancels it.
+	backfillDone := make(chan struct{})
+	go func() {
+		defer close(backfillDone)
+		e.backfillFailedIndex(ctx)
+	}()
+
 	e.logger.Info("loom engine started",
 		"coreKV", e.cfg.CoreKVBucket, "loomState", e.cfg.LoomStateBucket, "lane", e.cfg.Lane)
 	<-ctx.Done()
-	// Join the pass before returning, so nothing it owns — a publish, a log
-	// line, the summary — lands after Start's caller believes the engine is
-	// down. The wait needs no timeout of its own: the pass checks the same ctx
-	// at every marker and between families, and each of its publishes carries a
-	// bounded context, so a cancelled pass returns without waiting on anything
-	// unbounded.
+	// Join both start-time passes before returning, so nothing either owns — a
+	// publish, a log line, a summary — lands after Start's caller believes the
+	// engine is down. The waits need no timeout of their own: each pass checks
+	// the same ctx as it goes (the conversion pass at every marker and between
+	// families, the backfill between pages) and each of the conversion pass's
+	// publishes carries a bounded context, so a cancelled pass returns without
+	// waiting on anything unbounded.
 	<-sweepDone
+	<-backfillDone
 	e.supervisor.Stop()
 	return nil
 }

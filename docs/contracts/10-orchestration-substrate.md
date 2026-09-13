@@ -121,6 +121,11 @@ component's own: `docs/components/loom.md` / `docs/components/weaver.md`.
 - **Engine replicas are interchangeable.** Completion correlation needs no in-memory state: any
   replica resolves any pending completion from the bucket alone, and engine state is rebuildable
   (D3) with no startup scan.
+- **The control plane answers for the instances an operator can still act on** — those running, and
+  those failed and awaiting redrive. A completed instance is not enumerable there; completed-flow
+  history is a read-model concern, served by the projection of the `loom.*` lifecycle events, never by
+  asking the engine. An instance addressed by id is always answerable while its record exists,
+  whatever its state.
 - **A completed instance's record is permanent, and that is a decision.** It is retained as the
   dedup evidence above, indefinitely and by design — not held pending some future retention window.
   Anything that would expire, discard or sweep it removes the guarantee that a re-emitted trigger

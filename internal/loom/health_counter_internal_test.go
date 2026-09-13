@@ -73,10 +73,9 @@ func TestRunningInstanceCounter_LifecycleAcrossRealTransitions(t *testing.T) {
 	require.Equal(t, n-2, got, "terminal instances drop out of the count")
 }
 
-// A terminal instance's cursor record stays readable (retained for the
-// retention window, per Inc 1) but must not be counted as running — precisely
-// what the old body-scan got right by decoding Status, and what the pin-index
-// count must also get right despite never looking at the body.
+// A terminal instance's cursor record stays readable — it is permanent, and its
+// presence is the re-trigger dedup guard — but it must not be counted as
+// running. The pin index has to get that right while never looking at a body.
 func TestRunningInstanceCounter_TerminalRecordRetainedButNotCounted(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -98,7 +97,7 @@ func TestRunningInstanceCounter_TerminalRecordRetainedButNotCounted(t *testing.T
 
 	stored, err := s.getInstance(ctx, inst.InstanceID)
 	require.NoError(t, err)
-	require.NotNil(t, stored, "the cursor record is retained for the retention window, not deleted at terminal")
+	require.NotNil(t, stored, "the cursor record is permanent; only the pin is removed at terminal")
 	require.Equal(t, StatusComplete, stored.Status)
 }
 
@@ -130,43 +129,60 @@ func TestRunningInstanceCounter_PoisonedBodyDoesNotAffectCount(t *testing.T) {
 }
 
 // fakeInstanceReader implements runningInstanceReader with nothing but
-// KVListKeysPrefix. It has no KVGetMulti method at all, so if count() were
+// KVListKeysFilter. It has no KVGetMulti method at all, so if count() were
 // ever changed to fetch a record body, this file would fail to COMPILE
 // rather than merely fail an assertion — the strongest form of "no body
-// fetch" proof available for this call.
+// fetch" proof available for this call. It also records the bucket and filter
+// it was handed, which is what pins the call to the pin family server-side.
 type fakeInstanceReader struct {
-	keys []string
+	keys      []string
+	gotBucket string
+	gotFilter string
+	gotLimit  int
 }
 
-func (f fakeInstanceReader) KVListKeysPrefix(_ context.Context, _, _ string) ([]string, error) {
-	return f.keys, nil
+func (f *fakeInstanceReader) KVListKeysFilter(_ context.Context, bucket, filter, _ string, limit int) ([]string, string, error) {
+	f.gotBucket, f.gotFilter, f.gotLimit = bucket, filter, limit
+	return f.keys, "", nil
 }
 
-// Proves count() derives its result from nothing but the pin-suffixed keys a
-// KVListKeysPrefix call returns — no other method is available to it.
+// Proves count() derives its result from nothing but the keys one
+// KVListKeysFilter call returns — no other method is available to it — and that
+// the call asks the SERVER for the pin family alone. The filter assertion is the
+// revert-proof for the bound: a whole-keyspace prefix listing
+// (instance. / instance.>) delivers one key per instance that ever ran, and a
+// client-side suffix filter would still return the right count, so the filter
+// string is the only place that regression is visible.
 func TestRunningInstanceCounter_NoBodyFetchStructural(t *testing.T) {
 	t.Parallel()
 	sampleKeys := []string{
 		"instance.aaaaaaaaaaaaaaaaaaaa.pattern",
-		"instance.aaaaaaaaaaaaaaaaaaaa",
 		"instance.bbbbbbbbbbbbbbbbbbbb.pattern",
-		"instance.bbbbbbbbbbbbbbbbbbbb",
-		"instance.cccccccccccccccccccc", // terminal: pin already deleted
+		// Neither a pin: a cursor and a failed-index marker, handed over to
+		// pin the counting predicate that guards a mis-edited filter.
+		"instance.cccccccccccccccccccc",
+		"instance.dddddddddddddddddddd.failed",
 	}
-	r := &runningInstanceCounter{conn: fakeInstanceReader{keys: sampleKeys}, bucket: "loom-state", interval: defaultHeartbeatEvery}
+	fake := &fakeInstanceReader{keys: sampleKeys}
+	r := &runningInstanceCounter{conn: fake, bucket: "loom-state", interval: defaultHeartbeatEvery}
 
 	got, err := r.count(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 2, got, "only the two pin keys count as running")
+
+	require.Equal(t, "loom-state", fake.gotBucket)
+	require.Equal(t, "instance.*.pattern", fake.gotFilter,
+		"the pin family must be selected server-side; a prefix listing would deliver every cursor too")
+	require.Zero(t, fake.gotLimit, "the running set is listed in one page")
 }
 
-// blockingInstanceReader blocks on KVListKeysPrefix until its ctx is done, so
+// blockingInstanceReader blocks on KVListKeysFilter until its ctx is done, so
 // a test can observe exactly which deadline governs the call.
 type blockingInstanceReader struct{}
 
-func (blockingInstanceReader) KVListKeysPrefix(ctx context.Context, _, _ string) ([]string, error) {
+func (blockingInstanceReader) KVListKeysFilter(ctx context.Context, _, _, _ string, _ int) ([]string, string, error) {
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return nil, "", ctx.Err()
 }
 
 // count() must bound its KV call to countDeadline(interval), not inherit the

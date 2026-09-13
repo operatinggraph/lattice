@@ -82,41 +82,6 @@ func putPin(t *testing.T, ctx context.Context, conn *substrate.Conn, instanceID 
 	require.NoError(t, err)
 }
 
-// TestListInstances_SeededState proves ListInstances returns running instances
-// and retained terminals, filters out the .pattern pin sub-keys, and sorts by
-// instanceId.
-func TestListInstances_SeededState(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	conn, ctx := newControlTestConn(t)
-	e := newControlEngine(conn)
-
-	putInstance(t, ctx, conn, Instance{InstanceID: "aaa1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning})
-	putInstance(t, ctx, conn, Instance{InstanceID: "ccc3", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w3", Cursor: 2, Status: StatusComplete, RetryCount: 0})
-	putInstance(t, ctx, conn, Instance{InstanceID: "bbb2", PatternRef: "vtx.meta.p2", SubjectKey: "vtx.widget.w2", Cursor: 1, Status: StatusFailed, RetryCount: 1})
-	// A pin sub-key under a live instance — must be filtered out (not counted as
-	// an instance record).
-	putPin(t, ctx, conn, "aaa1", Pattern{PatternID: "p1", SubjectType: "widget", Steps: []Step{{Kind: StepKindSystemOp, Operation: "StepA"}}})
-
-	got, err := e.ListInstances(ctx)
-	require.NoError(t, err)
-	require.Len(t, got, 3, "running + retained terminals, pin sub-key excluded")
-
-	// Sorted by instanceId.
-	require.Equal(t, "aaa1", got[0].InstanceID)
-	require.Equal(t, "bbb2", got[1].InstanceID)
-	require.Equal(t, "ccc3", got[2].InstanceID)
-
-	require.Equal(t, StatusRunning, got[0].Status)
-	require.Equal(t, StatusFailed, got[1].Status)
-	require.Equal(t, 1, got[1].RetryCount)
-	require.Equal(t, StatusComplete, got[2].Status)
-	require.Equal(t, "vtx.meta.p2", got[1].PatternRef)
-	require.Equal(t, 1, got[1].Cursor)
-}
-
 // TestListInstances_Empty proves an empty loom-state yields an empty list, not an
 // error.
 func TestListInstances_Empty(t *testing.T) {
