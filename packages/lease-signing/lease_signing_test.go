@@ -1608,7 +1608,7 @@ func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
 				"lnk.leaseapp." + appID + ".applicationFor.identity." + applicantID,
 			},
-			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), leaseAppKey + ".decision"},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1639,7 +1639,7 @@ func withdrawAsConsumer(t *testing.T, ctx context.Context, conn *substrate.Conn,
 				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
 				"lnk.leaseapp." + appID + ".applicationFor.identity." + applicantID,
 			},
-			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), leaseAppKey + ".decision"},
 		},
 		AuthContext: &processor.AuthContext{Target: authActor},
 	}
@@ -1785,6 +1785,7 @@ func withdrawReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
 				"lnk.leaseapp." + appID + ".applicationFor.identity." + applicantID,
 				guardLinkKey(applicantKey, unitKey),
+				leaseAppKey + ".decision",
 			},
 		},
 	}
@@ -2785,5 +2786,30 @@ func TestDecideLeaseApplication_StampsDecidedProfileSnapshotOnFirstDecisionOnly(
 	}
 	if len(emptySignals) != 0 {
 		t.Fatalf("decidedProfileSnapshot.applicationSignals with no profile ever submitted must be empty, got %v", emptySignals)
+	}
+}
+
+// TestWithdrawLeaseApplication_ApprovedIsAnExecutedLease — an approved
+// application is refused (AlreadyApproved): its account, balance and rent
+// clause hang off it and the unit is leased. A declined application stays
+// withdrawable, which is how the applicant frees the guard link to re-apply.
+func TestWithdrawLeaseApplication_ApprovedIsAnExecutedLease(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "withdrawapproved")
+
+	appKey, applicantKey, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBwdapprovHJKMNPQAPR")
+	withdraw(t, ctx, conn, cp, cons, "wdApproved01", appKey, unitKey, applicantKey, processor.OutcomeRejected)
+	if !keyExists(t, ctx, conn, appKey) {
+		t.Fatalf("a refused withdraw must leave the executed lease alive")
+	}
+
+	declined := seedApplicant(t, ctx, conn, "BBwddecnedHJKMNPQDCL")
+	declinedApp := createApplication(t, ctx, conn, cp, cons, declined)
+	declinedUnit := unitKeyFor(declined)
+	decide(t, ctx, conn, cp, cons, "wdDeclineDec", declinedApp, "declined", declinedUnit, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+	withdraw(t, ctx, conn, cp, cons, "wdDeclined01", declinedApp, declinedUnit, declined, processor.OutcomeAccepted)
+	if keyExists(t, ctx, conn, declinedApp) {
+		t.Fatalf("a declined application withdraws like an undecided one")
 	}
 }

@@ -2173,7 +2173,7 @@ async function withdrawApplication(row) {
           "lnk.leaseapp." + appId + ".appliesToUnit.unit." + unitId,
           "lnk.leaseapp." + appId + ".applicationFor.identity." + applicantId,
         ],
-        optionalReads: ["lnk.identity." + applicantId + ".appliedToUnit.unit." + unitId],
+        optionalReads: ["lnk.identity." + applicantId + ".appliedToUnit.unit." + unitId, row.entityKey + ".decision"],
         payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
       },
       { authContext: { target: state.applicant } }

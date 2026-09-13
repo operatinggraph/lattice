@@ -444,9 +444,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.unit:id}",
 					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{payload.applicant:id}",
 				},
-				// The guard link being freed may already be tombstoned.
+				// The guard link being freed may already be tombstoned; the
+				// decision is absent on the undecided application (the normal
+				// withdraw) and refuses the withdraw when it reads approved.
 				OptionalReads: []string{
 					"lnk.identity.{payload.applicant:id}.appliedToUnit.unit.{payload.unit:id}",
+					"{payload.leaseAppKey}.decision",
 				},
 			},
 		},

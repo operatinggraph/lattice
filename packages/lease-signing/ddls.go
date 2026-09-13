@@ -122,7 +122,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"forOperation target the §10.8 playbook binds. WithdrawLeaseApplication{leaseAppKey, unit, applicant} soft-deletes the " +
 			"application (the convergence lens filters isDeleted → the row drops from My Applications) and FREES the " +
 			"per-(applicant, unit) guard link (tombstones it), verifying both the unit (appliesToUnit link) and the applicant " +
-			"(applicationFor link) — the complement to the duplicate-application guard so an applicant can back out + re-apply. " +
+			"(applicationFor link) — the complement to the duplicate-application guard so an applicant can back out + re-apply; " +
+			"an APPROVED application is an executed lease (its account, balance and rent clause hang off it, the unit is leased) " +
+			"and is refused (AlreadyApproved), a declined one stays withdrawable. " +
 			"DecideLeaseApplication{leaseAppKey, decision, reason?, unit?} records the landlord's leasing decision as a .decision aspect " +
 			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)}. A recorded decision is " +
 			"TERMINAL: re-submitting the same decision is idempotent, but changing it to a different value is rejected (DecisionFinal) so a " +
@@ -273,7 +275,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"the per-(applicant, unit) guard link lnk.identity.<a>.appliedToUnit.unit.<u> so the applicant can re-apply " +
 					"to the same unit (the next CreateLeaseApplication revives it). Emits leaseapp.applicationWithdrawn{leaseAppKey, " +
 					"unit}. Returns primaryKey. Rejects a non-existent application, a unit that is not the application's unit " +
-					"(UnitMismatch), or an applicant that is not the application's applicant (ApplicantMismatch).",
+					"(UnitMismatch), an applicant that is not the application's applicant (ApplicantMismatch), or an approved " +
+					"application (AlreadyApproved — an executed lease is never withdrawn; its .decision is declared as an " +
+					"optionalRead, absent on the undecided application).",
 			},
 			{
 				Name:    "DecideLeaseApplication — landlord approves an application (first approve stamps .tenancy)",

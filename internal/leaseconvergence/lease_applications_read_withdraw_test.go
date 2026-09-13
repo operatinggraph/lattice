@@ -110,6 +110,7 @@ func TestLeaseConvergence_WithdrawRetractsReadModelRow(t *testing.T) {
 		},
 		OptionalReads: []string{
 			"lnk.identity." + applicantID + ".appliedToUnit.unit." + unitID,
+			appKey + ".decision",
 		},
 	})
 	require.Equalf(t, processor.ReplyStatusAccepted, withdrawReply.Status, "WithdrawLeaseApplication: %+v", withdrawReply.Error)
