@@ -61,14 +61,17 @@ type legacyTombstoneFamily struct {
 // is reachable by the pass. `instance.*.pattern` cannot match a cursor:
 // instance.<id> is a single token after the prefix (an instanceId is a dot-free
 // NanoID) and `*` matches exactly one token, so the three-token pattern filter
-// matches only the pin sub-key.
+// matches only the pin sub-key. The failed index (instance.<id>.failed) is
+// absent for the same reason the cursor is, one step further: its only removal
+// is redrive's TTL'd purge, so no permanent marker this pass converts can ever
+// stand on it.
 //
 // Only deadline.> carries a guard (skipRunningDeadlineMarker): a conversion on
 // that family is a delivery, and the handler it wakes is destructive on a
 // running instance.
 func (e *Engine) legacyTombstoneFamilies() []legacyTombstoneFamily {
 	return []legacyTombstoneFamily{
-		{filter: instancePrefix + "*" + patternPinSuffix},
+		{filter: patternPinFilter},
 		{filter: tokenPrefix + ">"},
 		{filter: outboxPrefix + ">", paced: true},
 		{filter: deadlinePrefix + ">", paced: true, guard: e.skipRunningDeadlineMarker},

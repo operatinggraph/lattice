@@ -50,7 +50,7 @@ type healthIssue struct {
 // tick, let alone the TTL. Halving the interval leaves the rest of the tick
 // free for the KVPutWithTTL emit itself; the cap keeps a large configured
 // interval (e.g. minutes) from letting one stalled list run that long — 5s is
-// generous for a server-side prefix list that lists keys only, no bodies.
+// generous for a server-side filtered list that lists keys only, no bodies.
 const (
 	countDeadlineDivisor = 2
 	countDeadlineCap     = 5 * time.Second
@@ -71,34 +71,53 @@ func countDeadline(interval time.Duration) time.Duration {
 
 // runningInstanceReader is the narrow substrate.Conn surface
 // runningInstanceCounter needs. Deliberately just the one list method: count
-// no longer reads any instance body, so typing the field to this interface
-// (rather than *substrate.Conn) makes a body fetch from this path a compile
-// error, not just an absent one — a test fake needs to implement only
-// KVListKeysPrefix to stand in for *substrate.Conn here.
+// reads no instance body, so typing the field to this interface (rather than
+// *substrate.Conn) makes a body fetch from this path a compile error, not just
+// an absent one — a test fake needs to implement only KVListKeysFilter to stand
+// in for *substrate.Conn here. One method is the guard, and it only guards what
+// it is the only member of: a second, wider list method would leave the
+// whole-keyspace call reachable from exactly the path that must not make it.
 type runningInstanceReader interface {
-	KVListKeysPrefix(ctx context.Context, bucket, prefix string) ([]string, error)
+	KVListKeysFilter(ctx context.Context, bucket, filter, cursor string, limit int) ([]string, string, error)
 }
 
 // runningInstanceCounter reports the number of currently-running loom-state
 // instances by counting instance.<id>.pattern pin keys, not instance records.
 // The pin is written in the same AtomicBatch that creates instance.<id> and
-// deleted only in the terminal batch (state.go's isPatternPinKey / transition
-// doc comments), so the pin-key set IS the running-instance set — no record
-// body is ever fetched, so the NATS matched-subject fast-path gate (~1,024
-// keys, substrate/kv_multi.go) is unreachable on this path. Each call runs
-// under countDeadline(interval): KVListKeysPrefix surfaces a context expiry as
-// an error (substrate/kv.go), never a silent partial count, and emit already
-// treats a count error as "omit the metric, warn-log" rather than blocking.
+// removed only in the terminal batch (state.go's isPatternPinKey / transition
+// doc comments), so the pin-key set IS the running-instance set. The pin family
+// is selected by a server-side subject filter (patternPinFilter), so the keys
+// delivered per tick are the running population plus at most a marker TTL's
+// worth of expiring removals — not one key per instance that ever ran. No record
+// body is ever fetched, so the NATS matched-subject fast-path gate (~1,024 keys,
+// substrate/kv_multi.go) is unreachable on this path. Each call runs under
+// countDeadline(interval): KVListKeysFilter surfaces a context expiry as an
+// error (substrate/kv.go), never a silent partial count, and emit already treats
+// a count error as "omit the metric, warn-log" rather than blocking.
+//
+// This is the one read in the package that keeps a KEY LISTING, and deliberately.
+// A listing is hint-grade — it rides a count-bounded watcher, so a rewrite landing
+// mid-enumeration can end it a key short with no error (substrate's
+// KVListKeysFilter) — and a heartbeat gauge is exactly the consumer that tolerates
+// that: it is sampled every ten seconds and nothing decides anything on one tick.
+// The complete alternative (KVGetMultiNoSnapshot over the same filter) returns
+// BODIES, which is the fetch this interface exists to make impossible here.
+// Anything that has to be right rather than indicative — listInstances, the
+// backfill — resolves through the stream's subject state instead.
 type runningInstanceCounter struct {
 	conn     runningInstanceReader
 	bucket   string
 	interval time.Duration
 }
 
+// count lists the pin family in one page (limit 0) and counts it. isPatternPinKey
+// re-checks each key's shape client-side: the counting predicate stays the
+// package's one definition of a pin, so the metric cannot silently start
+// counting something else if this filter is ever mis-edited.
 func (r *runningInstanceCounter) count(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, countDeadline(r.interval))
 	defer cancel()
-	keys, err := r.conn.KVListKeysPrefix(ctx, r.bucket, instancePrefix)
+	keys, _, err := r.conn.KVListKeysFilter(ctx, r.bucket, patternPinFilter, "", 0)
 	if err != nil {
 		return 0, err
 	}

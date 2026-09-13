@@ -191,10 +191,11 @@ func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string,
 // comment) — this mirrors that idiom, pulling only the two fields the badge
 // needs rather than importing internal/loom/control.
 //
-// The status is half the answer, not decoration: the list carries FINISHED
-// instances too, so a decoder that kept only the ids could not tell a running
-// flow from a remembered one. A decode failure yields an empty map (no badge,
-// never a hard failure of the whole Flows list).
+// The status is half the answer, not decoration: the list carries failed
+// instances (terminal) as well as running ones, so a decoder that kept only the
+// ids could not tell a flow that is still moving from one waiting on a redrive.
+// A decode failure yields an empty map (no badge, never a hard failure of the
+// whole Flows list).
 func loomInstanceStatuses(raw json.RawMessage) map[string]string {
 	var reply struct {
 		Instances []struct {

@@ -621,3 +621,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `TestEnsureSyncStream_AdoptsThePolicyOnAStreamThatAlreadyHasConsumers` — the stream carries an
   explicit-ack consumer BEFORE the adoption. General form: any stream-config test whose production case is
   an *existing* stream must build the fixture with the population that stream will really have.
+- **A watcher-backed key listing is a hint; a verdict-bearing read resolves from the stream's subject state.**
+  `KVListKeys*` rides a count-bounded watcher (`initPending` captured once; every delivered message, purge
+  markers included, counts), so a rewrite landing mid-enumeration on an already-delivered subject ends the
+  listing short with a nil error — and the hottest rewrite family is exactly the one an index over sub-keys
+  lists. Any read an operator acts on (a redrive queue, a reconcile union) takes the filter to
+  `KVGetMultiNoSnapshot`, which resolves under the stream lock or through a subject-filtered `STREAM.INFO`;
+  a listing stays acceptable only for a sampled gauge. Second sighting (the first is the NATS row of
+  `docs/vendors.md`); not syntactically mechanizable, because which caller bears a verdict is semantic.
+  Minted: the loom enumeration fire's cold pass. Check: `TestListInstances_ResolvesBothFamiliesServerSide`
+  (`internal/loom`) asserts the primitive and the filter pair, not merely the result.

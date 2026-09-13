@@ -9,8 +9,10 @@ import (
 
 // InstanceSummary is the operator-facing snapshot of one Loom instance, returned
 // by ListInstances: the durable cursor record's identity and lifecycle fields. It
-// covers running instances and retained terminals alike (a terminal instance's
-// record persists — only its pattern pin is deleted).
+// covers the instances an operator can still act on — running, or failed and
+// awaiting a redrive. A completed instance's cursor record persists (it is the
+// re-trigger dedup evidence) but is answerable only by id, through
+// InspectInstance.
 type InstanceSummary struct {
 	InstanceID string `json:"instanceId"`
 	PatternRef string `json:"patternRef"`
@@ -95,16 +97,21 @@ const pauseRestartNote = "manual pause persists across restart until resume"
 // does not stall instances already in flight).
 const pauseDomainStallNote = "in-flight instances awaiting this domain will stall until resume"
 
-// ListInstances returns a snapshot of every Loom instance's cursor record in
-// loom-state — running instances and retained terminals alike (only the pattern
-// pin is deleted at terminal). The .pattern pin sub-keys are filtered out; an
-// unparseable record is skipped, not fatal, but a genuine read failure across
-// the batched fetch fails the whole call (listInstances' doc comment). Results
-// are sorted by instanceId for a stable operator view. Read-only.
+// ListInstances returns a snapshot of the Loom instances an operator can still
+// act on: those running, and those failed and awaiting a redrive. The two sets
+// are enumerated through their index sub-keys (instance.*.pattern and
+// instance.*.failed, each a server-side subject filter), so a completed
+// instance is absent here by construction — completed-flow history is a
+// read-model concern, served by the projection of the loom.* lifecycle events,
+// while an instance addressed by id stays answerable through InspectInstance
+// whatever its state. An unparseable record is skipped, not fatal, but a genuine
+// listing or batched-read failure fails the whole call (listInstances' doc
+// comment). Results are sorted by instanceId for a stable operator view.
+// Read-only.
 //
 // It relies on instance cursor records never being soft-deleted: a terminal is
 // recorded by flipping Status in place, so no isDeleted envelope is ever written
-// for an instance.<id> key. Every key that lists is therefore a live record,
+// for an instance.<id> key. Every record fetched is therefore a live record,
 // decoded directly with no tombstone check.
 func (e *Engine) ListInstances(ctx context.Context) ([]InstanceSummary, error) {
 	insts, err := e.state.listInstances(ctx, e.logger)

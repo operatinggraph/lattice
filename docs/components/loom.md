@@ -275,7 +275,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 |--------|--------|-------|
 | Step operations | Processor via `core-operations` | Submitted via the **command outbox**: written as `outbox.<token>` in the transition batch, fire-and-forget published by the relay (no dual write, no request-reply) |
 | `loom.patternStarted` / `Completed` / `Failed` | **lifecycle** ops (`StartLoomPattern`/`CompletePattern`/`FailPattern`) → outbox → `core-events` | Lifecycle on the first-class `loom` domain; no Core-KV business vertex (events ride the standard `vtx.op.<requestId>.events` outbox aspect); drives nesting + Weaver re-projection |
-| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor (permanent — a terminal flips `status` in place; its presence is the re-trigger dedup guard, see below) + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
+| Instance cursor + pinned pattern + failed index + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor (permanent — a terminal flips `status` in place; its presence is the re-trigger dedup guard, see below) + `instance.<id>.pattern` pinned definition (written with the create, removed at terminal) + `instance.<id>.failed` index (settled by every terminal batch: written on the failed arm, purged on the complete arm and on redrive — the enumerable half of the operator-actionable set) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition. Plus one engine-bookkeeping key outside the instance families: `backfill.failedIndex`, the failed-index pass's completion sentinel |
 | Tasks | **Core KV** (via Processor) | Business state — queryable, UI-rendered, audited, read by Weaver target Lens |
 
 ---
@@ -317,16 +317,23 @@ story latitude):
 **Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
 on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,
 `Conn.AtomicBatch` on the bucket is rejected. A removal on `loom-state` is a TTL'd purge — `KV-Operation:
-PURGE` + `Nats-Rollup: sub` + a one-minute `Nats-TTL` — so each of the four ephemeral families
-(`instance.<id>.pattern`, `token.*`, `outbox.*`, `deadline.*`) leaves no subject behind once its marker
-expires, and the cursor is the one permanent subject per instance. A bucket still carrying permanent DEL
-markers on those four families converts them at the engine's next start — one pass, off the startup path,
-one revision-conditioned purge per marker, the cursor family never enumerated, convergence by restart
-rather than by looping. The bucket must therefore also allow
+PURGE` + `Nats-Rollup: sub` + a one-minute `Nats-TTL` — so each of the five ephemeral families
+(`instance.<id>.pattern`, `instance.<id>.failed`, `token.*`, `outbox.*`, `deadline.*`) leaves no subject
+behind once its marker expires. The permanent subjects per instance are the cursor, plus a `failed` marker
+for as long as that instance is awaiting a redrive. A bucket still carrying permanent DEL markers on the
+pin, token, outbox and deadline families — the four a plain delete ever wrote — converts them at the
+engine's next start: one pass, off the startup path, one revision-conditioned purge per marker, the cursor
+family never enumerated, convergence by restart rather than by looping (no permanent marker can stand on
+the failed index, whose only removals are that same TTL'd purge). A second start-time pass, on the same
+terms, settles the failed index against the records the bucket already holds — every cursor reading
+`failed` with no marker beside it — so the enumerated redrive queue is complete and not merely
+forward-looking; it runs **once per bucket lifetime**, gated by the `backfill.failedIndex` sentinel it
+writes when it completes with nothing left owing. The bucket must therefore also allow
 rollups, per-message TTLs and purges (`AllowRollup`, `AllowMsgTTL`, `!DenyPurge`), asserted by
 `verify-kernel` beside `AllowAtomicPublish`. The "no secondary KV index" rule forbids a **separate
-index bucket** (dual-write atomicity / drift); the co-located disjoint-prefix `token.` index in the
-*same* bucket, written in the same atomic batch, is sanctioned and stronger. `deadline.` is keyed on
+index bucket** (dual-write atomicity / drift); the co-located disjoint-prefix `token.` index — and the
+`instance.<id>.failed` index beside it — in the *same* bucket, each written in the same atomic batch as the
+state it indexes, is sanctioned and stronger. `deadline.` is keyed on
 **`instanceId`** (not the token) because the interpreter is linear — exactly one step pending per
 instance, so one key always denotes the current step's clock — and because a TTL expiry marker is a
 delete-marker carrying no old value: the subject itself must carry the instanceId, where a
@@ -357,12 +364,13 @@ raised to the marker TTL — an exemption the bootstrap gates assert rather than
 
 An expiry is not confined to the failure path: a creation-deadline that expires while the dispatch was
 fine simply stands, so roughly one marker per in-flight async step sits on `deadline.*` for the
-window's length. Two things follow. Listings are unaffected — `instance.`-prefixed reads filter
-server-side, and `IgnoreDeletes` drops markers from the rest — so the enumeration ceiling is
-untouched. And a rebuilt `DeliverAll` `loom-deadline` durable replays a window's worth of genuine
-expiries rather than a second's: safe, because a replayed marker is at most a window old against 24 h
-of tracker and `deadlineArmed` short-circuits any whose instance has re-armed, but it is volume the
-one-second era never produced.
+window's length. Two things follow. The request paths are unaffected — each names an instance sub-key
+family server-side (`instance.*.pattern`, `instance.*.failed`) and a marker is not a value to either of the
+reads over them — so the enumeration ceiling is untouched; the one read that names the cursor family is the
+failed-index backfill, once per bucket lifetime and never on a request. And a rebuilt `DeliverAll`
+`loom-deadline` durable replays a window's worth of genuine expiries rather than a second's: safe, because
+a replayed marker is at most a window old against 24 h of tracker and `deadlineArmed` short-circuits any
+whose instance has re-armed, but it is volume the one-second era never produced.
 
 **The cursor's lifetime.** An `instance.<id>` record never expires and is never deleted — a terminal is
 recorded by flipping `status` in place, and only the pattern pin is removed. That permanence is load-bearing,
@@ -375,9 +383,57 @@ not an oversight: the record's presence is the dedup guard that collapses a re-e
 cursors out. The terminal record is therefore retained indefinitely, deliberately; what a bounding design
 would first have to bound is that horizon, not the record. See
 `_bmad-output/implementation-artifacts/loom-instance-enumeration-bounding-design.md` (§1, §9), and
-`loom-terminal-instance-retention-design.md` §0 for the falsified TTL direction. The four ephemeral
+`loom-terminal-instance-retention-design.md` §0 for the falsified TTL direction. The ephemeral
 sub-keys are the opposite case, swept by construction rather than kept: see
 `loom-state-tombstone-sweep-design.md`.
+
+**The cursor is a ledger that is never ENUMERATED — which is what makes its permanence cheap.** No request
+path reads the `instance.*` cursor family as a set: the control plane answers for the instances an operator
+can still act on, and it finds them through the two index families instead —
+`ListInstances` = `instance.*.pattern` ∪ `instance.*.failed`, unioned by instanceId, then one batched read of
+those instances' cursor records. So a completed instance's retained record costs the queue nothing, the
+batched read is bounded by the *actionable* population rather than by every instance that ever ran, and every
+other reader of a terminal cursor addresses it by id (`InspectInstance`, and the trigger path's own dedup
+GET). A presence probe against the cursor must therefore read its `status`: presence alone means "ran", not
+"running". The one read of the whole cursor family anywhere is the failed-index backfill below — once per
+bucket lifetime, never on a request.
+
+**How each of those reads is answered, because the two differ and the difference is load-bearing.** The
+actionable set is resolved from the **stream's own subject state** (`KVGetMultiNoSnapshot` over the family
+filters: one `multi_last` under the stream lock, or a subject-filtered `STREAM.INFO` plus chunked exact-key
+reads past the 1,024-subject cap). That resolution cannot come back short. A **key listing** cannot promise
+that: it rides a count-bounded watcher, so a rewrite landing mid-enumeration on an already-delivered subject
+ends the listing with keys undelivered and no error — and `instance.*.pattern` is the most-rewritten family
+in the bucket, one create and one rollup purge per instance. A queue an operator acts on, and a Contract #10
+promise, may not rest on a hint. The heartbeat's `runningInstances` gauge is the one read that keeps the
+listing, deliberately: it is a sampled metric, nothing decides on one tick, and the complete alternative
+would return bodies — which is exactly the fetch its narrow reader interface exists to forbid.
+
+**The failed index's lifetime** (`instance.<id>.failed`, a body-less `{}` whose presence is the whole
+signal). It is **settled by every terminal batch**, atomically with the status flip: **written** (plain PUT)
+on the failed arm, **removed** (TTL'd purge) on the complete arm, and removed the same way by `redrive`'s
+CAS-guarded batch. The complete arm's removal is what heals a marker whose instance has moved on — nothing
+else would, since redrive refuses a non-failed instance and no sweep touches the family — at the cost of one
+transient subject per completing instance that had no marker, gone a minute later. **Never `CreateOnly`:** a
+removal's purge marker stands on that subject for the marker's lifetime, and a redriven instance that fails
+again inside it would have a create-only write refused — the second failure would then be invisible to the
+queue. The index is a membership claim only: the cursor's `status` stays authoritative, so a marker can
+disagree with its instance **only while that instance is running**, and it lives until that instance's next
+terminal settles it. `listInstances` excludes a record reading `complete` whichever family named it, saying
+so at Debug when only the pin named it (the benign resolve-then-read race) and at Warn when the failed index
+did (a stale marker). A **one-shot backfill** settles the index against the records the bucket already holds
+— every cursor reading `failed` with no marker beside it — off the engine's startup path, idempotent,
+convergent by restart, writing nothing but markers, and gated by the `backfill.failedIndex` sentinel so it
+runs once per bucket lifetime: created by a pass that completed with nothing left owing, never removed (a
+bucket wipe takes it and the index together), and safe to be final because every terminal transition since
+settles the index itself.
+
+**One documented residual, by construction.** A **running** instance whose pattern pin is absent is named by
+neither family, so it is not listed at all. That state is an invariant break rather than a lifecycle stage:
+the engine converts it into a failed terminal the next time it touches the instance
+(`errPatternPinMissing` ⇒ `fail` ⇒ the failed index), which is what surfaces it in the queue. Nothing is
+lost — the cursor is readable by id throughout — and it is recorded here so the next author does not read the
+absence as a bug in the index.
 
 Correlation on a completion is a **direct `token.<token>` GET** — durable, domain-independent, and
 **multi-instance-safe**: any engine replica resolves any token via the bucket (no in-memory index, no
@@ -391,8 +447,11 @@ engine age.
 > preference.
 
 **Queryability** ("which flows are running") is served by Loom's **control plane** (reading
-`loom-state`), analogous to Refractor's `internal/refractor/control` — **not** Core KV. A Refractor lens
-over the `loom.*` event stream remains an option for a durable read model if one is later wanted.
+`loom-state`), analogous to Refractor's `internal/refractor/control` — **not** Core KV. It answers for the
+instances an operator can still act on: those running, and those failed and awaiting a redrive. Completed
+flows are a read-model concern, served by a projection of the `loom.*` lifecycle events rather than by
+asking the engine — a Refractor lens over that stream remains the option if a durable history read model
+is later wanted — while any single instance stays answerable by id whatever its state.
 
 ---
 
@@ -456,9 +515,11 @@ domain.
 
 - **Heartbeat** — Loom writes a Contract #5 §5.2 document to `health.loom.<instance>` (bucket
   `health-kv`) every 10s. `metrics` carries `runningInstances` (a count of `instance.<id>.pattern` pin
-  keys — the pin is written with the instance and deleted only at terminal, so the pin-key count IS the
-  running-instance count with no per-instance body read, bounded by a per-tick deadline derived from the
-  heartbeat interval) and `consumers` (a map of consumer
+  keys — the pin is written with the instance and removed only at terminal, so the pin-key count IS the
+  running-instance count with no per-instance body read; the pin family is selected by the
+  `instance.*.pattern` subject filter, so the keys delivered per tick are the running population plus at
+  most a marker TTL of expiring removals, and the whole call is bounded by a per-tick deadline derived
+  from the heartbeat interval) and `consumers` (a map of consumer
   name → state: `running` | `pausedInfra` | `pausedStructural` | `pausedManual`). The consumer states
   come from a Loom-side cache fed by the per-consumer `HealthSink` writes — the supervisor persists
   through the sink but exposes no read-back, so Loom caches each transition. `issues` is empty unless a
@@ -596,6 +657,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   things to audit. Minted: the 2026-09-04 deadline-provenance fire. Check:
   `TestHandleDeadline_ActsOnTheExpiryAndNotOnARemoval`,
   `TestOnDeadline_APresentDeadlineKeyMeansALaterStepRearmed`.
+- **A `prefix>` filter that matches a key's sub-keys is not the index you think it is.** The heartbeat's
+  running-instance count listed `instance.` — a trailing-prefix filter cannot express a suffix — so it was
+  delivered every cursor ever created in order to count the pins among them, for as long as the pin-index
+  fix had been shipped: the client-side suffix filter kept the NUMBER right, which is exactly why nothing
+  caught it. When a family is a sub-key, name it server-side (`instance.*.pattern`) and **assert the filter
+  the read hands the server**, not just the result — a client-side re-check keeps the answer right over any
+  width of enumeration, so the request is the only place the bound is visible. And pick the primitive by
+  what the answer is FOR: a watcher-backed key listing is hint-grade (count-bounded, so it can end short
+  with no error) and only a metric may rest on one; anything an operator acts on resolves from the stream's
+  own subject state (`KVGetMultiNoSnapshot`). Minted: the 2026-09-13 enumeration fire. Check:
+  `TestPinListings_PinsAndCursorsCoexist`, `TestListInstances_ResolvesBothFamiliesServerSide`, and the
+  filter assertion in `TestRunningInstanceCounter_NoBodyFetchStructural`.
 - **A constant whose only enforcement is a test of three constants is not enforced.** The deadline
   window's soundness bound reads `maxDeadlineArm + markerTTL < TrackerTTL`, and it was gated by a test
   that hardcoded `maxDeadlineArm` — while `StepTimeout` and `CreateTaskTimeout` were exported fields

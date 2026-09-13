@@ -91,7 +91,10 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List Loom instances (running + retained terminals)",
+		Short: "List actionable Loom instances (running + failed awaiting redrive)",
+		Long: "List the Loom instances an operator can still act on: those running, and those failed " +
+			"and awaiting a redrive. A completed instance is not listed — completed-flow history is a " +
+			"read-model concern — but any instance is still answerable by id with `lattice loom inspect`.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if actor == "" {
 				actor = *defaultActor

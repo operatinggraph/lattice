@@ -347,7 +347,7 @@ The one new stateful thing in this design. Every boundary the neighbouring pin a
 | Boundary | `instance.<id>.pattern` (existing) | `instance.<id>.failed` (new) |
 |---|---|---|
 | **Created** | `createInstance`, `CreateOnly`, atomic with the cursor | `transition`, **plain PUT**, atomic with the terminal flip, failed arm only |
-| **Removed** | `transition`'s terminal branch (both arms) | `redrive`'s CAS batch |
+| **Removed** | `transition`'s terminal branch (both arms) | `redrive`'s CAS batch — and, *amended 2026-09-13 (build)*, the complete arm of `transition`, so a marker the backfill wrote over a concurrent redrive is settled at the instance's next terminal rather than outliving it |
 | **Re-created after removal** | never (a redrive re-pins with a plain PUT, guarded by the cursor CAS) | yes — a redriven instance that fails again re-PUTs it. This is why it is not `CreateOnly` |
 | **Crash between batch and anything else** | impossible — one `AtomicBatch` | impossible — same batch |
 | **Concurrent redrive** | loser's whole batch rejected on the cursor CAS | same batch, same CAS, same rejection |
@@ -847,3 +847,35 @@ landed (not a blocker); Contract #10 clause 1 lands with this commit per the rat
 — confirmed. Terminal write sites: 2 (`engine.go:1208`, `:1239`), both via `transition` — confirmed. `redrive` the
 only `failed → running` path — confirmed. `lattice.ctrl.loom.list` consumers: `cmd/loupe/{control,flows}.go`,
 `cmd/lattice/loom/loom.go` — confirmed. Live sizing rows: not run (no shared stack from the container; REMOTE §3).
+
+**Build deviations (close review, 2026-09-13 — three cold reviewers over the whole diff; each line is a decided
+change, its reason, and the test that pins it):**
+- **The verdict-bearing enumerations resolve from the stream's subject state, not from a key listing.** A NATS
+  key listing is count-bounded and can end short, nil error, under a rewrite landing mid-enumeration
+  (`docs/vendors.md`, NATS row; `internal/substrate/kv_multi.go`'s `resolveThenGetFallback` doc) — and
+  `instance.*.pattern` is the bucket's hottest rewrite family. `listInstances`, `pinnedDomains` and the backfill
+  therefore read through `KVGetMultiNoSnapshot` with the sub-key filters as keys (fast-path `multi_last` under the
+  stream lock; past 1,024 subjects a `STREAM.INFO` subject-filter resolution with no stop condition), which is
+  complete either way. Only the heartbeat count keeps `KVListKeysFilter`: a metric tolerates a hint, and a body
+  fetch there is what its one-method interface forbids. §3's "`KVListKeysFilter`" wording for Inc 1's
+  `pinnedDomains` and Inc 2's listing is superseded by this; the bound is the same, the completeness is new.
+- **Every terminal batch settles the index for its arm** — the failed arm PUTs the marker, the complete arm purges
+  it (`Purge: true, TTL: tombstoneTTL`). The backfill's unconditioned PUT can race a redrive (read `failed` →
+  redrive → PUT lands on a running instance), and without the complete-arm purge that marker would outlive its
+  instance with no path left to remove it. §4's Removed row is amended: removed by `redrive`'s batch **and** by the
+  complete arm; a stale marker on a running instance lives until that instance's next terminal, listed as
+  running meanwhile.
+- **The backfill is gated by a completion sentinel** (`backfill.failedIndex`, written only by a pass that ended
+  with nothing remaining and no error) — §6's "run only while it has work", which the brief's 5(e) had traded
+  away on a cost model (≈13 pages, once) that did not describe a pass re-reading every cursor body on every
+  start. Lifetime: created by the first complete pass; never removed (a bucket wipe removes it with the index);
+  a partial pass writes nothing, so the next start re-runs; forward failures are indexed by `transition`.
+- **`listInstances` carries the leg per id**: a complete record reached through the pin leg is the benign
+  list→read race (Debug); through the failed leg it is a stale index (Warn).
+- **`pinnedDomains` keeps its client-side pin-shape re-check**: an `Instance` body decodes as a domain-less
+  `Pattern` silently, so a mis-edited filter would drain the reconcile union and tear down live consumers.
+- **Residual, documented, no code:** a RUNNING cursor with no pin (the invariant break `errPatternPinMissing`
+  exists for) is on neither leg and is absent from the listing until the engine next touches it and surfaces
+  it as a failed terminal, which indexes it.
+- **Not a defect:** Loupe's Flows tab issues one `InspectInstance` per stale-`running` history row (its ratified
+  §7.1 remedy); the ids differ per row, so there is nothing to memoize — bounded by Refractor's lag.
