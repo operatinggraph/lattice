@@ -49,15 +49,19 @@ pickup path):
 
 - The `augur` package ships a primordial **`augurDispatch` convergence target** (a `meta.weaverTarget`
   + the `augurDispatchPending` lens) projecting one §10.2 row per proposal under the `augurDispatch.`
-  prefix with **`violating = (review.state == "approved")`** and the proposed action/params + the
-  TRUSTED candidate as param columns.
+  prefix with **`violating = (review.state == "approved" AND gap.trigger <> "promotion")`** and the
+  proposed action/params, the plan's `proposedSteps` + `dispatchLeg`, and the TRUSTED candidate as
+  param columns.
 - Its single gap `missing_dispatch` maps to the **`proposedOp`** action (§10.8): Weaver materialises
-  the row-carried `{action, params}` into an ordinary dispatch after the **dispatch-time
-  deterministic re-validation** (action vocabulary · live-registry resolution · default-deny scope to
-  the trusted candidate · Weaver-authority), then dispatches a **two-op** episode: the proposed
-  remediation op (carrying a **proposal-scoped deterministic requestId**, so a sweep re-dispatch
-  collapses on the Contract #4 tracker — at-most-once) and **`RecordProposalDispatch`** (package op)
-  flipping `review.state approved → dispatched | invalid` + stamping `dispatchedAt`.
+  the row-carried leg — `steps[dispatchLeg]`, the one `{action, params}` of a single-step proposal —
+  into an ordinary dispatch after the **dispatch-time deterministic re-validation** (action
+  vocabulary · live-registry resolution · default-deny scope to the trusted candidate ·
+  Weaver-authority), then dispatches a **two-op** episode: the proposed remediation op (carrying a
+  **proposal-and-leg-scoped deterministic requestId**, so a sweep re-dispatch of the same leg
+  collapses on the Contract #4 tracker — collapse-only under reclaim) and **`RecordProposalDispatch`**
+  (package op, carrying the `leg` it records) advancing `review.leg` — `review.state` stays `approved`
+  while legs remain and flips `dispatched` + stamps `dispatchedAt` on the last leg, or flips `invalid`
+  on any leg that fails re-validation.
 - The flip reprojects `violating = false` → the mark clears (level-reconciled) → no re-dispatch.
   Correctness rests on the deterministic requestId; **the flip is liveness** (stop the churn). A
   genuinely-lost remediation leaves the **original** target violating → it re-escalates (a fresh
@@ -80,11 +84,13 @@ pickup path):
   the counter — the proposal stays `approved` while legs remain and flips `dispatched` on the last. A
   leg that fails re-validation flips the whole proposal `invalid`; no partial plan continues. Legs are
   **ordered** — the next is published only after the previous leg's flip re-projected the row — and
-  each dispatches **at most once**; a leg's success is not verified by the dispatch (a rejected leg
+  each is **collapse-only under reclaim** (the Contract #4 tracker holds its leg-scoped requestId);
+  a leg's success is not verified by the dispatch (a rejected leg
   leaves the origin gap violating, which re-escalates and a fresh proposal supersedes).
 - **A promotion proposal** is Weaver-authored, never model-authored: when a `mode:"planned"` gap's
-  `__effect` window (§10.3) for one actionRef holds a full window with every episode closed, Weaver
-  submits **`RecordPromotionProposal`** (package op, Weaver-actor only) once per (target, gap,
+  `__effect` window (§10.3) for one of its **derived** legs — an `actions` catalog ref or a
+  `candidates` entry, never a declared `action` — holds a full window with every episode closed,
+  Weaver submits **`RecordPromotionProposal`** (package op, Weaver-actor only) once per (target, gap,
   actionRef) — a `vtx.augurproposal` with `.gap.trigger = "promotion"`, its candidate the target's
   own meta vertex, `.proposed.action = "promotePlaybook"` carrying `{targetId, gapColumn, actionRef,
   window, closed}` — into the same review queue. It is **never dispatched**: the `augurDispatch` row
