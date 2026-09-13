@@ -3,6 +3,7 @@ package pkgmgr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/operatinggraph/lattice/internal/lenscolumns"
@@ -14,6 +15,17 @@ import (
 // installer's live preflight and the artifact validator's resolver — decide
 // "is this id a lens" on exactly this string, so it is spelled once.
 const MetaLensClass = "meta.lens"
+
+// ErrLensCatalogUnavailable is the sentinel every FAILED read of an installed-
+// lens catalog wraps — the substrate answered with an error, so nothing is
+// known about the binding.
+//
+// It is the class a caller needs to tell a TRANSIENT apart from a verdict: a
+// catalog that cannot be read says nothing about the artifact, and recording
+// one invalid on a connection blip would blame an author for a network fault,
+// permanently (the recorded verdict is what a reviewer reads). Every consumer
+// that turns a validation error into a stored state tests for it.
+var ErrLensCatalogUnavailable = errors.New("pkgmgr: the installed-lens catalog could not be read")
 
 // CoreKVLensResolver is the one live InstalledLensResolver: it answers a
 // lensRef from the installed kernel, reading the lens meta-vertex's root (for
@@ -69,7 +81,7 @@ func (r *CoreKVLensResolver) ResolveLensColumns(lensRef string) (lenscolumns.Res
 	specKey := rootKey + ".spec"
 	entries, err := r.conn.KVGetMulti(r.ctx, CoreBucket, []string{rootKey, specKey})
 	if err != nil {
-		return lenscolumns.Result{}, false, fmt.Errorf("pkgmgr: read lens meta %s: %w", rootKey, err)
+		return lenscolumns.Result{}, false, fmt.Errorf("%w: read lens meta %s: %v", ErrLensCatalogUnavailable, rootKey, err)
 	}
 
 	root, ok := entries[rootKey]

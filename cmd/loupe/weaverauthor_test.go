@@ -617,6 +617,25 @@ func TestWeaverAuthorCheck_CoAuthoredLensAnswersItsOwnTarget(t *testing.T) {
 	}
 }
 
+// A co-authored lens whose spec does not parse leaves the target's binding
+// underivable — and the verdict has to say WHOSE lens, because the author is
+// holding two artifacts and one of them is the one they just typed.
+func TestWeaverAuthorCheck_UnparseableDraftLensNamesItself(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	body := `{"target":{"targetId":"t1","lensRef":"draftLens","gaps":{}},` +
+		`"lens":{"canonicalName":"draftLens","adapter":"nats-kv","bucket":"weaver-targets",` +
+		`"spec":"this is not openCypher at all"}}`
+	resp := checkDraft(t, srv, body)
+	if resp.TargetValidation.Valid {
+		t.Fatalf("a target bound to an unreadable lens must not read valid: %+v", resp.TargetValidation)
+	}
+	joined := strings.Join(resp.TargetValidation.Errors, " ")
+	if !strings.Contains(joined, `cannot be derived: the co-authored lens "draftLens"`) {
+		t.Fatalf("errors = %q, want the verdict to name the co-authored lens as the one that could not be read", joined)
+	}
+}
+
 // checkDraft posts one draft through the real Check handler and decodes its
 // response — the entry point the console calls, not the rule underneath.
 func checkDraft(t *testing.T, srv *server, body string) weaverAuthorCheckResponse {

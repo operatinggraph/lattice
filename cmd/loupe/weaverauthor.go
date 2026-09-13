@@ -179,8 +179,12 @@ func (s *server) weaverAuthorCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	targetReport, err := pkgmgr.ValidateCapabilityArtifact("weaverTarget", targetContent, loupeCypherParser{}, nil, nil,
 		weaverAuthorLensResolver{
-			draft:     req.Lens,
-			canonical: buildLensCanonicalIndex(readers.metaKeys, readers.coreGet),
+			draft: req.Lens,
+			// Built on demand: the index costs one GET per spec-carrying meta,
+			// and the only ref that needs it is one that is neither the draft's
+			// own name nor already an id — which the common cases (a
+			// co-authored lens, a hydrated target carrying a NanoID) are not.
+			canonical: memoizedLensCanonicalIndex(readers),
 			installed: pkgmgr.NewCoreKVLensResolver(ctx, conn, loupeCypherParser{}),
 		})
 	if err != nil {
@@ -232,7 +236,7 @@ func (s *server) weaverAuthorCheck(w http.ResponseWriter, r *http.Request) {
 //     lens.
 type weaverAuthorLensResolver struct {
 	draft     *pkgmgr.LensArtifactContent
-	canonical map[string]string
+	canonical func() map[string]string
 	installed *pkgmgr.CoreKVLensResolver
 }
 
@@ -243,16 +247,37 @@ func (r weaverAuthorLensResolver) ResolveLensColumns(lensRef string) (lenscolumn
 		// its RETURN items' names.
 		cols, err := lenscolumns.Projected(
 			lenscolumns.Spec{CypherRule: r.draft.Spec}, lensReturnColumns(loupeCypherParser{}))
+		if err != nil {
+			// Say WHOSE lens could not be read. The author is holding two
+			// artifacts here, and "the lens cannot be derived" about the one
+			// they just typed reads very differently from the same words about
+			// something installed months ago.
+			err = fmt.Errorf("the co-authored lens %q: %w", lensRef, err)
+		}
 		return cols, true, err
 	}
 	if !substrate.IsValidNanoID(lensRef) {
-		id, ok := r.canonical[lensRef]
+		id, ok := r.canonical()[lensRef]
 		if !ok {
 			return lenscolumns.Result{}, false, nil
 		}
 		lensRef = id
 	}
 	return r.installed.ResolveLensColumns(lensRef)
+}
+
+// memoizedLensCanonicalIndex defers buildLensCanonicalIndex until a ref
+// actually needs a name→id resolution, and builds it at most once per request.
+// No goroutine reads it concurrently — one Check handler resolves one target's
+// one ref — so a plain closure over the memo is the whole mechanism.
+func memoizedLensCanonicalIndex(readers weaverReaders) func() map[string]string {
+	var index map[string]string
+	return func() map[string]string {
+		if index == nil {
+			index = buildLensCanonicalIndex(readers.metaKeys, readers.coreGet)
+		}
+		return index
+	}
 }
 
 // lensReturnColumns adapts a pkgmgr.CypherParser to the returnColumns function

@@ -116,9 +116,11 @@ type CypherParser interface {
 // canonicalName first, then the installed catalog.
 //
 // err is a read that FAILED — no verdict, which the validator returns to its
-// own caller rather than reporting as an invalid artifact. An installed lens
-// whose columns are not derivable is the opposite: found=true with an error
-// wrapping lenscolumns.ErrUnreadable, which IS a verdict on the artifact.
+// own caller rather than reporting as an invalid artifact; a resolver reading a
+// live catalog wraps ErrLensCatalogUnavailable there, so a caller that stores a
+// verdict can tell that transient apart from an artifact defect. An installed
+// lens whose columns are not derivable is the opposite: found=true with an
+// error wrapping lenscolumns.ErrUnreadable, which IS a verdict on the artifact.
 type InstalledLensResolver interface {
 	ResolveLensColumns(lensRef string) (cols lenscolumns.Result, found bool, err error)
 }
@@ -705,7 +707,7 @@ func weaverTargetArtifactLensBinding(wc WeaverTargetArtifactContent, installedLe
 	}
 	var errs []string
 	for _, col := range undeclaredGapColumns(cols, declared) {
-		errs = append(errs, undeclaredGapColumnRefusal(wc.LensRef, col, cols.Columns[col], sortedKeys(declared)))
+		errs = append(errs, UndeclaredGapColumnRefusal(wc.LensRef, col, cols.Columns[col], sortedKeys(declared)))
 	}
 	return errs, nil
 }

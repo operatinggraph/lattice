@@ -23,6 +23,7 @@ func specLabels(t *testing.T, body string) pkgmgr.SpecLabels {
 		Referenced: facts.Referenced,
 		Exhaustive: facts.Exhaustive,
 		Expansion:  facts.Expansion,
+		Columns:    facts.Columns,
 	}
 }
 

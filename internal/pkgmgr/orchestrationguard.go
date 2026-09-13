@@ -478,8 +478,26 @@ func validateGapCompanionPairDeclared(targetIdx int, t WeaverTargetSpec, col str
 	if _, declaresCap := declared[maxretriesCol]; !declaresInflight || declaresCap {
 		return nil
 	}
-	return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: lens %q declares row-body column %q (in %s) but no %q — action %q is external-class, and Contract #10 §10.3 requires the companion pair there: the declared marker takes the gap off the engine's default retry budget, so without a cap the dispatch count can never reach one, §10.8's GapBudgetExhausted can never fire, and the gap re-dispatches indefinitely with nothing telling an operator it is not converging. Declare %q in the lens's Output.BodyColumns, sized to what draining this gap can legitimately take (a StaticEmptyColumns entry projects an empty array, which the engine reads as no usable cap at all). Dropping %q instead is also a legal fix, but only because that hands the gap back to the engine's default retry budget — a real bound, not a way past this check",
-		targetIdx, t.TargetID, col, lensName, inflightCol, inflightIn, maxretriesCol, ga.Action, maxretriesCol, inflightCol)
+	return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: lens %q declares row-body column %q (in %s) but no %q — action %q is external-class, and Contract #10 §10.3 requires the companion pair there: the declared marker takes the gap off the engine's default retry budget, so without a cap the dispatch count can never reach one, §10.8's GapBudgetExhausted can never fire, and the gap re-dispatches indefinitely with nothing telling an operator it is not converging. %s Dropping %q instead is also a legal fix, but only because that hands the gap back to the engine's default retry budget — a real bound, not a way past this check",
+		targetIdx, t.TargetID, col, lensName, inflightCol, inflightIn, maxretriesCol, ga.Action,
+		companionCapRemedy(maxretriesCol, inflightIn), inflightCol)
+}
+
+// companionCapRemedy renders the "declare the cap" half of the companion-pair
+// refusal in terms of the declaration the MARKER came from, because that is
+// where the cap has to be added and the three shapes are edited in three
+// different places. A remedy naming Output.BodyColumns to the author of a plain
+// lens — which has no Output descriptor at all — is an instruction they cannot
+// follow.
+func companionCapRemedy(maxretriesCol, markerProvenance string) string {
+	switch markerProvenance {
+	case lenscolumns.ProvenanceReturn:
+		return fmt.Sprintf("Add %q to the lens's RETURN clause, sized to what draining this gap can legitimately take.", maxretriesCol)
+	case lenscolumns.ProvenanceProjectColumns:
+		return fmt.Sprintf("Add %q to the source's project.columns, sized to what draining this gap can legitimately take.", maxretriesCol)
+	default:
+		return fmt.Sprintf("Declare %q in the lens's Output.BodyColumns, sized to what draining this gap can legitimately take (a StaticEmptyColumns entry projects an empty array, which the engine reads as no usable cap at all).", maxretriesCol)
+	}
 }
 
 // undeclaredGapColumns returns, sorted, every missing_* column the lens's rows
@@ -498,15 +516,18 @@ func undeclaredGapColumns(cols lenscolumns.Result, declared map[string]bool) []s
 	return out
 }
 
-// undeclaredGapColumnRefusal renders the one sentence every holder of the
-// subset rule reports an undeclared gap column with — the same wording
-// scripts/lint-gap-column-declaration.go prints for the CI-visible half of the
-// invariant, so an author who has read one refusal has read them all.
+// UndeclaredGapColumnRefusal renders the one sentence every holder of the
+// subset rule reports an undeclared gap column with: the installer's live
+// preflight, the capability-artifact validator, and the CI gate
+// scripts/lint-gap-column-declaration.go, which calls this rather than keeping
+// a copy. An author who has read one of the three has read them all, and a
+// reworded remedy cannot reach two of them and not the third.
 //
 // provenance is the lenscolumns declaration the column came from
 // (Output.BodyColumns, Output.StaticEmptyColumns, Source.Project.Columns or
-// RETURN), which is what tells the author which list to edit.
-func undeclaredGapColumnRefusal(lensName, col, provenance string, declared []string) string {
+// RETURN), which is what tells the author which list to edit. declared is the
+// target's own gaps keys, sorted.
+func UndeclaredGapColumnRefusal(lensName, col, provenance string, declared []string) string {
 	declaredList := "none"
 	if len(declared) > 0 {
 		declaredList = strings.Join(declared, ", ")

@@ -28,6 +28,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -145,7 +146,8 @@ func run(logger *slog.Logger) error {
 			wire.NewClient(conn.NATS()),
 			conn,
 			capabilityauthor.CapabilityAuthorContextBucket,
-			newCapabilityArtifactVerdict(conn),
+			newCapabilityArtifactVerdict(bridgeCypherParser{}),
+			bridgeLensReturnColumns,
 			pkgmgr.PlatformProtectedPackage,
 		)
 		if err != nil {
@@ -270,48 +272,70 @@ func (bridgeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
 
 var _ pkgmgr.CypherParser = bridgeCypherParser{}
 
-// capabilityVerdictReadBudget bounds the one live read a verdict makes — the
-// installed-lens catalog lookup behind a weaverTarget's lensRef.
-// bridge.ArtifactValidator carries no context of its own (the adapter calls it
-// from inside its own result handling), so the closure below binds one per
-// call rather than borrowing a request deadline it cannot see. Generous
-// against a single KVGetMulti of two keys, and short enough that a wedged
-// substrate fails the verdict closed instead of holding the adapter open.
-const capabilityVerdictReadBudget = 10 * time.Second
-
 // newCapabilityArtifactVerdict builds the capabilityAuthor adapter's
 // deterministic validator: the same pkgmgr.ValidateCapabilityArtifact boundary
 // Loupe re-runs at approve time, so a proposal recorded valid here is one the
 // approve path would also accept. It is built at the composition root and
 // injected, keeping the installer out of internal/bridge.
 //
-// Two of the three injected dependencies are nil, and the third is the reason
-// this is a closure over conn at all. requesterHeld is read only for the
-// "grant" kind (a conferred-authority subset check) and the sensitive-aspect
-// resolver only for "opMeta", neither of which this adapter authors. The
-// installed-lens catalog IS consulted, for exactly the kind it does author: a
-// weaverTarget's lensRef must name a live meta.lens whose projected missing_*
-// columns the target declares, and with no resolver every authored target
-// would record invalid.
+// Two of the three per-kind dependencies are nil: requesterHeld is read only
+// for the "grant" kind (a conferred-authority subset check) and the
+// sensitive-aspect resolver only for "opMeta", neither of which this adapter
+// authors. The third — the installed-lens catalog a weaverTarget's lensRef
+// binds against — IS consulted, for exactly the kind it does author, and the
+// adapter supplies it: it resolves the ref from the capabilityAuthorContext
+// catalog rows it already reads. It is NOT pkgmgr.CoreKVLensResolver, because
+// the bridge's NKey is denied Core KV by design (internal/natsperm's matrix
+// denies it $JS.API.DIRECT.GET.KV_core-kv, closing a decrypt-RPC side channel)
+// — a Core-KV-backed resolver here would stall on every verdict and then
+// record the proposal invalid.
 //
-// A validator ERROR is a malformed artifact or a live read that failed, not an
-// unknown verdict: the report carries the reason and the state fails closed to
-// invalid, so an undecodable draft — or one whose lens could not be read —
-// records visibly rather than being admitted for review.
-func newCapabilityArtifactVerdict(conn *substrate.Conn) bridge.ArtifactValidator {
-	return func(kind string, content []byte) (string, string) {
-		ctx, cancel := context.WithTimeout(context.Background(), capabilityVerdictReadBudget)
-		defer cancel()
-		report, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), bridgeCypherParser{}, nil, nil,
-			pkgmgr.NewCoreKVLensResolver(ctx, conn, bridgeCypherParser{}))
-		if err != nil {
-			return bridge.ValidationStateInvalid, "artifact validation failed: " + err.Error()
+// parser supplies the RETURN-name parse of a plain lens's cypher; a nil one
+// cannot decide any binding, so the verdict function reports that as an ERROR
+// rather than answering invalid on the composition root's own omission.
+//
+// A verdict ERROR is the validator declining to decide — a missing dependency,
+// or a catalog that could not be read — and the adapter propagates it as a
+// transient failure rather than filing a proposal. Only what the validator
+// could read and found wanting (an undecodable artifact, a defect) comes back
+// as invalid, which is permanent and visible.
+func newCapabilityArtifactVerdict(parser pkgmgr.CypherParser) bridge.ArtifactValidator {
+	return func(kind string, content []byte, lenses bridge.InstalledLensResolver) (string, string, error) {
+		if parser == nil {
+			return "", "", fmt.Errorf("bridge: capabilityAuthor: no cypher parser wired into the artifact verdict")
 		}
-		if report.Valid {
-			return bridge.ValidationStateValid, ""
+		if lenses == nil {
+			return "", "", fmt.Errorf("bridge: capabilityAuthor: no installed-lens catalog supplied to the artifact verdict")
 		}
-		return bridge.ValidationStateInvalid, strings.Join(report.Errors, "; ")
+		report, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), parser, nil, nil, lenses)
+		switch {
+		case errors.Is(err, pkgmgr.ErrLensCatalogUnavailable):
+			// A catalog that could not be read says nothing about the
+			// artifact. Recording invalid here would blame an author for a
+			// substrate fault, permanently.
+			return "", "", err
+		case err != nil:
+			// Everything else the validator errors on is the artifact itself —
+			// content that does not decode for its kind — which fails closed to
+			// a visible invalid rather than being admitted for review.
+			return bridge.ValidationStateInvalid, "artifact validation failed: " + err.Error(), nil
+		case report.Valid:
+			return bridge.ValidationStateValid, "", nil
+		default:
+			return bridge.ValidationStateInvalid, strings.Join(report.Errors, "; "), nil
+		}
 	}
+}
+
+// bridgeLensReturnColumns is the plain-lens column parse the capabilityAuthor
+// adapter resolves a lensRef's projected columns through — the RETURN items'
+// effective names, from the same parse that reports a syntax error.
+func bridgeLensReturnColumns(rule string) ([]string, error) {
+	labels, err := bridgeCypherParser{}.Parse(rule)
+	if err != nil {
+		return nil, err
+	}
+	return labels.Columns, nil
 }
 
 // defaultUploadCap bounds a single docGen artifact write (OBJECTS_MAX_UPLOAD_BYTES).

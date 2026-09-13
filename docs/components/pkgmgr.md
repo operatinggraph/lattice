@@ -16,9 +16,10 @@ refusal, the `meta`/`op` name reservation (paired with the Processor's step-6 ga
 **narrowed-filter label cap** (`lenslabelcap.go`), which refuses an install whose own lens cannot fit
 `K + Σ leafBudget ≤ 8` at its abstract labels' declared worst case.
 
-**The live preflight** (`preflightLive`, called by both `Install` and `Apply` right after the pure
-`preflight`, and ahead of `Apply`'s `DryRun` return so a preview shows a refusal rather than a delta
-nobody can commit) is the install-time bound on Contract #10 §10.8's weaver-target binding. For every
+**The live preflight** (`preflightLive`, called by all three mutating entry points — `Install`, `Apply` and
+`Upgrade` — after the pure `preflight` and the core-kv bucket check, and ahead of `Apply`'s `DryRun` return so
+a preview shows the refusal rather than a delta nobody can commit) is the install-time bound on Contract #10
+§10.8's weaver-target binding. For every
 declared `WeaverTarget` carrying a `LensRef`, it resolves the bound lens — from this Definition's own
 `Lenses` when it declares one, otherwise from the installed kernel by id (one `KVGetMulti` of the lens
 meta-vertex's root and its `spec` aspect) — and refuses the install, wrapping `ErrLensBindingRefused`, when

@@ -312,8 +312,12 @@ func checkTarget(pkg string, def pkgmgr.Definition, t pkgmgr.WeaverTargetSpec, s
 		if exempt {
 			continue
 		}
-		findings = append(findings, fmt.Sprintf("%s: lens %q projects gap column %q (in %s), which the target's gaps map does not declare (declared: %s). Weaver's dispatchGap holds such a row on the long redelivery floor indefinitely. Add a gaps entry naming the remediation action — or, if the column is deliberately not remediated, declare it `surface` so it raises a standing Health issue and Acks.",
-			where, col.lens, col.name, col.field, declaredKeys(t.Gaps)))
+		// The sentence itself is pkgmgr's, not this gate's: the installer's
+		// live preflight and the capability-artifact validator refuse the same
+		// column, and an author who fixes one refusal is reading the same
+		// remedy whichever holder caught them. One spelling, three holders.
+		findings = append(findings, fmt.Sprintf("%s: %s", where,
+			pkgmgr.UndeclaredGapColumnRefusal(col.lens, col.name, col.field, sortedDeclaredKeys(t.Gaps))))
 	}
 	return findings
 }
@@ -461,18 +465,16 @@ func lookupLens(def pkgmgr.Definition, ref string) (pkgmgr.LensSpec, bool) {
 	return found, ok
 }
 
-// declaredKeys renders a target's declared gap keys in sorted order, so the
-// finding names what the author DID declare beside what they did not.
-func declaredKeys(gaps map[string]pkgmgr.GapActionSpec) string {
-	if len(gaps) == 0 {
-		return "none"
-	}
+// sortedDeclaredKeys returns a target's declared gap keys in sorted order, so
+// the finding names what the author DID declare beside what they did not — and
+// names them in the same order on every run.
+func sortedDeclaredKeys(gaps map[string]pkgmgr.GapActionSpec) []string {
 	keys := make([]string, 0, len(gaps))
 	for k := range gaps {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	return strings.Join(keys, ", ")
+	return keys
 }
 
 // runSelfTest drives synthetic Definitions through checkPackage — the same entry

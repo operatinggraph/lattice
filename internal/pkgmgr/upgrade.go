@@ -106,7 +106,8 @@ type UpgradeResult struct {
 // create / update / tombstone delta — committed atomically by the Processor.
 //
 // Steps:
-//  1. Validate the Definition (mirrors Install's field-level checks).
+//  1. Validate the Definition (mirrors Install's field-level checks), then the
+//     live preflight (the weaver-target lens binding, which needs the kernel).
 //  2. Find the installed package + read its old declaredKeys (the old key set).
 //     Absent → ErrNotInstalled (upgrade requires a base).
 //  3. Rebuild the new manifest with the shared buildManifestBatch machinery.
@@ -123,6 +124,12 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		return nil, err
 	}
 	if err := i.checkCoreBucketExists(ctx); err != nil {
+		return nil, err
+	}
+	// The live half of preflight, as on Install and Apply: an upgrade is where
+	// a lens GAINS a column, so it is the entry a target most easily falls out
+	// of declaration on.
+	if err := i.preflightLive(ctx, def); err != nil {
 		return nil, err
 	}
 

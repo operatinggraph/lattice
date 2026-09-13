@@ -93,7 +93,17 @@ const (
 // This function IS the verdict. The model's own claim about its output is never
 // consulted: a draft that fails here records as invalid, visibly, exactly like a
 // malformed result would.
-type ArtifactValidator func(kind string, content []byte) (state string, report string)
+//
+// lenses is the installed-lens catalog a weaverTarget's lensRef is resolved
+// against, built by the caller from the catalog rows it already holds.
+//
+// A non-nil err is NOT a verdict: it is the validator saying it could not
+// decide — a dependency it needed was missing or unreadable. The adapter
+// propagates it as a transient failure (its poll re-arms) rather than filing a
+// proposal, because a stored "invalid" is permanent and blames the author for a
+// fault that is not theirs. An artifact the validator could read and found
+// wanting comes back as state=invalid with err nil.
+type ArtifactValidator func(kind string, content []byte, lenses InstalledLensResolver) (state string, report string, err error)
 
 // ProtectedPackagePredicate reports whether a package name is on the platform's
 // protected deny-list — the packages no AI-authored proposal may install into or
@@ -134,6 +144,7 @@ type CapabilityAuthor struct {
 	conn          *substrate.Conn
 	contextBucket string
 	validate      ArtifactValidator
+	returnColumns LensReturnColumns
 	protected     ProtectedPackagePredicate
 	now           func() time.Time
 
@@ -201,12 +212,18 @@ func WithCapabilityAuthorClock(now func() time.Time) CapabilityAuthorOption {
 
 // NewCapabilityAuthor builds the adapter over a model-runner dispatcher, the
 // substrate connection it reads both KV surfaces through, the capability-author
-// catalog bucket, the deterministic artifact validator, and the
-// platform-protected-package predicate. A missing dependency is a wiring bug in
-// the composition root, surfaced here rather than nil-panicking on the first
-// authoring request — and for the predicate a nil would be worse than a panic,
-// since "nothing is protected" is the fail-open answer.
-func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBucket string, validate ArtifactValidator, protected ProtectedPackagePredicate, opts ...CapabilityAuthorOption) (*CapabilityAuthor, error) {
+// catalog bucket, the deterministic artifact validator, the plain-lens column
+// parse that validator's binding rule needs, and the platform-protected-package
+// predicate. A missing dependency is a wiring bug in the composition root,
+// surfaced here rather than nil-panicking on the first authoring request — and
+// for the predicate a nil would be worse than a panic, since "nothing is
+// protected" is the fail-open answer.
+//
+// returnColumns is required for the same reason: a nil one leaves every plain
+// lens unreadable, and since every capability-artifact lens is plain, that
+// records EVERY authored target invalid — a silent, fleet-wide fail-closed that
+// reads like a corpus of bad proposals.
+func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBucket string, validate ArtifactValidator, returnColumns LensReturnColumns, protected ProtectedPackagePredicate, opts ...CapabilityAuthorOption) (*CapabilityAuthor, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("bridge: capabilityAuthor: model dispatcher is required")
 	}
@@ -219,6 +236,9 @@ func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBu
 	if validate == nil {
 		return nil, fmt.Errorf("bridge: capabilityAuthor: artifact validator is required (the model's own verdict is never trusted)")
 	}
+	if returnColumns == nil {
+		return nil, fmt.Errorf("bridge: capabilityAuthor: the plain-lens column parse is required (a nil one makes every lens's columns underivable, so every authored target records invalid)")
+	}
 	if protected == nil {
 		return nil, fmt.Errorf("bridge: capabilityAuthor: platform-protected-package predicate is required (a nil one would make every protected package editable)")
 	}
@@ -227,6 +247,7 @@ func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBu
 		conn:          conn,
 		contextBucket: contextBucket,
 		validate:      validate,
+		returnColumns: returnColumns,
 		protected:     protected,
 		now:           time.Now,
 		episodes:      make(map[string]*authoringEpisode),
@@ -418,16 +439,21 @@ func (a *CapabilityAuthor) Poll(ctx context.Context, ref string) (Dispatch, erro
 // call on a correction pass carrying the validator's own errors.
 func (a *CapabilityAuthor) afterDraft(ctx context.Context, ref, repair string, first wire.Result) (Dispatch, error) {
 	ep := a.episode(ref)
-	// The lens index resolves the model's canonicalName choice to the installed
-	// lens's NanoID (assembly needs it whether the episode is warm or cold). A
-	// read failure here is transient — the poll re-arms and CallDeadline is the
+	// One catalog read answers both halves of the assessment: the lens index
+	// resolves the model's canonicalName choice to the installed lens's NanoID
+	// (assembly needs it whether the episode is warm or cold), and the lens
+	// specs are what the artifact verdict judges that binding against. A read
+	// failure here is transient — the poll re-arms and CallDeadline is the
 	// backstop — but it never reaches an empty-map special case: an empty index
 	// simply resolves nothing, and the draft records invalid.
-	lensIndex, err := a.lensIndex(ctx)
+	rows, err := a.readCatalogRows(ctx)
 	if err != nil {
 		return Dispatch{}, err
 	}
-	draft := a.assess(first, ep, lensIndex)
+	draft, err := a.assess(first, ep, rows)
+	if err != nil {
+		return Dispatch{}, err
+	}
 	if draft.state == ValidationStateValid {
 		return a.file(ref, draft, first.Model, promptHashOf(ep, false), catalogHashOf(ep))
 	}
@@ -463,7 +489,10 @@ func (a *CapabilityAuthor) afterDraft(ctx context.Context, ref, repair string, f
 	case second.State == wire.StateCompleted:
 		// The budget is spent either way: the correction pass's verdict — valid
 		// or still invalid — is the final one.
-		corrected := a.assess(*second, ep, lensIndex)
+		corrected, err := a.assess(*second, ep, rows)
+		if err != nil {
+			return Dispatch{}, err
+		}
 		return a.file(ref, corrected, second.Model, promptHashOf(ep, true), catalogHashOf(ep))
 
 	default:
@@ -506,11 +535,14 @@ func (a *CapabilityAuthor) afterVendorFailure(ctx context.Context, ref, repair s
 		return Dispatch{Disposition: Pending, Ref: ref}, nil
 
 	case second.State == wire.StateCompleted:
-		lensIndex, err := a.lensIndex(ctx)
+		rows, err := a.readCatalogRows(ctx)
 		if err != nil {
 			return Dispatch{}, err
 		}
-		corrected := a.assess(*second, ep, lensIndex)
+		corrected, err := a.assess(*second, ep, rows)
+		if err != nil {
+			return Dispatch{}, err
+		}
 		return a.file(ref, corrected, second.Model, promptHashOf(ep, true), catalogHashOf(ep))
 
 	case second.State == wire.StateRefused:
@@ -1170,17 +1202,23 @@ type authoredDraft struct {
 // model's own claim about its work: nothing in the output is ever taken as a
 // verdict.
 //
-// lensIndex resolves the model's canonicalName lens choice to the installed
-// lens's NanoID (assembly files the NanoID, the only form the apply path
-// resolves for a single-artifact target).
-func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, lensIndex map[string]string) authoredDraft {
+// rows is the catalog read the caller already made: its lens index resolves the
+// model's canonicalName lens choice to the installed lens's NanoID (assembly
+// files the NanoID, the only form the apply path resolves for a single-artifact
+// target), and its lens specs answer the validator's binding rule — one read,
+// both answers.
+//
+// A returned error is the validator declining to decide (see ArtifactValidator):
+// no draft is produced and the caller propagates it as a transient failure.
+func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, rows catalogRead) (authoredDraft, error) {
+	lensIndex := rows.lensIndex
 	var art modelArtifact
 	if err := json.Unmarshal(res.Output, &art); err != nil {
 		return authoredDraft{
 			content: append([]byte(nil), res.Output...),
 			state:   ValidationStateInvalid,
 			report:  "the model's output did not decode as a capability proposal: " + err.Error(),
-		}
+		}, nil
 	}
 
 	var problems []string
@@ -1209,7 +1247,10 @@ func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, lensInd
 		problems = append(problems, editProblems(*ep.edit, art.Content, lensRef)...)
 	}
 
-	state, report := a.validate(CapabilityAuthorKind, content)
+	state, report, err := a.validate(CapabilityAuthorKind, content, rows.lensResolver(a.returnColumns))
+	if err != nil {
+		return authoredDraft{}, fmt.Errorf("capabilityAuthor: validate the assembled artifact: %w", err)
+	}
 	if report != "" {
 		problems = append(problems, report)
 	}
@@ -1226,7 +1267,7 @@ func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, lensInd
 		confidence: art.Confidence,
 		state:      state,
 		report:     strings.Join(problems, "; "),
-	}
+	}, nil
 }
 
 // assembleTargetContent folds the model's structured answer into a weaverTarget

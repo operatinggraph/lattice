@@ -40,10 +40,20 @@ func TestProjected(t *testing.T) {
 			wantSource:  ProvenanceProjectColumns,
 		},
 		{
-			name:        "eventStream with nil Project reads no columns",
-			spec:        Spec{Source: &Source{Kind: EventStreamKind}},
-			wantColumns: map[string]string{},
-			wantSource:  ProvenanceProjectColumns,
+			// Unreadable, not empty: an eventStream lens's rows ARE its
+			// project.columns, so with none declared nothing states what a row
+			// carries — and an empty answer would read as "this lens projects
+			// no gap column", which is a claim about a lens nobody described.
+			name:    "eventStream with nil Project is unreadable, never empty",
+			spec:    Spec{Source: &Source{Kind: EventStreamKind}},
+			wantErr: true,
+		},
+		{
+			name: "eventStream with an empty project.columns is unreadable too",
+			spec: Spec{Source: &Source{Kind: EventStreamKind, Project: &Project{
+				Columns: map[string]json.RawMessage{},
+			}}},
+			wantErr: true,
 		},
 		{
 			name: "actorAggregate with Output, no EntryKeyColumn: BodyColumns ∪ StaticEmptyColumns",
@@ -97,9 +107,20 @@ func TestProjected(t *testing.T) {
 			wantSource:  ProvenanceReturn,
 		},
 		{
-			name: "plain lens with CypherBranches reads branch 0, ignoring CypherRule",
+			// The runtime refuses a spec carrying both (lens/corekv_source.go
+			// at activation), so such a lens never projects at all — reading
+			// branch 0 would describe row keys that never arrive.
+			name: "a spec declaring BOTH cypherRule and cypherBranches is unreadable",
 			spec: Spec{
-				CypherRule:     "should not be used",
+				CypherRule:     "MATCH (n) RETURN n.k AS k",
+				CypherBranches: []string{"MATCH (m) RETURN m.k AS k"},
+			},
+			returnCols: stubReturnColumns([]string{"k"}, nil),
+			wantErr:    true,
+		},
+		{
+			name: "plain lens with CypherBranches reads branch 0",
+			spec: Spec{
 				CypherBranches: []string{"branch0 rule", "branch1 rule"},
 			},
 			returnCols: func(rule string) ([]string, error) {

@@ -98,7 +98,8 @@ var ErrUnreadable = errors.New("lenscolumns: the lens's row columns are not deri
 // whitelist in order:
 //
 //   - Source.Kind == "eventStream": the keys of Source.Project.Columns. No
-//     cypher is read.
+//     cypher is read; a source declaring no project.columns is ErrUnreadable,
+//     since nothing then states what its rows carry.
 //   - ProjectionKind == "actorAggregate": Output == nil is ErrUnreadable (the
 //     lens never activates); Output.EntryKeyColumn != "" is ErrUnreadable (a
 //     per-entry list lens projects a runtime shape, not a static column set);
@@ -106,8 +107,10 @@ var ErrUnreadable = errors.New("lenscolumns: the lens's row columns are not deri
 //     BodyColumns winning the provenance on overlap.
 //   - otherwise (a plain lens — every artifact lens, and every other
 //     projectionKind): CypherBranches non-empty parses branch 0; empty parses
-//     CypherRule. A nil returnColumns, a parse error, or an empty RETURN are
-//     each ErrUnreadable naming the reason.
+//     CypherRule; declaring BOTH is ErrUnreadable, because the runtime refuses
+//     that pair at activation and the lens never projects at all. A nil
+//     returnColumns, a parse error, or an empty RETURN are each ErrUnreadable
+//     naming the reason.
 //
 // Every ErrUnreadable is wrapped with fmt.Errorf("%w: …") so errors.Is still
 // matches and the message names why.
@@ -123,11 +126,17 @@ func Projected(s Spec, returnColumns func(rule string) ([]string, error)) (Resul
 }
 
 func projectedFromEventStream(src *Source) (Result, error) {
-	cols := map[string]string{}
-	if src.Project != nil {
-		for name := range src.Project.Columns {
-			cols[name] = ProvenanceProjectColumns
-		}
+	// An eventStream lens's rows ARE its project.columns mapping: with no
+	// project declared, the Chronicler has nothing to render a row body from,
+	// and this derivation has nothing to read. Unreadable, never empty — an
+	// empty answer here would report "this lens projects no gap column" about a
+	// lens whose columns nobody has stated.
+	if src.Project == nil || len(src.Project.Columns) == 0 {
+		return Result{}, fmt.Errorf("%w: eventStream source declares no project.columns", ErrUnreadable)
+	}
+	cols := make(map[string]string, len(src.Project.Columns))
+	for name := range src.Project.Columns {
+		cols[name] = ProvenanceProjectColumns
 	}
 	return Result{Columns: cols, Source: ProvenanceProjectColumns}, nil
 }
@@ -152,6 +161,13 @@ func projectedFromActorAggregate(out *Output) (Result, error) {
 func projectedFromPlain(s Spec, returnColumns func(rule string) ([]string, error)) (Result, error) {
 	if returnColumns == nil {
 		return Result{}, fmt.Errorf("%w: no cypher parser supplied", ErrUnreadable)
+	}
+	// The two are mutually exclusive by construction (lens/corekv_source.go
+	// refuses the pair at activation), so a spec carrying both never activates
+	// and must not be read as though branch 0 were its rule: whichever of the
+	// two a reader picked, it would be describing a lens that projects nothing.
+	if len(s.CypherBranches) > 0 && strings.TrimSpace(s.CypherRule) != "" {
+		return Result{}, fmt.Errorf("%w: cypherRule and cypherBranches are mutually exclusive, and this spec declares both", ErrUnreadable)
 	}
 	rule := s.CypherRule
 	if len(s.CypherBranches) > 0 {

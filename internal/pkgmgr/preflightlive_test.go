@@ -2,11 +2,13 @@ package pkgmgr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/lenscolumns"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The fixtures below all share one shape: a package declaring a single lens
@@ -51,6 +53,27 @@ func aggregateBindingLens(canonicalName, targetID string, bodyColumns []string, 
 			BodyColumns:        append([]string{"key"}, bodyColumns...),
 			StaticEmptyColumns: staticEmpty,
 			EmptyBehavior:      "omit",
+		},
+	}
+}
+
+// eventStreamBindingLens is a Chronicler-fed lens: its rows are its source's
+// project.columns mapping, and no cypher is read for them at all.
+func eventStreamBindingLens(canonicalName string, columns ...string) LensSpec {
+	cols := map[string]ColumnMapping{"key": {Path: "event.key"}}
+	for _, c := range columns {
+		cols[c] = ColumnMapping{Path: "event." + c}
+	}
+	return LensSpec{
+		CanonicalName: canonicalName,
+		Class:         "meta.lens",
+		Adapter:       "nats-kv",
+		Bucket:        bindingLensBucket,
+		Engine:        "full",
+		Source: &SourceConfig{
+			Kind:     "eventStream",
+			Subjects: []string{"events.orchestration.>"},
+			Project:  &EventProjection{Key: "event.key", Columns: cols},
 		},
 	}
 }
@@ -139,8 +162,8 @@ func TestPreflightLive_InBatchAggregateUndeclared_Refused(t *testing.T) {
 	}
 }
 
-// The plain pair. A plain lens declares no Output at all, so before this rule
-// nothing at install time could say what its rows carry.
+// The plain pair. A plain lens declares no Output at all: its row columns are
+// the RETURN items' names, which only the injected SpecParser can read.
 func TestPreflightLive_InBatchPlainDeclared_Installs(t *testing.T) {
 	ctx, _, inst := newInstallerHarness(t)
 
@@ -309,9 +332,9 @@ func TestPreflightLive_UnplannableExemptSubsetOnly(t *testing.T) {
 	}
 }
 
-// The §10.3 companion pair reaching a lens this Definition does not declare —
-// the skip that retires with the live read. The marker column comes from the
-// INSTALLED lens, which the pure gate could never see.
+// The §10.3 companion pair over a lens this Definition does not declare: the
+// marker column comes from the INSTALLED lens, which only the live read
+// resolves.
 func TestPreflightLive_CompanionPairOverOutOfBatchLens(t *testing.T) {
 	ctx, _, inst := newInstallerHarness(t)
 
@@ -397,6 +420,330 @@ func mustFailInstall(t *testing.T, ctx context.Context, inst *Installer, def Def
 	res, err := inst.Install(ctx, def)
 	if err == nil {
 		t.Fatalf("expected the install to be refused, got %+v", res)
+	}
+	return err
+}
+
+// --- the third entry point, and the in-place upgrade branch -----------------
+
+// THE UPGRADE ENTRY. A lens GAINS a column on a version bump — the commonest
+// way a target that was fully declared stops being so — and Upgrade is a third
+// exported mutating entry, not a wrapper around Install or Apply. Without its
+// own live preflight the one shape the rule exists for commits.
+func TestPreflightLive_Upgrade_RefusedThenUpgrades(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	const pkgName = "bind-upgrade"
+	v1 := bindingDef(pkgName, "0.1.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder")},
+		bindingTarget("upgradeTarget", "plainLens", "missing_reminder"))
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("the v1 target is fully declared and must install: %v", err)
+	}
+
+	// v2: the lens projects a second gap column the target never declared.
+	v2 := bindingDef(pkgName, "0.2.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder", "missing_escalate")},
+		bindingTarget("upgradeTarget", "plainLens", "missing_reminder"))
+	msg := requireBindingRefusal(t, mustFailUpgrade(t, ctx, inst, v2))
+	if !strings.Contains(msg, `projects gap column "missing_escalate"`) {
+		t.Fatalf("the upgrade must be judged against the UPGRADED lens; got %v", msg)
+	}
+
+	// The declared twin, differing in the gaps map alone, upgrades.
+	declared := bindingDef(pkgName, "0.2.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder", "missing_escalate")},
+		bindingTarget("upgradeTarget", "plainLens", "missing_reminder", "missing_escalate"))
+	if _, err := inst.Upgrade(ctx, declared); err != nil {
+		t.Fatalf("declaring the new column must let the upgrade through: %v", err)
+	}
+}
+
+// The same sequence through Apply's IN-PLACE branch (the package is already
+// installed, so this is not applyFreshInstall's route into Install): §5's last
+// row, the `make reinstall-package` shape the lint alone could not hold.
+func TestPreflightLive_ApplyInPlaceUpgrade_RefusedThenApplies(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	const pkgName = "bind-apply-inplace"
+	v1 := bindingDef(pkgName, "0.1.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder")},
+		bindingTarget("inplaceTarget", "plainLens", "missing_reminder"))
+	if _, err := inst.Apply(ctx, v1, ApplyOptions{}); err != nil {
+		t.Fatalf("the v1 target must install: %v", err)
+	}
+
+	v2 := bindingDef(pkgName, "0.2.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder", "missing_escalate")},
+		bindingTarget("inplaceTarget", "plainLens", "missing_reminder"))
+	_, err := inst.Apply(ctx, v2, ApplyOptions{})
+	msg := requireBindingRefusal(t, err)
+	if !strings.Contains(msg, `projects gap column "missing_escalate"`) {
+		t.Fatalf("the in-place apply must be judged against the upgraded lens; got %v", msg)
+	}
+
+	declaredV2 := bindingDef(pkgName, "0.2.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder", "missing_escalate")},
+		bindingTarget("inplaceTarget", "plainLens", "missing_reminder", "missing_escalate"))
+	res, err := inst.Apply(ctx, declaredV2, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("the declared twin must apply in place: %v", err)
+	}
+	if res.Skipped {
+		t.Fatalf("a version bump is not a skip: %+v", res)
+	}
+}
+
+// --- §5 row 1: a target that declares no binding ---------------------------
+
+// An empty LensRef names nothing, so there is no binding to judge — the
+// contract clause says so explicitly, and resolveLensRef has always passed it
+// through. Pinned on BOTH entries, because turning that pass-through into a
+// refusal would break every target the lint flags but the installer admits.
+func TestPreflightLive_EmptyLensRefPassesThroughBothEntries(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	unbound := bindingDef("bind-unbound-install", "0.1.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_reminder")},
+		bindingTarget("unboundTarget", ""))
+	if _, err := inst.Install(ctx, unbound); err != nil {
+		t.Fatalf("a target declaring no LensRef binds nothing and must install: %v", err)
+	}
+
+	applied := bindingDef("bind-unbound-apply", "0.1.0",
+		[]LensSpec{plainBindingLens("unboundApplyLens", "missing_reminder")},
+		bindingTarget("unboundApplyTarget", ""))
+	if _, err := inst.Apply(ctx, applied, ApplyOptions{}); err != nil {
+		t.Fatalf("Apply must pass an unbound target through too: %v", err)
+	}
+}
+
+// --- the shapes a lens can be unreadable in --------------------------------
+
+// An eventStream lens's rows are its source's project.columns — no cypher at
+// all. Judged on those keys, with the provenance that tells the author where to
+// edit.
+func TestPreflightLive_InBatchEventStream_RefusedThenInstalls(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	undeclared := bindingDef("bind-events-bad", "0.1.0",
+		[]LensSpec{eventStreamBindingLens("eventLens", "missing_ack")},
+		bindingTarget("eventTarget", "eventLens"))
+	msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, undeclared))
+	for _, want := range []string{`projects gap column "missing_ack"`, lenscolumns.ProvenanceProjectColumns} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal must contain %q; got %v", want, msg)
+		}
+	}
+
+	declared := bindingDef("bind-events-ok", "0.1.0",
+		[]LensSpec{eventStreamBindingLens("eventLens", "missing_ack")},
+		bindingTarget("eventTarget", "eventLens", "missing_ack"))
+	if _, err := inst.Install(ctx, declared); err != nil {
+		t.Fatalf("declaring the projected column must install: %v", err)
+	}
+}
+
+// The same lens shape, installed by another package and bound by id: the live
+// read has to reach the source descriptor, not only the cypher.
+func TestPreflightLive_OutOfBatchEventStream_RefusedThenInstalls(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	lensID := installOutOfBatchLens(t, ctx, inst, "bind-events-remote-lens",
+		eventStreamBindingLens("remoteEventLens", "missing_ack"))
+
+	bad := bindingDef("bind-events-remote-bad", "0.1.0", nil, bindingTarget("remoteEventTarget", lensID))
+	msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, bad))
+	if !strings.Contains(msg, lenscolumns.ProvenanceProjectColumns) {
+		t.Fatalf("an installed eventStream lens must be judged on its project.columns; got %v", msg)
+	}
+
+	ok := bindingDef("bind-events-remote-ok", "0.1.0", nil, bindingTarget("remoteEventTargetOk", lensID, "missing_ack"))
+	if _, err := inst.Install(ctx, ok); err != nil {
+		t.Fatalf("declaring the projected column must install: %v", err)
+	}
+}
+
+// The three in-batch shapes whose columns are not derivable at all. Each is
+// refused NAMING THE REASON rather than read as "no columns" — the distinction
+// the whitelist exists for, since an empty answer would admit a target that
+// declares nothing.
+func TestPreflightLive_UnreadableInBatchShapes_RefusedNamingTheReason(t *testing.T) {
+	outputless := aggregateBindingLens("aggLens", "shapeTarget", nil, nil)
+	outputless.Output = nil
+
+	entryKeyed := aggregateBindingLens("aggLens", "shapeTarget", []string{"missing_x"}, nil)
+	entryKeyed.Output.EntryKeyColumn = "entryId"
+
+	unparseable := plainBindingLens("aggLens")
+	unparseable.Spec = "this is not openCypher at all"
+
+	bothRules := plainBindingLens("aggLens", "missing_x")
+	bothRules.SpecBranches = []string{"MATCH (n:identity) RETURN n.key AS key"}
+
+	for _, tc := range []struct {
+		name string
+		lens LensSpec
+		want string
+	}{
+		{"actorAggregate with no Output", outputless, "declares no Output descriptor"},
+		{"per-entry list lens", entryKeyed, "per-entry list lens"},
+		{"plain lens that does not parse", unparseable, "cannot be derived"},
+		{"a spec declaring both cypherRule and cypherBranches", bothRules, "mutually exclusive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _, inst := newInstallerHarness(t)
+			def := bindingDef("bind-shape-"+strings.ToLower(strings.ReplaceAll(tc.name, " ", "-")), "0.1.0",
+				[]LensSpec{tc.lens}, bindingTarget("shapeTarget", "aggLens", "missing_x"))
+			msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, def))
+			if !strings.Contains(msg, tc.want) {
+				t.Fatalf("refusal must name the reason %q; got %v", tc.want, msg)
+			}
+		})
+	}
+}
+
+// A lens whose package was uninstalled is gone as far as any binding goes:
+// Contract #1 keeps the key occupied by a tombstone, so "absent" and
+// "tombstoned" are different reads of the same key and both must refuse.
+func TestPreflightLive_OutOfBatchTombstonedLens_Refused(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	const lensPkg = "bind-tombstone-lens"
+	lensID := installOutOfBatchLens(t, ctx, inst, lensPkg, plainBindingLens("goneLens", "missing_reminder"))
+	if _, err := inst.Install(ctx, bindingDef("bind-tombstone-live", "0.1.0", nil,
+		bindingTarget("liveTarget", lensID, "missing_reminder"))); err != nil {
+		t.Fatalf("precondition: the binding must hold while the lens is live: %v", err)
+	}
+	if _, err := inst.Uninstall(ctx, lensPkg, UninstallOptions{}); err != nil {
+		t.Fatalf("uninstall the lens's package: %v", err)
+	}
+
+	msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst,
+		bindingDef("bind-tombstone-after", "0.1.0", nil, bindingTarget("danglingTarget", lensID, "missing_reminder"))))
+	if !strings.Contains(msg, "names no installed meta.lens") {
+		t.Fatalf("a tombstoned lens must refuse exactly as an absent one does; got %v", msg)
+	}
+}
+
+// The two ways an INSTALLED lens's own declaration goes missing under it: the
+// spec aspect absent, and the spec aspect tombstoned. Both leave a live
+// meta.lens root whose columns nothing states, which is refused naming the
+// reason — never read as a lens with no gap columns.
+func TestPreflightLive_OutOfBatchLensWithNoReadableSpec_Refused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(t *testing.T, ctx context.Context, conn *substrate.Conn, specKey string)
+		want   string
+	}{
+		{"spec aspect absent", func(t *testing.T, ctx context.Context, conn *substrate.Conn, specKey string) {
+			if err := conn.KVDelete(ctx, CoreBucket, specKey); err != nil {
+				t.Fatalf("delete %s: %v", specKey, err)
+			}
+		}, "carries no spec aspect"},
+		{"spec aspect tombstoned", func(t *testing.T, ctx context.Context, conn *substrate.Conn, specKey string) {
+			doc := kvDoc(t, ctx, conn, specKey)
+			doc["isDeleted"] = true
+			body, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal %s: %v", specKey, err)
+			}
+			if _, err := conn.KVPut(ctx, CoreBucket, specKey, body); err != nil {
+				t.Fatalf("tombstone %s: %v", specKey, err)
+			}
+		}, "is tombstoned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn, inst := newInstallerHarness(t)
+			lensID := installOutOfBatchLens(t, ctx, inst, "bind-nospec-lens", plainBindingLens("noSpecLens", "missing_reminder"))
+			tc.break_(t, ctx, conn, metaVertexPrefix+lensID+".spec")
+
+			// The resolver's own answer: FOUND (the lens exists) and
+			// unreadable (nothing states its columns).
+			cols, found, err := NewCoreKVLensResolver(ctx, conn, fullCypherParser{}).ResolveLensColumns(lensID)
+			if !found {
+				t.Fatalf("the lens root is live; an unreadable lens must not answer 'not found'")
+			}
+			if !errors.Is(err, lenscolumns.ErrUnreadable) {
+				t.Fatalf("err = %v, want lenscolumns.ErrUnreadable", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to name %q", err, tc.want)
+			}
+			if len(cols.Columns) != 0 {
+				t.Errorf("an unreadable lens declares no columns, got %v", cols.Columns)
+			}
+
+			// And both entry points refuse a target bound to it, naming that
+			// reason rather than admitting a target declaring nothing.
+			def := bindingDef("bind-nospec-target", "0.1.0", nil, bindingTarget("noSpecTarget", lensID, "missing_reminder"))
+			msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, def))
+			if !strings.Contains(msg, "cannot be derived") || !strings.Contains(msg, tc.want) {
+				t.Fatalf("Install refusal must name the reason; got %v", msg)
+			}
+			_, applyErr := inst.Apply(ctx, def, ApplyOptions{})
+			if applyMsg := requireBindingRefusal(t, applyErr); !strings.Contains(applyMsg, tc.want) {
+				t.Fatalf("Apply refusal must name the same reason; got %v", applyMsg)
+			}
+		})
+	}
+}
+
+// EVERY undeclared column in one refusal. An author holding three of them must
+// not have to discover them over three apply attempts — and the installer's
+// list must not be shorter than the validator's for the same pair.
+func TestPreflightLive_NamesEveryUndeclaredColumn(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	def := bindingDef("bind-many-undeclared", "0.1.0",
+		[]LensSpec{plainBindingLens("plainLens", "missing_a", "missing_b", "missing_c")},
+		bindingTarget("manyTarget", "plainLens", "missing_b"))
+	msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, def))
+	for _, want := range []string{`"missing_a"`, `"missing_c"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal must name %s; got %v", want, msg)
+		}
+	}
+	if strings.Contains(msg, `projects gap column "missing_b"`) {
+		t.Errorf("the DECLARED column must not be reported: %v", msg)
+	}
+}
+
+// The §10.3 companion-pair remedy has to be one the author can follow: a plain
+// lens has no Output descriptor at all, so "declare it in Output.BodyColumns"
+// is an instruction with nowhere to land.
+func TestPreflightLive_CompanionPairRemedyFollowsTheProvenance(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	lens := plainBindingLens("plainLens", "missing_dedupe")
+	lens.Spec += ", true AS inflight_dedupe"
+	def := bindingDef("bind-companion-plain", "0.1.0", []LensSpec{lens},
+		bindingTarget("plainCompanionTarget", "plainLens", "missing_dedupe"))
+	msg := requireBindingRefusal(t, mustFailInstall(t, ctx, inst, def))
+	if !strings.Contains(msg, `Add "maxretries_dedupe" to the lens's RETURN clause`) {
+		t.Fatalf("a plain lens's remedy must name its RETURN clause; got %v", msg)
+	}
+	if strings.Contains(msg, "Output.BodyColumns") {
+		t.Errorf("a plain lens has no Output descriptor to edit: %v", msg)
+	}
+
+	// The positive twin: the cap declared in the same clause.
+	capped := plainBindingLens("plainLens", "missing_dedupe")
+	capped.Spec += ", true AS inflight_dedupe, 5 AS maxretries_dedupe"
+	ok := bindingDef("bind-companion-plain-ok", "0.1.0", []LensSpec{capped},
+		bindingTarget("plainCompanionTargetOk", "plainLens", "missing_dedupe"))
+	if _, err := inst.Install(ctx, ok); err != nil {
+		t.Fatalf("a declared companion pair on a plain lens must install: %v", err)
+	}
+}
+
+// mustFailUpgrade runs an upgrade expected to be refused and returns the error,
+// failing the test if it committed instead.
+func mustFailUpgrade(t *testing.T, ctx context.Context, inst *Installer, def Definition) error {
+	t.Helper()
+	res, err := inst.Upgrade(ctx, def)
+	if err == nil {
+		t.Fatalf("expected the upgrade to be refused, got %+v", res)
 	}
 	return err
 }

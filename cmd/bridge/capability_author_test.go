@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/modelrunner/wire"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -83,33 +86,21 @@ func authorFixture(t *testing.T) (*bridge.CapabilityAuthor, *fixtureRunner, *sub
 	if !substrate.IsValidNanoID(staleLensNanoID) {
 		t.Fatalf("staleLensNanoID %q is not a valid NanoID (fix the test constant)", staleLensNanoID)
 	}
+	// The catalog row's `spec` column is the lens meta's `.spec` aspect DATA
+	// verbatim (the capabilityAuthorContext lens projects `m.spec.data AS
+	// spec`), so the fixture carries the shape internal/pkgmgr/build.go writes
+	// — `cypherRule` and all. It is what the model reads AND what the
+	// artifact verdict resolves the target's lensRef against: the bridge is
+	// denied Core KV, so this catalog is the only lens catalog it has.
 	row := `{"key":"vtx.meta.` + staleLensNanoID + `","class":"meta.lens","canonicalName":"` + staleLensCanonical + `",` +
-		`"spec":{"spec":"MATCH (i:identity) RETURN i.key AS key, true AS missing_reminder"}}`
+		`"spec":{"id":"` + staleLensNanoID + `","canonicalName":"` + staleLensCanonical + `","engine":"full",` +
+		`"cypherRule":"MATCH (i:identity) RETURN i.key AS key, true AS missing_reminder"}}`
 	if _, err := conn.KVPut(ctx, testCatalogBucket, "vtx.meta."+staleLensNanoID, []byte(row)); err != nil {
 		t.Fatalf("seed catalog: %v", err)
 	}
-	// The same lens in Core KV, in the shape an install writes it (a meta.lens
-	// root plus its `spec` aspect): the catalog row above is what the MODEL
-	// reads, and this is what the validator's installed-lens resolver reads to
-	// decide the target declares every missing_* column the lens projects. A
-	// fixture carrying only the catalog half would record every assembled
-	// target invalid — which is the unwired-caller failure the lint pin exists
-	// for, and exactly what these tests must not be blind to.
-	lensRootKey := "vtx.meta." + staleLensNanoID
-	seedCoreKV(t, conn, lensRootKey, map[string]any{"key": lensRootKey, "class": "meta.lens", "isDeleted": false, "data": map[string]any{}})
-	seedCoreKV(t, conn, lensRootKey+".spec", map[string]any{
-		"key": lensRootKey + ".spec", "class": "lensSpec", "isDeleted": false,
-		"vertexKey": lensRootKey, "localName": "spec",
-		"data": map[string]any{
-			"id":            staleLensNanoID,
-			"canonicalName": staleLensCanonical,
-			"engine":        "full",
-			"cypherRule":    "MATCH (i:identity) RETURN i.key AS key, true AS missing_reminder",
-		},
-	})
-
 	runner := &fixtureRunner{}
-	adapter, err := bridge.NewCapabilityAuthor(runner, conn, testCatalogBucket, newCapabilityArtifactVerdict(conn), pkgmgr.PlatformProtectedPackage)
+	adapter, err := bridge.NewCapabilityAuthor(runner, conn, testCatalogBucket,
+		newCapabilityArtifactVerdict(bridgeCypherParser{}), bridgeLensReturnColumns, pkgmgr.PlatformProtectedPackage)
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
 	}
@@ -264,22 +255,6 @@ func TestCapabilityAuthorAppliesEndToEnd(t *testing.T) {
 	}
 }
 
-// seedCoreKV writes one whole Core KV document, for the fixtures that must
-// carry an envelope's own fields (a root's class, an aspect's vertexKey) and
-// not only its data.
-func seedCoreKV(t *testing.T, conn *substrate.Conn, key string, doc map[string]any) {
-	t.Helper()
-	body, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("marshal %s: %v", key, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := conn.KVPut(ctx, "core-kv", key, body); err != nil {
-		t.Fatalf("write %s: %v", key, err)
-	}
-}
-
 // writeAspect stores a Contract #1 {data} aspect envelope in core-kv, the shape
 // pkgmgr.CapabilityApplyPlanForProposal reads.
 func writeAspect(t *testing.T, conn *substrate.Conn, key string, data map[string]any) {
@@ -320,18 +295,73 @@ func TestCapabilityAuthorRealBoundaryRejectsABadToken(t *testing.T) {
 
 // TestCapabilityArtifactVerdictFailsClosed pins the error leg: pkgmgr returns an
 // ERROR (not a verdict) for content it cannot decode at all, and an unknown
-// verdict must never read as approval.
+// verdict must never read as approval. That error is about the ARTIFACT, so it
+// becomes a stored invalid — the case the transient leg below is told apart
+// from.
 func TestCapabilityArtifactVerdictFailsClosed(t *testing.T) {
 	t.Parallel()
-	// A nil conn is safe here and says something: content that will not decode
-	// is refused before any kind-specific check runs, so the verdict never
-	// reaches the installed-lens catalog at all.
-	state, report := newCapabilityArtifactVerdict(nil)(bridge.CapabilityAuthorKind, []byte(`"not an object"`))
+	state, report, err := newCapabilityArtifactVerdict(bridgeCypherParser{})(
+		bridge.CapabilityAuthorKind, []byte(`"not an object"`), emptyLensCatalog{})
+	if err != nil {
+		t.Fatalf("an undecodable artifact is a verdict, not a declined decision: %v", err)
+	}
 	if state != bridge.ValidationStateInvalid {
 		t.Errorf("state = %q, want %q", state, bridge.ValidationStateInvalid)
 	}
 	if report == "" {
 		t.Error("report is empty; the operator would see no reason")
+	}
+}
+
+// emptyLensCatalog is a catalog holding no lens: every ref answers "not
+// installed", with no error. It stands in wherever a vector's subject is not
+// the binding rule.
+type emptyLensCatalog struct{}
+
+func (emptyLensCatalog) ResolveLensColumns(string) (lenscolumns.Result, bool, error) {
+	return lenscolumns.Result{}, false, nil
+}
+
+// unreadableLensCatalog is a catalog that could not be READ — the transient the
+// bridge must never store as a verdict.
+type unreadableLensCatalog struct{}
+
+func (unreadableLensCatalog) ResolveLensColumns(string) (lenscolumns.Result, bool, error) {
+	return lenscolumns.Result{}, false, fmt.Errorf("%w: connection lost mid-read", pkgmgr.ErrLensCatalogUnavailable)
+}
+
+// TestCapabilityArtifactVerdict_UnreadableCatalogIsNotAVerdict is the leg that
+// separates a substrate fault from an authoring defect. A recorded "invalid" is
+// permanent and names the author in front of a reviewer; a catalog that could
+// not be read says nothing about the artifact, so it must come back as an
+// error the adapter retries rather than as a verdict.
+func TestCapabilityArtifactVerdict_UnreadableCatalogIsNotAVerdict(t *testing.T) {
+	t.Parallel()
+	content := []byte(`{"targetId":"coldOnboarding","lensRef":"` + staleLensNanoID + `",` +
+		`"gaps":{"missing_reminder":{"action":"surface","issueCode":"X","issueSeverity":"warning"}}}`)
+	state, report, err := newCapabilityArtifactVerdict(bridgeCypherParser{})(
+		bridge.CapabilityAuthorKind, content, unreadableLensCatalog{})
+	if err == nil {
+		t.Fatalf("a catalog read failure must decline the decision; got state %q report %q", state, report)
+	}
+	if !errors.Is(err, pkgmgr.ErrLensCatalogUnavailable) {
+		t.Errorf("err = %v, want it to carry the catalog-unavailable class", err)
+	}
+	if state != "" {
+		t.Errorf("state = %q, want no verdict at all", state)
+	}
+}
+
+// A missing dependency is the composition root's own fault, never the
+// author's: the verdict declines rather than answering invalid, so an unwired
+// binary cannot quietly record a queue of bad proposals.
+func TestCapabilityArtifactVerdict_MissingDependenciesDecline(t *testing.T) {
+	t.Parallel()
+	if _, _, err := newCapabilityArtifactVerdict(nil)(bridge.CapabilityAuthorKind, []byte(`{}`), emptyLensCatalog{}); err == nil {
+		t.Error("a nil cypher parser must decline the decision, not answer invalid")
+	}
+	if _, _, err := newCapabilityArtifactVerdict(bridgeCypherParser{})(bridge.CapabilityAuthorKind, []byte(`{}`), nil); err == nil {
+		t.Error("a nil installed-lens catalog must decline the decision, not answer invalid")
 	}
 }
 
@@ -341,9 +371,10 @@ func TestCapabilityArtifactVerdictFailsClosed(t *testing.T) {
 // fail rather than be waved through.
 func TestCapabilityArtifactVerdictRejectsADisabledKind(t *testing.T) {
 	t.Parallel()
-	// Nil conn, same reason as above: a disabled kind is refused by the
-	// allow-list ahead of every per-kind dependency.
-	state, report := newCapabilityArtifactVerdict(nil)("somethingElse", []byte(`{}`))
+	state, report, err := newCapabilityArtifactVerdict(bridgeCypherParser{})("somethingElse", []byte(`{}`), emptyLensCatalog{})
+	if err != nil {
+		t.Fatalf("a disabled kind is a verdict, not a declined decision: %v", err)
+	}
 	if state != bridge.ValidationStateInvalid {
 		t.Errorf("state = %q, want %q", state, bridge.ValidationStateInvalid)
 	}

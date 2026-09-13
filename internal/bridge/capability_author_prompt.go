@@ -363,6 +363,7 @@ const (
 type catalogRead struct {
 	view              catalogView
 	lensIndex         map[string]string
+	lensSpecs         map[string]json.RawMessage
 	targets           map[string]catalogRow
 	packages          []packageRow
 	malformedPackages []string
@@ -425,19 +426,12 @@ func (a *CapabilityAuthor) readCatalog(ctx context.Context) (catalogSnapshot, er
 	return rows.snapshot(a.contextBucket)
 }
 
-// lensIndex resolves the canonicalName→NanoID map of every installed lens, for
-// binding a target's authored lensRef. It reads the FULL catalog (never the
-// capped prompt view — the model can only name a lens it was shown, so the index
-// must cover them all), and tolerates an empty catalog: an empty map simply
-// resolves nothing, and the draft records invalid. Only a real read failure is
-// an error, and it is transient (the poll re-arms; CallDeadline backstops).
-func (a *CapabilityAuthor) lensIndex(ctx context.Context) (map[string]string, error) {
-	rows, err := a.readCatalogRows(ctx)
-	return rows.lensIndex, err
-}
-
-// readCatalogRows lists and reads the catalog bucket once and builds every
-// projection of it a caller needs. Keys are read sorted, so the outputs are
+// readCatalogRows lists and reads the catalog bucket ONCE and builds every
+// projection of it a caller needs — the prompt view, the canonicalName→NanoID
+// lens index that binds a target's authored lensRef, and the lens specs the
+// artifact verdict resolves that binding's columns from. One read, because
+// they are three questions about the same rows and a second read could answer
+// them about different ones. Keys are read sorted, so the outputs are
 // byte-stable regardless of the order the underlying batch read returned. An
 // error is only a transport failure — emptiness is not an error here (each
 // caller decides what an empty catalog means).
@@ -484,6 +478,7 @@ func buildCatalogRead(keys []string, value func(string) []byte) catalogRead {
 			Operations:    []catalogOperation{},
 		},
 		lensIndex: map[string]string{},
+		lensSpecs: map[string]json.RawMessage{},
 		targets:   map[string]catalogRow{},
 	}
 	for _, key := range keys {
@@ -532,6 +527,14 @@ func buildCatalogRead(keys []string, value func(string) []byte) catalogRead {
 			if id := strings.TrimPrefix(row.Key, metaKeyPrefix); id != row.Key && substrate.IsValidNanoID(id) {
 				if _, seen := out.lensIndex[row.CanonicalName]; !seen && row.CanonicalName != "" {
 					out.lensIndex[row.CanonicalName] = id
+				}
+				// The UNSANITISED spec, keyed by id: the validator's binding
+				// rule reads the cypher's RETURN names off it, and the prompt
+				// copy above has had targetConfig subfields stripped. Nothing
+				// here reaches the vendor. First-wins under the sorted walk,
+				// like the index beside it.
+				if _, seen := out.lensSpecs[id]; !seen {
+					out.lensSpecs[id] = row.Spec
 				}
 			}
 		case metaClassWeaverTarget:

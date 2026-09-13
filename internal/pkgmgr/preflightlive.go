@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -109,10 +110,17 @@ func checkTargetLensBinding(idx int, t WeaverTargetSpec, lensName string, cols l
 		for col := range t.Gaps {
 			declared[col] = true
 		}
+		// EVERY undeclared column, not the first: an author holding three of
+		// them should be told all three once, not discover them over three
+		// apply attempts. The record-time validator reports them all for the
+		// same reason, and the two verdicts must not differ in what they name.
+		var refusals []string
 		for _, col := range undeclaredGapColumns(cols, declared) {
+			refusals = append(refusals, UndeclaredGapColumnRefusal(lensName, col, cols.Columns[col], sortedGapColumns(t.Gaps)))
+		}
+		if len(refusals) > 0 {
 			return fmt.Errorf("%w: pkgmgr: WeaverTarget[%d] %q: %s",
-				ErrLensBindingRefused, idx, t.TargetID,
-				undeclaredGapColumnRefusal(lensName, col, cols.Columns[col], sortedGapColumns(t.Gaps)))
+				ErrLensBindingRefused, idx, t.TargetID, strings.Join(refusals, " "))
 		}
 	}
 	for _, col := range sortedGapColumns(t.Gaps) {

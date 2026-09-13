@@ -19,12 +19,21 @@ import (
 type stubInstalledLenses struct {
 	lenses     map[string]lenscolumns.Result
 	unreadable map[string]string
-	readErr    error
+	// roots records ids that exist in the kernel under a class OTHER than
+	// meta.lens — a weaver target, a Loom pattern, a DDL, an op-meta. They are
+	// present and still answer found=false, which is what makes a wrong-class
+	// vector mean something: without the class test such an id resolves, since
+	// those metas carry a `spec` aspect of their own.
+	roots   map[string]string
+	readErr error
 }
 
 func (s stubInstalledLenses) ResolveLensColumns(lensRef string) (lenscolumns.Result, bool, error) {
 	if s.readErr != nil {
 		return lenscolumns.Result{}, false, s.readErr
+	}
+	if class, ok := s.roots[lensRef]; ok && class != MetaLensClass {
+		return lenscolumns.Result{}, false, nil
 	}
 	if why, ok := s.unreadable[lensRef]; ok {
 		return lenscolumns.Result{}, true, fmt.Errorf("%w: %s", lenscolumns.ErrUnreadable, why)
@@ -150,19 +159,33 @@ func TestValidateWeaverTarget_NanoIDLookalikeCanonicalName_Invalid(t *testing.T)
 	}
 }
 
-// A wrong-class id answers found=false through the resolver contract, so it
-// lands on the same verdict as an absent one — the two holders agree, and the
-// author is told the same thing either way. (CoreKVLensResolver's own class
-// test is proven against a live kernel in lensresolver_test.go.)
+// A wrong-class id — an id that EXISTS, under a class that is not meta.lens —
+// answers found=false through the resolver contract, so it lands on the same
+// verdict as an absent one: the two holders agree, and the author is told the
+// same thing either way. The fixture records the id as present under
+// meta.weaverTarget, so a resolver that dropped the class test would resolve it
+// (a weaverTarget meta carries a spec aspect too) and this vector would red.
+// (CoreKVLensResolver's own class test is proven against a live kernel in
+// lensresolver_test.go.)
 func TestValidateWeaverTarget_WrongClassID_Invalid(t *testing.T) {
-	content := weaverTargetArtifact(t, "someExistingLens", "missing_followUp")
-	report, err := ValidateCapabilityArtifact("weaverTarget", content, fullCypherParser{}, nil, nil,
-		stubInstalledLenses{lenses: map[string]lenscolumns.Result{}})
+	const targetMetaID = "weaverTargetMetaXYZa"
+	content := weaverTargetArtifact(t, targetMetaID, "missing_followUp")
+	resolver := stubInstalledLenses{
+		roots:  map[string]string{targetMetaID: "meta.weaverTarget"},
+		lenses: map[string]lenscolumns.Result{targetMetaID: projecting(lenscolumns.ProvenanceReturn, "key")},
+	}
+	if _, found, _ := resolver.ResolveLensColumns(targetMetaID); found {
+		t.Fatalf("fixture precondition: the class test is what must answer false here")
+	}
+	report, err := ValidateCapabilityArtifact("weaverTarget", content, fullCypherParser{}, nil, nil, resolver)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if report.Valid {
 		t.Fatalf("expected invalid for an id whose root is not a meta.lens")
+	}
+	if joined := strings.Join(report.Errors, " "); !strings.Contains(joined, "names no installed lens") {
+		t.Fatalf("report = %q, want the not-installed verdict", joined)
 	}
 }
 
