@@ -454,6 +454,7 @@ func (loupeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
 		Referenced: facts.Referenced,
 		Exhaustive: facts.Exhaustive,
 		Expansion:  facts.Expansion,
+		Columns:    facts.Columns,
 	}, nil
 }
 

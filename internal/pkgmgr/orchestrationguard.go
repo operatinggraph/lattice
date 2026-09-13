@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -476,15 +477,27 @@ func (def Definition) validateGapCompanionPair(targetIdx int, t WeaverTargetSpec
 // Refractor's projection driver materializes BodyColumns and StaticEmptyColumns
 // into the same envelope, so both are columns the Weaver sees; a name in both
 // lists is attributed to BodyColumns, which is the one carrying a real value.
+//
+// A call into lenscolumns.Projected for the actorAggregate shape — shares the
+// derivation with the lint's gapColumnsOf. Callers here already guard
+// out != nil for a lens they know is actorAggregate-shaped, so ProjectionKind
+// is supplied directly rather than round-tripped through the caller's
+// LensSpec.
 func declaredRowBodyColumns(out *OutputDescriptorSpec) map[string]string {
-	declared := make(map[string]string, len(out.BodyColumns)+len(out.StaticEmptyColumns))
-	for _, c := range out.StaticEmptyColumns {
-		declared[c] = "Output.StaticEmptyColumns"
+	result, err := lenscolumns.Projected(lenscolumns.Spec{
+		ProjectionKind: lenscolumns.ActorAggregateKind,
+		Output: &lenscolumns.Output{
+			BodyColumns:        out.BodyColumns,
+			StaticEmptyColumns: out.StaticEmptyColumns,
+			EntryKeyColumn:     out.EntryKeyColumn,
+		},
+	}, nil)
+	if err != nil {
+		// An unreadable shape (a per-entry list lens) declares no statically
+		// knowable columns, so the companion-pair rule has nothing to check.
+		return map[string]string{}
 	}
-	for _, c := range out.BodyColumns {
-		declared[c] = "Output.BodyColumns"
-	}
-	return declared
+	return result.Columns
 }
 
 // lensByCanonicalName resolves a WeaverTarget's LensRef to the lens this batch

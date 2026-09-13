@@ -1238,6 +1238,14 @@ type ExampleSpec struct {
 	ExpectedOutcome string
 }
 
+// ActorAggregateProjectionKind is the LensSpec.ProjectionKind value that opts
+// a lens into the §6.13 declarative actor-aggregate projection plan. Pinned
+// equal to lenscolumns.ActorAggregateKind
+// (TestActorAggregateProjectionKind_MatchesLensColumns) so the installer's
+// lens-shape dispatch and the shared column derivation never name the shape
+// differently.
+const ActorAggregateProjectionKind = "actorAggregate"
+
 // LensSpec is one Lens meta-vertex declaration.
 type LensSpec struct {
 	// CanonicalName is the lens's canonical name (e.g. `duplicateCandidates`).
@@ -1344,7 +1352,8 @@ type LensSpec struct {
 	Engine string
 
 	// ProjectionKind opts the lens into the declarative actor-aggregate
-	// projection plan ("actorAggregate"); empty for a plain projection lens.
+	// projection plan (ActorAggregateProjectionKind); empty for a plain
+	// projection lens.
 	ProjectionKind string
 
 	// Output is the §6.13 Output descriptor for an actor-aggregate lens. It is

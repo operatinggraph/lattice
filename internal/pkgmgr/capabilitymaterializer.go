@@ -65,6 +65,11 @@ type SpecLabels struct {
 	// taxonomy-expansion sigil, each of which the runtime replaces with the
 	// concrete types the taxonomy resolves it to.
 	Expansion map[string]struct{}
+
+	// Columns is the RETURN clause's items' effective names (the explicit
+	// alias, else the auto-alias) in declaration order — a mirror of
+	// full.LabelFacts.Columns. Nil when the rule has no RETURN clause.
+	Columns []string
 }
 
 // CypherParser abstracts the static openCypher parse pkgmgr needs in two

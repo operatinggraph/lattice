@@ -25,10 +25,37 @@ func (fullCypherParser) Parse(ruleBody string) (SpecLabels, error) {
 		Referenced: facts.Referenced,
 		Exhaustive: facts.Exhaustive,
 		Expansion:  facts.Expansion,
+		Columns:    facts.Columns,
 	}, nil
 }
 
 var _ CypherParser = fullCypherParser{}
+
+// The wrapper must thread Columns through unchanged from the same parse
+// full.SpecLabels itself produces — asserted equal to its source at this
+// producer, not merely non-empty.
+func TestFullCypherParser_ColumnsEqualsFullSpecLabels(t *testing.T) {
+	body := "MATCH (i:identity) RETURN i.name AS displayName, i.key"
+
+	want, err := full.SpecLabels(body)
+	if err != nil {
+		t.Fatalf("full.SpecLabels: %v", err)
+	}
+
+	got, err := fullCypherParser{}.Parse(body)
+	if err != nil {
+		t.Fatalf("fullCypherParser.Parse: %v", err)
+	}
+
+	if len(got.Columns) != len(want.Columns) {
+		t.Fatalf("Columns = %v, want %v", got.Columns, want.Columns)
+	}
+	for i := range want.Columns {
+		if got.Columns[i] != want.Columns[i] {
+			t.Fatalf("Columns = %v, want %v", got.Columns, want.Columns)
+		}
+	}
+}
 
 func lensContent(t *testing.T, lc LensArtifactContent) json.RawMessage {
 	t.Helper()

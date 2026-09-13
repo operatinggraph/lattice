@@ -505,7 +505,7 @@ func generateProducerLens(d ReadGrantDomainSpec, walks []*parsedWalk) LensSpec {
 		Adapter:        "nats-kv",
 		Bucket:         "capability-kv",
 		Engine:         "full",
-		ProjectionKind: "actorAggregate",
+		ProjectionKind: ActorAggregateProjectionKind,
 		Output: &OutputDescriptorSpec{
 			AnchorType:       capReadActorType,
 			OutputKeyPattern: "cap-read." + d.Name + ".{actorSuffix}",
