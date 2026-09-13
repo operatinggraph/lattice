@@ -761,7 +761,11 @@ in the remote container (REMOTE §3); the affected binaries are `bin/{lattice-pk
 binary linking `internal/pkgmgr` — a live deploy cycles them in any order (no wire change; `edge-manifest` 0.17.13
 reinstalls its generated lens).
 
-**Landing:** one `--no-ff` merge to `main` carrying the contract clause with the mechanism that keeps it. **Inc 3
+**Landing:** one `--no-ff` merge to `main` (`f276112`) carrying the contract clause with the mechanism that keeps it.
+Its CI run was red on one job the local gate set cannot see — `unit-shard-coverage`, which requires every package to
+sit in exactly one unit shard's glob list and did not know `internal/lenscolumns`; fixed in the same run (`f3fd09d`,
+shard 4 + the coverage list), CI green on run 1754. Classed brief-gap: a NEW `internal/*` package joins a shard in
+`.github/workflows/ci.yml` as part of the increment that creates it. **Inc 3
 stays sequenced** behind §11's trigger; the row returns to the board only when that trigger fires.
 
 **Neighbours on ship:** none blocked on this row; `lint-gap-column-declaration` keeps its UNREADABLE bucket for plain
