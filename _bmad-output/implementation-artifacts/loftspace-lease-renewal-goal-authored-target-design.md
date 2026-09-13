@@ -562,15 +562,37 @@ project `signalsSubmittedAt:null`, and a `SetApplicantProfile` task land on the 
 **In-scope gotchas:** the leg's `Target` column is reached across the `renews` hop — OPTIONAL in cypher shape
 only (every live renewal has one by construction; `leaseappAlive` gates the gap) — the dossier's optional-hop
 Params class, pinned by the planner test seeding no walk gap; `present` on a bool is always true
-(`planner/state.go:45`) — hence a timestamp column; the mark lease (≤30 min) delays the live re-plan; the
-existing open `SignRenewal` task stays open until signals land (no stale arm for it — it becomes completable, not
-stale). Standing checklist + dossier entries walked (packages: optional-hop params · lens↔op population coupling
-· precedent may carry debt; vertical-apps: sibling-form dead end · op-name lint on `cmd/<app>` edits).
+(`planner/state.go:45`) — hence a timestamp column. Standing checklist + dossier entries walked (packages:
+optional-hop params · lens↔op population coupling · precedent may carry debt; vertical-apps: sibling-form dead
+end · op-name lint on `cmd/<app>` edits).
 
-**Adjacent finds:** `SetApplicantProfile`'s descriptor declares `references` as an `integer` count
-(`permissions.go`) while the script consumes an array of strings — the generic catalog form would submit a shape
-the op rejects; absorbed here as its own unit if the descriptor path is exercised, else fixed with the FE
-increment (the shipped form bypasses the descriptor).
+**Adjacent finds:** `SetApplicantProfile`'s descriptor declared `references` as an `integer` count
+(`permissions.go`) while the script reads a list of strings (a count submitted through it was silently dropped to
+zero) — fixed in the build commit: the descriptor now declares the DDL's array, which the shared form module
+refuses to render rather than mis-shape.
 
 **Non-goals:** changing `SetApplicantProfile`'s ownership guard to admit the task path (the self-voiced form is the
 ratified shape; the stale arm retires the task); a goal atom for the profile; `renewalsRead` columns.
+
+**Shipped `8a046814` (build commit) — deviations from the brief, and what landing it live found.**
+- The cold review (opus, one pass) found two premises false and the diff was amended before merge: (1) the
+  apply-flow profile form is hidden on an approved application, so "the tenant may equally submit from the form"
+  named a route the FE did not offer — the application card now carries the form on an approved application with
+  no profile, and the stale arm's premise is true again; (2) a fresh cycle plans `[setTerms, submitProfile,
+  signRenewal]` (equal-cost legs order by ref), so the card's hint no longer promises the task "within a minute"
+  and points at the application card instead. Two more stale arms (`VerifyGuarantor`, `SignRenewal`) were added
+  for the duplicate task a re-minted episode leaves; the descriptor `references` type fixed (above); `staleUserTasks`'
+  Description and the descriptor-list comment updated; the profile task's disabled label no longer says "Loupe".
+- The review's headline — that an in-flight episode reuses its pinned leg verbatim
+  (`strategist.go resolveGoalAction`) so the live stuck cycle would need `lattice weaver revoke` + `enable` —
+  was correct as a mechanism and did not bind here: the live gap held no mark (its 09-12 `SignRenewal` task had
+  been cancelled and the mark released), so the 0.34.0 reprojection opened a fresh episode and minted the
+  `SetApplicantProfile` task within a second of the upgrade, no operator verb needed. **Rule for the next fire
+  that changes a pinned leg's `pre`:** a gap whose mark is still pinned to the old leg does NOT re-plan — read the
+  mark before promising a live outcome; `revoke` + `enable` is the verb.
+- Live proof, tenant `dzst9ZB6…` on `renewalComplete.QomdjY7h…`: profile submitted self-voiced through the
+  exact envelope the form sends → `signalsSubmittedAt` projected → `staleUserTasks` cancelled the profile task
+  before the FE's own `CompleteTask` arrived (the race the review named; the FE swallows it, the task ends
+  cancelled either way) → the planner advanced and minted a second `SignRenewal` task beside the 09-05 one →
+  the ORIGINAL, once-refused task signed the renewal (`accepted`, `status: complete`) → the new arm cancelled the
+  duplicate. Inbox empty.

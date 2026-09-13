@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `beb0fc12` · The desk reaches a retired studio's classes — `wellnessSessions` falls back to the session's `atLocation` snapshot, `ReassignSession` re-snapshots on a move, repair form operator-only.
+- 2026-09-06 · `beb0fc12` · The class card quotes the price the seat will charge — `cardPriceCents` applies CreateBooking's own rate rule (approved lease ⇔ `.tenancy`), "· resident rate" only when it differs.
 - 2026-09-06 · `beb0fc12` · The desk's class picker leads with what is still to run, past classes behind an optgroup, nothing dropped.
 - 2026-09-06 · `beb0fc12` · A manual charge needs a memo — `post_entry` refuses a ref-less debit without one, the staff descriptor requires it, the FE refuses a blank note like a zero amount.
 - 2026-09-06 · `28259217` · A recurring class is called off in one act — `wellnessSessions` projects `seriesKey`; `TombstoneSessionSeries` cancels every still-upcoming occurrence at the confirmed studio; 52 occurrences in 36 ms.

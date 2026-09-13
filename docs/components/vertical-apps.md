@@ -85,3 +85,12 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   from the literal. Minted: wellness/clinic catalog mirror (2026-09-13), caught cold. Check: a scan over embedded
   source classifies EVERY occurrence of the identifier (and the loaders/promise that alias it) as a known non-read
   or a read, and fails at the line on anything else; prove it with a mutation battery, not a green run.
+
+- **A "the person can also do it from X" claim — in a package comment, a lens rationale, or a card's hint — is a
+  claim about X's RENDER GATE in this row's state, and a "usually within N" promise is a claim about the mechanism's
+  actual order.** The renewal chain's `submitProfile` leg cited the apply-flow profile form as the tenant's second
+  route; that form hides once the landlord approves, and every renewing tenant is approved. The card's hint promised
+  the profile task "within a minute" while equal-cost legs order by ref, so `setTerms` runs first. Minted: LoftSpace
+  refused-signature (2026-09-13), both caught cold. Check: for every route a comment or hint names, open that
+  surface's `if (…) card.append(…)` gate with the row's live state; for every timing promise, name the leg order or
+  lease that bounds it, or cut the number.
