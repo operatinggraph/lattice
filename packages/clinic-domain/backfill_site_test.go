@@ -14,6 +14,7 @@
 //  2. TestClinic_BackfillAppointmentSite_NoopAlreadyHasSite — no-ops (site unchanged) when the appointment already carries a live atSite link
 //  3. TestClinic_BackfillAppointmentSite_NoopAmbiguousSites — no-ops (never guesses) when the provider practicesAt zero or two-or-more sites
 //  4. TestClinic_BackfillAppointmentSite_Idempotent   — a second dispatch after a successful backfill is a clean no-op
+//  5. TestClinic_BackfillAppointmentSite_DeadSiteNotCounted — a practicesAt link to a tombstoned building does not count: one live + one dead backfills to the live one; only-dead no-ops
 package clinicdomain_test
 
 import (
@@ -193,4 +194,70 @@ func TestClinic_BackfillAppointmentSite_Idempotent(t *testing.T) {
 	if first["targetVertex"] != second["targetVertex"] {
 		t.Fatalf("atSite link target changed across re-dispatch: %v -> %v", first["targetVertex"], second["targetVertex"])
 	}
+}
+
+// TestClinic_BackfillAppointmentSite_DeadSiteNotCounted proves the
+// exactly-one rule counts LIVE sites. TombstoneLocation (location-domain)
+// cascades onto no practicesAt link, so a provider moved off a decommissioned
+// site keeps a live link to a dead building; that link must not make a
+// one-site provider read as two (the live shape on the shared stack: every
+// still-site-less appointment belonged to a provider with one live and one
+// decommissioned site, and the op no-op'd them all as ambiguous).
+func TestClinic_BackfillAppointmentSite_DeadSiteNotCounted(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "backfill-deadsite")
+
+	t.Run("one live and one tombstoned site backfills to the live one", func(t *testing.T) {
+		patientKey := createPatient(t, ctx, conn, cp, cons, "bfdpat0001", "Dead Site Patient")
+		providerKey := createProvider(t, ctx, conn, cp, cons, "bfdprv0001", "Dr. Moved Site", "Cardiology")
+		liveBuilding := clCreateBuilding(t, ctx, conn, cp, cons, "bfdbldL001")
+		deadBuilding := clCreateBuilding(t, ctx, conn, cp, cons, "bfdbldD001")
+		assignProviderSite(t, ctx, conn, cp, cons, "bfdasgL001", providerKey, liveBuilding, processor.OutcomeAccepted)
+		assignProviderSite(t, ctx, conn, cp, cons, "bfdasgD001", providerKey, deadBuilding, processor.OutcomeAccepted)
+
+		// Decommission the second site in place — isDeleted on the building,
+		// every link it carries left live, the shape TombstoneLocation leaves
+		// behind (the remTombstoneVertex idiom, clinic-reminders).
+		clSeedVertex(t, ctx, conn, deadBuilding, "building", true)
+		if del, _ := clReadDoc(t, ctx, conn, practicesAtLinkKey(providerKey, deadBuilding))["isDeleted"].(bool); del {
+			t.Fatalf("the practicesAt link to the tombstoned building must stay live (TombstoneLocation cascades onto no link) for this test to prove anything")
+		}
+
+		apptID := clSubmit(t, ctx, conn, cp, cons, "bfdappt0001", "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-05T15:00:00Z","endsAt":"2026-07-05T15:30:00Z"}`,
+			[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		apptKey := "vtx.appointment." + apptID
+
+		clSubmit(t, ctx, conn, cp, cons, "bfdback0001", "BackfillAppointmentSite", "appointment",
+			`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+
+		doc := clReadDoc(t, ctx, conn, atSiteLinkKey(apptKey, liveBuilding))
+		if del, _ := doc["isDeleted"].(bool); doc["class"] != "atSite" || del {
+			t.Fatalf("atSite link to the live site should be written; got class=%v isDeleted=%v", doc["class"], del)
+		}
+		if !clMissing(t, ctx, conn, atSiteLinkKey(apptKey, deadBuilding)) {
+			t.Fatalf("no atSite link may name the tombstoned building")
+		}
+	})
+
+	t.Run("only a tombstoned site no-ops", func(t *testing.T) {
+		patientKey := createPatient(t, ctx, conn, cp, cons, "bfopat0001", "Only Dead Patient")
+		providerKey := createProvider(t, ctx, conn, cp, cons, "bfoprv0001", "Dr. Only Dead", "Cardiology")
+		deadBuilding := clCreateBuilding(t, ctx, conn, cp, cons, "bfobldD001")
+		assignProviderSite(t, ctx, conn, cp, cons, "bfoasgD001", providerKey, deadBuilding, processor.OutcomeAccepted)
+		clSeedVertex(t, ctx, conn, deadBuilding, "building", true)
+
+		apptID := clSubmit(t, ctx, conn, cp, cons, "bfoappt0001", "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-06T15:00:00Z","endsAt":"2026-07-06T15:30:00Z"}`,
+			[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		apptKey := "vtx.appointment." + apptID
+
+		clSubmit(t, ctx, conn, cp, cons, "bfoback0001", "BackfillAppointmentSite", "appointment",
+			`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+
+		if !clMissing(t, ctx, conn, atSiteLinkKey(apptKey, deadBuilding)) {
+			t.Fatalf("an appointment whose provider's only site is decommissioned must stay site-less, never be linked to the dead building")
+		}
+	})
 }

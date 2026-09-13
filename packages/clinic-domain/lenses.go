@@ -782,9 +782,10 @@ RETURN
 //
 // Non-convergence safety (mirrors cafe-domain's own missing_staleat note,
 // lenses.go): BackfillAppointmentSite (ddls.go) only ever writes the atSite
-// link when the appointment's provider practicesAt EXACTLY ONE site — zero
-// (an unassigned or dead provider) or two-or-more (genuinely ambiguous which
-// site) both leave the op a clean no-op. Such an appointment's missing_site
+// link when the appointment's provider practicesAt EXACTLY ONE live site — zero
+// (an unassigned or dead provider, or one whose only sites are decommissioned)
+// or two-or-more (genuinely ambiguous which site) both leave the op a clean
+// no-op. Such an appointment's missing_site
 // stays true forever, so Weaver re-dispatches BackfillAppointmentSite against
 // it on every convergence pass — harmlessly: each dispatch is an idempotent
 // no-op (empty mutations/events), never a retry that could clobber anything

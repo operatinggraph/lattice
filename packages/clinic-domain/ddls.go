@@ -603,9 +603,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"future appointment booked without one. A no-op (empty mutations/events) if the appointment already carries " +
 			"a live atSite link (another dispatch already won, or a redelivery). Otherwise it resolves the appointment's " +
 			"own provider LIVE off its withProvider link (appointment_provider, the same bounded read MarkPastDueNoShow " +
-			"uses above) and looks up that provider's practicesAt sites (sites_for_provider). When EXACTLY ONE site " +
+			"uses above) and looks up that provider's practicesAt sites (sites_for_provider), keeping only those whose " +
+			"building is still alive (TombstoneLocation cascades onto no practicesAt link, so a decommissioned site " +
+			"lingers on the provider). When EXACTLY ONE live site " +
 			"comes back, it writes the atSite link — the identical mutation CreateAppointment's own site branch writes. " +
-			"When ZERO or TWO-OR-MORE sites come back, it is ambiguous which site this appointment belongs to and the op " +
+			"When ZERO or TWO-OR-MORE live sites come back, it is ambiguous which site this appointment belongs to and the op " +
 			"never guesses: it no-ops cleanly, the same sole-site fallback semantics the booking UI's own client-side " +
 			"site auto-fill applies (cmd/clinic-app/web/app.js). Such an appointment stays missing_site forever, which " +
 			"is harmless — the gap is idempotently re-dispatched and cleanly no-ops every time, exactly the " +
@@ -754,7 +756,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>"},
 				ExpectedOutcome: "Validates the appointment is alive + class=appointment. No-ops cleanly (empty " +
 					"mutations/events) if it already carries a live atSite link. Otherwise resolves its provider LIVE " +
-					"off the withProvider link and looks up that provider's practicesAt sites: when exactly one comes " +
+					"off the withProvider link and looks up that provider's practicesAt sites, counting only those whose " +
+					"building is still alive: when exactly one comes " +
 					"back, writes the atSite link (the same mutation CreateAppointment's own site branch writes) and " +
 					"returns primaryKey as that LINK key (the op's only mutation, the AssignProviderSite convention); " +
 					"when zero or two-or-more come back, no-ops cleanly rather than guess. Submitted under Weaver's " +
@@ -3756,11 +3759,24 @@ def execute(state, op):
                 return {"mutations": [], "events": [], "response": {}}
 
         provider = appointment_provider(appt_id)
-        sites = sites_for_provider(provider)
+        # Only LIVE sites count. TombstoneLocation (location-domain) cascades
+        # onto no practicesAt link, so a provider moved off a decommissioned
+        # site keeps a live link to a dead building; sites_for_provider hands
+        # that link back because the confinement callers re-prove each
+        # building themselves (worksAt_covers). Here the count IS the decision,
+        # so the dead site must drop out before it is taken -- otherwise a
+        # provider at one live site reads as two and every appointment of
+        # theirs stays missing_site forever, while the providerSites read model
+        # (and the booking UI's auto-fill on it) shows the one site. vertex_live
+        # is the same per-candidate (e) re-proof worksAt_covers performs, and
+        # the same building screen clinic-reminders' sites_for_provider applies
+        # for its BackfillVisitSeriesSite pick (visitseries.go).
+        sites = [s for s in sites_for_provider(provider) if vertex_live(s)]
         if len(sites) != 1:
-            # Zero sites (an unassigned or dead provider) or two-or-more (which
-            # one this appointment belongs to is genuinely ambiguous) — never
-            # guess, the same sole-site fallback semantics the booking UI's own
+            # Zero live sites (an unassigned or dead provider, or one whose only
+            # sites are decommissioned) or two-or-more (which one this
+            # appointment belongs to is genuinely ambiguous) — never guess, the
+            # same sole-site fallback semantics the booking UI's own
             # client-side site auto-fill applies (submitBook, app.js). This
             # appointment stays missing_site forever, which is harmless: the
             # gap is idempotently re-dispatched and cleanly no-ops every time,
