@@ -6,21 +6,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
 // three consumer (scope=self) ones, CreateBooking, JoinWaitlist and
 // CancelBooking; the staff standing ones, CreateStudio, CreateSession,
-// CreateSessionSeries, TombstoneSessionSeries, TombstoneStudio and
-// CreateInstructor; and the
+// CreateSessionSeries, TombstoneSessionSeries, ReassignSessionSeries,
+// TombstoneStudio and CreateInstructor; and the
 // provider-hat standing ones, TombstoneSession, SetBookingAttendance and
 // SetInstructorProfile — mirroring clinic-domain's adoption (Fire 5 Inc 1)
 // and service-domain's original RequestService op-meta.
 //
-// TombstoneSessionSeries declares TargetType `sessionseries`, and no lens
-// projects a sessionseries entity today (edge-manifest's edgeEntitySessions
-// projects the OCCURRENCES, carrying no series column) — so no descriptor
-// client can resolve its target yet, and per OpDispatchSpec.TargetType a
-// client that cannot resolve one "has no business offering the op". The
-// descriptor is still what this package OWES the vocabulary: the day a
-// series-entity row exists the op lights up, whereas a missing descriptor
-// would leave a granted op invisible with nothing naming why. cmd/wellness-app
-// reaches the op through its own hand-built envelope either way.
+// TombstoneSessionSeries and ReassignSessionSeries declare TargetType
+// `sessionseries`, and no lens projects a sessionseries entity today
+// (edge-manifest's edgeEntitySessions projects the OCCURRENCES, carrying no
+// series column) — so no descriptor client can resolve their target yet, and
+// per OpDispatchSpec.TargetType a client that cannot resolve one "has no
+// business offering the op". The descriptors are still what this package OWES
+// the vocabulary: the day a series-entity row exists both ops light up,
+// whereas a missing descriptor would leave a granted op invisible with nothing
+// naming why. cmd/wellness-app reaches both through its own hand-built
+// envelopes either way.
 //
 // TombstoneStudio and CreateInstructor are granted `operator` alone
 // (permissions.go's mk() helper — entity provisioning stays a trusted-tool
@@ -596,12 +597,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The studio confirmation probe. Absence is a meaningful
 				// rejection the script renders (WrongStudio), not a
 				// correctness error — the same shape TombstoneSession's own
-				// atStudio probe uses. Every per-occurrence read past this one
-				// is a class-(e) follow-up off the partOf walk: a caller holds
+				// atStudio probe uses. The studio vertex itself is declared
+				// beside it: the front-of-house binder's studio_locations walk
+				// re-proves it live before resolving its rooms, and a retired
+				// studio is the fail-closed AuthDenied that walk renders, never
+				// a correctness error. Every per-occurrence read past these is
+				// a class-(e) follow-up off the partOf walk: a caller holds
 				// only the series key, so which sessions hang off it is not
 				// declarable up front.
 				OptionalReads: []string{
 					"lnk.sessionseries.{payload.seriesKey:id}.atStudio.studio.{payload.studio:id}",
+					"{payload.studio}",
 				},
 				// Two walks. The series' own partOf-in set is the op's whole
 				// subject and its hub is right there in the payload, so it is
@@ -612,6 +618,77 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// not yet resolved. The second is the operator-role
 				// confinement probe: the workplace-exempt short-circuit walks
 				// the actor's own holdsRole links (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.seriesKey}", Relation: "partOf", Direction: "in"},
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "ReassignSessionSeries",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Move the remaining classes",
+				Description: "Shift every class still to come in this recurring run to a new day and time, keeping their bookings and instructors. Classes that have already happened are left alone.",
+				Icon:        "calendar",
+				Tone:        "primary",
+				SubmitLabel: "Move remaining classes",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.sessionseries.<NanoID> of the recurring class to move — auto-filled from the series being viewed."},` +
+				`"studio":{"type":"string","title":"Studio","description":"vtx.studio.<NanoID> — must be the series' actual studio."},` +
+				`"anchorKey":{"type":"string","description":"vtx.session.<NanoID> of the next class still to come, as shown — auto-filled from the roster; rejected if it is no longer the next class."},` +
+				`"anchorStartsAt":{"type":"string","format":"date-time","description":"When that next class starts, as shown — auto-filled from the roster; rejected if the class has since moved."},` +
+				`"startsAt":{"type":"string","format":"date-time","title":"Next class starts","description":"The new start of the next class still to come, aligned to the 15-minute grid; every later class shifts by the same amount."},` +
+				`"endsAt":{"type":"string","format":"date-time","title":"Next class ends","description":"The new end of that next class, aligned to the 15-minute grid; every moved class takes on this length."}},` +
+				`"required":["seriesKey","studio","anchorKey","anchorStartsAt","startsAt","endsAt"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey":      "The recurring class being moved — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. Only its still-upcoming occurrences move; the series record itself, and every class that already ran, stay as they are.",
+				"studio":         "The studio this recurring class runs at — it must be the series' own studio, so a mismatched value is rejected, and only occurrences still held at it are moved. The classes stay in this studio.",
+				"anchorKey":      "The class the roster showed as the next one still to come — filled by the client from the loaded roster, not typed. If it is no longer the next class (it began, was called off, or was moved while the form was open), the move is rejected so the run is never shifted by an amount nobody chose; reload and try again.",
+				"anchorStartsAt": "When the roster showed that next class starting — filled by the client, not typed. The whole run shifts by the difference between this and the new start, so a class moved out from under the form is rejected rather than silently re-anchoring the shift.",
+				"startsAt":       "The new start of the next class still to come. Every later class in the run shifts by the same amount, so a run moved from Mondays at 6 to Wednesdays at 7 keeps its weekly rhythm. Must be in the future and on the 15-minute grid; the studio (and each class's instructor) cannot already be booked for any part of any moved class's new span.",
+				"endsAt":         "The new end of that next class. Every moved class takes on this length. Must be on the 15-minute grid and at most 24 hours after the start.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       sessionSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  sessionSeriesVertexDDL,
+				// `{entity.studioKey}` fills the studio off the series row
+				// being viewed, exactly as TombstoneSessionSeries's does —
+				// the one value only the machine knows is never asked of the
+				// staffer.
+				ContextParams: map[string]string{
+					"studio": "{entity.studioKey}",
+				},
+				// The series vertex is hydrated (vertex_alive + class_of read
+				// it from declared state, not live KV), so its absence is a
+				// correctness error, not a rejection the script renders. The
+				// anchor and its schedule are declared beside it so the pin
+				// is compared against hydrated state — on an OCC re-execution
+				// the re-hydration is what makes a concurrently moved anchor
+				// read as AnchorMoved rather than silently re-anchoring the
+				// shift.
+				Reads: []string{"{payload.seriesKey}", "{payload.anchorKey}", "{payload.anchorKey}.schedule"},
+				// The studio confirmation probe, TombstoneSessionSeries's
+				// exactly: absence is the WrongStudio rejection the script
+				// renders. The studio vertex itself is declared beside it: the
+				// front-of-house binder's studio_locations walk re-proves it
+				// live before resolving its rooms, and a retired studio is the
+				// fail-closed AuthDenied that walk renders, never a correctness
+				// error. Every per-occurrence read past these — each
+				// occurrence's atStudio link, its .schedule, its ledBy walk,
+				// and the slot cells its new span needs — is a class-(e)
+				// follow-up off the partOf walk: a caller holds only the
+				// series key, so none of them is declarable up front.
+				OptionalReads: []string{
+					"lnk.sessionseries.{payload.seriesKey:id}.atStudio.studio.{payload.studio:id}",
+					"{payload.studio}",
+				},
+				// TombstoneSessionSeries's two walks: the series' own
+				// partOf-in set (the op's whole subject, hubbed on the
+				// payload, so DECLARED) and the operator-role confinement
+				// probe over the actor's holdsRole links.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.seriesKey}", Relation: "partOf", Direction: "in"},
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},

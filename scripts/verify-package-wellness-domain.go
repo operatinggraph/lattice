@@ -10,8 +10,9 @@
 //
 //	20 DDLs: studio (CreateStudio + TombstoneStudio), session (CreateSession +
 //	  TombstoneSession + ReassignSession + CreateSessionSeries +
-//	  TombstoneSessionSeries), sessionseries (CreateSessionSeries +
-//	  TombstoneSessionSeries), booking (CreateBooking + CancelBooking +
+//	  TombstoneSessionSeries + ReassignSessionSeries), sessionseries
+//	  (CreateSessionSeries + TombstoneSessionSeries + ReassignSessionSeries),
+//	  booking (CreateBooking + CancelBooking +
 //	  JoinWaitlist + SetBookingAttendance + ReleaseOrphanedBooking +
 //	  PromoteWaitlistedBookings), instructor (CreateInstructor +
 //	  TombstoneInstructor + SetInstructorProfile + BindInstructorIdentity),
@@ -23,12 +24,13 @@
 //	  meta.ddl.aspectType — ddls.go's comment explains why a vertex-shaped
 //	  mutation uses the aspectType Kind], wellnessRefundDetail), each with its
 //	  self-description.
-//	20 permission vertices: one per (operationType, scope) pair (Contract #8
+//	21 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1). Most ops carry a single scope=any vertex granted to operator;
-//	  CreateStudio/CreateSession/CreateSessionSeries/TombstoneSessionSeries
-//	  additionally grant frontOfHouse at scope=any (the studio front-desk beat
-//	  — the series call-off is deliberately NOT granted to provider, unlike
-//	  TombstoneSession); TombstoneSession/
+//	  CreateStudio/CreateSession/CreateSessionSeries/TombstoneSessionSeries/
+//	  ReassignSessionSeries additionally grant frontOfHouse at scope=any (the
+//	  studio front-desk beat — the series call-off and series move are
+//	  deliberately NOT granted to provider, unlike TombstoneSession);
+//	  TombstoneSession/
 //	  ReassignSession/SetBookingAttendance additionally grant provider AND
 //	  frontOfHouse at scope=any (the bound-instructor / staff split);
 //	  CreateBooking/JoinWaitlist/CancelBooking each carry both a scope=any
@@ -74,7 +76,7 @@ const (
 
 var wellnessExpectedOps = []string{
 	"CreateStudio", "TombstoneStudio",
-	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries",
+	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries",
 	"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance",
 	"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity",
 	"ReleaseOrphanedBooking", "PromoteWaitlistedBookings",
@@ -96,6 +98,7 @@ var wellnessOpGrants = map[string][]permGrant{
 	"CreateSession":             {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"CreateSessionSeries":       {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSessionSeries":    {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"ReassignSessionSeries":     {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSession":          {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
 	"ReassignSession":           {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
 	"CreateBooking":             {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
@@ -199,15 +202,15 @@ func main() {
 
 	ddlChecks := []ddlCheck{
 		{canonical: "studio", class: "meta.ddl.vertexType", ops: []string{"CreateStudio", "TombstoneStudio"}},
-		{canonical: "session", class: "meta.ddl.vertexType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"}},
-		{canonical: "sessionseries", class: "meta.ddl.vertexType", ops: []string{"CreateSessionSeries", "TombstoneSessionSeries"}},
+		{canonical: "session", class: "meta.ddl.vertexType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
+		{canonical: "sessionseries", class: "meta.ddl.vertexType", ops: []string{"CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "booking", class: "meta.ddl.vertexType", ops: []string{"CreateBooking", "CancelBooking", "JoinWaitlist", "SetBookingAttendance", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},
 		{canonical: "instructor", class: "meta.ddl.vertexType", ops: []string{"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity"}},
 		{canonical: "studioProfile", class: "meta.ddl.aspectType", ops: []string{"CreateStudio"}},
-		{canonical: "sessionSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "ReassignSession", "CreateSessionSeries"}},
+		{canonical: "sessionSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "sessionSeriesDefinition", class: "meta.ddl.aspectType", ops: []string{"CreateSessionSeries"}},
-		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"}},
-		{canonical: "instructorSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"}},
+		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
+		{canonical: "instructorSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "bookerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"}},
 		{canonical: "bookingStatus", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance", "PromoteWaitlistedBookings"}},
 		{canonical: "sessionSeatClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "CancelBooking", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},

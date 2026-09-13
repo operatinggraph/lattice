@@ -2044,6 +2044,109 @@ function renderCancelClass(sessionKey) {
       btn.disabled = false;
     }
   });
+  renderMoveSeries(se, upcoming);
+}
+
+// earliestUpcomingInSeries picks, from the loaded sessions, the earliest
+// still-to-come occurrence of se's run at se's studio — the anchor
+// ReassignSessionSeries itself resolves (packages/wellness-domain/ddls.go), by
+// the same predicate upcomingSeriesCounts tallies with, so the class the form
+// prefills is the class the op moves first, and the N on the button is the
+// number of classes that follow it.
+function earliestUpcomingInSeries(sessions, se) {
+  const now = Date.now();
+  let anchor = null;
+  for (const x of sessions || []) {
+    if (!x.seriesKey || !x.startsAt) continue;
+    if (!(new Date(x.startsAt).getTime() > now)) continue;
+    if (seriesCountKey(x) !== seriesCountKey(se)) continue;
+    if (!anchor || x.startsAt < anchor.startsAt) anchor = x;
+  }
+  return anchor;
+}
+
+// renderMoveSeries appends the "Move the remaining N classes" control beside
+// the series call-off above, offered on the very same predicate (the same
+// staffer, the same run, the same studio, the same N — ReassignSessionSeries
+// moves exactly the set TombstoneSessionSeries would cancel). A small inline
+// form takes the NEXT occurrence's new start and end, prefilled from where it
+// stands today; every later occurrence follows by the same shift, on the same
+// studio, with its own instructor and its bookings.
+function renderMoveSeries(se, upcoming) {
+  const anchor = earliestUpcomingInSeries(staffSessionsCache, se);
+  if (!anchor) return;
+  const wrap = document.createElement("div");
+  wrap.className = "card-actions";
+  const toggle = document.createElement("button");
+  toggle.id = "move-series-toggle";
+  toggle.className = "ghost";
+  toggle.textContent = "Move the remaining " + upcoming + " classes in this series";
+  const form = document.createElement("div");
+  form.id = "move-series-form";
+  form.className = "session-form";
+  form.hidden = true;
+  const note = document.createElement("div");
+  note.className = "meta";
+  note.textContent =
+    "Set the new time of the next class (" + fmtRange(anchor.startsAt, anchor.endsAt) +
+    "); the other " + (upcoming - 1) + " shift by the same amount and keep their bookings.";
+  form.appendChild(note);
+  const mkField = (id, label, value) => {
+    const field = document.createElement("div");
+    field.className = "field";
+    const lab = document.createElement("label");
+    lab.textContent = label;
+    const input = document.createElement("input");
+    input.type = "datetime-local";
+    input.id = id;
+    input.step = "900";
+    // The wellness grid is UTC and toUtcInstant stamps the wall-clock
+    // verbatim, so the prefill is the stored instant's own leading
+    // "YYYY-MM-DDTHH:MM" — never a local-zone rendering.
+    input.value = (value || "").slice(0, 16);
+    field.appendChild(lab);
+    field.appendChild(input);
+    return field;
+  };
+  form.appendChild(mkField("move-series-starts", "Next class starts", anchor.startsAt));
+  form.appendChild(mkField("move-series-ends", "Next class ends", anchor.endsAt));
+  const submit = document.createElement("button");
+  submit.id = "move-series-submit";
+  submit.textContent = "Move classes";
+  form.appendChild(submit);
+  wrap.appendChild(toggle);
+  wrap.appendChild(form);
+  document.getElementById("roster-body").appendChild(wrap);
+
+  toggle.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  submit.addEventListener("click", async () => {
+    const startsAt = toUtcInstant(document.getElementById("move-series-starts").value);
+    const endsAt = toUtcInstant(document.getElementById("move-series-ends").value);
+    if (!startsAt || !endsAt) {
+      toast("Set both the new start and the new end of the next class.", false);
+      return;
+    }
+    // This one moves classes the staffer is not looking at, so it asks
+    // first, the way the call-off beside it does.
+    if (!window.confirm("Move " + upcoming + " classes — the next one to " + fmtRange(startsAt, endsAt) + "? Classes that already ran are not affected.")) return;
+    submit.disabled = true;
+    try {
+      await moveSeries(se, anchor, startsAt, endsAt);
+      toast("Remaining classes in the series moved.", true);
+      staffSessionsCache = null;
+      document.getElementById("roster-session").dataset.loaded = "";
+      setTimeout(loadRoster, 700);
+    } catch (e) {
+      // A StudioConflict / InstructorConflict names the occurrence that
+      // collided and an AnchorMoved says the next class changed under the
+      // form; both messages are surfaced verbatim so the desk sees which and
+      // knows to reload.
+      toast(e.message, false);
+      submit.disabled = false;
+    }
+  });
 }
 
 // cancelClass submits TombstoneSession — for a class this instructor leads
@@ -2103,13 +2206,14 @@ async function cancelSeries(se) {
       // class_of answer off the hydrated state, so its absence is a
       // correctness error, not a rejection the script renders.
       reads: [se.seriesKey],
-      // The studio confirmation probe, (d)-declared: an absent link is the
-      // meaningful WrongStudio rejection, not a correctness error — the same
-      // split cancelClass's own atStudio probe draws. Nothing per-occurrence
-      // is declared: the occurrence keys are discovered by the script's own
-      // partOf walk, so a client cannot name them up front (they are
-      // class-(e) follow-up reads, Contract #2 §2.5).
-      optionalReads: ["lnk.sessionseries." + idOf(se.seriesKey) + ".atStudio.studio." + idOf(se.studioKey)],
+      // The studio confirmation probe and the studio vertex itself,
+      // (d)-declared: an absent link is the meaningful WrongStudio rejection
+      // (the same split cancelClass's own atStudio probe draws), a retired
+      // studio the workplace walk's own AuthDenied — neither a correctness
+      // error. Nothing per-occurrence is declared: the occurrence keys are
+      // discovered by the script's own partOf walk, so a client cannot name
+      // them up front (they are class-(e) follow-up reads, Contract #2 §2.5).
+      optionalReads: ["lnk.sessionseries." + idOf(se.seriesKey) + ".atStudio.studio." + idOf(se.studioKey), se.studioKey],
       // The occurrence walk itself IS declarable — its hub is the series key
       // in the payload — even though every read it resolves off each link is
       // not. Enumerations are metadata (Contract #2 §2.5.1): declaring the
@@ -2119,6 +2223,54 @@ async function cancelSeries(se) {
       payload: { seriesKey: se.seriesKey, studio: se.studioKey },
     },
     "call off the series",
+    false,
+  );
+}
+
+// moveSeries submits ReassignSessionSeries — the whole-run counterpart of
+// reassignSession's time move, with cancelSeries's envelope shape plus the
+// anchor pin (packages/wellness-domain/ddls.go): the script walks the series'
+// partOf-in occurrences itself and shifts every still-upcoming occurrence at
+// the named studio by startsAt − anchorStartsAt, so the FE sends the keys it
+// can name, the anchor as this roster saw it, and the anchor's new span — and
+// never enumerates the occurrences or the cells they will need. The pin is
+// what makes a stale roster safe: if the anchor began, was called off or was
+// moved while the form sat open, the op refuses AnchorMoved instead of
+// re-anchoring the shift on the next class and carrying the run somewhere
+// nobody chose. Like cancelSeries it carries NO authContext.target: the grant
+// is scope=any and the script confines it in-script off the series' own
+// studio.
+async function moveSeries(se, anchor, startsAt, endsAt) {
+  await opOrThrow(
+    {
+      operationType: "ReassignSessionSeries",
+      class: "sessionseries",
+      // The series vertex, the anchor and the anchor's schedule are
+      // (a)-declared required reads — vertex_alive / class_of answer off the
+      // hydrated state, and the anchor pin is compared against the schedule
+      // as hydrated for THIS execution (re-hydrated on an OCC re-execution,
+      // which is what turns a concurrent move of the anchor into AnchorMoved).
+      reads: [se.seriesKey, anchor.sessionKey, anchor.sessionKey + ".schedule"],
+      // The studio confirmation probe and the studio vertex itself,
+      // (d)-declared: an absent link is the WrongStudio rejection, a retired
+      // studio the workplace walk's own AuthDenied. Nothing per-occurrence is
+      // declared: each occurrence's schedule, its instructor and the slot
+      // cells its new span needs are discovered by the script's own partOf
+      // walk (class-(e) follow-ups, Contract #2 §2.5) — a declaration from
+      // this roster's copy of the schedules would go stale the same way the
+      // anchor pin guards against.
+      optionalReads: ["lnk.sessionseries." + idOf(se.seriesKey) + ".atStudio.studio." + idOf(se.studioKey), se.studioKey],
+      enumerations: [{ hub: se.seriesKey, relation: "partOf", direction: "in" }],
+      payload: {
+        seriesKey: se.seriesKey,
+        studio: se.studioKey,
+        anchorKey: anchor.sessionKey,
+        anchorStartsAt: anchor.startsAt,
+        startsAt,
+        endsAt,
+      },
+    },
+    "move the series",
     false,
   );
 }

@@ -271,7 +271,18 @@ var appOpCeilings = map[string]int{
 	// which no entity lens projects — an op-catalog render could not resolve a
 	// target for it even with a form to draw. A second op on an established
 	// hand-built ceremony, not a new descriptor-catalog gap.
-	"cmd/wellness-app": 14,
+	// 15: ReassignSessionSeries is the roster's "move the remaining N
+	// classes" form beside that call-off (renderMoveSeries, app.js). Its
+	// descriptor exists (wellness-domain/opmetas.go) and declares TargetType
+	// `sessionseries`, which no entity lens projects — so the descriptor path
+	// (the catalog lens + internal/descriptorform) cannot resolve a target
+	// for it, and per OpDispatchSpec.TargetType a client that cannot resolve
+	// one has no business offering the op. The form's two date fields and its
+	// anchor pin are therefore hand-wired for the same reason the call-off
+	// beside it is: the series has no entity row to render against yet, not a
+	// new descriptor-catalog gap. The day a series-entity lens lands, both
+	// literals migrate together.
+	"cmd/wellness-app": 15,
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every

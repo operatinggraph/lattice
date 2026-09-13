@@ -49,13 +49,13 @@ const (
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
 //   - session (vertexType) — owns CreateSession + TombstoneSession +
-//     ReassignSession + CreateSessionSeries + TombstoneSessionSeries (the two
-//     series-wide ops; each shares this DDL's write gate for the session
-//     vertices/aspects it mints or tombstones, alongside its own sessionseries
-//     DDL below).
+//     ReassignSession + CreateSessionSeries + TombstoneSessionSeries +
+//     ReassignSessionSeries (the three series-wide ops; each shares this DDL's
+//     write gate for the session vertices/aspects it mints, tombstones or
+//     rewrites, alongside its own sessionseries DDL below).
 //   - sessionseries (vertexType) — owns CreateSessionSeries +
-//     TombstoneSessionSeries, the studio's recurring-class parent record
-//     (§ sessionSeriesVertexTypeDDL).
+//     TombstoneSessionSeries + ReassignSessionSeries, the studio's
+//     recurring-class parent record (§ sessionSeriesVertexTypeDDL).
 //   - booking (vertexType) — owns CreateBooking + CancelBooking + JoinWaitlist.
 //   - instructor (vertexType) — owns CreateInstructor + TombstoneInstructor +
 //     BindInstructorIdentity (the provider-archetype binding,
@@ -179,7 +179,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"},
 		Description: "Wellness session DDL. Vertex shape: vtx.session.<NanoID>, class=session, root data = {} " +
 			"(minimal, D5). CreateSession validates the studio is alive + class=studio, then atomically mints the " +
 			"session + the .schedule aspect {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?} + the atStudio link " +
@@ -256,8 +256,10 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"absent that, front-of-house staff may act workplace-confined to the studio's own location " +
 			"(enforce_workplace, same as CreateSession's staff path). CreateSessionSeries (dispatched under the " +
 			"sessionseries DDL below, sessionSeriesVertexTypeDDL) mints occurrenceCount session vertices on a " +
-			"cadence, and TombstoneSessionSeries (same DDL) tombstones the still-upcoming ones and releases their " +
-			"cells — this DDL's PermittedCommands lists both because every session/schedule/slot-claim mutation " +
+			"cadence, TombstoneSessionSeries (same DDL) tombstones the still-upcoming ones and releases their " +
+			"cells, and ReassignSessionSeries (same DDL) moves the still-upcoming ones by one shared delta, " +
+			"re-writing each one's .schedule and migrating its cells — this DDL's PermittedCommands lists all three " +
+			"because every session/schedule/slot-claim mutation " +
 			"they emit is still governed, per mutation, by ITS OWN class's write gate (step6_validate.go), regardless " +
 			"of which DDL's script executed the op.",
 		Script: sessionDDLScript,
@@ -453,7 +455,7 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionSeriesVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateSessionSeries", "TombstoneSessionSeries"},
+		PermittedCommands: []string{"CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"},
 		Description: "Wellness recurring-class series DDL. Vertex shape: vtx.sessionseries.<NanoID>, " +
 			"class=sessionseries, root data = {} (minimal, D5 — the data lives in the .definition aspect). " +
 			"CreateSessionSeries validates the studio alive + class=studio and, when supplied, the instructor alive " +
@@ -492,33 +494,67 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"SeriesWalkBound rather than reporting a partial call-off. Emits wellness.sessionSeriesCancelled {seriesKey, studio, sessionKeys} and returns NO primaryKey " +
 			"(it writes nothing on the series, and the reply constraint admits only a key the op wrote). Standing is CreateSessionSeries's own workplace confinement on the same studio " +
 			"(operator-exempt); there is no instructor path — an instructor cancels the class they lead, not a " +
-			"studio's standing booking.",
+			"studio's standing booking. ReassignSessionSeries is the whole-run counterpart of ReassignSession's " +
+			"time move, on the same seriesKey + studio confirmation, standing binder and partOf-in walk as " +
+			"TombstoneSessionSeries: the caller PINS the anchor — anchorKey, the occurrence it saw as the next " +
+			"class, and anchorStartsAt, that class's start as it saw it — and startsAt/endsAt name the anchor's " +
+			"NEW instants; every still-upcoming occurrence still held at the confirmed studio moves by the same " +
+			"shift (startsAt − anchorStartsAt) onto a span of the anchor's new length, on the same studio, each " +
+			"keeping its own instructor and its bookings (the seat aspects hang off the untouched session " +
+			"vertex). The pin is checked against the walk: when the walk's earliest still-upcoming occurrence is " +
+			"not anchorKey, or its schedule no longer starts at anchorStartsAt (the class began or was cancelled " +
+			"since the roster loaded, or ReassignSession moved it — the OCC re-execution re-reads both declared " +
+			"keys), the op refuses AnchorMoved rather than carrying the run by a shift the desk never intended. " +
+			"The new span is validated exactly as ReassignSession's (canonical UTC, strictly ordered, 15-minute " +
+			"grid, ≤ 96 cells) and must start after submittedAt (SessionInPast); a shift beyond 366 days, and a " +
+			"span identical to the anchor's current one (nothing moves), are refused (InvalidArgument). Cells move " +
+			"as ONE batch per hub: across every moved " +
+			"occurrence, the cells only the old spans held are released and only the cells no old span held are " +
+			"claimed (StudioConflict / InstructorConflict on collision, naming the occurrence that collided, and " +
+			"the whole move is rejected — no partial run left behind), so a shift equal to the series' own " +
+			"interval, where each occurrence lands on the cells its successor vacates in the same op, is " +
+			"accepted rather than tripping over the batch's own releases. Each occurrence's .schedule is " +
+			"OCC-rewritten with name/capacity/priceCents/residentPriceCents carried forward and remindAt " +
+			"re-derived; the series' .definition is NOT rewritten (firstStartsAt/firstEndsAt stay the minted " +
+			"fact — the occurrences' schedules are the schedule of record, as after any ReassignSession). Same " +
+			"skips as the call-off (already-started, individually cancelled, or moved to another studio), the " +
+			"same NoUpcomingOccurrences / WrongStudio / SeriesWalkBound refusals, and the same bounded read " +
+			"cost plus the ledBy walk per moved occurrence. One operation commits as one atomic batch of at most " +
+			"1000 messages (substrate.MaxBatchMessages, two of them the Processor's own), so the assembled " +
+			"mutation count is capped at 990 (SeriesTooLarge above it — a 52-occurrence, 5-cell, instructor-led " +
+			"run shifted clear of its own cells is 1092, reachable; the same run shifted by its own interval " +
+			"writes only the difference and fits). Emits wellness.sessionSeriesMoved {seriesKey, studio, " +
+			"sessionKeys, shiftSeconds} and returns NO primaryKey, for the call-off's reason.",
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> every occurrence runs at (required, validated alive + class=studio, shared by the whole series)."},` +
 			`"name":{"type":"string","description":"The display name every occurrence shares, e.g. Evening Flow with Sam (required)."},` +
-			`"startsAt":{"type":"string","description":"First occurrence's start, RFC3339 (required). Aligned to the 15-minute booking grid; later occurrences offset by i*intervalDays days preserve alignment automatically."},` +
-			`"endsAt":{"type":"string","description":"First occurrence's end, RFC3339 (required). Aligned to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong)."},` +
+			`"startsAt":{"type":"string","description":"First occurrence's start, RFC3339 (CreateSessionSeries; required). Aligned to the 15-minute booking grid; later occurrences offset by i*intervalDays days preserve alignment automatically. On ReassignSessionSeries: the NEW start of the earliest still-upcoming occurrence at the confirmed studio (required; must be after submittedAt) — every other still-upcoming occurrence shifts by the same delta."},` +
+			`"endsAt":{"type":"string","description":"First occurrence's end, RFC3339 (CreateSessionSeries; required). Aligned to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong). On ReassignSessionSeries: the NEW end of that same earliest occurrence (required); every moved occurrence takes on this span's length."},` +
 			`"capacity":{"type":"integer","description":"Maximum concurrent bookings, shared by every occurrence (required, 1..200)."},` +
 			`"priceCents":{"type":"integer","description":"Optional per-occurrence class price in integer cents (optional, >= 0 when supplied). 0 or omitted means every occurrence is free."},` +
 			`"residentPriceCents":{"type":"integer","description":"Optional per-occurrence resident class price in integer cents (optional, >= 0 when supplied). Charged instead of priceCents to a booking whose .status.rate is resident; omitted means a resident pays priceCents same as a standard booker."},` +
 			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading every occurrence (validated alive + class=instructor; writes each occurrence's ledBy link). Listed in ContextHint.Reads when supplied."},` +
 			`"intervalDays":{"type":"integer","description":"Days between occurrences, e.g. 7 for weekly (required, 1..365)."},` +
 			`"occurrenceCount":{"type":"integer","description":"How many occurrences to mint, first included (required, 2..52 — for a single class use CreateSession instead)."},` +
-			`"seriesKey":{"type":"string","description":"vtx.sessionseries.<NanoID> of an existing series to call off (TombstoneSessionSeries; required, validated alive + class=sessionseries)."}},` +
-			// Empty because this DDL now admits TWO ops with disjoint required
+			`"seriesKey":{"type":"string","description":"vtx.sessionseries.<NanoID> of an existing series to call off or move (TombstoneSessionSeries/ReassignSessionSeries; required, validated alive + class=sessionseries)."},` +
+			`"anchorKey":{"type":"string","description":"vtx.session.<NanoID> the caller saw as the series' next still-upcoming occurrence at the studio (ReassignSessionSeries; required). AnchorMoved unless it is still the walk's earliest eligible occurrence."},` +
+			`"anchorStartsAt":{"type":"string","description":"That occurrence's startsAt as the caller saw it, RFC3339 (ReassignSessionSeries; required). AnchorMoved unless it still matches; the shift is startsAt − anchorStartsAt."}},` +
+			// Empty because this DDL admits THREE ops with disjoint required
 			// sets, the same union shape every other multi-op DDL in this file
 			// declares; each op's own required_string/required_int in the
 			// script is what actually rejects a missing field.
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.sessionseries.<NanoID> CreateSessionSeries minted. TombstoneSessionSeries returns NO primaryKey at all: the reply constraint admits only a key the op actually wrote, and it deliberately writes nothing on the series (every mutation roots at an occurrence or a slot hub). The affected session keys are not returned either — the op envelope's response permits only primaryKey (InvalidReturnShape otherwise); they ride the emitted event, and the occurrences show up on (or drop off) the studio's own wellnessSessions schedule grid."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.sessionseries.<NanoID> CreateSessionSeries minted. TombstoneSessionSeries and ReassignSessionSeries return NO primaryKey at all: the reply constraint admits only a key the op actually wrote, and both deliberately write nothing on the series (every mutation roots at an occurrence or a slot hub). The affected session keys are not returned either — the op envelope's response permits only primaryKey (InvalidReturnShape otherwise); they ride the emitted event, and the occurrences show up on (or drop off) the studio's own wellnessSessions schedule grid."}}}`,
 		FieldDescription: map[string]string{
-			"seriesKey":          "Full vtx.sessionseries.<NanoID> key of an existing series to call off (TombstoneSessionSeries). Validated alive + class=sessionseries. The series vertex itself survives — only its still-upcoming occurrences are cancelled.",
-			"studio":             "Full vtx.studio.<NanoID> key every occurrence runs at. Validated alive + class=studio; the whole series claims one studioSlotClaim set per occurrence on it. TombstoneSessionSeries requires it too, as the confirmation param: it must be the series' own studio (WrongStudio otherwise), and only occurrences still at it are cancelled.",
+			"seriesKey":          "Full vtx.sessionseries.<NanoID> key of an existing series to call off (TombstoneSessionSeries) or move (ReassignSessionSeries). Validated alive + class=sessionseries. The series vertex itself survives either op — only its still-upcoming occurrences are cancelled or moved.",
+			"studio":             "Full vtx.studio.<NanoID> key every occurrence runs at. Validated alive + class=studio; the whole series claims one studioSlotClaim set per occurrence on it. TombstoneSessionSeries and ReassignSessionSeries require it too, as the confirmation param: it must be the series' own studio (WrongStudio otherwise), and only occurrences still at it are cancelled or moved.",
+			"anchorKey":          "Full vtx.session.<NanoID> key of the occurrence the caller saw as the next still-upcoming class of the series at the confirmed studio (ReassignSessionSeries; required). Declared in ContextHint.Reads with its .schedule. The op refuses AnchorMoved unless the walk's earliest eligible occurrence is exactly this key.",
+			"anchorStartsAt":     "That occurrence's start as the caller saw it (RFC3339, canonical UTC; ReassignSessionSeries; required). The shift every moved occurrence takes is startsAt − anchorStartsAt; AnchorMoved unless the anchor's live .schedule.startsAt still equals it.",
 			"name":               "The display name every occurrence shares.",
-			"startsAt":           "First occurrence's start (RFC3339, canonical UTC). Must align to the 15-minute grid (SlotGridViolation).",
-			"endsAt":             "First occurrence's end (RFC3339, canonical UTC). Must align to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong).",
+			"startsAt":           "First occurrence's start (RFC3339, canonical UTC; CreateSessionSeries). Must align to the 15-minute grid (SlotGridViolation). On ReassignSessionSeries: the NEW start of the earliest still-upcoming occurrence at the confirmed studio, after submittedAt (SessionInPast otherwise); every other still-upcoming occurrence there shifts by the same delta, at most 366 days (InvalidArgument beyond, as is a span identical to the anchor's current one).",
+			"endsAt":             "First occurrence's end (RFC3339, canonical UTC; CreateSessionSeries). Must align to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong). On ReassignSessionSeries: the NEW end of that same earliest occurrence; every moved occurrence takes on this span's length.",
 			"capacity":           "Maximum concurrent bookings, an integer 1..200, shared by every occurrence.",
 			"priceCents":         "Optional per-occurrence class price in integer cents (>= 0). Omitted or 0 means every occurrence is free.",
 			"residentPriceCents": "Optional per-occurrence resident class price in integer cents (>= 0). Charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays priceCents same as a standard booker.",
@@ -564,6 +600,25 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 					"cancelled session keys and returns no primaryKey (nothing it writes roots at the series). Rejects WrongStudio for a " +
 					"studio that is not the series' own, and NoUpcomingOccurrences when nothing was eligible.",
 			},
+			{
+				Name: "ReassignSessionSeries — move the rest of a recurring class to a new weekday and time",
+				Payload: map[string]any{
+					"seriesKey": "vtx.sessionseries.<NanoID>", "studio": "vtx.studio.<NanoID>",
+					"anchorKey": "vtx.session.<NanoID>", "anchorStartsAt": "2026-08-03T18:00:00Z",
+					"startsAt": "2026-08-05T19:00:00Z", "endsAt": "2026-08-05T20:15:00Z",
+				},
+				ExpectedOutcome: "With anchorKey still the earliest still-upcoming occurrence at that studio and still standing at 2026-08-03T18:00Z–19:00Z, " +
+					"shifts it and every later still-upcoming occurrence there by +2 days 1 hour onto a 75-minute span: each " +
+					"one's .schedule is OCC-rewritten (name/capacity/price carried forward, remindAt re-derived), the studio " +
+					"and instructor cells only the old spans held are released and only the cells no old span held are " +
+					"claimed, in one batch. Bookings ride with their sessions; the series' .definition is untouched. Emits " +
+					"wellness.sessionSeriesMoved with the moved session keys and shiftSeconds; returns no primaryKey. " +
+					"Rejects StudioConflict / InstructorConflict (naming the occurrence that collided, nothing moved) when " +
+					"any new cell is held by another class; AnchorMoved when the anchor is no longer the next class or no " +
+					"longer starts at anchorStartsAt (reload the roster); SeriesTooLarge past 990 assembled mutations; " +
+					"WrongStudio, NoUpcomingOccurrences, SlotGridViolation, SessionTooLong, InvalidArgument for a " +
+					"no-change span, and SessionInPast when the new start is not after submittedAt.",
+			},
 		},
 	}
 }
@@ -572,7 +627,7 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionScheduleAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "ReassignSession", "CreateSessionSeries"},
+		PermittedCommands: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries"},
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
 			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?, remindAt}. " +
 			"Non-sensitive. Written by " +
@@ -580,7 +635,9 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"startsAt/endsAt update on a time move, name/capacity/priceCents/residentPriceCents update when the " +
 			"caller supplies them (re-validated with CreateSession's own bounds) else carried forward unchanged, " +
 			"remindAt " +
-			"re-derived), and CreateSessionSeries (mints one per occurrence, same shape as CreateSession's) — all owned " +
+			"re-derived), CreateSessionSeries (mints one per occurrence, same shape as CreateSession's), and " +
+			"ReassignSessionSeries (OCC-conditioned per still-upcoming occurrence; startsAt/endsAt shifted by one " +
+			"shared delta, everything else carried forward, remindAt re-derived) — all owned " +
 			"by the session vertexType DDL's script; this aspect-type DDL is the step-6 write gate. Declaration-only: " +
 			"no op handler. CreateBooking reads capacity on demand (kv.Read) to bound its seat-claim loop; " +
 			"wellness-ledger's wellnessClassPriceSettlement lens reads priceCents and residentPriceCents, charging a " +
@@ -599,7 +656,7 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"capacity":           "Maximum concurrent bookings (integer 1..200).",
 			"priceCents":         "Optional class price in integer cents (>= 0). Omitted or 0 means a free class.",
 			"residentPriceCents": "Optional resident class price in integer cents (>= 0), charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays priceCents same as a standard booker.",
-			"remindAt":           "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateSession/CreateSessionSeries/ReassignSession, not a caller input; wellness-reminders' convergence lens projects it as freshUntil to arm the @at class-reminder timer.",
+			"remindAt":           "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateSession/CreateSessionSeries/ReassignSession/ReassignSessionSeries, not a caller input; wellness-reminders' convergence lens projects it as freshUntil to arm the @at class-reminder timer.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -674,7 +731,7 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     studioSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"},
 		Description: "Studio 15-minute slot-claim aspect (wellness). Stored as vtx.studio.<NanoID>.slot<cellcode> " +
 			"(class studioSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased. CreateSession claims " +
@@ -684,7 +741,10 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			"symmetric difference between the old and new covered cells (a cell both spans cover is left alone). " +
 			"CreateSessionSeries claims one set per occurrence (the whole batch rejects StudioConflict together if " +
 			"any occurrence collides — no partial series), and TombstoneSessionSeries releases the cells of every " +
-			"occurrence it cancels, exactly as TombstoneSession does per class. Non-sensitive; created on demand, no CreateStudio init " +
+			"occurrence it cancels, exactly as TombstoneSession does per class. ReassignSessionSeries applies " +
+			"ReassignSession's symmetric-difference delta to the UNION of every moved occurrence's cells in one " +
+			"batch (a cell one occurrence vacates and its sibling takes in the same op is left alone, which is what " +
+			"lets a run shift by its own interval). Non-sensitive; created on demand, no CreateStudio init " +
 			"needed. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
@@ -717,7 +777,7 @@ func instructorSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     instructorSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"},
 		Description: "Instructor 15-minute slot-claim aspect (wellness). Stored as vtx.instructor.<NanoID>.slot<cellcode> " +
 			"(class instructorSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased. CreateSession claims " +
@@ -732,7 +792,9 @@ func instructorSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			"the series' single instructor (the whole batch rejects InstructorConflict together if any occurrence " +
 			"collides — no partial series); TombstoneSessionSeries releases each cancelled occurrence's cells from " +
 			"whichever instructor leads THAT occurrence at cancellation time, which a mid-run ReassignSession sub " +
-			"makes different from the series' original. Non-sensitive; created on demand only when a session names an " +
+			"makes different from the series' original; ReassignSessionSeries migrates them the same per-occurrence " +
+			"way, as one symmetric-difference batch per instructor hub over every occurrence that instructor leads. " +
+			"Non-sensitive; created on demand only when a session names an " +
 			"instructor. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
@@ -2354,12 +2416,59 @@ def slot_cells(starts_at, ends_at):
 def slot_cellcode(cell_start):
     return cell_start.replace("-", "").replace(":", "").lower()
 
+def instant_seconds(t):
+    # Whole seconds since 1970-01-01T00:00:00Z of a canonical whole-second UTC
+    # instant ("YYYY-MM-DDTHH:MM:SSZ" -- the form time.rfc3339_utc emits and
+    # every .schedule stores). The time module exposes no epoch or subtraction
+    # builtin, only rfc3339_add over a Go duration string, so the DIFFERENCE
+    # between two instants (ReassignSessionSeries' shift, and the span it
+    # carries onto every occurrence) is derived here from the civil date by
+    # pure integer arithmetic: days-from-civil over the proleptic Gregorian
+    # calendar (400-year eras of 146097 days, the year rebased to begin in
+    # March so the leap day falls last in it), then the seconds_of_day builtin
+    # for the time part. Deterministic -- a function of the string alone, no
+    # clock.
+    y = int(t[0:4])
+    m = int(t[5:7])
+    d = int(t[8:10])
+    if m <= 2:
+        y -= 1
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * ((m + 9) % 12) + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    days = era * 146097 + doe - 719468
+    return days * 86400 + time.seconds_of_day(t)
+
+# ReassignSessionSeries refuses a move that carries the run further than this
+# from where it stands: a Go duration string (rfc3339_add's second argument)
+# overflows at roughly 292 years, and a term-wide move measured in years is
+# not a time move a front desk makes -- the bound keeps the refusal a clean
+# InvalidArgument rather than an opaque duration-parse failure at the edge.
+SERIES_MAX_SHIFT_SECONDS = 366 * 86400
+
+# ReassignSessionSeries' mutation ceiling. One operation commits as ONE
+# JetStream atomic batch of at most substrate.MaxBatchMessages (1000, NATS
+# 2.14 ADR-50) messages, two of which the Processor spends on the idempotency
+# tracker and the event outbox (step8_commit.go), so the business budget is
+# 998; past it the commit dies as a batch-too-large fault, never a refusal the
+# desk can read. A move at CreateSessionSeries' own ceiling -- 52 occurrences,
+# 5 cells each, instructor-led, shifted clear of its old cells -- assembles
+# 52 * (5 + 5 + 5 + 5 + 1) = 1092 mutations, so the shape is reachable. The
+# script counts what it assembled and refuses SeriesTooLarge above this,
+# with headroom under the 998 so a commit-time addition never reopens the
+# fault. A shift onto cells the run already holds (its own interval) writes
+# only the difference and lands well under it.
+SERIES_MOVE_MAX_MUTATIONS = 990
+
 def claim_cell(hub, cellcode, cls, conflict_code, who):
     key = hub + ".slot" + cellcode
     # read-posture: (d) optionalReads — derived server-side by this script's
     # own derive_reads(op) for CreateSession/CreateSessionSeries, still
     # client-declared for ReassignSession (see derive_reads' doc comment for
-    # why that op is excluded). An absent cell is the common case (no
+    # why that op is excluded), and a class-(e) follow-up of the partOf walk
+    # for ReassignSessionSeries (each cell is a function of a walked
+    # occurrence's schedule). An absent cell is the common case (no
     # existing booking), never a required read.
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
@@ -3022,6 +3131,317 @@ def execute(state, op):
         # puts its own minted keys.
         events = [{"class": "wellness.sessionSeriesCancelled",
                    "data": {"seriesKey": series_key, "studio": studio, "sessionKeys": cancelled_keys}}]
+        return {"mutations": mutations, "events": events}
+
+    if ot == "ReassignSessionSeries":
+        # The whole-run counterpart of ReassignSession's time move, the way
+        # TombstoneSessionSeries is TombstoneSession's: one submission carries
+        # every still-upcoming occurrence at the confirmed studio by the SAME
+        # delta -- startsAt/endsAt name the new instants of the ANCHOR, the
+        # earliest still-upcoming occurrence there, pinned by the caller as
+        # anchorKey + anchorStartsAt -- and every sibling moves by
+        # shift = startsAt - anchorStartsAt onto a span of the anchor's new
+        # length. Same studio, each occurrence keeps its own instructor, its
+        # bookings ride with it (the seat aspects hang off the session vertex,
+        # which is not touched), and the series' own .definition stays the
+        # minted fact -- firstStartsAt/firstEndsAt record what was authored,
+        # not where the run now stands; the occurrences' .schedule aspects are
+        # the schedule of record, exactly as they are after ReassignSession
+        # moves one of them.
+        series_key = required_string(p, "seriesKey")
+        _, series_id = parts_of(series_key, "seriesKey", "sessionseries")
+        if not vertex_alive(state, series_key):
+            fail("UnknownSessionSeries: " + series_key)
+        cls = class_of(state, series_key)
+        if cls != "sessionseries":
+            fail("WrongClass: seriesKey: " + series_key + " has class " + str(cls) + ", required sessionseries")
+
+        # Standing: TombstoneSessionSeries's binder verbatim -- the workplace
+        # confinement CreateSessionSeries applies to the same studio, off the
+        # CALLER-SUPPLIED studio, sound only because the confirmation just
+        # below then requires that studio to BE the series' (see the
+        # TombstoneSessionSeries arm for the conjunction). No instructor path:
+        # an instructor reschedules the one class they lead (ReassignSession),
+        # never a studio's whole standing booking.
+        studio = required_string(p, "studio")
+        # workplace-exempt: (no-validated-path) ReassignSessionSeries is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no task
+        # mints it, so nothing but the operator escape reaches the exemption.
+        if not workplace_exempt():
+            require_workplace(studio_locations(studio), "cannot move a session series at studio " + studio)
+
+        # The studio confirmation param against the SERIES' own atStudio link,
+        # ordered after the binder for the reason TombstoneSessionSeries gives.
+        _, studio_id = parts_of(studio, "studio", "studio")
+        # read-posture: (d) declared optionalReads at ReassignSessionSeries
+        # dispatch (validation link; absence means the caller named the wrong
+        # studio -- WrongStudio).
+        series_at_studio = kv.Read("lnk.sessionseries." + series_id + ".atStudio.studio." + studio_id)
+        if series_at_studio == None or series_at_studio.isDeleted:
+            fail("WrongStudio: studio " + studio + " is not the studio of series " + series_key)
+
+        # The anchor is PINNED by the caller, never inferred from the walk:
+        # anchorKey is the occurrence the desk saw as the next class and
+        # anchorStartsAt is its start as the desk saw it. Inferred from the
+        # walk alone, the anchor would drift silently -- a roster opened at
+        # 17:55 for a run whose next class is at 18:00 and submitted at 18:02
+        # would find today's class started, take NEXT week's as the anchor and
+        # carry the whole run six days EARLIER; a concurrent ReassignSession of
+        # the anchor would do the same through the OCC re-execution on fresh
+        # state. Both pins are (a)-declared reads at dispatch, so the
+        # re-execution sees the anchor's fresh schedule and the comparison
+        # after the walk refuses AnchorMoved instead. Liveness is deliberately
+        # not checked here: a cancelled anchor is never the walk's earliest
+        # eligible occurrence, and "the next class is no longer X" is the
+        # honest answer for it too.
+        anchor_key = required_string(p, "anchorKey")
+        parts_of(anchor_key, "anchorKey", "session")
+        anchor_cls = class_of(state, anchor_key)
+        if anchor_cls != None and anchor_cls != "session":
+            fail("WrongClass: anchorKey: " + anchor_key + " has class " + str(anchor_cls) + ", required session")
+        anchor_starts_at = time.rfc3339_utc(required_string(p, "anchorStartsAt"))
+
+        # The anchor's new span: ReassignSession's own reschedule validation
+        # (canonical UTC, strictly ordered, on the 15-minute grid, at most 24h
+        # -- slot_cells raises SessionTooLong past MAX_SLOT_CELLS), plus a
+        # future guard the single-class ops leave to the caller: a run moved
+        # to a next class that has already begun is a mistyped date, and
+        # CreateBooking's SessionInPast is the house word for it. The span's
+        # length is what every moved occurrence takes on, whatever length it
+        # had.
+        new_starts = time.rfc3339_utc(required_string(p, "startsAt"))
+        new_ends = time.rfc3339_utc(required_string(p, "endsAt"))
+        if not (new_starts < new_ends):
+            fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + new_starts + " endsAt=" + new_ends)
+        enforce_grid(new_starts, new_ends)
+        slot_cells(new_starts, new_ends)
+        submitted = time.rfc3339_utc(op.submittedAt)
+        if not (submitted < new_starts):
+            fail("SessionInPast: the next occurrence would start at " + new_starts + ", not in the future (submitted " + submitted + ")")
+        duration_seconds = instant_seconds(new_ends) - instant_seconds(new_starts)
+
+        # The walk: TombstoneSessionSeries's occurrence filter verbatim -- live,
+        # still at the confirmed studio, carrying a schedule, and starting
+        # after submittedAt -- collected rather than mutated, because the
+        # anchor pin is checked against the whole eligible set (the walk
+        # returns occurrences in key order, not cadence order) and the
+        # mutation count is refused as a whole.
+        eligible = []
+        seen = {}
+        cursor = None
+        for _page in range(SERIES_OCCURRENCE_MAX_PAGES):
+            # read-posture: (e) relation=partOf epoch=none -- the series' own
+            # occurrence set, bounded by CreateSessionSeries's occurrenceCount
+            # ceiling and by SERIES_OCCURRENCE_PAGE_LIMIT above; never a
+            # keyspace scan. The occurrences are not declarable: a caller holds
+            # only the series key, and which sessions hang off it is exactly
+            # what this walk is for.
+            links, cursor = kv.Links(series_key, "partOf", "in", cursor, SERIES_OCCURRENCE_PAGE_LIMIT)
+            for lk in links:
+                if lk.isDeleted:
+                    continue
+                sess_key = lk.sourceVertex
+                # A link may be delivered on more than one page (the pages are
+                # a cursor over a live keyspace, not a snapshot), and one
+                # occurrence moved twice in a single batch is a duplicate
+                # mutation -- the same dedup TombstoneSessionSeries keeps.
+                if sess_key in seen:
+                    continue
+                seen[sess_key] = True
+                # read-posture: (e) per-occurrence follow-up read off the
+                # enumeration above (data-derived key -- the occurrence is
+                # unknown until it resolves from the link). A cancelled
+                # occurrence holds no cells and has nothing to move.
+                if not vertex_live(sess_key):
+                    continue
+                _, occ_id = parts_of(sess_key, "occurrence", "session")
+                # This occurrence's OWN atStudio link to the CONFIRMED studio.
+                # An occurrence ReassignSession has since moved to a DIFFERENT
+                # studio has this link tombstoned and is passed over: its cells
+                # sit on a hub this call never confirmed, and releasing them
+                # there would tombstone whatever OTHER session now holds them.
+                # read-posture: (e) per-occurrence follow-up read, same walk.
+                occ_at_studio = kv.Read("lnk.session." + occ_id + ".atStudio.studio." + studio_id)
+                if occ_at_studio == None or occ_at_studio.isDeleted:
+                    continue
+                # read-posture: (e) per-occurrence follow-up read, same walk.
+                sched = kv.Read(sess_key + ".schedule")
+                if sched == None or sched.isDeleted:
+                    continue
+                starts_at = sched.data.get("startsAt")
+                ends_at = sched.data.get("endsAt")
+                if starts_at == None or ends_at == None:
+                    continue
+                # An occurrence that has already started is HISTORY: its seats
+                # were sat in, and moving it would rewrite a class that ran.
+                # Same inequality (and same at-the-boundary reading) as
+                # CreateBooking's SessionInPast: starting exactly at
+                # submittedAt counts as started.
+                if not (submitted < starts_at):
+                    continue
+                eligible.append({"key": sess_key, "sched": sched, "startsAt": starts_at, "endsAt": ends_at})
+            if cursor == None:
+                break
+        # The page budget strictly exceeds the largest occurrence set
+        # CreateSessionSeries can mint, so a cursor still open here means some
+        # other writer has hung occurrences off this series -- refuse rather
+        # than move part of a run (TombstoneSessionSeries's SeriesWalkBound).
+        if cursor != None:
+            fail("SeriesWalkBound: series " + series_key + " has more partOf occurrences than " +
+                 str(SERIES_OCCURRENCE_MAX_PAGES * SERIES_OCCURRENCE_PAGE_LIMIT) + "; nothing moved")
+        if len(eligible) == 0:
+            fail("NoUpcomingOccurrences: series " + series_key + " has no live occurrence at studio " + studio +
+                 " starting after " + submitted)
+
+        # The pin: the walk's earliest still-upcoming occurrence at this
+        # studio (canonical UTC compares lexically == chronologically) must BE
+        # the anchor the desk named, at the start the desk saw. Anything else
+        # -- the anchor started or was cancelled since the roster loaded, or
+        # ReassignSession moved it -- means the shift the desk intended is not
+        # the shift this run would take, and the honest answer is to reload.
+        earliest = eligible[0]
+        for occ in eligible:
+            if occ["startsAt"] < earliest["startsAt"]:
+                earliest = occ
+        if earliest["key"] != anchor_key or earliest["startsAt"] != anchor_starts_at:
+            fail("AnchorMoved: the next class is no longer " + anchor_starts_at + " at " + anchor_key +
+                 "; reload the roster and try again")
+
+        # The payload's startsAt names where the anchor lands, and every
+        # sibling follows by the same delta. Both instants sit on the
+        # 15-minute grid, so the shift is a whole number of grid steps and
+        # every moved span stays aligned without a per-occurrence enforce_grid.
+        shift_seconds = instant_seconds(new_starts) - instant_seconds(anchor_starts_at)
+        if shift_seconds > SERIES_MAX_SHIFT_SECONDS or -shift_seconds > SERIES_MAX_SHIFT_SECONDS:
+            fail("InvalidArgument: startsAt: moves the next occurrence (" + anchor_starts_at + ") by more than " +
+                 str(SERIES_MAX_SHIFT_SECONDS // 86400) + " days; got " + new_starts)
+        # A move that changes nothing is a refusal, as ReassignSession's
+        # no-edit call is: the anchor's span is exactly what it already holds,
+        # so nothing would move and every sibling would be re-written to the
+        # values it has.
+        if shift_seconds == 0 and duration_seconds == instant_seconds(earliest["endsAt"]) - instant_seconds(anchor_starts_at):
+            fail("InvalidArgument: nothing moves: the next class already runs " + anchor_starts_at + " to " +
+                 earliest["endsAt"] + "; at least one of startsAt or endsAt must change")
+        shift_dur = str(shift_seconds) + "s"
+        span_dur = str(duration_seconds) + "s"
+
+        # Cells move as ONE batch per hub, not one occurrence at a time. Across
+        # every occurrence being moved: the union of the cells the run holds
+        # today, the union of the cells it will hold, and only the DIFFERENCE
+        # is written -- tombstone (old - new), claim (new - old). This is
+        # ReassignSession's same-hub reschedule delta generalized from one
+        # occurrence to N, and it is load-bearing rather than tidy: a shift
+        # equal to the series' own interval ("every class one week later")
+        # lands occurrence i on exactly the cells occurrence i+1 vacates in
+        # this same op, and claim_cell reads LIVE KV -- this batch's own
+        # tombstones are not applied to the state it sees -- so claimed per
+        # occurrence it would find those cells still held by the sibling and
+        # refuse StudioConflict for a move that collides with nothing. The
+        # instructor hubs get the identical treatment, grouped by whoever leads
+        # each occurrence TODAY (session_ledby_link, read fresh per occurrence
+        # as TombstoneSessionSeries does: ReassignSession subs one class of a
+        # run without touching its siblings, so the series' original
+        # instructor is not who holds these cells); an occurrence with no
+        # instructor has no instructor cells on either side.
+        #
+        # Each "new" set remembers which occurrence first wanted the cell, so
+        # a collision names the class that collided -- the desk sees WHICH
+        # week hit another booking, not just that one did -- and a cell two
+        # occurrences of this run would BOTH need after the move (possible only
+        # when ReassignSession has since pulled a sibling off the cadence) is
+        # refused outright rather than claimed once for two classes.
+        old_studio_cells = {}
+        new_studio_cells = {}
+        old_instr_cells = {}
+        new_instr_cells = {}
+        moved = []
+        for occ in eligible:
+            sess_key = occ["key"]
+            sched = occ["sched"]
+            occ_new_starts = time.rfc3339_add(occ["startsAt"], shift_dur)
+            occ_new_ends = time.rfc3339_add(occ_new_starts, span_dur)
+            occ_old = slot_cells(occ["startsAt"], occ["endsAt"])
+            occ_new = slot_cells(occ_new_starts, occ_new_ends)
+            _, instructor = session_ledby_link(sess_key)
+            if instructor != None:
+                if instructor not in old_instr_cells:
+                    old_instr_cells[instructor] = {}
+                    new_instr_cells[instructor] = {}
+            for c in occ_old:
+                old_studio_cells[c] = occ["startsAt"]
+                if instructor != None:
+                    old_instr_cells[instructor][c] = occ["startsAt"]
+            for c in occ_new:
+                if c in new_studio_cells:
+                    fail("StudioConflict: the classes of " + new_studio_cells[c] + " and " + occ["startsAt"] +
+                         " would both need studio " + studio + " slot " + slot_cellcode(c) + " after the move")
+                new_studio_cells[c] = occ["startsAt"]
+                if instructor != None:
+                    if c in new_instr_cells[instructor]:
+                        fail("InstructorConflict: the classes of " + new_instr_cells[instructor][c] + " and " + occ["startsAt"] +
+                             " would both need instructor " + instructor + " slot " + slot_cellcode(c) + " after the move")
+                    new_instr_cells[instructor][c] = occ["startsAt"]
+            # remindAt re-derived from the new start, exactly as ReassignSession
+            # does; name/capacity/price carried forward unchanged, a missing
+            # price field staying missing rather than arriving as null.
+            new_sched = {
+                "name": sched.data.get("name"),
+                "startsAt": occ_new_starts, "endsAt": occ_new_ends,
+                "capacity": sched.data.get("capacity"),
+                "remindAt": time.rfc3339_add(occ_new_starts, "-24h"),
+            }
+            if sched.data.get("priceCents") != None:
+                new_sched["priceCents"] = sched.data.get("priceCents")
+            if sched.data.get("residentPriceCents") != None:
+                new_sched["residentPriceCents"] = sched.data.get("residentPriceCents")
+            moved.append({"key": sess_key, "startsAt": occ["startsAt"], "sched": new_sched, "revision": sched.revision})
+
+        mutations = []
+        for c in old_studio_cells:
+            if c not in new_studio_cells:
+                mutations.append(make_tombstone(studio + ".slot" + slot_cellcode(c)))
+        # claim_cell's read on each cell the run does not already hold is a
+        # class-(e) follow-up of the partOf walk: which cells these are is a
+        # function of each walked occurrence's schedule, which no caller
+        # holding a series key can name up front (the same reason
+        # derive_reads covers neither this op nor ReassignSession).
+        for c in new_studio_cells:
+            if c not in old_studio_cells:
+                mutations.append(claim_cell(studio, slot_cellcode(c), "studioSlotClaim", "StudioConflict",
+                                            "moving the class of " + new_studio_cells[c] + ": studio"))
+        for instructor in old_instr_cells:
+            for c in old_instr_cells[instructor]:
+                if c not in new_instr_cells[instructor]:
+                    mutations.append(make_tombstone(instructor + ".slot" + slot_cellcode(c)))
+            for c in new_instr_cells[instructor]:
+                if c not in old_instr_cells[instructor]:
+                    mutations.append(claim_cell(instructor, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict",
+                                                "moving the class of " + new_instr_cells[instructor][c] + ": instructor"))
+        moved_keys = []
+        for mv in moved:
+            # OCC on the revision this walk itself read -- the guard rests on
+            # this script's own follow-up read, never on a caller declaration.
+            mutations.append(make_aspect_upsert_occ(mv["key"], "schedule", "sessionSchedule", mv["sched"], mv["revision"]))
+            moved_keys.append(mv["key"])
+
+        # The batch ceiling, checked on what was actually assembled rather
+        # than on the run's shape: a shift onto the run's own cells writes only
+        # the difference, so the same 52-occurrence run fits or does not by
+        # where it is going, not by how long it is (SERIES_MOVE_MAX_MUTATIONS).
+        if len(mutations) > SERIES_MOVE_MAX_MUTATIONS:
+            fail("SeriesTooLarge: moving " + str(len(moved_keys)) + " occurrences takes " + str(len(mutations)) +
+                 " mutations, more than the " + str(SERIES_MOVE_MAX_MUTATIONS) +
+                 " one operation can commit; move the run in two halves (cancel the later half with " +
+                 "TombstoneSessionSeries and schedule it again with CreateSessionSeries), or shift it onto " +
+                 "cells it already holds")
+
+        # NO primaryKey, for TombstoneSessionSeries's reason: every mutation
+        # here roots at an occurrence or a slot hub, the series vertex is not
+        # written, and the reply constraint admits only a key the op wrote.
+        # Which occurrences moved, and by how much, rides the event.
+        events = [{"class": "wellness.sessionSeriesMoved",
+                   "data": {"seriesKey": series_key, "studio": studio, "sessionKeys": moved_keys,
+                            "shiftSeconds": shift_seconds}}]
         return {"mutations": mutations, "events": events}
 
     if ot == "ReassignSession":

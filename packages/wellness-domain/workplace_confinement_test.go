@@ -1169,3 +1169,109 @@ func seedTombstonedVertex(t *testing.T, ctx context.Context, conn *substrate.Con
 		t.Fatalf("seed tombstoned vertex %s: %v", key, err)
 	}
 }
+
+// TestWorkplace_StaffMoveSeriesConfinedToTheirBuilding: ReassignSessionSeries
+// grants frontOfHouse at scope=any (permissions.go), confined by the same
+// studio -locatedAt-> location walk CreateSessionSeries and
+// TombstoneSessionSeries run off the caller-supplied studio — sound only
+// because the series' own atStudio link is then required to match it. The
+// positive sibling leads: the same move at the staffer's own building lands.
+func TestWorkplace_StaffMoveSeriesConfinedToTheirBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcmoveseries")
+	wcSeedStaff(t, ctx, conn)
+	capDoc := wcStaffCapDoc()
+	capDoc.PlatformPermissions = append(capDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "ReassignSessionSeries", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, capDoc)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcmovestudioa00001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcmovestudiob00001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+	seriesA, keysA, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdwcmovecreatea00001", studioA, "", "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries A outcome = %v, want Accepted", outcome)
+	}
+	seriesB, keysB, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdwcmovecreateb00001", studioB, "", "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries B outcome = %v, want Accepted", outcome)
+	}
+
+	// POSITIVE SIBLING: moving a run at the staffer's own building.
+	if got, why := reassignSeriesAs(t, ctx, conn, cp, cons, "wdwcmoveseriesa00001", seriesA, studioA, keysA[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z", wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff ReassignSessionSeries at its OWN building = %v (%s), want Accepted", got, why)
+	}
+	assertMoved(t, ctx, conn, keysA[1], "2026-07-15T09:00:00Z", time.Hour, 30*time.Minute)
+
+	got, why := reassignSeriesAs(t, ctx, conn, cp, cons, "wdwcmoveseriesb00001", seriesB, studioB, keysB[0], "2026-07-08T18:00:00Z",
+		"2026-07-08T19:00:00Z", "2026-07-08T19:30:00Z", "2026-07-07T12:00:00Z", wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff ReassignSessionSeries at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("cross-building ReassignSessionSeries was rejected by something other than the workplace guard: %q", why)
+	}
+	for i, sessionKey := range keysB {
+		if s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey); s != wdShifted(t, "2026-07-08T18:00:00Z", time.Duration(i)*7*24*time.Hour) {
+			t.Errorf("the denied cross-building move changed occurrence %d's schedule to %s; it must be denied before any mutation", i, s)
+		}
+	}
+}
+
+// TestWorkplace_StaffCancelSeriesConfinedToTheirBuilding: TombstoneSessionSeries
+// grants frontOfHouse at scope=any (permissions.go), confined by
+// CreateSessionSeries' studio -locatedAt-> location walk off the
+// caller-supplied studio — sound only because the series' own atStudio link is
+// then required to match it. The positive sibling leads: the same call-off at
+// the staffer's own building lands.
+func TestWorkplace_StaffCancelSeriesConfinedToTheirBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwccancelseries")
+	wcSeedStaff(t, ctx, conn)
+	capDoc := wcStaffCapDoc()
+	capDoc.PlatformPermissions = append(capDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "TombstoneSessionSeries", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, capDoc)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwccancstudioa00001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwccancstudiob00001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+	seriesA, keysA, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdwccanccreatea00001", studioA, "", "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries A outcome = %v, want Accepted", outcome)
+	}
+	seriesB, keysB, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdwccanccreateb00001", studioB, "", "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries B outcome = %v, want Accepted", outcome)
+	}
+
+	// POSITIVE SIBLING: calling off a run at the staffer's own building.
+	if got, why := tombstoneSeriesAs(t, ctx, conn, cp, cons, "wdwccancseriesa00001", seriesA, studioA, "2026-07-07T12:00:00Z", wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff TombstoneSessionSeries at its OWN building = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range keysA {
+		if keyExists(t, ctx, conn, sessionKey) {
+			t.Errorf("occurrence %d must be tombstoned by the accepted call-off", i)
+		}
+	}
+
+	got, why := tombstoneSeriesAs(t, ctx, conn, cp, cons, "wdwccancseriesb00001", seriesB, studioB, "2026-07-07T12:00:00Z", wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff TombstoneSessionSeries at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("cross-building TombstoneSessionSeries was rejected by something other than the workplace guard: %q", why)
+	}
+	for i, sessionKey := range keysB {
+		if !keyExists(t, ctx, conn, sessionKey) {
+			t.Errorf("the denied cross-building call-off tombstoned occurrence %d; it must be denied before any mutation", i)
+		}
+	}
+}

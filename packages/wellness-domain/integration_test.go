@@ -82,6 +82,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "CreateSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSessionSeries", Scope: "any"},
+			{OperationType: "ReassignSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
@@ -3790,11 +3791,12 @@ func createSessionSeriesLed(t *testing.T, ctx context.Context, conn *substrate.C
 	return "vtx.sessionseries." + ids[0], sessionKeys, outcome
 }
 
-// tombstoneSeries submits TombstoneSessionSeries with exactly the read posture
-// cancelSeries() declares in cmd/wellness-app/web/app.js: the series vertex is
-// an (a)-declared required read (vertex_alive / class_of answer off hydrated
-// state) and the studio confirmation link is (d)-declared. Nothing
-// per-occurrence is declared — those keys are discovered by the script's own
+// tombstoneSeries submits TombstoneSessionSeries as the operator with exactly
+// the read posture cancelSeries() declares in cmd/wellness-app/web/app.js: the
+// series vertex is an (a)-declared required read (vertex_alive / class_of
+// answer off hydrated state); the studio confirmation link and the studio
+// vertex (the staff binder's studio_locations re-proof) are (d)-declared.
+// Nothing per-occurrence is declared — those keys are discovered by the script's own
 // partOf walk (class (e)) and are unknowable to a caller holding only a series
 // key.
 // It returns the outcome AND the script's own failure text, because the two
@@ -3805,11 +3807,18 @@ func createSessionSeriesLed(t *testing.T, ctx context.Context, conn *substrate.C
 // instead, which no outcome assertion could tell apart.
 func tombstoneSeries(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, seriesKey, studioKey, submittedAt string) (processor.MessageOutcome, string) {
 	t.Helper()
+	return tombstoneSeriesAs(t, ctx, conn, cp, cons, label, seriesKey, studioKey, submittedAt, domainActorKey)
+}
+
+// tombstoneSeriesAs is tombstoneSeries submitting as an arbitrary actor — the
+// workplace-confinement vector's shape (workplace_confinement_test.go).
+func tombstoneSeriesAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, seriesKey, studioKey, submittedAt, actorKey string) (processor.MessageOutcome, string) {
+	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
 		OperationType: "TombstoneSessionSeries",
-		Actor:         domainActorKey,
+		Actor:         actorKey,
 		SubmittedAt:   submittedAt,
 		Class:         "sessionseries",
 		Payload:       json.RawMessage(`{"seriesKey":"` + seriesKey + `","studio":"` + studioKey + `"}`),
@@ -3819,10 +3828,10 @@ func tombstoneSeries(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 			// which a dispatcher supplies from its own payload (the skip is
 			// why DeclaredEnumerationsWithSkips exists).
 			Enumerations: append(
-				testutil.DeclaredEnumerations("TombstoneSessionSeries", domainActorKey, wellnessdomain.OpMetas()),
+				testutil.DeclaredEnumerations("TombstoneSessionSeries", actorKey, wellnessdomain.OpMetas()),
 				processor.EnumerationHint{Hub: seriesKey, Relation: "partOf", Direction: "in"}),
 			Reads:         []string{seriesKey},
-			OptionalReads: []string{seriesAtStudioLnkKey(t, seriesKey, studioKey)},
+			OptionalReads: []string{seriesAtStudioLnkKey(t, seriesKey, studioKey), studioKey},
 		},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
@@ -4141,4 +4150,687 @@ func TestTombstoneSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
 			t.Fatalf("occurrence %d must be tombstoned", i)
 		}
 	}
+}
+
+// ---- ReassignSessionSeries ------------------------------------------------
+
+// reassignSeries submits ReassignSessionSeries as the operator with exactly
+// the read posture moveSeries() declares in cmd/wellness-app/web/app.js —
+// tombstoneSeries's posture plus the anchor pin: the series vertex, the anchor
+// and the anchor's schedule (a)-declared, the studio confirmation link
+// (d)-declared, the partOf walk declared as enumeration metadata, and nothing
+// else per-occurrence (each occurrence's liveness, atStudio link, schedule,
+// ledBy walk and the slot cells its new span needs are class-(e) follow-ups a
+// caller holding only a series key cannot name). Returns the outcome AND the
+// script's own failure text for tombstoneSeries's reason: several refusals
+// here (WrongStudio, NoUpcomingOccurrences, AnchorMoved, StudioConflict,
+// SessionInPast, SeriesTooLarge) are indistinguishable at the outcome level.
+func reassignSeries(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, seriesKey, studioKey, anchorKey, anchorStartsAt, startsAt, endsAt, submittedAt string) (processor.MessageOutcome, string) {
+	t.Helper()
+	return reassignSeriesAs(t, ctx, conn, cp, cons, label, seriesKey, studioKey, anchorKey, anchorStartsAt, startsAt, endsAt, submittedAt, domainActorKey)
+}
+
+// reassignSeriesAs is reassignSeries submitting as an arbitrary actor — the
+// workplace-confinement vector's shape (workplace_confinement_test.go).
+func reassignSeriesAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, seriesKey, studioKey, anchorKey, anchorStartsAt, startsAt, endsAt, submittedAt, actorKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ReassignSessionSeries",
+		Actor:         actorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "sessionseries",
+		Payload: json.RawMessage(`{"seriesKey":"` + seriesKey + `","studio":"` + studioKey +
+			`","anchorKey":"` + anchorKey + `","anchorStartsAt":"` + anchorStartsAt +
+			`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `"}`),
+		ContextHint: &processor.ContextHint{
+			Enumerations: append(
+				testutil.DeclaredEnumerations("ReassignSessionSeries", actorKey, wellnessdomain.OpMetas()),
+				processor.EnumerationHint{Hub: seriesKey, Relation: "partOf", Direction: "in"}),
+			Reads:         []string{seriesKey, anchorKey, anchorKey + ".schedule"},
+			OptionalReads: []string{seriesAtStudioLnkKey(t, seriesKey, studioKey), studioKey},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return outcome, failure
+}
+
+// sessionSchedule reads a session's live .schedule fields.
+func sessionSchedule(t *testing.T, ctx context.Context, conn *substrate.Conn, sessionKey string) (startsAt, endsAt, remindAt string, data map[string]any) {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	data, _ = doc["data"].(map[string]any)
+	startsAt, _ = data["startsAt"].(string)
+	endsAt, _ = data["endsAt"].(string)
+	remindAt, _ = data["remindAt"].(string)
+	return startsAt, endsAt, remindAt, data
+}
+
+// wdShifted returns an RFC3339 instant moved by d, in the canonical UTC form
+// the script stores.
+func wdShifted(t *testing.T, iso string, d time.Duration) string {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		t.Fatalf("parse %q: %v", iso, err)
+	}
+	return ts.Add(d).UTC().Format(time.RFC3339)
+}
+
+// assertMoved pins one occurrence's schedule at old + shift on a span of
+// length span, with remindAt re-derived from the new start.
+func assertMoved(t *testing.T, ctx context.Context, conn *substrate.Conn, sessionKey, oldStartsAt string, shift, span time.Duration) {
+	t.Helper()
+	wantStarts := wdShifted(t, oldStartsAt, shift)
+	wantEnds := wdShifted(t, wantStarts, span)
+	wantRemind := wdShifted(t, wantStarts, -24*time.Hour)
+	starts, ends, remind, _ := sessionSchedule(t, ctx, conn, sessionKey)
+	if starts != wantStarts || ends != wantEnds || remind != wantRemind {
+		t.Fatalf("%s schedule = %s–%s (remind %s), want %s–%s (remind %s)", sessionKey, starts, ends, remind, wantStarts, wantEnds, wantRemind)
+	}
+}
+
+// assertCells pins a hub's cells over a span as all held (want=true) or all
+// free (want=false).
+func assertCells(t *testing.T, ctx context.Context, conn *substrate.Conn, hub, startsAt, endsAt string, want bool, why string) {
+	t.Helper()
+	for _, cellKey := range wdSlotClaimKeys(t, hub, startsAt, endsAt) {
+		if held := keyExists(t, ctx, conn, cellKey); held != want {
+			t.Fatalf("%s: slot claim %s held = %v, want %v", why, cellKey, held, want)
+		}
+	}
+}
+
+// TestReassignSessionSeries_MovesOnlyUpcomingOccurrencesAtStudio is the row's
+// whole point — one submission moves the rest of a recurring class — and its
+// two skips: an occurrence that has already started is history, and an
+// occurrence ReassignSession has since moved to ANOTHER studio holds cells on
+// a hub this call never confirmed. Both keep their schedules and cells; every
+// other occurrence lands at old + shift on the new span, with remindAt
+// re-derived, its old studio cells released and its new ones claimed. The
+// series' own .definition is untouched.
+func TestReassignSessionSeries_MovesOnlyUpcomingOccurrencesAtStudio(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmove")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000001", "Flow Room")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000002", "Sculpt Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000001", studioA, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 4)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	starts := []string{"2026-07-08T09:00:00Z", "2026-07-15T09:00:00Z", "2026-07-22T09:00:00Z", "2026-07-29T09:00:00Z"}
+	ends := []string{"2026-07-08T09:30:00Z", "2026-07-15T09:30:00Z", "2026-07-22T09:30:00Z", "2026-07-29T09:30:00Z"}
+
+	// Occurrence 2 goes to studio B (operator-only, ddls.go).
+	moveEnv := reassignSessionEnv(t, ctx, conn, "wdsmoveoneocc0000001", sessionKeys[2], studioA, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKeys[2], "studio": studioA, "newStudio": studioB},
+		"2026-07-07T12:15:00Z")
+	if moved, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, moveEnv); moved != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newStudio outcome = %v, reply = %+v, want Accepted", moved, reply)
+	}
+	defDoc := readDoc(t, ctx, conn, seriesKey+".definition")
+	defBefore, _ := json.Marshal(defDoc["data"])
+
+	// Submitted after occurrence 0 started: the anchor is occurrence 1, moved
+	// a day and an hour later onto an hour-long span.
+	const shift, span = 25 * time.Hour, time.Hour
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000001", seriesKey, studioA, sessionKeys[1], "2026-07-15T09:00:00Z",
+		"2026-07-16T10:00:00Z", "2026-07-16T11:00:00Z", "2026-07-09T12:00:00Z")
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+
+	for _, i := range []int{1, 3} {
+		assertMoved(t, ctx, conn, sessionKeys[i], starts[i], shift, span)
+		assertCells(t, ctx, conn, studioA, starts[i], ends[i], false, "moved occurrence's old cells")
+		assertCells(t, ctx, conn, studioA, wdShifted(t, starts[i], shift), wdShifted(t, starts[i], shift+span), true, "moved occurrence's new cells")
+	}
+	for _, i := range []int{0, 2} {
+		s, e, _, _ := sessionSchedule(t, ctx, conn, sessionKeys[i])
+		if s != starts[i] || e != ends[i] {
+			t.Fatalf("occurrence %d must keep its schedule, got %s–%s", i, s, e)
+		}
+	}
+	assertCells(t, ctx, conn, studioA, starts[0], ends[0], true, "the started occurrence's cells")
+	assertCells(t, ctx, conn, studioB, starts[2], ends[2], true, "the studio-B occurrence's cells")
+	assertCells(t, ctx, conn, studioA, wdShifted(t, starts[2], shift), wdShifted(t, starts[2], shift+span), false, "no claim for the studio-B occurrence on studio A")
+
+	defAfter, _ := json.Marshal(readDoc(t, ctx, conn, seriesKey+".definition")["data"])
+	if string(defBefore) != string(defAfter) {
+		t.Fatalf("series .definition must stay the minted fact: before %s, after %s", defBefore, defAfter)
+	}
+	// The freed cells are genuinely free.
+	if _, o := createSession(t, ctx, conn, cp, cons, "wdsmoverebook0000001", studioA, "Power Sculpt", starts[1], ends[1], 20); o != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession on a moved occurrence's freed cells outcome = %v, want Accepted", o)
+	}
+}
+
+// TestReassignSessionSeries_BookingRidesWithItsSession proves a booking on a
+// moved occurrence survives untouched: the seat aspect, the booking's own
+// forSession link and its .status all hang off keys this op never writes.
+func TestReassignSessionSeries_BookingRidesWithItsSession(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmovebooking")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000003", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000002", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	booker := seedIdentity(t, ctx, conn, "BBWELLSMVEBKRABCDEFG")
+	bookingKey, o := createBooking(t, ctx, conn, cp, cons, "wdsmovebooking000001", sessionKeys[1], booker, "")
+	if o != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", o)
+	}
+	statusBefore, _ := json.Marshal(readDoc(t, ctx, conn, bookingKey+".status")["data"])
+
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000002", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-09T18:00:00Z", "2026-07-09T19:00:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+	assertMoved(t, ctx, conn, sessionKeys[1], "2026-07-15T09:00:00Z", 33*time.Hour, time.Hour)
+	for _, key := range []string{bookingKey, sessionKeys[1] + ".seat1", forSessionLnkKey(t, bookingKey, sessionKeys[1])} {
+		if !keyExists(t, ctx, conn, key) {
+			t.Fatalf("%s must survive the series move", key)
+		}
+	}
+	if statusAfter, _ := json.Marshal(readDoc(t, ctx, conn, bookingKey+".status")["data"]); string(statusAfter) != string(statusBefore) {
+		t.Fatalf("booking .status must be untouched: before %s, after %s", statusBefore, statusAfter)
+	}
+}
+
+// TestReassignSessionSeries_ConflictMovesNothing is the all-or-nothing proof:
+// a foreign class sitting on ONE occurrence's new cells refuses the whole move
+// (StudioConflict, naming the occurrence that collided), and the first
+// occurrence — whose own new cells were free — keeps its schedule, its old
+// cells stay held and its new cells stay unclaimed. The positive vector is
+// proved first on the same fixture: the identical move with the foreign
+// class's cells free is accepted.
+func TestReassignSessionSeries_ConflictMovesNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveconflict")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000004", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000003", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	// A one-off class holds occurrence 2's would-be cells (07-22 10:00–10:30
+	// after a +1h shift).
+	squatterKey, o := createSession(t, ctx, conn, cp, cons, "wdsmovesquatter00001", studioKey,
+		"Power Sculpt", "2026-07-22T10:00:00Z", "2026-07-22T10:30:00Z", 20)
+	if o != processor.OutcomeAccepted {
+		t.Fatalf("squatter CreateSession outcome = %v, want Accepted", o)
+	}
+
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000003", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("ReassignSessionSeries onto a held cell outcome = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "StudioConflict") || !strings.Contains(why, "2026-07-22T09:00:00Z") {
+		t.Fatalf("expected StudioConflict naming the colliding occurrence's original start, got %q", why)
+	}
+	for i, sessionKey := range sessionKeys {
+		oldStarts := wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*7*24*time.Hour)
+		s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey)
+		if s != oldStarts {
+			t.Fatalf("occurrence %d must keep its schedule after the refusal, got %s", i, s)
+		}
+		assertCells(t, ctx, conn, studioKey, oldStarts, wdShifted(t, oldStarts, 30*time.Minute), true, "refused move: old cells")
+		if i < 2 {
+			assertCells(t, ctx, conn, studioKey, wdShifted(t, oldStarts, time.Hour), wdShifted(t, oldStarts, 90*time.Minute), false, "refused move: new cells")
+		}
+	}
+
+	// The positive vector: with the squatter gone the identical move lands.
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdsmovesquattergone1"), Lane: processor.LaneDefault,
+		OperationType: "TombstoneSession", Actor: domainActorKey, SubmittedAt: "2026-07-07T12:10:00Z",
+		Class:   "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + squatterKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			squatterKey, squatterKey + ".schedule", atStudioLnkKey(t, squatterKey, studioKey),
+		}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000004", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:20:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries with the cells free outcome = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range sessionKeys {
+		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*7*24*time.Hour), time.Hour, 30*time.Minute)
+	}
+}
+
+// TestReassignSessionSeries_ShiftByOwnIntervalAccepted pins the batch rule:
+// moving a weekly run one week later lands each occurrence on exactly the
+// cells its successor vacates in the same op. Claimed one occurrence at a time
+// against live KV those cells read as held and the move refuses StudioConflict
+// for a collision with nothing; as one symmetric-difference batch per hub only
+// the first occurrence's cells are released and only the cells past the last
+// occurrence are claimed.
+func TestReassignSessionSeries_ShiftByOwnIntervalAccepted(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveinterval")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000005", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000004", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	const week = 7 * 24 * time.Hour
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000005", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries by its own interval outcome = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range sessionKeys {
+		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*week), week, 30*time.Minute)
+	}
+	assertCells(t, ctx, conn, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", false, "the vacated first week")
+	for _, day := range []string{"2026-07-15", "2026-07-22", "2026-07-29"} {
+		assertCells(t, ctx, conn, studioKey, day+"T09:00:00Z", day+"T09:30:00Z", true, "the run's cells after the move")
+	}
+}
+
+// TestReassignSessionSeries_MovesEachOccurrencesOwnInstructorCells proves the
+// instructor hubs move too, per occurrence: a run led by Sam whose middle
+// class ReassignSession subbed to Alex releases and claims Sam's cells for the
+// two classes Sam still leads and Alex's for the one Alex does.
+func TestReassignSessionSeries_MovesEachOccurrencesOwnInstructorCells(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveinstr")
+
+	sam := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdsmoveinstruct00001", "Sam")
+	alex := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdsmoveinstruct00002", "Alex")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000006", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000005", studioKey, sam, "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	subEnv := reassignSessionEnv(t, ctx, conn, "wdsmovesubocc0000001", sessionKeys[1], studioKey, sam, domainActorKey,
+		map[string]any{"sessionKey": sessionKeys[1], "studio": studioKey, "newInstructor": alex},
+		"2026-07-07T12:15:00Z")
+	if subbed, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, subEnv); subbed != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newInstructor outcome = %v, reply = %+v, want Accepted", subbed, reply)
+	}
+
+	const shift = 2 * time.Hour
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000006", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", "2026-07-07T12:20:00Z")
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries outcome = %v (%s), want Accepted", got, why)
+	}
+	leader := []string{sam, alex, sam}
+	other := []string{alex, sam, alex}
+	for i, sessionKey := range sessionKeys {
+		oldStarts := wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*7*24*time.Hour)
+		oldEnds := wdShifted(t, oldStarts, 30*time.Minute)
+		assertMoved(t, ctx, conn, sessionKey, oldStarts, shift, 30*time.Minute)
+		for _, hub := range []string{studioKey, leader[i]} {
+			assertCells(t, ctx, conn, hub, oldStarts, oldEnds, false, "old cells on "+hub)
+			assertCells(t, ctx, conn, hub, wdShifted(t, oldStarts, shift), wdShifted(t, oldEnds, shift), true, "new cells on "+hub)
+		}
+		assertCells(t, ctx, conn, other[i], wdShifted(t, oldStarts, shift), wdShifted(t, oldEnds, shift), false, "no claim on the instructor who does not lead this occurrence")
+		if !keyExists(t, ctx, conn, sessionLedByLnkKey(t, sessionKey, leader[i])) {
+			t.Fatalf("occurrence %d must still be led by %s", i, leader[i])
+		}
+	}
+}
+
+// TestReassignSessionSeries_WrongStudioRejected mirrors the call-off's: the
+// confirmation param is checked against the SERIES' own atStudio link, so a
+// caller naming some other live studio is refused WrongStudio outright with
+// nothing moved — not NoUpcomingOccurrences from a walk that found nothing at
+// that studio.
+func TestReassignSessionSeries_WrongStudioRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmovewrongstudio")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000007", "Flow Room")
+	otherStudio := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000008", "Sculpt Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000006", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000007", seriesKey, otherStudio, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "WrongStudio") {
+		t.Fatalf("ReassignSessionSeries with the wrong studio = %v (%q), want Rejected WrongStudio", got, why)
+	}
+	s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKeys[0])
+	if s != "2026-07-08T09:00:00Z" {
+		t.Fatalf("occurrence 0 must keep its schedule after the refusal, got %s", s)
+	}
+	// The positive vector on the same fixture.
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000008", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries with the right studio = %v (%s), want Accepted", got, why)
+	}
+}
+
+// TestReassignSessionSeries_AllPastRejected mirrors the call-off's: zero
+// eligible occurrences is a refusal (NoUpcomingOccurrences), never an accepted
+// empty batch — and a new start that is itself not in the future is refused
+// SessionInPast before the walk even runs, and a shift past the op's
+// own bound is refused InvalidArgument.
+func TestReassignSessionSeries_AllPastRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveallpast")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000009", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000007", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000009", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-09-02T09:00:00Z", "2026-09-02T09:30:00Z", "2026-09-01T12:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "NoUpcomingOccurrences") {
+		t.Fatalf("ReassignSessionSeries over a finished run = %v (%q), want Rejected NoUpcomingOccurrences", got, why)
+	}
+	got, why = reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000010", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-08T10:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "SessionInPast") {
+		t.Fatalf("ReassignSessionSeries to a start that is not in the future = %v (%q), want Rejected SessionInPast", got, why)
+	}
+	// A shift past the op's own bound (SERIES_MAX_SHIFT_SECONDS, ddls.go) is
+	// refused as a plain InvalidArgument rather than surfacing as a duration
+	// parse fault at rfc3339_add's edge.
+	got, why = reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000011", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2027-08-01T09:00:00Z", "2027-08-01T09:30:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "InvalidArgument") || !strings.Contains(why, "366 days") {
+		t.Fatalf("ReassignSessionSeries by more than a year = %v (%q), want Rejected InvalidArgument", got, why)
+	}
+	for i, sessionKey := range sessionKeys {
+		if s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey); s != wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*7*24*time.Hour) {
+			t.Fatalf("occurrence %d must keep its schedule after the refusals, got %s", i, s)
+		}
+	}
+}
+
+// TestReassignSessionSeries_FiftyTwoOccurrencesUnderTheWall drives the op at
+// CreateSessionSeries's ceiling (occurrenceCount 52, every occurrence still
+// upcoming and instructor-led) under the Processor's DEFAULT script wall,
+// mirroring the call-off's wall test. The shift is disjoint from the old
+// spans, so every occurrence costs its four walk reads plus a claim read per
+// new cell on both hubs — the op's worst read budget.
+func TestReassignSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
+	if os.Getenv("PROCESSOR_SCRIPT_WALL_MS") != "" {
+		t.Skip("wall override set — this test measures the default budget")
+	}
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmovefiftytwo")
+
+	instructorKey := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdsmoveinstruct00052", "Sam")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000052", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000052", studioKey, instructorKey, "Daily Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1, 52)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	started := time.Now()
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000052", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSessionSeries over 52 upcoming occurrences outcome = %v (%s), want Accepted (script wall?)", got, why)
+	}
+	t.Logf("52-occurrence move round trip: %s", time.Since(started))
+	for i, sessionKey := range sessionKeys {
+		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour), time.Hour, 30*time.Minute)
+	}
+}
+
+// TestReassignSessionSeries_AnchorMovedRejected pins the anchor to what the
+// desk saw. Inferred from the walk alone, the anchor would drift silently — a
+// roster opened before the next class began and submitted after it would
+// re-anchor on the week after and carry the whole run days EARLIER; a
+// concurrent ReassignSession of the anchor would do the same through the OCC
+// re-execution. Three fixtures, each led by its positive vector: the anchor
+// cancelled since the roster loaded, the anchor moved to a later time, and a
+// stale anchorStartsAt on the right key — every one refused AnchorMoved with
+// nothing moved.
+func TestReassignSessionSeries_AnchorMovedRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveanchor")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000010", "Flow Room")
+
+	mk := func(label, firstStartsAt string) (string, []string) {
+		seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+			label, studioKey, "", "Evening Flow", firstStartsAt, wdShifted(t, firstStartsAt, 30*time.Minute), 20, 7, 3)
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("CreateSessionSeries %s outcome = %v, want Accepted", label, outcome)
+		}
+		return seriesKey, sessionKeys
+	}
+	unchanged := func(sessionKeys []string, firstStartsAt, why string) {
+		for i, sessionKey := range sessionKeys {
+			if s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey); s != wdShifted(t, firstStartsAt, time.Duration(i)*7*24*time.Hour) {
+				t.Fatalf("%s: occurrence %d must keep its schedule after the refusal, got %s", why, i, s)
+			}
+		}
+	}
+
+	// (a) The anchor was called off since the roster loaded. The positive
+	// vector first: the same pin on the untouched run is accepted.
+	t.Run("cancelled", func(t *testing.T) {
+		seriesA, keysA := mk("wdsmovecreate0000010", "2026-07-08T09:00:00Z")
+		if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000012", seriesA, studioKey, keysA[0], "2026-07-08T09:00:00Z",
+			"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+			t.Fatalf("(a) positive vector outcome = %v (%s), want Accepted", got, why)
+		}
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID: testutil.GenReqID("wdsmoveanchortomb001"), Lane: processor.LaneDefault,
+			OperationType: "TombstoneSession", Actor: domainActorKey, SubmittedAt: "2026-07-07T12:10:00Z",
+			Class:   "session",
+			Payload: json.RawMessage(`{"sessionKey":"` + keysA[0] + `","studio":"` + studioKey + `"}`),
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+				keysA[0], keysA[0] + ".schedule", atStudioLnkKey(t, keysA[0], studioKey),
+			}},
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000013", seriesA, studioKey, keysA[0], "2026-07-08T10:00:00Z",
+			"2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", "2026-07-07T12:20:00Z")
+		if got != processor.OutcomeRejected || !strings.Contains(why, "AnchorMoved") || !strings.Contains(why, keysA[0]) {
+			t.Fatalf("(a) cancelled anchor = %v (%q), want Rejected AnchorMoved naming the anchor", got, why)
+		}
+		unchanged(keysA[1:], "2026-07-15T10:00:00Z", "(a)")
+	})
+
+	// (b) The anchor was moved to a later time since the roster loaded.
+	t.Run("moved", func(t *testing.T) {
+		seriesB, keysB := mk("wdsmovecreate0000011", "2026-08-05T09:00:00Z")
+		if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000014", seriesB, studioKey, keysB[0], "2026-08-05T09:00:00Z",
+			"2026-08-05T10:00:00Z", "2026-08-05T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+			t.Fatalf("(b) positive vector outcome = %v (%s), want Accepted", got, why)
+		}
+		moveEnv := reassignSessionEnv(t, ctx, conn, "wdsmoveanchorlater01", keysB[0], studioKey, "", domainActorKey,
+			map[string]any{"sessionKey": keysB[0], "studio": studioKey, "startsAt": "2026-08-06T10:00:00Z", "endsAt": "2026-08-06T10:30:00Z"},
+			"2026-07-07T12:10:00Z")
+		if moved, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, moveEnv); moved != processor.OutcomeAccepted {
+			t.Fatalf("ReassignSession of the anchor outcome = %v, reply = %+v, want Accepted", moved, reply)
+		}
+		got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000015", seriesB, studioKey, keysB[0], "2026-08-05T10:00:00Z",
+			"2026-08-05T11:00:00Z", "2026-08-05T11:30:00Z", "2026-07-07T12:20:00Z")
+		if got != processor.OutcomeRejected || !strings.Contains(why, "AnchorMoved") {
+			t.Fatalf("(b) moved anchor = %v (%q), want Rejected AnchorMoved", got, why)
+		}
+		if s, _, _, _ := sessionSchedule(t, ctx, conn, keysB[0]); s != "2026-08-06T10:00:00Z" {
+			t.Fatalf("(b) the moved anchor must keep ReassignSession's schedule, got %s", s)
+		}
+		unchanged(keysB[1:], "2026-08-12T10:00:00Z", "(b)")
+	})
+
+	// (c) The right key with a stale anchorStartsAt — the roster's copy of
+	// the anchor's start is no longer the anchor's start.
+	t.Run("stale-start", func(t *testing.T) {
+		seriesC, keysC := mk("wdsmovecreate0000012", "2026-09-02T09:00:00Z")
+		got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000016", seriesC, studioKey, keysC[0], "2026-09-02T08:00:00Z",
+			"2026-09-02T10:00:00Z", "2026-09-02T10:30:00Z", "2026-07-07T12:00:00Z")
+		if got != processor.OutcomeRejected || !strings.Contains(why, "AnchorMoved") || !strings.Contains(why, "2026-09-02T08:00:00Z") {
+			t.Fatalf("(c) stale anchorStartsAt = %v (%q), want Rejected AnchorMoved naming the stale start", got, why)
+		}
+		unchanged(keysC, "2026-09-02T09:00:00Z", "(c)")
+		if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000017", seriesC, studioKey, keysC[0], "2026-09-02T09:00:00Z",
+			"2026-09-02T10:00:00Z", "2026-09-02T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+			t.Fatalf("(c) positive vector outcome = %v (%s), want Accepted", got, why)
+		}
+	})
+}
+
+// TestReassignSessionSeries_NoChangeRejected mirrors ReassignSession's
+// no-edit refusal: a span identical to the anchor's current one moves nothing
+// and is refused InvalidArgument, where the same call with only the end
+// changed is a real (duration-only) move and lands.
+func TestReassignSessionSeries_NoChangeRejected(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmovenochange")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000011", "Flow Room")
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000013", studioKey, "", "Evening Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 7, 2)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000018", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "InvalidArgument") || !strings.Contains(why, "nothing moves") {
+		t.Fatalf("no-change move = %v (%q), want Rejected InvalidArgument nothing moves", got, why)
+	}
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000019", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T09:00:00Z", "2026-07-08T10:00:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("duration-only move = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range sessionKeys {
+		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*7*24*time.Hour), 0, time.Hour)
+	}
+}
+
+// TestReassignSessionSeries_MovesEarlierAndRevivesCancelledCells covers two
+// more shapes of the batch: a NEGATIVE shift (the run pulled two days earlier,
+// every sibling still upcoming), and a cancelled sibling's tombstoned cells
+// inside the union — a weekly run whose middle class was called off, shifted
+// by its own interval, lands its first class on cells that exist DEAD, which
+// claim_cell revives through its OCC path rather than CreateOnly-colliding.
+func TestReassignSessionSeries_MovesEarlierAndRevivesCancelledCells(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveearlier")
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000012", "Flow Room")
+
+	seriesKey, sessionKeys, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000014", studioKey, "", "Evening Flow",
+		"2026-07-15T09:00:00Z", "2026-07-15T09:30:00Z", 20, 7, 3)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
+	}
+	const week = 7 * 24 * time.Hour
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000020", seriesKey, studioKey, sessionKeys[0], "2026-07-15T09:00:00Z",
+		"2026-07-13T09:00:00Z", "2026-07-13T09:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("negative shift outcome = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range sessionKeys {
+		old := wdShifted(t, "2026-07-15T09:00:00Z", time.Duration(i)*week)
+		assertMoved(t, ctx, conn, sessionKey, old, -48*time.Hour, 30*time.Minute)
+		assertCells(t, ctx, conn, studioKey, old, wdShifted(t, old, 30*time.Minute), false, "old cells after the earlier move")
+		assertCells(t, ctx, conn, studioKey, wdShifted(t, old, -48*time.Hour), wdShifted(t, old, -48*time.Hour+30*time.Minute), true, "new cells after the earlier move")
+	}
+
+	// The run now sits on 07-13, 07-20, 07-27. Call off the middle class,
+	// then shift the run by its own week: the first class wants 07-20's cells,
+	// which exist as tombstones.
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdsmovemidcancel0001"), Lane: processor.LaneDefault,
+		OperationType: "TombstoneSession", Actor: domainActorKey, SubmittedAt: "2026-07-07T12:10:00Z",
+		Class:   "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKeys[1] + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKeys[1], sessionKeys[1] + ".schedule", atStudioLnkKey(t, sessionKeys[1], studioKey),
+		}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000021", seriesKey, studioKey, sessionKeys[0], "2026-07-13T09:00:00Z",
+		"2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z", "2026-07-07T12:20:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("shift onto a cancelled sibling's dead cells outcome = %v (%s), want Accepted", got, why)
+	}
+	assertMoved(t, ctx, conn, sessionKeys[0], "2026-07-13T09:00:00Z", week, 30*time.Minute)
+	assertMoved(t, ctx, conn, sessionKeys[2], "2026-07-27T09:00:00Z", week, 30*time.Minute)
+	assertCells(t, ctx, conn, studioKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z", true, "the revived cells")
+	assertCells(t, ctx, conn, studioKey, "2026-07-13T09:00:00Z", "2026-07-13T09:30:00Z", false, "the vacated first week")
+	assertCells(t, ctx, conn, studioKey, "2026-08-03T09:00:00Z", "2026-08-03T09:30:00Z", true, "the last class's new cells")
+	if keyExists(t, ctx, conn, sessionKeys[1]) {
+		t.Fatalf("the cancelled sibling must stay cancelled")
+	}
+}
+
+// TestReassignSessionSeries_BatchCeiling pins SERIES_MOVE_MAX_MUTATIONS at
+// the two shapes either side of it: a 52-occurrence, 75-minute (5-cell),
+// instructor-led run shifted clear of its own cells assembles 1092 mutations
+// — more than one atomic batch can carry (substrate.MaxBatchMessages) — and
+// is refused SeriesTooLarge with nothing moved, where the same run at 60
+// minutes (884 mutations) moves. Both are creatable, so without the in-script
+// count the first would die at commit as a batch-too-large fault the desk
+// could not read.
+func TestReassignSessionSeries_BatchCeiling(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveceiling")
+
+	instructorA := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdsmoveinstruct00053", "Sam")
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000053", "Flow Room")
+	seriesA, keysA, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000053", studioA, instructorA, "Daily Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T10:15:00Z", 20, 1, 52)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries (75 min) outcome = %v, want Accepted", outcome)
+	}
+	got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000053", seriesA, studioA, keysA[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T11:00:00Z", "2026-07-08T12:15:00Z", "2026-07-07T12:00:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "SeriesTooLarge") || !strings.Contains(why, "990") {
+		t.Fatalf("52 x 75-minute led run shifted clear = %v (%q), want Rejected SeriesTooLarge naming the ceiling", got, why)
+	}
+	for i, sessionKey := range keysA {
+		if s, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey); s != wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour) {
+			t.Fatalf("occurrence %d must keep its schedule after the refusal, got %s", i, s)
+		}
+	}
+	assertCells(t, ctx, conn, studioA, "2026-07-08T11:00:00Z", "2026-07-08T12:15:00Z", false, "refused move claims nothing")
+
+	instructorB := mkSeriesInstructor(t, ctx, conn, cp, cons, "wdsmoveinstruct00054", "Alex")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdsmovestudio0000054", "Sculpt Room")
+	seriesB, keysB, outcome := createSessionSeriesLed(t, ctx, conn, cp, cons,
+		"wdsmovecreate0000054", studioB, instructorB, "Daily Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T10:00:00Z", 20, 1, 52)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSessionSeries (60 min) outcome = %v, want Accepted", outcome)
+	}
+	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000054", seriesB, studioB, keysB[0], "2026-07-08T09:00:00Z",
+		"2026-07-08T11:00:00Z", "2026-07-08T12:00:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("52 x 60-minute led run shifted clear = %v (%s), want Accepted", got, why)
+	}
+	for i, sessionKey := range keysB {
+		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour), 2*time.Hour, time.Hour)
+	}
+	assertCells(t, ctx, conn, instructorB, "2026-08-28T11:00:00Z", "2026-08-28T12:00:00Z", true, "the last class's instructor cells")
 }

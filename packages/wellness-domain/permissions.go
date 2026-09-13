@@ -52,6 +52,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // not over a studio's whole standing booking — an instructor who wants out of
 // one occurrence still has TombstoneSession for it.
 //
+// ReassignSessionSeries grants the same [operator, frontOfHouse] for the same
+// reason: moving a recurring class to a new day and time is the desk's beat,
+// bound by the same walk on the series' own studio, and an instructor
+// reschedules the one class they lead through ReassignSession.
+//
 // TombstoneSession additionally grants `provider` and `frontOfHouse` at
 // scope=any (widening the EXISTING scope=any row's GrantsTo, never a second
 // row — a permission's identity is its (operationType, scope) pair, Contract
@@ -123,6 +128,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "TombstoneSessionSeries",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit TombstoneSessionSeries (calls off every still-upcoming occurrence of a recurring class in one act) — the same studio front-desk beat as CreateSessionSeries, confined by the same in-script workplace walk on the series' own studio. Deliberately NOT granted to `provider`, unlike TombstoneSession: a bound instructor cancels the one class they lead, not a studio's whole standing booking, and this op takes no instructor param to bind such a caller with.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "ReassignSessionSeries",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit ReassignSessionSeries (moves every still-upcoming occurrence of a recurring class to a new day and time in one act, bookings and instructors riding along) — the same studio front-desk beat as CreateSessionSeries and TombstoneSessionSeries, confined by the same in-script workplace walk on the series' own studio. Deliberately NOT granted to `provider`, for TombstoneSessionSeries's reason: a bound instructor reschedules the one class they lead (ReassignSession), not a studio's whole standing booking, and this op takes no instructor param to bind such a caller with.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
