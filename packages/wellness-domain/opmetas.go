@@ -197,7 +197,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// read that rejects a booking once the class has started,
 				// SessionStarted) — every CreateBooking call validates them,
 				// with a clean UnknownEndpoint/InvalidState fail on absence,
-				// not a designed branch.
+				// not a designed branch. The booker root is also read for
+				// data.protected: a kernel identity is refused as a member
+				// (ProtectedBooker) before any slot cell lands on its hub.
 				Reads: []string{
 					"{payload.session}",
 					"{payload.session}.schedule",

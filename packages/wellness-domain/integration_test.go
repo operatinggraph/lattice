@@ -1365,6 +1365,90 @@ func TestCreateBooking_RejectsDoubleBook(t *testing.T) {
 	}
 }
 
+// bookingEntryReply submits CreateBooking or JoinWaitlist with the same
+// declared-read shape createBooking / joinWaitlist use and returns the outcome
+// plus the script's own failure text, for refusals that share an outcome with
+// their neighbours (ProtectedBooker vs. WrongClass vs. DoubleBooked are all
+// Rejected).
+func bookingEntryReply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, opType, label, sessionKey, bookerKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": bookerKey})
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	optionalReads := wdSeatKeys(sessionKey, 20)
+	if opType == "JoinWaitlist" {
+		optionalReads = wdWaitlistKeys(sessionKey, 20)
+	}
+	optionalReads = append(optionalReads, sessionKey+".bkr"+bookerID)
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	startsAt, _ := schedData["startsAt"].(string)
+	endsAt, _ := schedData["endsAt"].(string)
+	optionalReads = append(optionalReads, wdSlotClaimKeys(t, bookerKey, startsAt, endsAt)...)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: opType,
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Enumerations:  testutil.DeclaredEnumerations(opType, domainActorKey, wellnessdomain.OpMetas()),
+			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
+			OptionalReads: optionalReads,
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		failure = reply.Error.Message
+	}
+	return outcome, failure
+}
+
+// TestBookingEntry_RefusesProtectedBooker proves a kernel root is not a
+// member: an identity carrying data.protected (the primordial admin, the
+// service actors) is refused by both cell-minting entry points BEFORE any
+// slot cell is claimed on its hub — the Processor lets a create under a
+// protected root commit but refuses every later tombstone, so a booking that
+// got in could never be cancelled. The unprotected booker on the same
+// session is the positive vector that keeps the refusal from passing for
+// the wrong reason.
+func TestBookingEntry_RefusesProtectedBooker(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookingprotected")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudio000061", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000061", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+
+	kernelKey := "vtx.identity.BBWELLKERNELPRT1HJKM"
+	seedVertex(t, ctx, conn, kernelKey, "identity", map[string]any{"protected": true, "note": "primordial admin"})
+
+	for _, opType := range []string{"CreateBooking", "JoinWaitlist"} {
+		outcome, failure := bookingEntryReply(t, ctx, conn, cp, cons, opType, "wdprotectedbkr0"+opType[:5], sessionKey, kernelKey)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s on a data.protected booker outcome = %v, want Rejected", opType, outcome)
+		}
+		if !strings.Contains(failure, "ProtectedBooker") {
+			t.Fatalf("%s on a data.protected booker failed with %q, want ProtectedBooker", opType, failure)
+		}
+	}
+	for _, cell := range wdSlotClaimKeys(t, kernelKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z") {
+		if keyExists(t, ctx, conn, cell) {
+			t.Fatalf("slot cell %s was claimed on a protected hub", cell)
+		}
+	}
+	if keyExists(t, ctx, conn, sessionKey+".bkrBBWELLKERNELPRT1HJKM") {
+		t.Fatalf("the session's booker guard was written for a refused protected booker")
+	}
+
+	memberKey := seedIdentity(t, ctx, conn, "BBWELLMEMBERPRT1HJKM")
+	_, accepted := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000061", sessionKey, memberKey, "")
+	if accepted != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking for an unprotected member outcome = %v, want Accepted", accepted)
+	}
+}
+
 // TestCreateBooking_RejectsPastSession proves the soft past-time guard: a
 // booking whose op.submittedAt is at or after the session's startsAt is
 // rejected (SessionInPast), mirroring clinic's ScheduleInPast. The session is

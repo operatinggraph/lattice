@@ -832,7 +832,9 @@ func bookerSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased, computed from the " +
 			"BOOKED SESSION's [startsAt, endsAt) span. CreateBooking and JoinWaitlist each claim one per covered " +
 			"cell on the booker's own identity hub (CreateOnly — the key collision across two overlapping " +
-			"sessions IS the double-book lock: BookerConflict on commit-time rejection); CancelBooking tombstones " +
+			"sessions IS the double-book lock: BookerConflict on commit-time rejection; a data.protected booker is " +
+			"refused before any cell is claimed — ProtectedBooker — since a cell under a protected root could never " +
+			"be tombstoned); CancelBooking tombstones " +
 			"all held cells for the cancelled booking's session on release; ReleaseOrphanedBooking does the same " +
 			"for a booking whose session TombstoneSession already killed (a called-off class does not cascade). " +
 			"Non-sensitive; created on demand, no CreateBooking init needed. Declaration-only: no op handler.",
@@ -859,7 +861,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateBooking", "CancelBooking", "JoinWaitlist", "SetBookingAttendance", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"},
 		Description: "Wellness booking DDL. Vertex shape: vtx.booking.<NanoID>, class=booking, root data = {} " +
 			"(minimal, D5). CreateBooking validates the session is alive + class=session and the booker is alive " +
-			"+ class=identity, reads the session's .schedule.capacity, and claims the first free " +
+			"+ class=identity and NOT a data.protected kernel root (ProtectedBooker — the Processor lets a create " +
+			"under a protected root through but refuses every later tombstone, so the booker's slot cells could " +
+			"never be released), reads the session's .schedule.capacity, and claims the first free " +
 			"vtx.session.<s>.seat<n> for n in 1..capacity (SessionFull once every seat is claimed) — the SAME " +
 			"CreateOnly/expectedRevision write-path idiom studioSlotClaim uses, applied over an enumerated seat-" +
 			"index dimension instead of a time-cell dimension (Capability-KV §06). It then atomically mints the " +
@@ -3898,6 +3902,20 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def require_bookable_identity(state, booker):
+    # A kernel root is not a member. The Processor's commit-time guard refuses
+    # every update/tombstone under a root carrying data.protected (the
+    # primordial admin and service identities) but lets a create through, so
+    # the bookerSlotClaim cells this op mints on the booker's own hub could be
+    # written and never released: CancelBooking / ReleaseOrphanedBooking would
+    # be refused at commit (ProtectedKey) for as long as the booking lived.
+    # Refusing the booker here, before any cell is claimed, is the only place
+    # the domain knows an identity is being used as a member. The root doc is
+    # the declared read require_live_typed just proved alive; the flag is the
+    # same bool the kernel guard tests.
+    if state[booker].data.get("protected") == True:
+        fail("ProtectedBooker: " + booker + " is a kernel identity, not a member; its slot cells could never be released")
+
 def require_matching_session(book_id, session):
     _, sess_id = parts_of(session, "session", "session")
     for_session_lnk = "lnk.booking." + book_id + ".forSession.session." + sess_id
@@ -4376,6 +4394,7 @@ def prepare_booking_common(state, op, p):
     booker = required_string(p, "booker")
     _, booker_id = parts_of(booker, "booker", "identity")
     require_live_typed(state, booker, "booker", "identity")
+    require_bookable_identity(state, booker)
 
     # Consumer self-scope (scope=self grant only): step 3 authorizes via
     # authContext.target == actor (Contract #6); the payload.booker field
