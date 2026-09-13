@@ -1111,6 +1111,22 @@ strand slots on every revoke), then to `rowIssueTarget`, then delete the excepti
 `TestCensusPerEntityIssueFamiliesAreBudgeted` enforces that order and fails the exception as stale
 once it lands. This is a pre-existing gap the gate exposed, not one this item introduced.
 
+### The live actions, run 2026-09-13
+
+`lattice weaver replay-target` runs unattended with `NATS_NKEY=deploy/nkeys/lattice.nk` + `--actor
+<loupe-operator.json actor>`; the 2026-09-06 refusal was the fire's own tool classifier, not the verb. What
+the two runs found:
+
+- **`pastDueBookings` needed no replay.** 0 rows violating; every booking the row named (`endsAt`
+  2026-07-20…08-23) already reads `noShow`. Closed on the verticals Done log.
+- **`clinicSiteBackfill` replayed: 130 rows queued, 15 still violating, all 15 dispatched, all 15 committed
+  with `mutations=0`.** The engine did its part — the residual is a **clinic-domain package bug**: every one
+  of the 15 is Dr. Maya Patel's, who holds TWO live `practicesAt` links, one to Riverside Clinic and one to
+  a building tombstoned 2026-08-23 (`vtx.building.kJoNH76sGkpPszmchL6w`, `TombstoneLocation` cascades onto
+  no link). `BackfillAppointmentSite` counts links, sees two, and no-ops as "ambiguous"; the `providerSites`
+  read model (and the booking UI's auto-fill on it) joins live buildings and shows one. Fix: the op counts
+  live sites only — clinic-domain 0.34.26, then the replay again. Tracked on the verticals lane.
+
 ### The build record (was: checkpoint)
 
 **Branch, not a worktree** (`agents/steward/REMOTE.md` §1): `claude/great-lamport-i6872w`, pushed
