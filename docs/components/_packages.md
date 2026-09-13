@@ -559,7 +559,11 @@ mechanizes it (name the gate, strike the entry).
   charge — closed by keeping the tally as a field on the reversed charge's own declared `.entry` read and
   pinning the upsert to that read's revision; the enumeration-shaped cap is the tell. Fourth sighting (clinic `BindPatientIdentity`,
   2026-09-06): the `.demographics` rewrite used the unconditioned upsert while its own comment claimed a pin —
-  caught in the fix round; `make_aspect_update_occ` now carries `demo.revision`.
+  caught in the fix round; `make_aspect_update_occ` now carries `demo.revision`. Fifth sighting (wellness `ReassignSessionSeries`, 2026-09-13), on the SUBJECT axis: an op that derives WHICH vertex it
+  acts on from a walk at execution time (the earliest still-upcoming occurrence) re-derives it on the OCC re-execute —
+  the revision pin on the aspect held, the premise did not, and a stale roster or a concurrent single-class move flipped
+  the whole run's shift; caught cold as BLOCKING. Pin the subject the caller saw in the payload (`anchorKey` +
+  `anchorStartsAt`) and refuse on mismatch (`AnchorMoved`).
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -628,13 +632,6 @@ mechanizes it (name the gate, strike the entry).
   caller may name the account lets any grant-holder bill ~500 live reads to a stranger's key. Minted: café
   `CreditCafeAccount` (2026-09-05). Check: ask which leg the guard is NOT on, and what runs before the proof that
   names the target.
-## Related contracts
-
-- **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.
-- **Contract #8** ([package-install](/docs/contracts/08-package-install.md)) — the `InstallPackage` / `UninstallPackage` op payload + guardrail contract.
-- **Contract #6** §6.2 — Capability KV envelope shape (reached via Lens projection, never written directly).
-- [`processor.md`](./processor.md#package-install--uninstall) — Processor-side commit + cache-coherence behavior.
-- [`refractor.md`](./refractor.md) — the consumer of new Lens meta-vertices.
 - **A lens that reads a RECORDED fact depends on whoever arms the timer that records it — couple the two
   populations in one fragment, and never host a neighbour's window on an anchor nothing reads.** Two shapes
   in one item (expiry-as-a-recorded-fact, 2026-09-02). (a) `appointmentReminders` closed its gap on
@@ -651,3 +648,11 @@ mechanizes it (name the gate, strike the entry).
   (`wellnessWaitlistPromotion` counted `status = booked` while `PromoteWaitlistedBookings` read seat cells —
   a class that ran and was rescheduled opened a gap the op could only decline, `GapBudgetExhausted` forever;
   2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
+
+## Related contracts
+
+- **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.
+- **Contract #8** ([package-install](/docs/contracts/08-package-install.md)) — the `InstallPackage` / `UninstallPackage` op payload + guardrail contract.
+- **Contract #6** §6.2 — Capability KV envelope shape (reached via Lens projection, never written directly).
+- [`processor.md`](./processor.md#package-install--uninstall) — Processor-side commit + cache-coherence behavior.
+- [`refractor.md`](./refractor.md) — the consumer of new Lens meta-vertices.
