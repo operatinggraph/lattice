@@ -644,8 +644,8 @@ mechanizes it (name the gate, strike the entry).
   a class that ran and was rescheduled opened a gap the op could only decline, `GapBudgetExhausted` forever;
   2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
 
-## Related contracts
-
+## Related contracts Second sighting 2026-09-13: `capabilityEphemeral`'s population-coverage pin landed fixture-based; the
+  shipped-spec fragment pin (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment`) is the shape.
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.
 - **Contract #8** ([package-install](/docs/contracts/08-package-install.md)) — the `InstallPackage` / `UninstallPackage` op payload + guardrail contract.
 - **Contract #6** §6.2 — Capability KV envelope shape (reached via Lens projection, never written directly).

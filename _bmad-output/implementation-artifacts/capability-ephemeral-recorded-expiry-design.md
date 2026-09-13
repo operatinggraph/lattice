@@ -191,15 +191,20 @@ the predicate reads `task.data.expiresAt`, a root-body field already loaded with
 
 - **The bound.** Candidate tasks per actor = the actor's open direct assignments + its reports' + the open
   tasks queued to roles it holds — the same set the RETURN already dereferences for `op.description` (an
-  aspect on a walked node, read the same way). Live: max 3 grants per doc, 27 across 177 docs (C8). The ten
-  converted lenses pay exactly this read per row on their anchor (`a2dfd339`); this lens pays it per
-  candidate task, which is the same order.
+  aspect on a walked node, read the same way). The ten converted lenses pay exactly this read per row on
+  their anchor (`a2dfd339`); this lens pays it per candidate task. **Amended 2026-09-13 (build, cold
+  review):** the original sizing here cited C8's *grant* count (max 3 per doc) for a bound that is over
+  *candidates* — the two differ on arm 3, where every open task queued to a role the actor holds is a
+  candidate whether or not it grants, and a `MarkExpired` on one queued task re-projects every holder of
+  that role. The equivalence corpus (`branch_decomposition_equivalence_test.go`, 50 queued per role × 30
+  holders) is the shape to size against; an absent marker is memoised and enters the footprint like any
+  read (`executor.go:1125-1131`). The live p95 measurement below remains the acceptance for this cost.
 - **Not hoisted.** Moving the three predicates to a `WITH … WHERE` stage would batch the reads but
   re-shape the pattern graph that eleven corpus pins hold (`g3/o9[…]` branch decomposition, the grouping
-  reduction, the WITH-carried scalars) for a lens whose live p95 is 17.7 ms at 3 tasks per actor (C9,
-  `lensLatency.capabilityEphemeral`). Decided: **inline, measured** — Increment 1's acceptance records
-  `lensLatency.capabilityEphemeral` p95 before and after on the dev stack, and re-opens the hoist only if
-  the read is visible at the actor's candidate count.
+  reduction, the WITH-carried scalars). Decided: **inline, measured** — the acceptance records
+  `lensLatency.capabilityEphemeral` p95 before and after on the dev stack (§16 carries it as a pending
+  observation: the ledger holds no p95 for this lens, and the container has no stack), and re-opens the
+  hoist only if the read is visible at the actor's candidate count.
 - Each dereferenced marker key enters the evaluation's read-surface footprint (`executor.go:1125-1131`),
   which is what makes the marker write re-validate the row on drift — intended, and now stated.
 
@@ -290,6 +295,10 @@ never a grep of cypher text:
   the set is asserted exactly, so a second one fails by name and must argue its own case.
 - A floor on the enumerated count (the corpus is > 60 declarations) so an empty enumeration cannot read as
   a clean table.
+- **Amended 2026-09-13 (build):** a second census lands beside it — `negated_varlength_bound_corpus_census_test.go`
+  runs `lint-lens-anchors`' negated finite-bound hop rule over the same rendered corpus. The `fmt.Sprintf`
+  rebuild of this spec moved the auth-plane lens out of the source-text lint's reach (its advisory count went
+  20 → 21, and an advisory never fails CI); the census sees a spec as the engine does.
 
 The package-level `TestTaskDeadlineLenses_ReferenceNoClockParameter` (`orchestration-base/lens_cypher_test.go:605`)
 gains `capabilityEphemeral`; its doc comment, which today says the lens *"still read[s] the clock, for
@@ -503,6 +512,16 @@ or equivalent), and a lapsed-and-marked vector asserting all three converted occ
   fail-closed retraction of one task's grant — visible as the task still open in `myTasks` and absent from
   `cap.ephemeral`. Alternative 3's re-open trigger: a task-anchored target that records anything but a
   delivered deadline, or the `MarkExpired` grant widened below `operator`.
+- **The operator path is irreversible, not just fail-closed (build, cold review 2026-09-13).** No op lowers
+  or clears `expiredAt`: the merge folds the prior value forward even across the tombstone-revive branch
+  (`mark_expired.go:384-388`) and keeps the maximum (`:405-409`). An operator-recorded future instant is
+  therefore a permanent retraction of that task's grant in the projection, repairable only by a revive that
+  moves the deadline past the recorded instant, or by a new task.
+  Direction is still denial-only; the lens's doc comment says so.
+- **A tombstoned marker aspect un-retracts in the read model.** A deleted aspect decodes to a nil handle
+  (`executor.go:1095-1097`), so `NOT (nil >= x)` keeps the row — fail-open on the projection axis only; the
+  Processor's lookup gate still denies. `mark_expired.go:366-371` contemplates a tombstoned marker, so the
+  state is not held impossible; no generic aspect-tombstone op ships today.
 - **Not in scope:** `myTasks` (deliberately clock-free and expiry-inclusive); the `$projectedAt` output
   column in `capabilityRoleIndex` (pinned, not converted); any change to `MarkExpired`.
 
@@ -711,3 +730,41 @@ the clock is absorbed into Inc 1's header rewrite.
 `capabilityRoleIndex` (pinned, not converted); `MarkExpired`; the Processor gate; any contract; hoisting the
 predicate into a `WITH` stage (§3.1.1 — measured, not hoisted); the live-stack p95 measurement (§3.1.1) and
 C7/C8 re-census, which need the Mac dev stack and are recorded below as pending observation, not deferred work.
+
+## 16. Close note (2026-09-13) — built in full; one fire
+
+**Status: ✅ BUILT + SHIPPED.** Fire branch `claude/relaxed-rubin-kj4qv4`, merged to `main` in one landing (never partial).
+Units, in order: `e97234e` Inc 0 (walked-node negated-ordering engine pin) · `bb5c192` Inc 2 (café stale-tab lens,
+cafe-domain 0.12.3) · `2e08562` Inc 1 (the auth-plane lens, orchestration-base 0.7.19) · `519ef40` the 3-layer
+review fold · `4e8dfe5` the negated finite-bound hop corpus census (a discovery of this fire, fixed in the batch) ·
+`9a26091` Inc 3 (clock-reference corpus census + docs) · `bac2f3a` an adjacent doc-comment fix · the close-pass
+fold (this commit). Gates run green in the container: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+all 21 `scripts/lint-*.go` CI runs, `go test ./... -p 4` with Postgres up, and the seven build-tagged harnesses
+(`lease`/`unrouted`/`augur` convergence, `system-actor-capability`, `control-plane-authz`, `object-gc`,
+`crypto-shred`).
+
+**Review record.** Inc 1 (posture-changing): three cold `opus` reviewers — blind hunter, edge-case hunter,
+acceptance auditor — no blocking finding; 5 should-fix + 6 nits folded in `519ef40`. Cumulative close pass (one
+cold `opus` reviewer over the whole diff + the delta since the round): no blocking finding; 5 should-fix + 6
+nits folded here (the shipped-spec fragment pin, the third hand-copy's annotation, the §3.1.1 hoist bullet's
+ungrounded p95, the §3.5 second-census line, the dossier "MECHANIZED" claim, a rewrap, a named floor, the
+hopindex replica's abridgement claim, the revive wording).
+
+**Classification** (design-gap / implementation-bug / brief-gap / convention / review-over-reach): design-gap ×2
+(the observer soundness claim omitted the operator writer, §3.1 as ratified; the population claim rested on
+fixtures, not the shipped specs) · implementation-bug ×1 (the `const` → `fmt.Sprintf` rebuild demoted the lens
+out of `lint-lens-anchors`' reach — closed by the second census) · brief-gap ×2 (arm-2/3 transport pin; the
+clock-form comparator) · convention ×5 · review-over-reach ×0. **Dossier routing:** refractor — the re-spelling
+lesson folded into the "expansion sigil" entry (cap 12 held; no new line); weaver — fourth sighting of "a shared
+fixture that always supplies an optional input"; `_packages` — second sighting of "couple the two populations in
+one fragment", mechanized as `TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment`.
+
+**Pending observations (Mac dev stack only — not reproducible in the container, not deferred work):**
+`lensLatency.capabilityEphemeral` p95 before/after (§3.1.1; the ledger holds no baseline for this lens);
+the `capabilityEphemeral` health entry showing no `LensProjectionDiverged` after a deadline crossing (§12 Inc 1's
+live acceptance — its executable form, `TestSweepVerdict_EphemeralGrantStraddlingADeadlineIsNotADivergence`, is
+green); a C7/C8 re-census. Each is a reading of the running stack, taken at the next attended fire on the Mac.
+
+**Body amendments made at build time, where they stand:** §3.1.1 (the bound is over candidates, not grants; the
+hoist bullet no longer cites a p95 the ledger never held), §3.5 (the second census), §11 (the operator path's
+irreversibility; a tombstoned marker un-retracts in the read model only), §15.2 (cafe-domain 0.12.3).

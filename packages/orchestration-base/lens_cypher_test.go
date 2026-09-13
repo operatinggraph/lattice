@@ -647,10 +647,13 @@ func TestCapabilityEphemeral_EveryArmReadsTheRecordedLapse(t *testing.T) {
 // required match this arm's task cannot satisfy). It would miss a
 // PROPERTY-conditioned narrowing these three fixtures happen to satisfy — a new
 // clause on a field they all carry. The universal claim rests on the cyphers
-// rather than on the fixtures: arm 1's and arm 2's task binding is
-// character-for-character staleAssignedTasksSpec's `(t:task)-[:assignedTo]->`,
-// and arm 3's is unroutedTasksSpec's `(t:task)-[:queuedFor]->`, so every task
-// either lens can bind is one the matching target binds too.
+// rather than on the fixtures — arms 1 and 2 bind a task through the same
+// assignedTo relation staleAssignedTasksSpec anchors on, arm 3 through the
+// queuedFor relation unroutedTasksSpec anchors on, and every one of the five
+// gates on the same `status = 'open'` fragment — which
+// TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment pins
+// on the shipped spec text, so a property-conditioned narrowing on either side
+// fails there even when the three fixtures here still pass.
 func TestCapabilityEphemeral_EveryArmsTaskIsCoveredByARoutingShapeTarget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -1009,4 +1012,29 @@ func TestTaskDeadlineLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 	}
 	require.Equal(t, 2, checked,
 		"unroutedTasks and staleAssignedTasks each read a recorded lapse; a drop here is a lens that went back to a clock")
+}
+
+// TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment is
+// the executable half of the population claim, pinned on the SHIPPED spec text
+// rather than on a fixture: each ephemeral arm binds its task through the
+// relation the routing-shape target anchors on, and both sides gate on the one
+// `status = 'open'` fragment with nothing else between the pattern and the
+// recorded-lapse read. A conjunct added to either side — a target narrowing to
+// a priority, an arm narrowing to an operation — changes the substring and
+// fails here by arm name, which is the case the fixture-driven coverage pin
+// cannot see.
+func TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment(t *testing.T) {
+	for _, tc := range []struct{ arm, ephemeralBinding, ephemeralWhere, target, targetBinding string }{
+		{"directAssignment", "(identity)<-[:assignedTo]-(task:task)", "WHERE task.data.status = 'open' AND NOT (", "staleAssignedTasks", "-[:assignedTo]->(assignee:identity)"},
+		{"managerDelegation", "<-[:assignedTo]-(task2:task)", "WHERE task2.data.status = 'open' AND NOT (", "staleAssignedTasks", "-[:assignedTo]->(assignee:identity)"},
+		{"roleQueueFanOut", "<-[:queuedFor]-(task3:task)", "WHERE task3.data.status = 'open' AND NOT (", "unroutedTasks", "-[:queuedFor]->(role:role)"},
+	} {
+		t.Run(tc.arm, func(t *testing.T) {
+			require.Contains(t, capabilityEphemeralSpec, tc.ephemeralBinding, "the arm binds its task through the routing relation")
+			require.Contains(t, capabilityEphemeralSpec, tc.ephemeralWhere, "the arm gates on status = 'open' and then only on the recorded lapse")
+			targetSpec := map[string]string{"staleAssignedTasks": staleAssignedTasksSpec, "unroutedTasks": unroutedTasksSpec}[tc.target]
+			require.Contains(t, targetSpec, tc.targetBinding, "%s anchors on the same relation", tc.target)
+			require.Contains(t, targetSpec, "WHERE t.data.status = 'open'\n", "%s gates on the same status fragment and nothing else", tc.target)
+		})
+	}
 }

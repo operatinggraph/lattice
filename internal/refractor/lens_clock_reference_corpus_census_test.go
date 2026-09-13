@@ -33,6 +33,11 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
+// clockReferenceCorpusFloor is the least number of executable cyphers the
+// enumeration must visit for its verdict to mean anything; the live corpus is
+// about twice this.
+const clockReferenceCorpusFloor = 60
+
 // projectedAtPin is the exact set of lenses whose cypher may reference
 // `$projectedAt`, with the reason it is sound to. A name here that
 // ReferencesParam stops finding, or a referencing lens missing from here, is
@@ -77,7 +82,7 @@ func TestCorpusClockReference_NoLensReferencesNow(t *testing.T) {
 	})
 
 	t.Logf("enumerated %d corpus specs", enumerated)
-	require.GreaterOrEqualf(t, enumerated, 60,
+	require.GreaterOrEqualf(t, enumerated, clockReferenceCorpusFloor,
 		"the corpus enumeration collapsed to %d specs — this census is only worth what it covers, "+
 			"and an empty (or near-empty) enumeration must not read as a clean table", enumerated)
 }

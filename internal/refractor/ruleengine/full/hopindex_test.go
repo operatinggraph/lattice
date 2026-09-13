@@ -99,8 +99,9 @@ func TestAnchorHopIndex_UnrelatedRelationBindsNothing(t *testing.T) {
 }
 
 // The shipped capabilityEphemeral (packages/orchestration-base/lenses.go),
-// abridged only by dropping the RETURN's collect() bodies — the pattern
-// sources, which are all this derivation reads, are verbatim.
+// abridged by dropping the RETURN's collect() bodies and each arm's
+// `status = 'open'` conjunct — the pattern sources, which are all this
+// derivation reads, are verbatim.
 //
 // This is a hand-kept COPY, and no corpus census sees it: the census pins
 // enumerate the installed corpus through pkgregistry, so an edit to the shipped

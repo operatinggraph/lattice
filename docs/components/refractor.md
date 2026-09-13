@@ -2054,9 +2054,14 @@ wrong kind of claim: state the mechanism-level invariant and point at the pin.
   indexing" is an attractive package edit that is fail-closed on a positive arm (a too-shallow bound drops a
   service) and fail-OPEN on a negated one (it drops an exclusion, granting access). Same edit, opposite
   directions. Check: that half is **MECHANIZED** — `scripts/lint-lens-anchors.go` refuses a finite upper
-  bound below the engine's own `maxVarLengthHops` clamp inside a negated extent, and runs its own
-  positive-and-negative vectors on every invocation because the corpus ships no violating lens for it to
-  catch. The **sigil** half still has only the per-lens string pin (`service-location/package_test.go`) — the
+  bound below the engine's own `maxVarLengthHops` clamp inside a negated extent for a literal or same-file
+  const Spec, and `negated_varlength_bound_corpus_census_test.go` runs the same rule over every RENDERED
+  corpus cypher (the source lint only warns on a `fmt.Sprintf`-built Spec, 21 lenses today); both run their
+  own positive-and-negative vectors on every invocation because the corpus ships no violating lens for them
+  to catch. A gate that resolves its subject from SOURCE TEXT loses the subject when the declaration is
+  re-spelled — the auth-plane `capabilityEphemeral`'s `const` → `fmt.Sprintf` rebuild (2026-09-13) moved it
+  from gated to advisory, and an advisory never fails CI; after changing how a linted declaration is built,
+  diff that lint's advisory count, and close a degraded gate with a census over the rendered artifact. The **sigil** half still has only the per-lens string pin (`service-location/package_test.go`) — the
   entry retires when that one is mechanized too. Generalize before writing either: ask which direction the
   edit fails in on each arm, not whether it is "tighter".
 - **A two-layer seam can be green at each layer and broken across it — the interposed step is where it dies**

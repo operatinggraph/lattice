@@ -235,8 +235,9 @@ against it (the `freshnessExpiry` marker's `byTarget.<targetId>` entry), so a ga
 stored values — `missing_<g> = … AND (marker >= deadline)`, or its negation where the column asks for
 freshness rather than for a gap. A lens that is no target's own — the auth-plane `capabilityEphemeral`,
 an observer with no `byTarget` entry — reads the marker's `expiredAt`, the entity-wide maximum, since any
-recorded instant at or past its deadline proves the lapse whichever target fired. The same cypher projects the deadline as the optional `freshUntil`
-column the temporal lane arms a timer from (below), which is what makes the marker appear. Reading
+recorded instant at or past its deadline proves the lapse whichever target fired. The same cypher
+projects the deadline as the optional `freshUntil` column the temporal lane arms a timer from (below),
+which is what makes the marker appear. Reading
 `$now` instead makes the row a function of when it was evaluated, which the projection plane does not
 promise to hold stable.
 
@@ -1384,7 +1385,8 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   reclaim/backoff corpus, then the count-leg corpus (2026-08-25); a third time 2026-09-06, when every un-park
   fixture omitted `escalatedAt`, so a count-leg route that swallowed an un-parked, previously-escalated goal gap
   shipped green until lead review traced the live document shape. Check: for every fixture helper, list the
-  columns it writes that production code treats as OPTIONAL, and require one vector that omits each.
+  columns it writes that production code treats as OPTIONAL, and require one vector that omits each. A fourth time 2026-09-13: the orchestration-base identity-spec helper injected `now` for every
+  lens, so a clock-free `capabilityEphemeral` was untestable for the regression until the parameter was removed.
 - **An operator verb that hands a gap to a reconciler arm must refuse exactly what that arm PERMANENTLY
   declines** — the verb's whole effect is the arm's next pass, so accepting a shape the arm will never act
   on reports success, changes nothing an operator can observe, and leaves the operator's own diagnostic

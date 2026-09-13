@@ -142,7 +142,8 @@ func TestSweepVerdict_EphemeralGrantIsAPureFunctionOfTheSubgraph(t *testing.T) {
 // verdict taken from the CLOCK instead of the recorded lapse. It exists to
 // measure the comparator: without it the two tests above are satisfied just as
 // well by a lens with nothing time-dependent in it, or by a classifyDivergence
-// that has stopped comparing.
+// that has stopped comparing. It is a hand-kept copy no corpus census sees:
+// keep its pattern sources in step with the shipped spec by hand.
 const ephemeralClockReadingSpec = `
 MATCH (identity:identity {key: $actorKey})
 

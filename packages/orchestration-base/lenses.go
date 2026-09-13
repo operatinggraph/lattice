@@ -458,8 +458,8 @@ RETURN
 // retract a grant, never confer one — and it is irreversible: the fold keeps
 // the maximum over byTarget and the marker's own standing value, no operation
 // lowers or clears expiredAt, and even a tombstone-and-revive carries it
-// forward, so that task's grant stays retracted until its deadline is moved
-// past the recorded instant.
+// forward, so that task's grant stays retracted until a revive moves its
+// deadline past the recorded instant, or a new task replaces it.
 //
 // The predicate is negated so the absent cases stay granted: an unmarked
 // task's marker hop binds nil, a nil ordering comparison is false, and
