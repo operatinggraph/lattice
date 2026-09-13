@@ -253,6 +253,10 @@ is the row's **anchor**. No channel names the neighbour whose window lapsed.
 
 ### 2.6 C6 — `capabilityEphemeral` proves the placement argument, and is not convertible here
 
+> **Superseded 2026-09-13.** The premise below ('no fact to record') was falsified by this design's own Increment 3
+> (the two task-anchored targets record the lapse on every task); the lens converted as an OBSERVER reading the
+> marker's `expiredAt` — [capability-ephemeral-recorded-expiry-design.md](capability-ephemeral-recorded-expiry-design.md) §16.
+
 The one `$now` lens with no `freshUntil`, no timer, no marker and no Weaver target. Its consumer is
 `internal/processor/step3_auth_capability.go`, which **re-checks the grant's own recorded `expiresAt` at
 authorization time** against an injectable clock (`:349-358`, *"Expired — Contract #6 §6.6:
@@ -566,6 +570,9 @@ shape the criterion rules out.
 One predicate **pair** each — gap column **and** `freshUntil`.
 
 **`cafeStaleTabSettlement` leaves the design, because converting it would close a shipped gap forever.**
+
+> **Superseded 2026-09-13.** Its `BodyColumns` gained `freshUntil` (`b569fd2c`), so the lens converted as an ordinary
+> anchor-hosted member reading its own `byTarget` entry — capability-ephemeral-recorded-expiry-design.md §3.4 / §16.
 Its cypher computes `freshUntil` (`cafe-domain/lenses.go:366`) and its doc comment describes the intended
 behaviour — *"freshUntil arms a one-shot @at at staleAt while the tab is still open"* (`:334`) — but
 `StaleTabSettlementTarget`'s `BodyColumns` **omits `freshUntil`** (`:69`), and `BodyColumns` is a strict

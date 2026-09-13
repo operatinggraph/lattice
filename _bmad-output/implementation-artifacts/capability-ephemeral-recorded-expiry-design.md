@@ -734,11 +734,11 @@ C7/C8 re-census, which need the Mac dev stack and are recorded below as pending 
 ## 16. Close note (2026-09-13) — built in full; one fire
 
 **Status: ✅ BUILT + SHIPPED.** Fire branch `claude/relaxed-rubin-kj4qv4`, merged to `main` in one landing (never partial).
-Units, in order: `e97234e` Inc 0 (walked-node negated-ordering engine pin) · `bb5c192` Inc 2 (café stale-tab lens,
-cafe-domain 0.12.3) · `2e08562` Inc 1 (the auth-plane lens, orchestration-base 0.7.19) · `519ef40` the 3-layer
-review fold · `4e8dfe5` the negated finite-bound hop corpus census (a discovery of this fire, fixed in the batch) ·
-`9a26091` Inc 3 (clock-reference corpus census + docs) · `bac2f3a` an adjacent doc-comment fix · the close-pass
-fold (this commit). Gates run green in the container: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+Units, in order (the SHAs as rebased onto `main`): `462d55d` Inc 0 (walked-node negated-ordering engine pin) ·
+`7cdf6c5` Inc 2 (café stale-tab lens, cafe-domain 0.12.3) · `c744c11` Inc 1 (the auth-plane lens,
+orchestration-base 0.7.19) · `a9c97b9` the 3-layer review fold · `99a6020` the negated finite-bound hop corpus
+census (a discovery of this fire, fixed in the batch) · `86ed14d` Inc 3 (clock-reference corpus census + docs) ·
+`be1a89f` an adjacent doc-comment fix · `77feaa3` the close-pass fold. Gates run green in the container: `go build ./...`, `make vet`, `golangci-lint run ./...`,
 all 21 `scripts/lint-*.go` CI runs, `go test ./... -p 4` with Postgres up, and the seven build-tagged harnesses
 (`lease`/`unrouted`/`augur` convergence, `system-actor-capability`, `control-plane-authz`, `object-gc`,
 `crypto-shred`).
@@ -746,7 +746,7 @@ all 21 `scripts/lint-*.go` CI runs, `go test ./... -p 4` with Postgres up, and t
 **Review record.** Inc 1 (posture-changing): three cold `opus` reviewers — blind hunter, edge-case hunter,
 acceptance auditor — no blocking finding; 5 should-fix + 6 nits folded in `519ef40`. Cumulative close pass (one
 cold `opus` reviewer over the whole diff + the delta since the round): no blocking finding; 5 should-fix + 6
-nits folded here (the shipped-spec fragment pin, the third hand-copy's annotation, the §3.1.1 hoist bullet's
+nits folded in `77feaa3` (the shipped-spec fragment pin, the third hand-copy's annotation, the §3.1.1 hoist bullet's
 ungrounded p95, the §3.5 second-census line, the dossier "MECHANIZED" claim, a rewrap, a named floor, the
 hopindex replica's abridgement claim, the revive wording).
 

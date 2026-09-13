@@ -121,7 +121,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor/Processor] `capabilityEphemeral` is the last `$now` in the lens corpus** | Its three arms admit a task's grants only while `expiresAt > $now`; the two task-anchored targets already record the lapse on the task, so the lens reads that marker instead, the café stale-tab lens converts alike, and a corpus census pin refuses `$now` blocking. Safe today: the Processor re-checks `expiresAt`. | ★★ | S | 🏗️ building · owner: claude/relaxed-rubin-kj4qv4 · [design](../../implementation-artifacts/capability-ephemeral-recorded-expiry-design.md) §15 · next: Inc 0 engine pin |
 | **[Refractor] The three partition-shaped grant tables keep a whole source-scoped diff per event** | `providerIdentityReadGrants`, `staffReadGrants`, `patientIdentityReadGrants` partition by anchor but stay whole-diff: that per-event diff is an un-truncatable grant table's only shrink path on a rebuild. Needs a grant-writer rebuild diff (or truncate) + `ListKeysWhere`. | ★ | S | 🗄️ shelved (revive: a measured grant-table event cost, or a grant-writer rebuild diff) · [why](../../implementation-artifacts/anchor-partitioned-plain-lens-retraction-design.md) §3.7 |
 | **Typed relation signatures — `containedIn: location→location`** | Declare a relation's endpoint types against the taxonomy, enforced at step 6 fail-closed; a signed variable-length hop contributes its endpoint expansion rather than clearing exhaustiveness. Held 2026-08-13: the payoff shrank to 2 lenses, both convertible by a single-hop rewrite (replacement row on verticals). | ★★ | L | 🗄️ shelved (revive: an intermediate containment level, or rewrite-unreachable varlength census) · [design](../../implementation-artifacts/typed-relation-signatures-design.md) |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
@@ -143,6 +142,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-13 · `77feaa3` · [Refractor/Processor] `capabilityEphemeral` reads the recorded lapse — the last `$now` leaves the lens corpus, censused ([design](../../implementation-artifacts/capability-ephemeral-recorded-expiry-design.md))
 - 2026-09-13 · `5a9c3ca` · [Weaver/Augur] the planner mandate's Fire 9 — plan-shaped proposals dispatched leg by leg + the promotion proposal; Fires 1–9 built ([design](../../implementation-artifacts/weaver-planner-mandate-design.md))
 - 2026-09-13 · `0cda80c` · [lease-signing] a superseded bgcheck retires itself — lens + Weaver directOp; the op derives its reads, admits Weaver ([design](../../implementation-artifacts/bgcheck-supersession-convergence-rule-design.md))
 - 2026-09-13 · `83e1e14` · [Loom] `loom-state` enumeration bounded to the actionable set — failed index, complete-resolution listings, sentinel-gated backfill ([design](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md))
@@ -167,10 +167,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-05 · `89b61556` · [Weaver] an exhausted goal gap re-plans at its leg boundary; the budget books attempts, the escalation books nothing and is paced ([design](../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md))
 - 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is ONE counted entry per (target, gap column); refused raises paced, overflow windowed ([design](../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
 - 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
-- 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))
-- 2026-09-04 · `c38af84` · [CI] lint-build split into lint-build + lint-static, parallel not serial — 131s/163s vs old combined 171–206s, full CI green (run 33893636046)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `a5f4ef2e`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `d9db9deb`)*

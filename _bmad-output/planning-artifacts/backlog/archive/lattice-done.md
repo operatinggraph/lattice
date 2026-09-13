@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))
+- 2026-09-04 · `c38af84` · [CI] lint-build split into lint-build + lint-static, parallel not serial — 131s/163s vs old combined 171–206s, full CI green (run 33893636046)
 - 2026-09-04 · `1982952e` · [Loom] deadline probe keys on the `MaxAge` marker + key presence + a conditioned fail, never an empty body; `disarmDeadline` deleted ([design](../../../implementation-artifacts/loom-deadline-marker-provenance-design.md))
 - 2026-09-03 · `a5f4ef2e` · [Loom/Substrate] `loom-state` removals are TTL'd purges, 61,731 legacy tombstones swept at start, `redrive` over a removed token fixed, gate `checkLoomStateDelete`
 - 2026-09-03 · `595ea540` · [Refractor] a `WITH` no longer refuses per-anchor closure: 3 lenses gain the anchor Delete, leaseApplicationsRead licensed, 1 to 22 msg/s ([design](../../../implementation-artifacts/with-alias-anchor-closure-design.md))
