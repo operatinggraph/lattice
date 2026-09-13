@@ -150,7 +150,13 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	// (t)-[:forOperation]->(op:meta) is label-typed, so op can never bind the
 	// task actor type — every hop off t (identity/leaseapp/renewal/meta) now
 	// excludes task, and the task anchor type binds only at the anchor.
-	"staleUserTasks":                    oneKey,
+	"staleUserTasks": oneKey,
+	// The second MATCH's `(newer:service)` is a SECOND service-typed position
+	// (index 3, alongside the anchor at 0): a completed sibling's own write
+	// binds there too, so another anchor's row (the sibling's own, were it
+	// superseded) really can render this vertex. Off-anchor, as intended — the
+	// whole point is that a write to either instance reprojects both.
+	"supersededBackgroundChecks":        walkMultiPosition,
 	"unroutedTasks":                     oneKey,
 	"visitSeriesDue":                    oneKey,
 	"visitSeriesSiteBackfill":           oneKey,

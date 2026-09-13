@@ -171,6 +171,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"renewalComplete":                   hopIndexed,
 	"staleAssignedTasks":                hopIndexed,
 	"staleUserTasks":                    hopIndexed,
+	"supersededBackgroundChecks":        hopIndexed,
 	"unroutedTasks":                     hopIndexed,
 	"visitSeriesDue":                    hopIndexed,
 	"visitSeriesSiteBackfill":           hopIndexed,

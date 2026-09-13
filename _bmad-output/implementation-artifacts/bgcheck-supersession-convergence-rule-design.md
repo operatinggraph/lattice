@@ -634,10 +634,47 @@ of a link create (design said "the gate refuses"; live "permissive default") —
   link**. The operator-path successor-ownership residual stays exactly as §4.3 (c) records it (a guard-level, documented
   residual; Weaver's path is proven by the lens's `(newer)-[:instanceOf]->(m)` conjunct). The link needs no
   `PermittedCommands` entry on any DDL. **§11.2 (viii) is struck** with it; (vii) stays and is the link's proof.
-- **§4.3 version target:** `0.31.29 → 0.31.30` (the manifest reached `0.31.29` with `6ae4006`).
+- **§4.3 version target:** `0.32.0 → 0.32.1` (the manifest reached `0.31.29` with `6ae4006` and `0.32.0` with
+  `a87e06b`, both after this design was written).
 - **§11.2 Inc 2 e2e home:** `internal/leaseconvergence` (the only harness that runs Weaver + Refractor against this
   package), not `lease_signing_test.go` (Processor-only).
+- **§4.3 (d)(ii) "a test proves it" — struck.** No test can reorder a script's mutation batch; the claim reduces to the
+  cited fact (`step6_validate.go` applies no same-batch endpoint-liveness rule to a link create; its one endpoint rule
+  covers required-*absent* endpoints, and both endpoints here are hydrated), verified by a scratch-copy reorder during
+  the build, and the code comment states only that fact.
+- **§4.3 (a) "six … derived server-side … the seventh keeps its dispatcher wording" — the seventh is now read from the
+  step-4 snapshot, and an undeclared submission is refused.** With six reads derived, a bare payload with no
+  `contextHint` ran to a committed supersession off an undeclared lazy `kv.Read` of the ownership link (the cold
+  review's second blocker). The op reads `state[instance_of_lnk]` and fails `InvalidArgument` when the key is not in
+  the snapshot; Weaver declares it as `row.instanceOfLink`, an operator as the key the descriptor spells out.
+- **§4.3 (a) `derive_reads` derives only grammatical keys of the right type** (`vtx.service.*` for the two
+  instances, `vtx.identity.*` for the subject); a 3-segment key of the wrong shape or type derives nothing, so every
+  malformed payload rejects with execute's `InvalidArgument` rather than a `DeriveReadsInvalid` hydration fault.
+- **§4.3 (b) gains a form guard:** each `completedAt` must be a 20-char Z-suffixed RFC3339 stamp, else
+  `NotSuperseded` — a precondition string ordering depends on, outside the predicate the lens mirrors; the single
+  writer (`RecordLeaseServiceOutcome`) means it never fires today.
+- **§4.3 (d) chain case, stated:** a retired predecessor keeps its own outbound `supersedes` link live (op(A,B) then
+  op(B,C) leaves both links live with B tombstoned); one permanent live link per retirement, walkable at rest, read as
+  absent by every live walk. And on the operator path the link is sourced at the unproven successor (§4.3 c's
+  residual now includes a write, not only a read).
+- **§8 / the brief's "permissive default, always":** the gate resolves by exact class first and a link create's class
+  is its relation, so the premise is *no linkType DDL registers `supersedes`* (true corpus-wide); a package that
+  registered it would move the link under that DDL's `PermittedCommands`.
+- **Unpriced costs, named:** `derive_reads` is one extra Starlark pass per op on this DDL (returns `{}` for
+  `CreateLeaseServiceInstance` on Loom's hot path); each retirement adds a fourth KV write and an adjacency entry on
+  a live `service` vertex.
 
-### 14.2 Checkpoint
+### 14.2 Review record
 
-🏗️ owner: `claude/relaxed-rubin-0d3ozn` · brief committed · next: Inc 1.
+**Inc 1 (posture-changing; one cold opus reviewer, read-only):** 2 BLOCKING (the ungrammatical-key derivation; the
+undeclared lazy ownership read), 4 SHOULD-FIX (operator-path link source; the untestable reorder claim; the chain case;
+the `PermittedCommands` premise), 4 NIT, 3 NOTE — all folded, each with a scratch-copy revert-proof. Classification:
+design-gap ×3 (the lazy-read hole a derivation opens, the gate premise, the chain case), implementation-bug ×1
+(segment-count-only derivation), doc-truth ×2. Held under attack: tie-break parity with the lens, the failing
+pre-pass bindings, weakest-wins merge, link key shape and direction, double-run collision, Weaver's submitter identity,
+`expectedRevision` inertness. Commit `c3f4d19`.
+
+### 14.3 Checkpoint
+
+🏗️ owner: `claude/relaxed-rubin-0d3ozn` · Inc 1 committed on the fire branch (`c3f4d19`) · next: Inc 2 (lens + target +
+pins + e2e), then the close pass and the merge to `main`.

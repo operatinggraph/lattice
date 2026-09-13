@@ -226,6 +226,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// (t)-[:forOperation]->(op:meta) is label-typed, same as the other three
 	// hops off t, so the label set is exhaustive.
 	"staleUserTasks":                    {narrow, "identity leaseapp meta renewal task", modeLabel},
+	"supersededBackgroundChecks":        {narrow, "identity meta service", modeRelation},
 	"unroutedTasks":                     {narrow, "role task", modeRelation},
 	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},

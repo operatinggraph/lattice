@@ -198,6 +198,30 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"watched it, until its overdue timer fires and the marker lands. Freshness fails OPEN here; the " +
 			"recorded lapse is the only evidence.",
 		LensRef: BackgroundCheckFreshnessTarget,
+	}, {
+		// supersededBackgroundChecks — the lens above projects a row only for a
+		// completed check that a later completed check on the same applicant,
+		// minted by this package, has already superseded. The only gap it ever
+		// opens dispatches the shipped TombstoneSupersededLeaseServiceInstance,
+		// which re-proves every conjunct on the Processor's own OCC snapshot —
+		// the row is a hint to converge on, never trusted as the mutation's
+		// authority.
+		TargetID: "supersededBackgroundChecks",
+		Description: "A completed background check that a later completed check on the same applicant, minted by " +
+			"this package, has superseded is retired, so every live view aggregates only over the current check. " +
+			"OPERATOR NOTE: a GapBudgetExhausted here means the lens and TombstoneSupersededLeaseServiceInstance " +
+			"disagree about a pair; Weaver logs the requestId at submit — read the rejection off the Contract #4 " +
+			"tracker (vtx.op.<requestId>) or the Processor log, fix, then reset-budget.",
+		LensRef: "supersededBackgroundChecks",
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_retirement": {
+				Action:    "directOp",
+				Operation: "TombstoneSupersededLeaseServiceInstance",
+				Class:     "leaseServiceInstance",
+				Params:    map[string]string{"instanceKey": "row.entityKey", "supersededBy": "row.supersededBy", "subjectKey": "row.subjectKey"},
+				Reads:     []string{"row.instanceOfLink"},
+			},
+		},
 	}}
 	return append(targets, RenewalTargets()...)
 }

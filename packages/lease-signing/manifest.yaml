@@ -102,6 +102,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: supersededBackgroundChecks
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
     - canonicalName: leaseApplicationsRead
       adapter: postgres
       engine: full
@@ -204,6 +208,8 @@ declares:
       lensRef: staleUserTasks
     - targetId: backgroundCheckFreshness
       lensRef: backgroundCheckFreshness
+    - targetId: supersededBackgroundChecks
+      lensRef: supersededBackgroundChecks
     - targetId: leaseExpiry
       lensRef: leaseExpiry
     - targetId: renewalComplete

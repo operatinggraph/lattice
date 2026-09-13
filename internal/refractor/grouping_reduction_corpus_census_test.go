@@ -181,6 +181,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"staffReadGrants":                   {"p", 0},
 	"staleAssignedTasks":                {"p", 0},
 	"staleUserTasks":                    {"p p!onbSsn", 0},
+	"supersededBackgroundChecks":        {"key(entityKey instanceOfLink subjectKey) p", 0},
 	"unroutedTasks":                     {"p", 0},
 	"visitSeriesDue":                    {"p", 0},
 	"visitSeriesRead":                   {"p", 0},

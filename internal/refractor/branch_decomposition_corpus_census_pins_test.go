@@ -120,6 +120,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// it (no-aggregating-item), same shape as orphanedTaskGrants' own single
 	// forOperation branch.
 	"staleUserTasks":                    {"g4/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
+	"supersededBackgroundChecks":        {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
 	"visitSeriesDue":                    {"g1/o1!no-aggregating-item", 0, 1},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
@@ -274,6 +275,7 @@ var footprintValidationVerdicts = map[string]bool{
 	"renewalComplete":                   true,
 	"staleAssignedTasks":                true,
 	"staleUserTasks":                    true,
+	"supersededBackgroundChecks":        true,
 	"unroutedTasks":                     true,
 	"visitSeriesDue":                    true,
 	"visitSeriesSiteBackfill":           true,

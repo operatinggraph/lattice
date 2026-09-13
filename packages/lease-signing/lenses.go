@@ -164,6 +164,34 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// supersededBackgroundChecks — the SERVICE-INSTANCE-anchored
+			// convergence rule that retires a completed background check once a
+			// later completed check on the same applicant, minted by this same
+			// package, exists. See supersededBackgroundChecksSpec below for the
+			// full projection contract; the row is violating-rows-only (an
+			// anchor with no qualifying successor projects no row at all), so
+			// the live population this rule bounds — checks that have already
+			// been superseded — never carries a standing subject in
+			// weaver-targets.
+			//
+			// Same shared weaver-targets bucket as every other target here, rows
+			// namespaced by OutputKeyPattern, with the targetId as that prefix.
+			CanonicalName:  "supersededBackgroundChecks",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           supersededBackgroundChecksSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "service",
+				OutputKeyPattern: "supersededBackgroundChecks.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_retirement", "entityKey", "subjectKey", "supersededBy", "instanceOfLink"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
 			// leaseApplicationsRead — the protected Postgres read model for the
 			// applicant-facing "My Applications" view (D1.3 Fire 2, the
 			// applicant-self milestone). Contract #6 §6.14: protected-by-default,
@@ -862,6 +890,60 @@ RETURN
   entityKey,
   CASE WHEN lapsedAt >= validUntil THEN null ELSE validUntil END AS freshUntil,
   False AS violating
+`
+
+// supersededBackgroundChecksSpec anchors on the background-check INSTANCE, the
+// same anchor backgroundCheckFreshnessSpec above uses, and projects VIOLATING
+// ROWS ONLY: an anchor with no qualifying successor binds nothing in the
+// second MATCH, so the WITH's aggregation runs over zero rows and the query
+// emits nothing for it. There is no standing row per live check — only a
+// superseded one ever shows up here, which is what keeps this lens's fan-out
+// (§4.1 of the design) bounded by the population it exists to shrink rather
+// than by every check this package has ever minted.
+//
+// The anchor MATCH is the op's own precondition on instanceKey, restated:
+// completed, background-check class, owned (by instanceOf) by a meta vertex
+// whose canonicalName is "leaseServiceInstance" — this DDL's own type
+// authority, not merely a same-named one elsewhere.
+//
+// The second MATCH is the op's precondition on supersededBy, plus one the op
+// does not itself prove: same class, completed, and either strictly later or
+// tied at the same completedAt with the greater key — re-bound to the SAME
+// meta (m) the anchor's own instanceOf link targets, so a same-shaped
+// instance owned by a different type authority never supersedes this one.
+// completedAt is RecordLeaseServiceOutcome's rfc3339_utc stamp: fixed-width
+// and zero-padded, so string comparison orders it identically to
+// chronological order, at whole-second granularity — which is why the tie
+// needs breaking at all (Weaver paces backgroundCheck dispatch at 2/s, so two
+// replies for one applicant can commit in the same second). The tie-break is
+// TEXTUALLY the same predicate TombstoneSupersededLeaseServiceInstance's own
+// recency guard applies (scripts.go); a pinned row here that guard would
+// reject is the drift detector for an edit that changes one side and not the
+// other.
+//
+// supersededBy is max(newer.key): a deterministic member of the qualifying
+// set of later, owned, completed siblings — not necessarily the newest, and
+// the op accepts any member. instanceOfLink is own.key, the anchor's own
+// instanceOf link key: the one read the op cannot derive from its payload
+// alone (Contract #2 §2.5 class (g) covers the other six), so the lens hands
+// it over as a projected column instead. The successor's own instanceOf link
+// key cannot be projected the same way through this aggregation — a
+// relationship variable used as the argument to max()/min() is refused at
+// parse — which is why the successor's ownership is enforced by the pattern
+// re-binding (m), never by handing its link key to the op.
+const supersededBackgroundChecksSpec = `
+MATCH (inst:service {key: $actorKey})-[own:instanceOf]->(m:meta)
+  WHERE inst.class = 'service.backgroundCheck.instance'
+    AND inst.outcome.data.status = 'completed'
+    AND m.canonicalName.data.value = 'leaseServiceInstance'
+MATCH (inst)-[:providedTo]->(id:identity)<-[:providedTo]-(newer:service)-[:instanceOf]->(m)
+  WHERE newer.class = 'service.backgroundCheck.instance'
+    AND newer.outcome.data.status = 'completed'
+    AND ((newer.outcome.data.completedAt > inst.outcome.data.completedAt)
+      OR ((newer.outcome.data.completedAt = inst.outcome.data.completedAt) AND (newer.key > inst.key)))
+WITH inst.key AS entityKey, own.key AS instanceOfLink, id.key AS subjectKey, max(newer.key) AS supersededBy
+RETURN entityKey AS actorKey, entityKey, subjectKey, instanceOfLink, supersededBy,
+  True AS missing_retirement, True AS violating
 `
 
 // leaseApplicationCompleteSpec is built once at package init: the retry caps
