@@ -10,6 +10,7 @@ package leasesigning_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -393,6 +394,25 @@ func TestLeaseDocInstance_TenantNameTemplatedButAbsent_DroppedNotFailed(t *testi
 // in-place upgrade of the one op-meta under test — never a partial Definition
 // that would read the omitted fields as "retire everything else" (Apply's
 // whole-Definition convergence semantics, internal/pkgmgr/apply.go).
+// nextPatchVersion returns v with its patch component incremented, so a test
+// that re-installs a modified Definition over the real install always lands
+// one version ABOVE whatever the package ships at: an upgrade the installer
+// applies rather than a same-version no-op it skips. Derived from the package's
+// own Version, never spelled as a literal, so a package bump cannot turn the
+// upgrade into a skip.
+func nextPatchVersion(t *testing.T, v string) string {
+	t.Helper()
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		t.Fatalf("package version %q is not major.minor.patch", v)
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		t.Fatalf("package version %q has a non-numeric patch: %v", v, err)
+	}
+	return parts[0] + "." + parts[1] + "." + strconv.Itoa(patch+1)
+}
+
 func leaseSigningPackageWithoutDocInstanceDispatch(t *testing.T, version string) pkgmgr.Definition {
 	t.Helper()
 	def := leasesigning.Package
@@ -436,7 +456,7 @@ func TestLeaseDocInstance_TenantNameAbsent_FloorMutation_RejectsHydrationMiss(t 
 		"backOfHouse":  pkgmgr.RoleID("identity-domain", "backOfHouse"),
 		"provider":     pkgmgr.RoleID("identity-domain", "provider"),
 	}
-	modified := leaseSigningPackageWithoutDocInstanceDispatch(t, "0.32.1")
+	modified := leaseSigningPackageWithoutDocInstanceDispatch(t, nextPatchVersion(t, leasesigning.Package.Version))
 	// Apply submits UpgradePackage over ops.meta and awaits a reply; the
 	// original install's meta pipeline (setupLeaseEnv/installLeaseDeps) is
 	// already stopped by now, so this test starts its own, exactly like

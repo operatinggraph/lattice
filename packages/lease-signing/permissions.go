@@ -86,7 +86,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "TombstoneSupersededLeaseServiceInstance",
 			Scope:         "any",
-			Note:          "Grants the operator alone the right to retire a lease service instance superseded by a newer completed one on the same subject + family — a one-time/maintenance repair (the runaway-bgcheck-instance purge, bgcheck-runaway-and-broad-filter-design.md §6), never a person-facing action (BackfillPatientRegistration precedent, clinic-domain).",
+			Note:          "Grants the operator the right to retire a lease service instance superseded by a later completed one on the same subject + family — never a person-facing action (BackfillPatientRegistration precedent, clinic-domain). Weaver's service actor holds the operator role and is the DURABLE submitter: the supersededBackgroundChecks convergence target dispatches this op as a directOp off a lens row that has already proven the pair (bgcheck-supersession-convergence-rule-design.md). An operator or trusted tool may run it by hand for a one-off repair. Loom holds the same role and is refused in-script: it mints instances and never retires them.",
 			GrantsTo:      []string{"operator"},
 		},
 		{

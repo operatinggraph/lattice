@@ -1,6 +1,8 @@
 // TombstoneSupersededLeaseServiceInstance op tests through the real install +
-// Processor pipeline (bgcheck-runaway-and-broad-filter-design.md §6). External
-// test package, mirroring lease_signing_test.go's shape and helpers.
+// Processor pipeline (bgcheck-supersession-convergence-rule-design.md — the op
+// Weaver's supersededBackgroundChecks target submits, and an operator may run by
+// hand). External test package, mirroring lease_signing_test.go's shape and
+// helpers.
 package leasesigning_test
 
 import (
@@ -193,23 +195,44 @@ func readRevision(t *testing.T, ctx context.Context, conn *substrate.Conn, key s
 	return entry.Revision
 }
 
+// tsDecl selects what a submission declares in contextHint, so one envelope
+// builder serves the DDL's real contract and the two probing shapes.
+type tsDecl int
+
+const (
+	// tsDeclareAll declares all SEVEN keys required — the all-seven declaration
+	// shape, valid under the weakest-wins merge (Contract #2 §2.5 class (g)):
+	// each derived key collides with an identically-disposed envelope key.
+	tsDeclareAll tsDecl = iota
+	// tsDeclareOwnershipOnly declares the ONE key derive_reads(op) cannot
+	// compute (the ownership instanceOf link, keyed on ddl[...].metaKey) and
+	// leaves the other six to the derivation — the shape Weaver's
+	// supersededBackgroundChecks target and an operator both submit.
+	tsDeclareOwnershipOnly
+	// tsDeclareLinksOptional declares the five non-link keys required and the
+	// two providedTo links OPTIONAL. A link keyed on a WRONG subject genuinely
+	// never exists in KV, and derive_reads derives it required, so only an
+	// envelope declaration can weaken it to a script-visible branch instead of
+	// a HydrationMiss fault (mirroring lease_signing_test.go's withdrawReason
+	// probing envelope) — a technique, not the DDL's real contract.
+	tsDeclareLinksOptional
+	// tsDeclareNothing sends no contextHint at all. Two vectors use it: a
+	// malformed payload (derive_reads derives nothing, so execute()'s own
+	// required_string / parts_of raises InvalidArgument before any key is
+	// touched) and a VALID payload, where the six derived reads hydrate and the
+	// script refuses the missing ownership declaration rather than reading that
+	// key live.
+	tsDeclareNothing
+)
+
 // submitTombstoneSuperseded builds + submits TombstoneSupersededLeaseServiceInstance
-// as actor. The DDL's documented contract (ddls.go) declares all SEVEN reads
-// required (contextHint.reads): instanceKey's root, instanceKey's ownership
-// instanceOf link (B1/B2 — keyed on metaID, the leaseServiceInstance DDL's
-// installed meta-vertex id), both .outcome aspects, supersededBy's root, and
-// both providedTo links. The roots + outcomes + ownership link are always
-// safe to declare required here because every guard that reads them runs
-// only once an earlier vertex_alive/ownership check has already confirmed
-// the read is meaningful (state[key] is never subscripted, and kv.Read is
-// never called, on a key still known to be absent) — but a providedTo link
-// keyed on a WRONG subject genuinely never exists in KV, so linksOptional
-// lets a wrong-subject test declare the two providedTo link keys as
-// optionalReads instead (mirroring lease_signing_test.go's withdrawReason: a
-// probing envelope that makes absence a script-visible branch rather than a
-// HydrationMiss fault — a technique, not the DDL's real (required) contract,
-// which every other test in this file exercises unmodified).
-func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, actor, instanceKey, supersededBy, subjectKey, metaID string, linksOptional bool) (processor.MessageOutcome, *processor.OperationReply) {
+// as actor, declaring what decl selects. The op's seven reads are instanceKey's
+// root, instanceKey's ownership instanceOf link (B1/B2 — keyed on metaID, the
+// leaseServiceInstance DDL's installed meta-vertex id), both .outcome aspects,
+// supersededBy's root, and both providedTo links; six of them are derived
+// server-side by the DDL's own derive_reads(op), and the ownership link is the
+// one a dispatcher declares.
+func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, actor, instanceKey, supersededBy, subjectKey, metaID string, decl tsDecl) (processor.MessageOutcome, *processor.OperationReply) {
 	t.Helper()
 	_, instHandle, _ := substrate.ParseVertexKey(instanceKey)
 	_, succHandle, _ := substrate.ParseVertexKey(supersededBy)
@@ -218,13 +241,22 @@ func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrat
 	instProvidedTo := "lnk.service." + instHandle + ".providedTo.identity." + subjID
 	succProvidedTo := "lnk.service." + succHandle + ".providedTo.identity." + subjID
 
-	hint := &processor.ContextHint{
-		Reads: []string{instanceKey, instOwnership, instanceKey + ".outcome", supersededBy, supersededBy + ".outcome"},
-	}
-	if linksOptional {
-		hint.OptionalReads = []string{instProvidedTo, succProvidedTo}
-	} else {
-		hint.Reads = append(hint.Reads, instProvidedTo, succProvidedTo)
+	var hint *processor.ContextHint
+	switch decl {
+	case tsDeclareOwnershipOnly:
+		hint = &processor.ContextHint{Reads: []string{instOwnership}}
+	case tsDeclareLinksOptional:
+		hint = &processor.ContextHint{
+			Reads:         []string{instanceKey, instOwnership, instanceKey + ".outcome", supersededBy, supersededBy + ".outcome"},
+			OptionalReads: []string{instProvidedTo, succProvidedTo},
+		}
+	case tsDeclareNothing:
+		hint = nil
+	default:
+		hint = &processor.ContextHint{
+			Reads: []string{instanceKey, instOwnership, instanceKey + ".outcome", supersededBy, supersededBy + ".outcome",
+				instProvidedTo, succProvidedTo},
+		}
 	}
 
 	env := &processor.OperationEnvelope{
@@ -241,58 +273,30 @@ func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrat
 	return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 }
 
-// TestTombstoneSupersededLeaseServiceInstance_Success: the happy path. Two
-// completed background-check instances on the same subject, older strictly
-// before newer. Tombstoning older-superseded-by-newer tombstones older's root
-// + its instanceOf link + its providedTo link, leaves older's .outcome aspect
-// dangling alive (non-cascading tombstone — the WithdrawLeaseApplication
-// precedent: readers filter on the ROOT's isDeleted), leaves newer entirely
-// untouched, and emits lease.serviceInstanceSuperseded. B1/B2: additionally
-// proves the tombstoned instanceOf link is the PRE-EXISTING record (its
-// revision advances by the tombstone, and its sourceVertex/targetVertex
-// provenance survives unchanged), not a freshly materialized phantom.
-func TestTombstoneSupersededLeaseServiceInstance_Success(t *testing.T) {
-	t.Parallel()
-	ctx, conn := setupLeaseEnv(t)
-	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-success")
-
-	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
-	subject := seedApplicant(t, ctx, conn, "BBftM6nXFwju1FgWbCTm")
-	older := seedServiceInstance(t, ctx, conn, cp, cons, "tsSuOld1", "BBAdPZkFfj9NpfDYJPwL", "backgroundCheck", subject, "2026-02-01T00:00:00Z", "completed")
-	newer := seedServiceInstance(t, ctx, conn, cp, cons, "tsSuNew1", "BBy2epMitMCHBLgu4cFd", "backgroundCheck", subject, "2026-02-02T00:00:00Z", "completed")
-
-	olderInstOf := instanceOfLinkKey(t, ctx, conn, "BBAdPZkFfj9NpfDYJPwL")
-	newerInstOf := instanceOfLinkKey(t, ctx, conn, "BBy2epMitMCHBLgu4cFd")
-	olderInstOfBefore := readDoc(t, ctx, conn, olderInstOf)
-	olderInstOfRevBefore := readRevision(t, ctx, conn, olderInstOf)
+// assertSupersessionPostState asserts the whole committed outcome of one
+// accepted supersession: the predecessor's root + its instanceOf link + its
+// providedTo link are tombstoned, its dangling .outcome aspect is left alive
+// (non-cascading), the successor is untouched on all three of its own keys, the
+// lnk.service.<successor>.supersedes.service.<predecessor> link is LIVE with the
+// successor as sourceVertex and the tombstoned predecessor as targetVertex (the
+// "new supersedes old" direction, Contract #1 §1.1) and is NOT one of the
+// tombstones, and lease.serviceInstanceSuperseded names the pair + subject.
+// opTag is the submission's tag, from which the request id is re-derived.
+func assertSupersessionPostState(t *testing.T, ctx context.Context, conn *substrate.Conn, older, newer, subject, opTag string) {
+	t.Helper()
+	_, olderHandle, _ := substrate.ParseVertexKey(older)
+	_, newerHandle, _ := substrate.ParseVertexKey(newer)
 	_, subjID, _ := substrate.ParseVertexKey(subject)
-	olderProvidedTo := "lnk.service.BBAdPZkFfj9NpfDYJPwL.providedTo.identity." + subjID
-	newerProvidedTo := "lnk.service.BBy2epMitMCHBLgu4cFd.providedTo.identity." + subjID
-
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSuccessOp1", lsActorKey, older, newer, subject, metaID, false)
-	if outcome != processor.OutcomeAccepted {
-		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
-	}
+	olderInstOf := instanceOfLinkKey(t, ctx, conn, olderHandle)
+	newerInstOf := instanceOfLinkKey(t, ctx, conn, newerHandle)
+	olderProvidedTo := "lnk.service." + olderHandle + ".providedTo.identity." + subjID
+	newerProvidedTo := "lnk.service." + newerHandle + ".providedTo.identity." + subjID
 
 	if d, _ := readDoc(t, ctx, conn, older)["isDeleted"].(bool); !d {
 		t.Fatalf("older instance root must be tombstoned")
 	}
-	olderInstOfAfter := readDoc(t, ctx, conn, olderInstOf)
-	if d, _ := olderInstOfAfter["isDeleted"].(bool); !d {
+	if d, _ := readDoc(t, ctx, conn, olderInstOf)["isDeleted"].(bool); !d {
 		t.Fatalf("older instance's instanceOf link must be tombstoned")
-	}
-	// B1/B2: the pre-existing record, not a phantom — provenance survives and
-	// the revision advances (a fresh key would start at revision 1).
-	if got, want := olderInstOfAfter["sourceVertex"], olderInstOfBefore["sourceVertex"]; got != want {
-		t.Fatalf("instanceOf sourceVertex changed across the tombstone: got %v, want %v (a phantom record would drop it)", got, want)
-	}
-	if got, want := olderInstOfAfter["targetVertex"], olderInstOfBefore["targetVertex"]; got != want {
-		t.Fatalf("instanceOf targetVertex changed across the tombstone: got %v, want %v (a phantom record would drop it)", got, want)
-	}
-	olderInstOfRevAfter := readRevision(t, ctx, conn, olderInstOf)
-	if olderInstOfRevAfter <= olderInstOfRevBefore {
-		t.Fatalf("instanceOf link revision did not advance (before=%d after=%d) — a phantom tombstone would instead start a fresh key",
-			olderInstOfRevBefore, olderInstOfRevAfter)
 	}
 	if d, _ := readDoc(t, ctx, conn, olderProvidedTo)["isDeleted"].(bool); !d {
 		t.Fatalf("older instance's providedTo link must be tombstoned")
@@ -312,7 +316,25 @@ func TestTombstoneSupersededLeaseServiceInstance_Success(t *testing.T) {
 		t.Fatalf("newer instance's providedTo link must NOT be touched")
 	}
 
-	ev := findEmittedEvent(t, ctx, conn, testutil.GenReqID("tsSuccessOp1"), "lease.serviceInstanceSuperseded")
+	supersedes := "lnk.service." + newerHandle + ".supersedes.service." + olderHandle
+	link := readDoc(t, ctx, conn, supersedes)
+	if d, _ := link["isDeleted"].(bool); d {
+		t.Fatalf("%s must be LIVE — the retirement is walkable at rest, so the link is never one of the tombstones", supersedes)
+	}
+	if got, _ := link["class"].(string); got != "supersedes" {
+		t.Fatalf("supersedes link class = %q, want %q", got, "supersedes")
+	}
+	if got, _ := link["localName"].(string); got != "supersedes" {
+		t.Fatalf("supersedes link localName = %q, want %q", got, "supersedes")
+	}
+	if got, _ := link["sourceVertex"].(string); got != newer {
+		t.Fatalf("supersedes link sourceVertex = %q, want the successor %q (new supersedes old)", got, newer)
+	}
+	if got, _ := link["targetVertex"].(string); got != older {
+		t.Fatalf("supersedes link targetVertex = %q, want the retired predecessor %q", got, older)
+	}
+
+	ev := findEmittedEvent(t, ctx, conn, testutil.GenReqID(opTag), "lease.serviceInstanceSuperseded")
 	if got, _ := ev["instanceKey"].(string); got != older {
 		t.Fatalf("event instanceKey = %q, want %q", got, older)
 	}
@@ -321,6 +343,283 @@ func TestTombstoneSupersededLeaseServiceInstance_Success(t *testing.T) {
 	}
 	if got, _ := ev["subjectKey"].(string); got != subject {
 		t.Fatalf("event subjectKey = %q, want %q", got, subject)
+	}
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_Success: the happy path. Two
+// completed background-check instances on the same subject, older strictly
+// before newer. Tombstoning older-superseded-by-newer tombstones older's root
+// + its instanceOf link + its providedTo link, leaves older's .outcome aspect
+// dangling alive (non-cascading tombstone — the WithdrawLeaseApplication
+// precedent: readers filter on the ROOT's isDeleted), leaves newer entirely
+// untouched, mints the live supersedes link from newer to older, and emits
+// lease.serviceInstanceSuperseded (assertSupersessionPostState). B1/B2:
+// additionally proves the tombstoned instanceOf link is the PRE-EXISTING record
+// (its revision advances by the tombstone, and its sourceVertex/targetVertex
+// provenance survives unchanged), not a freshly materialized phantom.
+//
+// This vector declares ALL SEVEN reads in the envelope (tsDeclareAll), which is
+// the weakest-wins merge half of the derive_reads contract: a dispatcher that
+// restates the six derived keys still succeeds, identically to
+// _DerivedReads_OwnershipOnlyDeclaration_Success, which declares only the one
+// key derive_reads cannot compute.
+func TestTombstoneSupersededLeaseServiceInstance_Success(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-success")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBftM6nXFwju1FgWbCTm")
+	older := seedServiceInstance(t, ctx, conn, cp, cons, "tsSuOld1", "BBAdPZkFfj9NpfDYJPwL", "backgroundCheck", subject, "2026-02-01T00:00:00Z", "completed")
+	newer := seedServiceInstance(t, ctx, conn, cp, cons, "tsSuNew1", "BBy2epMitMCHBLgu4cFd", "backgroundCheck", subject, "2026-02-02T00:00:00Z", "completed")
+
+	olderInstOf := instanceOfLinkKey(t, ctx, conn, "BBAdPZkFfj9NpfDYJPwL")
+	olderInstOfBefore := readDoc(t, ctx, conn, olderInstOf)
+	olderInstOfRevBefore := readRevision(t, ctx, conn, olderInstOf)
+
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSuccessOp1", lsActorKey, older, newer, subject, metaID, tsDeclareAll)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	assertSupersessionPostState(t, ctx, conn, older, newer, subject, "tsSuccessOp1")
+
+	// B1/B2: the pre-existing record, not a phantom — provenance survives and
+	// the revision advances (a fresh key would start at revision 1).
+	olderInstOfAfter := readDoc(t, ctx, conn, olderInstOf)
+	if got, want := olderInstOfAfter["sourceVertex"], olderInstOfBefore["sourceVertex"]; got != want {
+		t.Fatalf("instanceOf sourceVertex changed across the tombstone: got %v, want %v (a phantom record would drop it)", got, want)
+	}
+	if got, want := olderInstOfAfter["targetVertex"], olderInstOfBefore["targetVertex"]; got != want {
+		t.Fatalf("instanceOf targetVertex changed across the tombstone: got %v, want %v (a phantom record would drop it)", got, want)
+	}
+	olderInstOfRevAfter := readRevision(t, ctx, conn, olderInstOf)
+	if olderInstOfRevAfter <= olderInstOfRevBefore {
+		t.Fatalf("instanceOf link revision did not advance (before=%d after=%d) — a phantom tombstone would instead start a fresh key",
+			olderInstOfRevBefore, olderInstOfRevAfter)
+	}
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_DerivedReads_OwnershipOnlyDeclaration_Success:
+// a submission that declares ONLY the ownership instanceOf link in
+// contextHint.reads — the shape Weaver's supersededBackgroundChecks target sends
+// (Reads: [row.instanceOfLink]) and the shape an operator can now type by hand —
+// reaches the same committed post-state as _Success. The other six keys are
+// supplied by the DDL's own derive_reads(op) (Contract #2 §2.5 class (g)): if the
+// derivation returned nothing, both .outcome reads and both providedTo reads
+// would be undeclared and the script's first kv.Read would fault
+// HydrationMiss/HydrationFailed instead of committing.
+func TestTombstoneSupersededLeaseServiceInstance_DerivedReads_OwnershipOnlyDeclaration_Success(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-derivedreads")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBnZ4Qw7yKcThsvLm2XR")
+	older := seedServiceInstance(t, ctx, conn, cp, cons, "tsDrOld1", "BBq8sCPTrbhxwEj5ndVk", "backgroundCheck", subject, "2026-06-01T00:00:00Z", "completed")
+	newer := seedServiceInstance(t, ctx, conn, cp, cons, "tsDrNew1", "BBW3gyXLuiRf6ScAtpZq", "backgroundCheck", subject, "2026-06-02T00:00:00Z", "completed")
+
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsDerivedOp1", lsActorKey, older, newer, subject, metaID, tsDeclareOwnershipOnly)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	assertSupersessionPostState(t, ctx, conn, older, newer, subject, "tsDerivedOp1")
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_MalformedPayload_Rejected: a
+// payload field that is missing, not 3-segment, not "vtx"-rooted, or of the
+// wrong vertex type makes derive_reads(op) derive NOTHING (its optional_string /
+// shape / type guards return {}) and leaves the rejection to execute()'s own
+// required_string / parts_of — an InvalidArgument ScriptError, never a hydration
+// fault. A derivation missing any of those guards would instead build a key that
+// the Processor refuses as DeriveReadsInvalid (a hydration-class code) or hydrate
+// a key outside vtx.service.* / vtx.identity.*, so the reason text is the
+// discriminator in every sub-case here.
+func TestTombstoneSupersededLeaseServiceInstance_MalformedPayload_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-malformed")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBjUx8VfPq3mgWsdkCRn")
+	newer := seedServiceInstance(t, ctx, conn, cp, cons, "tsMfNew1", "BBSvLd7pWy2uXkQmzRAt", "backgroundCheck", subject, "2026-07-02T00:00:00Z", "completed")
+
+	t.Run("instanceKey is not a 3-segment vertex key", func(t *testing.T) {
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsMfShortOp1", lsActorKey, "vtx.service", newer, subject, metaID, tsDeclareNothing)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+			t.Fatalf("want InvalidArgument from execute(), got %+v", reply.Error)
+		}
+	})
+
+	t.Run("instanceKey is a 3-segment non-vtx key", func(t *testing.T) {
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsMfNonVtxOp1", lsActorKey, "a.b.c", newer, subject, metaID, tsDeclareNothing)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+			t.Fatalf("want InvalidArgument from execute(), got %+v", reply.Error)
+		}
+	})
+
+	// The wrong-type sub-case pins the documented reason (InvalidArgument from
+	// parts_of). What it cannot observe from the reply is the other half of the
+	// type guard's job — that no key outside vtx.service.* / vtx.identity.* is
+	// hydrated on the way there; that half is enforced in derive_reads itself.
+	t.Run("instanceKey is a well-formed key of the wrong type", func(t *testing.T) {
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsMfWrongTypeOp1", lsActorKey, subject, newer, subject, metaID, tsDeclareNothing)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+			t.Fatalf("want InvalidArgument from execute(), got %+v", reply.Error)
+		}
+	})
+
+	t.Run("subjectKey missing", func(t *testing.T) {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID("tsMfNoSubjOp1"),
+			Lane:          processor.LaneDefault,
+			OperationType: "TombstoneSupersededLeaseServiceInstance",
+			Actor:         lsActorKey,
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			Class:         "leaseServiceInstance",
+			Payload:       json.RawMessage(`{"instanceKey":"vtx.service.BBkuT9CyoiVsWqDLeAX7","supersededBy":"` + newer + `"}`),
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+			t.Fatalf("want InvalidArgument from execute(), got %+v", reply.Error)
+		}
+	})
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_EqualCompletedAt_TieBrokenOnKey:
+// two instances completed in the SAME second (one fixed submittedAt for both, so
+// RecordLeaseServiceOutcome stamps an identical whole-second completedAt) are
+// ordered by their full keys. supersededBy > instanceKey is accepted and commits
+// the whole supersession; the reverse pairing is refused NotSuperseded. Without
+// the tie-break both directions would refuse and such a pair would stay live
+// forever with nothing to name a survivor — the rule the supersededBackgroundChecks
+// lens projects its tie rows by, textually mirrored in the op.
+func TestTombstoneSupersededLeaseServiceInstance_EqualCompletedAt_TieBrokenOnKey(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-tiebreak")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBhVAquN6ewDzRk5YtLc")
+	const sameSecond = "2026-08-01T12:00:00Z"
+
+	// Uppercase sorts before lowercase in a byte comparison, so the "Aa…"
+	// handles are unambiguously below the "za…" ones.
+	lowA := seedServiceInstance(t, ctx, conn, cp, cons, "tsTieLoA", "BBAaAaAaAaAaAaAaAaAa", "backgroundCheck", subject, sameSecond, "completed")
+	highA := seedServiceInstance(t, ctx, conn, cp, cons, "tsTieHiA", "BBzazazazazazazazaza", "backgroundCheck", subject, sameSecond, "completed")
+	lowB := seedServiceInstance(t, ctx, conn, cp, cons, "tsTieLoB", "BBAbAbAbAbAbAbAbAbAb", "backgroundCheck", subject, sameSecond, "completed")
+	highB := seedServiceInstance(t, ctx, conn, cp, cons, "tsTieHiB", "BBzbzbzbzbzbzbzbzbzb", "backgroundCheck", subject, sameSecond, "completed")
+
+	t.Run("greater successor key wins the tie", func(t *testing.T) {
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsTieAccOp1", lsActorKey, lowA, highA, subject, metaID, tsDeclareAll)
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+		}
+		assertSupersessionPostState(t, ctx, conn, lowA, highA, subject, "tsTieAccOp1")
+	})
+
+	t.Run("smaller successor key loses the tie", func(t *testing.T) {
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsTieRejOp1", lsActorKey, highB, lowB, subject, metaID, tsDeclareAll)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("outcome = %v, want Rejected", outcome)
+		}
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "NotSuperseded") {
+			t.Fatalf("want NotSuperseded, got %+v", reply.Error)
+		}
+		if d, _ := readDoc(t, ctx, conn, highB)["isDeleted"].(bool); d {
+			t.Fatalf("a refused tie must not tombstone the instance")
+		}
+	})
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_NoContextHint_Rejected: a VALID
+// pair submitted with no contextHint at all is refused InvalidArgument. Six of
+// the seven reads arrive by derivation, so without the script's own refusal the
+// op would run to a successful commit off a LAZY live kv.Read of the ownership
+// link — an undeclared (class-(b)) read of the one trust-bearing key, taken
+// outside the step-4 snapshot the mutations are OCC-conditioned on. Nothing is
+// written.
+func TestTombstoneSupersededLeaseServiceInstance_NoContextHint_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-nohint")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBs5RnCxZLgqVWdKmtu7")
+	older := seedServiceInstance(t, ctx, conn, cp, cons, "tsNhOld1", "BBTgn6bWvqzLcSdKpRhx", "backgroundCheck", subject, "2026-09-01T00:00:00Z", "completed")
+	newer := seedServiceInstance(t, ctx, conn, cp, cons, "tsNhNew1", "BBmZjL4uEvKrqSXtc7Wd", "backgroundCheck", subject, "2026-09-02T00:00:00Z", "completed")
+
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsNoHintOp1", lsActorKey, older, newer, subject, metaID, tsDeclareNothing)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected (reply=%+v)", outcome, reply)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+		t.Fatalf("want InvalidArgument naming the undeclared ownership link, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "contextHint.reads must declare the ownership link") {
+		t.Fatalf("the refusal must name the missing declaration, got %q", reply.Error.Message)
+	}
+	if d, _ := readDoc(t, ctx, conn, older)["isDeleted"].(bool); d {
+		t.Fatalf("a refused submission must not tombstone the instance")
+	}
+	if keyExists(t, ctx, conn, "lnk.service.BBmZjL4uEvKrqSXtc7Wd.supersedes.service.BBTgn6bWvqzLcSdKpRhx") {
+		t.Fatalf("a refused submission must mint no supersedes link")
+	}
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_Chain_LeavesEachSupersedesLinkLive:
+// A retired by B, then B retired by C. Each step mints its own supersedes link
+// and neither tombstones the other's: a retired predecessor keeps its outbound
+// supersedes link live, so the history is walkable link by link at rest even
+// though no live walk can chain through it (a tombstoned neighbour decodes as
+// absent). The second op leaves A exactly as the first left it.
+func TestTombstoneSupersededLeaseServiceInstance_Chain_LeavesEachSupersedesLinkLive(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-chain")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBvTc8yNdLqKzXmR3jWs")
+	const handleA = "BBAchainTsSeedQrStUv"
+	const handleB = "BBBchainTsSeedQrStUv"
+	const handleC = "BBCchainTsSeedQrStUv"
+	instA := seedServiceInstance(t, ctx, conn, cp, cons, "tsChA", handleA, "backgroundCheck", subject, "2026-10-01T00:00:00Z", "completed")
+	instB := seedServiceInstance(t, ctx, conn, cp, cons, "tsChB", handleB, "backgroundCheck", subject, "2026-10-02T00:00:00Z", "completed")
+	instC := seedServiceInstance(t, ctx, conn, cp, cons, "tsChC", handleC, "backgroundCheck", subject, "2026-10-03T00:00:00Z", "completed")
+
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsChainOp1", lsActorKey, instA, instB, subject, metaID, tsDeclareOwnershipOnly)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("op(A,B) outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	assertSupersessionPostState(t, ctx, conn, instA, instB, subject, "tsChainOp1")
+
+	outcome, reply = submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsChainOp2", lsActorKey, instB, instC, subject, metaID, tsDeclareOwnershipOnly)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("op(B,C) outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	assertSupersessionPostState(t, ctx, conn, instB, instC, subject, "tsChainOp2")
+
+	bSupersedesA := "lnk.service." + handleB + ".supersedes.service." + handleA
+	link := readDoc(t, ctx, conn, bSupersedesA)
+	if d, _ := link["isDeleted"].(bool); d {
+		t.Fatalf("%s must stay LIVE after B is itself retired — the chain is walkable link by link", bSupersedesA)
+	}
+	if got, _ := link["sourceVertex"].(string); got != instB {
+		t.Fatalf("%s sourceVertex = %q, want %q", bSupersedesA, got, instB)
+	}
+	if d, _ := readDoc(t, ctx, conn, instA)["isDeleted"].(bool); !d {
+		t.Fatalf("A stays tombstoned: the second op touches nothing of A's")
 	}
 }
 
@@ -336,7 +635,7 @@ func TestTombstoneSupersededLeaseServiceInstance_SameKey_Rejected(t *testing.T) 
 	subject := seedApplicant(t, ctx, conn, "BBrFKVqAaXJjbN92DrPe")
 	same := "vtx.service.BBSkb4zJYvgDJy7wp1yK"
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSameKeyOp1", lsActorKey, same, same, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSameKeyOp1", lsActorKey, same, same, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -363,7 +662,7 @@ func TestTombstoneSupersededLeaseServiceInstance_UnknownInstance_Rejected(t *tes
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsUnkSucc1", "BBb1eQV6sQsxVG7vxWPz", "backgroundCheck", subject, "2026-02-03T00:00:00Z", "completed")
 	unknown := seedTombstonedServiceInstance(t, ctx, conn, "BB3wuwRaUezF8ecSEiUu", "service.backgroundCheck.instance")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsUnkInstOp1", lsActorKey, unknown, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsUnkInstOp1", lsActorKey, unknown, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -386,7 +685,7 @@ func TestTombstoneSupersededLeaseServiceInstance_UnknownSuccessor_Rejected(t *te
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsUnkInst2", "BB77YtbAHikNAjVuyLi2", "backgroundCheck", subject, "2026-02-03T00:00:00Z", "completed")
 	unknown := seedTombstonedServiceInstance(t, ctx, conn, "BB3ePSy6ycfmjrq1r5zp", "service.backgroundCheck.instance")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsUnkSuccOp1", lsActorKey, instance, unknown, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsUnkSuccOp1", lsActorKey, instance, unknown, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -419,9 +718,16 @@ func TestTombstoneSupersededLeaseServiceInstance_ForeignInstance_Rejected(t *tes
 
 	phantomOwnership := "lnk.service.BB8vaM4gn9r8gtLEkRfj.instanceOf.meta." + metaID
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsForeignOp1", lsActorKey, foreign, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsForeignOp1", lsActorKey, foreign, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected (reply=%+v)", outcome, reply)
+	}
+	// The declared ownership key is required-absent at the step-4 snapshot, so
+	// the script's membership test on it faults the deferred miss: the rejection
+	// is HydrationMiss, not the script's own NotOwned (which is reachable only
+	// for a present-but-tombstoned ownership link).
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "HydrationMiss") {
+		t.Fatalf("want HydrationMiss on the declared-absent ownership link, got %+v", reply.Error)
 	}
 	if d, _ := readDoc(t, ctx, conn, foreign)["isDeleted"].(bool); d {
 		t.Fatalf("a rejected tombstone of a foreign instance must not tombstone its root")
@@ -445,7 +751,7 @@ func TestTombstoneSupersededLeaseServiceInstance_DifferentClass_Rejected(t *test
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsClsInst1", "BBCzisaLY72wQqpzqLX1", "backgroundCheck", subject, "2026-02-04T00:00:00Z", "completed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsClsSucc1", "BBD9X3rdNVMyHKhsjxAQ", "payment", subject, "2026-02-05T00:00:00Z", "completed")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsDiffClsOp1", lsActorKey, instance, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsDiffClsOp1", lsActorKey, instance, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -471,7 +777,7 @@ func TestTombstoneSupersededLeaseServiceInstance_InstanceNotCompleted_Rejected(t
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsIncInst1", "BBXtW35Ca4TqQmKvuBz7", "backgroundCheck", subject, "2026-02-06T00:00:00Z", "failed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsIncSucc1", "BBUybciw91QMjcDPRsSL", "backgroundCheck", subject, "2026-02-07T00:00:00Z", "completed")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsInstIncOp1", lsActorKey, instance, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsInstIncOp1", lsActorKey, instance, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -492,7 +798,7 @@ func TestTombstoneSupersededLeaseServiceInstance_SuccessorNotCompleted_Rejected(
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsScIncI1", "BBMJgy9RM5uSLsju3i76", "backgroundCheck", subject, "2026-02-08T00:00:00Z", "completed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsScIncS1", "BBkERRjQuwcbjmERSW1n", "backgroundCheck", subject, "2026-02-09T00:00:00Z", "failed")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSuccIncOp1", lsActorKey, instance, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsSuccIncOp1", lsActorKey, instance, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -502,9 +808,10 @@ func TestTombstoneSupersededLeaseServiceInstance_SuccessorNotCompleted_Rejected(
 }
 
 // TestTombstoneSupersededLeaseServiceInstance_SuccessorNotStrictlyLater_Rejected:
-// supersededBy's completedAt must be STRICTLY later than instanceKey's — an
-// older successor and an equal-timestamp successor are both rejected
-// (NotSuperseded).
+// a successor completed EARLIER than instanceKey is rejected (NotSuperseded), and
+// so is one completed in the same second whose key is smaller — the tie-break
+// admits equal stamps only in the greater-key direction
+// (_EqualCompletedAt_TieBrokenOnKey proves both halves of that rule).
 func TestTombstoneSupersededLeaseServiceInstance_SuccessorNotStrictlyLater_Rejected(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -530,7 +837,8 @@ func TestTombstoneSupersededLeaseServiceInstance_SuccessorNotStrictlyLater_Rejec
 			succAt:     "2026-03-01T00:00:00Z",
 		},
 		{
-			name:       "successor equal timestamp",
+			// BBqR… < BBwY…, so the tie-break's key comparison refuses it too.
+			name:       "successor equal timestamp, smaller key",
 			tag:        "tsEqual1",
 			instHandle: "BBwY3HTjRECQTWqGT8Vq",
 			instAt:     "2026-03-05T00:00:00Z",
@@ -543,7 +851,7 @@ func TestTombstoneSupersededLeaseServiceInstance_SuccessorNotStrictlyLater_Rejec
 			instance := seedServiceInstance(t, ctx, conn, cp, cons, tc.tag+"i", tc.instHandle, "backgroundCheck", subject, tc.instAt, "completed")
 			successor := seedServiceInstance(t, ctx, conn, cp, cons, tc.tag+"s", tc.succHandle, "backgroundCheck", subject, tc.succAt, "completed")
 
-			outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, tc.tag+"op", lsActorKey, instance, successor, subject, metaID, false)
+			outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, tc.tag+"op", lsActorKey, instance, successor, subject, metaID, tsDeclareAll)
 			if outcome != processor.OutcomeRejected {
 				t.Fatalf("outcome = %v, want Rejected", outcome)
 			}
@@ -576,7 +884,7 @@ func TestTombstoneSupersededLeaseServiceInstance_WrongSubject_Rejected(t *testin
 		instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsWsI1", "BBGV5MzcarGETjVS6xLz", "backgroundCheck", otherSubject, "2026-04-01T00:00:00Z", "completed")
 		successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsWsI2", "BBTxHCyp5ESgbJ8UpgP6", "backgroundCheck", realSubject, "2026-04-02T00:00:00Z", "completed")
 
-		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsWsIOp1", lsActorKey, instance, successor, realSubject, metaID, true)
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsWsIOp1", lsActorKey, instance, successor, realSubject, metaID, tsDeclareLinksOptional)
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("outcome = %v, want Rejected", outcome)
 		}
@@ -589,7 +897,7 @@ func TestTombstoneSupersededLeaseServiceInstance_WrongSubject_Rejected(t *testin
 		instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsWsS1", "BB71iV5eSiSrMfUKNXiJ", "backgroundCheck", realSubject, "2026-04-03T00:00:00Z", "completed")
 		successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsWsS2", "BB3iQqYpjEQmd2KnAXx2", "backgroundCheck", otherSubject, "2026-04-04T00:00:00Z", "completed")
 
-		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsWsSOp1", lsActorKey, instance, successor, realSubject, metaID, true)
+		outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsWsSOp1", lsActorKey, instance, successor, realSubject, metaID, tsDeclareLinksOptional)
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("outcome = %v, want Rejected", outcome)
 		}
@@ -618,7 +926,7 @@ func TestTombstoneSupersededLeaseServiceInstance_NonOperatorDenied(t *testing.T)
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsNoOpI1", "BBpYmMxj63kVBBpoYKJd", "backgroundCheck", subject, "2026-02-10T00:00:00Z", "completed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsNoOpS1", "BBCEkWumU5ZMmXv1vGxm", "backgroundCheck", subject, "2026-02-11T00:00:00Z", "completed")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsNonOpOp1", stranger, instance, successor, subject, metaID, false)
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsNonOpOp1", stranger, instance, successor, subject, metaID, tsDeclareAll)
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
@@ -631,11 +939,10 @@ func TestTombstoneSupersededLeaseServiceInstance_NonOperatorDenied(t *testing.T)
 }
 
 // lsWeaverCapDoc grants Weaver's primordial relay actor the op under test —
-// mirroring lsLoomCapDoc's shape — so
-// TestTombstoneSupersededLeaseServiceInstance_PlatformEngineDenied proves the
-// SCRIPT's own actor-guard is what refuses it (S3), not a missing platform
-// grant (the same isolation TestLeaseServiceInstance_NonLoomOperatorDenied
-// uses for lsActorKey against CreateLeaseServiceInstance's own guard).
+// mirroring lsLoomCapDoc's shape, and standing in for the operator-role grant
+// Weaver's service actor carries on a real stack — so
+// TestTombstoneSupersededLeaseServiceInstance_WeaverAccepted exercises the
+// script's actor guard rather than step-3 authorization.
 func lsWeaverCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -654,47 +961,57 @@ func lsWeaverCapDoc() *processor.CapabilityDoc {
 	}
 }
 
-// TestTombstoneSupersededLeaseServiceInstance_PlatformEngineDenied (S3): the
-// operator/Scope:"any" grant behind this op is broad enough to admit Loom and
-// Weaver (both hold the operator role for their own unrelated ops), so the
-// script's own actor-guard refuses them outright even though each holds an
-// EXPLICIT grant for this exact op here (lsLoomCapDoc / lsWeaverCapDoc) —
-// isolating the script's guard from a missing-permission denial. Two real
-// instances prove nothing is written either.
-func TestTombstoneSupersededLeaseServiceInstance_PlatformEngineDenied(t *testing.T) {
+// TestTombstoneSupersededLeaseServiceInstance_LoomDenied (S3): Loom holds the
+// operator role for its own ops, so the operator/Scope:"any" grant behind this op
+// admits its actor at step 3 — and the script's own actor-guard refuses it
+// outright anyway, even with an EXPLICIT grant for this exact op (lsLoomCapDoc):
+// Loom MINTS instances and never retires them. Nothing is written.
+func TestTombstoneSupersededLeaseServiceInstance_LoomDenied(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
-	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-platformengine")
-	testutil.SeedCapDoc(t, ctx, conn, lsWeaverCapDoc())
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-loomdenied")
 
 	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
 	subject := seedApplicant(t, ctx, conn, "BBaWoRoHptUTc9JJt85J")
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsPeInst1", "BBUvt216BmikSKRcjmJS", "backgroundCheck", subject, "2026-02-12T00:00:00Z", "completed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsPeSucc1", "BBVdyaF5YB9hQgsEh8VR", "backgroundCheck", subject, "2026-02-13T00:00:00Z", "completed")
 
-	cases := []struct {
-		name  string
-		tag   string
-		actor string
-	}{
-		{"loom", "tsPeLoomOp1", bootstrap.LoomIdentityKey},
-		{"weaver", "tsPeWeavOp1", bootstrap.WeaverIdentityKey},
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsPeLoomOp1", bootstrap.LoomIdentityKey, instance, successor, subject, metaID, tsDeclareAll)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected", outcome)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, tc.tag, tc.actor, instance, successor, subject, metaID, false)
-			if outcome != processor.OutcomeRejected {
-				t.Fatalf("outcome = %v, want Rejected", outcome)
-			}
-			if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
-				t.Fatalf("want AuthDenied, got %+v", reply.Error)
-			}
-			if !strings.Contains(reply.Error.Message, "a platform engine never supersedes a check") {
-				t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
-			}
-			if d, _ := readDoc(t, ctx, conn, instance)["isDeleted"].(bool); d {
-				t.Fatalf("a denied tombstone must not tombstone the instance")
-			}
-		})
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want AuthDenied, got %+v", reply.Error)
 	}
+	if !strings.Contains(reply.Error.Message, "Loom mints instances and never retires them") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	if d, _ := readDoc(t, ctx, conn, instance)["isDeleted"].(bool); d {
+		t.Fatalf("a denied tombstone must not tombstone the instance")
+	}
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_WeaverAccepted: Weaver's actor is
+// the DURABLE submitter — the supersededBackgroundChecks convergence target
+// dispatches this op as a directOp — so the script's actor guard admits it and the
+// full supersession commits, mutation for mutation, exactly as for an operator.
+// The guard refuses Loom alone (_LoomDenied); admitting Weaver widens who may ask
+// and nothing about what is proven, since every trust-bearing key is derived from
+// the payload + ddl[...].metaKey and re-proven from hydrated state.
+func TestTombstoneSupersededLeaseServiceInstance_WeaverAccepted(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-weaveraccepted")
+	testutil.SeedCapDoc(t, ctx, conn, lsWeaverCapDoc())
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBwKq4XcmhSNdT7zAvEu")
+	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsWvInst1", "BBRmH2kydLuQTsWqcAz9", "backgroundCheck", subject, "2026-02-14T00:00:00Z", "completed")
+	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsWvSucc1", "BBpF8nhTceqXwVuLj2Sk", "backgroundCheck", subject, "2026-02-15T00:00:00Z", "completed")
+
+	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsPeWeavOp1", bootstrap.WeaverIdentityKey, instance, successor, subject, metaID, tsDeclareOwnershipOnly)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	assertSupersessionPostState(t, ctx, conn, instance, successor, subject, "tsPeWeavOp1")
 }

@@ -1452,9 +1452,10 @@ def execute(state, op):
 // leaseServiceInstanceDDLScript is the externalTask instanceOp. It mints the
 // claim vertex vtx.service.<handle> (the same shape 14.1's service instance
 // uses, reusing its .outcome aspect shape downstream), records the family
-// discriminator + the providedTo link, and emits the external.<adapter> event
-// off its own transactional outbox. Template-less (no instanceOf): the lens
-// hops providedTo, not instanceOf.
+// discriminator, mints the instanceOf link to this DDL's own meta-vertex (the
+// write-gate type authority, and the key TombstoneSupersededLeaseServiceInstance
+// reads as its ownership proof) + the providedTo link the lens hops, and emits
+// the external.<adapter> event off its own transactional outbox.
 //
 // event_data.params is resolve_subject_params(p.params, subject_key)
 // (orchestration-base's shared helper, prepended below): the backgroundCheck
@@ -1492,6 +1493,18 @@ def required_string(p, name):
     v = getattr(p, name)
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def optional_string(p, name):
+    # The absence-tolerant reader derive_reads uses: a missing, null,
+    # non-string or whitespace-only field yields None instead of failing, so
+    # the pre-pass derives nothing and execute()'s own required_string raises
+    # the real InvalidArgument (clinic-domain / objects-base precedent).
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type(""):
+        return None
     return v.strip()
 
 def required_bare_handle(p, name):
@@ -1558,6 +1571,53 @@ def family_of(p):
     if fam not in SERVICE_FAMILIES:
         fail("InvalidArgument: params.family: must be one of backgroundCheck, payment; got " + fam)
     return fam
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g) for TombstoneSupersededLeaseServiceInstance.
+    # Every key below is a pure function of the {instanceKey, supersededBy,
+    # subjectKey} payload -- the same parts_of derivation execute() performs --
+    # so no dispatcher restates it: Weaver's supersededBackgroundChecks target
+    # names one read, an operator names one key. The SEVENTH read (the
+    # instanceOf ownership link) needs ddl[...].metaKey, which this pre-pass
+    # cannot reach (state / ddl / kv / nanoid all fail on access here), so it
+    # stays the dispatcher's declaration.
+    #
+    # A malformed or missing field derives nothing and lets execute() raise the
+    # real InvalidArgument: the pre-pass classifies keys, it never validates
+    # payloads. So it derives only from a payload whose SHAPE and TYPE are
+    # already right -- 3 segments, "vtx", the type segment each key must carry.
+    # A grammatically wrong key would otherwise either be refused by the
+    # Processor as DeriveReadsInvalid (a hydration-class code, not the
+    # InvalidArgument this op promises) or hydrate a key outside
+    # vtx.service.* / vtx.identity.* before a guard rejects it. What the
+    # pre-pass does NOT check is the id segment: an id that is not a valid
+    # NanoID still derives, and execute()'s parts_of raises the rejection.
+    if op.operationType != "TombstoneSupersededLeaseServiceInstance":
+        return {}
+    p = op.payload
+    inst = optional_string(p, "instanceKey")
+    succ = optional_string(p, "supersededBy")
+    subj = optional_string(p, "subjectKey")
+    if inst == None or succ == None or subj == None:
+        return {}
+    if inst == "" or succ == "" or subj == "":
+        return {}
+    ip = inst.split(".")
+    sp = succ.split(".")
+    jp = subj.split(".")
+    if len(ip) != 3 or len(sp) != 3 or len(jp) != 3:
+        return {}
+    if ip[0] != "vtx" or ip[1] != "service":
+        return {}
+    if sp[0] != "vtx" or sp[1] != "service":
+        return {}
+    if jp[0] != "vtx" or jp[1] != "identity":
+        return {}
+    if ip[2] == "" or sp[2] == "" or jp[2] == "":
+        return {}
+    return {"reads": [inst, succ, inst + ".outcome", succ + ".outcome",
+                      "lnk.service." + ip[2] + ".providedTo.identity." + jp[2],
+                      "lnk.service." + sp[2] + ".providedTo.identity." + jp[2]]}
 
 def execute(state, op):
     ot = op.operationType
@@ -1647,27 +1707,35 @@ def execute(state, op):
                 "response": {"primaryKey": inst_key}}
 
     if ot == "TombstoneSupersededLeaseServiceInstance":
-        # Andrew-authorized maintenance op (bgcheck-runaway-and-broad-filter-
-        # design.md §6): retires a lease service instance superseded by a
-        # newer COMPLETED one on the same subject + family, so a readiness
-        # aggregate that fans out over every instance of an applicant (the
-        # leaseApplicationComplete lens) stops reading retired checks. Every
-        # read below is a DECLARED key -- the dispatcher's contextHint.reads
-        # responsibility (see this DDL's Description); the script never
+        # The retirement half of the supersession rule (bgcheck-supersession-
+        # convergence-rule-design.md): retires a lease service instance
+        # superseded by a LATER COMPLETED one on the same subject + family, so a
+        # readiness aggregate that fans out over every instance of an applicant
+        # (the leaseApplicationComplete lens) stops reading retired checks. Six of
+        # the seven reads below are DERIVED server-side by this script's own
+        # derive_reads(op) (Contract #2 §2.5 class (g)); the ownership link is
+        # the one DECLARED key a dispatcher supplies. The script never
         # enumerates.
 
-        # actor-guard: the grant behind this op is operator/Scope:"any",
-        # which admits every operator-role holder -- INCLUDING Loom and
-        # Weaver, which hold that role for their own unrelated ops
+        # actor-guard: the grant behind this op is operator/Scope:"any", which
+        # admits every operator-role holder -- including the two platform
+        # engines, which hold that role for their own ops
         # (CreateLeaseServiceInstance's own actor-guard comment above states
-        # the same structural fact). This is a human/trusted-tool maintenance
-        # op, never a platform engine's; a platform engine landing here would
-        # mean a confused or compromised caller, not a legitimate submitter,
-        # so it is refused outright rather than merely under-scoped.
+        # the same structural fact). Weaver IS the durable submitter here: its
+        # supersededBackgroundChecks convergence target dispatches this op as a
+        # directOp off a lens row that has already proven the pair, and an
+        # operator or trusted tool is admitted for a hand repair. Loom is
+        # refused: it MINTS instances (CreateLeaseServiceInstance is restricted
+        # to exactly it) and never retires them, so Loom's actor landing here is
+        # a confused or compromised caller, not a legitimate submitter.
+        # Weaver's admission widens who may ASK, never what can be proven: every
+        # trust-bearing key is derived from the payload + ddl[...].metaKey and
+        # proven against Processor-hydrated state, never taken from the caller
+        # (bgcheck-supersession-convergence-rule-design.md §6).
         # primordialActor's only two keys (cmd/processor/main.go's
         # PrimordialActors wiring) are loom and weaver.
-        if op.actor == primordialActor["loom"] or op.actor == primordialActor["weaver"]:
-            fail("AuthDenied: TombstoneSupersededLeaseServiceInstance is an operator maintenance op; a platform engine never supersedes a check; got " + op.actor)
+        if op.actor == primordialActor["loom"]:
+            fail("AuthDenied: TombstoneSupersededLeaseServiceInstance is submitted by Weaver's convergence target or an operator; Loom mints instances and never retires them; got " + op.actor)
 
         instance_key = required_string(p, "instanceKey")
         superseded_by = required_string(p, "supersededBy")
@@ -1694,20 +1762,46 @@ def execute(state, op):
         # DIFFERENT type authority (lnk.service.<handle>.instanceOf.service.<
         # templateId>, not .meta.<ourId>) -- a key this derivation never
         # produces, so it is simply absent for a foreign instance, never read
-        # as some other document. A declared (required) read: a genuinely
-        # foreign/never-owned instance is RequiredAbsent and faults
-        # HydrationMiss before this line runs (Contract #2 §2.5) -- fail-closed
-        # at dispatch, before the script sees it at all. Reaching this check
-        # with the key present-but-tombstoned is the residual case the script
-        # itself refuses.
+        # as some other document. A declared (required) read: for a genuinely
+        # foreign/never-owned instance the key is required-absent at the step-4
+        # snapshot, and the first touch below faults the deferred HydrationMiss
+        # (Contract #2 §2.5) instead of branching -- fail-closed, and the script
+        # never sees a document for it. Reaching the check itself with the key
+        # present-but-tombstoned is the residual case the script refuses.
         meta_key = ddl["leaseServiceInstance"].metaKey
         _, meta_id = parts_of(meta_key, "typeAuthority", "meta")
         instance_of_lnk = "lnk.service." + inst_handle + ".instanceOf.meta." + meta_id
-        # read-posture: (a) declared reads at TombstoneSupersededLeaseServiceInstance dispatch.
-        inst_ownership = kv.Read(instance_of_lnk)
+        # The ownership link is read from the STEP-4 SNAPSHOT, not live: it is
+        # the one key derive_reads(op) cannot compute (ddl[...].metaKey is
+        # unreachable in the pre-pass), so it is the one key a dispatcher
+        # declares in contextHint.reads -- Weaver as row.instanceOfLink off the
+        # supersededBackgroundChecks lens, an operator as the key this DDL's
+        # Description spells out. A submission that declares nothing still has
+        # its six derived reads, so a lazy kv.Read here would silently serve an
+        # UNDECLARED live read of the trust-bearing key (class-(b) debt no
+        # annotation makes visible); refusing an undeclared ownership link keeps
+        # the proof inside the OCC snapshot the mutations are conditioned on.
+        # A DECLARED-but-absent ownership link is required-absent, so naming it
+        # here faults the deferred HydrationMiss -- the foreign-instance vector.
+        if instance_of_lnk not in state:
+            fail("InvalidArgument: contextHint.reads must declare the ownership link " + instance_of_lnk + " (the one key derive_reads cannot compute)")
+        inst_ownership = state[instance_of_lnk]
         if inst_ownership == None or inst_ownership.isDeleted:
             fail("NotOwned: " + instance_key + " is not a lease-signing service instance (no live instanceOf link to this DDL's type authority)")
 
+        # The successor is proven alive, same-class, completed, later and
+        # providedTo the same subject -- but NOT owned: no read here resolves
+        # supersededBy's own instanceOf link to this DDL's type authority, so on
+        # the OPERATOR path a same-class instance minted by another type
+        # authority can be named as the successor -- and the supersedes link the
+        # batch below mints is then SOURCED at that unproven vertex, i.e. an
+        # outbound edge on another type authority's vertex. Documented residual,
+        # not a gap in the durable rule: on Weaver's path the
+        # supersededBackgroundChecks lens re-binds the successor to the anchor's
+        # own meta, so every convergence-submitted pair is owned on both sides.
+        # Closing it for the operator path needs an eighth declared read the lens
+        # cannot project (a relationship variable is refused inside an
+        # aggregate), so the op keeps seven reads.
         if not vertex_alive(state, superseded_by):
             fail("UnknownInstance: " + superseded_by)
 
@@ -1728,12 +1822,14 @@ def execute(state, op):
         if inst_class != succ_class:
             fail("WrongClass: instanceKey " + instance_key + " (class " + str(inst_class) + ") and supersededBy " + superseded_by + " (class " + str(succ_class) + ") must carry the SAME envelope class")
 
-        # read-posture: (a) declared reads at TombstoneSupersededLeaseServiceInstance dispatch.
+        # read-posture: (a) reads — derived server-side by this script's own
+        # derive_reads(op) (Contract #2 §2.5 class (g)).
         inst_outcome = kv.Read(instance_key + ".outcome")
         if inst_outcome == None or inst_outcome.isDeleted or inst_outcome.data.get("status") != "completed":
             fail("NotSuperseded: " + instance_key + " carries no completed outcome")
 
-        # read-posture: (a) declared reads at TombstoneSupersededLeaseServiceInstance dispatch.
+        # read-posture: (a) reads — derived server-side by this script's own
+        # derive_reads(op) (Contract #2 §2.5 class (g)).
         succ_outcome = kv.Read(superseded_by + ".outcome")
         if succ_outcome == None or succ_outcome.isDeleted or succ_outcome.data.get("status") != "completed":
             fail("NotSuperseded: " + superseded_by + " carries no completed outcome")
@@ -1746,26 +1842,55 @@ def execute(state, op):
         # identically to chronological order -- the same fact clinic-domain's
         # own starts_at/ends_at RFC3339 comparisons rely on (ddls.go) and the
         # lens's validUntil/completedAt CASE comparisons rely on (lenses.go).
-        if inst_completed_at == None or succ_completed_at == None or not (succ_completed_at > inst_completed_at):
-            fail("NotSuperseded: supersededBy " + superseded_by + " completedAt (" + str(succ_completed_at) + ") is not strictly later than " + instance_key + "'s (" + str(inst_completed_at) + ")")
+        #
+        # The order is LATER, or EQUAL with the greater key: rfc3339_utc formats
+        # whole seconds, so two replies committing in the same second stamp an
+        # equal completedAt, and a rule that demanded strict lateness would leave
+        # that pair live forever with nothing to name either one the survivor.
+        # Comparing the full keys breaks the tie totally and deterministically.
+        # This predicate is TEXTUALLY the same rule the supersededBackgroundChecks
+        # lens projects a row by ((newer.completedAt > inst.completedAt) OR
+        # (equal AND newer.key > inst.key)): a row the lens emits must be a pair
+        # this guard accepts, or Weaver's convergence dispatch rejects forever and
+        # exhausts its budget. The pinned lens rows are the drift detector for an
+        # edit that changes one side and not the other.
+        if inst_completed_at == None or succ_completed_at == None:
+            fail("NotSuperseded: supersededBy " + superseded_by + " completedAt (" + str(succ_completed_at) + ") and " + instance_key + "'s (" + str(inst_completed_at) + ") must both be present")
+        # A form precondition, not part of the ordering predicate the lens
+        # mirrors: string order equals time order only for the fixed-width
+        # whole-second UTC form rfc3339_utc writes (20 chars, Z-suffixed).
+        # RecordLeaseServiceOutcome is the only writer of this aspect, so this
+        # never fires today; it fails closed against a later writer (a backfill,
+        # an import) stamping a fractional or offset-bearing value, which would
+        # otherwise mis-order silently.
+        for stamp in [inst_completed_at, succ_completed_at]:
+            if len(stamp) != 20 or not stamp.endswith("Z"):
+                fail("NotSuperseded: " + instance_key + " / " + superseded_by + " completedAt must be a whole-second RFC3339 UTC stamp (20 characters, Z-suffixed); got " + str(inst_completed_at) + " and " + str(succ_completed_at))
+        later = succ_completed_at > inst_completed_at
+        tie_break = succ_completed_at == inst_completed_at and superseded_by > instance_key
+        if not (later or tie_break):
+            fail("NotSuperseded: supersededBy " + superseded_by + " completedAt (" + str(succ_completed_at) + ") must be later than " + instance_key + "'s (" + str(inst_completed_at) + "), or equal with the greater instance key")
 
         inst_provided_to = "lnk.service." + inst_handle + ".providedTo.identity." + subject_id
-        # read-posture: (a) declared reads at TombstoneSupersededLeaseServiceInstance
-        # dispatch (validation link). A WRONG subjectKey's derived key never
+        # read-posture: (a) reads — derived server-side by this script's own
+        # derive_reads(op) (Contract #2 §2.5 class (g)).
+        # A validation link: a WRONG subjectKey's derived key never
         # exists at all under the REAL link's key shape (the target identity
         # id is baked into the key itself, not a separate field to compare),
-        # so that submission is RequiredAbsent and faults HydrationMiss before
-        # this line runs -- the same fail-closed-at-dispatch posture the
-        # ownership check above takes. The script's own SubjectMismatch below
-        # is the residual case: the key present but tombstoned.
+        # so that submission's key is required-absent at the step-4 snapshot and
+        # this read faults the deferred HydrationMiss instead of returning None
+        # -- the same fail-closed posture the ownership check above takes. The
+        # script's own SubjectMismatch below is the residual case: the key
+        # present but tombstoned.
         inst_plink = kv.Read(inst_provided_to)
         if inst_plink == None or inst_plink.isDeleted:
             fail("SubjectMismatch: " + instance_key + " is not providedTo " + subject_key)
 
         succ_provided_to = "lnk.service." + succ_handle + ".providedTo.identity." + subject_id
-        # read-posture: (a) declared reads at TombstoneSupersededLeaseServiceInstance
-        # dispatch (validation link; same RequiredAbsent-faults-HydrationMiss
-        # posture as instance_key's own providedTo read above).
+        # read-posture: (a) reads — derived server-side by this script's own
+        # derive_reads(op) (Contract #2 §2.5 class (g)).
+        # A validation link; same required-absent-faults-on-touch posture as
+        # instance_key's own providedTo read above.
         succ_plink = kv.Read(succ_provided_to)
         if succ_plink == None or succ_plink.isDeleted:
             fail("SubjectMismatch: " + superseded_by + " is not providedTo " + subject_key)
@@ -1782,10 +1907,31 @@ def execute(state, op):
         # readiness aggregate stops reading this instance at all (a tombstoned
         # root alone is still read before being filtered,
         # ruleengine/full/executor.go).
+        #
+        # The fourth mutation makes the retirement walkable at rest: the live
+        # successor SOURCES a supersedes link to the predecessor being tombstoned
+        # in this same batch (Contract #1 §1.1 -- the later-arriving vertex is the
+        # source, and the sentence reads "new supersedes old"). Both endpoints are
+        # already hydrated and validated by the guards above, so the link costs no
+        # read. step6_validate.go applies no same-batch endpoint-liveness rule to
+        # a link create; its one endpoint rule, firstRequiredAbsentMutation,
+        # covers required-ABSENT endpoints, and both endpoints here are hydrated.
+        # The write gate resolves a mutation's governing DDL by exact class first,
+        # and a link create's class is its relation: no linkType DDL registers
+        # the relation "supersedes", and the fallback walk needs a vertex root a link mutation
+        # does not have, so it takes the permissive default (step6_resolve_ddl.go)
+        # and no DDL's permittedCommands names this op for the link.
+        # Live lenses cannot chain through the link -- every walk decodes a
+        # tombstoned neighbour as absent -- which is exactly the "history at rest"
+        # posture: Loupe's inspector, an audit, or a retention pass follows it by
+        # key. A predecessor retired in its turn keeps its own outbound supersedes
+        # link live, so a chain of retirements stays walkable link by link.
+        supersedes_lnk = "lnk.service." + succ_handle + ".supersedes.service." + inst_handle
         mutations = [
             make_tombstone(instance_key),
             make_tombstone(instance_of_lnk),
             make_tombstone(inst_provided_to),
+            make_link(supersedes_lnk, superseded_by, instance_key, "supersedes", "supersedes", {}),
         ]
         events = [{"class": "lease.serviceInstanceSuperseded",
                    "data": {"instanceKey": instance_key, "supersededBy": superseded_by, "subjectKey": subject_key}}]
