@@ -19,7 +19,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
-#   lint-static        — golangci + the 19 STRICT scripts/lint-*.go gates,
+#   lint-static        — golangci + the 21 STRICT scripts/lint-*.go gates,
 #                         split off lint-build so the compile/vet half and the
 #                         static-analysis half run in parallel instead of
 #                         serially — lint-build's own wall-clock (Build+Vet+
@@ -341,8 +341,13 @@ jobs:
         # OutputKeyPattern prefix equals the targetId — a targetId IS the row
         # prefix, and lane-1 dispatch watches the bucket, not LensRef. Read from
         # the compiled pkgregistry Definitions. One exemption: a target
-        # escalating `unplannable` to the Augur tier. Self-tests on every run and
-        # refuses an all-clear over zero examined columns.
+        # escalating `unplannable` to the Augur tier. Second rule over the same
+        # rows: every `maxretries_<g>` retry cap has a `missing_<g>` gap column
+        # beside it — Weaver reads a cap only under the name it derives from the
+        # gap key, so a hand-spelled cap under any other name is dead
+        # (wellness-ledger's `maxretries_price` beside `missing_price_charge`).
+        # Self-tests on every run and refuses an all-clear over zero examined
+        # columns.
         run: STRICT=1 go run ./scripts/lint-gap-column-declaration.go
 
       - name: Weaver witnessed-retire lint (a `surface` membership leaves only on a READ column)
@@ -387,6 +392,42 @@ jobs:
         # are out of scope by design: a test pins the mechanism rather than
         # inheriting its bound.
         run: STRICT=1 go run ./scripts/lint-flag-consumer-census.go
+
+      - name: Link-target count lint (a count over link endpoints counts live vertices only)
+        # A soft-delete cascades onto no link, so a list built from a kv.Links
+        # page's .targetVertex / .sourceVertex holds dead vertices even after
+        # the link's own isDeleted is filtered. Harmless where the consumer
+        # re-proves each element; wrong wherever the list's LENGTH is the
+        # decision — an exactly-one / ambiguity count reads a decommissioned
+        # building as a live candidate and the op no-ops forever (clinic-domain
+        # BackfillAppointmentSite, live, after clinic-reminders' sibling had
+        # been screened at build). Twice-seen. This gate parses every shipped
+        # package script with go.starlark.net/syntax and fails a
+        # `len(<link-target list>)` comparison whose elements were not screened
+        # by a liveness predicate in the producer or at the count;
+        # `# link-count: live-screened <why>` declares a screening the
+        # recogniser cannot see. Self-tests on every run and refuses an
+        # all-clear over zero examined scripts.
+        run: STRICT=1 go run ./scripts/lint-link-target-count.go
+
+      - name: Loupe console-grants lint (the console submits only ops its role is granted)
+        # cmd/loupe runs as the scoped consoleOperator (mechanism B, never
+        # root), whose grants live in ONE package, console-operator, with no
+        # wildcard; every other package grants its ops to the primordial
+        # `operator`, which the console identity does not hold. A Loupe handler
+        # submitting an op console-operator does not name is denied at the
+        # CapabilityAuthorizer and the feature no-ops, while the handler's own
+        # mocked-Gateway test, the op's package pins and CI all stay green —
+        # the gap is cross-package. Twice-seen (RecordCapabilityInstallReceipt;
+        # the Vault erase's StartLoomPattern, denied since it shipped).
+        # Resolves every gatewayOperationRequest literal
+        # in cmd/loupe with go/ast against the compiled console-operator
+        # grants at the submitted lane; relay sites are a ledger whose op set
+        # is derived from the consumer's own source and that rots loudly; a
+        # known gap is pinned with the fix it waits on and fails the day its
+        # grant lands. Self-tests on every run and refuses an all-clear over
+        # zero examined sites.
+        run: STRICT=1 go run ./scripts/lint-loupe-console-grants.go
 
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,

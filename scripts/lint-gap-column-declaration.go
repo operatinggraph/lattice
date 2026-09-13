@@ -65,6 +65,28 @@
 // dispatchGap at all (objects-base's objectAttachments display read model is that
 // shape today — it shares the bucket and declares no gap columns).
 //
+// THE SECOND RULE: A RETRY CAP NAMES A GAP THAT EXISTS. The engine recognises
+// one companion column per gap by DERIVING its name from the gap key
+// (`missing_<g>` → `maxretries_<g>`, internal/weaver/state.go's
+// maxretriesColumnPrefix; evaluator.go's gapSuppressed reads the cap through
+// intColumn under exactly that derived name). A cap spelled by hand under a name
+// that derives from no gap is never read: the engine finds nothing under the
+// derived name, falls back to its default budget, and no gate, test or
+// projection notices — the column sits in every row, the package's own doc keeps
+// claiming it bounds the gap, and the bound in force is the default. That shipped:
+// wellness-ledger projected `maxretries_price` for the gap `missing_price_charge`
+// and the cap was dead from the day it landed, harmless only because the default
+// happened to equal the intended value. So for every target, every `maxretries_<g>`
+// column landing in its rows must have a `missing_<g>` landing in the same rows
+// (the same union of feeders), or it is a finding. The other companion,
+// `inflight_<g>`, is deliberately NOT held to this rule: an inflight presence
+// signal is a legitimate FE-facing column in its own right (lease-signing's
+// `inflight_docGen` feeds the applicant's status view and is consumed by the gap
+// formula itself, under a name that derives from no gap), so an orphan inflight
+// cannot be told from a display column without a reader census this gate does
+// not run. A cap has no reader but the engine's budget, so its orphan is dead by
+// construction.
+//
 // WHAT THIS GATE CANNOT READ, AND SAYS SO. Output is consulted only on the
 // actor-aggregate projection path (internal/refractor/projection/plan.go's
 // IsActorAggregate/Compile). A PLAIN weaver-targets lens is a first-class
@@ -136,6 +158,12 @@ const (
 	// of the engine.
 	gapColumnPrefix = "missing_"
 
+	// maxretriesColumnPrefix is the engine-recognised retry-cap companion of a
+	// gap column (internal/weaver/state.go, unexported there for the same
+	// reason as gapColumnPrefix): for gap `missing_<g>` the engine reads the
+	// cap under `maxretries_<g>` and under no other name.
+	maxretriesColumnPrefix = "maxretries_"
+
 	// escalateUnplannable is the Contract #10 §10.8 Augur trigger for "a
 	// missing_* column with no gaps[col] entry". A target escalating it routes
 	// the undeclared column to the reasoning tier instead of the long-Nak arm.
@@ -162,6 +190,7 @@ type stats struct {
 	exemptTargets       int
 	lensesRead          int
 	columnsChecked      int
+	capsChecked         int
 }
 
 func main() {
@@ -202,8 +231,8 @@ func main() {
 		fmt.Println(f)
 	}
 	if len(findings) == 0 {
-		fmt.Printf("lint-gap-column-declaration: clean — %d target(s) across %d package(s); %d weaver-targets lens(es) read, %d gap column(s) checked against their target's gaps map (%d target(s) exempt via augur.escalate %q)\n",
-			st.targets, st.packagesWithTargets, st.lensesRead, st.columnsChecked, st.exemptTargets, escalateUnplannable)
+		fmt.Printf("lint-gap-column-declaration: clean — %d target(s) across %d package(s); %d weaver-targets lens(es) read, %d gap column(s) checked against their target's gaps map (%d target(s) exempt via augur.escalate %q), %d retry cap(s) checked against their rows' gap columns\n",
+			st.targets, st.packagesWithTargets, st.lensesRead, st.columnsChecked, st.exemptTargets, escalateUnplannable, st.capsChecked)
 		return
 	}
 	fmt.Printf("lint-gap-column-declaration: %d issue(s) — %d target(s) across %d package(s), %d weaver-targets lens(es) read, %d gap column(s) checked\n",
@@ -221,6 +250,7 @@ type rowSource struct {
 	name     string
 	prefix   string
 	gapCols  map[string]string
+	capCols  map[string]string
 	readable bool
 	why      string
 }
@@ -319,7 +349,60 @@ func checkTarget(pkg string, def pkgmgr.Definition, t pkgmgr.WeaverTargetSpec, s
 		findings = append(findings, fmt.Sprintf("%s: %s", where,
 			pkgmgr.UndeclaredGapColumnRefusal(col.lens, col.name, col.field, sortedDeclaredKeys(t.Gaps))))
 	}
+
+	// A retry cap is read under a name the engine derives from the gap key, so
+	// a cap whose gap no feeder projects is never read. The exemption does not
+	// apply: an unplannable escalation routes an undeclared GAP, and says
+	// nothing about a cap that names no gap at all.
+	rowGaps := map[string]bool{}
+	for _, col := range sortedGapColumns(feeders) {
+		rowGaps[col.name] = true
+	}
+	for _, cap := range sortedCapColumns(feeders) {
+		st.capsChecked++
+		gap := gapColumnPrefix + strings.TrimPrefix(cap.name, maxretriesColumnPrefix)
+		if rowGaps[gap] {
+			continue
+		}
+		findings = append(findings, fmt.Sprintf("%s: lens %q projects the retry cap %q (in %s), but no lens feeding this target's rows projects the gap column %q it would bound. Weaver reads a cap ONLY under the name it derives from an open gap key (missing_<g> → maxretries_<g>), so this column is never read: the gap it was written for keeps the engine's default budget, and the package's own description of the cap is wrong. Build the cap's name from the gap key it bounds — the gap columns landing in these rows are %s.",
+			where, cap.lens, cap.name, cap.field, gap, quotedNames(rowGaps)))
+	}
 	return findings
+}
+
+// sortedCapColumns unions the `maxretries_*` columns of every feeding lens the
+// way sortedGapColumns unions the gap columns, so a cap and the gap it names are
+// looked up over the same row set.
+func sortedCapColumns(feeders []rowSource) []gapColumn {
+	seen := map[string]gapColumn{}
+	for _, s := range feeders {
+		for col, field := range s.capCols {
+			if _, dup := seen[col]; dup {
+				continue
+			}
+			seen[col] = gapColumn{name: col, lens: s.name, field: field}
+		}
+	}
+	out := make([]gapColumn, 0, len(seen))
+	for _, c := range seen {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// quotedNames renders a column set sorted and quoted for a finding, or "none"
+// when the rows carry no gap column at all.
+func quotedNames(set map[string]bool) string {
+	if len(set) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, fmt.Sprintf("%q", n))
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // gapColumn is one `missing_*` column attributed to the lens and descriptor
@@ -382,14 +465,14 @@ func classify(l pkgmgr.LensSpec) rowSource {
 		return src
 	}
 	src.prefix = prefix
-	src.gapCols = gapColumnsOf(l.Output)
+	src.gapCols, src.capCols = rowColumnsOf(l.Output)
 	src.readable = true
 	return src
 }
 
-// gapColumnsOf returns the `missing_*` columns an actor-aggregate lens's Output
-// descriptor puts into the projected row body, mapped to the descriptor field
-// that declares each. It delegates to internal/lenscolumns — the one
+// rowColumnsOf returns the `missing_*` columns and the `maxretries_*` columns an
+// actor-aggregate lens's Output descriptor puts into the projected row body,
+// each mapped to the descriptor field that declares it. It delegates to internal/lenscolumns — the one
 // derivation pkgmgr's declaredRowBodyColumns (orchestrationguard.go) also
 // calls into — including its attribution of a name appearing in both lists to
 // BodyColumns, the one carrying a real value. The union is what matters:
@@ -402,7 +485,7 @@ func classify(l pkgmgr.LensSpec) rowSource {
 // ProjectionKind is supplied directly rather than round-tripped through the
 // caller's LensSpec, and Projected returning an error here is a gate defect,
 // not a corpus finding.
-func gapColumnsOf(out *pkgmgr.OutputDescriptorSpec) map[string]string {
+func rowColumnsOf(out *pkgmgr.OutputDescriptorSpec) (gaps, caps map[string]string) {
 	result, err := lenscolumns.Projected(lenscolumns.Spec{
 		ProjectionKind: lenscolumns.ActorAggregateKind,
 		Output: &lenscolumns.Output{
@@ -417,9 +500,15 @@ func gapColumnsOf(out *pkgmgr.OutputDescriptorSpec) map[string]string {
 		// cannot read after all. That is this gate lying about what it
 		// checked, not a package to report — fail loudly rather than
 		// answering an empty (falsely "no gap columns") result.
-		panic(fmt.Sprintf("lint-gap-column-declaration: gapColumnsOf: gate defect — classify() admitted an Output lenscolumns.Projected refuses: %v", err))
+		panic(fmt.Sprintf("lint-gap-column-declaration: rowColumnsOf: gate defect — classify() admitted an Output lenscolumns.Projected refuses: %v", err))
 	}
-	return lenscolumns.Gaps(result)
+	caps = map[string]string{}
+	for col, field := range result.Columns {
+		if strings.HasPrefix(col, maxretriesColumnPrefix) {
+			caps[col] = field
+		}
+	}
+	return lenscolumns.Gaps(result), caps
 }
 
 // keyPrefix returns the segment of an OutputKeyPattern before its first dot —
@@ -590,6 +679,43 @@ func runSelfTest(verbose bool) {
 	})
 	check(len(f) == 1 && strings.Contains(joined(f), "otherPrefix") && strings.Contains(joined(f), "not under \"driftTarget\""),
 		fmt.Sprintf("a LensRef'd lens whose key prefix disagrees with the targetId is flagged (got: %s)", joined(f)))
+
+	// Vector 5b — the retry-cap rule. A cap named from its gap is clean; the
+	// shipped defect (a cap spelled `maxretries_price` beside `missing_price_charge`)
+	// is a finding naming both; a cap whose gap the OTHER feeder projects is
+	// clean, since the rows are one union; and the unplannable exemption does
+	// not reach a cap.
+	f, st = run(pkgmgr.Definition{
+		Lenses:        []pkgmgr.LensSpec{wtLens("capLens", "capTarget.{actorSuffix}", []string{"violating", "missing_charge", "maxretries_charge"}, nil)},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{target("capTarget", "capLens", []string{"missing_charge"})},
+	})
+	check(len(f) == 0 && st.capsChecked == 1, fmt.Sprintf("a cap named from its gap is clean and counted (got %d finding(s), %d cap(s): %s)", len(f), st.capsChecked, joined(f)))
+	f, _ = run(pkgmgr.Definition{
+		Lenses:        []pkgmgr.LensSpec{wtLens("deadCapLens", "deadCapTarget.{actorSuffix}", []string{"violating", "missing_price_charge", "maxretries_price"}, nil)},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{target("deadCapTarget", "deadCapLens", []string{"missing_price_charge"})},
+	})
+	check(len(f) == 1 && strings.Contains(joined(f), "maxretries_price") && strings.Contains(joined(f), "\"missing_price\"") && strings.Contains(joined(f), "\"missing_price_charge\""),
+		fmt.Sprintf("a cap spelled by hand beside a differently-named gap is flagged, naming the gap it derives to and the gaps the rows carry (got: %s)", joined(f)))
+	f, _ = run(pkgmgr.Definition{
+		Lenses: []pkgmgr.LensSpec{
+			wtLens("gapFeeder", "unionTarget.{actorSuffix}", []string{"missing_shared"}, nil),
+			wtLens("capFeeder", "unionTarget.{actorSuffix}", []string{"maxretries_shared"}, nil),
+		},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{target("unionTarget", "gapFeeder", []string{"missing_shared"})},
+	})
+	check(len(f) == 0, fmt.Sprintf("a cap whose gap another feeder of the same rows projects is clean (got: %s)", joined(f)))
+	exemptCap := target("exemptCapTarget", "exemptCapLens", nil)
+	exemptCap.Augur = &pkgmgr.AugurSpec{Escalate: []string{escalateUnplannable}}
+	f, _ = run(pkgmgr.Definition{
+		Lenses:        []pkgmgr.LensSpec{wtLens("exemptCapLens", "exemptCapTarget.{actorSuffix}", []string{"missing_a", "maxretries_b"}, nil)},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{exemptCap},
+	})
+	check(len(f) == 1 && strings.Contains(joined(f), "maxretries_b"), fmt.Sprintf("the unplannable exemption covers an undeclared gap, not an orphan cap (got: %s)", joined(f)))
+	f, _ = run(pkgmgr.Definition{
+		Lenses:        []pkgmgr.LensSpec{wtLens("inflightLens", "inflightTarget.{actorSuffix}", []string{"missing_a", "inflight_docGen"}, nil)},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{target("inflightTarget", "inflightLens", []string{"missing_a"})},
+	})
+	check(len(f) == 0, fmt.Sprintf("an inflight_<g> under no gap is out of the cap rule by construction (got: %s)", joined(f)))
 
 	// Vector 6 — an unreadable weaver-targets lens is reported as unreadable,
 	// in its own words, not as an undeclared column.

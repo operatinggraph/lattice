@@ -18,17 +18,19 @@ non-advisory finding.
 | `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding |
 | `lint-doc-orphan` | A doc comment names the declaration it sits above |
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
-| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map — derived through `internal/lenscolumns`, the one reading of "which keys does a row of this lens carry", which `internal/pkgmgr` holds the same invariant on at the two non-CI paths (the installer's live preflight refuses the install; the capability-artifact validator records the proposal invalid) |
+| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map — derived through `internal/lenscolumns`, the one reading of "which keys does a row of this lens carry", which `internal/pkgmgr` holds the same invariant on at the two non-CI paths (the installer's live preflight refuses the install; the capability-artifact validator records the proposal invalid). Second rule over the same rows: every `maxretries_<g>` retry cap has a `missing_<g>` gap beside it — the engine reads a cap only under the name it derives from the gap key, so a hand-spelled cap under any other name is dead |
 | `lint-board` | The backlog is an index, not a journal |
 | `lint-slog-values` | An slog attribute value's in-module struct type implements `slog.LogValuer`/`json.Marshaler`/`encoding.TextMarshaler` — a JSON handler never consults `fmt.Stringer` |
 | `lint-flag-consumer-census` | A registered process-wide flag's readers are a declared ledger (file + function), so a new reader re-reads the bound the flag's own comment prices |
+| `lint-loupe-console-grants` | Every op `cmd/loupe` submits through the Gateway under the operator's token is granted to `consoleOperator` by `packages/console-operator` at the lane it submits on — the console never holds `operator`, so a grant missing from that one package is a silent denial every package-local pin misses; relay sites are a ledger whose op set is derived from the consumer's own source; a known gap is pinned with the fix it waits on and fails the day the grant lands |
+| `lint-link-target-count` | A `len(<link-target list>)` comparison in a package script counts vertices screened for liveness — a soft-delete cascades onto no link, so a live link to a dead endpoint is otherwise a live candidate in an exactly-one / ambiguity decision; parses every shipped script with `go.starlark.net/syntax`, resolves target-list producers transitively, binds the liveness test (`vertex_live` / `vertex_alive` / a `kv.Read` document's `isDeleted`) to the counted element and its branch, and `# link-count: live-screened <why>` declares a screening the recogniser cannot see |
 
 ## The author-declares shape
 
 Several gates share one design: rather than trying to classify a site, they **default-deny** it and require
 the author to declare which sanctioned shape it is, in a machine-checked annotation carrying a
-human-written `<why>`. `# read-posture:` is the original; `# authcontext-target:`, `# workplace-exempt:`
-and `# op-name:` follow it. The payoff is that the gate never has to be smarter than the author — it only
+human-written `<why>`. `# read-posture:` is the original; `# authcontext-target:`, `# workplace-exempt:`,
+`# op-name:` and `# link-count:` follow it. The payoff is that the gate never has to be smarter than the author — it only
 has to make the author say what they meant, where the next reader will see it.
 
 Two properties make one of these work, and both have been got wrong:

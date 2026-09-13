@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-loupe-console-grants install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2331,8 +2331,14 @@ lint-capability-kv-readers:
 ## `unplannable` routes an undeclared column to the reasoning tier. An unresolvable
 ## LensRef, a prefix/targetId mismatch, and a lens whose columns the gate cannot
 ## read (non-actorAggregate, or no Output) are each reported, never silently
-## passed. Runs an embedded self-test on every invocation (--selftest to see it)
-## and refuses an all-clear over zero examined columns.
+## passed. Second rule, same rows: every `maxretries_<g>` retry cap landing in a
+## target's rows has a `missing_<g>` gap column landing there too — the engine
+## reads a cap only under the name it derives from the gap key, so a cap spelled
+## by hand under any other name is dead (wellness-ledger's `maxretries_price`
+## beside `missing_price_charge`). `inflight_<g>` is not held to it: an inflight
+## signal is a legitimate FE-facing column in its own right. Runs an embedded
+## self-test on every invocation (--selftest to see it) and refuses an all-clear
+## over zero examined columns.
 ## Advisory by default; STRICT=1 exits non-zero.
 lint-gap-column-declaration:
 	@echo "==> Linting weaver gap-column declarations..."
@@ -2372,6 +2378,40 @@ lint-slog-values:
 lint-flag-consumer-census:
 	@echo "==> Linting flag consumer census..."
 	go run ./scripts/lint-flag-consumer-census.go
+
+## lint-link-target-count — a COUNT over link targets counts live vertices only.
+## A soft-delete cascades onto no link, so a list of `.targetVertex` /
+## `.sourceVertex` endpoints holds dead vertices even after the link's own
+## isDeleted is filtered; harmless where the consumer re-proves each one, wrong
+## wherever the list's LENGTH is the decision (an exactly-one / ambiguity count
+## reads a decommissioned building as a live candidate and the op no-ops
+## forever — clinic-domain's BackfillAppointmentSite, live, 15 appointments).
+## Parses every shipped package script (the compiled pkgregistry corpus, via
+## go.starlark.net/syntax) and fails a `len(<target list>)` comparison whose
+## elements were not screened by a liveness predicate, in the producer or at the
+## count; `# link-count: live-screened <why>` declares one the recogniser cannot
+## see. Self-tests on every run. Advisory by default; STRICT=1 exits non-zero.
+lint-link-target-count:
+	@echo "==> Linting link-target counts for liveness screening..."
+	go run ./scripts/lint-link-target-count.go
+
+## lint-loupe-console-grants — every op the console submits under its own
+## identity is granted to the consoleOperator role at the lane it submits on.
+## cmd/loupe runs as the scoped consoleOperator (mechanism B, never root) whose
+## grants live only in packages/console-operator; every other package grants
+## its ops to the primordial `operator`, which the console identity does not
+## hold, so a Loupe handler submitting an op console-operator does not name is
+## denied at the CapabilityAuthorizer while every package-local pin, the handler's
+## own mocked-Gateway test and CI stay green (RecordCapabilityInstallReceipt;
+## the Vault erase's StartLoomPattern, denied since it shipped). Resolves every
+## gatewayOperationRequest literal in cmd/loupe with go/ast against the compiled
+## console-operator grants; relay sites are a ledger whose op set is derived
+## from the consumer's source; a known gap is pinned with the fix it waits on
+## and fails the day the grant lands. Self-tests on every run. Advisory by
+## default; STRICT=1 exits non-zero.
+lint-loupe-console-grants:
+	@echo "==> Linting Loupe's submitted ops against the consoleOperator grants..."
+	go run ./scripts/lint-loupe-console-grants.go
 
 ## install-skills — Symlink the canonical agentic-ops role-skills from agents/
 ## into the (gitignored) .claude/skills/ where the harness discovers them. A

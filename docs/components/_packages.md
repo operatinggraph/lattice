@@ -587,13 +587,6 @@ mechanizes it (name the gate, strike the entry).
   hidden is never declared or derived — write it blind. Mechanized as an instrument, not a gate:
   `claim_timing_probe_test.go`'s already-claimed fixture is now a real secret-claimed identity with a live
   binding, so the probe measures the production shape.
-- **An engine-recognized companion column whose name does not match its gap is silently dead** — the engine
-  derives the name from the gap key (`missing_<g>` → `maxretries_<g>`/`inflight_<g>`), finds nothing, and
-  falls back to its default; no gate, test or projection notices, and the package's own doc keeps claiming
-  the column works. Minted: `wellness-ledger` projected `maxretries_price` for gap `missing_price_charge`
-  (2026-08-24) — dead since it shipped, harmless only because the default budget happened to equal the
-  intended cap. Check: build the column name from the gap key in code, never spell it by hand; a column
-  with no gap of the same name is dead unless a named non-Weaver reader consumes it.
 - **A cap derived from a paged sweep must be summed over every ARM the gap covers, not one arm's reach** —
   a sweep that drains one relation per commit, in fixed order, needs `Σ_arms(pages × pageLimit) / perCommit`
   dispatches; a drained arm returns empty and yields to the next rather than failing, so dispatches past
@@ -606,28 +599,8 @@ mechanizes it (name the gate, strike the entry).
   `unclaimed` for exactly this reason. Minted: clinic `BindPatientIdentity` (2026-09-06), caught cold as BLOCKING.
   Check: for every op granted to a staff role that names an identity (or any actor-bearing vertex) by key, ask
   which `.state` values the script refuses and whether the caller could name themselves.
-- **A new op granted to `operator` by its OWN package is not thereby callable from the console** —
-  `cmd/loupe` runs as the scoped `consoleOperator` (mechanism B, "never root"), whose grants live in a
-  DIFFERENT package (`console-operator`), and there is no wildcard: an op absent from that list is denied
-  at the CapabilityAuthorizer, so the feature no-ops while the endpoint still answers 200. Nothing fails —
-  every package-local pin, the corpus census and CI all stay green, because the grant gap is cross-package.
-  Minted: `RecordCapabilityInstallReceipt` (2026-08-29) shipped granted only to `operator`, so the receipt
-  would never have landed from the console. Check: for every new op a `cmd/loupe` handler submits, assert
-  it appears in `console-operator`'s grant list — and have the submitting handler surface its own failure
-  on the SUCCESS path, so a denial is visible instead of swallowed.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
 
-- **A soft-delete cascades onto no link, so a list of link TARGETS holds dead vertices — harmless where the
-  consumer re-proves each one (`worksAt_covers`), wrong wherever the list's LENGTH is the decision.** An
-  exactly-one / ambiguity / uniqueness count over `lk.targetVertex` reads a decommissioned building as a live
-  candidate, and the op no-ops (or picks the dead one) forever while the read model, which joins live vertices,
-  shows the right count. Minted: clinic-reminders `BackfillVisitSeriesSite` (2026-08, screened at build and
-  the divergence from clinic-domain's sibling recorded); **second sighting** clinic-domain
-  `BackfillAppointmentSite` (2026-09-13, live — 15 appointments stuck, provider at one live + one tombstoned
-  site). Check: any `len(<targets>)` comparison filters the list through `vertex_live` first, and the package
-  pins it with a one-live-one-dead fixture (`TestVisitSeries_SiteOps_SkipDecommissionedBuilding`,
-  `TestClinic_BackfillAppointmentSite_DeadSiteNotCounted`). A third sighting mechanizes the `len(` check as a
-  `lint-conventions` gate.
 - **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
   `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
   label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
