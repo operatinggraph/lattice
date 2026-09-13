@@ -39,7 +39,9 @@ redirects that dead-end to the AI-reasoning tier:
 `augur.escalate` values ∈ `{unplannable, exhausted}`; `augur.op` / `augur.adapter` / `augur.replyOp` /
 `augur.model` (all optional overrides) are single NATS-token strings; `augur.autoApply.actions` ⊆
 `{triggerLoom, assignTask, directOp}`. The §10.8 `gaps`/templating/action-table shapes are unchanged
-(weaver shard).
+(weaver shard). **At record time** `CreateAugurReasoningClaim` refuses a `trigger` outside
+`{unplannable, exhausted}`: `promotion` is written only by `RecordPromotionProposal` (below), never by
+an escalation claim.
 
 ### Augur dispatch (approved proposal → remediation)
 

@@ -1166,7 +1166,28 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// ever look at this gap again. Released and advanced in the same pass, the
 	// plan reaches its next leg; released and returned, it would wait on a row
 	// write that the flip has already made.
-	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev, countRev) {
+	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev) {
+		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, 0); suppressed {
+			// The ADVANCE is a dispatch, and the gap has a call in flight —
+			// exactly the state inflight_<g> exists to keep a fresh episode out
+			// of, and an advance taken here would jump the suppression gate from
+			// ABOVE. The goal branch below withholds its advance for this reason
+			// and a proposal leg is no different: the next leg's remediation is a
+			// real op against a real entity.
+			//
+			// The RELEASE stands regardless — a release is not a dispatch, and
+			// the leg it cleared was recorded by the flip whatever the row has in
+			// flight now. Only the advance is the gate's business.
+			//
+			// The count is asked as ZERO because the release has just deleted the
+			// document, and nothing is stranded by holding: inflight_<g> is a
+			// column of THIS row, so only a row write can lift the suppression,
+			// and that write is a lane-1 delivery arriving at a gap with no mark
+			// — a genuinely fresh episode, leg advanced.
+			e.logger.Debug("weaver sweep: proposal leg released with its advance withheld; the gap has a call in flight",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			return
+		}
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			e.logger.Warn("weaver sweep: proposal leg-advance dispatch did not complete cleanly; will retry",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn)

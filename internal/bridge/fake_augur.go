@@ -37,8 +37,12 @@ import (
 //     "refusal": the model declined to propose; err == nil, a definitive verdict
 //     the bridge must NOT retry), carrying NO proposal.
 //   - AugurPlanSubject          → a benign, in-scope PLAN-shaped proposal: two
-//     ordered assignTask steps, both scoped to the escalated candidate, which
-//     Weaver dispatches one leg per episode.
+//     ordered assignTask steps, both scoped to the escalated candidate. Like the
+//     default single-step proposal it mirrors, it is a RECORD-TIME fixture: its
+//     params are the {scopedTo, forOperation} shape the §5 boundary scope-checks,
+//     not the {operation, assignee, target} shape materializeGapAction needs, so
+//     it records `pending` with both legs and is not a dispatchable shape. A test
+//     that drives the dispatch leg supplies its own proposal (SetProposal).
 //
 // Any other Subject yields a benign, in-scope, VALID assignTask proposal scoped
 // to the escalated candidate (read from Request.Params["entityId"], falling back
@@ -80,9 +84,10 @@ const (
 	// AugurPlanSubject makes FakeAugur return a PLAN-shaped proposal: two ordered
 	// assignTask steps, each in-vocabulary and scoped to the escalated candidate,
 	// differing only in the operation they ask a human to perform. It is the
-	// happy path for the plan shape — the §5 boundary holds per step, so the
-	// proposal records `pending` with both legs, and Weaver dispatches leg 0 then
-	// leg 1 as two ordinary episodes.
+	// happy path for the plan shape at RECORD time — the §5 boundary holds per
+	// step, so the proposal records `pending` with both legs. Its params are the
+	// scope-checkable shape, not the materialisable one (see the subject list
+	// above).
 	AugurPlanSubject = "augur-plan"
 	// fakeAugurForeignEntity is the foreign entity key the scope-escape proposal
 	// targets — deliberately not the escalated candidate. A type-neutral kernel
@@ -195,6 +200,8 @@ func (f *FakeAugur) proposalFor(req Request) AugurProposal {
 		base.Confidence = 1.5
 		return base
 	case AugurPlanSubject:
+		// Record-time shape, as the subject doc explains: scope-checkable, not
+		// materialisable.
 		base.Steps = []AugurStep{
 			{Action: "assignTask", Params: map[string]any{"scopedTo": entity, "forOperation": "ApproveLeaseApplication"}},
 			{Action: "assignTask", Params: map[string]any{"scopedTo": entity, "forOperation": "RecordLeaseDecision"}},
