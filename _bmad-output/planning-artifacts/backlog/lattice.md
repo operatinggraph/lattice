@@ -144,7 +144,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-13 · `54a45fa` · [lease-signing] a superseded bgcheck retires itself — lens + Weaver directOp; the op derives its reads, admits Weaver ([design](../../implementation-artifacts/bgcheck-supersession-convergence-rule-design.md))
+- 2026-09-13 · `0cda80c` · [lease-signing] a superseded bgcheck retires itself — lens + Weaver directOp; the op derives its reads, admits Weaver ([design](../../implementation-artifacts/bgcheck-supersession-convergence-rule-design.md))
 - 2026-09-13 · `83e1e14` · [Loom] `loom-state` enumeration bounded to the actionable set — failed index, complete-resolution listings, sentinel-gated backfill ([design](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md))
 - 2026-09-13 · `f276112` · [Pkgmgr/Bridge/Loupe] a weaver target's lens binding held at authoring and install; §10.8 clause landed ([design](../../implementation-artifacts/weaver-target-gap-declaration-holder-design.md))
 - 2026-09-13 · `bd293c45` · [bridge/privacy-base] egress serves every key-holder kind — class envelope lens, one kind set at both gates, nested marker refused ([design](../../implementation-artifacts/retention-class-egress-envelope-design.md))

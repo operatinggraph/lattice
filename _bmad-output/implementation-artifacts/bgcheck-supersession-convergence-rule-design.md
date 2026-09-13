@@ -1,6 +1,6 @@
 # Background-check supersession is a convergence rule — the older completed check retires through Weaver, never through the reply op
 
-**Status: ✅ SHIPPED 2026-09-13 — Inc 1 `c3f4d19`, Inc 2 `7a01a41`, close-pass fold `54a45fa` (build note §14).** Ratification: ✅ Andrew-ratified 2026-09-11 — build-ready. Designer fire 2026-09-06 · Winston · one cold adversarial pass
+**Status: ✅ SHIPPED 2026-09-13 — Inc 1 `b86e000`, Inc 2 `ac13dbb`, close-pass fold `0cda80c` (build note §14).** Ratification: ✅ Andrew-ratified 2026-09-11 — build-ready. Designer fire 2026-09-06 · Winston · one cold adversarial pass
 run and folded (§13) · ratification session 2026-09-11 (Andrew): decision 1 **ratified** (history is a record at rest);
 **decision 4 added at ratification — the op mints `lnk.service.<new>.supersedes.service.<old>`** ("new supersedes
 old", Contract #1 §1.1: the later-arriving vertex is the source) in the same batch as the tombstones, so the history at
@@ -726,7 +726,7 @@ the `PermittedCommands` premise), 4 NIT, 3 NOTE — all folded, each with a scra
 design-gap ×3 (the lazy-read hole a derivation opens, the gate premise, the chain case), implementation-bug ×1
 (segment-count-only derivation), doc-truth ×2. Held under attack: tie-break parity with the lens, the failing
 pre-pass bindings, weakest-wins merge, link key shape and direction, double-run collision, Weaver's submitter identity,
-`expectedRevision` inertness. Commit `c3f4d19`.
+`expectedRevision` inertness. Commit `b86e000`.
 
 **Close pass (cumulative, one cold opus reviewer over the whole item):** 1 BLOCKING (the meta as a derivation hub —
 design-gap: §4.1's priced fan was wrong by a factor of N), 5 SHOULD-FIX (the census comment's meaning — convention;
@@ -770,7 +770,7 @@ conjuncts stay proven in the package's lens test.
 
 ### 14.3 Checkpoint
 
-✅ Shipped: Inc 1 `c3f4d19`, Inc 2 `7a01a41`, close-pass fold `54a45fa` (`0.32.2`), merged to `main` 2026-09-13. Live
+✅ Shipped: Inc 1 `b86e000`, Inc 2 `ac13dbb`, close-pass fold `0cda80c` (`0.32.2`), merged to `main` 2026-09-13. Live
 close on the ephemeral native stack (at Inc 2's `0.32.1`; the fold is package content over the same install path):
 `verify-kernel` + `verify-package-lease-signing` (93 OK) pass, the lens installed at
 `vtx.meta.5DKn2YSUXe6zNhPe5DKn`; the Weaver retirement itself is proven by the `leaseshortwindow` e2e (a fresh stack
