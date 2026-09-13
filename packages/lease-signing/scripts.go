@@ -1555,6 +1555,15 @@ def make_tombstone(key):
 
 SERVICE_FAMILIES = ["backgroundCheck", "payment"]
 
+# Page limit for the successor-ownership instanceOf walk in
+# TombstoneSupersededLeaseServiceInstance. A service instance carries exactly ONE
+# instanceOf link (CreateLeaseServiceInstance mints it; nothing else adds one), so
+# the walk is degree-1 by construction and one small page is the whole set --
+# sized above 1 only so a stray extra link on some future minter's instance could
+# not hide this DDL's own link behind a page boundary. A second page refuses
+# loudly rather than reading as NotOwned (the enumeration below).
+INSTANCE_OF_PAGE_LIMIT = 8
+
 def family_of(p):
     # The family is opaque pass-through from the Loom step's params.family.
     # A nested payload object is exposed to Starlark as a dict (not a struct),
@@ -1713,9 +1722,12 @@ def execute(state, op):
         # readiness aggregate that fans out over every instance of an applicant
         # (the leaseApplicationComplete lens) stops reading retired checks. Six of
         # the seven reads below are DERIVED server-side by this script's own
-        # derive_reads(op) (Contract #2 §2.5 class (g)); the ownership link is
-        # the one DECLARED key a dispatcher supplies. The script never
-        # enumerates.
+        # derive_reads(op) (Contract #2 §2.5 class (g)); the predecessor's
+        # ownership link is the one DECLARED key a dispatcher supplies. The
+        # successor's ownership is the eighth proof, and the one thing neither a
+        # derivation nor a lens column can carry: a bounded class-(e) enumeration
+        # of the successor's own instanceOf relation, declared by every dispatcher
+        # as an enumeration rather than a read.
 
         # actor-guard: the grant behind this op is operator/Scope:"any", which
         # admits every operator-role holder -- including the two platform
@@ -1789,21 +1801,42 @@ def execute(state, op):
         if inst_ownership == None or inst_ownership.isDeleted:
             fail("NotOwned: " + instance_key + " is not a lease-signing service instance (no live instanceOf link to this DDL's type authority)")
 
-        # The successor is proven alive, same-class, completed, later and
-        # providedTo the same subject -- but NOT owned: no read here resolves
-        # supersededBy's own instanceOf link to this DDL's type authority, so on
-        # the OPERATOR path a same-class instance minted by another type
-        # authority can be named as the successor -- and the supersedes link the
-        # batch below mints is then SOURCED at that unproven vertex, i.e. an
-        # outbound edge on another type authority's vertex. Documented residual,
-        # not a gap in the durable rule: on Weaver's path the
-        # supersededBackgroundChecks lens re-binds the successor to the anchor's
-        # own meta, so every convergence-submitted pair is owned on both sides.
-        # Closing it for the operator path needs an eighth declared read the lens
-        # cannot project (a relationship variable is refused inside an
-        # aggregate), so the op keeps seven reads.
         if not vertex_alive(state, superseded_by):
             fail("UnknownInstance: " + superseded_by)
+
+        # OWNERSHIP of the SUCCESSOR -- the same Contract #1 §1.5 type-authority
+        # proof instance_key gets above, and for the same reason: a foreign
+        # instance carries the identical readable shape (envelope class, a
+        # completed .outcome, a providedTo link) while its real instanceOf link
+        # targets another type authority. It is proven on EVERY path here, the
+        # op's own eighth proof, because neither of the two ways a declared read
+        # reaches this script can carry it: derive_reads cannot compute the key
+        # (its target is ddl[...].metaKey, unreachable in the pre-pass) and the
+        # lens cannot project it (a relationship variable inside max() is refused
+        # at parse). A bounded enumeration of the successor's OWN outbound
+        # instanceOf relation resolves it instead: degree 1 by construction --
+        # CreateLeaseServiceInstance mints exactly one instanceOf link per
+        # instance and nothing else adds one -- so this is one page of one link,
+        # far inside the op's wall budget. Every dispatcher declares the walk:
+        # Weaver's supersededBackgroundChecks target as an Enumerations entry on
+        # the gap (hub row.supersededBy, targets.go), an operator as
+        # contextHint.enumerations.
+        # read-posture: (e) relation=instanceOf epoch=none -- this op is the only mutator of instanceOf on a service vertex; a concurrent retirement of the successor between the walk and the commit leaves the supersedes link sourced at a tombstoned vertex, the accepted chain-case state; Weaver's detect+recover is the backstop.
+        succ_instance_of_page, succ_instance_of_more = kv.Links(superseded_by, "instanceOf", "out", None, INSTANCE_OF_PAGE_LIMIT)
+        succ_owned = False
+        for lk in succ_instance_of_page:
+            if not lk.isDeleted and lk.targetVertex == meta_key:
+                succ_owned = True
+        if not succ_owned:
+            # One page is the whole set for a vertex minted with one instanceOf
+            # link, so a second page means the degree-1 invariant this walk rests
+            # on is broken. Say that instead of reporting the walk's silence as
+            # "not owned": a link that exists past the page boundary is a
+            # different fault from a link that does not exist, and only one of
+            # them is the caller's.
+            if succ_instance_of_more != None:
+                fail("NotOwned: " + superseded_by + " carries more than " + str(INSTANCE_OF_PAGE_LIMIT) + " instanceOf links; a service instance is minted with exactly one")
+            fail("NotOwned: " + superseded_by + " is not a lease-signing service instance (no live instanceOf link to this DDL's type authority)")
 
         # Same envelope class (P7): a successor supersedes only its OWN
         # family -- a completed payment can never supersede a background
@@ -1862,9 +1895,13 @@ def execute(state, op):
         # RecordLeaseServiceOutcome is the only writer of this aspect, so this
         # never fires today; it fails closed against a later writer (a backfill,
         # an import) stamping a fractional or offset-bearing value, which would
-        # otherwise mis-order silently.
+        # otherwise mis-order silently. The TYPE test comes first, and is part of
+        # the same refusal: a stamp that is not a string at all (a number, a dict)
+        # has no len() and no endswith(), so testing the form first would abort the
+        # script with a bare Starlark error instead of this op's own
+        # NotSuperseded.
         for stamp in [inst_completed_at, succ_completed_at]:
-            if len(stamp) != 20 or not stamp.endswith("Z"):
+            if type(stamp) != type("") or len(stamp) != 20 or not stamp.endswith("Z"):
                 fail("NotSuperseded: " + instance_key + " / " + superseded_by + " completedAt must be a whole-second RFC3339 UTC stamp (20 characters, Z-suffixed); got " + str(inst_completed_at) + " and " + str(succ_completed_at))
         later = succ_completed_at > inst_completed_at
         tie_break = succ_completed_at == inst_completed_at and superseded_by > instance_key

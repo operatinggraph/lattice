@@ -152,10 +152,25 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	// excludes task, and the task anchor type binds only at the anchor.
 	"staleUserTasks": oneKey,
 	// The second MATCH's `(newer:service)` is a SECOND service-typed position
-	// (index 3, alongside the anchor at 0): a completed sibling's own write
-	// binds there too, so another anchor's row (the sibling's own, were it
-	// superseded) really can render this vertex. Off-anchor, as intended — the
-	// whole point is that a write to either instance reprojects both.
+	// (index 3, alongside the anchor at 0), so a write to either instance of a
+	// pair binds off-anchor and the walk is the right answer: the reprojection
+	// set is that applicant's own live instances, reached through the two
+	// providedTo hops via the identity at index 2, which is what this lens needs
+	// (a completion is exactly what makes an earlier sibling superseded).
+	// `(m:meta)` at index 1 is bound only by the anchor's own instanceOf hop, so
+	// under the ACTING derivation (REFRACTOR_ANCHOR_DERIVATION=act, the built-in
+	// default) no service write crosses the meta: the walk reaches index 1 only
+	// from the anchor position, which it admits and never expands. Re-binding the
+	// successor to `(m)` is what would break that, and the lens refuses to
+	// (packages/lease-signing/lenses.go).
+	//
+	// That is the DERIVATION's answer, not this census's verdict. This table's
+	// `walk` is the BFS, and the BFS narrows by relation NAME only
+	// (actor_enumerator.go's neighborsInScope over the walk scope): instanceOf is
+	// in scope from the anchor, so wherever the BFS decides — `off`/`shadow`, a
+	// read-cap decline, an error — it does cross the meta to every owned
+	// instance. A meta's OWN aspect write reaches every live owned anchor under
+	// either arm, which is the package-install cost that design prices.
 	"supersededBackgroundChecks":        walkMultiPosition,
 	"unroutedTasks":                     oneKey,
 	"visitSeriesDue":                    oneKey,

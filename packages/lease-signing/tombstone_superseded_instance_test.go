@@ -86,18 +86,26 @@ func seedTombstonedServiceInstance(t *testing.T, ctx context.Context, conn *subs
 	return key
 }
 
-// seedForeignShapedInstance seeds a service-instance root that LOOKS exactly
-// like a real lease-signing background check (same envelope class, a
-// completed .outcome, a providedTo link to subjectKey) but whose instanceOf
-// link targets a DIFFERENT type authority — service.<foreignTplID> (the
-// shape service-domain's own generic template-instanceOf mechanism produces),
-// never this DDL's meta.<ourId> — the B1/B2 forgery vector this test proves
-// is refused: nothing about the instance's READABLE shape distinguishes it
-// from a real lease-signing instance, only its actual instanceOf target does.
-// Written directly via KV, bypassing every op (no sanctioned op mints this
-// shape on purpose — it stands in for a hypothetical or future foreign
-// minter, not a real lease-signing code path).
-func seedForeignShapedInstance(t *testing.T, ctx context.Context, conn *substrate.Conn, handle, foreignTplID, subjectKey, completedAt string) string {
+// seedForeignShapedInstance seeds a service-instance root that LOOKS like a real
+// lease-signing background check (same envelope class, a completed .outcome, a
+// providedTo link to subjectKey) but whose instanceOf link targets a DIFFERENT
+// type authority — service.<foreignTplID> (the shape service-domain's own
+// generic template-instanceOf mechanism produces), never this DDL's meta.<ourId>
+// — the B1/B2 forgery vector: only its actual instanceOf target distinguishes it
+// from a real lease-signing instance.
+//
+// outcomeClass picks WHICH readable shape: "outcome" with data {status,
+// completedAt} is what service-domain's own RecordServiceOutcome really writes
+// for the backgroundCheck family it also admits (packages/service-domain/ddls.go),
+// while "leaseServiceOutcome" forges this package's own aspect class — the only
+// shape the supersededBackgroundChecks lens's zero-hop successor conjunct admits,
+// and therefore the only foreign successor that can reach this op through Weaver.
+// The op reads neither class, so both reach the same ownership refusal; the pair
+// of vectors pins that the refusal does not depend on the readable shape.
+// Written directly via KV, bypassing every op (no sanctioned op mints either
+// shape under this package's meta — it stands in for a hypothetical or future
+// foreign minter).
+func seedForeignShapedInstance(t *testing.T, ctx context.Context, conn *substrate.Conn, handle, foreignTplID, subjectKey, completedAt, outcomeClass string) string {
 	t.Helper()
 	instKey := "vtx.service." + handle
 	seedVertex(t, ctx, conn, instKey, "service.backgroundCheck.instance", map[string]any{})
@@ -132,10 +140,17 @@ func seedForeignShapedInstance(t *testing.T, ctx context.Context, conn *substrat
 		t.Fatalf("seed foreign instanceOf %s: %v", foreignInstanceOf, err)
 	}
 
+	outcomeData := map[string]any{"status": "completed", "completedAt": completedAt}
+	if outcomeClass == "leaseServiceOutcome" {
+		// The forged shape copies the whole aspect, validUntil included:
+		// RecordLeaseServiceOutcome always stamps it, so a forgery that omitted
+		// it would be distinguishable by something other than the class.
+		outcomeData["validUntil"] = completedAt
+	}
 	outcomeDoc := map[string]any{
-		"class": "leaseServiceOutcome", "isDeleted": false,
+		"class": outcomeClass, "isDeleted": false,
 		"vertexKey": instKey, "localName": "outcome",
-		"data": map[string]any{"status": "completed", "completedAt": completedAt, "validUntil": completedAt},
+		"data": outcomeData,
 	}
 	ob, err := json.Marshal(outcomeDoc)
 	if err != nil {
@@ -225,39 +240,57 @@ const (
 	tsDeclareNothing
 )
 
-// submitTombstoneSuperseded builds + submits TombstoneSupersededLeaseServiceInstance
-// as actor, declaring what decl selects. The op's seven reads are instanceKey's
-// root, instanceKey's ownership instanceOf link (B1/B2 — keyed on metaID, the
-// leaseServiceInstance DDL's installed meta-vertex id), both .outcome aspects,
-// supersededBy's root, and both providedTo links; six of them are derived
-// server-side by the DDL's own derive_reads(op), and the ownership link is the
-// one a dispatcher declares.
-func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, actor, instanceKey, supersededBy, subjectKey, metaID string, decl tsDecl) (processor.MessageOutcome, *processor.OperationReply) {
-	t.Helper()
+// tsHint builds the contextHint decl selects. Every declaring shape carries the
+// SAME single enumeration entry — the successor's outbound instanceOf walk the
+// script runs to prove the successor's ownership (Contract #2 §2.5 class (e)) —
+// because every real dispatcher declares it: Weaver as the gap's Enumerations
+// entry on row.supersededBy (targets.go), an operator by hand. The declaration is
+// metadata rather than a gate for this op (the Processor shape-validates it and
+// never hydrates a walk), so these fixtures mirror the dispatchers rather than
+// supply the proof; what the walk actually decides is proved by
+// _ForeignSuccessor_Rejected.
+func tsHint(instanceKey, supersededBy, subjectKey, metaID string, decl tsDecl) *processor.ContextHint {
 	_, instHandle, _ := substrate.ParseVertexKey(instanceKey)
 	_, succHandle, _ := substrate.ParseVertexKey(supersededBy)
 	_, subjID, _ := substrate.ParseVertexKey(subjectKey)
 	instOwnership := "lnk.service." + instHandle + ".instanceOf.meta." + metaID
 	instProvidedTo := "lnk.service." + instHandle + ".providedTo.identity." + subjID
 	succProvidedTo := "lnk.service." + succHandle + ".providedTo.identity." + subjID
+	succInstanceOfWalk := []processor.EnumerationHint{
+		{Hub: supersededBy, Relation: "instanceOf", Direction: "out"},
+	}
 
-	var hint *processor.ContextHint
 	switch decl {
 	case tsDeclareOwnershipOnly:
-		hint = &processor.ContextHint{Reads: []string{instOwnership}}
+		return &processor.ContextHint{Reads: []string{instOwnership}, Enumerations: succInstanceOfWalk}
 	case tsDeclareLinksOptional:
-		hint = &processor.ContextHint{
+		return &processor.ContextHint{
 			Reads:         []string{instanceKey, instOwnership, instanceKey + ".outcome", supersededBy, supersededBy + ".outcome"},
 			OptionalReads: []string{instProvidedTo, succProvidedTo},
+			Enumerations:  succInstanceOfWalk,
 		}
 	case tsDeclareNothing:
-		hint = nil
+		return nil
 	default:
-		hint = &processor.ContextHint{
+		return &processor.ContextHint{
 			Reads: []string{instanceKey, instOwnership, instanceKey + ".outcome", supersededBy, supersededBy + ".outcome",
 				instProvidedTo, succProvidedTo},
+			Enumerations: succInstanceOfWalk,
 		}
 	}
+}
+
+// submitTombstoneSuperseded builds + submits TombstoneSupersededLeaseServiceInstance
+// as actor, declaring what decl selects. The op's seven reads are instanceKey's
+// root, instanceKey's ownership instanceOf link (B1/B2 — keyed on metaID, the
+// leaseServiceInstance DDL's installed meta-vertex id), both .outcome aspects,
+// supersededBy's root, and both providedTo links; six of them are derived
+// server-side by the DDL's own derive_reads(op), and the ownership link is the
+// one a dispatcher declares. The successor's own ownership is the eighth proof
+// and arrives by the declared enumeration instead (tsHint).
+func submitTombstoneSuperseded(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, actor, instanceKey, supersededBy, subjectKey, metaID string, decl tsDecl) (processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	hint := tsHint(instanceKey, supersededBy, subjectKey, metaID, decl)
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(tag),
@@ -713,7 +746,7 @@ func TestTombstoneSupersededLeaseServiceInstance_ForeignInstance_Rejected(t *tes
 
 	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
 	subject := seedApplicant(t, ctx, conn, "BB9e76vvacmwMZSPTfn6")
-	foreign := seedForeignShapedInstance(t, ctx, conn, "BB8vaM4gn9r8gtLEkRfj", "BBDTF1cTG597CakmXX6D", subject, "2026-05-01T00:00:00Z")
+	foreign := seedForeignShapedInstance(t, ctx, conn, "BB8vaM4gn9r8gtLEkRfj", "BBDTF1cTG597CakmXX6D", subject, "2026-05-01T00:00:00Z", "outcome")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsForSucc1", "BBAHX2hEXsxAnukTrAoW", "backgroundCheck", subject, "2026-05-02T00:00:00Z", "completed")
 
 	phantomOwnership := "lnk.service.BB8vaM4gn9r8gtLEkRfj.instanceOf.meta." + metaID
@@ -998,6 +1031,13 @@ func TestTombstoneSupersededLeaseServiceInstance_LoomDenied(t *testing.T) {
 // The guard refuses Loom alone (_LoomDenied); admitting Weaver widens who may ask
 // and nothing about what is proven, since every trust-bearing key is derived from
 // the payload + ddl[...].metaKey and re-proven from hydrated state.
+//
+// The envelope is built here rather than through submitTombstoneSuperseded to
+// carry the FOURTH payload field Weaver really sends: strategist.go injects
+// expectedRevision (a NUMBER) into every directOp's params bag. This DDL's
+// InputSchema is open and the script reads only its three named fields, so the
+// extra field is inert — and inert is the claim this vector pins, since a payload
+// shape nothing tests is a payload shape only production sees.
 func TestTombstoneSupersededLeaseServiceInstance_WeaverAccepted(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -1009,9 +1049,99 @@ func TestTombstoneSupersededLeaseServiceInstance_WeaverAccepted(t *testing.T) {
 	instance := seedServiceInstance(t, ctx, conn, cp, cons, "tsWvInst1", "BBRmH2kydLuQTsWqcAz9", "backgroundCheck", subject, "2026-02-14T00:00:00Z", "completed")
 	successor := seedServiceInstance(t, ctx, conn, cp, cons, "tsWvSucc1", "BBpF8nhTceqXwVuLj2Sk", "backgroundCheck", subject, "2026-02-15T00:00:00Z", "completed")
 
-	outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, "tsPeWeavOp1", bootstrap.WeaverIdentityKey, instance, successor, subject, metaID, tsDeclareOwnershipOnly)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("tsPeWeavOp1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSupersededLeaseServiceInstance",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseServiceInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + instance + `","supersededBy":"` + successor +
+			`","subjectKey":"` + subject + `","expectedRevision":7}`),
+		ContextHint: tsHint(instance, successor, subject, metaID, tsDeclareOwnershipOnly),
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
 	}
 	assertSupersessionPostState(t, ctx, conn, instance, successor, subject, "tsPeWeavOp1")
+}
+
+// TestTombstoneSupersededLeaseServiceInstance_ForeignSuccessor_Rejected: the
+// SUCCESSOR is a completed, strictly-later background check providedTo the same
+// applicant whose real instanceOf link targets another type authority —
+// service.<tplId>, never this DDL's meta.<ourId>. The script's bounded instanceOf
+// walk off supersededBy finds no live link to this DDL's metaKey and refuses
+// NotOwned, naming the successor. Nothing is written: the predecessor stays live,
+// the successor is untouched, and no supersedes link is minted.
+//
+// Two readable shapes, one refusal. "service-domain's own shape" is what a real
+// foreign minter writes (aspect class `outcome`, no validUntil): the
+// supersededBackgroundChecks lens's zero-hop successor conjunct already excludes
+// it, so this vector is the op holding the line where a hand-typed operator
+// submission bypasses the lens entirely. "forging this package's outcome class"
+// is the ONE foreign shape the lens admits, so it is the pair Weaver can actually
+// dispatch (the lens side is
+// TestSupersededBackgroundChecks_LaterSiblingOwnedByDifferentSameNamedMeta_ProjectsARowTheOpRefuses),
+// and it is the vector proving the refusal rests on the instanceOf walk rather
+// than on anything readable.
+func TestTombstoneSupersededLeaseServiceInstance_ForeignSuccessor_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "tomb-foreignsucc")
+
+	metaID := resolveLeaseServiceInstanceMetaID(t, ctx, conn, cp, cons)
+	subject := seedApplicant(t, ctx, conn, "BBxKnG4dwVe7LcQmRtZ2")
+
+	cases := []struct {
+		name         string
+		tag          string
+		instHandle   string
+		succHandle   string
+		tplID        string
+		outcomeClass string
+	}{
+		{
+			name:         "service-domain's own outcome shape",
+			tag:          "tsFsPlain",
+			instHandle:   "BBLdy5QnWpXcRtMvJ3Ah",
+			succHandle:   "BBc9RjXpLmTvQ2wdSnKh",
+			tplID:        "BBPqW7ntEzVdKmXrLu4C",
+			outcomeClass: "outcome",
+		},
+		{
+			name:         "forging this package's outcome class",
+			tag:          "tsFsForged",
+			instHandle:   "BBRy4mQtXvchLdnKpW7s",
+			succHandle:   "BBhT2zVdqLmXpRc8NwKu",
+			tplID:        "BBWn6kXtQpLdRvMz3CyA",
+			outcomeClass: "leaseServiceOutcome",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := seedServiceInstance(t, ctx, conn, cp, cons, tc.tag+"i", tc.instHandle, "backgroundCheck", subject, "2026-11-01T00:00:00Z", "completed")
+			foreignSuccessor := seedForeignShapedInstance(t, ctx, conn, tc.succHandle, tc.tplID, subject, "2026-11-02T00:00:00Z", tc.outcomeClass)
+
+			outcome, reply := submitTombstoneSuperseded(t, ctx, conn, cp, cons, tc.tag+"op", lsActorKey, instance, foreignSuccessor, subject, metaID, tsDeclareAll)
+			if outcome != processor.OutcomeRejected {
+				t.Fatalf("outcome = %v, want Rejected (reply=%+v)", outcome, reply)
+			}
+			if reply.Error == nil || !strings.Contains(reply.Error.Message, "NotOwned") {
+				t.Fatalf("want NotOwned from the successor-ownership enumeration, got %+v", reply.Error)
+			}
+			if !strings.Contains(reply.Error.Message, foreignSuccessor) {
+				t.Fatalf("the refusal must name the successor %q, got %q", foreignSuccessor, reply.Error.Message)
+			}
+			if d, _ := readDoc(t, ctx, conn, instance)["isDeleted"].(bool); d {
+				t.Fatalf("a refused supersession must not tombstone the predecessor")
+			}
+			if d, _ := readDoc(t, ctx, conn, foreignSuccessor)["isDeleted"].(bool); d {
+				t.Fatalf("a refused supersession must not touch the successor either")
+			}
+			if keyExists(t, ctx, conn, "lnk.service."+tc.succHandle+".supersedes.service."+tc.instHandle) {
+				t.Fatalf("a refused supersession must mint no supersedes link off the foreign successor")
+			}
+		})
+	}
 }

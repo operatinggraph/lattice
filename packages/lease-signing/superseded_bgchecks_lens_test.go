@@ -7,6 +7,15 @@ package leasesigning
 // nothing in the second MATCH, so most of these vectors assert an EMPTY
 // projection rather than a false column — there is no standing row to read a
 // column off.
+//
+// One row of that table is the lens's boundary rather than its rule: the
+// successor's OWNERSHIP is not bound as a hop here (binding it would make the
+// meta a derivation hub — lenses.go's spec comment). What the successor does
+// carry is the zero-hop signal of this package's own .outcome aspect class, which
+// is what keeps a foreign instance with a greater key from winning max() and
+// starving the retirement; a forged aspect class still projects, and the op's own
+// enumeration refuses it. Every OTHER conjunct the op checks, this lens mirrors
+// exactly.
 
 import (
 	"context"
@@ -47,9 +56,39 @@ func leaseServiceInstanceMeta(t *testing.T, f *lensFixture, name string) {
 // (instanceOf) by the named meta, providedTo the named subject identity.
 func completedBgcheckOwned(t *testing.T, f *lensFixture, name, metaName, subjName, completedAt string) {
 	t.Helper()
+	completedOwnedInstance(t, f, name, "service.backgroundCheck.instance", metaName, subjName, completedAt)
+}
+
+// completedOwnedInstance seeds one completed lease-signing service instance of
+// the given envelope class, owned (instanceOf) by the named meta and providedTo
+// the named subject identity. The .outcome aspect is written exactly as
+// RecordLeaseServiceOutcome writes it — aspect class leaseServiceOutcome, data
+// {status, completedAt, validUntil} (scripts.go) — because the aspect's own CLASS
+// is a conjunct of this lens, so a fixture that stamped any other class would be
+// seeding the FOREIGN shape and testing the wrong thing. validUntil equals
+// completedAt here: this lens never reads it (backgroundCheckFreshness does),
+// and only its presence distinguishes the shape.
+func completedOwnedInstance(t *testing.T, f *lensFixture, name, vertexClass, metaName, subjName, completedAt string) {
+	t.Helper()
+	f.vtxWithClass(t, name, "service", vertexClass)
+	f.aspect(t, name, "outcome", "leaseServiceOutcome",
+		map[string]any{"status": "completed", "completedAt": completedAt, "validUntil": completedAt})
+	f.edge(t, "instanceOf", name, metaName)
+	f.edge(t, "providedTo", name, subjName)
+}
+
+// foreignCompletedBgcheck seeds the shape service-domain's own generic service
+// mechanism really produces for the backgroundCheck family it also admits
+// (packages/service-domain/ddls.go): the same envelope class
+// service.backgroundCheck.instance and a providedTo link to the same applicant,
+// but RecordServiceOutcome's aspect — class `outcome`, data {status, completedAt},
+// no validUntil — and an instanceOf link to a service TEMPLATE vertex rather than
+// to any leaseServiceInstance meta.
+func foreignCompletedBgcheck(t *testing.T, f *lensFixture, name, tmplName, subjName, completedAt string) {
+	t.Helper()
 	f.vtxWithClass(t, name, "service", "service.backgroundCheck.instance")
 	f.aspect(t, name, "outcome", "outcome", map[string]any{"status": "completed", "completedAt": completedAt})
-	f.edge(t, "instanceOf", name, metaName)
+	f.edge(t, "instanceOf", name, tmplName)
 	f.edge(t, "providedTo", name, subjName)
 }
 
@@ -217,10 +256,26 @@ func TestSupersededBackgroundChecks_AnchorNotOwnedByLeaseServiceInstance_NoRow(t
 
 // Row 8b — B's instanceOf targets a DIFFERENT meta vertex that also happens
 // to carry canonicalName "leaseServiceInstance" (a second, same-named type
-// authority): the `(newer)-[:instanceOf]->(m)` re-bind to the SAME meta A's
-// own instanceOf targets keeps a foreign check from ever superseding this
-// one, name collision notwithstanding.
-func TestSupersededBackgroundChecks_LaterSiblingOwnedByDifferentSameNamedMeta_NoRow(t *testing.T) {
+// authority), and B carries OUR .outcome aspect class, so the successor's
+// zero-hop ownership signal admits it. The lens PROJECTS a row naming B: real
+// ownership is deliberately not a conjunct here, because binding the successor to
+// the anchor's own (m) would make that meta position reachable from the successor
+// side and turn it into a derivation hub — every completion reprojecting every
+// instance this package owns (lenses.go's spec comment;
+// internal/refractor/pipeline's TestDeriveAnchors_SupersededBgchecks_StaysInsideTheApplicant
+// holds the shape). The row is the op's to refuse: it proves the successor's
+// ownership by a bounded instanceOf walk and rejects this pair NotOwned
+// (TestTombstoneSupersededLeaseServiceInstance_ForeignSuccessorForgingOurOutcomeClass_Rejected),
+// so the foreign check retires nothing and the row raises a loud, per-entity
+// GapBudgetExhausted instead.
+//
+// In production the minter this vector describes cannot exist: the write gate
+// resolves an aspect mutation's governing DDL by exact class, so only this
+// package's own leaseServiceOutcome aspectType DDL may stamp that class, and no
+// shipped package forges it. The vector stands as the op's belt — the one shape
+// that reaches the op past the lens's signal is a forging minter, and the op
+// refuses it.
+func TestSupersededBackgroundChecks_LaterSiblingOwnedByDifferentSameNamedMeta_ProjectsARowTheOpRefuses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -232,7 +287,88 @@ func TestSupersededBackgroundChecks_LaterSiblingOwnedByDifferentSameNamedMeta_No
 	completedBgcheckOwned(t, f, "b", "meta2", "subj", "2026-07-01T00:00:00Z")
 
 	rows := f.projectSuperseded(t, "a")
-	require.Empty(t, rows, "B is owned by a DIFFERENT meta vertex, even though it carries the same canonicalName")
+	require.Len(t, rows, 1, "the lens does not judge the successor's ownership -- the op does")
+	require.Equal(t, "vtx.service."+f.ids["b"], rows[0].Values["supersededBy"],
+		"the row names the foreign-owned successor, which is what the op refuses NotOwned")
+	require.Equal(t, "lnk.service."+f.ids["a"]+".instanceOf.meta."+f.ids["meta1"], rows[0].Values["instanceOfLink"],
+		"the ANCHOR's ownership is still a conjunct, and its own link key is still the projected read")
+}
+
+// The anchor's class conjunct is the anchor's, not only the successor's: a
+// completed PAYMENT instance with a later completed payment sibling is never an
+// anchor here. Payments accumulate by design (missing_payment closes
+// permanently on the first completed one), so retiring them is out of this
+// rule's scope entirely, and row 7's successor-side class conjunct would not
+// stop a payment pair from pairing with itself. Both are seeded as genuine
+// lease-signing instances — RecordLeaseServiceOutcome serves both families, so a
+// real payment's outcome carries this package's own aspect class — which leaves
+// the VERTEX class conjunct as the only thing excluding them.
+func TestSupersededBackgroundChecks_PaymentAnchor_NoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "subj", "identity")
+	leaseServiceInstanceMeta(t, f, "meta1")
+	completedOwnedInstance(t, f, "payA", "service.payment.instance", "meta1", "subj", "2026-06-01T00:00:00Z")
+	completedOwnedInstance(t, f, "payB", "service.payment.instance", "meta1", "subj", "2026-07-01T00:00:00Z")
+
+	rows := f.projectSuperseded(t, "payA")
+	require.Empty(t, rows, "the anchor MATCH admits only service.backgroundCheck.instance")
+}
+
+// The starvation vector, and the reason the successor carries an ownership
+// SIGNAL rather than nothing: A is owned and superseded by the owned B, while a
+// FOREIGN completed background check F sits on the same applicant with a key
+// GREATER than B's. max(newer.key) ranks by key, so without the successor's
+// .outcome-class conjunct the row would name F — a successor the op refuses
+// NotOwned on every delivery, which does not merely fail, it STARVES the
+// genuine retirement: B never gets named, A is never retired, and the target
+// exhausts its budget on a row that can never be satisfied. The conjunct keeps
+// max() over this package's own candidates, so the row names B.
+func TestSupersededBackgroundChecks_ForeignRivalWithGreaterKey_RowNamesTheOwnedSuccessor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "subj", "identity")
+	leaseServiceInstanceMeta(t, f, "meta1")
+	f.vtxWithClass(t, "foreignTmpl", "service", "service.backgroundCheck.template")
+	completedBgcheckOwned(t, f, "a", "meta1", "subj", "2026-06-01T00:00:00Z")
+	completedBgcheckOwned(t, f, "starveB", "meta1", "subj", "2026-07-01T00:00:00Z")
+	// F completes LATER than B as well, so recency cannot be what decides it.
+	foreignCompletedBgcheck(t, f, "starveF", "foreignTmpl", "subj", "2026-08-01T00:00:00Z")
+
+	bKey := "vtx.service." + f.ids["starveB"]
+	fKey := "vtx.service." + f.ids["starveF"]
+	// lenstest.NanoID is a pure hash of the logical name, so this ordering is
+	// fixed — asserted rather than assumed, because the vector is only the
+	// starvation vector while F outranks B.
+	require.Greater(t, fKey, bKey, "the fixture's foreign rival must hold the GREATER key for max() to prefer it")
+
+	rows := f.projectSuperseded(t, "a")
+	require.Len(t, rows, 1)
+	require.Equal(t, bKey, rows[0].Values["supersededBy"],
+		"max() must range over this package's own candidates -- naming F would starve A's retirement behind a permanent NotOwned")
+}
+
+// The same-applicant join is the join: B is later, completed and owned by the
+// very same meta, but providedTo a DIFFERENT applicant, so it supersedes
+// nothing of A's. Two applicants' checks are never each other's successors, and
+// the shared meta is not a path the pattern offers between them.
+func TestSupersededBackgroundChecks_LaterSiblingOnAnotherApplicant_NoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "subj", "identity")
+	f.vtx(t, "otherSubj", "identity")
+	leaseServiceInstanceMeta(t, f, "meta1")
+	completedBgcheckOwned(t, f, "a", "meta1", "subj", "2026-06-01T00:00:00Z")
+	completedBgcheckOwned(t, f, "b", "meta1", "otherSubj", "2026-07-01T00:00:00Z")
+
+	rows := f.projectSuperseded(t, "a")
+	require.Empty(t, rows, "B is another applicant's check -- the providedTo join through the shared identity binds nothing")
 }
 
 // Row 9 — two later completed siblings: supersededBy is a deterministic
@@ -267,8 +403,7 @@ func TestSupersededBackgroundChecks_TwoLaterSiblings_SupersededByIsMaxKey(t *tes
 // exactly one of the pair projects a row, the one with the SMALLER key,
 // naming the greater. The tie-break is TEXTUALLY the same rule
 // TombstoneSupersededLeaseServiceInstance's own recency guard applies
-// (scripts.go) -- drift between the two is what mutation (c) below proves
-// this test would catch.
+// (scripts.go); drift between the two is what this vector catches.
 func TestSupersededBackgroundChecks_SameSecondTie_SmallerKeyNamesGreater(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

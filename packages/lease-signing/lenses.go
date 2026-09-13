@@ -174,6 +174,19 @@ func Lenses() []pkgmgr.LensSpec {
 			// been superseded — never carries a standing subject in
 			// weaver-targets.
 			//
+			// Reprojection cost under the acting anchor derivation
+			// (REFRACTOR_ANCHOR_DERIVATION=act, the built-in default): a service
+			// or identity write reprojects the anchor and, through the providedTo
+			// hops, the OTHER live instances of that one applicant (steady state
+			// one to two — the population this rule keeps small). The successor
+			// position reaches no shared meta position, so no completion fans out
+			// past its own applicant; the only pass over the whole live owned
+			// population is a package install rewriting this DDL's meta aspects
+			// (spec comment below, design §4.1 (ii)/§11.1). Under `off`/`shadow`
+			// or a declined derivation the ActorEnumerator BFS answers instead,
+			// and it scopes by relation NAME only — instanceOf is in scope from
+			// the anchor, so it crosses the meta to every owned instance.
+			//
 			// Same shared weaver-targets bucket as every other target here, rows
 			// namespaced by OutputKeyPattern, with the targetId as that prefix.
 			CanonicalName:  "supersededBackgroundChecks",
@@ -906,11 +919,56 @@ RETURN
 // whose canonicalName is "leaseServiceInstance" — this DDL's own type
 // authority, not merely a same-named one elsewhere.
 //
-// The second MATCH is the op's precondition on supersededBy, plus one the op
-// does not itself prove: same class, completed, and either strictly later or
-// tied at the same completedAt with the greater key — re-bound to the SAME
-// meta (m) the anchor's own instanceOf link targets, so a same-shaped
-// instance owned by a different type authority never supersedes this one.
+// The second MATCH is the op's precondition on supersededBy: same class,
+// completed, providedTo the same applicant, and either strictly later or tied
+// at the same completedAt with the greater key.
+//
+// The successor's ownership is NOT bound as a hop, and that omission is
+// load-bearing. Re-binding (newer)-[:instanceOf]->(m) would make the anchor's
+// meta a pattern position reachable from the SUCCESSOR side, and affected-anchor
+// derivation walks the position graph in both directions
+// (internal/refractor/pipeline/anchor_derivation.go, full.HopIndex.StepsFrom):
+// a single .outcome write would step successor → meta → every live inbound
+// instanceOf edge of that meta, i.e. reproject EVERY live instance this package
+// owns for one completion (O(N), with the derivation's read cap falling back to
+// the BFS and the actor-set ceiling above it). The anchor's own (m) binding
+// stays: own.key is a projected column, and the meta's position is reachable
+// only from the anchor position, which derivation admits as an anchor and never
+// expands. That narrowing is the ACTING derivation's answer
+// (REFRACTOR_ANCHOR_DERIVATION=act, the built-in default): under `off`/`shadow`,
+// or when the derivation declines (read cap, error), the ActorEnumerator BFS
+// decides, and it is scoped by RELATION NAME only (actor_enumerator.go's
+// neighborsInScope) — instanceOf is in the anchor's own scope entry, so the BFS
+// still crosses the meta to every owned instance. The remaining fan under `act`
+// is the package install rewriting its DDL metas' aspects (design §4.1 (ii),
+// §11.1) — one pass over the live owned population per rewritten aspect, bounded
+// by the population this rule shrinks.
+//
+// What the pattern does carry on the successor is a ZERO-HOP ownership SIGNAL:
+// the .outcome aspect's own class. Only this package's leaseServiceOutcome
+// aspectType DDL writes `leaseServiceOutcome` (RecordLeaseServiceOutcome, the
+// sole writer), and the write gate resolves an aspect mutation's governing DDL
+// by exact class — while service-domain's own RecordServiceOutcome, which admits
+// the same `backgroundCheck` family and can mint a service.backgroundCheck.instance
+// providedTo the same applicant, writes class `outcome` with {status, completedAt}
+// and no validUntil. Without that conjunct a foreign instance with a greater key
+// wins max(newer.key), the op refuses the row NotOwned, and the genuine
+// retirement starves behind it forever — the row names a successor the op will
+// never accept while the owned successor sits unnamed. With it, max() ranges over
+// candidates carrying this package's own aspect, so an owned successor is never
+// shadowed by a foreign one. The same conjunct rides the anchor side for
+// symmetry: the aspect is already read there for `status`, so it costs nothing.
+//
+// The signal is not the proof. A minter that FORGED the aspect class would pass
+// here (in production the write gate refuses it that aspect class, and nothing
+// does), so ownership is proven by
+// TombstoneSupersededLeaseServiceInstance instead, on BOTH submission paths, by
+// a Contract #2 §2.5 class-(e) bounded enumeration of the successor's own
+// outbound instanceOf relation (degree 1 by construction — CreateLeaseServiceInstance
+// mints exactly one) against this DDL's metaKey, refusing NotOwned otherwise
+// (scripts.go). Such a row is refused loudly and per-entity
+// (GapBudgetExhausted) rather than retiring anything on a foreign check's word.
+//
 // completedAt is RecordLeaseServiceOutcome's rfc3339_utc stamp: fixed-width
 // and zero-padded, so string comparison orders it identically to
 // chronological order, at whole-second granularity — which is why the tie
@@ -929,15 +987,16 @@ RETURN
 // it over as a projected column instead. The successor's own instanceOf link
 // key cannot be projected the same way through this aggregation — a
 // relationship variable used as the argument to max()/min() is refused at
-// parse — which is why the successor's ownership is enforced by the pattern
-// re-binding (m), never by handing its link key to the op.
+// parse — so the op resolves it by its own bounded enumeration.
 const supersededBackgroundChecksSpec = `
 MATCH (inst:service {key: $actorKey})-[own:instanceOf]->(m:meta)
   WHERE inst.class = 'service.backgroundCheck.instance'
+    AND inst.outcome.class = 'leaseServiceOutcome'
     AND inst.outcome.data.status = 'completed'
     AND m.canonicalName.data.value = 'leaseServiceInstance'
-MATCH (inst)-[:providedTo]->(id:identity)<-[:providedTo]-(newer:service)-[:instanceOf]->(m)
+MATCH (inst)-[:providedTo]->(id:identity)<-[:providedTo]-(newer:service)
   WHERE newer.class = 'service.backgroundCheck.instance'
+    AND newer.outcome.class = 'leaseServiceOutcome'
     AND newer.outcome.data.status = 'completed'
     AND ((newer.outcome.data.completedAt > inst.outcome.data.completedAt)
       OR ((newer.outcome.data.completedAt = inst.outcome.data.completedAt) AND (newer.key > inst.key)))

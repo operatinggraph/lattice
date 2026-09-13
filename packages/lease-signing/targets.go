@@ -200,18 +200,31 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		LensRef: BackgroundCheckFreshnessTarget,
 	}, {
 		// supersededBackgroundChecks — the lens above projects a row only for a
-		// completed check that a later completed check on the same applicant,
-		// minted by this package, has already superseded. The only gap it ever
-		// opens dispatches the shipped TombstoneSupersededLeaseServiceInstance,
-		// which re-proves every conjunct on the Processor's own OCC snapshot —
-		// the row is a hint to converge on, never trusted as the mutation's
-		// authority.
+		// completed check that a later completed check on the same applicant has
+		// already superseded. The only gap it ever opens dispatches the shipped
+		// TombstoneSupersededLeaseServiceInstance, which re-proves every conjunct
+		// on the Processor's own OCC snapshot — the row is a hint to converge on,
+		// never trusted as the mutation's authority. The op also proves what the
+		// lens deliberately does not: that the successor belongs to this package's
+		// leaseServiceInstance type authority. That proof is a bounded instanceOf
+		// walk off the successor rather than a read (a lens cannot project a
+		// relationship variable through an aggregate), so the gap declares the
+		// walk in Enumerations beside its one declared read.
 		TargetID: "supersededBackgroundChecks",
-		Description: "A completed background check that a later completed check on the same applicant, minted by " +
-			"this package, has superseded is retired, so every live view aggregates only over the current check. " +
-			"OPERATOR NOTE: a GapBudgetExhausted here means the lens and TombstoneSupersededLeaseServiceInstance " +
-			"disagree about a pair; Weaver logs the requestId at submit — read the rejection off the Contract #4 " +
-			"tracker (vtx.op.<requestId>) or the Processor log, fix, then reset-budget.",
+		Description: "A completed background check that a later completed check on the same applicant has " +
+			"superseded is retired, so every live view aggregates only over the current check. " +
+			"OPERATOR NOTE: a GapBudgetExhausted here means Weaver's dispatch for that row is refused every time, " +
+			"and there are two causes with remedies. (1) The lens and TombstoneSupersededLeaseServiceInstance " +
+			"disagree about the pair — a drifted predicate on one side only; fix the drift, then reset-budget. " +
+			"(2) The successor's outcome.completedAt is not the whole-second RFC3339 UTC stamp the op requires (20 " +
+			"characters, Z-suffixed) — something other than RecordLeaseServiceOutcome, a backfill or an import, " +
+			"wrote it; the op's form guard refuses it and the lens cannot mirror that guard, so the row projects " +
+			"and never clears. Repair the stamp, then reset-budget. Read the rejection first either way: Weaver " +
+			"logs the requestId at submit, so it is on the Contract #4 tracker (vtx.op.<requestId>) or in the " +
+			"Processor log. A NotOwned refusal is neither of those and has no operator remedy: it means some " +
+			"package is minting instances that forge this package's own leaseServiceOutcome aspect class, which the " +
+			"lens reads as ours while the op's instanceOf proof does not. The retirement is BLOCKED, not delayed, " +
+			"until that minter stops.",
 		LensRef: "supersededBackgroundChecks",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_retirement": {
@@ -220,6 +233,11 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				Class:     "leaseServiceInstance",
 				Params:    map[string]string{"instanceKey": "row.entityKey", "supersededBy": "row.supersededBy", "subjectKey": "row.subjectKey"},
 				Reads:     []string{"row.instanceOfLink"},
+				// The successor's ownership proof (scripts.go): one outbound
+				// instanceOf walk off the successor, degree 1 by construction.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "row.supersededBy", Relation: "instanceOf", Direction: "out"},
+				},
 			},
 		},
 	}}

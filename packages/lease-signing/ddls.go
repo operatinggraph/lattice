@@ -756,12 +756,16 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 			"reachable and the key breaks the tie — the textually identical rule the supersededBackgroundChecks lens " +
 			"projects a row by), each stamp first checked for that whole-second UTC form (20 characters, Z-suffixed) — " +
 			"a form precondition string ordering depends on, not part of the ordering rule itself; both instances' " +
-			"providedTo link to subjectKey is alive. RESIDUAL, operator path only: " +
-			"the op does NOT prove supersededBy's own ownership, so an operator may name a same-class instance from " +
-			"another type authority as the successor — and the supersedes link below is then sourced at that unproven " +
-			"vertex, an outbound edge on another type authority's vertex; Weaver's path cannot (the lens re-binds the " +
-			"successor to the anchor's own meta), and closing it for the operator would need an eighth read the lens " +
-			"cannot project. " +
+			"providedTo link to subjectKey is alive; and supersededBy's OWN instanceOf link resolves to this DDL's " +
+			"meta-vertex too (NotOwned otherwise) — the EIGHTH proof, held on EVERY submission path, so a same-class " +
+			"instance minted by another type authority can never supersede one of ours and can never source the " +
+			"supersedes link below. That proof is a BOUNDED ENUMERATION rather than a read (Contract #2 §2.5 class " +
+			"(e)): kv.Links over supersededBy's outbound instanceOf relation — degree 1 by construction, one link per " +
+			"instance minted by CreateLeaseServiceInstance — accepted only on a LIVE link whose target is this DDL's " +
+			"metaKey. Neither route a declared read takes can carry it: derive_reads cannot reach ddl[...].metaKey, and " +
+			"a lens cannot project a relationship variable through an aggregate. So every dispatcher declares the WALK " +
+			"instead: Weaver's supersededBackgroundChecks target as an Enumerations entry on the gap (hub " +
+			"row.supersededBy, relation instanceOf, direction out), an operator as contextHint.enumerations. " +
 			"READS, seven: SIX are DERIVED server-side by this DDL's own derive_reads(op) (Contract #2 §2.5 class (g) " +
 			"— pure arithmetic on the payload: instanceKey; supersededBy; instanceKey+\".outcome\"; " +
 			"supersededBy+\".outcome\"; lnk.service.<instanceKey's handle>.providedTo.identity.<subjectKey's id>; " +
@@ -808,7 +812,7 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"CreateLeaseServiceInstance: vtx.service.<handle> of the minted claim vertex. TombstoneSupersededLeaseServiceInstance: vtx.service.<handle> of the tombstoned (superseded) instance. Either way, the operation's principal key."}}}`,
 		FieldDescription: map[string]string{
 			"instanceKey":  "CreateLeaseServiceInstance: the bare instance handle Loom minted for this externalTask (type-free, no dots / key segments / wildcards); the op prepends vtx.service. to it → vtx.service.<handle>, echoed back as the reply op's externalRef and the bridge's adapter dedup key. TombstoneSupersededLeaseServiceInstance: the FULL vtx.service.<handle> key of the older, superseded instance being retired — validated alive, owned by this DDL's type authority, same envelope class as supersededBy, providedTo subjectKey; its root, instanceOf link and providedTo link are tombstoned and it becomes the target of the supersedes link. Required either way.",
-			"supersededBy": "TombstoneSupersededLeaseServiceInstance only: full vtx.service.<handle> key of the later completed instance that supersedes instanceKey — validated alive, same envelope class, providedTo the same subjectKey, and its outcome.completedAt later than instanceKey's or equal with the greater key (whole-second stamps make an equal completedAt reachable). Never itself tombstoned by this op; it SOURCES the supersedes link the op mints to the retired predecessor. Its own ownership is not proven, the operator-path residual the Description records. Required.",
+			"supersededBy": "TombstoneSupersededLeaseServiceInstance only: full vtx.service.<handle> key of the later completed instance that supersedes instanceKey — validated alive, same envelope class, providedTo the same subjectKey, its outcome.completedAt later than instanceKey's or equal with the greater key (whole-second stamps make an equal completedAt reachable), and OWNED by this DDL's type authority, proven by a bounded instanceOf enumeration off this key (Contract #2 §2.5 class (e); NotOwned otherwise) — every dispatcher declares that walk, Weaver as the gap's Enumerations entry on row.supersededBy, an operator in contextHint.enumerations. Never itself tombstoned by this op; it SOURCES the supersedes link the op mints to the retired predecessor. Required.",
 			"subjectKey":   "CreateLeaseServiceInstance: full vtx.identity.<NanoID> key of the applicant the externalTask is for (the Loom pattern subject); validated alive, the providedTo link target (the convergence link the lens reads across). TombstoneSupersededLeaseServiceInstance: full vtx.identity.<NanoID> key both instanceKey and supersededBy must carry a live providedTo link to — the shared subject that makes one a legitimate successor of the other. Required either way.",
 			"adapter":      "CreateLeaseServiceInstance only: the registered bridge adapter name (e.g. backgroundCheck, stripe). Carried into the external.<adapter> event class + body so the bridge selects its adapter. Required.",
 			"replyOp":      "CreateLeaseServiceInstance only: the result-op type the bridge posts back (RecordLeaseServiceOutcome). Carried into the external event body so the bridge knows which op to submit on success. Required.",
@@ -838,8 +842,9 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 					"subjectKey":   "vtx.identity.<applicantNanoID>",
 				},
 				ExpectedOutcome: "The submitter declares ONE key in contextHint.reads — instanceKey's ownership " +
-					"instanceOf link (Weaver's supersededBackgroundChecks target sends it as row.instanceOfLink) — and " +
-					"this DDL's own derive_reads(op) supplies the other six (both roots, both .outcome aspects, both " +
+					"instanceOf link (Weaver's supersededBackgroundChecks target sends it as row.instanceOfLink) — plus " +
+					"ONE walk in contextHint.enumerations (supersededBy's outbound instanceOf relation), and " +
+					"this DDL's own derive_reads(op) supplies the other six reads (both roots, both .outcome aspects, both " +
 					"providedTo links to subjectKey). A dispatcher that declares all seven is equally valid " +
 					"(weakest-wins merge), but the ownership link is never optional: the op reads it from the step-4 " +
 					"snapshot, so a submission that declares nothing at all is refused InvalidArgument rather than " +
@@ -855,9 +860,12 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 					"outcome.completedAt later than instanceKey's, or equal with the greater instance key (RFC3339 UTC " +
 					"string compare, NotSuperseded otherwise); both instances providedTo subjectKey (SubjectMismatch " +
 					"otherwise — same present-but-tombstoned-only reachability), each completedAt carrying the " +
-					"whole-second UTC form string ordering depends on. It does NOT prove supersededBy's own " +
-					"ownership — the operator-path residual, which also puts the supersedes link's source on an " +
-					"unproven vertex; Weaver's lens proves it on that path. Commits four " +
+					"whole-second UTC form string ordering depends on (a stamp of any other shape, or of a " +
+					"non-string type, is NotSuperseded). supersededBy's own ownership is proven too, on every " +
+					"path: a bounded kv.Links walk of its outbound instanceOf relation must find a live link to " +
+					"this DDL's metaKey (NotOwned otherwise), which the submitter declares as an enumeration — " +
+					"contextHint.enumerations {hub: supersededBy, relation: instanceOf, direction: out}, which " +
+					"Weaver's target carries as Enumerations on the gap. Commits four " +
 					"mutations in one batch: bare op:tombstone (no document) of instanceKey's root + its instanceOf " +
 					"link + its providedTo link, and a create of " +
 					"lnk.service.<newerHandle>.supersedes.service.<olderHandle> (source = supersededBy, target = " +

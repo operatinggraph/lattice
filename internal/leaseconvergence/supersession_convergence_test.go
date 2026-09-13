@@ -87,6 +87,48 @@ type supersededEvent struct {
 	SubjectKey   string `json:"subjectKey"`
 }
 
+// liveTargetRow is weaverTargetRow plus the retraction reading this target
+// needs: nil for an absent key AND for a retracted one.
+//
+// A retraction here leaves a BODY under the same key — {isDeleted:true,
+// projectedAt, projectionSeq} — and it is not the adapter's delete mode that
+// decides so. supersededBackgroundChecks declares EmptyBehavior "delete", which
+// makes its compiled plan RequiresGuard (projection/plan.go,
+// empty.go's RequiresGuardedTombstone), so the lens installs with the monotonic
+// projection-write guard on, and a guarded delete is ALWAYS a soft tombstone
+// carrying the watermark "regardless of the lens's deleteMode"
+// (adapter/natskv.go's deleteRow) — the high-water mark has to survive physical
+// absence or a lower-seq replay could resurrect the row. adapter.DeleteModeHard,
+// which this harness passes at construction (harness_test.go), is overridden for
+// exactly these lenses. The shared dev stack shows the same bodies (design §7.2).
+func (h *harness) liveTargetRow(targetID, entityID string) map[string]any {
+	h.t.Helper()
+	row := h.weaverTargetRow(targetID, entityID)
+	if row == nil || rowBool(row, "isDeleted") {
+		return nil
+	}
+	return row
+}
+
+// supersededEventsEventually waits for at least one committed
+// lease.serviceInstanceSuperseded event and returns every one committed by then.
+// What the wait rules out is an un-caught-up stream: supersededEvents drains an
+// ordered consumer until it runs dry, so calling it too early returns an empty
+// slice that an exactly-once assertion would read as "zero committed" — the same
+// verdict a broken dispatch produces. It is NOT what bounds a storm; the
+// assertSteadyState window the caller holds before counting is, since a second
+// dispatch inside it would have to commit under the same watch.
+func (h *harness) supersededEventsEventually(deadline time.Duration) []supersededEvent {
+	h.t.Helper()
+	var events []supersededEvent
+	require.Eventuallyf(h.t, func() bool {
+		events = h.supersededEvents()
+		return len(events) >= 1
+	}, deadline, 200*time.Millisecond,
+		"at least one lease.serviceInstanceSuperseded event must commit before its count can mean anything")
+	return events
+}
+
 // supersededEvents reads every committed lease.serviceInstanceSuperseded
 // event off core-events, in commit order. Reading the durable EVENT stream
 // (rather than counting Weaver's fire-and-forget ops.system submissions, the
@@ -178,16 +220,25 @@ func TestLeaseConvergence_Supersession_RetiresTheOlderCheck(t *testing.T) {
 
 	// The instanceOf link key is deterministic (Contract #1) but names a meta
 	// NanoID minted at package install, so it is read off Core KV once rather
-	// than guessed. A tombstone carries the link's prior class/endpoints
-	// unchanged (only isDeleted flips — it is not a KV delete), so the key
-	// itself is discoverable by shape whether supersession has already run by
-	// the time this reads or not; assertEagerReopenCycle's own re-converge
-	// wait leaves no guarantee it has NOT already run.
+	// than guessed. In CORE KV a tombstone is a body — op:tombstone flips
+	// isDeleted and carries class/endpoints over — so the key stays discoverable
+	// by shape whether supersession has already run by the time this reads or
+	// not; assertEagerReopenCycle's own re-converge wait leaves no guarantee it
+	// has NOT already run.
 	instanceOfLinkKey := h.instanceOfLinkKeyFor(aHandle)
 	require.NotEmpty(t, instanceOfLinkKey, "A's own instanceOf link must be discoverable")
 
 	supersedesLinkKey := "lnk.service." + bHandle + ".supersedes.service." + aHandle
 
+	// What this test proves is the DISPATCH, not the row: on the likely
+	// interleaving the retirement rides the same delivery as the re-converge, so
+	// A's row is already gone by the time a test can look, and any assertion
+	// shaped "the row is there OR it already did its job" is vacuous. The row's
+	// columns are pinned deterministically where the level is fixed — the lens's
+	// own rule-engine test over the real cypher (packages/lease-signing's
+	// superseded_bgchecks_lens_test.go) — and what only a live stack can show is
+	// that Weaver turns that row into this committed op.
+	//
 	// A's root tombstones, its own instanceOf link tombstones, and the
 	// successor mints the supersedes link — all in the SAME batch (§4.3 d) —
 	// waited for together.
@@ -196,34 +247,42 @@ func TestLeaseConvergence_Supersession_RetiresTheOlderCheck(t *testing.T) {
 	}, 60*time.Second, 200*time.Millisecond,
 		"A's root and its instanceOf link must tombstone and lnk.service.%s.supersedes.service.%s must go live in the same batch", bHandle, aHandle)
 
-	// A's supersededBackgroundChecks row retracts (gone, or a tombstone body —
-	// EmptyBehavior:"delete" writes a body under the same key, never a real KV
-	// delete, design §7.2).
+	// A's supersededBackgroundChecks row retracts — as a watermark-carrying
+	// tombstone body under the same key, for the reason liveTargetRow states.
 	require.Eventuallyf(t, func() bool {
-		row := h.weaverTargetRow("supersededBackgroundChecks", aHandle)
-		return row == nil || rowBool(row, "isDeleted")
+		return h.liveTargetRow("supersededBackgroundChecks", aHandle) == nil
 	}, 30*time.Second, 200*time.Millisecond, "A's supersededBackgroundChecks row must retract")
 
 	// A's backgroundCheckFreshness row retracts too (its own anchor tombstoned).
 	require.Eventuallyf(t, func() bool {
-		row := h.weaverTargetRow("backgroundCheckFreshness", aHandle)
-		return row == nil || rowBool(row, "isDeleted")
+		return h.liveTargetRow("backgroundCheckFreshness", aHandle) == nil
 	}, 30*time.Second, 200*time.Millisecond, "A's backgroundCheckFreshness row must retract once A tombstones")
 
 	// B's root stays live and its OWN backgroundCheckFreshness row stands
 	// (nothing here ever touches the live successor's root or freshness row).
 	require.False(t, h.vertexTombstoned(bKey), "B must stay live -- nothing here is later than B")
-	bFresh := h.weaverTargetRow("backgroundCheckFreshness", bHandle)
-	require.NotNil(t, bFresh, "B's own freshness row must stand")
-	require.False(t, rowBool(bFresh, "isDeleted"))
+	require.NotNil(t, h.liveTargetRow("backgroundCheckFreshness", bHandle), "B's own freshness row must stand")
 
 	// The application stays converged throughout and after.
 	h.assertSteadyState(appID, 3*time.Second)
 
+	// What the retirement is FOR, read off the row Weaver reads: the application
+	// still counts a fresh completed check after A is gone, so its bgcheck gap
+	// stays shut. The design states this as freshBgComplete == 1; that scalar is
+	// an internal WITH value leaseApplicationComplete's output descriptor does
+	// not project (lenses.go's BodyColumns), so missing_bgcheck — computed from
+	// it, and the column Weaver actually dispatches off — is the reachable form.
+	appRow := h.liveTargetRow("leaseApplicationComplete", appID)
+	require.NotNil(t, appRow, "the application's own row must stand after the retirement")
+	require.Falsef(t, rowBool(appRow, "missing_bgcheck"),
+		"retiring A must leave the application counting B as its fresh completed check; row=%v", appRow)
+
 	// Exactly ONE TombstoneSupersededLeaseServiceInstance ever COMMITTED,
 	// naming this exact pair — never a storm, never a rejected dispatch that
-	// also happened to fire.
-	events := h.supersededEvents()
+	// also happened to fire. The steady-state window just held is what makes
+	// "one" mean no storm; the wait inside the witness only rules out a stream
+	// this test read before it caught up.
+	events := h.supersededEventsEventually(30 * time.Second)
 	require.Lenf(t, events, 1, "exactly one lease.serviceInstanceSuperseded event must have committed; got %+v", events)
 	require.Equal(t, aKey, events[0].InstanceKey)
 	require.Equal(t, bKey, events[0].SupersededBy)
