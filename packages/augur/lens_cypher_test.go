@@ -81,20 +81,46 @@ func (f *augurFixture) claim(t *testing.T, name, candidate, targetMeta, gapColum
 }
 
 // reasoned adds the model's remediation + provenance — what RecordProposal
-// lands on top of a claim.
+// lands on top of a claim. The recorded shape always carries `steps`, with
+// action/params mirroring its first leg.
 func (f *augurFixture) reasoned(t *testing.T, name, action string, params map[string]any) {
 	t.Helper()
-	f.aspect(t, name, "proposed", "proposed", map[string]any{"action": action, "params": params})
+	f.aspect(t, name, "proposed", "proposed", map[string]any{
+		"action": action, "params": params,
+		"steps": []any{map[string]any{"action": action, "params": params}},
+	})
 	f.aspect(t, name, "rationale", "rationale", map[string]any{"text": "the unit has no listing"})
 	f.aspect(t, name, "confidence", "confidence", map[string]any{"score": 0.82})
 	f.aspect(t, name, "provenance", "provenance", map[string]any{"model": "test-model", "reasonedAt": "2026-07-26T00:00:00Z"})
 }
 
-// reviewed stamps the verdict.
+// reviewed stamps the verdict, with the plan's leg counter at 0.
 func (f *augurFixture) reviewed(t *testing.T, name, state string) {
 	t.Helper()
+	f.reviewedAtLeg(t, name, state, 0)
+}
+
+// reviewedAtLeg stamps the verdict with an explicit leg counter — a plan
+// part-way through its legs.
+func (f *augurFixture) reviewedAtLeg(t *testing.T, name, state string, leg int) {
+	t.Helper()
 	f.aspect(t, name, "review", "review", map[string]any{
-		"state": state, "reviewedAt": "2026-07-26T01:00:00Z"})
+		"state": state, "reviewedAt": "2026-07-26T01:00:00Z", "leg": leg})
+}
+
+// planned adds a multi-leg recorded remediation: `steps` is the whole ordered
+// plan and action/params mirror its first leg.
+func (f *augurFixture) planned(t *testing.T, name string, steps ...map[string]any) {
+	t.Helper()
+	asAny := make([]any, 0, len(steps))
+	for _, step := range steps {
+		asAny = append(asAny, step)
+	}
+	f.aspect(t, name, "proposed", "proposed", map[string]any{
+		"action": steps[0]["action"], "params": steps[0]["params"], "steps": asAny})
+	f.aspect(t, name, "rationale", "rationale", map[string]any{"text": "two legs"})
+	f.aspect(t, name, "confidence", "confidence", map[string]any{"score": 0.78})
+	f.aspect(t, name, "provenance", "provenance", map[string]any{"model": "test-model", "reasonedAt": "2026-09-13T00:00:00Z"})
 }
 
 func (f *augurFixture) project(t *testing.T, spec, actorKey string) []ruleengine.ProjectionResult {
@@ -176,6 +202,57 @@ func TestAugurDispatchPending_AnchorsTheDispatchOnTheTrustedGapAspect(t *testing
 		"the remediation projects verbatim as a map column — the reviewer approves exactly what would be dispatched")
 }
 
+// TestAugurDispatchPending_ProjectsThePlanAndItsLeg pins the two columns that
+// make a plan dispatchable leg by leg: the whole ordered `steps` list, and the
+// counter that says which leg is next. Weaver indexes one by the other, so a
+// lens that dropped either would silently re-dispatch leg 0 forever.
+func TestAugurDispatchPending_ProjectsThePlanAndItsLeg(t *testing.T) {
+	f := newAugurFixture(t)
+	f.claim(t, "p", augurCandidate, augurTargetMeta, "listingKey")
+	f.planned(t, "p",
+		map[string]any{"action": "assignTask", "params": map[string]any{"target": augurCandidate, "operation": "ApproveLease"}},
+		map[string]any{"action": "directOp", "params": map[string]any{"target": augurCandidate, "operation": "RecordDecision"}},
+	)
+	f.reviewedAtLeg(t, "p", "approved", 1)
+
+	rows := f.project(t, augurDispatchPendingSpec, f.key("p"))
+	require.Len(t, rows, 1)
+	row := rows[0].Values
+
+	require.Equal(t, true, row["violating"],
+		"a plan mid-flight is still approved, so the row stays dispatchable for its next leg")
+	require.EqualValues(t, 1, row["dispatchLeg"],
+		"dispatchLeg is what selects the step to materialise; without it every delivery re-fires leg 0")
+	steps, ok := row["proposedSteps"].([]any)
+	require.True(t, ok, "proposedSteps must project as a list column, got %T", row["proposedSteps"])
+	require.Len(t, steps, 2)
+	require.Equal(t, "assignTask", steps[0].(map[string]any)["action"])
+	require.Equal(t, "directOp", steps[1].(map[string]any)["action"],
+		"the plan projects in ORDER — the leg counter indexes into it")
+}
+
+// TestAugurDispatchPending_LegacyProposalProjectsNullPlanColumns is the
+// optional-field-absent vector: a proposal recorded before the plan shape has
+// neither steps nor a leg, and both columns must project null rather than drop
+// the row — the legacy single-leg dispatch reads them as "one step, leg 0".
+func TestAugurDispatchPending_LegacyProposalProjectsNullPlanColumns(t *testing.T) {
+	f := newAugurFixture(t)
+	f.claim(t, "p", augurCandidate, augurTargetMeta, "listingKey")
+	f.aspect(t, "p", "proposed", "proposed", map[string]any{
+		"action": "CreateListing", "params": map[string]any{"unit": augurCandidate}})
+	f.aspect(t, "p", "review", "review", map[string]any{
+		"state": "approved", "reviewedAt": "2026-07-26T01:00:00Z"})
+
+	rows := f.project(t, augurDispatchPendingSpec, f.key("p"))
+	require.Len(t, rows, 1)
+	row := rows[0].Values
+	require.Equal(t, true, row["violating"])
+	require.Nil(t, row["proposedSteps"])
+	require.Nil(t, row["dispatchLeg"])
+	require.Equal(t, "CreateListing", row["proposedAction"],
+		"the legacy single remediation is still the row's dispatch")
+}
+
 func TestAugurDispatchPending_AnchorKeepsOtherProposalsOut(t *testing.T) {
 	f := newAugurFixture(t)
 	f.claim(t, "mine", augurCandidate, augurTargetMeta, "listingKey")
@@ -212,6 +289,11 @@ func TestAugurProposals_ProjectsOneRowPerProposalWithTheFullAudit(t *testing.T) 
 	require.Equal(t, "listingKey", row["gapColumn"])
 	require.Equal(t, "convergence", row["trigger"])
 	require.Equal(t, "CreateListing", row["proposedAction"])
+	steps, ok := row["proposedSteps"].([]any)
+	require.True(t, ok, "the review surface projects the whole plan, got %T", row["proposedSteps"])
+	require.Len(t, steps, 1, "a single-step proposal records exactly one leg")
+	require.EqualValues(t, 0, row["dispatchLeg"],
+		"the reviewer sees how far a plan has run; nothing is dispatched at record")
 	require.Equal(t, "the unit has no listing", row["rationale"])
 	require.EqualValues(t, 0.82, row["confidence"])
 	require.Equal(t, "test-model", row["model"])
@@ -230,7 +312,7 @@ func TestAugurProposals_ClaimInFlightProjectsWithNullModelColumns(t *testing.T) 
 	row := rows[0].Values
 	require.Equal(t, augurCandidate, row["entityId"],
 		"the trusted escalation context is written ahead of the reasoning, so it is readable throughout")
-	for _, col := range []string{"proposedAction", "proposedParams", "rationale", "confidence", "model", "reasonedAt", "reviewState", "invalidReason", "reviewedAt", "dispatchedAt"} {
+	for _, col := range []string{"proposedAction", "proposedParams", "proposedSteps", "dispatchLeg", "rationale", "confidence", "model", "reasonedAt", "reviewState", "invalidReason", "reviewedAt", "dispatchedAt"} {
 		require.Nil(t, row[col],
 			"%s must project null on a not-yet-written aspect, not drop the row", col)
 	}

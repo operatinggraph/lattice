@@ -36,6 +36,9 @@ import (
 //   - AugurRefusalSubject       → a terminal OutcomeFailed (a modeled stop_reason
 //     "refusal": the model declined to propose; err == nil, a definitive verdict
 //     the bridge must NOT retry), carrying NO proposal.
+//   - AugurPlanSubject          → a benign, in-scope PLAN-shaped proposal: two
+//     ordered assignTask steps, both scoped to the escalated candidate, which
+//     Weaver dispatches one leg per episode.
 //
 // Any other Subject yields a benign, in-scope, VALID assignTask proposal scoped
 // to the escalated candidate (read from Request.Params["entityId"], falling back
@@ -74,6 +77,13 @@ const (
 	// a model refusal (stop_reason "refusal"): a definitive verdict (err == nil),
 	// no proposal, the bridge must not retry it.
 	AugurRefusalSubject = "augur-refusal"
+	// AugurPlanSubject makes FakeAugur return a PLAN-shaped proposal: two ordered
+	// assignTask steps, each in-vocabulary and scoped to the escalated candidate,
+	// differing only in the operation they ask a human to perform. It is the
+	// happy path for the plan shape — the §5 boundary holds per step, so the
+	// proposal records `pending` with both legs, and Weaver dispatches leg 0 then
+	// leg 1 as two ordinary episodes.
+	AugurPlanSubject = "augur-plan"
 	// fakeAugurForeignEntity is the foreign entity key the scope-escape proposal
 	// targets — deliberately not the escalated candidate. A type-neutral kernel
 	// key (the bridge is type-agnostic platform code — no vertical type leaks in).
@@ -142,8 +152,9 @@ func (f *FakeAugur) Execute(_ context.Context, req Request) (Dispatch, error) {
 }
 
 // proposalFor builds the deterministic proposal for a Request: a trigger Subject
-// selects its adversarial shape; an override (if set) wins for non-trigger
-// Subjects; otherwise the benign in-scope assignTask. Caller holds f.mu.
+// selects its adversarial shape (or, for AugurPlanSubject, the benign two-step
+// plan); an override (if set) wins for non-trigger Subjects; otherwise the
+// benign in-scope single-step assignTask. Caller holds f.mu.
 func (f *FakeAugur) proposalFor(req Request) AugurProposal {
 	entity := req.Params["entityId"]
 	if entity == "" {
@@ -182,6 +193,14 @@ func (f *FakeAugur) proposalFor(req Request) AugurProposal {
 		base.Params = map[string]any{"scopedTo": entity, "forOperation": "ApproveLeaseApplication"}
 		base.Rationale = "crafted out-of-range confidence"
 		base.Confidence = 1.5
+		return base
+	case AugurPlanSubject:
+		base.Steps = []AugurStep{
+			{Action: "assignTask", Params: map[string]any{"scopedTo": entity, "forOperation": "ApproveLeaseApplication"}},
+			{Action: "assignTask", Params: map[string]any{"scopedTo": entity, "forOperation": "RecordLeaseDecision"}},
+		}
+		base.Rationale = "no playbook entry; the gap needs an approval followed by a recorded decision, both on the escalated candidate"
+		base.Confidence = 0.78
 		return base
 	}
 	if f.override != nil {

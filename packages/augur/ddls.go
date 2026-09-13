@@ -22,6 +22,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     model-derived aspects (.proposed / .rationale / .confidence / .provenance /
 //     .review) create-only, and emits augur.proposalRecorded for the review lens.
 //     There is no Loom instance to unpark, so no externalTaskCompleted is emitted.
+//   - RecordProposalDispatch (the Weaver flip) records one dispatched leg of the
+//     proposal, advancing .review.leg and flipping the state to dispatched only
+//     once the last leg has fired.
+//
+// A proposal is either single-step or PLAN-SHAPED, and both normalise to the
+// same stored shape: .proposed always carries a `steps` list of at least one
+// {action, params} leg, with the top-level action/params mirroring steps[0], and
+// .review carries a `leg` counter of how many legs have been dispatched. Weaver
+// dispatches steps[leg] as an ordinary proposedOp episode per leg, so a plan
+// executes leg by leg through the frozen action vocabulary — there is no plan
+// vertex and no new authority.
 //
 // The load-bearing safety split (design §5): the entity/target IDENTITY the
 // proposal acts on is read from the instanceOp-minted claim vertex — NEVER from
@@ -47,9 +58,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     aspect) and rejects if absent — the instanceOp must have committed first.
 //   - The deterministic-validation boundary (design §5, record-time leg) is the
 //     safety core: the proposal is stored review.state=pending (dispatchable) only
-//     when the proposed action is in the allowed escalation vocabulary, the
-//     confidence is a real 0..1 score, and the proposal does not escape the
-//     escalated candidate's scope. Any failure — and a modeled refusal
+//     when EVERY step's action is in the allowed escalation vocabulary, the
+//     confidence is a real 0..1 score, and no step escapes the escalated
+//     candidate's scope. Any failure — and a modeled refusal
 //     (status=failed) — stores the proposal review.state=invalid with an auditable
 //     invalidReason, never pending, never dispatchable. The proposal vertex is
 //     ALWAYS recorded (auditability); the verdict decides only pending vs invalid.
@@ -59,11 +70,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 //	vtx.augurproposal.<handle>   root data = {}            (handle = the escalation episode's instanceKey)
 //	  .gap         { targetId, entityId, gapColumn, trigger, model }   # instanceOp — TRUSTED escalation context (model optional)
-//	  .proposed    { action, params }                           # replyOp — the model's remediation
+//	  .proposed    { action, params, steps }                    # replyOp — the model's remediation
 //	  .rationale   { text }                                     # replyOp — the model's reasoning (audit)
 //	  .confidence  { score }                                    # replyOp — 0..1 self-reported
 //	  .provenance  { model, promptHash, catalogHash, reasonedAt }  # replyOp
-//	  .review      { state, invalidReason, reviewedAt, dispatchedAt }  # replyOp — verdict
+//	  .review      { state, invalidReason, reviewedAt, dispatchedAt, leg }  # replyOp — verdict
 //	lnk.augurproposal.<handle>.forCandidate.<type>.<entityId>   # proposal forCandidate candidate
 //	lnk.augurproposal.<handle>.forTarget.meta.<weaverTargetId>  # proposal forTarget target
 //
@@ -86,9 +97,9 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 		Description: "Augur proposal DDL — the externalTask matched pair for one reasoning episode. " +
 			"Vertex shape: vtx.augurproposal.<handle>, class=augurproposal, root data = {} (D5); business " +
 			"data in aspects: .gap {targetId, entityId, gapColumn, trigger, model} (the instanceOp's TRUSTED " +
-			"escalation context), .proposed {action, params}, .rationale {text}, .confidence {score}, " +
+			"escalation context), .proposed {action, params, steps}, .rationale {text}, .confidence {score}, " +
 			".provenance {model, promptHash, catalogHash, reasonedAt}, .review {state, invalidReason, " +
-			"reviewedAt, dispatchedAt} (the replyOp's model-derived data + verdict). Relationships are LINKS: " +
+			"reviewedAt, dispatchedAt, leg} (the replyOp's model-derived data + verdict). Relationships are LINKS: " +
 			"forCandidate (proposal→candidate: the escalated entity), forTarget (proposal→weaverTarget meta: " +
 			"the target whose gap was stuck). Both links: proposal is the later-arriving source (Contract #1 " +
 			"§1.1). CreateAugurReasoningClaim is the reasoning instanceOp Weaver submits as a directOp: it mints " +
@@ -96,10 +107,14 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"RecordProposal is the bridge replyOp (payload {externalRef, status, result}): it reads the " +
 			"trusted gap context back from the claim, decodes the model proposal from the opaque result " +
 			"string, and applies the design §5 record-time deterministic-validation boundary — a proposal is " +
-			"stored review.state=pending (dispatchable) only when its action is in the allowed escalation " +
-			"vocabulary (triggerLoom|assignTask|directOp), its confidence is a real 0..1 score, and it does " +
-			"not escape the escalated candidate's scope; otherwise (and on a model refusal, status=failed) it " +
-			"is stored review.state=invalid with an auditable invalidReason. The proposal is always stored. " +
+			"stored review.state=pending (dispatchable) only when EVERY step's action is in the allowed escalation " +
+			"vocabulary (triggerLoom|assignTask|directOp), its confidence is a real 0..1 score, and no step " +
+			"escapes the escalated candidate's scope; otherwise (and on a model refusal, status=failed) it " +
+			"is stored review.state=invalid with an auditable invalidReason naming the failing step. The " +
+			"proposal is always stored. A reply may be single-step ({action, params}) or PLAN-shaped (an " +
+			"ordered `steps` list of up to 8 {action, params} legs, which wins over the top-level pair); both " +
+			"normalise to .proposed {action, params, steps} with steps[0] mirrored into action/params, and " +
+			".review.leg counts how many legs have been dispatched (0 at record). " +
 			"The model NEVER supplies the entity it acts on (read from the claim); idempotent on a redelivered " +
 			"reply via the create-only .review aspect atop the bridge's deterministic reply requestId. " +
 			"ReviewProposal is the human verdict op (payload {externalRef, verdict ∈ approve|reject}): an operator " +
@@ -107,17 +122,21 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"and the stamp is op.submittedAt; approve re-runs the §5 boundary against the stored proposal and " +
 			"fail-closes to invalid if it no longer validates. Only a pending proposal is reviewable. " +
 			"RecordProposalDispatch is the Weaver-dispatched flip (design Fire 2b, §3.3): the second op of the " +
-			"two-op augurDispatch dispatch (payload {externalRef, outcome ∈ dispatched|invalid, reason?}) — flips " +
-			"an approved proposal to dispatched (the proposed remediation was fired) or invalid (the dispatch-time " +
-			"§5 re-validation failed, e.g. a stale operation reference); dispatchedAt is stamped only on dispatched. " +
-			"Only an approved proposal can be dispatched; a redelivery or a second flip is rejected " +
+			"two-op augurDispatch dispatch (payload {externalRef, outcome ∈ dispatched|invalid, reason?, leg?}) — " +
+			"records the dispatch of ONE leg. leg (default 0) must equal the proposal's current review.leg, else the " +
+			"flip is a stale dispatch and rejects (InvalidDispatchTransition). On dispatched the counter advances: " +
+			"while legs remain the proposal stays approved (dispatchable again, now for the next leg) with " +
+			"dispatchedAt unset, and the last leg flips it to dispatched and stamps dispatchedAt. On invalid (the " +
+			"dispatch-time §5 re-validation failed, e.g. a stale operation reference) the WHOLE proposal is " +
+			"invalid with the given reason, counter unchanged — no half-plan continues. " +
+			"Only an approved proposal can be dispatched; a redelivery or a second flip of the same leg is rejected " +
 			"(InvalidDispatchTransition) — in practice unreachable on a genuine redelivery, since the flip's own " +
-			"deterministic requestId already collapses on the Contract #4 tracker first.",
+			"leg-scoped deterministic requestId already collapses on the Contract #4 tracker first.",
 		Script: augurproposalDDLScript,
 		InputSchema: `{"type":"object","description":"RecordProposal — the bridge replyOp. The bridge posts {externalRef, status, result}; gap context is reconstructed from the claim vertex, never this payload.","properties":` +
 			`{"externalRef":{"type":"string","description":"The bare instanceKey handle of the reasoning episode; the claim vertex is vtx.augurproposal.<externalRef>."},` +
 			`"status":{"type":"string","description":"The adapter's terminal outcome: completed (the model proposed) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
-			`"result":{"type":"string","description":"The model's structured-output proposal as a JSON string {action, params, confidence, rationale, model, promptHash, catalogHash, reasonedAt} — the opaque adapter Detail. Required when status=completed; carried as the rationale on a refusal."}},` +
+			`"result":{"type":"string","description":"The model's structured-output proposal as a JSON string {action, params, steps?, confidence, rationale, model, promptHash, catalogHash, reasonedAt} — the opaque adapter Detail. A non-empty steps list (up to 8 ordered {action, params} legs) makes the proposal plan-shaped and wins over the top-level action/params. Required when status=completed; carried as the rationale on a refusal."}},` +
 			`"required":["externalRef","status"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.augurproposal.<handle> of the recorded proposal. The recorded review.state (pending | invalid) is read from the proposal's .review aspect, not the op response."}}}`,
@@ -125,10 +144,11 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"externalRef": "The bare instanceKey handle Weaver minted for the reasoning episode (no dots / key segments / whitespace); the claim vertex key is vtx.augurproposal.<externalRef>. RecordProposal rejects if no live claim vertex exists for it (the CreateAugurReasoningClaim instanceOp must commit write-ahead).",
 			"model":       "CreateAugurReasoningClaim only — the optional adapter model override (the target's augur.model, Contract #10 §10.8), stored on .gap alongside the rest of the TRUSTED escalation context. Empty when the target's augur block sets none, in which case the adapter applies its own default (design: claude-opus-4-8).",
 			"status":      "The adapter's terminal outcome verbatim: completed (the model returned a structured proposal in result) or failed (a modeled refusal — the proposal is stored invalid with the refusal as its rationale, never dispatchable). Any other value rejects the op.",
-			"result":      "The model's structured-output proposal as a JSON string {action, params, confidence, rationale, model, promptHash, catalogHash, reasonedAt}. The §5 validator decodes it and validates action ∈ {triggerLoom, assignTask, directOp}, confidence ∈ [0,1], and no scope escape (a params entity-key other than the escalated candidate, read from the trusted claim). Required when status=completed.",
+			"result":      "The model's structured-output proposal as a JSON string {action, params, steps?, confidence, rationale, model, promptHash, catalogHash, reasonedAt}. The §5 validator decodes it and validates, PER STEP, action ∈ {triggerLoom, assignTask, directOp} and no scope escape (a params entity-key other than the escalated candidate, read from the trusted claim), plus confidence ∈ [0,1] once for the proposal. steps is the optional plan shape: an ordered list of up to 8 {action, params} legs, each dispatched as its own episode; when present it supersedes the top-level action/params, which the recorded proposal re-derives from steps[0]. Required when status=completed.",
 			"verdict":     "ReviewProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field.",
-			"outcome":     "RecordProposalDispatch only — the Weaver-computed dispatch-time verdict: 'dispatched' (the proposed remediation was fired; dispatchedAt is stamped) or 'invalid' (the dispatch-time §5 re-validation failed; reason is required). Only an approved proposal may transition.",
+			"outcome":     "RecordProposalDispatch only — the Weaver-computed dispatch-time verdict for ONE leg: 'dispatched' (that leg's remediation was fired; the leg counter advances, and dispatchedAt is stamped only when it was the last leg) or 'invalid' (the dispatch-time §5 re-validation failed; reason is required, and the whole proposal — not just the leg — goes invalid). Only an approved proposal may transition.",
 			"reason":      "RecordProposalDispatch only — the auditable explanation for an 'invalid' outcome (e.g. a stale/uninstalled operation reference, a scope-escape caught at dispatch time). Ignored/omitted on a 'dispatched' outcome.",
+			"leg":         "RecordProposalDispatch only — the 0-based index of the plan leg this flip records, defaulting to 0 (a single-step proposal's only leg). It must equal the proposal's current review.leg: a flip naming any other leg is a stale dispatch whose remediation is already recorded, and it is rejected (InvalidDispatchTransition) rather than allowed to skip a leg.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -178,6 +198,20 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 					"(dispatchable) + its model-derived aspects. Emits augur.proposalRecorded for the review lens (no Loom to unpark).",
 			},
 			{
+				Name: "RecordProposal — a PLAN-shaped proposal: two ordered legs, each dispatched as its own episode",
+				Payload: map[string]any{
+					"externalRef": "augurEpisodeHJKMNPQRST",
+					"status":      "completed",
+					"result":      `{"steps":[{"action":"assignTask","params":{"scopedTo":"vtx.leaseapp.<applicantNanoID>","forOperation":"ApproveLeaseApplication"}},{"action":"assignTask","params":{"scopedTo":"vtx.leaseapp.<applicantNanoID>","forOperation":"RecordLeaseDecision"}}],"rationale":"The gap needs an approval and then a recorded decision, both on the escalated applicant.","confidence":0.78,"model":"claude-opus-4-8","reasonedAt":"2026-09-13T15:00:00Z"}`,
+				},
+				ExpectedOutcome: "Each step is validated against the SAME §5 boundary a single-step proposal gets — in " +
+					"vocabulary, and scoped to the trusted candidate read from the claim — so the proposal is stored " +
+					"review.state=pending with .proposed {action: \"assignTask\", params: <steps[0].params>, steps: <both legs>} " +
+					"and .review.leg=0. Had step 2 alone escaped scope, the WHOLE proposal would be invalid with an " +
+					"invalidReason naming \"step 2\". Weaver then dispatches leg 0, records it, and the re-projected " +
+					"approved row dispatches leg 1.",
+			},
+			{
 				Name: "RecordProposal — a scope-escaping proposal is stored invalid (auditable, never dispatchable)",
 				Payload: map[string]any{
 					"externalRef": "augurEpisodeHJKMNPQRST",
@@ -210,9 +244,24 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 					"outcome":     "dispatched",
 				},
 				ExpectedOutcome: "The proposal must be review.state=approved (only an approved proposal can be dispatched; any " +
-					"other state rejects InvalidDispatchTransition). Flips .review.state to dispatched and stamps " +
-					"dispatchedAt=op.submittedAt. Submitted by Weaver as the second op of the two-op augurDispatch dispatch " +
-					"(the first being the materialised remediation itself), immediately after that op — design §3.3.",
+					"other state rejects InvalidDispatchTransition). leg defaults to 0 and matches the recorded " +
+					"review.leg. The proposal holds one leg, so the counter reaches its length: .review.state flips to " +
+					"dispatched and dispatchedAt=op.submittedAt is stamped. Submitted by Weaver as the second op of the " +
+					"two-op augurDispatch dispatch (the first being the materialised remediation itself), immediately " +
+					"after that op — design §3.3.",
+			},
+			{
+				Name: "RecordProposalDispatch — leg 0 of a two-leg plan: the proposal stays approved for the next leg",
+				Payload: map[string]any{
+					"externalRef": "augurEpisodeHJKMNPQRST",
+					"outcome":     "dispatched",
+					"leg":         0,
+				},
+				ExpectedOutcome: "leg 0 equals the proposal's current review.leg, and the plan holds two legs, so the " +
+					"counter advances to 1 while .review.state stays approved and dispatchedAt stays unset — the " +
+					"augurDispatchPending row re-projects as violating with dispatchLeg=1, and Weaver dispatches " +
+					"steps[1] as a fresh episode under a leg-scoped requestId. The flip for THAT leg carries leg=1; a " +
+					"repeat of leg=0 is a stale dispatch and rejects InvalidDispatchTransition.",
 			},
 			{
 				Name: "RecordProposalDispatch — Weaver flips an approved proposal invalid (dispatch-time drift caught)",
@@ -294,6 +343,45 @@ def proposal_dict(d, name):
         return {}
     return v
 
+def review_leg(rd):
+    # The count of plan legs already dispatched, off a .review aspect. A document
+    # written before the counter existed carries none, and 0 — nothing dispatched
+    # yet — is what such a proposal means.
+    if rd == None or "leg" not in rd:
+        return 0
+    v = rd["leg"]
+    if v == None or type(v) != type(0):
+        return 0
+    return v
+
+def proposal_steps(d):
+    # The ordered plan of a plan-shaped proposal. Absent / null => the empty
+    # list, which the caller normalises to a single step from the top-level
+    # {action, params}. A present-but-malformed steps value is a definitive
+    # verdict, not a crash: it returns (None, reason) and the proposal is stored
+    # invalid with that reason, exactly like every other §5 failure.
+    if "steps" not in d:
+        return [], ""
+    v = d["steps"]
+    if v == None:
+        return [], ""
+    if type(v) != type([]):
+        return None, "steps must be a list of {action, params} steps"
+    if len(v) == 0:
+        return None, "steps is present but empty; a plan-shaped proposal must carry at least one step"
+    if len(v) > MAX_PLAN_STEPS:
+        return None, "plan carries " + str(len(v)) + " steps, more than the " + str(MAX_PLAN_STEPS) + " a proposal may plan"
+    out = []
+    for i in range(len(v)):
+        step = v[i]
+        if type(step) != type({}):
+            return None, "step " + str(i + 1) + " is not an object"
+        act = proposal_string(step, "action")
+        if act == "":
+            return None, "step " + str(i + 1) + " carries no string action"
+        out.append({"action": act, "params": proposal_dict(step, "params")})
+    return out, ""
+
 def proposal_number(d, name):
     # confidence: absent / non-numeric => -1.0 (out of range => invalid verdict).
     if name not in d:
@@ -326,6 +414,12 @@ def alive(doc):
 # other action is stored invalid — the model gains NO new authority, only the
 # ability to PROPOSE arranging the actions Weaver already has.
 ALLOWED_ACTIONS = ["triggerLoom", "assignTask", "directOp"]
+
+# The most legs one plan-shaped proposal may carry. A plan is a short ordered
+# remediation a human reviews in one sitting, and each leg is dispatched as its
+# own episode, so the bound keeps both the review surface and the dispatch chain
+# finite.
+MAX_PLAN_STEPS = 8
 
 def is_vtx_key(v):
     # True if v is a string shaped vtx.<type>.<id> (a vertex key a proposal would
@@ -396,6 +490,24 @@ def scope_verdict(params, entity_key, entity_id):
         return False, "proposal does not scope to the escalated candidate " + entity_key + " (no param references it)"
     return True, ""
 
+# steps_verdict runs the §5 action-vocabulary + scope boundary over EVERY leg of
+# a plan, in order. A single-step proposal is the one-element case, so both
+# shapes are judged by exactly the same rules. The first failing step decides the
+# verdict and names itself by its 1-based index, which is the index the reviewer
+# reads on the proposal and the leg counter dispatches by. Confidence is a
+# property of the whole proposal, so it is checked once by the caller rather than
+# per step. Returns (ok, reason).
+def steps_verdict(steps, entity_key, entity_id):
+    for i in range(len(steps)):
+        step = steps[i]
+        at = "step " + str(i + 1) + ": "
+        if step["action"] not in ALLOWED_ACTIONS:
+            return False, at + "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + step["action"]
+        in_scope, reason = scope_verdict(step["params"], entity_key, entity_id)
+        if not in_scope:
+            return False, at + reason
+    return True, ""
+
 # revalidate_for_approval re-runs the §5 record-time deterministic boundary
 # against the STORED proposal at approval time (design §3.2: "re-runs the
 # deterministic validator on approve"). It re-reads the proposal's .proposed /
@@ -420,8 +532,23 @@ def revalidate_for_approval(proposal_key):
     params = {}
     if "params" in pdata and type(pdata["params"]) == type({}):
         params = pdata["params"]
-    if action not in ALLOWED_ACTIONS:
-        return False, "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
+    # The plan is re-validated leg by leg. A proposal recorded before the stored
+    # shape carried steps has only the mirrored {action, params}, which is its
+    # single leg — so the same per-step boundary judges both shapes.
+    steps = [{"action": action, "params": params}]
+    if "steps" in pdata and type(pdata["steps"]) == type([]) and len(pdata["steps"]) > 0:
+        stored = []
+        for step in pdata["steps"]:
+            if type(step) != type({}):
+                return False, "stored plan carries a step that is not an object"
+            sa = ""
+            if "action" in step and type(step["action"]) == type(""):
+                sa = step["action"]
+            sp = {}
+            if "params" in step and type(step["params"]) == type({}):
+                sp = step["params"]
+            stored.append({"action": sa, "params": sp})
+        steps = stored
 
     # read-posture: (a) declared in contextHint.reads by ReviewProposal's
     # dispatcher (see the .proposed note above)
@@ -441,7 +568,7 @@ def revalidate_for_approval(proposal_key):
         return False, "claim .gap missing entityId"
     entity_key = gap_doc.data["entityId"]
     _, entity_id = parts_of(entity_key, "claim.gap.entityId", "")
-    return scope_verdict(params, entity_key, entity_id)
+    return steps_verdict(steps, entity_key, entity_id)
 
 def execute(state, op):
     ot = op.operationType
@@ -564,6 +691,7 @@ def execute(state, op):
         invalid_reason = ""
         action = ""
         params = {}
+        steps = []
         rationale = ""
         confidence = 0.0
         model = ""
@@ -595,8 +723,21 @@ def execute(state, op):
                 invalid_reason = "completed reply carried no decodable JSON-object reasoning result"
                 rationale = result_str
             else:
+                # A plan-shaped proposal carries its ordered remediation in
+                # steps; a single-step one carries it in the top-level
+                # {action, params}. Both normalise to the SAME stored shape — a
+                # non-empty steps list whose first entry is mirrored into
+                # action/params — so every reader downstream (the review lens,
+                # the approval re-validation, Weaver's per-leg dispatch) sees one
+                # shape and the top-level pair of a plan-shaped reply is ignored.
+                decoded_steps, steps_reason = proposal_steps(proposal)
                 action = proposal_string(proposal, "action")
                 params = proposal_dict(proposal, "params")
+                steps = [{"action": action, "params": params}]
+                if steps_reason == "" and len(decoded_steps) > 0:
+                    steps = decoded_steps
+                    action = steps[0]["action"]
+                    params = steps[0]["params"]
                 rationale = proposal_string(proposal, "rationale")
                 confidence = proposal_number(proposal, "confidence")
                 model = proposal_string(proposal, "model")
@@ -607,21 +748,32 @@ def execute(state, op):
                 # --- §5 record-time deterministic validation (the safety core) ---
                 # The proposal is ALWAYS stored (auditability); the verdict decides
                 # only pending (dispatchable) vs invalid (never dispatchable). The
-                # scope check is DEFAULT-DENY against the TRUSTED entity_key from the
-                # claim — never the model's reply.
-                if action not in ALLOWED_ACTIONS:
+                # action-vocabulary + scope legs run PER STEP — every leg of a plan
+                # must clear the same boundary a single-step proposal does, and the
+                # first failure invalidates the WHOLE proposal (no half-plan is ever
+                # dispatchable). The scope check is DEFAULT-DENY against the TRUSTED
+                # entity_key from the claim — never the model's reply. Confidence is
+                # the model's score for the proposal as a whole, checked once.
+                if steps_reason != "":
                     review_state = "invalid"
-                    invalid_reason = "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
+                    invalid_reason = steps_reason
                 elif confidence < 0.0 or confidence > 1.0:
                     review_state = "invalid"
                     invalid_reason = "confidence out of range [0,1]: " + str(confidence)
                 else:
-                    in_scope, scope_reason = scope_verdict(params, entity_key, entity_id)
+                    in_scope, step_reason = steps_verdict(steps, entity_key, entity_id)
                     if not in_scope:
                         review_state = "invalid"
-                        invalid_reason = scope_reason
+                        invalid_reason = step_reason
         else:
             fail("InvalidArgument: status: must be one of completed, failed; got " + status)
+
+        # Every recorded proposal stores a steps list of at least one entry
+        # whose first entry mirrors {action, params} — including a refusal or an
+        # undecodable reply, which record the empty step they proposed. One
+        # stored shape means no reader has to carry a second, list-less branch.
+        if len(steps) == 0:
+            steps = [{"action": action, "params": params}]
 
         # Write the model-derived aspects create-only — the once-only guarantee (a
         # redelivered reply conflicts on .review and the batch is rejected, atop the
@@ -629,7 +781,7 @@ def execute(state, op):
         # the instanceOp committed are left untouched (D5).
         mutations = [
             make_aspect(proposal_key, "proposed", "augur.proposed",
-                        {"action": action, "params": params}),
+                        {"action": action, "params": params, "steps": steps}),
             make_aspect(proposal_key, "rationale", "augur.rationale", {"text": rationale}),
             make_aspect(proposal_key, "confidence", "augur.confidence", {"score": confidence}),
             make_aspect(proposal_key, "provenance", "augur.provenance",
@@ -637,7 +789,7 @@ def execute(state, op):
                          "catalogHash": catalog_hash, "reasonedAt": reasoned_at}),
             make_aspect(proposal_key, "review", "augur.review",
                         {"state": review_state, "invalidReason": invalid_reason,
-                         "reviewedAt": "", "dispatchedAt": ""}),
+                         "reviewedAt": "", "dispatchedAt": "", "leg": 0}),
         ]
         # Augur dispatches as a Weaver directOp (Option F) — there is NO Loom
         # instance to unpark, so no orchestration.externalTaskCompleted is emitted.
@@ -682,6 +834,11 @@ def execute(state, op):
             cur_state = rd["state"]
         if cur_state != "pending":
             fail("InvalidReviewTransition: proposal " + proposal_key + " is '" + cur_state + "', only a pending proposal is reviewable")
+        # The leg counter rides through the verdict untouched — a review decides
+        # whether the plan may be dispatched, never how far it has got. A proposal
+        # recorded before .review carried the counter reads as leg 0, the value it
+        # would have been recorded with.
+        cur_leg = review_leg(rd)
 
         reviewer = op.actor
         if not is_vtx_key(reviewer):
@@ -717,7 +874,8 @@ def execute(state, op):
              "document": {"class": "augur.review", "isDeleted": False,
                           "vertexKey": proposal_key, "localName": "review",
                           "data": {"state": new_state, "invalidReason": invalid_reason,
-                                   "reviewedAt": reviewed_at, "dispatchedAt": ""}}},
+                                   "reviewedAt": reviewed_at, "dispatchedAt": "",
+                                   "leg": cur_leg}}},
             make_link(reviewedby_lnk, proposal_key, reviewer, "reviewedBy", "reviewedBy",
                       {"reviewedAt": reviewed_at, "verdict": verdict}),
         ]
@@ -740,6 +898,16 @@ def execute(state, op):
         # practice this is unreachable on a genuine redelivery, since the flip's own
         # deterministic requestId already collapses at the Contract #4 tracker first
         # (the guard here is the second, independent backstop).
+        #
+        # A plan-shaped proposal is dispatched one leg per flip. The payload's
+        # leg is the leg the dispatch just fired, and it must equal the counter
+        # the proposal currently stands at: an out-of-order or repeated leg is a
+        # stale dispatch whose remediation has already been recorded, and letting
+        # it advance the counter would skip a leg of the plan. While legs remain
+        # the proposal stays approved with the counter advanced (so the lens
+        # re-projects it as still dispatchable, now for the next leg); the last
+        # leg flips it dispatched and stamps dispatchedAt. An invalid outcome
+        # on ANY leg invalidates the WHOLE proposal — no half-plan continues.
         handle = required_bare_handle(p, "externalRef")
         proposal_key = "vtx.augurproposal." + handle
         outcome = required_string(p, "outcome")
@@ -748,6 +916,13 @@ def execute(state, op):
         reason = optional_string_attr(p, "reason")
         if outcome == "invalid" and len(reason.strip()) == 0:
             fail("InvalidArgument: reason: required when outcome is invalid")
+        leg = 0
+        if hasattr(p, "leg"):
+            lv = p.leg
+            if lv != None:
+                if type(lv) != type(0) or lv < 0:
+                    fail("InvalidArgument: leg: must be a non-negative integer; got " + str(lv))
+                leg = lv
 
         # read-posture: (a) declared in contextHint.reads by Weaver's
         # recordDispatchOutcomePlan directOp (internal/weaver/augur_dispatch.go)
@@ -761,8 +936,34 @@ def execute(state, op):
         if cur_state != "approved":
             fail("InvalidDispatchTransition: proposal " + proposal_key + " is '" + cur_state + "', only an approved proposal can be dispatched")
 
+        cur_leg = review_leg(rd)
+        if leg != cur_leg:
+            fail("InvalidDispatchTransition: proposal " + proposal_key + " stands at leg " + str(cur_leg) + ", stale leg " + str(leg) + " cannot be recorded")
+
+        # How many legs the plan holds, read from the recorded proposal. A
+        # proposal recorded before .proposed carried steps has exactly the one
+        # leg its mirrored {action, params} names.
+        # read-posture: (a) declared in contextHint.reads by Weaver's
+        # recordDispatchOutcomePlan directOp (internal/weaver/augur_dispatch.go)
+        proposed_doc = kv.Read(proposal_key + ".proposed")
+        total_legs = 1
+        if alive(proposed_doc) and proposed_doc.data != None:
+            sv = proposed_doc.data["steps"] if "steps" in proposed_doc.data else None
+            if type(sv) == type([]) and len(sv) > 0:
+                total_legs = len(sv)
+
         prior_reviewed_at = rd["reviewedAt"] if rd != None and "reviewedAt" in rd else ""
-        dispatched_at = op.submittedAt if outcome == "dispatched" else ""
+        new_state = outcome
+        new_leg = cur_leg
+        dispatched_at = ""
+        if outcome == "dispatched":
+            new_leg = cur_leg + 1
+            if new_leg < total_legs:
+                # Legs remain: the proposal is still the approved, dispatchable
+                # thing the lens projects — one leg further along.
+                new_state = "approved"
+            else:
+                dispatched_at = op.submittedAt
         new_invalid_reason = reason if outcome == "invalid" else ""
 
         # Unconditioned update preserving the aspect's full shape (D5) — same
@@ -773,12 +974,14 @@ def execute(state, op):
             {"op": "update", "key": proposal_key + ".review",
              "document": {"class": "augur.review", "isDeleted": False,
                           "vertexKey": proposal_key, "localName": "review",
-                          "data": {"state": outcome, "invalidReason": new_invalid_reason,
-                                   "reviewedAt": prior_reviewed_at, "dispatchedAt": dispatched_at}}},
+                          "data": {"state": new_state, "invalidReason": new_invalid_reason,
+                                   "reviewedAt": prior_reviewed_at, "dispatchedAt": dispatched_at,
+                                   "leg": new_leg}}},
         ]
         events = [
             {"class": "augur.proposalDispatched",
-             "data": {"proposalKey": proposal_key, "outcome": outcome, "reason": new_invalid_reason}},
+             "data": {"proposalKey": proposal_key, "outcome": outcome,
+                      "reason": new_invalid_reason, "leg": new_leg}},
         ]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": proposal_key}}

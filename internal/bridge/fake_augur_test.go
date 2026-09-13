@@ -135,6 +135,66 @@ func TestFakeAugur_Refusal(t *testing.T) {
 	}
 }
 
+// TestFakeAugur_PlanSubject: the plan trigger Subject yields a benign, in-scope
+// PLAN-shaped proposal — two ordered assignTask steps, both scoped to the
+// escalated candidate — and, like every other reasoning call, bills exactly one
+// reasoning side-effect no matter how often the key is redelivered.
+func TestFakeAugur_PlanSubject(t *testing.T) {
+	t.Parallel()
+	a := bridge.NewFakeAugur()
+	entity := "vtx.leaseapp.applicant1"
+	req := bridge.Request{
+		IdempotencyKey: "aug-plan-1",
+		Subject:        bridge.AugurPlanSubject,
+		Params:         map[string]string{"entityId": entity},
+	}
+	disp, err := a.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if disp.Result.Status != bridge.OutcomeCompleted {
+		t.Fatalf("plan Status = %q, want %q", disp.Result.Status, bridge.OutcomeCompleted)
+	}
+	p, err := bridge.DecodeAugurProposal(disp.Result.Detail)
+	if err != nil {
+		t.Fatalf("decode proposal: %v", err)
+	}
+	if len(p.Steps) != 2 {
+		t.Fatalf("plan proposal steps = %d, want 2 (%+v)", len(p.Steps), p)
+	}
+	if p.Confidence < 0 || p.Confidence > 1 {
+		t.Fatalf("plan proposal confidence out of range: %v", p.Confidence)
+	}
+	ops := map[string]bool{}
+	for i, step := range p.Steps {
+		if step.Action != "assignTask" {
+			t.Fatalf("step %d action = %q, want assignTask (the plan stays in the allowed vocabulary)", i+1, step.Action)
+		}
+		if got, _ := step.Params["scopedTo"].(string); got != entity {
+			t.Fatalf("step %d scopedTo = %q, want the escalated candidate %q", i+1, got, entity)
+		}
+		op, _ := step.Params["forOperation"].(string)
+		if op == "" {
+			t.Fatalf("step %d carries no forOperation: %#v", i+1, step.Params)
+		}
+		ops[op] = true
+	}
+	if len(ops) != 2 {
+		t.Fatalf("the two legs must differ in what they ask for, got %v", ops)
+	}
+
+	again, err := a.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("repeat Execute: %v", err)
+	}
+	if again.Result.Detail != disp.Result.Detail {
+		t.Fatalf("repeat key must replay the same plan verbatim")
+	}
+	if got := a.SideEffects("aug-plan-1"); got != 1 {
+		t.Fatalf("a plan is one reasoning call: side effects = %d, want 1", got)
+	}
+}
+
 // TestFakeAugur_HonoursModelOverride proves the target's optional augur.model
 // override (threaded by Weaver as Params["model"], the
 // weaver-exhausted-escalation-and-model wiring) is genuinely observable

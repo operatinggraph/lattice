@@ -293,6 +293,8 @@ type augurProposalCols struct {
 	Trigger        string  `json:"trigger"`
 	ProposedAction string  `json:"proposedAction"`
 	ProposedParams any     `json:"proposedParams"`
+	ProposedSteps  any     `json:"proposedSteps"`
+	DispatchLeg    int     `json:"dispatchLeg"`
 	Rationale      string  `json:"rationale"`
 	Confidence     float64 `json:"confidence"`
 	Model          string  `json:"model"`

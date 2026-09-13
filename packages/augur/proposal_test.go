@@ -847,7 +847,12 @@ func dispatchEnv(reqID, handle, outcome, reason string) *processor.OperationEnve
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
-		ContextHint:   &processor.ContextHint{Reads: []string{proposalKey, proposalKey + ".review"}},
+		// The flip reads the verdict it guards on and the recorded plan it counts
+		// legs against — read-posture class (a), the same pair Weaver's
+		// recordDispatchOutcomePlan declares (internal/weaver/augur_dispatch.go).
+		ContextHint: &processor.ContextHint{Reads: []string{
+			proposalKey, proposalKey + ".review", proposalKey + ".proposed",
+		}},
 	}
 }
 
@@ -971,5 +976,365 @@ func TestAugur_Dispatch_InvalidOutcomeRequiresReason_Rejected(t *testing.T) {
 
 	if got := reviewState(t, ctx, conn, pk); got != "approved" {
 		t.Fatalf("review.state = %q, want approved (unchanged — the malformed flip must not land)", got)
+	}
+}
+
+// --- Plan-shaped proposals + per-leg dispatch -------------------------------
+
+// Per-scenario plan-episode handles (valid 20-char NanoIDs).
+const (
+	hPnPending = "BBaugurPnokHJKMNPQRS"
+	hPnScope   = "BBaugurPnscHJKMNPQRS"
+	hPnTooMany = "BBaugurPnmxHJKMNPQRS"
+	hPnReval   = "BBaugurPnrvHJKMNPQRS"
+	hPnChain   = "BBaugurPnchHJKMNPQRS"
+	hPnStale   = "BBaugurPnstHJKMNPQRS"
+	hPnLegacy  = "BBaugurPngcHJKMNPQRS"
+	hPnRevLeg  = "BBaugurPnrgHJKMNPQRS"
+)
+
+// planResult marshals a PLAN-shaped model proposal — the ordered `steps` list
+// the adapter produces instead of a single top-level {action, params}.
+func planResult(confidence float64, steps ...map[string]any) string {
+	m := map[string]any{
+		"steps":      steps,
+		"confidence": confidence,
+		"rationale":  "an ordered remediation for the stuck gap",
+		"model":      "claude-opus-4-8",
+		"reasonedAt": "2026-09-13T00:00:00Z",
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+// assignStep builds one in-vocabulary, in-scope plan leg.
+func assignStep(entityKey, operation string) map[string]any {
+	return map[string]any{
+		"action": "assignTask",
+		"params": map[string]any{"scopedTo": entityKey, "forOperation": operation},
+	}
+}
+
+// seedAspect writes a full aspect document (vertexKey + localName, the shape the
+// Processor's own mutations produce) directly into Core KV — the seam a test uses
+// to plant a stored shape the validated write path can no longer produce, such as
+// a proposal recorded before `steps` / `leg` existed.
+func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexKey, localName, class string, data map[string]any) {
+	t.Helper()
+	key := vertexKey + "." + localName
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"vertexKey": vertexKey, "localName": localName, "data": data,
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed aspect %s: %v", key, err)
+	}
+}
+
+// proposedSteps reads vtx.augurproposal.<id>.proposed.data.steps.
+func proposedSteps(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalKey string) []any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, proposalKey+".proposed")
+	data, _ := doc["data"].(map[string]any)
+	steps, _ := data["steps"].([]any)
+	return steps
+}
+
+// reviewLeg reads vtx.augurproposal.<id>.review.data.leg (a JSON number).
+func reviewLeg(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalKey string) int {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, proposalKey+".review")
+	data, _ := doc["data"].(map[string]any)
+	n, _ := data["leg"].(float64)
+	return int(n)
+}
+
+// dispatchLegEnv builds the Weaver flip for one NAMED leg — the shape
+// recordDispatchOutcomePlan publishes. dispatchEnv (above) deliberately omits
+// `leg` entirely: that is the optional-field-absent vector, the payload a
+// dispatcher written before the plan shape sends.
+func dispatchLegEnv(reqID, handle, outcome, reason string, leg int) *processor.OperationEnvelope {
+	env := dispatchEnv(reqID, handle, outcome, reason)
+	var payload map[string]any
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		panic(err)
+	}
+	payload["leg"] = leg
+	b, _ := json.Marshal(payload)
+	env.Payload = json.RawMessage(b)
+	return env
+}
+
+func driveDispatchLeg(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, outcome, reason string, leg int, want processor.MessageOutcome) {
+	t.Helper()
+	dp := dispatchLegEnv(testutil.GenReqID("APDisp"+tag), handle, outcome, reason, leg)
+	testutil.PublishOp(t, conn, dp)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// TestAugur_Plan_ValidPending: a two-leg plan whose every step is in vocabulary
+// and scoped to the escalated candidate records pending, with the ordered steps
+// stored, action/params mirroring steps[0], and the leg counter at 0.
+func TestAugur_Plan_ValidPending(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-ok")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	result := planResult(0.78,
+		assignStep(entityKey, "ApproveLeaseApplication"),
+		assignStep(entityKey, "RecordLeaseDecision"))
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnok", hPnPending, targetKey, entityKey, "completed", result)
+
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("review.state = %q, want pending", got)
+	}
+	steps := proposedSteps(t, ctx, conn, pk)
+	if len(steps) != 2 {
+		t.Fatalf(".proposed.steps = %d entries, want 2 (%v)", len(steps), steps)
+	}
+	first, _ := steps[0].(map[string]any)
+	second, _ := steps[1].(map[string]any)
+	firstParams, _ := first["params"].(map[string]any)
+	secondParams, _ := second["params"].(map[string]any)
+	if got, _ := firstParams["forOperation"].(string); got != "ApproveLeaseApplication" {
+		t.Fatalf("step 1 params = %v, want the first leg's operation", firstParams)
+	}
+	if got, _ := secondParams["forOperation"].(string); got != "RecordLeaseDecision" {
+		t.Fatalf("step 2 params = %v, want the second leg's operation", secondParams)
+	}
+	// action/params mirror steps[0] — every reader sees one shape.
+	proposed := readDoc(t, ctx, conn, pk+".proposed")
+	pd, _ := proposed["data"].(map[string]any)
+	if got, _ := pd["action"].(string); got != "assignTask" {
+		t.Fatalf(".proposed.action = %q, want the mirrored steps[0].action", got)
+	}
+	mirrored, _ := pd["params"].(map[string]any)
+	if got, _ := mirrored["forOperation"].(string); got != "ApproveLeaseApplication" {
+		t.Fatalf(".proposed.params = %v, want the mirrored steps[0].params", mirrored)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 0 {
+		t.Fatalf(".review.leg = %d, want 0 (nothing dispatched yet)", got)
+	}
+}
+
+// TestAugur_Plan_SecondStepScopeEscape_Invalid: the §5 boundary runs PER STEP —
+// a plan whose FIRST leg is impeccable and whose second smuggles a foreign
+// entity invalidates the WHOLE proposal, and the reason names the failing step
+// so a reviewer can find it.
+func TestAugur_Plan_SecondStepScopeEscape_Invalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-scope")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	escaping := map[string]any{
+		"action": "assignTask",
+		"params": map[string]any{
+			"scopedTo": entityKey,
+			"assignee": "vtx.identity.BBattackerHJKMNPQRS",
+		},
+	}
+	result := planResult(0.9, assignStep(entityKey, "ApproveLeaseApplication"), escaping)
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnsc", hPnScope, targetKey, entityKey, "completed", result)
+
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (step 2 escapes scope)", got)
+	}
+	reason := reviewField(t, ctx, conn, pk, "invalidReason")
+	if !strings.Contains(reason, "step 2") {
+		t.Fatalf("invalidReason = %q, want it to name step 2", reason)
+	}
+}
+
+// TestAugur_Plan_TooManySteps_Invalid: a plan longer than the bound is stored
+// invalid rather than recorded as an unbounded dispatch chain.
+func TestAugur_Plan_TooManySteps_Invalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-many")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	steps := make([]map[string]any, 0, 9)
+	for i := 0; i < 9; i++ {
+		steps = append(steps, assignStep(entityKey, "ApproveLeaseApplication"))
+	}
+	result := planResult(0.8, steps...)
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnmx", hPnTooMany, targetKey, entityKey, "completed", result)
+
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (9 steps is past the bound)", got)
+	}
+	if reason := reviewField(t, ctx, conn, pk, "invalidReason"); !strings.Contains(reason, "9 steps") {
+		t.Fatalf("invalidReason = %q, want it to name the plan length", reason)
+	}
+}
+
+// TestAugur_Plan_ApprovalRevalidatesEveryStep: the approval leg re-runs the §5
+// boundary over the STORED plan step by step, not just its first leg — a plan
+// tampered in its SECOND step fail-closes to invalid on approve.
+func TestAugur_Plan_ApprovalRevalidatesEveryStep(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-reval")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	result := planResult(0.78,
+		assignStep(entityKey, "ApproveLeaseApplication"),
+		assignStep(entityKey, "RecordLeaseDecision"))
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnrv", hPnReval, targetKey, entityKey, "completed", result)
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("precondition: review.state = %q, want pending", got)
+	}
+	// Force the precondition the validated record path cannot produce: a stored
+	// plan whose SECOND leg is out of vocabulary while the verdict is pending.
+	seedVertex(t, ctx, conn, pk+".proposed", "augur.proposed", map[string]any{
+		"action": "assignTask",
+		"params": map[string]any{"scopedTo": entityKey, "forOperation": "ApproveLeaseApplication"},
+		"steps": []any{
+			map[string]any{"action": "assignTask", "params": map[string]any{"scopedTo": entityKey, "forOperation": "ApproveLeaseApplication"}},
+			map[string]any{"action": "DROP TABLE", "params": map[string]any{"scopedTo": entityKey}},
+		},
+	})
+
+	driveReview(t, ctx, conn, cp, cons, "pnrv", hPnReval, "approve", processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (the approval must re-validate EVERY step)", got)
+	}
+	if reason := reviewField(t, ctx, conn, pk, "invalidReason"); !strings.Contains(reason, "step 2") {
+		t.Fatalf("invalidReason = %q, want it to name step 2", reason)
+	}
+}
+
+// TestAugur_Plan_DispatchesLegByLeg: the flip advances the plan one leg at a
+// time — leg 0 of 2 leaves the proposal approved (dispatchable again, for the
+// next leg) with nothing stamped, and leg 1 is the last, which flips it
+// dispatched and stamps dispatchedAt. The approve verdict carries the counter
+// through untouched.
+func TestAugur_Plan_DispatchesLegByLeg(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-chain")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	result := planResult(0.78,
+		assignStep(entityKey, "ApproveLeaseApplication"),
+		assignStep(entityKey, "RecordLeaseDecision"))
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnch", hPnChain, targetKey, entityKey, "completed", result)
+	driveReview(t, ctx, conn, cp, cons, "pnch", hPnChain, "approve", processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("precondition: review.state = %q, want approved", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 0 {
+		t.Fatalf("the verdict must carry the leg counter through: .review.leg = %d, want 0", got)
+	}
+
+	driveDispatchLeg(t, ctx, conn, cp, cons, "pnch0", hPnChain, "dispatched", "", 0, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("after leg 0 of 2: review.state = %q, want approved (a leg remains)", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 1 {
+		t.Fatalf("after leg 0: .review.leg = %d, want 1", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got != "" {
+		t.Fatalf("dispatchedAt = %q, want empty until the LAST leg fires", got)
+	}
+
+	driveDispatchLeg(t, ctx, conn, cp, cons, "pnch1", hPnChain, "dispatched", "", 1, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "dispatched" {
+		t.Fatalf("after the last leg: review.state = %q, want dispatched", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 2 {
+		t.Fatalf("after the last leg: .review.leg = %d, want 2 (the plan's length)", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got == "" {
+		t.Fatal("dispatchedAt must be stamped once the last leg fires")
+	}
+}
+
+// TestAugur_Plan_ReviewCarriesTheLegThrough: the verdict decides whether a plan
+// may be dispatched, never how far it has got — so the leg counter rides through
+// the flip untouched. Planted directly, because the op sequence itself only ever
+// reviews a proposal standing at leg 0: an unpreserved counter would be
+// invisible there and would silently re-dispatch a completed leg wherever a
+// proposal was reviewed mid-plan.
+func TestAugur_Plan_ReviewCarriesTheLegThrough(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-rvleg")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	result := planResult(0.78,
+		assignStep(entityKey, "ApproveLeaseApplication"),
+		assignStep(entityKey, "RecordLeaseDecision"))
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnrl", hPnRevLeg, targetKey, entityKey, "completed", result)
+	seedAspect(t, ctx, conn, pk, "review", "augur.review", map[string]any{
+		"state": "pending", "invalidReason": "", "reviewedAt": "", "dispatchedAt": "", "leg": 1,
+	})
+
+	driveReview(t, ctx, conn, cp, cons, "pnrl", hPnRevLeg, "approve", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 1 {
+		t.Fatalf(".review.leg = %d, want 1 (the verdict must not rewind the plan)", got)
+	}
+}
+
+// TestAugur_Plan_StaleLeg_Rejected: a flip naming a leg the proposal has already
+// passed is a stale dispatch — rejected, so a redelivery that survived the
+// requestId tracker can never skip a leg of the plan.
+func TestAugur_Plan_StaleLeg_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-stale")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	result := planResult(0.78,
+		assignStep(entityKey, "ApproveLeaseApplication"),
+		assignStep(entityKey, "RecordLeaseDecision"))
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "pnst", hPnStale, targetKey, entityKey, "completed", result)
+	driveReview(t, ctx, conn, cp, cons, "pnst", hPnStale, "approve", processor.OutcomeAccepted)
+	driveDispatchLeg(t, ctx, conn, cp, cons, "pnst0", hPnStale, "dispatched", "", 0, processor.OutcomeAccepted)
+
+	// The proposal stands at leg 1; a flip for leg 0 (or leg 2) is stale.
+	dp := dispatchLegEnv(testutil.GenReqID("APDisppnstStale"), hPnStale, "dispatched", "", 0)
+	_, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, dp)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidDispatchTransition") {
+		t.Fatalf("a stale leg must reject InvalidDispatchTransition, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "stale leg") {
+		t.Fatalf("the denial must name the stale leg, got %q", reply.Error.Message)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 1 {
+		t.Fatalf(".review.leg = %d, want 1 (the stale flip must not advance it)", got)
+	}
+}
+
+// TestAugur_Plan_LegacyProposalDispatchesAtLegZero is the optional-field-absent
+// vector for BOTH new fields at once: a proposal whose stored .proposed carries
+// no `steps` and whose .review carries no `leg` — the shape recorded before the
+// plan existed — is dispatched by a flip that names no leg at all, and lands
+// `dispatched` exactly as it always did.
+func TestAugur_Plan_LegacyProposalDispatchesAtLegZero(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-pn-legacy")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := driveApproved(t, ctx, conn, cp, cons, "pngc", hPnLegacy, targetKey, entityKey)
+	// Rewrite both aspects into the pre-plan shape.
+	seedAspect(t, ctx, conn, pk, "proposed", "augur.proposed", map[string]any{
+		"action": "assignTask",
+		"params": map[string]any{"scopedTo": entityKey, "forOperation": "ApproveLeaseApplication"},
+	})
+	seedAspect(t, ctx, conn, pk, "review", "augur.review", map[string]any{
+		"state": "approved", "invalidReason": "", "reviewedAt": "2026-09-13T00:00:00Z", "dispatchedAt": "",
+	})
+
+	driveDispatch(t, ctx, conn, cp, cons, "pngc", hPnLegacy, "dispatched", "", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "dispatched" {
+		t.Fatalf("review.state = %q, want dispatched (a legacy single-leg proposal completes on its one flip)", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 1 {
+		t.Fatalf(".review.leg = %d, want 1 (its single leg dispatched)", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got == "" {
+		t.Fatal("dispatchedAt must be stamped on the legacy proposal's dispatch")
 	}
 }

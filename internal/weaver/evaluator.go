@@ -533,6 +533,18 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// mark records the reasoning op's dispatch class and carries the displaced
 	// leg in its own field, so a gap whose budget was re-armed under a standing
 	// escalation still releases at the boundary the contract promises.
+	// The same boundary for an Augur PLAN: a proposedOp mark whose leg the
+	// proposal's counter has passed stands over a leg already dispatched and
+	// recorded, so it is released and the rest of this call dispatches the next
+	// leg as a fresh episode. It carries none of the goal-gap bookkeeping — a
+	// proposal has no catalog leg, no retry budget of its own and no effect
+	// window — so it is its own release rather than a branch of the one above.
+	if found && e.releaseAdvancedProposalLeg(ctx, targetID, entityID, col, ga, rec, row, markRev) {
+		found = false
+		pinnedAction = ""
+		rec = nil
+	}
+
 	if found && e.releaseCompletedLeg(ctx, targetID, entityID, col, ga, legOf(ga, rec, count), row, markRev, countRev) {
 		found = false
 		pinnedAction = ""
@@ -1076,6 +1088,11 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 // legScoped says the gap's budget is per LEG (a goal gap), which is what lets a
 // change of action restart it — bookDispatch states the rule.
 //
+// The Augur plan leg comes off the PLAN (pl.proposalLeg), not a parameter: the
+// leg is a property of the dispatch being fired, decided where the leg was
+// picked (buildProposedOpPlan), and every mark this function writes describes
+// that same dispatch. It is zero for every gap that is not a proposedOp.
+//
 // created reports that THIS call won the CAS and minted the episode's mark. It
 // is false for every other disposition — a re-publish of a live episode, a
 // re-arm of a stale one, and a create the concurrent winner took — so a caller
@@ -1146,7 +1163,7 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 			from, class = escalatedFrom, escalation
 		}
 		rev, conflict, err := e.marks.replace(ctx, targetID, entityID, col, entityKey, action, from, class,
-			claimID, markRev, markTTLBackstopFactor*e.marks.lease)
+			claimID, pl.proposalLeg, markRev, markTTLBackstopFactor*e.marks.lease)
 		if err != nil {
 			e.logger.Error("weaver: stale mark reclaim failed; nak with delay",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
@@ -1172,7 +1189,8 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 		return e.fire(ctx, targetID, entityID, col, rev, claimID, pl), false
 	}
 
-	rev, claimID, lost, err := e.marks.create(ctx, targetID, entityID, col, entityKey, action, escalatedFrom, escalation)
+	rev, claimID, lost, err := e.marks.create(ctx, targetID, entityID, col, entityKey, action, escalatedFrom, escalation,
+		pl.proposalLeg)
 	if err != nil {
 		e.logger.Error("weaver: mark create failed; nak with delay",
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
@@ -1942,18 +1960,66 @@ func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col 
 	return true
 }
 
+// releaseAdvancedProposalLeg clears the mark of a proposedOp episode the
+// proposal has already moved past: the row's dispatchLeg column says the plan's
+// leg counter is beyond the leg this mark stands over, so the leg it holds was
+// dispatched and recorded, and what the row is asking for now is the NEXT leg.
+// Without the release the mark would be reclaimed onto the completed leg for as
+// long as the proposal lived, and the plan would never advance past it.
+//
+// The clear is revision-conditioned on the mark the caller read (mirroring
+// releaseCompletedLeg's marked branch): a conflict means a concurrent pass
+// already released this episode or CAS-created the next leg's, so the release is
+// not this caller's to claim and the mark is left exactly as found.
+//
+// It FIRES NOTHING. A released gap is a gap with no mark, which is what the
+// ordinary path treats as a genuinely fresh episode: the caller falls through to
+// planGap/fireEpisode, which CAS-creates a fresh mark for the next leg and
+// dispatches it under that leg's own deterministic requestId. The next leg is
+// therefore an ordinary proposedOp episode and inherits proposedOp's own
+// classification — an external dispatch class whose reclaim is collapse-only —
+// exactly as the first leg did.
+func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entityID, col string,
+	ga GapAction, rec *mark, row map[string]any, markRev uint64) bool {
+
+	if ga.Action != actionProposedOp || rec == nil {
+		return false
+	}
+	if rowLeg(row, "dispatchLeg") <= rec.ProposalLeg {
+		return false
+	}
+	conflict, err := e.marks.deleteRevision(ctx, targetID, entityID, col, markRev)
+	if err != nil {
+		e.logger.Error("weaver: proposal leg release mark clear failed",
+			"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg, "err", err)
+		return false
+	}
+	if conflict {
+		// The mark changed since the caller's read — a concurrent path already
+		// released this leg or opened the next one. Not this caller's release.
+		e.logger.Debug("weaver: proposal leg release lost the mark delete; a concurrent pass owns the gap",
+			"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg)
+		return false
+	}
+	e.logger.Info("weaver: proposal leg released; the plan advances to its next leg",
+		"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg)
+	return true
+}
+
 // advanceReleasedLeg plans and dispatches the NEXT leg of a chain whose previous
 // leg just released — the gap's OWN playbook entry, never an escalation's, as a
-// genuinely fresh episode (no pin, no mark, no budget: the release deleted
-// both). Where the advanced chain has no derivable next leg and the target
-// escalates that, the escalation seam takes it instead.
+// genuinely fresh episode (no pin, no mark: the release cleared them). Where the
+// advanced chain has no derivable next leg and the target escalates that, the
+// escalation seam takes it instead. Both leg boundaries land here: a goal gap's
+// completed catalog leg, and an Augur plan's recorded leg, whose next entry the
+// same planGap call resolves from the row's advanced dispatchLeg.
 func (e *Engine) advanceReleasedLeg(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	ga GapAction, row map[string]any, rowRevision uint64) substrate.Decision {
 
 	// The half of a boundary that releaseCompletedLeg cannot claim: the release
 	// is owed to every caller, the advance only to the ones whose gap may be
 	// dispatched into, so the re-plan is announced from here.
-	e.logger.Info("weaver: released goal leg's chain advancing; re-planning from the advanced state",
+	e.logger.Info("weaver: released leg's chain advancing; re-planning from the advanced state",
 		"targetId", targetID, "entityId", entityID, "gap", col)
 	pl, actionRef, esc, escalate, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, rowRevision, "")
 	if escalate {

@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -262,7 +263,7 @@ func TestBuildProposedOpPlan_Valid_DirectOp(t *testing.T) {
 		t.Fatal("a valid dispatch must carry a proposal-scoped requestID override")
 	}
 	got := pl.requestID("ignored-claim")
-	want := deriveProposalDispatchRequestID(handle)
+	want := deriveProposalDispatchRequestID(handle, 0)
 	if got != want {
 		t.Fatalf("requestID = %q, want the proposal-scoped %q", got, want)
 	}
@@ -399,7 +400,7 @@ func TestHandleRow_AugurDispatch_ValidProposal_FiresTwoOps(t *testing.T) {
 	if first["operationType"] != "SetListingStatus" {
 		t.Fatalf("first op = %v, want SetListingStatus", first["operationType"])
 	}
-	if first["requestId"] != deriveProposalDispatchRequestID(handle) {
+	if first["requestId"] != deriveProposalDispatchRequestID(handle, 0) {
 		t.Fatalf("first op requestId = %v, want the proposal-scoped id", first["requestId"])
 	}
 
@@ -444,4 +445,411 @@ func TestHandleRow_AugurDispatch_InvalidProposal_FiresFlipOnly(t *testing.T) {
 		t.Fatalf("only op = %v, want RecordProposalDispatch (no remediation ever fires)", only["operationType"])
 	}
 	h.requireNoOp(t)
+}
+
+// --- plan-shaped proposals: per-leg dispatch --------------------------------
+
+// planRow is dispatchRow with a recorded PLAN: the ordered steps and the leg
+// counter the augurDispatchPending lens projects.
+func planRow(candidateKey, targetMetaKey string, leg int, steps ...map[string]any) map[string]any {
+	row := dispatchRow(candidateKey, targetMetaKey,
+		steps[0]["action"].(string), steps[0]["params"].(map[string]any))
+	asAny := make([]any, 0, len(steps))
+	for _, step := range steps {
+		asAny = append(asAny, any(step))
+	}
+	row["proposedSteps"] = asAny
+	// The lens row arrives decoded from JSON, where every number is a float64.
+	row["dispatchLeg"] = float64(leg)
+	return row
+}
+
+// directStep is one plan leg as a directOp — the arm with no live-registry
+// resolution, so a leg's materialisation is pinned without seeding a catalog.
+func directStep(operation, target string) map[string]any {
+	return map[string]any{
+		"action": actionDirectOp,
+		"params": map[string]any{"operation": operation, "target": target},
+	}
+}
+
+// TestDeriveProposalDispatchRequestID_LegZeroUnchanged pins the leg-0
+// derivation to the literal it produced before the leg became part of it: every
+// proposal already in flight — and every single-step proposal forever — keeps
+// the SAME requestId, so the Contract #4 tracker still collapses its
+// re-dispatch. Leg 1 is a genuinely different op.
+func TestDeriveProposalDispatchRequestID_LegZeroUnchanged(t *testing.T) {
+	t.Parallel()
+	const handle = "BBdispatchAHJKMNPQRS"
+	if got := deriveProposalDispatchRequestID(handle, 0); got != "mxeLQDvHxqQnNRcWzHNR" {
+		t.Fatalf("leg 0 requestId = %q, want the pre-plan literal mxeLQDvHxqQnNRcWzHNR", got)
+	}
+	if got := deriveProposalDispatchFlipRequestID(handle, "dispatched", 0); got != "EG1DoSJF9pzMntehaUZt" {
+		t.Fatalf("leg 0 flip requestId = %q, want the pre-plan literal EG1DoSJF9pzMntehaUZt", got)
+	}
+	if deriveProposalDispatchRequestID(handle, 1) == deriveProposalDispatchRequestID(handle, 0) {
+		t.Fatal("leg 1 must derive its own requestId, or the next leg would collapse onto the previous one")
+	}
+	if deriveProposalDispatchFlipRequestID(handle, "dispatched", 1) == deriveProposalDispatchFlipRequestID(handle, "dispatched", 0) {
+		t.Fatal("leg 1's flip must derive its own requestId")
+	}
+}
+
+// TestBuildProposedOpPlan_DispatchesTheRowsLeg proves the plan is dispatched one
+// leg at a time: the row's dispatchLeg selects the step materialised, the
+// requestId is that leg's, and the followUp flip carries the leg it records.
+func TestBuildProposedOpPlan_DispatchesTheRowsLeg(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+	const handle = "AProposalHandle0010"
+	steps := []map[string]any{
+		directStep("SetListingStatus", dpCandidate),
+		directStep("RecordLeaseDecision", dpCandidate),
+	}
+
+	for leg, wantOp := range map[int]string{0: "SetListingStatus", 1: "RecordLeaseDecision"} {
+		row := planRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", leg, steps...)
+		pl, perr := buildProposedOpPlan(s, handle, row, 7)
+		if perr != nil {
+			t.Fatalf("leg %d: buildProposedOpPlan: %v", leg, perr)
+		}
+		if pl.operationType != wantOp {
+			t.Fatalf("leg %d dispatched %q, want the step's own operation %q", leg, pl.operationType, wantOp)
+		}
+		if got, want := pl.requestID("ignored"), deriveProposalDispatchRequestID(handle, leg); got != want {
+			t.Fatalf("leg %d requestID = %q, want the leg-scoped %q", leg, got, want)
+		}
+		if pl.proposalLeg != leg {
+			t.Fatalf("leg %d: plan.proposalLeg = %d — the mark must record the leg it stands over", leg, pl.proposalLeg)
+		}
+		if pl.followUp == nil {
+			t.Fatalf("leg %d must carry the flip", leg)
+		}
+		fu := pl.followUp.payload("ignored")
+		if got, _ := fu["leg"].(int); got != leg {
+			t.Fatalf("leg %d flip payload leg = %v, want %d", leg, fu["leg"], leg)
+		}
+		if got, want := pl.followUp.requestID("ignored"), deriveProposalDispatchFlipRequestID(handle, "dispatched", leg); got != want {
+			t.Fatalf("leg %d flip requestID = %q, want %q", leg, got, want)
+		}
+		if !slicesContain(pl.followUp.reads, "vtx.augurproposal."+handle+".proposed") {
+			t.Fatalf("leg %d flip must declare the .proposed read it counts legs against: %v", leg, pl.followUp.reads)
+		}
+	}
+}
+
+// TestBuildProposedOpPlan_LegPastTheEnd_FlipOnly: a counter past the plan's last
+// step is a row and a counter that disagree — the dispatch records the proposal
+// invalid rather than indexing out of range.
+func TestBuildProposedOpPlan_LegPastTheEnd_FlipOnly(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+	row := planRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", 2,
+		directStep("SetListingStatus", dpCandidate),
+		directStep("RecordLeaseDecision", dpCandidate))
+
+	pl, perr := buildProposedOpPlan(s, "AProposalHandle0011", row, 7)
+	if perr != nil {
+		t.Fatalf("a leg past the end must plan a flip, not error: %v", perr)
+	}
+	if pl.operationType != opRecordProposalDispatch {
+		t.Fatalf("op = %q, want the invalid flip", pl.operationType)
+	}
+	payload := pl.payload("ignored")
+	if payload["outcome"] != "invalid" {
+		t.Fatalf("flip outcome = %v, want invalid", payload["outcome"])
+	}
+	if reason, _ := payload["reason"].(string); !strings.Contains(reason, "past the end") {
+		t.Fatalf("reason = %q, want it to explain the out-of-range leg", reason)
+	}
+}
+
+// TestBuildProposedOpPlan_LegacyRowUnchanged is the optional-field-absent
+// vector: a row with no proposedSteps and no dispatchLeg — the shape projected
+// for a proposal recorded before the plan — dispatches its single remediation at
+// leg 0 under the pre-plan requestId, and its flip carries leg 0.
+func TestBuildProposedOpPlan_LegacyRowUnchanged(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+	row := dispatchRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", "directOp", map[string]any{
+		"operation": "SetListingStatus",
+		"target":    dpCandidate,
+	})
+	const handle = "AProposalHandle0012"
+
+	pl, perr := buildProposedOpPlan(s, handle, row, 7)
+	if perr != nil {
+		t.Fatalf("buildProposedOpPlan: %v", perr)
+	}
+	if pl.operationType != "SetListingStatus" {
+		t.Fatalf("op = %q, want the single recorded remediation", pl.operationType)
+	}
+	if pl.proposalLeg != 0 {
+		t.Fatalf("plan.proposalLeg = %d, want 0", pl.proposalLeg)
+	}
+	if got, want := pl.requestID("x"), deriveProposalDispatchRequestID(handle, 0); got != want {
+		t.Fatalf("requestID = %q, want %q", got, want)
+	}
+	if got, _ := pl.followUp.payload("x")["leg"].(int); got != 0 {
+		t.Fatalf("flip leg = %v, want 0", pl.followUp.payload("x")["leg"])
+	}
+}
+
+func slicesContain(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// --- the per-leg release, at both dispatch seams ----------------------------
+
+// augurPlanTarget seeds the augurDispatch convergence target — one proposedOp
+// gap, the shape packages/augur's weaver target installs.
+func augurPlanTarget(targetID string) *Target {
+	return &Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_dispatch": {Action: actionProposedOp}},
+	}
+}
+
+// twoLegRow is the augurDispatchPending row for a two-leg plan standing at leg.
+func twoLegRow(handle string, leg int) map[string]any {
+	row := planRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", leg,
+		directStep("SetListingStatus", dpCandidate),
+		directStep("RecordLeaseDecision", dpCandidate))
+	row["entityKey"] = "vtx.augurproposal." + handle
+	return row
+}
+
+// TestHandleRow_AugurDispatch_AdvancedLegReleasesAndFiresNext: lane 1. A LIVE
+// mark for leg 0 over a row whose counter has reached leg 1 stands over a leg
+// already dispatched and recorded — it is released, and the delivery goes on to
+// fire leg 1 as a genuinely fresh episode under a fresh mark that records the
+// new leg. Without the release the live mark would take the anti-storm drop and
+// the plan would never reach its second leg.
+func TestHandleRow_AugurDispatch_AdvancedLegReleasesAndFiresNext(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchCHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	_, _, lost, err := h.engine.marks.create(ctx, targetID, handle, "missing_dispatch",
+		"vtx.augurproposal."+handle, actionProposedOp, "", "", 0)
+	if err != nil || lost {
+		t.Fatalf("seed leg-0 mark: err=%v lost=%v", err, lost)
+	}
+
+	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, handle, twoLegRow(handle, 1), 3, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("the advanced-leg delivery must Ack, got %v", dec)
+	}
+
+	first := h.nextOp(t)
+	if first["operationType"] != "RecordLeaseDecision" {
+		t.Fatalf("first op = %v, want the SECOND leg's remediation", first["operationType"])
+	}
+	if first["requestId"] != deriveProposalDispatchRequestID(handle, 1) {
+		t.Fatalf("first op requestId = %v, want leg 1's own id", first["requestId"])
+	}
+	second := h.nextOp(t)
+	if second["operationType"] != opRecordProposalDispatch {
+		t.Fatalf("second op = %v, want the flip", second["operationType"])
+	}
+
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("expected a FRESH mark for the advanced leg (err=%v found=%v)", err, found)
+	}
+	if rec.ProposalLeg != 1 {
+		t.Fatalf("the fresh mark must record the leg it stands over: proposalLeg = %d, want 1", rec.ProposalLeg)
+	}
+}
+
+// TestHandleRow_AugurDispatch_SameLegIsNotReleased: the release is conditioned
+// on the counter having MOVED. A mark standing over the leg the row is still on
+// is a live episode, and the delivery takes the ordinary anti-storm drop — it
+// must not re-fire the leg already in flight.
+func TestHandleRow_AugurDispatch_SameLegIsNotReleased(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchDHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	rev, _, lost, err := h.engine.marks.create(ctx, targetID, handle, "missing_dispatch",
+		"vtx.augurproposal."+handle, actionProposedOp, "", "", 1)
+	if err != nil || lost {
+		t.Fatalf("seed leg-1 mark: err=%v lost=%v", err, lost)
+	}
+
+	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, handle, twoLegRow(handle, 1), 3, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("a live episode's delivery Acks, got %v", dec)
+	}
+	h.requireNoOp(t)
+
+	rec, gotRev, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("the live mark must stand (err=%v found=%v)", err, found)
+	}
+	if gotRev != rev || rec.ProposalLeg != 1 {
+		t.Fatalf("the live mark must be untouched: rev %d→%d, proposalLeg %d", rev, gotRev, rec.ProposalLeg)
+	}
+}
+
+// TestReclaim_AugurDispatch_AdvancedLegReleasesAndAdvances: the sweep seam. The
+// sweep enumerates MARKS, so an expired mark over a leg the plan has recorded is
+// the only thing that will look at this gap again — released and advanced in the
+// same pass, or the plan stalls on the completed leg forever.
+func TestReclaim_AugurDispatch_AdvancedLegReleasesAndAdvances(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchEHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	key := markKey(targetID, handle, "missing_dispatch")
+	rec := fixtureMark(targetID, handle, "missing_dispatch", actionProposedOp, pastLease())
+	rec.EntityKey = "vtx.augurproposal." + handle
+	h.putMark(t, ctx, key, rec)
+	h.putRow(t, ctx, targetID, handle, twoLegRow(handle, 1))
+
+	h.pass(ctx)
+
+	op := h.nextOp(t)
+	if op["operationType"] != "RecordLeaseDecision" {
+		t.Fatalf("expected the released leg to advance to the SECOND leg in the same pass, got %v", op["operationType"])
+	}
+	flip := h.nextOp(t)
+	if flip["operationType"] != opRecordProposalDispatch {
+		t.Fatalf("expected the advanced leg's flip, got %v", flip["operationType"])
+	}
+
+	fresh, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("expected a FRESH mark for the advanced leg (err=%v found=%v)", err, found)
+	}
+	if fresh.ProposalLeg != 1 {
+		t.Fatalf("the advanced mark must record leg 1, got %d", fresh.ProposalLeg)
+	}
+	h.requireNoOp(t)
+}
+
+// TestReclaim_AugurDispatch_SameLegReArmsKeepingItsLeg is the third mark-writer
+// pin: the sweep's reclaim rewrites the whole mark value, so the leg it stands
+// over survives only by being threaded through. A re-armed mark that read back
+// as leg 0 would be released on the next pass and re-dispatch a leg already in
+// flight.
+func TestReclaim_AugurDispatch_SameLegReArmsKeepingItsLeg(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchFHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	key := markKey(targetID, handle, "missing_dispatch")
+	rec := fixtureMark(targetID, handle, "missing_dispatch", actionProposedOp, pastLease())
+	rec.EntityKey = "vtx.augurproposal." + handle
+	rec.ProposalLeg = 1
+	h.putMark(t, ctx, key, rec)
+	h.putRow(t, ctx, targetID, handle, twoLegRow(handle, 1))
+
+	h.pass(ctx)
+
+	op := h.nextOp(t)
+	if op["operationType"] != "RecordLeaseDecision" {
+		t.Fatalf("the reclaim re-fires the SAME leg, got %v", op["operationType"])
+	}
+	rearmed, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("the reclaim must leave a mark standing (err=%v found=%v)", err, found)
+	}
+	if rearmed.ProposalLeg != 1 {
+		t.Fatalf("the re-armed mark must keep its leg: proposalLeg = %d, want 1", rearmed.ProposalLeg)
+	}
+}
+
+// TestFireEpisode_AugurDispatch_StaleReclaimKeepsItsLeg is the second mark-writer
+// pin: lane 1's own in-place re-arm of an expired external mark (fireEpisode's
+// stale branch) rewrites the whole mark value, so the leg it stands over must be
+// written back. It comes off the PLAN being re-fired, which for a re-arm is the
+// same leg the row still stands on.
+func TestFireEpisode_AugurDispatch_StaleReclaimKeepsItsLeg(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchGHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	key := markKey(targetID, handle, "missing_dispatch")
+	rec := fixtureMark(targetID, handle, "missing_dispatch", actionProposedOp, pastLease())
+	rec.EntityKey = "vtx.augurproposal." + handle
+	rec.ProposalLeg = 1
+	staleRev := h.putMark(t, ctx, key, rec)
+
+	// inflight_<g>, declared and false, is what nominates the gap for the
+	// external stale-reconcile class staleMark gates the in-place re-arm on.
+	row := twoLegRow(handle, 1)
+	row["inflight_dispatch"] = false
+	body, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal row: %v", err)
+	}
+	msg := substrate.Message{
+		Subject:      h.engine.rowSubjectPrefix + targetID + "." + handle,
+		Body:         body,
+		Sequence:     9,
+		NumDelivered: 1,
+	}
+	if dec := h.engine.handleRow(ctx, msg); dec != substrate.Ack {
+		t.Fatalf("the stale-mark re-arm must Ack, got %v", dec)
+	}
+	if op := h.nextOp(t); op["operationType"] != "RecordLeaseDecision" {
+		t.Fatalf("the re-arm re-fires the SAME leg, got %v", op["operationType"])
+	}
+
+	rearmed, gotRev, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("the re-arm must leave a mark standing (err=%v found=%v)", err, found)
+	}
+	if gotRev == staleRev {
+		t.Fatal("the re-arm must replace the mark in place with a fresh revision")
+	}
+	if rearmed.ProposalLeg != 1 {
+		t.Fatalf("the re-armed mark must keep its leg: proposalLeg = %d, want 1", rearmed.ProposalLeg)
+	}
 }

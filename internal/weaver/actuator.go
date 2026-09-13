@@ -191,24 +191,28 @@ func deriveAugurHandle(targetID, entityID, gapColumn string) string {
 }
 
 // deriveProposalDispatchRequestID returns the deterministic requestId for the
-// Fire 2b augurDispatch target's proposed-remediation op — PROPOSAL-scoped
-// (keyed on the handle alone, no mark revision / claimId), so a sweep reclaim
-// of the same open dispatch re-derives the SAME requestId and collapses on the
-// Contract #4 tracker (at-most-one remediation effect) regardless of whether
-// the prior attempt's RecordProposalDispatch flip ever landed (design
-// augur-dispatch-pickup §3.3/§3.4). Namespaced disjoint from every other
+// Fire 2b augurDispatch target's proposed-remediation op — PROPOSAL-and-LEG-
+// scoped (keyed on the handle and the plan leg, never a mark revision /
+// claimId), so a sweep reclaim of the same open dispatch re-derives the SAME
+// requestId and collapses on the Contract #4 tracker (at-most-one remediation
+// effect per leg) regardless of whether the prior attempt's
+// RecordProposalDispatch flip ever landed (design augur-dispatch-pickup
+// §3.3/§3.4), while the NEXT leg of a plan is a genuinely different op. leg 0 is
+// every single-step proposal's only leg, and folds the zero revision every
+// unscoped derivation here folds. Namespaced disjoint from every other
 // derivation.
-func deriveProposalDispatchRequestID(proposalHandle string) string {
-	return deriveID("proposalDispatch:", proposalHandle, 0)
+func deriveProposalDispatchRequestID(proposalHandle string, leg int) string {
+	return deriveID("proposalDispatch:", proposalHandle, uint64(leg))
 }
 
 // deriveProposalDispatchFlipRequestID returns the deterministic requestId for
 // the RecordProposalDispatch flip that follows a Fire 2b dispatch — scoped to
-// the proposal handle AND the outcome, so a redelivery/reclaim's repeat flip
-// attempt (dispatched or invalid) collapses on the Contract #4 tracker too;
-// the DDL's approved-only guard is the independent second backstop.
-func deriveProposalDispatchFlipRequestID(proposalHandle, outcome string) string {
-	return deriveID("proposalDispatchFlip:", proposalHandle+"\x00"+outcome, 0)
+// the proposal handle, the outcome AND the leg it records, so a
+// redelivery/reclaim's repeat flip attempt (dispatched or invalid) collapses on
+// the Contract #4 tracker too while the next leg's flip is its own op; the
+// DDL's approved-only + matching-leg guards are the independent second backstop.
+func deriveProposalDispatchFlipRequestID(proposalHandle, outcome string, leg int) string {
+	return deriveID("proposalDispatchFlip:", proposalHandle+"\x00"+outcome, uint64(leg))
 }
 
 // deriveTimerRequestID returns the deterministic requestId for one fired-timer

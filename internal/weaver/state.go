@@ -115,6 +115,13 @@ const dispatchCountTTLBackstopFactor = 256
 // a reader that inferred the class from "this action no longer resolves" would
 // take a removed ref under an open leg for a standing escalation. The document
 // declares its class; the key only addresses.
+//
+// ProposalLeg is the plan leg a proposedOp episode dispatched — which leg of an
+// Augur proposal's ordered remediation this mark stands over. A proposal whose
+// leg counter has since advanced past it has left this episode behind, and the
+// mark is released so the next leg dispatches fresh; without the field an
+// expired mark would be reclaimed forever onto the leg the plan has already
+// dispatched. Zero for every other dispatch and for a single-step proposal.
 type mark struct {
 	TargetID       string `json:"targetId"`
 	EntityKey      string `json:"entityKey"`
@@ -122,6 +129,7 @@ type mark struct {
 	Action         string `json:"action"`
 	EscalatedFrom  string `json:"escalatedFrom,omitempty"`
 	Escalation     string `json:"escalation,omitempty"`
+	ProposalLeg    int    `json:"proposalLeg,omitempty"`
 	ClaimID        string `json:"claimId,omitempty"`
 	ClaimedAt      string `json:"claimedAt"`
 	LeaseExpiresAt string `json:"leaseExpiresAt,omitempty"`
@@ -164,8 +172,10 @@ func markKey(targetID, entityID, gapColumn string) string {
 //
 // escalatedFrom is the plan leg this episode displaces and escalation the
 // trigger it was escalated on — both set only by an Augur escalation, empty for
-// every ordinary dispatch.
-func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, escalation string) (revision uint64, claimID string, exists bool, err error) {
+// every ordinary dispatch. proposalLeg is the Augur plan leg a proposedOp
+// dispatch fires, zero for every other dispatch.
+func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, escalation string,
+	proposalLeg int) (revision uint64, claimID string, exists bool, err error) {
 	claimID, err = substrate.NewNanoID()
 	if err != nil {
 		return 0, "", false, fmt.Errorf("weaver: mint mark claimId: %w", err)
@@ -178,6 +188,7 @@ func (m *markStore) create(ctx context.Context, targetID, entityID, gapColumn, e
 		Action:         action,
 		EscalatedFrom:  escalatedFrom,
 		Escalation:     escalation,
+		ProposalLeg:    proposalLeg,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
@@ -246,9 +257,11 @@ func (m *markStore) get(ctx context.Context, targetID, entityID, gapColumn strin
 // is standing over — taking every level test on that pin dark — and leave the
 // re-armed mark unable to say it is an escalation at all. The caller passes what
 // the re-armed episode still is, which for an ordinary re-arm is what the mark
-// already carried.
+// already carried. proposalLeg is the Augur plan leg the episode stands over and
+// travels for the same reason: a re-arm that dropped it would re-read as leg 0
+// and the plan's leg release could never tell this episode from the first one.
 func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, entityKey, action, escalatedFrom, escalation, claimID string,
-	expectedRevision uint64, ttl time.Duration) (revision uint64, conflict bool, err error) {
+	proposalLeg int, expectedRevision uint64, ttl time.Duration) (revision uint64, conflict bool, err error) {
 
 	now := time.Now()
 	rec := mark{
@@ -258,6 +271,7 @@ func (m *markStore) replace(ctx context.Context, targetID, entityID, gapColumn, 
 		Action:         action,
 		EscalatedFrom:  escalatedFrom,
 		Escalation:     escalation,
+		ProposalLeg:    proposalLeg,
 		ClaimID:        claimID,
 		ClaimedAt:      substrate.FormatTimestamp(now),
 		LeaseExpiresAt: substrate.FormatTimestamp(now.Add(m.lease)),
