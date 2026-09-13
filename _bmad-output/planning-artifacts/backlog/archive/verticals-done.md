@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `656fc802` · The 24h class reminder shows where it was sent — `wellnessBookings` projects `reminderSentAt`, My Classes + roster badge it; `TombstoneSession`'s op-meta now declares its required reads.
+- 2026-09-06 · `ef12f478` · `wellnessMemberAccounts` anchors on the identity it keys on — per-anchor seeding/retraction, `DiffRetraction` dropped, five refractor pins moved to closed/derivation; live 6 rows → 6.
 - 2026-09-06 · `eca8a407` · An automated refund is recorded as money handed back — third `refund` reason on the ledger enum, passed by `wellnessRefundSettlement`, refused on a self-scoped credit, badged "(refunded)".
 - 2026-09-06 · `859e7503` · The New-instructor form is offered only to the operator hat that can submit it — `/api/staff-hats` reports `isOperator`, the FE gates the form and admits an operator-only session to Studios.
 - 2026-09-06 · `e0c1b99c` · A waitlisted member is seated the moment their class has room — `wellnessWaitlistPromotion` target → `PromoteWaitlistedBookings` (all promotable, lowest slot first); live: capacity 1→3 seated the waitlist in 4 s.

@@ -802,3 +802,35 @@ ever written by a renewal, and its absence means "the original term").
 transactions; 1 renewal vertex, `status: open` (no renewal has ever been signed, so no lease carries a
 `termStart`). Approved leaseapps without `.tenancy`: 0 (`fuW7…` is tombstoned). Over-charges by the term rule:
 4 (listed in 13.2). Re-run: `nats … kv ls core-kv | grep -E '^vtx\.clause\.[^.]+$' | wc -l` → 6.
+
+### 13.6 Close note (Vertical Steward, 2026-09-13) — SHIPPED `67799a7d`, CI green
+
+Built in full in one fire, no persistent worktree (`steward-verticals-clause-term`, merged and deleted). Live
+landing from the main checkout: `bin/processor` + `bin/gateway` cycled (the new builtin), the three packages
+diff-applied (`loftspace-ledger` 0.5.1→0.6.0, `lease-signing` 0.32.0→0.33.0, `semantic-contracts`
+0.4.8→0.5.0). The first `BackfillClauseTerm` dispatches landed one second before the `operator` grant's
+`cap.role-by-operation` row projected (the documented install lag, `_packages.md` §5) and were `AuthDenied`;
+`lattice weaver revoke` + `enable leaseRentSettlement` cleared the marks and all six clauses termed within 20 s,
+each with its due on the grid and its `governs` link re-keyed (six `governs.leaseapp.` live, six `governs.lease.`
+tombstoned). Observed per clause, matching §13.2's corrected walk: `vigBJ…` (Priya) re-armed at 09-08, the `@at`
+fired at once, one $2,400 charge posted for [09-08, 10-08) and the due moved to 10-08; `oo4Xh…` 09-28, `9LcU…` and
+`RiDMS…` 09-30, `3VM7…` 10-01, all `freshUntil` armed and not violating; `kaZpA…` (Jordan) capped at its
+`validUntil` and marked `completed`, no timer. Four operator `CreditAccount` reversals posted as the primordial
+operator (the Loupe operator actor holds `consoleOperator` + `consumer`, whose `CreditAccount` grant is
+`scope=self`): Priya −$4,800 (owes $2,400 for her first period), `pbCxp…` −$2,100, Jordan −$2,050. Every ledger
+row reads back through `loftspace-ledger-history`; `make verify-kernel` passes against the live stack.
+
+Review classification (one cold opus pass over the whole diff + the lead's review): **implementation-bug ×2**,
+both BLOCKING/SHOULD-FIX and closed before merge — the due-normalization double bill (the derived due was
+re-gridded instead of the charge instant it was derived from) and the unhydrated-`.status`-as-never-charged
+rewind — filed as one `_packages.md` dossier entry; **design-gap ×1** — the clause-anchored `governs` walk the
+brief designed could never bind on the live keys (`governs.lease.`), found by the builder's fixture change, shape
+amended mid-fire to the lease-anchored gap + link repair, filed as a second dossier entry; **doc ×2** — §13.2's
+per-clause live claim was wrong for two clauses and the `missing_term` attribution went stale in three comments,
+both fixed in the commit. The `_packages.md` dossier retired *a lens MATCH edit is a corpus edit* (mechanized by
+the refractor corpus census tests) and stands at 13 entries — one over its cap for the next close pass to fold.
+
+Not built, by design: under-billing catch-up for the three clauses minted late; mid-month proration; an FE
+surface (the ledger already shows every charge with its clause prose). Residual for the running stack: `loom`,
+`bridge`, `loupe`, `facet` and the four vertical apps link the new builtin but never execute it; their binaries
+are rebuilt in `bin/` and their running processes are the pre-fire builds.
