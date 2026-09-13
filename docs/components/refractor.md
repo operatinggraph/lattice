@@ -786,7 +786,13 @@ dropping the row (a dropped convergence row reads to Weaver as an entity deletio
 The lease vertical is the worked example of the *other* way to stay safe — its
 background-check freshness discrimination lives inside a `count`/`max` `CASE` on one
 unfiltered `providedTo` fan, so there is no filtered optional to null-restore at all,
-and the deadline it compares against is a stored marker rather than `$now`.
+and the deadline it compares against is a stored marker rather than `$now`. That holds
+corpus-wide: `lens_clock_reference_corpus_census_test.go` drives every executable cypher
+through `ReferencesParam("now")` and refuses any reference with no allowlist, and pins
+`$projectedAt` to `capabilityRoleIndex` by name (a bare output column the sweep excludes as
+volatile); `negated_varlength_bound_corpus_census_test.go` runs `lint-lens-anchors`' negated
+finite-bound hop rule over the same rendered corpus, which the source-text lint cannot see for
+a `fmt.Sprintf`-built spec.
 
 #### Anchor-tombstone retraction (plain projection lenses)
 

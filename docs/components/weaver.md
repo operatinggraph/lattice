@@ -233,7 +233,9 @@ The freshness rule lives **in the target cypher**, not the engine, and it reads 
 rather than a clock**: the deadline is stored on the entity, and so is the instant a timer fired
 against it (the `freshnessExpiry` marker's `byTarget.<targetId>` entry), so a gap column compares two
 stored values — `missing_<g> = … AND (marker >= deadline)`, or its negation where the column asks for
-freshness rather than for a gap. The same cypher projects the deadline as the optional `freshUntil`
+freshness rather than for a gap. A lens that is no target's own — the auth-plane `capabilityEphemeral`,
+an observer with no `byTarget` entry — reads the marker's `expiredAt`, the entity-wide maximum, since any
+recorded instant at or past its deadline proves the lapse whichever target fired. The same cypher projects the deadline as the optional `freshUntil`
 column the temporal lane arms a timer from (below), which is what makes the marker appear. Reading
 `$now` instead makes the row a function of when it was evaluated, which the projection plane does not
 promise to hold stable.
