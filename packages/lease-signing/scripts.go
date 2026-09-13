@@ -1004,6 +1004,17 @@ def execute(state, op):
         if ulink == None or ulink.isDeleted:
             fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
 
+        # An approved application is an executed lease: its account (heldFor),
+        # balance and rent clause hang off it and the unit is leased, so it is
+        # never withdrawn — the FE hides the button, and the API refuses the
+        # same way. A declined application stays withdrawable (the applicant
+        # frees the guard link to re-apply).
+        # read-posture: (d) declared optionalReads at WithdrawLeaseApplication
+        # dispatch — absent is the undecided application, the normal withdraw.
+        decision = kv.Read(app_key + ".decision")
+        if decision != None and not decision.isDeleted and decision.data.get("value") == "approved":
+            fail("AlreadyApproved: application " + app_key + " is an executed lease and cannot be withdrawn")
+
         # Tombstone the application. The applicationFor / appliesToUnit links are
         # left in place (non-cascading tombstone, the clinic-domain precedent) — they
         # dangle off a tombstoned anchor every reader filters.

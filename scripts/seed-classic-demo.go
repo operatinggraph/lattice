@@ -1603,7 +1603,7 @@ func reapLeasesByApplicant(ctx context.Context, conn *substrate.Conn, applicantK
 					unitPrefix + unitID,
 					link,
 				},
-				OptionalReads: []string{"lnk.identity." + applicantID + ".appliedToUnit.unit." + unitID},
+				OptionalReads: []string{"lnk.identity." + applicantID + ".appliedToUnit.unit." + unitID, leaseKey + ".decision"},
 			})
 		fmt.Printf("==> reaped ghost lease: %s (applicant=%s, verify-fire litter)\n", leaseKey, applicantKey)
 	}
