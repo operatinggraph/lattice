@@ -2,6 +2,16 @@
 
 **Status: ✅ RATIFIED (split) by Andrew 2026-09-02 — "agreed - split it, cursor alone is fine once tombstones are swept".** The enumeration fire (Inc 1–3 as one Lattice fire, §11) is ready, sequenced AFTER the Loupe-lane row *Flows-tab liveness must not read absence from the engine list as orphaned* (§7.1). The retention fork is resolved: the cursor is permanent (accepted), and the delete tombstones — five sixths of the bucket — are swept (§8 alternative 9, filed as its own designer row). Contract #10 substrate: clause 2 committed at ratification with its closing sentence narrowed to the retained-record set; clause 1 lands with the fire, text of record in §7. Winston's adjudications: `runningInstanceReader` swaps to the filter; the `failed` index as designed; Phase 0 re-runs §5's censuses. Winston (Lattice Designer, unattended fire, 2026-09-01).
 
+**Build-time amendment (Steward, 2026-09-13).** Two later Loom fires moved the ground this body stands on, and
+the affected passages are struck where they stand (§3, §4, §5, §11): the 2026-09-03 tombstone-sweep fire
+(`a5f4ef2e`, `loom-state-tombstone-sweep-design.md`) made every removal on the four ephemeral families a
+TTL'd purge and converts legacy DEL markers at start — so **no permanent tombstone subject exists any more**,
+the "tombstones cross the wire" cost is bounded to one minute, `PurgeDeletes` is no longer the lever, and
+§8's alternative 9 is **shipped, not filed**; and `lint-conventions`' `checkLoomStateDelete` now binds this
+fire's one removal (the `failed` marker on redrive) to the `Purge: true, TTL: tombstoneTTL` batch shape. The
+cross-lane constraint on Inc 2 (§7.1, §11) is **satisfied**: Loupe's `flowLiveness` inspects a running row by
+id before badging it (`dafa7b83`, `cmd/loupe/flows.go`). The mechanism is unchanged; the cost claims improve.
+
 **Supersedes the pruning direction** of
 [`loom-terminal-instance-retention-design.md`](loom-terminal-instance-retention-design.md) — whose §0 already
 withdrew its own Inc 1/Inc 3 and re-filed the item as a designer pass naming an absent primitive
@@ -249,6 +259,12 @@ therefore **2× on the heartbeat and 6× on `pinnedDomains`**, with the residue 
 instance ever created. That is a large, cheap, immediate win on the two paths that run thousands of times a
 day — and it is a **constant factor, not a bound**. The bound belongs to Inc 2 and to §9's ceiling.
 
+*Amended 2026-09-13 (build):* the paragraph above priced a bucket that no longer exists. Since `a5f4ef2e`
+a pin's removal is a purge carrying a one-minute TTL, so `instance.*.pattern` matches the live pins plus at
+most a minute's worth of expiring markers — the delivered set **is** bounded by the running population, and
+the heartbeat's transfer drops from every cursor ever created to ~|running|. The mechanism this increment
+ships is exactly as written; only its payoff is now the bound the paragraph withdrew.
+
 Both are pure substitutions: the pin key set is unchanged, and `pinnedDomains`' documented error posture
 (unparseable pin ⇒ skip; transient read error ⇒ hard error) is unchanged. The mid-token `*` is settled, not
 novel: `KVListKeysFilter`'s own doc comment gives it as the target-bounded link-enumeration idiom, it has
@@ -303,6 +319,12 @@ does. Both are still cheap (header-only, and the failed population is small by c
 still bounded by §9's ceiling rather than by this increment. Alternative 9 in §8 is the lever that would bound
 them; it is deliberately not in this fire.
 
+*Amended 2026-09-13 (build):* alternative 9 shipped ahead of this fire (`a5f4ef2e`). The `failed` marker's
+removal on redrive is a TTL'd purge like the pin's (the `checkLoomStateDelete` gate refuses any other shape),
+so neither listing leg pays a permanent tombstone tax: `instance.*.pattern` delivers ~|running| subjects and
+`instance.*.failed` ~|failed|, each plus at most a minute of expiring markers. PUT-not-`CreateOnly` still
+binds: a re-fail inside that minute meets the marker.
+
 **The semantic change, stated plainly:** `complete` instances stop appearing in `lattice.ctrl.loom.list`. That
 is visible in two places, and both are this fire's responsibility to land: `cmd/lattice/loom list`'s help text
 (*"List Loom instances (running + retained terminals)"*) changes in the same commit, and Loupe's Flows badge
@@ -340,12 +362,13 @@ reachable by hand-editing) is resolved in favour of the cursor: `listInstances` 
 so a stale marker costs one extra `KVGetMulti` entry and nothing else, and a *missing* marker hides a failed
 instance from the list — which §6's backfill exists to prevent and §10 prices as the design's main risk.
 
-**The marker adds a seventh subject to any instance that ever fails, permanently.** Its removal by `redrive`
-is a delete like every other in this bucket: the subject stays, holding a tombstone, and no sweep exists
-(§2). That is a real cost of this increment and it is accepted knowingly — the failed population is small by
-construction (an un-redriven failure is an operator work item, not a steady-state class), and the alternative
-is leaving the failed set unenumerable, which is the capability loss §6 exists to prevent. It is also the
-increment that makes alternative 9's absence *visible* rather than merely inherited.
+**The marker adds one subject to a failed instance for as long as it stays failed.** *(Amended 2026-09-13,
+build — the ratified text priced it as a permanent seventh subject; since `a5f4ef2e` the bucket's removals
+are TTL'd purges.)* Its removal by `redrive` is a purge carrying `tombstoneTTL`, in the same CAS-guarded
+batch as the re-pin, so the subject is gone a minute after the redrive — the shape `checkLoomStateDelete`
+mandates for every removal in this package. The failed population is small by construction (an un-redriven
+failure is an operator work item, not a steady-state class), and the alternative is leaving the failed set
+unenumerable, which is the capability loss §6 exists to prevent.
 
 ## 5. Executable censuses
 
@@ -361,7 +384,7 @@ merged `main`; a disagreement is a scope change, not a rounding error.
 | Does any consumer of `ListInstances` read `complete`? | read `cmd/loupe/flows.go`'s `flowLiveness` / `loomInstanceStatuses`, then `cmd/lattice/loom/loom.go`'s `list` | **REFUTED.** `flowLiveness` tests *absence* before status — `!engineHas ⇒ orphaned`, terminal ⇒ `stale-history` — so dropping `complete` converts one verdict into the other. §7.1 owns the remedy |
 | How often does a *whole-bucket* enumeration run? | read `reconcileConsumers`' callers in `internal/loom/engine.go` | reached from the complete arm **and** the fail arm ⇒ **once per terminal instance**, ~1,000×/day here, each a 74,032-subject delivery |
 | `loom-state`'s stream limits | `nats stream info KV_loom-state`, and read `PlatformBuckets()` + `ProvisionBuckets` in `internal/bootstrap/` | `max_msgs_per_subject=1`, `max_age=0`, `max_bytes=-1`; `PerKeyTTL: true` in `platform_buckets.go`, so the live stream carries `allow_msg_ttl=true` and `subject_delete_marker_ttl=1s`. **Confirmed** |
-| Nothing sweeps delete tombstones | `grep -rn PurgeDeletes --include='*.go' .` | **zero production hits** — the mechanism behind §2's ~6-subjects-per-instance figure |
+| Nothing sweeps delete tombstones | `grep -rn PurgeDeletes --include='*.go' .` | **zero production hits** at 2026-09-01 — the mechanism behind §2's ~6-subjects-per-instance figure. **Superseded 2026-09-13 (build):** `a5f4ef2e` made every ephemeral-family removal a TTL'd purge (`grep -rn "KVPurgeWithTTL\|Purge:  *true" internal/loom/` → the terminal batch, `redrive`'s token, the actuator, the start-time sweep), so the figure is now ~1 permanent subject (the cursor) per instance |
 | Producers of `StartLoomPattern` (who can supply a stable `instanceId`) | `grep -rn "StartLoomPattern" --include='*.go' internal/ cmd/ packages/ \| grep -v _test` | 3 production producers — Weaver's `triggerLoom` (always, claimId-seeded); `cmd/lattice/loom start --instance-id` (operator opt-in, else a fresh requestId); Loupe's vault-erase trigger (never). **Only Weaver re-invokes automatically**, so only its path can re-trigger an existing cursor |
 | Readers of `instance.<id>` outside `internal/loom` | `grep -rn "LoomStateBucket" --include='*.go' cmd/ internal/ \| grep -v _test` | exactly one — `cmd/loupe/weaver.go`'s `weaverArtifactLive` (§2.1). No Chronicler reader, no package `kv.Read` |
 | **The sizing input** — live keys, subjects, bytes | `nats kv ls loom-state \| wc -l`; `nats stream info KV_loom-state`; `nats stream subjects KV_loom-state` | **12,341 live keys · 74,032 subjects · 13,536,548 bytes**, of which cursors 12,339, pin subjects 12,339 (**1** live), `token.*` 12,339, `deadline.*` 12,338, `outbox.*` 24,677. Growth ≈ **1,000 instances/day** ⇒ ≈6,000 subjects/day |
@@ -660,7 +683,9 @@ dossier entries — the enumeration lesson (*"a `prefix>` filter that matches a 
 you think it is — the heartbeat's `instance.` prefix matched every cursor for as long as the pin-index fix has
 been shipped"*) and the tombstone lesson (*"in a `max_msgs_per_subject=1` bucket a delete is not a removal: it
 leaves a permanent subject that every listing still pays for, and nothing in this tree sweeps them"*).
-*Owns:* no test; `lint-board` + `lint-conventions` are its gates.
+*Owns:* no test; `lint-board` + `lint-conventions` are its gates. *(Amended 2026-09-13, build: the tombstone
+lesson is already the dossier's seventh entry, minted by the sweep fire — Inc 3 adds the enumeration lesson
+only. Clause 1 was authorised to land with the fire's commit at ratification, so it is not conditional.)*
 
 **Cross-lane constraint, binding on Inc 2.** The Loupe row *[Loupe] Flows-tab liveness must not read absence
 from the list as orphaned* (§7.1) must land **with or before** this fire. It is Stream 3's build lock, so the
@@ -725,3 +750,100 @@ Every claim above is pinned to code that *does* the thing, never to a comment th
 | lease-signing deliberately removed its userTask `maxretries` caps | `packages/lease-signing/lenses.go`, `targets.go` |
 | Reclaim backoff caps at 24 h | `internal/weaver/reconciler.go` — `defaultReclaimBackoffCap` |
 | `instanceId` is optional on the op; absent ⇒ the op's own `requestId` | `packages/orchestration-base/loom_lifecycle.go` |
+
+---
+
+### Enumeration fire brief (build note, 2026-09-13)
+
+Fire branch `claude/relaxed-rubin-q8w7ug` (remote container; `agents/steward/REMOTE.md` binds). One fire, Inc 1–3,
+merged once when complete.
+
+**1. Scope sentence (verbatim, §3 + §11).** *Keep the cursor exactly as it is. Make every enumeration server-side
+and bounded to the actionable set.* Inc 1 — `health.go`'s counter and `state.go`'s `pinnedDomains` onto
+`KVListKeysFilter` with `instance.*.pattern`; `runningInstanceReader` swaps its one method. Inc 2 — the `failed`
+index (`instance.<id>.failed`, PUT on the failed arm of `transition`, purged on `redrive`) + `listInstances` =
+`instance.*.pattern` ∪ `instance.*.failed` → one `KVGetMulti` + the one-shot start-time backfill; `cmd/lattice loom
+list` help text. Inc 3 — `docs/components/loom.md` keyspace + one dossier entry; Contract #10 substrate clause 1
+(text of record §7) lands with the fire's commit.
+
+**2. Verified touch-list (checked live 2026-09-13).**
+- `internal/loom/health.go:78-80` `runningInstanceReader` (one method, `KVListKeysPrefix`); `:98-112` `count`.
+- `internal/loom/state.go:25-30` prefixes; `:39` `patternPinSuffix`; `:48-64` `isInstanceRecordKey` /
+  `isPatternPinKey`; `:207-237` `listInstances` (`KVListKeys` whole bucket → `isInstanceRecordKey` → `KVGetMulti`);
+  `:335-368` `pinnedDomains` (`KVListKeys` whole bucket → `isPatternPinKey`); `:452-537` `transition` — the terminal
+  branch `:463-477` purges the pin `Purge: true, TTL: tombstoneTTL`; `:554-571` `redrive` (instance CAS + plain
+  re-pin).
+- `internal/loom/engine.go:55` `tombstoneTTL = time.Minute`; `:287-346` `Start` — the sweep goroutine `:328-332`
+  joined at `:343`; `:1207` `complete`, `:1238` `fail` (the only two terminal writers, both via `transition`).
+- `internal/loom/control.go:109-127` `ListInstances` (doc comment claims "running + retained terminals").
+- `internal/loom/tombstone_sweep.go:69-76` the `instance.*.pattern` filter idiom + the cursor-family argument.
+- `internal/loom/health_counter_internal_test.go:138-168` the two fakes (`fakeInstanceReader`, `blockingInstanceReader`).
+- `internal/loom/control_internal_test.go:65-118` `putInstance`/`putPin` + `TestListInstances_SeededState`
+  (asserts a complete instance IS listed — rewritten by Inc 2); `:474-515` the real-terminal seeding shape
+  (`createInstance` → `submitStep` → `advance` → `fail`).
+- `internal/substrate/kv.go:282-306` `KVListKeysFilter(ctx, bucket, filter, cursor, limit) (keys, next, err)` —
+  **collects every match in memory, then pages**; `internal/substrate/kv_multi.go:256` `KVGetMulti` (1,024 fast path).
+- `cmd/lattice/loom/loom.go:94` `Short: "List Loom instances (running + retained terminals)"`; `loom_test.go`.
+- `cmd/loupe/flows.go:161` — inspects a running row by id when absent from the list (the §7.1 remedy, landed).
+- `docs/components/loom.md:278` keyspace row, `:283-380` state section, `:458` heartbeat metric, `:542-607` dossier
+  (10 entries; cap 12). `docs/contracts/10-orchestration-substrate.md:95-128` the `loom-state` promises.
+- No `//go:build`-tagged fake implements `runningInstanceReader` (grep over `internal/` + `cmd/`).
+
+**3. Precedents to mirror.** Filter idiom: `tombstone_sweep.go:71` (`instancePrefix + "*" + patternPinSuffix`).
+Removal shape: `state.go:471-476`. Start-time one-shot goroutine, off the startup path, joined before return:
+`engine.go:328-343` + `tombstone_sweep.go:208` (`sweepLegacySummary` log line). Real-terminal test seeding:
+`control_internal_test.go:474-500`. Structural no-body-fetch fake: `health_counter_internal_test.go:138-160`.
+
+**4. Increment order + green checks.**
+- Inc 1: `go test ./internal/loom/ -run 'RunningInstanceCounter|PinnedDomains|ListPins' -count=1` — a fixture test
+  where pins AND cursors coexist proves the filter returns pins only (mutation: the `instance.` prefix / `instance.>`
+  fails it); the counter's structural fake asserts the filter string.
+- Inc 2: `go test ./internal/loom/ -run 'Failed|ListInstances|Redrive|Backfill' -count=1` — marker written on the
+  failed arm, not the complete arm, seeded through a real `transition`; purged on redrive; **re-fail after redrive
+  re-writes it** (the PUT-not-CreateOnly proof — the fixture's purge marker lives `tombstoneTTL`, so a CreateOnly
+  would be refused); `ListInstances` = running ∪ failed, complete absent; backfill idempotent, partial-pass
+  convergent, get-multi pages < 1,024; `go test ./cmd/lattice/loom/`.
+- Inc 3: `go run ./scripts/lint-board.go`, `STRICT=1 go run ./scripts/lint-conventions.go`.
+- Fire: `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go` · `make verify-kernel`
+  (native NATS) · `go test ./internal/loom/... ./internal/substrate/... ./internal/bootstrap/... ./cmd/lattice/...
+  ./cmd/loupe/...` · full `go test ./... -p 4` with `POSTGRES_TEST_DSN`.
+
+**5. In-scope gotchas.** (a) `checkLoomStateDelete`: the marker's removal is `Purge: true, TTL: tombstoneTTL` in a
+literal — never a field assignment, never `KVDelete`. (b) `KVListKeysFilter` collects all matches per call, so the
+backfill lists `instance.*` **once** (limit 0) and chunks the key set locally into <1,024 `KVGetMulti` pages —
+paging the listing would re-deliver the whole cursor family per page (deviation from §6's wording, same bound).
+(c) `instance.*` (one `*`) matches cursors only; `instance.*.pattern` / `instance.*.failed` match one sub-key
+family each — a NanoID never carries a `.`. (d) A `failed` marker whose cursor reads `running`/`complete` is a
+stale index: `listInstances` trusts the record (§4) and excludes a complete one with a warn log, never fails.
+(e) The backfill runs one pass per start, off the startup path, joined before `Start` returns — no completion
+sentinel (new state with its own lifetime; the pass is ~13 fast-path pages). (f) `ListInstances`' and
+`listInstances`' doc comments and `isInstanceRecordKey`'s claim to be "the control-plane's instance.* scan" go
+stale — rewrite, no history narration. (g) No `packages/` content → no manifest bump. (h) Health-KV schema doc
+unchanged (`runningInstances` already documented off the pin index). **Dossier entries copied (loom.md):**
+CreateOnly-vs-marker guard (entry 1); hand-seeded fixtures cannot reach a real terminal's state — seed through
+`createInstance` + `transition` (2); the cursor's presence discharges two obligations with different horizons
+(3); lifetimes live in `10-orchestration-substrate.md` (4); no `require` inside `Eventually` predicates (5);
+deterministic token = entry one, one key over (6); a removal is a TTL'd purge, never a DEL (7); `deadline.>` is a
+delivery (8); act on headers, never on "empty body" (9); a constant enforced only by a test of constants is not
+enforced (10). **Standing checklist:** state needs a lifetime (§4 table — the marker's every boundary);
+every census is a premise (§5 re-run: the four code rows re-confirmed by scout, the live sizing rows NOT
+runnable in the container — no shared stack; they set urgency, not scope); negative test needs its positive
+vector + revert-proof; removal needs transport AND observer (the marker's removal is observed by
+`listInstances` and by the redrive tests); one deterministic key, one writer (the marker: `transition` and the
+backfill both PUT it — idempotent same-content writers, the backfill only where a record already reads
+`failed`); precedent may carry debt.
+
+**6. Adjacent finds.** None filed. The §2.1 presence-probe row and the §7.1 Flows-badge row both closed in
+`dafa7b83` (Loupe lane). §8 alternative 9 shipped as `a5f4ef2e`.
+
+**7. Non-goals.** No cursor retention change; no sweep of anything; no Loupe change; no Health-KV schema change;
+no new control verb; the §9 retraction primitive stays named, not built.
+
+**Scope-diff gate:** every touch above traces to the scope sentence; the one deviation is 5(b) (listing once,
+chunking locally — the bound §6 asks for, at lower cost). Dependencies re-verified both ways: the Loupe row is
+landed (not a blocker); Contract #10 clause 1 lands with this commit per the ratification banner.
+
+**Phase-0 census (2026-09-13, code rows).** Enumeration sites: 3 (`health.go:101`, `state.go:208`, `state.go:336`)
+— confirmed. Terminal write sites: 2 (`engine.go:1208`, `:1239`), both via `transition` — confirmed. `redrive` the
+only `failed → running` path — confirmed. `lattice.ctrl.loom.list` consumers: `cmd/loupe/{control,flows}.go`,
+`cmd/lattice/loom/loom.go` — confirmed. Live sizing rows: not run (no shared stack from the container; REMOTE §3).
