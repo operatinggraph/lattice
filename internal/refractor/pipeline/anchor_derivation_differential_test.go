@@ -394,7 +394,11 @@ func TestDerivation_Differential_VertexAndAspect(t *testing.T) {
 // direct assignment and the role-queue fan-out. It is the lens §4.7's 3b names
 // as the reason the derivation exists — broad-filtered and non-exhaustive, so
 // Increments 1 and 2 cannot narrow it at all, and its targets are UNLABELED
-// positions that only a node-seeded walk can reach.
+// positions that only a node-seeded walk can reach. It is a hand-kept
+// reduction no corpus census sees, and it keeps the `$now` clock deliberately:
+// TestDerivation_Differential_ExpiredTaskIsNotTheDerivationsProblem advances
+// f.now with no CDC event to pin the §4.4 boundary, and the shipped lens
+// (which reads a recorded lapse instead) has no such input to advance.
 const ephemeralDiffSpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)

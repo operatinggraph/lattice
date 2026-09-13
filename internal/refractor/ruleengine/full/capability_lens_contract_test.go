@@ -417,11 +417,12 @@ func TestCapabilityEphemeralLens_ContractConformance(t *testing.T) {
 	cr, err := eng.Parse(body)
 	require.NoError(t, err, "literal capabilityEphemeral cypher must parse")
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	// No $now: capabilityEphemeral decides expiry from the recorded lapse on
+	// the task, so supplying a clock here would pin only the supplied case.
+	// projectedAt stays — the envelope wrapper stamps it on the row.
 	projectedAt := time.Now().UTC().Format(time.RFC3339)
 	params := map[string]any{
 		"actorKey":    managerKey,
-		"now":         now,
 		"projectedAt": projectedAt,
 	}
 	out, err := eng.ExecuteWith(context.Background(), cr,

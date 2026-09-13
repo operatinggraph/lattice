@@ -28,7 +28,10 @@ const freshnessExpiryAspectDDL = "freshnessExpiry"
 // A convergence lens reads its own entry —
 // `<anchor>.freshnessExpiry.data.byTarget.<targetId> >= <the stored deadline>` —
 // so the projected row is a pure function of the subgraph and a re-projection
-// reaches the same verdict whenever it runs. The write also bumps the entity's
+// reaches the same verdict whenever it runs. An OBSERVER lens — one that is no
+// target's own, so it has no `byTarget` entry to read — reads `expiredAt`, the
+// family-wide maximum, which is why that field is constrained (the monotone
+// maximum below) rather than decorative. The write also bumps the entity's
 // adjacency revision, so the marker both carries the verdict and triggers the
 // reprojection that publishes it (FR58's eager re-open).
 //

@@ -38,18 +38,17 @@ func (f *unrFixture) tombstoneVtx(t *testing.T, name string) {
 	require.NoError(t, err)
 }
 
-// projectOrphanedAt runs the anchored orphanedTaskGrants spec for one task
-// with an injected $now, mirroring unrFixture.projectAt.
-func (f *unrFixture) projectOrphanedAt(t *testing.T, taskName, now string) []ruleengine.ProjectionResult {
+// projectOrphaned runs the anchored orphanedTaskGrants spec for one task. NO
+// clock parameter is supplied — the cypher references none, and a fixture that
+// always supplied one would pin only the supplied case.
+func (f *unrFixture) projectOrphaned(t *testing.T, taskName string) []ruleengine.ProjectionResult {
 	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(orphanedTaskGrantsSpec)
 	require.NoError(t, err, "orphanedTaskGrants cypher must parse on the full engine")
 	taskKey := "vtx.task." + f.ids[taskName]
 	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
-		"actorKey":    taskKey,
-		"now":         now,
-		"projectedAt": now,
+		"actorKey": taskKey,
 	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
@@ -64,7 +63,7 @@ func TestOrphanedTaskGrants_OpenWithLiveOp_NotViolating(t *testing.T) {
 	f.vtx(t, "op1", "meta", nil)
 	f.edge(t, "forOperation", "task1", "op1")
 
-	rows := f.projectOrphanedAt(t, "task1", unrNow)
+	rows := f.projectOrphaned(t, "task1")
 	require.Len(t, rows, 1)
 	v := rows[0].Values
 	require.Equal(t, "vtx.task."+f.ids["task1"], v["taskKey"])
@@ -82,7 +81,7 @@ func TestOrphanedTaskGrants_OpenWithTombstonedOp_Violating(t *testing.T) {
 	f.edge(t, "forOperation", "task1", "op1")
 	f.tombstoneVtx(t, "op1")
 
-	v := f.projectOrphanedAt(t, "task1", unrNow)[0].Values
+	v := f.projectOrphaned(t, "task1")[0].Values
 	require.Equal(t, true, v["missing_operation"], "the bound op-meta was tombstoned out from under an open task")
 	require.Equal(t, true, v["violating"])
 	requireIntColumn(t, v, "maxretries_operation", maxOperationRetries)
@@ -95,7 +94,7 @@ func TestOrphanedTaskGrants_OpenWithNoForOperationLink_Violating(t *testing.T) {
 	f := newUnrFixture(t)
 	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-07-01T12:00:00Z"})
 
-	v := f.projectOrphanedAt(t, "task1", unrNow)[0].Values
+	v := f.projectOrphaned(t, "task1")[0].Values
 	require.Equal(t, true, v["missing_operation"], "forOperation is required at CreateTask — an absent link is never legitimate")
 	require.Equal(t, true, v["violating"])
 }
@@ -110,7 +109,7 @@ func TestOrphanedTaskGrants_CancelledNeverMatches(t *testing.T) {
 	f.edge(t, "forOperation", "task1", "op1")
 	f.tombstoneVtx(t, "op1")
 
-	rows := f.projectOrphanedAt(t, "task1", unrNow)
+	rows := f.projectOrphaned(t, "task1")
 	require.Empty(t, rows, "a cancelled task is excluded by the status='open' gate even with a dead op")
 }
 
@@ -124,6 +123,6 @@ func TestOrphanedTaskGrants_CompleteNeverMatches(t *testing.T) {
 	f.edge(t, "forOperation", "task1", "op1")
 	f.tombstoneVtx(t, "op1")
 
-	rows := f.projectOrphanedAt(t, "task1", unrNow)
+	rows := f.projectOrphaned(t, "task1")
 	require.Empty(t, rows, "a completed task is excluded by the status='open' gate — nothing left to converge")
 }
