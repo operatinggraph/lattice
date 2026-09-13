@@ -48,7 +48,7 @@ const (
 
 // The ops the augurproposal DDL owns — each in its permittedCommands and each a
 // permission vertex granted to operator.
-var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch"}
+var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch", "RecordPromotionProposal"}
 
 func main() {
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)

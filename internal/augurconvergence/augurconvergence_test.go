@@ -487,6 +487,148 @@ func (h *harness) awaitDispatchOutcome(handle string, timeout time.Duration) (st
 	return "", "", ""
 }
 
+// putPlanDispatchRow is putDispatchRow for a PLAN-shaped proposal: the row the
+// real augurDispatchPending lens projects carries the whole ordered plan plus the
+// leg counter the flip advances, and action/params mirror the leg being
+// dispatched exactly as the stored proposal mirrors steps[0].
+func (h *harness) putPlanDispatchRow(handle, candidateKey, targetMetaKey string, leg int, steps []map[string]any) {
+	h.t.Helper()
+	asAny := make([]any, 0, len(steps))
+	for _, step := range steps {
+		asAny = append(asAny, any(step))
+	}
+	current := steps[leg]
+	row := map[string]any{
+		"entityKey":        "vtx.augurproposal." + handle,
+		"violating":        true,
+		"missing_dispatch": true,
+		"proposedAction":   current["action"],
+		"proposedParams":   current["params"],
+		"proposedSteps":    asAny,
+		"dispatchLeg":      leg,
+		"candidateKey":     candidateKey,
+		"targetMetaKey":    targetMetaKey,
+		"projectedAt":      substrate.FormatTimestamp(time.Now()),
+	}
+	body, err := json.Marshal(row)
+	require.NoError(h.t, err)
+	_, err = h.conn.KVPut(h.ctx, bootstrap.WeaverTargetsBucket, "augurDispatch."+handle, body)
+	require.NoError(h.t, err)
+}
+
+// awaitReviewLeg polls the proposal's .review aspect until its leg counter
+// reaches want, returning the state it was in at that moment.
+func (h *harness) awaitReviewLeg(handle string, want int, timeout time.Duration) (state string, reached bool) {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if review := readAspect(h, "vtx.augurproposal."+handle+".review"); review != nil {
+			leg, _ := review["leg"].(float64)
+			s, _ := review["state"].(string)
+			if int(leg) >= want {
+				return s, true
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return "", false
+}
+
+// TestAugurConvergence_PlanShapedProposalDispatchesLegByLeg drives a PLAN-shaped
+// proposal the whole way on the live stack: two ordered directOp legs, each
+// validated against the §5 boundary at record time, each dispatched as its own
+// Weaver episode under its own leg-scoped requestId, with the flip advancing the
+// counter between them.
+//
+// The two legs write OPPOSITE values to the same aspect, so the final value is
+// the proof that both ops genuinely committed in order: had the second leg
+// collapsed onto the first's requestId — the failure a shared id would cause —
+// the aspect would still read the first leg's value.
+func TestAugurConvergence_PlanShapedProposalDispatchesLegByLeg(t *testing.T) {
+	h := newHarness(t, nil)
+	entityKey := h.seedEntity()
+	entityID := strings.TrimPrefix(entityKey, "vtx.identity.")
+
+	steps := []map[string]any{
+		{"action": "directOp", "params": map[string]any{
+			"operation": "SetAvailability",
+			"target":    entityKey,
+			"params":    map[string]any{"identity": entityKey, "available": true},
+			"reads":     []any{entityKey},
+		}},
+		{"action": "directOp", "params": map[string]any{
+			"operation": "SetAvailability",
+			"target":    entityKey,
+			"params":    map[string]any{"identity": entityKey, "available": false},
+			"reads":     []any{entityKey},
+		}},
+	}
+	h.augur.SetProposal(bridge.AugurProposal{
+		Steps: []bridge.AugurStep{
+			{Action: "directOp", Params: steps[0]["params"].(map[string]any)},
+			{Action: "directOp", Params: steps[1]["params"].(map[string]any)},
+		},
+		Rationale:  "mark the candidate available, then withdraw it",
+		Confidence: 0.8,
+		Model:      "claude-opus-4-8",
+	})
+
+	const targetID = "augurPlanTarget"
+	h.installAugurTarget(targetID)
+	h.waitTargetConsumer(targetID)
+	h.putGapRow(targetID, entityID, entityKey, "missing_approval")
+
+	p := h.awaitProposal(45 * time.Second)
+	require.NotNil(t, p, "no augurproposal reached a terminal verdict — the escalation loop did not converge")
+	require.Equalf(t, "pending", p.state, "every leg of the plan is in scope; reason=%q", p.reason)
+
+	proposed := readAspect(h, "vtx.augurproposal."+p.handle+".proposed")
+	require.NotNil(t, proposed)
+	recorded, ok := proposed["steps"].([]any)
+	require.True(t, ok, "the recorded proposal must carry its ordered plan, got %T", proposed["steps"])
+	require.Len(t, recorded, 2)
+	review := readAspect(h, "vtx.augurproposal."+p.handle+".review")
+	require.NotNil(t, review)
+	leg, _ := review["leg"].(float64)
+	require.EqualValues(t, 0, leg, "nothing is dispatched at record")
+
+	reply := h.approve(p.handle)
+	require.Equalf(t, processor.ReplyStatusAccepted, reply.Status, "ReviewProposal{approve}: %+v", reply.Error)
+
+	h.waitTargetConsumer("augurDispatch")
+	claim := readAspect(h, "vtx.augurproposal."+p.handle+".gap")
+	require.NotNil(t, claim, "the claim's TRUSTED .gap context must be live")
+	targetMetaKey, _ := claim["targetId"].(string)
+	require.NotEmpty(t, targetMetaKey)
+
+	// Leg 0. The flip advances the counter and leaves the proposal APPROVED —
+	// still dispatchable, now for the next leg.
+	h.putPlanDispatchRow(p.handle, entityKey, targetMetaKey, 0, steps)
+	state, reached := h.awaitReviewLeg(p.handle, 1, 45*time.Second)
+	require.True(t, reached, "the flip must advance the leg counter after leg 0")
+	require.Equal(t, "approved", state, "a plan with legs remaining stays approved, not dispatched")
+	require.Empty(t, readAspect(h, "vtx.augurproposal."+p.handle+".review")["dispatchedAt"],
+		"dispatchedAt is stamped only once the LAST leg fires")
+	avail := readAspect(h, entityKey+".availability")
+	require.NotNil(t, avail, "leg 0's remediation must have actually run")
+	require.Equal(t, true, avail["available"], "leg 0 wrote available=true")
+
+	// Leg 1, arriving as the lens's re-projection of the advanced row. Weaver
+	// releases the leg-0 mark and dispatches the next leg fresh.
+	h.putPlanDispatchRow(p.handle, entityKey, targetMetaKey, 1, steps)
+	finalState, reason, dispatchedAt := h.awaitDispatchOutcome(p.handle, 45*time.Second)
+	require.Equalf(t, "dispatched", finalState, "the last leg terminates the plan; reason=%q", reason)
+	require.NotEmpty(t, dispatchedAt, "dispatchedAt must be stamped on the last leg")
+	finalReview := readAspect(h, "vtx.augurproposal."+p.handle+".review")
+	finalLeg, _ := finalReview["leg"].(float64)
+	require.EqualValues(t, 2, finalLeg, "the counter ends at the plan's length")
+
+	avail = readAspect(h, entityKey+".availability")
+	require.NotNil(t, avail)
+	require.Equal(t, false, avail["available"],
+		"leg 1 wrote available=false — the second op committed as its own dispatch, not a collapse onto leg 0's requestId")
+}
+
 // TestAugurConvergence_Fire2b_DispatchApprovedProposal drives the loop's last
 // hop end-to-end: an approved directOp(SetAvailability) proposal dispatches
 // through the real Weaver two-op fire (the materialised remediation, then

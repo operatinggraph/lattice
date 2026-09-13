@@ -93,7 +93,7 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "augurproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch"},
+		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch", "RecordPromotionProposal"},
 		Description: "Augur proposal DDL — the externalTask matched pair for one reasoning episode. " +
 			"Vertex shape: vtx.augurproposal.<handle>, class=augurproposal, root data = {} (D5); business " +
 			"data in aspects: .gap {targetId, entityId, gapColumn, trigger, model} (the instanceOp's TRUSTED " +
@@ -131,7 +131,16 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"invalid with the given reason, counter unchanged — no half-plan continues. " +
 			"Only an approved proposal can be dispatched; a redelivery or a second flip of the same leg is rejected " +
 			"(InvalidDispatchTransition) — in practice unreachable on a genuine redelivery, since the flip's own " +
-			"leg-scoped deterministic requestId already collapses on the Contract #4 tracker first.",
+			"leg-scoped deterministic requestId already collapses on the Contract #4 tracker first. " +
+			"RecordPromotionProposal is Weaver's OWN engine-authored recommendation (payload {handle, targetId, " +
+			"gapColumn, actionRef, window, closed}): when a planned-mode target's action has closed every episode of " +
+			"its full confidence window, Weaver mints the whole proposal in one commit — .gap {trigger: \"promotion\", " +
+			"entityId = the target's meta vertex}, .proposed {action: \"promotePlaybook\", …}, .confidence {score: 1.0}, " +
+			".provenance {model: \"weaver\"}, .review {state: pending} — for the same human review surface a model " +
+			"proposal lands on. The handle is derived from (target, gapColumn, actionRef), so the create-only vertex IS " +
+			"the durable emit-once latch. promotePlaybook is deliberately OUTSIDE the escalation vocabulary: a promotion " +
+			"is a recommendation for the package author, so approving one skips the §5 re-validation, and dispatching " +
+			"one is refused (InvalidDispatchTransition) on top of the lens excluding it from violating.",
 		Script: augurproposalDDLScript,
 		InputSchema: `{"type":"object","description":"RecordProposal — the bridge replyOp. The bridge posts {externalRef, status, result}; gap context is reconstructed from the claim vertex, never this payload.","properties":` +
 			`{"externalRef":{"type":"string","description":"The bare instanceKey handle of the reasoning episode; the claim vertex is vtx.augurproposal.<externalRef>."},` +
@@ -148,6 +157,11 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"verdict":     "ReviewProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field.",
 			"outcome":     "RecordProposalDispatch only — the Weaver-computed dispatch-time verdict for ONE leg: 'dispatched' (that leg's remediation was fired; the leg counter advances, and dispatchedAt is stamped only when it was the last leg) or 'invalid' (the dispatch-time §5 re-validation failed; reason is required, and the whole proposal — not just the leg — goes invalid). Only an approved proposal may transition.",
 			"reason":      "RecordProposalDispatch only — the auditable explanation for an 'invalid' outcome (e.g. a stale/uninstalled operation reference, a scope-escape caught at dispatch time). Ignored/omitted on a 'dispatched' outcome.",
+			"handle":      "RecordPromotionProposal only — the bare NanoID handle Weaver derives from (targetId, gapColumn, actionRef); the proposal vertex is vtx.augurproposal.<handle>, minted create-only, so a repeat emission for the same triple conflicts and commits nothing. No dots / key segments / wildcards / whitespace.",
+			"actionRef":   "RecordPromotionProposal only — the goal-catalog action ref whose confidence window came back all-closed; the action the proposal recommends the package author declare as the gap's playbook entry.",
+			"window":      "RecordPromotionProposal only — the size of the confidence window the evidence was read from (the engine's effectWindowSize). Recorded on the proposal so a reviewer can see how much evidence the recommendation rests on.",
+			"closed":      "RecordPromotionProposal only — how many of those window episodes were observed to close. Weaver emits only when it equals window; the figure is recorded so the reviewer reads the evidence rather than trusting the emission rule.",
+			"gapColumn":   "RecordPromotionProposal only — the missing_<g> column the recommended action closes.",
 			"leg":         "RecordProposalDispatch only — the 0-based index of the plan leg this flip records, defaulting to 0 (a single-step proposal's only leg). It must equal the proposal's current review.leg: a flip naming any other leg is a stale dispatch whose remediation is already recorded, and it is rejected (InvalidDispatchTransition) rather than allowed to skip a leg.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -264,6 +278,27 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 					"repeat of leg=0 is a stale dispatch and rejects InvalidDispatchTransition.",
 			},
 			{
+				Name: "RecordPromotionProposal — Weaver recommends promoting a goal leg that always closes",
+				Payload: map[string]any{
+					"handle":    "promotionHandleHJKMNPQ",
+					"targetId":  "vtx.meta.<weaverTargetNanoID>",
+					"gapColumn": "missing_approval",
+					"actionRef": "assignApproval",
+					"window":    20,
+					"closed":    20,
+				},
+				ExpectedOutcome: "Restricted to Weaver's dispatch actor (any other submitter is AuthDenied before the " +
+					"payload is read). Validates the weaver target is alive, then mints the WHOLE proposal in one " +
+					"commit — no claim vertex, no reasoning call: vtx.augurproposal.promotionHandleHJKMNPQ with " +
+					".gap {trigger: \"promotion\", entityId = the target's own meta vertex}, .proposed " +
+					"{action: \"promotePlaybook\", params: {targetId, gapColumn, actionRef, window, closed}, steps: [that one leg]}, " +
+					".confidence {score: 1.0}, .provenance {model: \"weaver\"}, .review {state: pending, leg: 0}, and both " +
+					"links pointing at the target meta. Every mutation is create-only, so a repeat emission for the same " +
+					"(target, gap, actionRef) conflicts and commits nothing — the vertex is the durable emit-once latch. " +
+					"An operator can approve it (no §5 re-validation: promotePlaybook is deliberately outside the " +
+					"escalation vocabulary) or reject it; it is never dispatched.",
+			},
+			{
 				Name: "RecordProposalDispatch — Weaver flips an approved proposal invalid (dispatch-time drift caught)",
 				Payload: map[string]any{
 					"externalRef": "augurEpisodeHJKMNPQRST",
@@ -284,6 +319,13 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 // .gap aspect — the bridge posts the reply with no ContextHint.Reads). The §5
 // record-time deterministic-validation boundary decides pending vs invalid on the
 // reply; the proposal is always stored (auditability). No-orphan by construction.
+// It also owns the review/dispatch flips and RecordPromotionProposal, Weaver's
+// own engine-authored recommendation.
+//
+// The script below is a Go RAW STRING: a backtick anywhere inside it — Starlark
+// comment prose included — terminates the literal and the file stops compiling
+// with an error pointing at whatever Starlark follows. Quote identifiers with
+// plain words, never backticks.
 const augurproposalDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -314,6 +356,14 @@ def optional_string_attr(p, name):
     v = getattr(p, name)
     if v == None or type(v) != type(""):
         return ""
+    return v
+
+def required_int(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type(0) or v < 0:
+        fail("InvalidArgument: " + name + ": required non-negative integer")
     return v
 
 def required_bare_handle(p, name):
@@ -519,9 +569,9 @@ def steps_verdict(steps, entity_key, entity_id):
 # (ok, reason); ok False => the approval fail-closes to invalid.
 def revalidate_for_approval(proposal_key):
     # read-posture: (a) declared in contextHint.reads by ReviewProposal's
-    # dispatcher (test envelope today — no production dispatcher yet, hard
-    # case 3, script-read-posture-design §13); absence of a recorded
-    # .proposed aspect is a wiring fault, never a legitimate branch
+    # approve dispatcher (Loupe's review view, cmd/loupe/web/js/views/review.js);
+    # absence of a recorded .proposed aspect is a wiring fault, never a
+    # legitimate branch
     proposed_doc = kv.Read(proposal_key + ".proposed")
     if not alive(proposed_doc) or proposed_doc.data == None:
         return False, "proposal has no recorded .proposed aspect"
@@ -551,7 +601,7 @@ def revalidate_for_approval(proposal_key):
         steps = stored
 
     # read-posture: (a) declared in contextHint.reads by ReviewProposal's
-    # dispatcher (see the .proposed note above)
+    # approve dispatcher (see the .proposed note above)
     conf_doc = kv.Read(proposal_key + ".confidence")
     score = -1.0
     if alive(conf_doc) and conf_doc.data != None and "score" in conf_doc.data:
@@ -562,7 +612,7 @@ def revalidate_for_approval(proposal_key):
         return False, "confidence out of range [0,1]: " + str(score)
 
     # read-posture: (a) declared in contextHint.reads by ReviewProposal's
-    # dispatcher (see the .proposed note above)
+    # approve dispatcher (see the .proposed note above)
     gap_doc = kv.Read(proposal_key + ".gap")
     if not alive(gap_doc) or gap_doc.data == None or "entityId" not in gap_doc.data:
         return False, "claim .gap missing entityId"
@@ -822,9 +872,9 @@ def execute(state, op):
         if verdict != "approve" and verdict != "reject":
             fail("InvalidArgument: verdict: must be one of approve, reject; got " + verdict)
 
-        # read-posture: (a) declared in contextHint.reads by ReviewProposal's
-        # dispatcher (test envelope today — no production dispatcher yet, hard
-        # case 3, script-read-posture-design §13); absence is a wiring fault
+        # read-posture: (a) declared in contextHint.reads by BOTH ReviewProposal
+        # dispatchers — approve and reject alike (Loupe's review view,
+        # cmd/loupe/web/js/views/review.js); absence is a wiring fault
         review_doc = kv.Read(proposal_key + ".review")
         if not alive(review_doc):
             fail("UnknownAugurProposal: no recorded proposal for " + proposal_key + " (RecordProposal must commit a verdict before review)")
@@ -850,16 +900,33 @@ def execute(state, op):
         invalid_reason = ""
         if verdict == "reject":
             # A reject is always permitted — no re-validation; the operator declines
-            # the proposal regardless of whether it would still dispatch.
+            # the proposal regardless of whether it would still dispatch. It reads
+            # nothing beyond the .review aspect the pending-only guard needed,
+            # which is exactly what the reject dispatcher declares.
             new_state = "rejected"
         else:
-            # Re-run the §5 boundary against the STORED proposal (design §3.2). A
-            # re-validation failure fail-closes to invalid: the operator reviewed,
-            # but the verdict is invalid, never approved / dispatchable.
-            in_scope, reason = revalidate_for_approval(proposal_key)
-            if not in_scope:
-                new_state = "invalid"
-                invalid_reason = "re-validation at approval failed: " + reason
+            # A PROMOTION proposal is a recommendation for the package author, not
+            # a remediation: its action is deliberately outside the escalation
+            # vocabulary, so the §5 re-validation would fail-close every approval
+            # of one. The trigger comes from the TRUSTED .gap aspect the minting
+            # op wrote, never from anything the reviewer supplies. The read lives
+            # inside this arm because only an approval asks the question, and the
+            # reject dispatcher declares no .gap.
+            # read-posture: (a) declared in contextHint.reads by ReviewProposal's
+            # approve dispatcher (Loupe's review view, cmd/loupe/web/js/views/review.js)
+            rv_gap_doc = kv.Read(proposal_key + ".gap")
+            is_promotion = False
+            if alive(rv_gap_doc) and rv_gap_doc.data != None and "trigger" in rv_gap_doc.data:
+                is_promotion = rv_gap_doc.data["trigger"] == "promotion"
+            if not is_promotion:
+                # Re-run the §5 boundary against the STORED proposal (design §3.2).
+                # A re-validation failure fail-closes to invalid: the operator
+                # reviewed, but the verdict is invalid, never approved /
+                # dispatchable.
+                in_scope, reason = revalidate_for_approval(proposal_key)
+                if not in_scope:
+                    new_state = "invalid"
+                    invalid_reason = "re-validation at approval failed: " + reason
 
         # Flip the .review aspect (unconditioned update, preserving the aspect's
         # full shape — D5; the reply leg carries no ContextHint.Reads, so the
@@ -936,6 +1003,18 @@ def execute(state, op):
         if cur_state != "approved":
             fail("InvalidDispatchTransition: proposal " + proposal_key + " is '" + cur_state + "', only an approved proposal can be dispatched")
 
+        # A PROMOTION proposal is a recommendation for the package author and is
+        # never dispatched — an approved one carries no remediation the platform
+        # could fire. The augurDispatchPending lens already excludes it from
+        # violating, so nothing should reach here; this is the second,
+        # independent refusal, taken from the TRUSTED .gap aspect.
+        # read-posture: (a) declared in contextHint.reads by Weaver's
+        # recordDispatchOutcomePlan directOp (internal/weaver/augur_dispatch.go)
+        dp_gap_doc = kv.Read(proposal_key + ".gap")
+        if alive(dp_gap_doc) and dp_gap_doc.data != None and "trigger" in dp_gap_doc.data:
+            if dp_gap_doc.data["trigger"] == "promotion":
+                fail("InvalidDispatchTransition: a promotion proposal is never dispatched: " + proposal_key)
+
         cur_leg = review_leg(rd)
         if leg != cur_leg:
             fail("InvalidDispatchTransition: proposal " + proposal_key + " stands at leg " + str(cur_leg) + ", stale leg " + str(leg) + " cannot be recorded")
@@ -982,6 +1061,82 @@ def execute(state, op):
             {"class": "augur.proposalDispatched",
              "data": {"proposalKey": proposal_key, "outcome": outcome,
                       "reason": new_invalid_reason, "leg": new_leg}},
+        ]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": proposal_key}}
+
+    if ot == "RecordPromotionProposal":
+        # actor-guard: (primordial) restricted to Weaver's dispatch actor, the
+        # same guard and the same reason as CreateAugurReasoningClaim. Every
+        # coordinate this branch trusts — the target, the gap column, the action
+        # ref and the window figures — arrives FLAT off the payload and is
+        # written as the proposal a human reads and ratifies, so a wider
+        # submitter set is a forged recommendation: an arbitrary operator
+        # manufacturing evidence that some action always works. First statement
+        # in the branch, so it also denies the payload-shape oracles beneath it.
+        if op.actor != primordialActor["weaver"]:
+            fail("AuthDenied: RecordPromotionProposal is restricted to Weaver's dispatch actor; got " + op.actor)
+
+        # Weaver's own proposal that a goal leg has earned a place in the
+        # playbook: the action closed every episode of its full confidence
+        # window. It is authored by the engine rather than a model, so it has no
+        # claim vertex and no reasoning call — this op mints the WHOLE proposal
+        # in one commit, already pending, for the same human review surface every
+        # model proposal lands on.
+        #
+        # Every mutation is create-only, and the handle is derived from
+        # (target, gap, actionRef) alone — so the vertex IS the durable latch: a
+        # second emission for the same triple conflicts here and commits nothing,
+        # whatever the engine's in-memory latch has forgotten across a restart.
+        handle = required_bare_handle(p, "handle")
+        target_key = required_string(p, "targetId")
+        gap_column = required_string(p, "gapColumn")
+        action_ref = required_string(p, "actionRef")
+        window = required_int(p, "window")
+        closed = required_int(p, "closed")
+        _, target_id = parts_of(target_key, "targetId", "meta")
+
+        # No-orphan (FR29 / P4): the recommendation's two links both point at the
+        # weaver target's meta vertex, which must be alive.
+        # read-posture: (a) declared in contextHint.reads by Weaver's promotion
+        # submit (internal/weaver/evaluator.go proposePromotionIfClean)
+        if not alive(kv.Read(target_key)):
+            fail("UnknownTarget: " + target_key)
+
+        proposal_key = "vtx.augurproposal." + handle
+        promo_params = {"targetId": target_key, "gapColumn": gap_column,
+                        "actionRef": action_ref, "window": window, "closed": closed}
+        # The candidate of a promotion IS the target's meta vertex: the
+        # recommendation is about the target's playbook, not about any one entity.
+        forcand_lnk = "lnk.augurproposal." + handle + ".forCandidate.meta." + target_id
+        fortarget_lnk = "lnk.augurproposal." + handle + ".forTarget.meta." + target_id
+        rationale = ("action " + action_ref + " closed " + str(closed) + " of its last " + str(window) +
+                     " dispatches of " + gap_column + " on " + target_key +
+                     "; promoting it to the playbook's declared entry for that gap removes the planner's need to derive it")
+
+        mutations = [
+            make_vtx(proposal_key, "augurproposal", {}),
+            make_aspect(proposal_key, "gap", "augur.gap",
+                        {"targetId": target_key, "entityId": target_key,
+                         "gapColumn": gap_column, "trigger": "promotion", "model": ""}),
+            make_aspect(proposal_key, "proposed", "augur.proposed",
+                        {"action": "promotePlaybook", "params": promo_params,
+                         "steps": [{"action": "promotePlaybook", "params": promo_params}]}),
+            make_aspect(proposal_key, "rationale", "augur.rationale", {"text": rationale}),
+            make_aspect(proposal_key, "confidence", "augur.confidence", {"score": 1.0}),
+            make_aspect(proposal_key, "provenance", "augur.provenance",
+                        {"model": "weaver", "promptHash": "", "catalogHash": "",
+                         "reasonedAt": op.submittedAt}),
+            make_aspect(proposal_key, "review", "augur.review",
+                        {"state": "pending", "invalidReason": "",
+                         "reviewedAt": "", "dispatchedAt": "", "leg": 0}),
+            make_link(forcand_lnk, proposal_key, target_key, "forCandidate", "forCandidate", {}),
+            make_link(fortarget_lnk, proposal_key, target_key, "forTarget", "forTarget", {}),
+        ]
+        events = [
+            {"class": "augur.proposalRecorded",
+             "data": {"proposalKey": proposal_key, "entityId": target_key,
+                      "action": "promotePlaybook", "reviewState": "pending"}},
         ]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": proposal_key}}

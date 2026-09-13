@@ -233,12 +233,13 @@ func buildProposedDirectOpPlan(params map[string]any, expectedRevision uint64) (
 // op (the DDL's approved-only + matching-leg guards are the second, independent
 // backstop). The payload carries the leg it records, which the DDL refuses
 // unless it is the leg the proposal currently stands at. ContextHint.Reads
-// carries the proposal's .review and .proposed aspects (the required keys the
-// DDL's kv.Reads fail closed on — the verdict it guards on, and the plan it
-// counts legs against; read-posture class (a), script-read-posture-design §13);
-// the bare proposalKey rides alongside them for authTarget's
-// belt-and-suspenders alive check, mirroring CreateAugurReasoningClaim's
-// convention.
+// carries the proposal's .review, .proposed and .gap aspects (the required keys
+// the DDL's kv.Reads fail closed on — the verdict it guards on, the plan it
+// counts legs against, and the trigger that tells a model proposal from a
+// promotion, which is never dispatched; read-posture class (a),
+// script-read-posture-design §13); the bare proposalKey rides alongside them for
+// authTarget's belt-and-suspenders alive check, mirroring
+// CreateAugurReasoningClaim's convention.
 func recordDispatchOutcomePlan(handle, outcome, reason string, leg int) *plan {
 	proposalKey := "vtx.augurproposal." + handle
 	return &plan{
@@ -252,7 +253,7 @@ func recordDispatchOutcomePlan(handle, outcome, reason string, leg int) *plan {
 			}
 			return p
 		},
-		reads: []string{proposalKey, proposalKey + ".review", proposalKey + ".proposed"},
+		reads: []string{proposalKey, proposalKey + ".review", proposalKey + ".proposed", proposalKey + ".gap"},
 	}
 }
 

@@ -535,14 +535,18 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// escalation still releases at the boundary the contract promises.
 	// The same boundary for an Augur PLAN: a proposedOp mark whose leg the
 	// proposal's counter has passed stands over a leg already dispatched and
-	// recorded, so it is released and the rest of this call dispatches the next
-	// leg as a fresh episode. It carries none of the goal-gap bookkeeping — a
-	// proposal has no catalog leg, no retry budget of its own and no effect
-	// window — so it is its own release rather than a branch of the one above.
-	if found && e.releaseAdvancedProposalLeg(ctx, targetID, entityID, col, ga, rec, row, markRev) {
+	// recorded, so it is released — mark and per-leg retry budget together — and
+	// the rest of this call dispatches the next leg as a fresh episode. It is its
+	// own release rather than a branch of the one above because a proposal has no
+	// catalog leg to test effects against and no confidence window to credit: the
+	// row's own counter is the boundary, already decided by the flip.
+	if found && e.releaseAdvancedProposalLeg(ctx, targetID, entityID, col, ga, rec, row, markRev, countRev) {
 		found = false
 		pinnedAction = ""
-		rec = nil
+		// The release cleared the mark and the count, so nothing records a leg or
+		// a revision any more — the same zero pair every reader below treats as
+		// "nothing recorded", and the state the release actually left.
+		rec, count, countRev = nil, dispatchCount{}, 0
 	}
 
 	if found && e.releaseCompletedLeg(ctx, targetID, entityID, col, ga, legOf(ga, rec, count), row, markRev, countRev) {
@@ -1526,6 +1530,12 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 			if cErr := e.marks.recordEffectClose(ctx, targetID, col, rec.Action); cErr != nil {
 				e.logger.Warn("weaver: effect close record failed",
 					"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
+			} else {
+				// The credit just landed, so this is the moment the window can
+				// have become all-closed. Only a successful credit asks: a
+				// failed one leaves the window as it was, and proposing off it
+				// would rest the recommendation on evidence that was not written.
+				e.proposePromotionIfClean(ctx, target, targetID, col, rec.Action)
 			}
 		}
 	}
@@ -1814,6 +1824,11 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 	if err := e.marks.recordEffectClose(ctx, targetID, col, pinnedAction); err != nil {
 		e.logger.Warn("weaver: goal leg release effect-close record failed",
 			"targetId", targetID, "entityId", entityID, "gap", col, "action", pinnedAction, "err", err)
+	} else if target, known := e.source.target(targetID); known {
+		// A leg boundary credits the window exactly as a gap close does, so it
+		// is the same moment the leg can have earned its recommendation. Only a
+		// successful credit asks (see the gap-close site's note).
+		e.proposePromotionIfClean(ctx, target, targetID, col, pinnedAction)
 	}
 	if markRev != 0 {
 		// The mark delete above was this release's mutex, so the budget follows
@@ -1960,6 +1975,77 @@ func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col 
 	return true
 }
 
+// proposePromotionIfClean submits Weaver's OWN recommendation that a goal leg be
+// promoted to the gap's declared playbook entry — the one seam where the engine
+// authors a proposal instead of a model. It runs immediately after a close has
+// been credited to (targetID, gapColumn, actionRef)'s confidence window, and
+// fires only when that window is FULL and every one of its episodes closed: the
+// evidence the recommendation rests on is "this action has never once failed to
+// close, across a whole window", and a single un-closed episode withdraws it.
+// Non-planned targets never reach the emission — only a planned-mode target
+// derives its legs, so only it has a derived leg to recommend declaring.
+//
+// It fires NO EPISODE, and that is the whole point: there is no mark, no
+// dispatch-count booking, no classifier and no pacing. Those exist to bound
+// REMEDIATION of a row's gap — a repeatable action against an entity that may
+// need retrying, backing off, or reclaiming. This is one deterministic op per
+// (target, gap, actionRef) for the life of the deployment, addressed to a human
+// rather than to the graph, so the only duplicate-suppression it needs is
+// identity: the requestId collapses on the Contract #4 tracker and the proposal
+// vertex is create-only under a handle derived from the same triple. Mirrors the
+// temporal lane's markless MarkExpired submit (docs/components/weaver.md §"Lane
+// 3").
+//
+// The in-memory latch keeps the repeats off the wire — a full all-closed window
+// stays full, so every later close would otherwise re-submit an op that collapses
+// on arrival. It is created on first emission and lost on restart, which is
+// harmless for exactly the reason above: the durable latch is the vertex. A
+// publish failure clears it so the next close retries.
+func (e *Engine) proposePromotionIfClean(ctx context.Context, target *Target, targetID, gapColumn, actionRef string) {
+	if target == nil || target.Mode != targetModePlanned || actionRef == "" {
+		return
+	}
+	rate, sampleSize, ok, err := e.marks.effectCloseRate(ctx, targetID, gapColumn, actionRef)
+	if err != nil {
+		e.logger.Warn("weaver: promotion window read failed; not proposing this close",
+			"targetId", targetID, "gap", gapColumn, "action", actionRef, "err", err)
+		return
+	}
+	if !ok || sampleSize < effectWindowSize || rate < 1.0 {
+		return
+	}
+	targetMetaKey, ok := e.source.targetMetaKey(targetID)
+	if !ok {
+		return
+	}
+	latch := targetID + "\x00" + gapColumn + "\x00" + actionRef
+	if _, loaded := e.promoted.LoadOrStore(latch, struct{}{}); loaded {
+		return
+	}
+	handle := derivePromotionHandle(targetID, gapColumn, actionRef)
+	payload := map[string]any{
+		"handle":    handle,
+		"targetId":  targetMetaKey,
+		"gapColumn": gapColumn,
+		"actionRef": actionRef,
+		"window":    effectWindowSize,
+		"closed":    sampleSize,
+	}
+	// The target's meta vertex is both the authTarget (the capability check's
+	// anchor, as augurEscalation anchors its own directOp) and the op's single
+	// declared read (the no-orphan alive check its script runs) — the
+	// recommendation is about that target's playbook, so it names nothing else.
+	if err := e.act.submit(ctx, derivePromotionRequestID(targetID, gapColumn, actionRef),
+		opRecordPromotionProposal, "", payload, targetMetaKey, []string{targetMetaKey}, nil, nil); err != nil {
+		e.promoted.Delete(latch)
+		e.logger.Warn("weaver: promotion proposal publish failed; the next close retries it",
+			"targetId", targetID, "gap", gapColumn, "action", actionRef, "err", err)
+		return
+	}
+	e.logger.Info("weaver: promotion proposed; the action closed its whole confidence window",
+		"targetId", targetID, "gap", gapColumn, "action", actionRef, "window", effectWindowSize)
+}
+
 // releaseAdvancedProposalLeg clears the mark of a proposedOp episode the
 // proposal has already moved past: the row's dispatchLeg column says the plan's
 // leg counter is beyond the leg this mark stands over, so the leg it holds was
@@ -1979,8 +2065,23 @@ func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col 
 // therefore an ordinary proposedOp episode and inherits proposedOp's own
 // classification — an external dispatch class whose reclaim is collapse-only —
 // exactly as the first leg did.
+//
+// The gap's dispatch-count is reset with the mark, because the retry budget is
+// PER LEG (Contract #10 §10.8: a pin release resets the gap's dispatch count):
+// the attempts charged to it were spent reaching the leg that has now been
+// recorded, and carrying them into the next leg would spend one plan's budget on
+// another leg's first try. The mark delete goes FIRST and is what decides
+// ownership — it is the mutex, exactly as releaseCompletedLeg's marked branch
+// argues — so the count reset follows only a won delete. A crash between the two
+// leaves a released mark over a stale count, which the next episode's own
+// booking writes over; the reverse order would destroy the budget of an episode
+// this caller may not own. countRev is the revision the caller read the count at:
+// a conflict (a concurrent dispatch booked against it since) leaves the document
+// standing and the release still stands. A caller holding no revision — the gate
+// answered without reading the count — clears it blind on the strength of the
+// same mutex.
 func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entityID, col string,
-	ga GapAction, rec *mark, row map[string]any, markRev uint64) bool {
+	ga GapAction, rec *mark, row map[string]any, markRev, countRev uint64) bool {
 
 	if ga.Action != actionProposedOp || rec == nil {
 		return false
@@ -2000,6 +2101,19 @@ func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entit
 		e.logger.Debug("weaver: proposal leg release lost the mark delete; a concurrent pass owns the gap",
 			"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg)
 		return false
+	}
+	if countRev != 0 {
+		countConflict, cErr := e.marks.deleteDispatchCountRevision(ctx, targetID, entityID, col, countRev)
+		if cErr != nil {
+			e.logger.Warn("weaver: proposal leg release dispatch-count reset failed",
+				"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
+		} else if countConflict {
+			e.logger.Debug("weaver: proposal leg release left a changed dispatch-count standing",
+				"targetId", targetID, "entityId", entityID, "gap", col)
+		}
+	} else if cErr := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); cErr != nil {
+		e.logger.Warn("weaver: proposal leg release dispatch-count reset failed",
+			"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
 	}
 	e.logger.Info("weaver: proposal leg released; the plan advances to its next leg",
 		"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg)

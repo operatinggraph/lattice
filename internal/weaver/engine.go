@@ -294,6 +294,14 @@ type Engine struct {
 	// can walk a pace window without waiting one out. Nil means time.Now — see
 	// Engine.now, which is what every caller goes through.
 	clock func() time.Time
+	// promoted is the in-memory emit-once set for promotion recommendations,
+	// keyed <targetId>\x00<gapColumn>\x00<actionRef>. It keeps the repeat
+	// emissions of a window that stays full off the wire; it is NOT the
+	// correctness latch. That is the proposal vertex itself, minted create-only
+	// under a handle derived from the same triple, which refuses a second
+	// emission whatever this set has forgotten — so losing it on restart costs
+	// one collapsed op, never a duplicate recommendation. Zero value is ready.
+	promoted sync.Map
 
 	mu sync.Mutex
 	// targets is the last-applied desired lane-1 consumer set (targetId →

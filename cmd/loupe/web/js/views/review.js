@@ -579,6 +579,30 @@ function proposedOpSection(p) {
     meta.appendChild(el("span", "confidence-band " + band, "conf " + p.confidence.toFixed(2)));
   }
   box.appendChild(meta);
+  const steps = Array.isArray(p.proposedSteps) ? p.proposedSteps : [];
+  if (steps.length > 1) {
+    // A PLAN: the legs are dispatched one per episode, in order, and the
+    // reviewer approves the whole plan — so the whole plan is what the card
+    // shows, with the leg counter saying how far it has run. proposedAction /
+    // proposedParams mirror steps[0], so rendering both would repeat the first
+    // leg.
+    const leg = typeof p.dispatchLeg === "number" ? p.dispatchLeg : 0;
+    box.appendChild(el("div", "muted small",
+      "plan of " + steps.length + " legs — " + leg + " dispatched"));
+    const list = el("ol", "review-plan");
+    steps.forEach(function (step, i) {
+      const item = el("li");
+      const head = el("div", "muted small",
+        "leg " + i + (i < leg ? " (dispatched)" : "") + " — " + ((step && step.action) || "?"));
+      item.appendChild(head);
+      item.appendChild(step && step.params !== undefined && step.params !== null
+        ? renderDoc(step.params)
+        : el("div", "muted small", "(no params recorded)"));
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+    return box;
+  }
   box.appendChild(p.proposedParams !== undefined && p.proposedParams !== null
     ? renderDoc(p.proposedParams)
     : el("div", "muted small", "(no params recorded)"));
@@ -661,11 +685,17 @@ function augurActionSection(p, raw) {
 }
 
 function augurOutcomeLine(p, displayState) {
+  // A multi-leg plan runs across several dispatches, so the verdict line carries
+  // how far it has got: "approved" alone would read as "nothing has happened
+  // yet" for a plan that is halfway through.
+  const steps = Array.isArray(p.proposedSteps) ? p.proposedSteps : [];
+  const leg = typeof p.dispatchLeg === "number" ? p.dispatchLeg : 0;
+  const legSuffix = steps.length > 1 ? " — leg " + leg + " of " + steps.length : "";
   if (displayState === "dispatched") {
-    return "approved & dispatched at " + (p.dispatchedAt || "?");
+    return "approved & dispatched at " + (p.dispatchedAt || "?") + legSuffix;
   }
   if (displayState === "approved") {
-    return "approved at " + (p.reviewedAt || "?") + " — awaiting dispatch";
+    return "approved at " + (p.reviewedAt || "?") + " — awaiting dispatch" + legSuffix;
   }
   if (displayState === "rejected") {
     return "rejected at " + (p.reviewedAt || "?");

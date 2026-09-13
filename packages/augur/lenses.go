@@ -76,13 +76,21 @@ func Lenses() []pkgmgr.LensSpec {
 // concatenation in cypher (the full engine's function set has none) because
 // BuildKey composes it in Go from the anchor key alone.
 //
-// `violating = (reviewState = "approved")` is the ONLY dispatching state and is
-// default-deny: a pending / rejected / invalid / dispatched / superseded
-// proposal — or a claim still in flight (null reviewState) — projects
-// violating=false (no dispatch). The row is 1:1 with the proposal vertex, so
-// the approved→dispatched flip is a single-row column overwrite (`violating`
-// retracts via the ordinary §10.2 upsert) — no negative/filter-retraction
-// primitive needed (design §3.1, §4).
+// `violating` is approved-AND-not-a-promotion, and is default-deny: a pending /
+// rejected / invalid / dispatched / superseded proposal — or a claim still in
+// flight (null reviewState) — projects violating=false (no dispatch). The row is
+// 1:1 with the proposal vertex, so the approved→dispatched flip is a single-row
+// column overwrite (`violating` retracts via the ordinary §10.2 upsert) — no
+// negative/filter-retraction primitive needed (design §3.1, §4).
+//
+// The trigger term excludes Weaver's own PROMOTION proposals. A promotion is a
+// recommendation for the package author — its proposed action is deliberately
+// outside the escalation vocabulary and there is nothing for the platform to
+// fire — so an approved one is a ratified recommendation, never a dispatch. The
+// exclusion is here, at the pickup transport, so the dispatch never begins;
+// RecordProposalDispatch refuses one independently. A model proposal's trigger
+// is "unplannable" or "exhausted", and a claim with no .gap at all compares
+// null, which `<>` reads as unequal — so only a promotion is excluded.
 //
 // candidateKey / targetMetaKey come from the TRUSTED .gap aspect (the
 // instanceOp-minted escalation context) — never from the model's .proposed
@@ -112,8 +120,8 @@ RETURN
   pr.gap.data.entityId AS candidateKey,
   pr.gap.data.targetId AS targetMetaKey,
   pr.gap.data.gapColumn AS originGap,
-  (pr.review.data.state = "approved") AS missing_dispatch,
-  (pr.review.data.state = "approved") AS violating
+  ((pr.review.data.state = "approved") AND (pr.gap.data.trigger <> "promotion")) AS missing_dispatch,
+  ((pr.review.data.state = "approved") AND (pr.gap.data.trigger <> "promotion")) AS violating
 `
 
 // augurProposalsSpec projects one row per augurproposal vertex. Flat (no-WITH, no

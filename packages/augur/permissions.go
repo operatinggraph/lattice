@@ -4,7 +4,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
-// All four ops are operator-driven — Weaver (the directOp dispatcher / the
+// All five ops are operator-driven — Weaver (the directOp dispatcher / the
 // augurDispatch two-op fire), the bridge service actor, and the human reviewer
 // are operator-equivalent (holdsRole → operator, exactly like the
 // orchestration-base service actors), so each op is granted to operator at
@@ -21,6 +21,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - RecordProposalDispatch — Weaver submits this flip as the second op of the
 //     augurDispatch target's two-op dispatch (design Fire 2b §3.3), recording
 //     whether the proposed remediation fired.
+//   - RecordPromotionProposal — Weaver submits its OWN recommendation that a goal
+//     leg whose confidence window came back all-closed be promoted to the gap's
+//     declared playbook entry; it mints the whole proposal for human review.
 //
 // All are target-less for auth (the directOp/replyOp posture, Contract #10
 // §10.4): auth keys on operationType + actor, so the operator grant authorizes
@@ -50,6 +53,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "RecordProposalDispatch",
 			Scope:         "any",
 			Note:          "Authorizes Weaver (operator-equivalent) to submit the dispatched-flip that closes the augurDispatch target's two-op dispatch (design Fire 2b §3.3): approved → dispatched | invalid.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordPromotionProposal",
+			Scope:         "any",
+			Note:          "Authorizes Weaver (operator-equivalent) to mint its own promotion recommendation — the whole proposal in one commit, pending human review — when a planned-mode target's action has closed every episode of its confidence window. The op's own script pins op.actor to Weaver's primordial dispatch actor, so the operator grant is the outer of two checks.",
 			GrantsTo:      []string{"operator"},
 		},
 	}

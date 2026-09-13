@@ -853,3 +853,53 @@ func TestFireEpisode_AugurDispatch_StaleReclaimKeepsItsLeg(t *testing.T) {
 		t.Fatalf("the re-armed mark must keep its leg: proposalLeg = %d, want 1", rearmed.ProposalLeg)
 	}
 }
+
+// TestReleaseAdvancedProposalLeg_ResetsTheGapsDispatchCount: the retry budget is
+// PER LEG — the attempts charged to it were spent reaching the leg the proposal
+// has now recorded, so the release clears them. Carrying them forward would spend
+// one leg's budget on the next leg's first try.
+func TestReleaseAdvancedProposalLeg_ResetsTheGapsDispatchCount(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchHHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	markRev, _, lost, err := h.engine.marks.create(ctx, targetID, handle, "missing_dispatch",
+		"vtx.augurproposal."+handle, actionProposedOp, "", "", 0)
+	if err != nil || lost {
+		t.Fatalf("seed leg-0 mark: err=%v lost=%v", err, lost)
+	}
+	putStateValue(t, ctx, h.conn, countKey(targetID, handle, "missing_dispatch"),
+		dispatchCount{Count: 3, Leg: actionProposedOp})
+	_, countRev, err := h.engine.marks.getDispatchCount(ctx, targetID, handle, "missing_dispatch")
+	if err != nil {
+		t.Fatalf("read the seeded count's revision: %v", err)
+	}
+
+	ga := GapAction{Action: actionProposedOp}
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("read the seeded mark: err=%v found=%v", err, found)
+	}
+	if !h.engine.releaseAdvancedProposalLeg(ctx, targetID, handle, "missing_dispatch", ga, rec,
+		twoLegRow(handle, 1), markRev, countRev) {
+		t.Fatal("the advanced leg must release")
+	}
+
+	// getDispatchCount, not a raw read: a clean reset DELETES the document, and
+	// absence reads as the zero one.
+	doc, _, err := h.engine.marks.getDispatchCount(ctx, targetID, handle, "missing_dispatch")
+	if err != nil {
+		t.Fatalf("read the count document back: %v", err)
+	}
+	if doc.Count != 0 {
+		t.Fatalf("count document = %+v, want it reset: the next leg starts on a fresh per-leg budget", doc)
+	}
+}

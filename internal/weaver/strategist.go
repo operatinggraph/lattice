@@ -36,10 +36,11 @@ const (
 
 // Operation types the Actuator submits.
 const (
-	opStartLoomPattern       = "StartLoomPattern"       // op-name: (submits) the Actuator submits this to trigger a Loom pattern instance for a triggerLoom action
-	opCreateTask             = "CreateTask"             // op-name: (submits) the Actuator submits this for an assignTask action, assigning a bound op to a human subject
-	opMarkExpired            = "MarkExpired"            // op-name: (submits) the Actuator submits this when a gap's mark has outlived its TTL
-	opRecordProposalDispatch = "RecordProposalDispatch" // op-name: (submits) the Actuator submits this to record that an approved Augur proposal was dispatched as a directOp
+	opStartLoomPattern        = "StartLoomPattern"        // op-name: (submits) the Actuator submits this to trigger a Loom pattern instance for a triggerLoom action
+	opCreateTask              = "CreateTask"              // op-name: (submits) the Actuator submits this for an assignTask action, assigning a bound op to a human subject
+	opMarkExpired             = "MarkExpired"             // op-name: (submits) the Actuator submits this when a gap's mark has outlived its TTL
+	opRecordProposalDispatch  = "RecordProposalDispatch"  // op-name: (submits) the Actuator submits this to record that an approved Augur proposal was dispatched as a directOp
+	opRecordPromotionProposal = "RecordPromotionProposal" // op-name: (submits) the Actuator submits this to recommend promoting a goal leg whose confidence window came back all-closed
 )
 
 // assignTaskGrantTTL is the expiry horizon set on an assignTask grant. The

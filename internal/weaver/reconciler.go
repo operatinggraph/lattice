@@ -1166,7 +1166,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// ever look at this gap again. Released and advanced in the same pass, the
 	// plan reaches its next leg; released and returned, it would wait on a row
 	// write that the flip has already made.
-	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev) {
+	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev, countRev) {
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			e.logger.Warn("weaver sweep: proposal leg-advance dispatch did not complete cleanly; will retry",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
@@ -1666,6 +1666,18 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 		if cErr := e.marks.recordEffectClose(ctx, targetID, gapColumn, action); cErr != nil {
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
+		} else if target, known := e.source.target(targetID); known {
+			// The credit just landed, so this is the moment the window can have
+			// become all-closed — the same question the two lane-1 credit sites
+			// ask, asked here for the same reason this leg credits at all: for a
+			// row that has gone quiet the sweep is the ONLY leg that will ever
+			// observe the close, so a recommendation earned by that close would
+			// otherwise wait on a lane-1 delivery that never comes. Only a
+			// successful credit asks: a failed one leaves the window as it was,
+			// and proposing off it would rest the recommendation on evidence that
+			// was not written. A target the registry no longer knows proposes
+			// nothing — there is no playbook left to recommend an entry for.
+			e.proposePromotionIfClean(ctx, target, targetID, gapColumn, action)
 		}
 		// The delete won, so this gap has ENDED for this entity — the same fact
 		// lane-1's clearClosedMarks acts on, through the same function, so the
