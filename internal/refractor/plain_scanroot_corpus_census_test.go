@@ -182,6 +182,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"providerIdentityReadGrants": {hasNeighbour: true, reason: rootUngrounded},
 	"providerSites":              {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"renewalsRead":               {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"retentionClassKeyEnvelope":  {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"retentionKeyStatus":         {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"shredStatus":                {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},

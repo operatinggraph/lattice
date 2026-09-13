@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	retentionHolderID = "RetCLassHoLderAAAAAA"
-	encounterAnchorID = "AppointmentAnchorAAA"
+	retentionHolderID   = "RetCLassHoLderAAAAAA"
+	encounterAnchorID   = "AppointmentAnchorAAA"
+	unknownKindHolderID = "UnknownKindHoLderAAA"
 )
 
 // newKeyIDTestVault builds a real LocalBackend — fake crypto would prove
@@ -141,11 +142,12 @@ func TestDecryptSensitiveDoc_MalformedKeyIDNeverFallsBackToTheAnchor(t *testing.
 	}
 }
 
-// The egress disposition refuses a holder the bridge cannot serve. The
-// piiKeyEnvelope lens enumerates identity holders alone, so authoring a ref
-// for a class-held record would produce an envelope that never projects; the
-// refusal happens where the operation is authored instead.
-func TestEgressReads_ClassHeldRecord_RefusedAtMint(t *testing.T) {
+// A retention-class-held record authors an egress ref: the class holder kind
+// has its own live envelope projection, so the boundary serves it and the mint
+// gate admits it. The ref carries the CLASS holder in its ciphertext's keyId —
+// which is what the bridge resolves its envelope source from — and a MAC, so
+// the boundary can verify the mint happened before any key is touched.
+func TestEgressReads_ClassHeldRecord_AuthorsARef(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	v := newKeyIDTestVault(t)
@@ -157,12 +159,51 @@ func TestEgressReads_ClassHeldRecord_RefusedAtMint(t *testing.T) {
 
 	env := asPrimordialEngine(newTestEnvelope(testNanoID2))
 	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	marker, ok := state.Context.Hydrated[aspectKey].Data["$sensitiveRef"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("data = %+v, want a $sensitiveRef marker", state.Context.Hydrated[aspectKey].Data)
+	}
+	ciphertext, ok := marker["ciphertext"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("marker = %+v, want a ciphertext object", marker)
+	}
+	if keyID, _ := ciphertext["keyId"].(string); keyID != holderKey {
+		t.Errorf("marker ciphertext keyId = %q, want the class holder %q", keyID, holderKey)
+	}
+	if mac, _ := marker["mac"].(string); mac == "" {
+		t.Errorf("marker = %+v, want a minted mac the boundary can verify", marker)
+	}
+}
+
+// A holder kind outside the closed set (vault.KeyHolderKinds) is refused at
+// mint, with the kind named — the pin that makes a third custody kind fail
+// here, typed, rather than at the boundary as an envelope that never projects.
+// The positive vector proving a ref for a non-identity holder reaches this gate
+// at all is TestEgressReads_ClassHeldRecord_AuthorsARef above: same seal-under-
+// a-foreign-holder fixture, same egress disposition, admitted — so this test's
+// refusal is the gate firing, not the vector missing it.
+func TestEgressReads_UnknownHolderKind_RefusedAtMint(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	v := newKeyIDTestVault(t)
+	h := newEgressTestHydrator(t, ctx, conn, v)
+
+	holderKey := "vtx.foo." + unknownKindHolderID
+	aspectKey := "vtx.appointment." + encounterAnchorID + ".ssn"
+	sealUnderHolder(t, ctx, conn, v, holderKey, aspectKey, "ssn", `{"value":"chart note"}`)
+
+	env := asPrimordialEngine(newTestEnvelope(testNanoID2))
+	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
 	_, err := h.Hydrate(ctx, env)
 	if err == nil {
-		t.Fatalf("a class-held record must not be authored as an egress ref")
+		t.Fatalf("a record held by a kind with no envelope projection must not be authored as an egress ref")
 	}
-	if !strings.Contains(err.Error(), "retentionclass") {
-		t.Fatalf("err = %v, want the refusal to name the holder type", err)
+	if !strings.Contains(err.Error(), `"foo"`) {
+		t.Fatalf("err = %v, want the refusal to name the holder kind", err)
 	}
 }
 

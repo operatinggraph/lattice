@@ -170,9 +170,11 @@ caller and never discovered by graph traversal. Two holder kinds exist:
   **erase-on-expiry**. Its DEK is destroyed by `ShredRetentionClassKey`, on the controller's retention
   schedule, not on a data subject's request.
 
-**The external-egress boundary carries identity-held records only.** The bridge resolves a holder's
-envelope from a lens that enumerates identity holders alone, so an egress ref for any other holder type
-is refused, with the type named, at the site that authors the operation.
+**The external-egress boundary serves every key-holder kind custody can name.** A sensitive-ref's
+holder is served from a live envelope projection for that holder kind. An egress ref whose holder kind
+has no such projection is refused, with the kind named, at the site that authors the operation — never
+deferred to the boundary as an envelope that fails to appear. A sensitive-ref is served only where the
+operation placed it; one carried inside a nested parameter value is refused at the boundary.
 
 Every holder references only its **wrapped** DEK, from `<holderKey>.piiKey`, satisfying "key material
 never in Core KV." Encryption is non-deterministic (random nonce) and is compatible with
@@ -236,17 +238,19 @@ RPC**, which recomputes the MAC before any decryption; because the MAC covers th
 custody is **authenticated rather than re-derived**. An unverifiable ref (absent or mismatched MAC) is a
 permanent data error — never decrypted, never retried. A ref is a per-execution artifact, not a durable
 capability: a consumer never accepts a marker outside the event of the operation that minted it. The
-wholesale decrypt RPC (no MAC) remains for the trusted-tool inspector class only. A sensitive-ref for a
-**non-`identity`** holder is **refused** at hydration until the external-egress key-envelope read path
-covers non-identity holders; the refusal is typed and loud, never a silent pass-through of raw
-ciphertext.
+wholesale decrypt RPC (no MAC) remains for the trusted-tool inspector class only. A sensitive-ref whose
+holder kind the external-egress envelope read path does not serve is **refused** at hydration; the
+refusal is typed and loud, never a silent pass-through of raw ciphertext.
 
 **Reveal.** A decrypt request carrying no actor and no declared purpose is **denied** for a
 non-`identity` holder. A retention-class record has no data subject whose grant scopes its disclosure, so
 the wholesale trusted-tool decrypt RPC — which carries neither actor nor purpose — is not an
 authorization path for it. The sanctioned read path is a read-path-authorized **Secure Lens**, where
 custody answers "can this be decrypted at all" and the Protected/RLS/grant plane answers "which actor
-sees this row."
+sees this row." An external-egress unwrap is not such a request: the ref it opens was minted inside an
+operation that declared the read for a named adapter and ran under an accountable actor, and the unwrap
+verifies that provenance before any key is touched. Egress is therefore licensed for every holder kind
+by the declaration, not by the holder's custody.
 
 ### 3.11 Sensitive-object (blob) encryption at rest
 

@@ -225,17 +225,22 @@ func IsKeyHolderKind(vertexType string) bool
 ### 3.3 The bridge picks its envelope source by holder kind
 
 ```go
+// envelopeBucketByHolderKind is envelopeBucketFor's table — a map, so a test can
+// enumerate the kinds it serves and pin that set equal to vault.KeyHolderKinds()
+// in both directions (a switch cannot be enumerated).
+var envelopeBucketByHolderKind = map[string]string{
+    "identity":       identityEnvelopeBucket,       // "privacy-pii-key-envelopes"
+    "retentionclass": retentionClassEnvelopeBucket, // "privacy-retention-key-envelopes"
+}
+
 // envelopeBucketFor maps a key holder's vertex type to the lens read model that
 // projects that holder kind's live envelope. Every kind in vault.KeyHolderKinds
 // has an entry; a kind with none is refused permanently, naming the kind.
-func envelopeBucketFor(holderType string) (bucket string, ok bool) {
-    switch holderType {
-    case "identity":       return identityEnvelopeBucket, true       // "privacy-pii-key-envelopes"
-    case "retentionclass": return retentionClassEnvelopeBucket, true // "privacy-retention-key-envelopes"
-    }
-    return "", false
-}
+func envelopeBucketFor(holderType string) (bucket string, ok bool)
 ```
+
+*(Amended at build, 2026-09-12: the table is a map rather than the switch first sketched here, because the
+both-directions pin this section requires is only expressible over an enumerable table.)*
 
 `fetchLiveEnvelope(ctx, bucket, keyHolderKey)` takes the bucket; everything after it — transient budget
 on absence, permanent on a bad row, `ErrKeyShredded` permanent, MAC-unverified permanent — is unchanged.
@@ -263,7 +268,9 @@ sequence behind that fire** and claims no closure from it; §11 records the resi
 **(a) The docGen adapter reads `tenantName` from the unwrapped map.** `docGenFields` keeps its nested
 `doc` from `RawParams` (the numeric fields need it — `docgen_adapter.go:26-28`), and gains one read from
 `req.Params["tenantName"]` — the flat, unwrapped string map every adapter already receives — used for the
-"Tenant" line ahead of the existing `doc.Applicant` fallback. This is the shape the background-check
+"Tenant" line ahead of the existing `doc.Applicant` fallback. *(Amended at build, 2026-09-12: the resolution
+order is the flat param, then a `doc`-carried plaintext name, then the applicant key; the "Tenant ID" line
+follows the resolved name from whichever source supplied it.)* This is the shape the background-check
 consumer already has (ledger #23). The verticals increment then templates
 `"tenantName": "subject.tenantName.data.value"` at the **top level** of the `leaseDocument` step's
 `Params`, beside `"family"`, and leaves `doc` as it is.
@@ -275,6 +282,14 @@ unwrap does not serve")`. Today a nested marker rides out to a vendor as ciphert
 decrypt grant), but after this design it is a *retained record's* ciphertext leaving the platform, and
 the same shape is the silent way Inc 2 fails if it templates into `doc`. Refusing converts both into one
 typed terminal outcome.
+
+*(Amended at build, 2026-09-12 — two widenings of the refusal as first written.)* **(i)** The scan is bounded at
+eight levels and refuses on **truncation as well as on a hit**: a value that nests past the bound with a container
+still unopened is refused, because a walk that stopped early establishes nothing about what lies below it, and a
+bound that answered "no marker" on truncation would be the way to carry one past the scan at depth nine. No shipped
+step nests past two. **(ii)** A `params` value that is not a JSON object at all (a bare array or scalar, which Loom
+passes through opaque) is scanned too: nothing in it is ever served, so a marker anywhere inside it is refused the
+same way. Both are mechanism (§7.3); the contract sentence in §7.1(a) is what they make true.
 
 ### 3.6 Read path / write path
 
@@ -363,10 +378,12 @@ leaseapp roots: 64
 ```
 
 **C6 — registration sites of a privacy-base lens.** The first grep keyed on the sibling's name and was
-answer-shaped; the corpus enumeration is the census. `internal/refractor` carries **nine**
-`*corpus_census*_test.go` files; the four the name-grep hid (`actor_onekey`, `actor_walk_scope`,
-`anchor_hopindex`, `personal_derivation`, `rel_projection`) pin no privacy lens, so the conclusion holds
-but the build re-runs all nine.
+answer-shaped; the corpus enumeration is the census. *(Corrected at build, 2026-09-12: `internal/refractor`
+carries **13** `*census*_test.go` files, of which **seven** pin plain lenses by name — `branch_decomposition_pins`,
+`grouping_reduction`, `label_derivation`, `plain_partition`, `plain_retraction_transport`, `plain_scanroot`,
+`plain_with_alias_closure` — and each gained the new lens with the identity lens's verdicts; `anchor_hopindex`
+skips any lens with no `$actorKey` anchor position, so neither envelope lens reaches it.)* The build re-runs all
+of them.
 
 ```
 $ ls internal/refractor/*corpus_census*_test.go | wc -l     → 9
@@ -566,7 +583,8 @@ objection, run back against my own shape: my design supplies no subject at all, 
 
 ## 10. Migration, compatibility, tests
 
-- **Install:** `privacy-base` `0.15.7 → 0.16.0` (manifest + `Version`); a plain `lattice pkg install`
+- **Install:** `privacy-base` `0.15.8 → 0.16.0` (manifest + `Version`; the package had moved to 0.15.8 between
+  design and build); a plain `lattice pkg install`
   diff-applies the new lens; the Refractor creates the bucket on activation and projects 2 rows. No wipe.
 - **Rolling order:** install `privacy-base` **before cycling the Processor** — the Processor is the gate
   that admits a class ref at mint, and a new Processor against a bucket that does not exist yet turns a
@@ -585,7 +603,8 @@ objection, run back against my own shape: my design supplies no subject at all, 
   shredded-class case (row `shredded: true`, empty `wrappedDEK` → permanent `ErrKeyShredded`); add the
   **nested marker ⇒ permanent** case with a positive top-level control; add the table-equals-
   `KeyHolderKinds()` + bucket-literal pin (§3.3); docGen: a top-level `tenantName` in `req.Params`
-  renders on the Tenant line, and `doc.tenantName` alone still falls back to the applicant.
+  renders on the Tenant line, a `doc`-carried name alone still renders, and with neither present the Tenant
+  line falls back to the applicant key *(the second arm corrected at build, 2026-09-12 — §3.5(a))*.
 - **Unit — Vault + Loupe (§6.1):** `handleDecrypt` refuses a `vtx.retentionclass.*` holder with the typed
   error; the positive vector (an identity holder decrypts) sits beside it; Loupe's handler test asserts
   the surfaced refusal.
@@ -609,6 +628,7 @@ objection, run back against my own shape: my design supplies no subject at all, 
 | A forged `egressReads` under a raw `ops.>` credential reaches a retained record | **Residual, unchanged in kind** (§3.4): that credential class is platform-trusted infrastructure and already reaches identity-custodied PII the same way; no fire on the board closes it, and this design claims no closure. The revive trigger is the app-tier read-scope design's: the app-tier NKey stops being trusted infra. |
 | The two kind sets drift | One value in `internal/vault`, read by both; the bridge's table is pinned equal to it. |
 | A future consumer templates into a nested value | Refused, typed, at the boundary (§3.5 b) — the same terminal outcome Inc 2 would have hit silently. |
+| A markerless param nests past the eight levels the scan walks | Terminal, even with no marker (§3.5 b, amended at build): a truncated walk establishes nothing. No shipped step emits one — the deepest nests two. |
 | F2 option A | The mechanism ships and is inert; the verticals row closes at the contract. No wasted build — the lens is 2 rows and the gates are re-sourced either way. |
 
 ## 12. Decomposition for the Steward
@@ -636,6 +656,9 @@ table (a second lens read model; the nested-marker refusal under "Failure modes"
 envelope sibling); `internal/vault/keyholder.go:45-53` and the two gate comments (the reason changes
 from "the lens enumerates identity holders alone" to "the kind has no envelope projection");
 `cmd/loupe/vault.go` (the "as readily as" comment became the parent's re-derived reason in `e81914be`).
+*(Two further sites, found at build: `internal/vault/service.go`'s `handleDecryptRef` comment, which had pointed
+forward at this design as the thing that would admit a class-held ref; and `bridge.md`'s In/Out table, which had
+no row for the envelope-lens read or the `decryptref` RPC at all.)*
 
 ## 13. Adversarial pass (run this fire, cold reviewer, security plane; findings folded)
 
@@ -761,3 +784,45 @@ change to `piiKeyEnvelope`, the MAC, the ref-verified RPC, the Refractor, or `ha
 **Scope-diff gate:** every touch above traces to the scope sentence; the fixture package is the §10 "test-package
 fixture", not a new consumer. Dependencies: none declared (`seq:` dropped at §13 #2); §6.1 shipped (`e81914be`)
 and is untouched here — re-verified both ways.
+
+### 14.1 Close (2026-09-12) — deviations, reviews, classification, gates
+
+**Deviations from the brief, all recorded where the body stands:** the bucket table is a map (§3.3); the nested
+refusal is wider on two axes (§3.5 b); the docGen resolution order (§3.5 a); the census (§5 C6) and version (§10)
+numbers; two doc sites the §12 table missed. The e2e fixture mints a vertex (the Processor accepted that shape
+first try; a zero-mutation batch was not tried), and its second arm witnesses the bridge's terminal `replyOp` on the
+op lane before asserting the vendor was never called.
+
+**Reviews.** Per-increment: lead review on Inc A (mechanical), Inc B (posture-changing, lead review found the
+array-element hole before commit), Inc C (lead review). Close: three cold passes over the whole diff — Blind
+Hunter, Edge-Case Hunter, Acceptance Auditor. What they found, classified:
+
+| Class | Finding | Fixed |
+|---|---|---|
+| implementation-bug (bridge) | case-variant `$SensitiveRef` served at top, missed at depth (struct-tag fold vs exact scan) | yes — exact lookup both sides + case-insensitive residual backstop |
+| implementation-bug (bridge) | a served marker's value never scanned; a non-object `params` never scanned; an array element at depth 0 | yes — scan every value incl. served, scan non-object params, arrays are a level |
+| implementation-bug (bridge) | empty `{}`/`[]` past the depth bound over-refused | yes |
+| test-shape (bridge) | class shred case pinned the placeholder envelope, not the real-DEK+shredded row | yes — both rows |
+| test-shape (vault) | the custody-kind cross-check restated a literal | yes — `pkgmgr.CustodyKinds()` consulted by the install switch and the pin |
+| implementation-bug (bridge) | map-order refusal message; permanent vs transient decided by visit order | yes — sorted keys, scan-before-resolve |
+| convention (bridge, natsperm) | mutable package-level table; a read-set comment naming one bucket; a harness comment naming one lens kind | yes |
+| design-gap | the depth bound's fail-closed truncation and the non-object arm were not in the ratified §3.5(b) | amended (§3.5 b, §11) |
+| brief-gap | "8 census files" was 7; 0.15.7 was 0.15.8 | amended (§5 C6, §10) |
+| review-over-reach | two wording objections to Andrew-ratified contract text — §7.1(a)'s "serves every kind" beside its own refusal sentence, and §7.1(c)'s "verifies that provenance" where the MAC binds `{ref, requestId, ciphertext}` and the actor is the script guard's | not taken: the text is Andrew's, ratified verbatim; flagged here for his eye, no row |
+
+Dossier: bridge gains two entries (two detectors of one wire shape; a pass-through arm predating a refusal), vault
+one (a cross-check whose upstream set is a literal). No class was seen a second time across items this fire.
+
+**Gates (remote, native Postgres on :5433):** `go build ./...`, `make vet`, `golangci-lint run ./...` (v2.11.4 built
+with go1.26.1) 0 issues, every `scripts/lint-*.go` STRICT clean, `lint-package-version` clean, `gofmt` clean,
+`go test ./... -p 4` green with `POSTGRES_TEST_DSN`, `make test-lease-convergence` green (both commands, the two
+new arms included), every other build-tagged harness compiled under its tag. MERGED ≠ RUNNING: no shared stack
+exists in the remote container (`REMOTE.md` §3); the rolling order for a live deploy is §10's — install
+`privacy-base` 0.16.0 before cycling the Processor, then the bridge.
+
+**Landing:** one `--no-ff` merge to `main`, so `main` never carries the widened contract clause without the
+mechanism that makes it true (the fire branch's first commit is the contract text, which the exception says lands
+*with* the build; on the branch it precedes the build by two commits, which the merge collapses).
+
+**Neighbours on ship:** `verticals.md`'s lease-tenant-name row is `🚧 blocked-on:` this row and is now unblocked
+(Inc 2, §12) — that lane's steward flips it; this fire writes only `lattice.md`.

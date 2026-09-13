@@ -103,6 +103,7 @@ func TestBridgeCoreKVReadIsolation(t *testing.T) {
 	boot := connectAs(t, url, "bootstrap")
 	provision(t, boot, "core-kv")
 	provision(t, boot, "privacy-pii-key-envelopes")
+	provision(t, boot, "privacy-retention-key-envelopes")
 
 	proc := connectAs(t, url, "processor")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -110,11 +111,15 @@ func TestBridgeCoreKVReadIsolation(t *testing.T) {
 	if _, err := proc.KVPut(ctx, "core-kv", "vtx.identity.x.ssn", []byte(`{"ct":"x"}`)); err != nil {
 		t.Fatalf("processor KVPut core-kv: want success, got %v", err)
 	}
-	// The envelope lens bucket is refractor-written (the sole projector), not
-	// processor-written — mirroring how a real piiKeyEnvelope row lands.
+	// The envelope lens buckets are refractor-written (the sole projector), not
+	// processor-written — mirroring how a real piiKeyEnvelope /
+	// retentionClassKeyEnvelope row lands.
 	ref := connectAs(t, url, "refractor")
 	if _, err := ref.KVPut(ctx, "privacy-pii-key-envelopes", "vtx.identity.x", []byte(`{"wrappedDEK":"x"}`)); err != nil {
 		t.Fatalf("refractor KVPut privacy-pii-key-envelopes: want success, got %v", err)
+	}
+	if _, err := ref.KVPut(ctx, "privacy-retention-key-envelopes", "vtx.retentionclass.x", []byte(`{"wrappedDEK":"x"}`)); err != nil {
+		t.Fatalf("refractor KVPut privacy-retention-key-envelopes: want success, got %v", err)
 	}
 
 	// Owner read succeeds — proves the key exists and reads work at all.
@@ -129,13 +134,16 @@ func TestBridgeCoreKVReadIsolation(t *testing.T) {
 		t.Error("bridge KVGet core-kv: want transport denial, got success")
 	}
 
-	// The one lens bucket the egress unwrap actually needs stays reachable —
-	// the deny is scoped to core-kv's backing stream only, not a blanket
-	// read lockout.
+	// The lens buckets the egress unwrap actually needs stay reachable — one per
+	// key-holder kind the boundary serves — because the deny is scoped to
+	// core-kv's backing stream only, not a blanket read lockout.
 	octx, ocancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer ocancel()
 	if _, err := bridge.KVGet(octx, "privacy-pii-key-envelopes", "vtx.identity.x"); err != nil {
 		t.Fatalf("bridge KVGet privacy-pii-key-envelopes: want success, got %v", err)
+	}
+	if _, err := bridge.KVGet(octx, "privacy-retention-key-envelopes", "vtx.retentionclass.x"); err != nil {
+		t.Fatalf("bridge KVGet privacy-retention-key-envelopes: want success, got %v", err)
 	}
 }
 

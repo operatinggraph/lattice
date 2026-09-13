@@ -1,5 +1,5 @@
 name: privacy-base
-version: 0.15.8
+version: 0.16.0
 description: |
   The key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2), for both holder kinds.
@@ -65,6 +65,10 @@ declares:
     - canonicalName: piiKeyEnvelope
       adapter: nats-kv
       bucket: privacy-pii-key-envelopes
+      engine: full
+    - canonicalName: retentionClassKeyEnvelope
+      adapter: nats-kv
+      bucket: privacy-retention-key-envelopes
       engine: full
     - canonicalName: identityErasureResidue
       adapter: nats-kv

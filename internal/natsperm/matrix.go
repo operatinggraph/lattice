@@ -513,7 +513,8 @@ var Matrix = []Component{
 		// closes the CORE-KV read side channel specifically; the bridge's overall
 		// read set remains whatever $JS.API.> reaches minus these denies — which
 		// legitimately includes its lens read-models (privacy-pii-key-envelopes
-		// for the egress unwrap, capability-author-context for the authoring
+		// and privacy-retention-key-envelopes, one per key-holder kind the
+		// egress unwrap serves, and capability-author-context for the authoring
 		// catalog) and the model-results bucket it polls. The guarantee is
 		// scoped precisely: these denies close the core-KV read side channel;
 		// core-EVENTS reads remain open (protectedStreamDenies does not deny

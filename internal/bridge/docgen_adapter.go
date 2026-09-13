@@ -145,7 +145,7 @@ func (f *FakeDocGen) Execute(ctx context.Context, req Request) (Dispatch, error)
 			Result{Status: OutcomeFailed, Detail: "lease-doc render failed: doc.signedAt is required (unsigned application)"}), nil
 	}
 
-	content := renderLeaseDocument(params.LeaseAppKey, params.Doc)
+	content := renderLeaseDocument(params.LeaseAppKey, params.Doc, req.Params)
 	storeName := substrate.DeriveNanoID(leaseDocStoreNamespace, params.LeaseAppKey)
 	info, err := f.conn.ObjectPut(ctx, f.bucket, storeName, strings.NewReader(content), f.uploadCap)
 	if err != nil {
@@ -205,14 +205,21 @@ func (f *FakeDocGen) SideEffects(idempotencyKey string) int {
 
 // renderLeaseDocument renders the executed-lease text from the resolved
 // document fields — the reference vendor's renderer. It is deterministic:
-// every line is drawn from the supplied fields, with no clock read, so the
+// every line is drawn from the supplied inputs, with no clock read, so the
 // same inputs always render byte-identical bytes (the basis for the
 // idempotent, orphan-free attach — identical bytes map to one digest/oid).
 // Only present fields are emitted, so an application missing optional terms
 // degrades to whatever it carries rather than printing blanks; an unnamed
 // applicant renders by their bare identity key, and an unmanaged unit omits
 // the Landlord line entirely rather than naming a placeholder party.
-func renderLeaseDocument(leaseAppKey string, doc docGenFields) string {
+//
+// The tenant's name is taken from flatParams (Request.Params, the unwrapped
+// flat string map) ahead of the nested doc's own tenantName: the egress unwrap
+// substitutes a sensitive-ref at the TOP LEVEL of params only, so a templated
+// tenant name arrives there and never inside doc — the same shape the
+// background-check adapter reads. A doc-carried name still renders, for a
+// plaintext name the instanceOp assembled itself.
+func renderLeaseDocument(leaseAppKey string, doc docGenFields, flatParams map[string]string) string {
 	var b strings.Builder
 	line := func(label, value string) {
 		if strings.TrimSpace(value) == "" {
@@ -227,12 +234,13 @@ func renderLeaseDocument(leaseAppKey string, doc docGenFields) string {
 
 	b.WriteString("PARTIES & PREMISES\n")
 	b.WriteString("------------------\n")
-	tenant := doc.TenantName
+	tenantName := firstNonEmpty(flatParams["tenantName"], doc.TenantName)
+	tenant := tenantName
 	if tenant == "" {
 		tenant = doc.Applicant
 	}
 	line("Tenant", tenant)
-	if doc.TenantName != "" && doc.Applicant != "" {
+	if tenantName != "" && doc.Applicant != "" {
 		line("Tenant ID", doc.Applicant)
 	}
 	line("Landlord", doc.LandlordKey)

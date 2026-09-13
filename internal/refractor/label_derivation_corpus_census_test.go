@@ -209,6 +209,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"providerSites":                 {narrow, "building provider", modeRelation},
 	"renewalComplete":               {narrow, "identity leaseapp renewal service unit", modeLabel},
 	"renewalsRead":                  {narrow, "identity leaseapp renewal unit", modeLabel},
+	"retentionClassKeyEnvelope":     {narrow, "retentionclass", modeRelation},
 	// retentionKeyStatus narrows to the holder type alone, and that single
 	// label is what makes the lens self-updating: a shred writes
 	// vtx.retentionclass.<H>.piiKey, which matches the one subject this

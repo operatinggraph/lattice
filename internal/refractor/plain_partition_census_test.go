@@ -112,6 +112,7 @@ var plainPartitionCorpusVerdicts = map[string]partitionVerdict{
 	"providerIdentityReadGrants":     {oneRowPerAnchor: false, partitions: true, identifying: []string{"actor_id"}, diffRetraction: true},
 	"providerSites":                  {oneRowPerAnchor: false, partitions: true, identifying: []string{"provider_id"}, diffRetraction: true},
 	"renewalsRead":                   {oneRowPerAnchor: true, partitions: true, identifying: []string{"renewal_id"}, diffRetraction: false},
+	"retentionClassKeyEnvelope":      {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"retentionKeyStatus":             {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"shredStatus":                    {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"staffReadGrants":                {oneRowPerAnchor: false, partitions: true, identifying: []string{"actor_id"}, diffRetraction: true},

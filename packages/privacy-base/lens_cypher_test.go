@@ -15,6 +15,7 @@ package privacybase
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,15 @@ func TestPiiKeyEnvelopeLens_ProjectsOnlyIdentitiesWithAnEnvelope(t *testing.T) {
 	require.Equal(t, true, placeholder["shredded"], "shredded must be projected (not silently dropped) so a Vault-process restart cannot re-admit a shredded identity's PII via this lens")
 }
 
+// TestRetentionClassKeyEnvelopeSpec_MirrorsPiiKeyEnvelopeSpec pins the two
+// envelope specs equal to each other after swapping the anchor label and its
+// alias, so the sibling lens cannot drift from piiKeyEnvelope's shape
+// (retention-class-egress-envelope-design.md §3.1, §10).
+func TestRetentionClassKeyEnvelopeSpec_MirrorsPiiKeyEnvelopeSpec(t *testing.T) {
+	swapped := strings.NewReplacer("(i:identity)", "(r:retentionclass)", "i.", "r.").Replace(piiKeyEnvelopeSpec)
+	require.Equal(t, swapped, retentionClassKeyEnvelopeSpec, "retentionClassKeyEnvelope must be piiKeyEnvelope with the anchor label swapped — nothing else may differ")
+}
+
 // putRetentionClassVtx seeds a retention-class holder — the vertex plus its
 // `.retentionPolicy` declaration, and optionally a `.piiKey` envelope — the
 // shape internal/pkgmgr/build.go writes at install.
@@ -163,6 +173,55 @@ func putRetentionClassVtx(t *testing.T, coreKV *substrate.KV, id string,
 	put("retentionPolicy", policyData)
 	put("piiKey", piiKeyData)
 	return key
+}
+
+// TestRetentionClassKeyEnvelopeLens_ProjectsOnlyClassesWithAnEnvelope mirrors
+// TestPiiKeyEnvelopeLens_ProjectsOnlyIdentitiesWithAnEnvelope for the other
+// holder kind (retention-class-egress-envelope-design.md §3.1): the
+// `keyId <> null` aspect-presence guard admits both a real envelope AND a
+// ShredRetentionClassKey empty-wrappedDEK placeholder, and keeps a class
+// carrying no `.piiKey` out entirely.
+func TestRetentionClassKeyEnvelopeLens_ProjectsOnlyClassesWithAnEnvelope(t *testing.T) {
+	adjKV, coreKV := lenstest.KVs(t)
+
+	realKey := putRetentionClassVtx(t, coreKV, "RCkeyREA1Enve1opeAAA",
+		map[string]any{"canonicalName": "underwritingRecord", "policy": "eraseOnExpiry", "retentionPeriod": "P3Y", "description": "retained underwriting records"},
+		map[string]any{"wrappedDEK": "d2FyID09PT0=", "keyId": "vtx.retentionclass.RCkeyREA1Enve1opeAAA", "kekVersion": "v1", "alg": "AES-256-GCM", "shredded": false},
+	)
+	placeholderKey := putRetentionClassVtx(t, coreKV, "RCkeyP1aceho1derAAAA",
+		map[string]any{"canonicalName": "clinicalRecord", "policy": "eraseOnExpiry", "retentionPeriod": "P7Y", "description": "retained clinical records"},
+		map[string]any{"wrappedDEK": "", "keyId": "vtx.retentionclass.RCkeyP1aceho1derAAAA", "kekVersion": "", "alg": "", "shredded": true},
+	)
+	putRetentionClassVtx(t, coreKV, "RCkeyNoPiiKeyAAAAAAA",
+		map[string]any{"canonicalName": "expiredRecord", "policy": "eraseOnExpiry", "retentionPeriod": "P1Y", "description": "an expired class"},
+		nil,
+	)
+
+	eng := full.New()
+	cr, err := eng.Parse(retentionClassKeyEnvelopeSpec)
+	require.NoError(t, err, "retentionClassKeyEnvelope cypher must parse on the full engine")
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now": now, "projectedAt": now,
+	}}, adjKV, coreKV)
+	require.NoError(t, err)
+
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		k, _ := r.Values["key"].(string)
+		byKey[k] = r
+	}
+	require.Len(t, byKey, 2, "only classes WITH a piiKey aspect may project; got %v", byKey)
+
+	real := byKey[realKey].Values
+	require.Equal(t, "d2FyID09PT0=", real["wrappedDEK"])
+	require.Equal(t, "v1", real["kekVersion"])
+	require.Equal(t, "AES-256-GCM", real["alg"])
+	require.Equal(t, false, real["shredded"], "an unshredded class's row must project shredded=false — the Vault's shred gate ORs this in")
+
+	placeholder := byKey[placeholderKey].Values
+	require.Equal(t, "", placeholder["wrappedDEK"], "a shredded placeholder still projects — the Vault fails closed on the empty key, not this lens")
+	require.Equal(t, true, placeholder["shredded"], "shredded must be projected so a Vault-process restart cannot re-admit a shredded class's PII via this lens")
 }
 
 // TestRetentionKeyStatusLens_ProjectsEveryDeclaredClass proves the operator

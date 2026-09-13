@@ -5,18 +5,56 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 )
 
-// envelopeLensBucket is the privacy-base piiKeyEnvelope lens's read model
-// (packages/privacy-base.PiiKeyEnvelopeBucket) — kept as a literal, like
-// Config's other bucket defaults, so internal/bridge does not import
-// packages/privacy-base (P5: the bridge reads this bucket as an ordinary lens
-// consumer, exactly the pattern cmd/loftspace-app/objects_crypto.go ships).
-const envelopeLensBucket = "privacy-pii-key-envelopes"
+// The privacy-base envelope lenses' read models
+// (packages/privacy-base.PiiKeyEnvelopeBucket and RetentionKeyEnvelopeBucket)
+// — kept as literals, like Config's other bucket defaults, so internal/bridge
+// does not import packages/privacy-base (P5: the bridge reads these buckets as
+// an ordinary lens consumer, exactly the pattern
+// cmd/loftspace-app/objects_crypto.go ships). envelope_bucket_pin_test.go pins
+// each literal equal to the package's own exported constant.
+const (
+	identityEnvelopeBucket       = "privacy-pii-key-envelopes"
+	retentionClassEnvelopeBucket = "privacy-retention-key-envelopes"
+)
+
+// envelopeBuckets is envelopeBucketFor's table: one lens read model per
+// key-holder kind the boundary serves. A map rather than a switch so a test can
+// enumerate the kinds it serves and pin that set equal to
+// vault.KeyHolderKinds() in both directions, and a fresh map per call for the
+// reason KeyHolderKinds returns a fresh slice — the set of holder kinds this
+// boundary will serve is not something a caller can widen by writing into the
+// table it was handed.
+func envelopeBuckets() map[string]string {
+	return map[string]string{
+		"identity":       identityEnvelopeBucket,
+		"retentionclass": retentionClassEnvelopeBucket,
+	}
+}
+
+// envelopeBucketFor maps a key holder's vertex type to the lens read model that
+// projects that holder kind's live envelope. Every kind in vault.KeyHolderKinds
+// has an entry (pinned by test); a kind with none is refused permanently,
+// naming the kind.
+func envelopeBucketFor(holderType string) (bucket string, ok bool) {
+	bucket, ok = envelopeBuckets()[holderType]
+	return bucket, ok
+}
+
+// maxNestedMarkerScanDepth bounds the nested-$sensitiveRef scan
+// (nestedMarkerScan) so a deeply shaped param value cannot turn one unwrap into
+// unbounded work. Eight levels is far past any shape a step emits (the deepest
+// shipped params object nests two), and a value that does nest deeper is
+// refused rather than passed: absence of a marker is what the boundary needs to
+// establish, and a truncated walk establishes nothing.
+const maxNestedMarkerScanDepth = 8
 
 // vaultDecryptTimeout bounds the bridge's own wait on the lattice.vault.decrypt
 // RPC, independent of the Vault responder's internal handlerTimeout — a wedged
@@ -57,16 +95,6 @@ func transientEgressFailure(err error) *egressFailure {
 	return &egressFailure{err: err, class: egressTransient}
 }
 
-// sensitiveRefWrapper detects the `{"$sensitiveRef": {...}}` marker shape a
-// resolved param value carries for a sensitive templated aspect
-// (orchestration-base's resolve_subject_params, design §3.2/§3.3). Any other
-// JSON shape (a plain string/number/bool/object/array) fails to unmarshal into
-// this or leaves SensitiveRef nil, and is treated as "not a marker" — passed
-// through untouched, exactly as coerceParams already tolerates.
-type sensitiveRefWrapper struct {
-	SensitiveRef json.RawMessage `json:"$sensitiveRef"`
-}
-
 // sensitiveRefMarker is the inner `$sensitiveRef` shape: the sensitive
 // aspect's canonical key, its at-rest ciphertext, the plaintext field name
 // the resolver appended for the bridge's post-decrypt extraction, and the
@@ -89,12 +117,24 @@ type sensitiveRefMarker struct {
 // ever going through Processor hydration — fails closed HERE, before any
 // Vault RPC (design §3.4: "a pre-MAC marker or a fabricated one never leaves
 // the bridge").
+//
+// The key is matched EXACTLY, by looking it up in the decoded object rather
+// than by decoding into a struct tag: encoding/json matches a tag
+// case-insensitively, so a struct-tag match would SERVE `$SensitiveRef` while
+// the nested scan and every other reader of the marker spell it one way. The
+// Processor mints exactly sensitiveRefMarkerKey; any other spelling is not a
+// marker this boundary serves, and the unwrap refuses it rather than passing
+// it through (unwrapEgressParams' residual check).
 func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool, ferr *egressFailure) {
-	var w sensitiveRefWrapper
-	if err := json.Unmarshal(raw, &w); err != nil || w.SensitiveRef == nil {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
 		return sensitiveRefMarker{}, false, nil
 	}
-	if err := json.Unmarshal(w.SensitiveRef, &marker); err != nil {
+	inner, present := obj[sensitiveRefMarkerKey]
+	if !present {
+		return sensitiveRefMarker{}, false, nil
+	}
+	if err := json.Unmarshal(inner, &marker); err != nil {
 		return sensitiveRefMarker{}, false, permanentEgressFailure(
 			fmt.Errorf("bridge: malformed $sensitiveRef marker: %w", err))
 	}
@@ -105,6 +145,75 @@ func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool
 	return marker, true, nil
 }
 
+// sensitiveRefMarkerKey is the reserved param-value key a sensitive-ref marker
+// is wrapped in: the exact spelling the Processor mints and the only one the
+// unwrap serves. The nested scan matches it case-INsensitively and on the key
+// alone — a marker the unwrap will not serve is refused wherever it sits,
+// however it is spelled, rather than judged on whether its contents are
+// well-formed.
+const sensitiveRefMarkerKey = "$sensitiveRef"
+
+// nestedMarkerScan walks one top-level param value looking for a
+// `$sensitiveRef` key BELOW that value's own top level. depth is the caller's
+// level: 1 is a direct child of the param — a member of a child object OR an
+// element of a child array, both of which are places the unwrap does not
+// substitute — 2 a child of that, and so on. A key at depth 0 (the value
+// itself) is the shape the unwrap serves and is never reported, so callers pass
+// depth 0 for a value detectSensitiveRef has already judged.
+//
+// truncated reports that the walk stopped at maxNestedMarkerScanDepth with a
+// container left unopened: the answer is then "unknown", not "no marker", and
+// the caller refuses on it. Returning found and truncated separately is what
+// keeps the depth bound from becoming the way to smuggle a marker past the
+// scan.
+func nestedMarkerScan(raw json.RawMessage, depth int) (markerDepth int, found, truncated bool) {
+	if depth > maxNestedMarkerScanDepth {
+		return 0, false, jsonContainer(raw)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		for k, v := range obj {
+			if strings.EqualFold(k, sensitiveRefMarkerKey) && depth > 0 {
+				return depth, true, false
+			}
+			d, hit, cut := nestedMarkerScan(v, depth+1)
+			if hit {
+				return d, true, false
+			}
+			truncated = truncated || cut
+		}
+		return 0, false, truncated
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		for _, v := range arr {
+			d, hit, cut := nestedMarkerScan(v, depth+1)
+			if hit {
+				return d, true, false
+			}
+			truncated = truncated || cut
+		}
+	}
+	return 0, false, truncated
+}
+
+// jsonContainer reports whether raw is a NON-EMPTY JSON object or array — the
+// two shapes a marker key can hide inside, and so the only shapes an unfinished
+// walk has to treat as unknown. A scalar, a null, an empty object and an empty
+// array all provably hide nothing, so none of them turns the depth bound into a
+// refusal.
+func jsonContainer(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return len(obj) > 0
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return len(arr) > 0
+	}
+	return false
+}
+
 // unwrapEgressParams walks raw (the external event's params object) and
 // replaces every `$sensitiveRef` marker with the vendor-ready plaintext field
 // it names, fetched via the bridge's egress-unwrap boundary (design §3.5).
@@ -113,6 +222,20 @@ func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool
 // through the ordinary string-param coercion unchanged. RawParams (the
 // caller's Request.RawParams) is deliberately NOT derived from this output —
 // it stays the original event params, still carrying refs (design §8).
+//
+// A marker is served at the TOP LEVEL of a params OBJECT only, and a marker
+// anywhere else is a permanent failure rather than a pass-through: nothing
+// substitutes it, so it would otherwise ride out to the vendor as ciphertext +
+// a MAC inside RawParams, and a pattern that templates a sensitive aspect into
+// a nested value would fail silently in exactly that shape. Refusing makes the
+// silent shape one typed terminal outcome, naming the param and the depth.
+//
+// The walk is therefore in two passes over a SORTED key set. Pass one scans
+// every value — a marker value included, since a marker nested inside a
+// marker's own fields is served by nothing — and pass two resolves the
+// top-level markers. Scanning first makes a permanent refusal beat a transient
+// envelope lag on some other param, and sorting makes both the outcome and the
+// operator-facing message the same on every redelivery of the same event.
 //
 // numDelivered (msg.NumDelivered) buys the transient-failure retry budget
 // (maxEgressUnwrapAttempts): an envelope-lens row not yet projected for a
@@ -128,14 +251,32 @@ func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, re
 	}
 	var generic map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &generic); err != nil {
-		// params is not a JSON object (e.g. a bare array/scalar) — no marker to
-		// find; pass through unchanged, exactly as coerceParams already does.
-		return raw, nil
+		// params is not a JSON object (a bare array or scalar). There is no top
+		// level for a marker to be served AT, so nothing here is substitutable —
+		// but a marker can still be present (Loom passes a non-object params
+		// value through opaque), and passing it through is the very leak this
+		// scan exists to stop. Scan it as one value and refuse on any hit.
+		if ferr := refuseUnservedMarker("params", raw); ferr != nil {
+			return nil, ferr
+		}
+		return raw, unservedMarkerResidual(raw)
+	}
+
+	keys := make([]string, 0, len(generic))
+	for k := range generic {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		if ferr := refuseUnservedMarker(fmt.Sprintf("param %q", k), generic[k]); ferr != nil {
+			return nil, ferr
+		}
 	}
 
 	changed := false
-	for k, v := range generic {
-		marker, ok, ferr := detectSensitiveRef(v)
+	for _, k := range keys {
+		marker, ok, ferr := detectSensitiveRef(generic[k])
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -154,26 +295,65 @@ func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, re
 		changed = true
 	}
 	if !changed {
-		return raw, nil
+		return raw, unservedMarkerResidual(raw)
 	}
 	out, err := json.Marshal(generic)
 	if err != nil {
 		return nil, permanentEgressFailure(fmt.Errorf("bridge: remarshal unwrapped params: %w", err))
 	}
-	return out, nil
+	return out, unservedMarkerResidual(out)
+}
+
+// refuseUnservedMarker is the structural half of the boundary's rule that a
+// marker is served where the operation placed it or not at all: it scans one
+// value (label names it for the operator — a param, or the whole params) and
+// returns the permanent failure for a marker the unwrap does not serve, or for
+// a subtree too deep to rule one out.
+func refuseUnservedMarker(label string, value json.RawMessage) *egressFailure {
+	depth, found, truncated := nestedMarkerScan(value, 0)
+	if found {
+		return permanentEgressFailure(fmt.Errorf(
+			"bridge: $sensitiveRef marker under %s at a depth the unwrap does not serve (depth %d) — a sensitive-ref is served only at the top level of a params object",
+			label, depth))
+	}
+	if truncated {
+		return permanentEgressFailure(fmt.Errorf(
+			"bridge: %s nests past the %d levels scanned for a $sensitiveRef marker, so no marker can be ruled out — a sensitive-ref is served only at the top level of a params object",
+			label, maxNestedMarkerScanDepth))
+	}
+	return nil
+}
+
+// unservedMarkerResidual is the backstop behind that structural scan: every
+// marker the unwrap served has been replaced by its plaintext string, so the
+// marker key occurring ANYWHERE in the bytes about to be dispatched — in any
+// letter case, at any depth, inside a shape the walk treats as opaque — is a
+// marker nothing served, and it must not reach the vendor. Same posture and
+// same reason as pkgmgr's raw-literal artifact scan: a text scan needs no
+// shape awareness and so cannot be evaded by an unexpected shape.
+//
+// The structural scan stays in front of it because it is the one that can name
+// the param and the depth, which is what a script author acts on; this one only
+// has to be impossible to slip past.
+func unservedMarkerResidual(params json.RawMessage) *egressFailure {
+	if strings.Contains(strings.ToLower(string(params)), strings.ToLower(sensitiveRefMarkerKey)) {
+		return permanentEgressFailure(errors.New(
+			"bridge: a $sensitiveRef the unwrap did not serve remains in params"))
+	}
+	return nil
 }
 
 // resolveSensitiveRef unwraps one sensitive-ref marker to its plaintext field
 // value: resolve the key holder from the ciphertext's own keyId, fetch that
-// holder's LIVE key envelope from the piiKeyEnvelope lens (never a
-// stored/carried copy — the restart-/replay-proof shred gate, design
-// §3.2/§3.5), call the ref-verified Vault decrypt RPC (mandatory MAC
-// verification), and extract the requested field. Every failure is classified
-// permanent (do not retry) or transient (redeliver, bounded).
+// holder's LIVE key envelope from the lens that projects its holder kind's
+// envelopes (never a stored/carried copy — the restart-/replay-proof shred
+// gate, design §3.2/§3.5), call the ref-verified Vault decrypt RPC (mandatory
+// MAC verification), and extract the requested field. Every failure is
+// classified permanent (do not retry) or transient (redeliver, bounded).
 //
-// Only an identity holder can be served here, because the envelope source —
-// the piiKeyEnvelope lens — enumerates identity holders alone. The Processor
-// refuses to author an egress ref for any other holder type, so this is the
+// The holder kinds served are exactly the ones envelopeBucketFor has a lens
+// for; a holder of any other kind is refused permanently, naming the kind. The
+// Processor refuses to author such a ref in the first place, so this is the
 // second of two gates on the same rule rather than the only one; it exists
 // because the bridge is where an unserveable holder would otherwise decay into
 // an envelope that simply never projects.
@@ -187,16 +367,18 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 		return "", permanentEgressFailure(
 			fmt.Errorf("bridge: $sensitiveRef for %q: %w", marker.Ref, err))
 	}
-	if holderType := vault.KeyHolderType(keyHolderKey); holderType != "identity" {
+	holderType := vault.KeyHolderType(keyHolderKey)
+	bucket, ok := envelopeBucketFor(holderType)
+	if !ok {
 		return "", permanentEgressFailure(fmt.Errorf(
-			"bridge: $sensitiveRef for %q is held by %s, a %q holder — the piiKeyEnvelope lens serves identity holders only",
+			"bridge: $sensitiveRef for %q is held by %s, a %q holder — no envelope source for that holder kind",
 			marker.Ref, keyHolderKey, holderType))
 	}
 	if marker.Field == "" {
 		return "", permanentEgressFailure(fmt.Errorf("bridge: $sensitiveRef for %q carries no field", marker.Ref))
 	}
 
-	envelope, err := e.fetchLiveEnvelope(ctx, keyHolderKey)
+	envelope, err := e.fetchLiveEnvelope(ctx, bucket, keyHolderKey)
 	if err != nil {
 		if numDelivered < maxEgressUnwrapAttempts {
 			verb := "read"
@@ -204,14 +386,14 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 				verb = "not yet projected"
 			}
 			return "", transientEgressFailure(
-				fmt.Errorf("bridge: piiKeyEnvelope for %s %s (attempt %d): %w", keyHolderKey, verb, numDelivered, err))
+				fmt.Errorf("bridge: envelope for %s %s (attempt %d): %w", keyHolderKey, verb, numDelivered, err))
 		}
 		// Every fetchLiveEnvelope failure — absent row, unparseable value, a
 		// persistent bucket error — must escalate past the retry budget, not
 		// only the ErrKeyNotFound arm: an unconditional transient return here
 		// would Nak forever on a bad row, parking the pattern unbounded (FR29).
 		return "", permanentEgressFailure(
-			fmt.Errorf("bridge: piiKeyEnvelope for %s unusable after %d attempts: %w", keyHolderKey, numDelivered, err))
+			fmt.Errorf("bridge: envelope for %s unusable after %d attempts: %w", keyHolderKey, numDelivered, err))
 	}
 
 	plaintext, verr := e.vaultDecryptRef(ctx, marker.Ref, requestID, envelope, marker.Ciphertext, marker.MAC)
@@ -251,21 +433,24 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 	return s, nil
 }
 
-// fetchLiveEnvelope reads keyHolderKey's wrapped-DEK Envelope off the
-// privacy-base piiKeyEnvelope lens — the P5-compliant read the bridge uses in
-// place of a Core-KV read (P2: the bridge reads no Core KV; its two transport
-// surfaces are this one lens-bucket read and the vault decrypt RPC). Always
-// resolved fresh from the lens for this call — never cached or carried across
-// calls — so a shred that lands between op commit and egress is observed
-// (design §3.2/§3.5's live-envelope rule).
-func (e *Engine) fetchLiveEnvelope(ctx context.Context, keyHolderKey string) (vault.Envelope, error) {
-	entry, err := e.conn.KVGet(ctx, envelopeLensBucket, keyHolderKey)
+// fetchLiveEnvelope reads keyHolderKey's wrapped-DEK Envelope out of bucket —
+// the read model of whichever privacy-base envelope lens projects that holder
+// kind (piiKeyEnvelope for an identity, retentionClassKeyEnvelope for a
+// retention class), chosen by the caller via envelopeBucketFor. Both lenses
+// project the same six Envelope columns, so one parse serves either. This is
+// the P5-compliant read the bridge uses in place of a Core-KV read (P2: the
+// bridge reads no Core KV; its two transport surfaces are these lens-bucket
+// reads and the vault decrypt RPC). Always resolved fresh for this call —
+// never cached or carried across calls — so a shred that lands between op
+// commit and egress is observed (design §3.2/§3.5's live-envelope rule).
+func (e *Engine) fetchLiveEnvelope(ctx context.Context, bucket, keyHolderKey string) (vault.Envelope, error) {
+	entry, err := e.conn.KVGet(ctx, bucket, keyHolderKey)
 	if err != nil {
 		return vault.Envelope{}, err
 	}
 	var env vault.Envelope
 	if err := json.Unmarshal(entry.Value, &env); err != nil {
-		return vault.Envelope{}, fmt.Errorf("parse piiKeyEnvelope for %s: %w", keyHolderKey, err)
+		return vault.Envelope{}, fmt.Errorf("parse envelope row for %s in %s: %w", keyHolderKey, bucket, err)
 	}
 	return env, nil
 }

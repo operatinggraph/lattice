@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -22,6 +23,8 @@ import (
 const (
 	testEgressIdentityID = "EgressUnitPersonAAAA"
 	testEgressClassID    = "EgressUnitCLassAAAAA"
+	testEgressLeaseAppID = "EgressUnitLeaseAppAA"
+	testEgressUnknownID  = "EgressUnitUnknownAAA"
 )
 
 func egressTestConn(t *testing.T) *substrate.Conn {
@@ -50,10 +53,16 @@ func testIdentityID(t *testing.T) string {
 	return id
 }
 
+// provisionEnvelopeBucket provisions BOTH envelope-lens read models — one per
+// key-holder kind the boundary serves (envelopeBucketFor) — because a test's
+// holder kind decides which bucket the unwrap reads, and a bucket that is
+// merely unprovisioned fails the same way as one whose row has not projected.
 func provisionEnvelopeBucket(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
-	if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: envelopeLensBucket}); err != nil {
-		t.Fatalf("provision %s: %v", envelopeLensBucket, err)
+	for _, bucket := range []string{identityEnvelopeBucket, retentionClassEnvelopeBucket} {
+		if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
+			t.Fatalf("provision %s: %v", bucket, err)
+		}
 	}
 }
 
@@ -100,7 +109,7 @@ func seedSensitiveAspect(t *testing.T, ctx context.Context, conn *substrate.Conn
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
-	if _, err := conn.KVPut(ctx, envelopeLensBucket, identityKey, envBytes); err != nil {
+	if _, err := conn.KVPut(ctx, identityEnvelopeBucket, identityKey, envBytes); err != nil {
 		t.Fatalf("seed envelope: %v", err)
 	}
 
@@ -113,6 +122,43 @@ func seedSensitiveAspect(t *testing.T, ctx context.Context, conn *substrate.Conn
 		t.Fatalf("Encrypt: %v", err)
 	}
 	return ref, sensitiveRefMarker{Ref: ref, Ciphertext: ct}
+}
+
+// seedClassHeldAspect is seedSensitiveAspect's retention-class sibling: it
+// mints the CLASS holder's DEK, writes that envelope into the
+// retentionClassKeyEnvelope lens's own read model, encrypts plaintext under it,
+// and returns the aspect's ref + marker. The aspect anchors on a business
+// vertex (a lease application), which is the whole point of class custody — the
+// anchor holds no key, so the unwrap can only work by resolving the holder from
+// the ciphertext's keyId and its bucket from that holder's kind. The holder key
+// and the minted envelope come back so a test can rewrite that row (e.g. into a
+// shredded shape that still carries the real wrapped DEK).
+func seedClassHeldAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, v *vault.LocalBackend, classID, anchorID, aspect string, plaintext map[string]any) (holderKey, ref string, marker sensitiveRefMarker, envelope vault.Envelope) {
+	t.Helper()
+	holderKey = "vtx.retentionclass." + classID
+	ref = "vtx.leaseapp." + anchorID + "." + aspect
+
+	env, err := v.CreateIdentityKey(ctx, holderKey)
+	if err != nil {
+		t.Fatalf("CreateIdentityKey(%s): %v", holderKey, err)
+	}
+	envBytes, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, retentionClassEnvelopeBucket, holderKey, envBytes); err != nil {
+		t.Fatalf("seed class envelope: %v", err)
+	}
+
+	pt, err := json.Marshal(plaintext)
+	if err != nil {
+		t.Fatalf("marshal plaintext: %v", err)
+	}
+	ct, err := v.Encrypt(ctx, holderKey, env, pt)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	return holderKey, ref, sensitiveRefMarker{Ref: ref, Ciphertext: ct}, env
 }
 
 // mintRefMAC computes the Processor-side MAC binding {ref, requestId,
@@ -173,6 +219,350 @@ func TestUnwrapEgressParams_HappyPath(t *testing.T) {
 	}
 }
 
+// A retention-class-held record is served from the retentionClassKeyEnvelope
+// lens's own read model: the holder kind the ciphertext names picks the bucket,
+// so the SAME unwrap that serves an identity serves a class with no other
+// input. Nothing in the fixture could make this pass by accident — the aspect
+// anchors on a lease application that holds no key, and no row for this holder
+// exists in the identity envelope bucket.
+func TestResolveSensitiveRef_ClassHeldRecord_ServedFromItsOwnLens(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	marker.Field = "value"
+
+	got, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
+	if ferr != nil {
+		t.Fatalf("resolveSensitiveRef for a class-held record: %v", ferr)
+	}
+	if got != "Alice Smith" {
+		t.Errorf("plaintext = %q, want %q", got, "Alice Smith")
+	}
+}
+
+// A marker below the top level of params is refused permanently, naming the
+// param and the depth — it is never substituted, so without the refusal the
+// retained record's ciphertext + MAC would ride to the vendor inside RawParams.
+// The top-level control in the same test is what proves the refusal is about
+// the marker's PLACE and not about the fixture: the identical marker, moved to
+// the top level, unwraps to plaintext.
+func TestUnwrapEgressParams_NestedMarkerRefused(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	param := sensitiveRefParam(t, marker, "value")
+
+	nested, _ := json.Marshal(map[string]json.RawMessage{
+		"family": json.RawMessage(`"docGen"`),
+		"doc":    json.RawMessage(`{"tenantName":` + string(param) + `,"signedAt":"2026-07-01T12:00:00Z"}`),
+	})
+	_, ferr := e.unwrapEgressParams(ctx, nested, testRequestID, 1)
+	if ferr == nil || ferr.class != egressPermanent {
+		t.Fatalf("nested marker: want permanent failure, got %v", ferr)
+	}
+	if !strings.Contains(ferr.err.Error(), `"doc"`) {
+		t.Errorf("refusal must name the param carrying the nested marker, got %v", ferr.err)
+	}
+	if !strings.Contains(ferr.err.Error(), "depth 1") {
+		t.Errorf("refusal must name the depth, got %v", ferr.err)
+	}
+
+	// The control: the same marker at the top level is served.
+	topLevel, _ := json.Marshal(map[string]json.RawMessage{
+		"family":     json.RawMessage(`"docGen"`),
+		"tenantName": param,
+	})
+	out, ferr := e.unwrapEgressParams(ctx, topLevel, testRequestID, 1)
+	if ferr != nil {
+		t.Fatalf("top-level control: %v", ferr)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if got["tenantName"] != "Alice Smith" {
+		t.Errorf("tenantName = %q, want plaintext %q", got["tenantName"], "Alice Smith")
+	}
+}
+
+// An array element is a place the unwrap does not substitute, exactly like an
+// object member: a marker as the sole element of a top-level array param would
+// otherwise be neither served (detectSensitiveRef sees an array, not a marker)
+// nor refused, and would ride to the vendor as ciphertext + MAC inside
+// RawParams. The control beside it is a top-level array of plain strings, which
+// still passes through byte-identical.
+func TestUnwrapEgressParams_MarkerInsideAnArrayRefused(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	param := sensitiveRefParam(t, marker, "value")
+
+	inArray, _ := json.Marshal(map[string]json.RawMessage{
+		"family":  json.RawMessage(`"docGen"`),
+		"tenants": json.RawMessage(`[` + string(param) + `]`),
+	})
+	_, ferr := e.unwrapEgressParams(ctx, inArray, testRequestID, 1)
+	if ferr == nil || ferr.class != egressPermanent {
+		t.Fatalf("marker as an array element: want permanent failure, got %v", ferr)
+	}
+	if !strings.Contains(ferr.err.Error(), `"tenants"`) {
+		t.Errorf("refusal must name the param carrying the marker, got %v", ferr.err)
+	}
+
+	// The control: an ordinary array param carries no marker and is untouched.
+	plain := json.RawMessage(`{"family":"docGen","tenants":["Alice Smith","Bob Jones"]}`)
+	out, ferr := e.unwrapEgressParams(ctx, plain, testRequestID, 1)
+	if ferr != nil {
+		t.Fatalf("plain array param: %v", ferr)
+	}
+	if string(out) != string(plain) {
+		t.Errorf("markerless array param must pass through byte-identical: got %s, want %s", out, plain)
+	}
+}
+
+// The marker key is matched one way at the top level and every way below it. A
+// spelling other than the minted one is not served — encoding/json would match
+// a struct tag case-insensitively, which would have made `$SensitiveRef` a
+// served marker that the scan (and every other reader) spells differently — and
+// wherever such a spelling sits it is refused rather than carried to the vendor.
+func TestUnwrapEgressParams_CaseVariantMarkerKeyNeverPasses(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	marker.Field = "value"
+	inner, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	variant := `{"$SensitiveRef":` + string(inner) + `}`
+
+	t.Run("at the top level it is not served", func(t *testing.T) {
+		raw := json.RawMessage(`{"tenantName":` + variant + `}`)
+		out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("case-variant marker key at the top level: want permanent failure, got %v (out=%s)", ferr, out)
+		}
+		if strings.Contains(string(out), "Alice Smith") {
+			t.Fatalf("a spelling the unwrap does not serve must never be substituted, got %s", out)
+		}
+	})
+
+	t.Run("below the top level it is refused by the scan", func(t *testing.T) {
+		raw := json.RawMessage(`{"doc":{"tenantName":` + variant + `}}`)
+		_, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("case-variant marker key at depth: want permanent failure, got %v", ferr)
+		}
+		if !strings.Contains(ferr.err.Error(), `"doc"`) {
+			t.Errorf("refusal must name the param, got %v", ferr.err)
+		}
+	})
+}
+
+// A value that IS a served marker is scanned too: a second marker hidden among
+// a marker's own fields is substituted by nothing, so without the scan it would
+// stay in the params the adapter's RawParams carries while the outer marker
+// resolved happily.
+func TestUnwrapEgressParams_MarkerNestedInsideAServedMarkerRefused(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	marker.Field = "value"
+	inner, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	// The outer value is a well-formed, servable marker; a second one rides in
+	// an extra field beside it.
+	raw := json.RawMessage(`{"tenantName":{"$sensitiveRef":` + string(inner) + `,"aux":{"$sensitiveRef":` + string(inner) + `}}}`)
+
+	out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+	if ferr == nil || ferr.class != egressPermanent {
+		t.Fatalf("marker nested inside a served marker: want permanent failure, got %v (out=%s)", ferr, out)
+	}
+	if !strings.Contains(ferr.err.Error(), `"tenantName"`) {
+		t.Errorf("refusal must name the param, got %v", ferr.err)
+	}
+}
+
+// params is not always a JSON object — Loom passes a non-object params value
+// through opaque — and a marker inside one is served by nothing, so it is
+// refused rather than passed out to the vendor. A markerless non-object params
+// still passes through byte-identical.
+func TestUnwrapEgressParams_NonObjectParams(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	param := sensitiveRefParam(t, marker, "value")
+
+	t.Run("a bare array carrying a marker is refused", func(t *testing.T) {
+		raw := json.RawMessage(`[` + string(param) + `]`)
+		out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("bare-array params carrying a marker: want permanent failure, got %v (out=%s)", ferr, out)
+		}
+	})
+
+	t.Run("a bare array of plain values passes through", func(t *testing.T) {
+		raw := json.RawMessage(`["Alice Smith","Bob Jones"]`)
+		out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr != nil {
+			t.Fatalf("bare-array params: %v", ferr)
+		}
+		if string(out) != string(raw) {
+			t.Errorf("markerless non-object params must pass through byte-identical: got %s, want %s", out, raw)
+		}
+	})
+}
+
+// One event must unwrap to one outcome, whatever order Go's map iteration
+// happens to take: an event carrying both an unserveable marker and a
+// merely-lagging one would otherwise Nak on one delivery and fail terminally on
+// the next, with the operator-facing Detail wandering between them. The scan
+// pass runs over every param before any marker is resolved, and both passes
+// walk a sorted key set, so the permanent refusal wins and names the same param
+// every time.
+func TestUnwrapEgressParams_OutcomeIsDeterministic(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	provisionEnvelopeBucket(t, ctx, conn)
+	v := startTestVault(t, ctx, conn)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	nested := `{"tenantName":` + string(sensitiveRefParam(t, marker, "value")) + `}`
+
+	// A second marker whose envelope row was never seeded: on its own this is a
+	// TRANSIENT failure (the lens may still be lagging), which is exactly the
+	// outcome the permanent one has to beat.
+	laggingID := testIdentityID(t)
+	lagging := sensitiveRefMarker{
+		Ref: "vtx.identity." + laggingID + ".ssn", Field: "value", MAC: []byte("placeholder"),
+		Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: "vtx.identity." + laggingID},
+	}
+	laggingInner, err := json.Marshal(lagging)
+	if err != nil {
+		t.Fatalf("marshal lagging marker: %v", err)
+	}
+	raw := json.RawMessage(`{"aaa":` + nested + `,"zzz":{"$sensitiveRef":` + string(laggingInner) + `}}`)
+
+	for i := 0; i < 20; i++ {
+		_, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("run %d: want the permanent refusal to win over a transient lag, got %v", i, ferr)
+		}
+		if !strings.Contains(ferr.err.Error(), `"aaa"`) {
+			t.Fatalf("run %d: err = %v, want the refusal to name the same param every time", i, ferr.err)
+		}
+	}
+
+	// With two unserveable params, the sorted walk names the first of them —
+	// one event, one message, on every redelivery.
+	two := json.RawMessage(`{"bbb":` + nested + `,"aaa":` + nested + `}`)
+	for i := 0; i < 20; i++ {
+		_, ferr := e.unwrapEgressParams(ctx, two, testRequestID, 1)
+		if ferr == nil || !strings.Contains(ferr.err.Error(), `"aaa"`) {
+			t.Fatalf("run %d: err = %v, want the lexicographically first param named", i, ferr)
+		}
+	}
+}
+
+// The scan's depth bound is not a way past the refusal: a value nested deeper
+// than the scan walks is refused on the truncation itself, because a walk that
+// stopped early proves nothing about what is below it. A value of ordinary
+// depth carrying no marker still passes through untouched.
+func TestUnwrapEgressParams_DepthBoundIsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	e := &Engine{conn: conn, logger: slog.Default()}
+
+	nest := func(levels int, leaf string) string {
+		body := leaf
+		for i := 0; i < levels; i++ {
+			body = `{"a":` + body + `}`
+		}
+		return body
+	}
+
+	t.Run("a container past the scanned depth is refused", func(t *testing.T) {
+		raw := json.RawMessage(`{"deep":` + nest(maxNestedMarkerScanDepth+2, `{"tenantName":"Alice Smith"}`) + `}`)
+		_, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("param nested past the scan depth: want permanent failure, got %v", ferr)
+		}
+		if !strings.Contains(ferr.err.Error(), `"deep"`) {
+			t.Errorf("refusal must name the param, got %v", ferr.err)
+		}
+	})
+
+	t.Run("a scalar at the scanned depth passes", func(t *testing.T) {
+		raw := json.RawMessage(`{"deep":` + nest(maxNestedMarkerScanDepth, `"a plain value"`) + `,"family":"docGen"}`)
+		out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+		if ferr != nil {
+			t.Fatalf("ordinary nested params: %v", ferr)
+		}
+		if string(out) != string(raw) {
+			t.Errorf("markerless params must pass through byte-identical: got %s, want %s", out, raw)
+		}
+	})
+
+	// An EMPTY container past the bound provably holds no marker, so refusing it
+	// would be a refusal with nothing behind it. Only an unopened container with
+	// something in it makes the answer unknown.
+	t.Run("an empty container past the scanned depth passes", func(t *testing.T) {
+		for _, empty := range []string{`{}`, `[]`} {
+			// The empty container sits exactly AT the level the walk stops on,
+			// so it is the value the bound has to judge.
+			raw := json.RawMessage(`{"deep":` + nest(maxNestedMarkerScanDepth+1, empty) + `}`)
+			out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
+			if ferr != nil {
+				t.Fatalf("empty %s past the scan depth: want pass-through, got %v", empty, ferr)
+			}
+			if string(out) != string(raw) {
+				t.Errorf("markerless params must pass through byte-identical: got %s, want %s", out, raw)
+			}
+		}
+	})
+}
+
 func TestUnwrapEgressParams_NonMarkerPassthrough(t *testing.T) {
 	ctx := context.Background()
 	conn := egressTestConn(t)
@@ -213,26 +603,81 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		}
 	})
 
-	// The envelope source — the piiKeyEnvelope lens — enumerates identity
-	// holders alone, so a class-held record can only be refused here. It is
-	// refused on the HOLDER's type, not the ref's: the ref below anchors on a
-	// perfectly ordinary identity.
-	t.Run("non-identity key holder", func(t *testing.T) {
+	// A holder kind with no envelope projection is refused here, permanently,
+	// with the kind named — never left to fail as a row that simply never
+	// appears, which the boundary cannot tell from a lagging lens. It is
+	// refused on the HOLDER's kind, not the ref's: the ref below anchors on a
+	// perfectly ordinary identity. The positive control that this vector
+	// reaches the gate rather than dying earlier is
+	// TestResolveSensitiveRef_ClassHeldRecord_ServedFromItsOwnLens — the same
+	// shape with a holder kind the table serves, which returns plaintext.
+	t.Run("unknown holder kind", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
 		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{
 			Ref: "vtx.identity." + testEgressIdentityID + ".ssn",
 			Ciphertext: vault.Ciphertext{
 				CT: []byte("x"), Nonce: []byte("y"),
-				KeyID: "vtx.retentionclass." + testEgressClassID,
+				KeyID: "vtx.foo." + testEgressUnknownID,
 			},
 			Field: "value",
 		}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
-			t.Fatalf("class-held record: want permanent failure, got %v", ferr)
+			t.Fatalf("holder kind with no envelope source: want permanent failure, got %v", ferr)
 		}
-		if !strings.Contains(ferr.err.Error(), "retentionclass") {
-			t.Fatalf("refusal must name the holder type, got %v", ferr.err)
+		if !strings.Contains(ferr.err.Error(), `"foo"`) {
+			t.Fatalf("refusal must name the holder kind, got %v", ferr.err)
+		}
+	})
+
+	// A shredded retention class answers exactly as a shredded identity does:
+	// the Vault's shred gate fires on the row's own shredded flag before it
+	// looks at wrappedDEK, so the ShredRetentionClassKey shape (shredded, DEK
+	// destroyed) is permanent, not a transient "unusable row".
+	t.Run("shredded class holder", func(t *testing.T) {
+		conn := egressTestConn(t)
+		provisionEnvelopeBucket(t, ctx, conn)
+		v := startTestVault(t, ctx, conn)
+		e := &Engine{conn: conn, logger: slog.Default()}
+
+		holderKey, ref, marker, envelope := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+			"tenantName", map[string]any{"value": "Alice Smith"})
+		marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+		marker.Field = "value"
+
+		// Two rows, because ShredRetentionClassKey writes two shapes and only
+		// one of them exercises the Vault gate's ORDERING. The production shape
+		// for a class that actually held records keeps the real wrappedDEK and
+		// flips shredded (shred_retention_class_key.go), so the refusal can only
+		// come from the shredded check running BEFORE the DEK is unwrapped; the
+		// placeholder shape (never minted, empty wrappedDEK) would answer
+		// ErrKeyShredded even from a gate in the wrong order, because the check
+		// it must precede is the empty-WrappedDEK one.
+		for _, row := range []struct {
+			name     string
+			envelope vault.Envelope
+		}{
+			{"real wrapped DEK, shredded", vault.Envelope{
+				WrappedDEK: envelope.WrappedDEK, KeyID: envelope.KeyID, KEKVersion: envelope.KEKVersion,
+				Alg: envelope.Alg, CreatedAt: envelope.CreatedAt, Shredded: true,
+			}},
+			{"never-minted placeholder", vault.Envelope{KeyID: holderKey, Shredded: true}},
+		} {
+			shredded, err := json.Marshal(row.envelope)
+			if err != nil {
+				t.Fatalf("%s: marshal shredded envelope: %v", row.name, err)
+			}
+			if _, err := conn.KVPut(ctx, retentionClassEnvelopeBucket, holderKey, shredded); err != nil {
+				t.Fatalf("%s: seed shredded class envelope: %v", row.name, err)
+			}
+
+			_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
+			if ferr == nil || ferr.class != egressPermanent {
+				t.Fatalf("shredded class holder (%s): want permanent failure, got %v", row.name, ferr)
+			}
+			if !errors.Is(ferr.err, vault.ErrKeyShredded) {
+				t.Fatalf("shredded class holder (%s): err = %v, want the ErrKeyShredded sentinel", row.name, ferr.err)
+			}
 		}
 	})
 
@@ -330,7 +775,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 
 		id := testIdentityID(t)
 		identityKey := "vtx.identity." + id
-		if _, err := conn.KVPut(ctx, envelopeLensBucket, identityKey, []byte("not json")); err != nil {
+		if _, err := conn.KVPut(ctx, identityEnvelopeBucket, identityKey, []byte("not json")); err != nil {
 			t.Fatalf("seed unparseable envelope: %v", err)
 		}
 		marker := sensitiveRefMarker{Ref: identityKey + ".ssn", Field: "value",
@@ -366,7 +811,7 @@ func TestResolveSensitiveRef_Transient(t *testing.T) {
 
 		id := testIdentityID(t)
 		identityKey := "vtx.identity." + id
-		if _, err := conn.KVPut(ctx, envelopeLensBucket, identityKey, []byte("not json")); err != nil {
+		if _, err := conn.KVPut(ctx, identityEnvelopeBucket, identityKey, []byte("not json")); err != nil {
 			t.Fatalf("seed unparseable envelope: %v", err)
 		}
 		marker := sensitiveRefMarker{Ref: identityKey + ".ssn", Field: "value",
@@ -623,7 +1068,7 @@ func TestFetchLiveEnvelope_ShredThenVaultRestart_DecryptStillRefuses(t *testing.
 	if err != nil {
 		t.Fatalf("marshal shredded envelope: %v", err)
 	}
-	if _, err := conn.KVPut(ctx, envelopeLensBucket, identityKey, envBytes); err != nil {
+	if _, err := conn.KVPut(ctx, identityEnvelopeBucket, identityKey, envBytes); err != nil {
 		t.Fatalf("seed shredded envelope: %v", err)
 	}
 
@@ -690,4 +1135,41 @@ func TestHandleExternal_EgressHappyPath_AdapterReceivesPlaintext(t *testing.T) {
 	// e2e's job (design §7); here we only assert the adapter (the last-mile
 	// vendor call) received plaintext and the dispatch converged.
 	awaitReplyOp(t, ctx, conn, "ResolveCharge", 5*time.Second)
+}
+
+// The same happy path for a retention-class-held record, end to end through
+// handleExternal: the adapter — the last-mile vendor call — receives the
+// plaintext of a record custodied on a class holder, resolved through that
+// holder kind's own envelope lens, and the dispatch converges.
+func TestHandleExternal_EgressClassHeldRecord_AdapterReceivesPlaintext(t *testing.T) {
+	ctx := context.Background()
+	conn := egressTestConn(t)
+	v := startTestVault(t, ctx, conn)
+	e := newTestEngineWithVault(t, ctx, conn)
+
+	var gotParams map[string]string
+	if err := e.RegisterAdapter("docGen", AdapterFunc(func(_ context.Context, req Request) (Dispatch, error) {
+		gotParams = req.Params
+		return Dispatch{Disposition: Resolved, Result: Result{Status: OutcomeCompleted}}, nil
+	})); err != nil {
+		t.Fatalf("RegisterAdapter: %v", err)
+	}
+
+	_, ref, marker, _ := seedClassHeldAspect(t, ctx, conn, v, testEgressClassID, testEgressLeaseAppID,
+		"tenantName", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
+	params, _ := json.Marshal(map[string]json.RawMessage{
+		"tenantName": sensitiveRefParam(t, marker, "value"),
+		"family":     json.RawMessage(`"docGen"`),
+	})
+	ev := externalEvent{InstanceKey: "class-handle-1", Adapter: "docGen", ReplyOp: "RecordLeaseDocOutcome", Params: params}
+	msg := substrate.Message{Body: externalEventBody(t, testRequestID, ev), NumDelivered: 1}
+
+	if decision := e.handleExternal(ctx, msg); decision != substrate.Ack {
+		t.Fatalf("Decision = %v, want Ack", decision)
+	}
+	if gotParams["tenantName"] != "Alice Smith" {
+		t.Errorf("adapter Params[tenantName] = %q, want plaintext %q", gotParams["tenantName"], "Alice Smith")
+	}
+	awaitReplyOp(t, ctx, conn, "RecordLeaseDocOutcome", 5*time.Second)
 }

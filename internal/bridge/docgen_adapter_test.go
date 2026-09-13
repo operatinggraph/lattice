@@ -164,6 +164,74 @@ func TestFakeDocGen_RenderDegradesWithoutOptionalFields(t *testing.T) {
 	require.NotContains(t, content, "Monthly rent")
 }
 
+// TestFakeDocGen_TenantNameFromUnwrappedParams: the tenant name the egress
+// unwrap can substitute arrives in the flat Params map (the unwrap serves a
+// sensitive-ref at the TOP LEVEL of params only, never inside the nested doc),
+// so the Tenant line reads it from there ahead of doc.tenantName, and falls
+// back to the applicant key when neither carries a name.
+func TestFakeDocGen_TenantNameFromUnwrappedParams(t *testing.T) {
+	conn := startDocGenStore(t)
+	a := bridge.NewFakeDocGen(conn, docGenTestBucket, 1<<20)
+
+	render := func(t *testing.T, key string, params map[string]string, doc map[string]any) string {
+		t.Helper()
+		d, err := a.Execute(context.Background(), bridge.Request{
+			IdempotencyKey: key,
+			Params:         params,
+			RawParams:      docGenRawParams(t, "vtx.leaseapp.TTenantNameCase12345", doc),
+		})
+		require.NoError(t, err)
+		require.Equal(t, bridge.OutcomeCompleted, d.Result.Status)
+		var ptr struct {
+			StoreName string `json:"storeName"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(d.Result.Detail), &ptr))
+		return readStoredDoc(t, conn, ptr.StoreName)
+	}
+
+	bareDoc := func() map[string]any {
+		return map[string]any{
+			"applicant": "vtx.identity.BBareKeyAppLicant123",
+			"signedAt":  "2026-07-02T09:00:00Z",
+		}
+	}
+
+	// The rendered line, built the way the renderer builds it, so the
+	// assertion pins the VALUE on the Tenant line rather than its mere
+	// presence somewhere in the document.
+	line := func(label, value string) string { return fmt.Sprintf("%-16s%s\n", label+":", value) }
+
+	t.Run("top-level param renders on the Tenant line", func(t *testing.T) {
+		content := render(t, "docgen-tenant-param", map[string]string{"tenantName": "Alice Smith"}, bareDoc())
+		require.Contains(t, content, line("Tenant", "Alice Smith"), "the unwrapped top-level tenantName names the tenant")
+		require.Contains(t, content, line("Tenant ID", "vtx.identity.BBareKeyAppLicant123"),
+			"a named tenant keeps the applicant key on its own line")
+		require.Contains(t, content, line("Signed by", "Alice Smith"), "the execution block names the same tenant")
+	})
+
+	t.Run("doc tenantName alone still renders", func(t *testing.T) {
+		doc := bareDoc()
+		doc["tenantName"] = "Bob Jones"
+		content := render(t, "docgen-tenant-doc", nil, doc)
+		require.Contains(t, content, line("Tenant", "Bob Jones"), "a doc-carried plaintext name still renders")
+	})
+
+	t.Run("neither present falls back to the applicant", func(t *testing.T) {
+		content := render(t, "docgen-tenant-none", map[string]string{"family": "docGen"}, bareDoc())
+		require.Contains(t, content, line("Tenant", "vtx.identity.BBareKeyAppLicant123"),
+			"with no name anywhere the tenant renders by bare applicant key")
+		require.NotContains(t, content, "Tenant ID", "no separate id line when the tenant IS the bare key")
+	})
+
+	t.Run("the top-level param wins over a doc-carried name", func(t *testing.T) {
+		doc := bareDoc()
+		doc["tenantName"] = "Stale Snapshot"
+		content := render(t, "docgen-tenant-both", map[string]string{"tenantName": "Alice Smith"}, doc)
+		require.Contains(t, content, line("Tenant", "Alice Smith"))
+		require.NotContains(t, content, "Stale Snapshot")
+	})
+}
+
 // TestFakeDocGen_IdempotentPerKey: a repeat Execute with the same
 // idempotencyKey returns the first Result verbatim and performs NO second
 // byte-plane side-effect.

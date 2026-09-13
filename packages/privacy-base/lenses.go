@@ -22,10 +22,22 @@ const ShredStatusBucket = "privacy-shreds"
 // Core-KV read (P5 inspector exception) cmd/loupe/objects_crypto.go uses.
 const PiiKeyEnvelopeBucket = "privacy-pii-key-envelopes"
 
+// RetentionKeyEnvelopeBucket is the package-owned NATS-KV read model the
+// retentionClassKeyEnvelope lens projects into — the sibling of
+// PiiKeyEnvelopeBucket for the other holder kind (retention-class-egress-
+// envelope-design.md §3.1). The bridge's external-egress unwrap reads a
+// retention-class holder's live envelope here, from its own bucket, never
+// PiiKeyEnvelopeBucket: a plain lens's Truncate is unscoped, and an operator
+// Rebuild(truncate=true) on one lens would purge the other's rows under the
+// bridge's five-attempt unwrap budget. shredded is projected for the Vault's
+// shred gate, exactly as for identities.
+const RetentionKeyEnvelopeBucket = "privacy-retention-key-envelopes"
+
 // RetentionKeyStatusBucket is the package-owned NATS-KV read model the
 // retentionKeyStatus lens projects into — the operator analog of
 // ShredStatusBucket for the other holder kind
-// (retention-class-key-custody-design.md §4.4).
+// (retention-class-key-custody-design.md §4.4). Its envelope sibling is
+// RetentionKeyEnvelopeBucket, projected by retentionClassKeyEnvelope.
 //
 // A NEW lens rather than a widening of piiKeyEnvelope: that lens's
 // `MATCH (i:identity)` has two live consumers — the bridge's egress unwrap
@@ -101,6 +113,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        PiiKeyEnvelopeBucket,
 			Engine:        "full",
 			Spec:          piiKeyEnvelopeSpec,
+		},
+		{
+			CanonicalName: "retentionClassKeyEnvelope",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        RetentionKeyEnvelopeBucket,
+			Engine:        "full",
+			Spec:          retentionClassKeyEnvelopeSpec,
 		},
 		{
 			CanonicalName:  "identityErasureResidue",
@@ -217,6 +237,25 @@ RETURN
   i.piiKey.data.kekVersion AS kekVersion,
   i.piiKey.data.alg AS alg,
   i.piiKey.data.shredded AS shredded`
+
+// retentionClassKeyEnvelopeSpec is piiKeyEnvelopeSpec's sibling for the other
+// holder kind (retention-class-egress-envelope-design.md §3.1): same six
+// columns, same absence semantics (no row until the class's .piiKey is
+// minted), same shredded projection the Vault's shred gate needs. The
+// bridge's external-egress unwrap reads a retention-class holder's live
+// envelope here — its own bucket, never PiiKeyEnvelopeBucket, because a plain
+// lens's Truncate is unscoped and an operator Rebuild(truncate=true) on one
+// lens would purge the other's rows under the bridge's five-attempt unwrap
+// budget.
+const retentionClassKeyEnvelopeSpec = `MATCH (r:retentionclass)
+WHERE r.piiKey.data.keyId <> null
+RETURN
+  r.key AS key,
+  r.piiKey.data.wrappedDEK AS wrappedDEK,
+  r.piiKey.data.keyId AS keyId,
+  r.piiKey.data.kekVersion AS kekVersion,
+  r.piiKey.data.alg AS alg,
+  r.piiKey.data.shredded AS shredded`
 
 // identityErasureResidueSpec projects one row per ERASURE-REQUESTED identity —
 // the anchor predicate is the `.erasureRequested` marker SealIdentityForErasure

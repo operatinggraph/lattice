@@ -367,25 +367,25 @@ func discardTombstonedDecrypt(ctx context.Context, conn *substrate.Conn, bucket 
 	_ = json.Unmarshal(plaintext, &value)
 }
 
-// refusableEgressHolder refuses an egress ref whose key holder the bridge
-// cannot resolve an envelope for.
+// refusableEgressHolder refuses an egress ref whose key holder kind has no
+// envelope projection at the external-egress boundary.
 //
-// The bridge unwraps a $sensitiveRef by reading the holder's envelope live
-// from the piiKeyEnvelope lens (packages/privacy-base), and that lens
-// enumerates identity holders alone. A retention-class-custodied record handed
-// to the bridge would therefore fail as an envelope that never projects —
-// indistinguishable from a lens that is merely lagging, and retried until the
-// unwrap budget is spent. Refusing it here, where the operation is authored,
-// turns that into one typed error naming the holder type, at the point a
-// script author can act on it.
+// It is the pin that makes a third custody kind fail at mint, typed, until its
+// envelope projection exists. Both of the kinds custody can name today
+// (vault.KeyHolderKinds) are served by a lens the bridge reads, so this arm is
+// unreachable from any Processor-written ciphertext — it costs one string
+// comparison, and what it buys is the difference between one error a script
+// author can act on and five silent bridge retries against an envelope that is
+// never going to project (an absence the boundary cannot tell from a lagging
+// lens).
 func refusableEgressHolder(ct vault.Ciphertext) error {
 	keyHolderKey, err := vault.KeyHolder(ct)
 	if err != nil {
 		return err
 	}
-	if holderType := vault.KeyHolderType(keyHolderKey); holderType != "identity" {
+	if holderType := vault.KeyHolderType(keyHolderKey); !vault.IsKeyHolderKind(holderType) {
 		return fmt.Errorf(
-			"key holder %s is a %q holder, and only an identity holder's envelope is reachable at the external-egress boundary",
+			"key holder %s is a %q holder, a kind with no envelope projection at the external-egress boundary",
 			keyHolderKey, holderType)
 	}
 	return nil

@@ -136,7 +136,7 @@ failure blocks the other:
 | Decrypt with a tampered ciphertext or wrong key | `ErrDecryptFailed` (AEAD authentication failure) |
 | `Envelope` presented under the wrong `keyHolderKey` | `ErrInvalidEnvelope` — fails closed, never silently decrypts under the wrong holder |
 | Ciphertext's `keyId` absent or not a well-formed vertex key | `ErrInvalidEnvelope` (`vault.KeyHolder`) — refused with no fallback to the aspect's anchor |
-| A `$sensitiveRef` egress marker names a non-`identity` key holder | refused where authored (`internal/processor/sensitive_decrypt.go`) and again by the bridge (`internal/bridge/egress.go`) — the `piiKeyEnvelope` lens the bridge resolves a live envelope from enumerates identity holders only |
+| A `$sensitiveRef` egress marker names a key holder of a kind with no envelope projection | refused where authored (`internal/processor/sensitive_decrypt.go`) and again by the bridge (`internal/bridge/egress.go`), the kind named — both gates read one closed set, `vault.KeyHolderKinds` (identity, retention class), and the bridge's bucket table is pinned equal to it; a third custody kind fails at mint as one typed error until its lens exists, never as five silent bridge retries |
 | The wholesale decrypt RPC (`lattice.vault.decrypt`) is asked to open a record whose key holder is not an identity | `ErrRevealDenied`, surfaced as-is — the RPC carries no actor and no declared purpose, so the Reveal rule (Contract #3 §3.10) denies it before any key is touched, and a shredded retention class answers the same way; Loupe reports it as 403 naming the holder. The sanctioned read path is a read-path-authorized Secure Lens, whose in-process decrypt is untouched |
 | `wrapkey` / `unwrapkey` asked for a key holder that is not an identity | `ErrHolderNotIdentity`, surfaced as-is before any key is touched — an unwrap is a decrypt, so this is the Reveal refusal's sibling on the object plane; both real callers pass the object's governing identity, and Loupe reports the refusal as 403 |
 | `issuesessionkey` asked for a key holder that is not an identity | `ErrHolderNotIdentity` — a session key is an identity's own DEK for its personal-lens session; no component holds a transport grant to the endpoint today |
@@ -195,4 +195,10 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `ErrHolderNotIdentity` surfaced as 403 from Reveal and as 502 ("the platform is broken") from the
   object read/upload proxies. Check: `internal/objectcrypto.wireError` turns known sentinels back into
   sentinels; grep every `objectcrypto.`/`vault.DecryptSubject` caller for an `errors.Is` on each one.
+- **A "cross-check" whose upstream set is a literal in the test is a restatement, not a pin.** A closed
+  set pinned only to other hand-maintained literals terminates in nothing upstream, so the case the pin
+  exists for — a kind added at the source — leaves every pin green. Minted: `KeyHolderKinds` was pinned to
+  a two-entry map the test wrote itself while `pkgmgr`'s custody switch stayed a hand-written `case`.
+  Check: the source exports its set as a function the switch consults, and the pin derives its expected
+  set from that function.
 

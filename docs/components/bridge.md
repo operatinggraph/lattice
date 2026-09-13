@@ -228,6 +228,8 @@ exactly like Loom and Weaver (`docs/components/service-actors.md`). Consequences
 | In | `events.external.>` durable consumer | one fixed durable; the envelope above; domain is ordinary (no allowlist) |
 | In (optional) | the Contract #4 op tracker `vtx.op.<deterministic-reqId>` | generic skip-on-redelivery probe (same key shape for all ops) — **not** a read of the typed claim vertex; the bridge stays type-agnostic |
 | In (async) | `schedule.bridge.*.fired.>` fixed durable (`bridge-schedule`) | the fired poll/timeout lane (§10.4); routing rides the schedule payload so the handler needs no typed read |
+| In | the two privacy-base envelope lens read models — `privacy-pii-key-envelopes` (identity holders) and `privacy-retention-key-envelopes` (retention-class holders) | the egress unwrap's P5 read: a `$sensitiveRef`'s holder is resolved from the ciphertext's own `keyId`, and its LIVE envelope is read by key from the bucket that projects that holder kind (`envelopeBucketFor`, pinned equal to `vault.KeyHolderKinds`); never a stored copy, never Core KV |
+| Out | `lattice.vault.decryptref` RPC | the ref-verified decrypt (MAC over `{ref, requestId, ciphertext}` mandatory) — the bridge's sole decrypt authority |
 | Out | `replyOp` result op via `core-operations` | `requestId = deterministic(instanceKey)`; `payload.externalRef = instanceKey` + outcome fields; its DDL records the outcome as **aspect(s)** on the claim vertex (D5) **and emits `orchestration.externalTaskCompleted{externalRef}`** (the uniform Loom completion signal, §10.6); submitted under the bridge service actor |
 | Out (async) | `dispatchOp` pending-marker op via `core-operations` | on a `Pending` outcome: records the create-only vendor-`ref` marker, **no** terminal outcome (token stays parked) |
 | Out (async) | `@at` schedules `schedule.bridge.{poll,timeout}.<handle>` on `core-schedules` | arm the poll (self-rescheduling `@at` chain) + timeout (deadline backstop) for a pending call |
@@ -266,6 +268,8 @@ Crash points and their recovery:
 | Adapter panics | panic-contained — the framework, not the adapter, is the safety boundary; the event is re-drivable, the dispatch goroutine survives |
 | Never-completing external call | Loom's `externalTask` per-step deadline (§10.6) is the backstop on the *waiting* side — the bridge itself does not wedge Loom |
 | Poison event | head-of-line blocks the `external` consumer only (domain-scoped blast radius) |
+| A `$sensitiveRef` names a holder kind with no envelope projection | permanent unwrap failure naming the kind → the terminal `replyOp` posts a failed outcome (converge, never park); the Processor refuses the same kind at mint, so the bridge's refusal is the second gate on one closed set, not the only one |
+| A `$sensitiveRef` sits inside a nested param value, or a param nests past the eight levels the scan walks, or `params` is not a JSON object at all | permanent unwrap failure naming the param — the unwrap substitutes at the top level of a `params` object only, and a marker anywhere else would otherwise ride to the vendor as ciphertext + MAC inside `RawParams`; a truncated scan is refused too, since it establishes nothing about what lies below. A consumer templates a sensitive field at the top level (the background-check and docGen shapes) |
 
 ---
 
@@ -338,3 +342,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   from the real thing on the surface where someone approves it. Minted: `FakeAugur` stamped
   `Model: "claude-opus-4-8"` on canned proposals that the `augur-proposals` lens carries into Loupe's
   review console. Check: a fake names itself in any field an operator reads to judge trustworthiness.
+- **Two detectors of one wire shape must share one predicate.** A marker recognised by struct-tag decoding
+  is matched case-insensitively (`encoding/json` folds tag names), while a hand-written key scan matches
+  exactly, so the boundary serves a spelling the refusal cannot see. Minted: the nested-marker scan missed
+  `$SensitiveRef` at depth while `detectSensitiveRef` served it at the top. Check: one exact key lookup
+  feeds both the serve and the refuse path, and a raw case-insensitive residual check over the substituted
+  bytes backstops every structural walk (`internal/pkgmgr`'s materializer scan is the precedent).
+- **A pass-through arm written before a refusal existed silently exempts a shape from it.** Every early
+  `return raw, nil` in a boundary is a claim that nothing below needs the new rule; re-walk each one when
+  a refusal is added, and walk the served value too, not only the unserved ones. Minted: the nested-marker
+  refusal skipped a non-object `params` and never scanned a top-level value that was itself a marker, so a
+  second marker inside it rode to the vendor in `RawParams`. Check: the refusal's tests include one case
+  per early-return arm and one where the smuggled shape sits inside a legitimately served value.

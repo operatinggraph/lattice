@@ -1,6 +1,21 @@
 package pkgmgr
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
+
+// quoteAll renders a set of declared names for an error message, each quoted,
+// so a reader can tell a name's exact spelling (the custody kinds are
+// camelCase and their holder vertex types are not).
+func quoteAll(names []string) []string {
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		quoted = append(quoted, fmt.Sprintf("%q", n))
+	}
+	return quoted
+}
 
 // validateCustodyScope enforces the install-time custody rules
 // (retention-class-key-custody-design.md §3.2). Every one fails CLOSED, and
@@ -30,13 +45,14 @@ func (def Definition) validateCustodyScope() error {
 		// 1. The kind must be one this platform implements. An unrecognized
 		// kind cannot be resolved at commit time, and the permissive reading
 		// (treat it as identity) would silently custody a record on the very
-		// subject whose erasure it was declared to survive.
-		switch c.Kind {
-		case CustodyKindIdentity, CustodyKindRetentionClass:
-		default:
+		// subject whose erasure it was declared to survive. The admitted set is
+		// CustodyKinds(), read here rather than spelled again, so every reader
+		// of the set — including the pin that ties it to the holder kinds the
+		// external-egress boundary serves — sees what install actually admits.
+		if !slices.Contains(CustodyKinds(), c.Kind) {
 			return fmt.Errorf(
-				"pkgmgr: DDL[%d] %q: Custody.Kind is %q — must be %q, %q, or empty (== %q)",
-				idx, d.CanonicalName, c.Kind, CustodyKindIdentity, CustodyKindRetentionClass, CustodyKindIdentity)
+				"pkgmgr: DDL[%d] %q: Custody.Kind is %q — must be one of %s, or empty (== %q)",
+				idx, d.CanonicalName, c.Kind, strings.Join(quoteAll(CustodyKinds()), ", "), CustodyKindIdentity)
 		}
 
 		// 2. Custody is meaningful only for an aspect-type DDL, mirroring

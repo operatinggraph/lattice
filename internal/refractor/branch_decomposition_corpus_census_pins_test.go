@@ -109,6 +109,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"providerSites":                  {"g0/o0!no-aggregating-item", 0, 0},
 	"renewalComplete":                {"g1/o5[inst;landlord,u] g0/o0!no-aggregating-item", 2, 1},
 	"renewalsRead":                   {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
+	"retentionClassKeyEnvelope":      {"g0/o0!no-aggregating-item", 0, 0},
 	"retentionKeyStatus":             {"g0/o0!no-aggregating-item", 0, 0},
 	"shredStatus":                    {"g0/o0!no-aggregating-item", 0, 0},
 	"staffReadGrants":                {"g0/o0!no-aggregating-item", 0, 0},

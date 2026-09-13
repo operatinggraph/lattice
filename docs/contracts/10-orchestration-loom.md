@@ -108,8 +108,8 @@ then park; the completer is a human for userTask, the bridge for externalTask). 
   PII never enters the `external.<adapter>` event, the claim vertex, or any durable plane. The
   **bridge** is the unwrap point — at dispatch, just before the adapter call, it resolves each
   sensitive-ref via the **ref-verified Vault decrypt** (MAC mandatory; the event's top-level
-  `requestId` is part of the verified input) using the identity's **live** key envelope (never a
-  stored copy — §3.10 live-envelope rule), so a fabricated or spliced ref and a shredded identity's
+  `requestId` is part of the verified input) using the holder's **live** key envelope (never a
+  stored copy — §3.10 live-envelope rule), so a fabricated or spliced ref and a shredded holder's
   ref both fail closed. An unwrap failure is a data error: a permanent one (unverified / shredded /
   malformed / absent) posts the terminal `replyOp` with a failed outcome so the pattern converges; a
   transient one retries — never a blank field to a vendor.

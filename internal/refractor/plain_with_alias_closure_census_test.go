@@ -127,6 +127,7 @@ var withAliasClosureBuckets = map[string]string{
 	"providerIdentityReadGrants": closureB,
 	"providerSites":              closureB,
 	"renewalsRead":               closureF,
+	"retentionClassKeyEnvelope":  closureA,
 	"retentionKeyStatus":         closureA,
 	"shredStatus":                closureA,
 	"staffReadGrants":            closureB,

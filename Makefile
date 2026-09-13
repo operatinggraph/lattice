@@ -498,7 +498,7 @@ verify-package-identity-hygiene:
 ## verify-package-privacy-base — Co-install privacy-base's dependency chain
 ## (rbac-domain for the operator role, identity-domain for step 3's
 ## UnbindIdentityCredentials) then assert privacy-base's KV state: the 13 DDLs
-## of the erasure spine, the 4 lenses, the identityErasureComplete weaverTarget,
+## of the erasure spine, the 5 lenses, the identityErasureComplete weaverTarget,
 ## the identityErasure Loom pattern's 4 ordered steps, the 5 permission grants,
 ## and the package manifest.
 verify-package-privacy-base:
