@@ -1,5 +1,5 @@
 name: augur
-version: 0.6.0
+version: 0.7.0
 description: |
   Augur (Weaver L3 reasoning tier) data + safety foundation: the augurproposal
   vertex type + the CreateAugurReasoningClaim / RecordProposal capture pair + the
@@ -15,8 +15,14 @@ description: |
   weaver-targets, Weaver's proposedOp action materialises + dispatch-time-
   re-validates + fires the row-carried remediation with a proposal-scoped
   deterministic requestId (collapse-only), and RecordProposalDispatch flips
-  approved → dispatched | invalid. The AI proposes; the human decides; the
-  Processor stays sole writer.
+  approved → dispatched | invalid. A proposal may be plan-shaped — an ordered
+  steps list, validated per step and dispatched one leg per episode under
+  leg-scoped requestIds. RecordPromotionProposal is Weaver's own engine-authored
+  recommendation: when a planned-mode target's action closes every episode of its
+  confidence window, Weaver mints a pending promotion proposal (create-only under
+  a handle derived from the target/gap/action triple, so it emits once) for the
+  package author to ratify; it is never dispatched. The AI proposes; the human
+  decides; the Processor stays sole writer.
 depends:
   - orchestration-base
 declares:
@@ -43,6 +49,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: RecordProposalDispatch
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordPromotionProposal
       scope: any
       grantsTo: [operator]
   weaverTargets:

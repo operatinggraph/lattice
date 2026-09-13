@@ -60,6 +60,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "RecordProposal", Scope: "any"},
 			{OperationType: "ReviewProposal", Scope: "any"},
 			{OperationType: "RecordProposalDispatch", Scope: "any"},
+			{OperationType: "RecordPromotionProposal", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -73,10 +74,11 @@ func staffCapDoc() *processor.CapabilityDoc {
 // bootstrap's primordial globals are populated by SetupPackageTestEnv's
 // EnsurePrimordials, well after package var initialization.
 //
-// staffCapDoc keeps its own CreateAugurReasoningClaim grant deliberately — an
-// operator-role holder that is NOT Weaver is exactly the forged-dispatch vector
-// the guard rejects, and the negative test submits as apStaffActorKey to prove
-// the refusal comes from the actor check rather than from a missing grant.
+// staffCapDoc keeps its own CreateAugurReasoningClaim + RecordPromotionProposal
+// grants deliberately — an operator-role holder that is NOT Weaver is exactly the
+// forged-dispatch vector the guard rejects, and the negative tests submit as
+// apStaffActorKey to prove the refusal comes from the actor check rather than
+// from a missing grant.
 func weaverCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -88,6 +90,7 @@ func weaverCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateAugurReasoningClaim", Scope: "any"},
+			{OperationType: "RecordPromotionProposal", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -847,11 +850,12 @@ func dispatchEnv(reqID, handle, outcome, reason string) *processor.OperationEnve
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
-		// The flip reads the verdict it guards on and the recorded plan it counts
-		// legs against — read-posture class (a), the same pair Weaver's
-		// recordDispatchOutcomePlan declares (internal/weaver/augur_dispatch.go).
+		// The flip reads the verdict it guards on, the recorded plan it counts
+		// legs against, and the trigger that refuses a promotion — read-posture
+		// class (a), the same set Weaver's recordDispatchOutcomePlan declares
+		// (internal/weaver/augur_dispatch.go).
 		ContextHint: &processor.ContextHint{Reads: []string{
-			proposalKey, proposalKey + ".review", proposalKey + ".proposed",
+			proposalKey, proposalKey + ".review", proposalKey + ".proposed", proposalKey + ".gap",
 		}},
 	}
 }
@@ -1336,5 +1340,277 @@ func TestAugur_Plan_LegacyProposalDispatchesAtLegZero(t *testing.T) {
 	}
 	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got == "" {
 		t.Fatal("dispatchedAt must be stamped on the legacy proposal's dispatch")
+	}
+}
+
+// --- RecordPromotionProposal (Weaver's own engine-authored recommendation) ---
+
+// Per-scenario promotion handles (valid 20-char NanoIDs).
+const (
+	hPromoOK     = "BBaugurPromHJKMNPQRS"
+	hPromoTwice  = "BBaugurPrtwHJKMNPQRS"
+	hPromoForged = "BBaugurPrfgHJKMNPQRS"
+	hPromoDead   = "BBaugurPrdeHJKMNPQRS"
+	hPromoReview = "BBaugurPrrvHJKMNPQRS"
+	hPromoDisp   = "BBaugurPrdpHJKMNPQRS"
+)
+
+// promotionEnv builds the Weaver-submitted promotion op. Weaver declares the
+// target meta vertex as its one read (the no-orphan alive check the script runs)
+// and anchors auth on it, so this fixture mirrors that Reads set.
+func promotionEnv(reqID, handle, targetKey, gapColumn, actionRef string, window, closed int) *processor.OperationEnvelope {
+	payload := map[string]any{
+		"handle": handle, "targetId": targetKey, "gapColumn": gapColumn,
+		"actionRef": actionRef, "window": window, "closed": closed,
+	}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordPromotionProposal",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "augurproposal",
+		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{targetKey}},
+	}
+}
+
+func drivePromotion(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, targetKey string, want processor.MessageOutcome) string {
+	t.Helper()
+	env := promotionEnv(testutil.GenReqID("APPromo"+tag), handle, targetKey, "missing_approval", "assignApproval", 20, 20)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return "vtx.augurproposal." + handle
+}
+
+// TestAugur_Promotion_MintsPendingRecommendation: Weaver mints the WHOLE
+// proposal in one commit — no claim vertex, no reasoning call — already pending
+// on the same review surface a model proposal lands on, with the target's own
+// meta vertex as both candidate and target.
+func TestAugur_Promotion_MintsPendingRecommendation(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-ok")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	pk := drivePromotion(t, ctx, conn, cp, cons, "ok", hPromoOK, targetKey, processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("review.state = %q, want pending", got)
+	}
+	if got := reviewLeg(t, ctx, conn, pk); got != 0 {
+		t.Fatalf(".review.leg = %d, want 0", got)
+	}
+	gap := readDoc(t, ctx, conn, pk+".gap")
+	gd, _ := gap["data"].(map[string]any)
+	if got, _ := gd["trigger"].(string); got != "promotion" {
+		t.Fatalf(".gap.trigger = %q, want promotion", got)
+	}
+	if got, _ := gd["entityId"].(string); got != targetKey {
+		t.Fatalf(".gap.entityId = %q, want the target's own meta vertex %q", got, targetKey)
+	}
+	proposed := readDoc(t, ctx, conn, pk+".proposed")
+	pd, _ := proposed["data"].(map[string]any)
+	if got, _ := pd["action"].(string); got != "promotePlaybook" {
+		t.Fatalf(".proposed.action = %q, want promotePlaybook", got)
+	}
+	params, _ := pd["params"].(map[string]any)
+	if got, _ := params["actionRef"].(string); got != "assignApproval" {
+		t.Fatalf(".proposed.params.actionRef = %q, want the recommended ref", got)
+	}
+	if steps := proposedSteps(t, ctx, conn, pk); len(steps) != 1 {
+		t.Fatalf(".proposed.steps = %d entries, want the one normalised leg", len(steps))
+	}
+	conf := readDoc(t, ctx, conn, pk+".confidence")
+	cd, _ := conf["data"].(map[string]any)
+	if score, _ := cd["score"].(float64); score != 1.0 {
+		t.Fatalf(".confidence.score = %v, want 1.0 (the engine measured it, it did not guess)", cd["score"])
+	}
+	prov := readDoc(t, ctx, conn, pk+".provenance")
+	prd, _ := prov["data"].(map[string]any)
+	if got, _ := prd["model"].(string); got != "weaver" {
+		t.Fatalf(".provenance.model = %q, want weaver — a reviewer must see this was not reasoned", got)
+	}
+	rat := readDoc(t, ctx, conn, pk+".rationale")
+	rd, _ := rat["data"].(map[string]any)
+	text, _ := rd["text"].(string)
+	for _, want := range []string{"assignApproval", "missing_approval", "20"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf(".rationale.text = %q, want it to name %q", text, want)
+		}
+	}
+	// Both links point at the target meta: the recommendation is about the
+	// target's playbook, not about any one entity.
+	_, targetID, _ := strings.Cut(strings.TrimPrefix(targetKey, "vtx."), ".")
+	for name, lnk := range map[string]string{
+		"forCandidate": "lnk.augurproposal." + hPromoOK + ".forCandidate.meta." + targetID,
+		"forTarget":    "lnk.augurproposal." + hPromoOK + ".forTarget.meta." + targetID,
+	} {
+		doc := readDoc(t, ctx, conn, lnk)
+		if got, _ := doc["targetVertex"].(string); got != targetKey {
+			t.Fatalf("%s link targetVertex = %q, want %q", name, got, targetKey)
+		}
+	}
+}
+
+// TestAugur_Promotion_SecondEmissionConflicts is the DURABLE latch: the handle is
+// derived from (target, gap, actionRef), so a repeat emission — a restart having
+// cleared Weaver's in-memory latch, a second full window — conflicts create-only
+// and commits nothing. A second recommendation for the same triple can never
+// reach the reviewer.
+func TestAugur_Promotion_SecondEmissionConflicts(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-twice")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	pk := drivePromotion(t, ctx, conn, cp, cons, "tw1", hPromoTwice, targetKey, processor.OutcomeAccepted)
+	// A DISTINCT requestId, so the Contract #4 tracker does not collapse it —
+	// the create-only vertex is what must refuse.
+	drivePromotion(t, ctx, conn, cp, cons, "tw2", hPromoTwice, targetKey, processor.OutcomeRejected)
+
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("review.state = %q, want pending (the first recommendation stands untouched)", got)
+	}
+}
+
+// TestAugur_Promotion_ByNonWeaverOperator_Denied: the actor guard. The evidence a
+// promotion carries is the engine's own measurement — an operator-role holder
+// that is not Weaver must not be able to manufacture it.
+func TestAugur_Promotion_ByNonWeaverOperator_Denied(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-forged")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	env := promotionEnv(testutil.GenReqID("APPromoForge"), hPromoForged, targetKey, "missing_approval", "assignApproval", 20, 20)
+	env.Actor = apStaffActorKey
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a non-Weaver operator's promotion: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.augurproposal."+hPromoForged); err == nil {
+		t.Fatal("a denied promotion must mint NO proposal vertex")
+	}
+}
+
+// TestAugur_Promotion_AbsentTarget_Rejected: the no-orphan invariant — a
+// recommendation about a target that no longer exists is rejected rather than
+// minting a proposal whose links dangle.
+func TestAugur_Promotion_AbsentTarget_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-dead")
+	seedEscalation(t, ctx, conn)
+
+	drivePromotion(t, ctx, conn, cp, cons, "dead", hPromoDead, "vtx.meta.BBgoneTargtHJKMNPQR", processor.OutcomeRejected)
+}
+
+// TestAugur_Promotion_ApproveSkipsRevalidation: promotePlaybook is deliberately
+// outside the escalation vocabulary, so the §5 re-validation would fail-close
+// every approval of a promotion. The trigger — read from the TRUSTED .gap — is
+// what exempts it, and an operator's approve lands `approved`.
+func TestAugur_Promotion_ApproveSkipsRevalidation(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-review")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	pk := drivePromotion(t, ctx, conn, cp, cons, "rv", hPromoReview, targetKey, processor.OutcomeAccepted)
+	driveReview(t, ctx, conn, cp, cons, "prrv", hPromoReview, "approve", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved (a promotion is ratified, not re-validated)", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got != "" {
+		t.Fatalf("invalidReason = %q, want empty", got)
+	}
+}
+
+// TestAugur_Promotion_IsNeverDispatched: the belt-and-suspenders refusal beneath
+// the lens exclusion. Even handed a flip directly, an approved promotion refuses
+// — there is no remediation in it for the platform to have fired.
+func TestAugur_Promotion_IsNeverDispatched(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-disp")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	pk := drivePromotion(t, ctx, conn, cp, cons, "dp", hPromoDisp, targetKey, processor.OutcomeAccepted)
+	driveReview(t, ctx, conn, cp, cons, "prdp", hPromoDisp, "approve", processor.OutcomeAccepted)
+
+	dp := dispatchEnv(testutil.GenReqID("APPromoDisp"), hPromoDisp, "dispatched", "")
+	_, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, dp)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "never dispatched") {
+		t.Fatalf("an approved promotion must refuse the dispatch flip, got %+v", reply.Error)
+	}
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved (the refused flip must not land)", got)
+	}
+}
+
+// --- ReviewProposal's per-verdict read sets ---------------------------------
+
+// Handles for the per-verdict read-set vectors.
+const (
+	hRvRejectReads = "BBaugurRvrrHJKMNPQRS"
+	hPromoApproveR = "BBaugurPraaHJKMNPQRS"
+)
+
+// rejectEnvMinimalReads builds the REJECT op exactly as Loupe's reject
+// dispatcher does: {externalRef, verdict} with ONE declared read, the .review
+// aspect the pending-only guard needs. A reject asks nothing else — it declines
+// the proposal whatever the proposal says — so any read the script makes beyond
+// this one is undeclared and the read-drift guard is what says so.
+func rejectEnvMinimalReads(reqID, handle string) *processor.OperationEnvelope {
+	payload := map[string]any{"externalRef": handle, "verdict": "reject"}
+	b, _ := json.Marshal(payload)
+	proposalKey := "vtx.augurproposal." + handle
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReviewProposal",
+		Actor:         apStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "augurproposal",
+		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{proposalKey + ".review"}},
+	}
+}
+
+// TestAugur_Review_RejectDeclaresOnlyTheReviewAspect pins the reject verdict's
+// read set to what its production dispatcher actually declares. The approve arm
+// reads .proposed / .confidence / .gap; a reject that fell through the same
+// reads would demand a contextHint Loupe's reject button does not send, and the
+// op would fail in production while every approve-shaped fixture stayed green.
+func TestAugur_Review_RejectDeclaresOnlyTheReviewAspect(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-rejreads")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "rvrr", hRvRejectReads, targetKey, entityKey)
+
+	rv := rejectEnvMinimalReads(testutil.GenReqID("APRevRejReads"), hRvRejectReads)
+	testutil.PublishOp(t, conn, rv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "rejected" {
+		t.Fatalf("review.state = %q, want rejected", got)
+	}
+}
+
+// TestAugur_Promotion_ApproveDeclaresTheApproveReadSet is the other half: an
+// approve DOES read the trigger, and the approve dispatcher declares it. A
+// promotion approved through that four-read envelope lands `approved` — the
+// exemption is reached through a declared read, never a live one.
+func TestAugur_Promotion_ApproveDeclaresTheApproveReadSet(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-promo-apreads")
+	targetKey, _ := seedEscalation(t, ctx, conn)
+
+	pk := drivePromotion(t, ctx, conn, cp, cons, "apr", hPromoApproveR, targetKey, processor.OutcomeAccepted)
+	// reviewEnv carries the four reads Loupe's approve dispatcher declares.
+	driveReview(t, ctx, conn, cp, cons, "prapr", hPromoApproveR, "approve", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved", got)
 	}
 }

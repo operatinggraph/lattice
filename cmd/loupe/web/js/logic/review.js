@@ -219,6 +219,8 @@ function augurProposalRows(list) {
       trigger: r.trigger || "",
       proposedAction: r.proposedAction || "",
       proposedParams: r.proposedParams,
+      proposedSteps: Array.isArray(r.proposedSteps) ? r.proposedSteps : [],
+      dispatchLeg: typeof r.dispatchLeg === "number" ? r.dispatchLeg : 0,
       rationale: r.rationale || "",
       confidence: r.confidence,
       model: r.model || "",

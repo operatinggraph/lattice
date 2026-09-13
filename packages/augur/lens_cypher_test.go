@@ -253,6 +253,66 @@ func TestAugurDispatchPending_LegacyProposalProjectsNullPlanColumns(t *testing.T
 		"the legacy single remediation is still the row's dispatch")
 }
 
+// promotion mints the shape RecordPromotionProposal writes: the .gap trigger is
+// "promotion" and the candidate IS the target's own meta vertex.
+func (f *augurFixture) promotion(t *testing.T, name, targetMeta, gapColumn, actionRef string) {
+	t.Helper()
+	id := lenstest.NanoID(name)
+	f.ids[name] = id
+	key := "vtx.augurproposal." + id
+	body := map[string]any{"key": key, "class": "augurproposal", "isDeleted": false, "data": map[string]any{}}
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+	f.aspect(t, name, "gap", "gap", map[string]any{
+		"entityId": targetMeta, "targetId": targetMeta, "gapColumn": gapColumn, "trigger": "promotion"})
+	params := map[string]any{"targetId": targetMeta, "gapColumn": gapColumn, "actionRef": actionRef}
+	f.aspect(t, name, "proposed", "proposed", map[string]any{
+		"action": "promotePlaybook", "params": params,
+		"steps": []any{map[string]any{"action": "promotePlaybook", "params": params}}})
+	f.aspect(t, name, "confidence", "confidence", map[string]any{"score": 1.0})
+}
+
+// TestAugurDispatchPending_ApprovedPromotionIsNeverDispatched: an approved
+// PROMOTION is a ratified recommendation for the package author, not a
+// remediation — there is nothing for the platform to fire, and its proposed
+// action is deliberately outside the escalation vocabulary. The exclusion lives
+// at the pickup transport, so the dispatch never begins.
+func TestAugurDispatchPending_ApprovedPromotionIsNeverDispatched(t *testing.T) {
+	f := newAugurFixture(t)
+	f.promotion(t, "promo", augurTargetMeta, "missing_approval", "assignApproval")
+	f.reviewed(t, "promo", "approved")
+
+	rows := f.project(t, augurDispatchPendingSpec, f.key("promo"))
+	require.Len(t, rows, 1, "the promotion still projects — it is a real proposal on the review surface")
+	require.Equal(t, false, rows[0].Values["violating"],
+		"an approved promotion must never become a dispatch: nothing in the platform can fire promotePlaybook")
+	require.Equal(t, false, rows[0].Values["missing_dispatch"])
+}
+
+// TestAugurDispatchPending_ApprovedModelProposalStillDispatches is the other
+// half of the same term: the trigger exclusion must narrow to promotions only —
+// an approved proposal on either escalation trigger still dispatches.
+func TestAugurDispatchPending_ApprovedModelProposalStillDispatches(t *testing.T) {
+	for _, trigger := range []string{"unplannable", "exhausted"} {
+		t.Run(trigger, func(t *testing.T) {
+			f := newAugurFixture(t)
+			f.claim(t, "p", augurCandidate, augurTargetMeta, "listingKey")
+			f.aspect(t, "p", "gap", "gap", map[string]any{
+				"entityId": augurCandidate, "targetId": augurTargetMeta,
+				"gapColumn": "listingKey", "trigger": trigger})
+			f.reasoned(t, "p", "CreateListing", map[string]any{"unit": augurCandidate})
+			f.reviewed(t, "p", "approved")
+
+			rows := f.project(t, augurDispatchPendingSpec, f.key("p"))
+			require.Len(t, rows, 1)
+			require.Equal(t, true, rows[0].Values["violating"],
+				"trigger %q is a model escalation — the approved proposal still dispatches", trigger)
+			require.Equal(t, true, rows[0].Values["missing_dispatch"])
+		})
+	}
+}
+
 func TestAugurDispatchPending_AnchorKeepsOtherProposalsOut(t *testing.T) {
 	f := newAugurFixture(t)
 	f.claim(t, "mine", augurCandidate, augurTargetMeta, "listingKey")

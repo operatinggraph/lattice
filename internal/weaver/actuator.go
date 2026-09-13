@@ -215,6 +215,28 @@ func deriveProposalDispatchFlipRequestID(proposalHandle, outcome string, leg int
 	return deriveID("proposalDispatchFlip:", proposalHandle+"\x00"+outcome, uint64(leg))
 }
 
+// derivePromotionRequestID returns the deterministic requestId for the
+// promotion recommendation Weaver submits for one (target, gapColumn,
+// actionRef) triple. It carries no episode tag because a promotion is not an
+// episode: it is ONE op per triple for the life of the deployment, so every
+// re-emission — a second full window after a restart cleared the in-memory
+// latch, a redelivery of the close that triggered it — re-derives this id and
+// collapses on the Contract #4 tracker. Namespaced disjoint from every other
+// derivation.
+func derivePromotionRequestID(targetID, gapColumn, actionRef string) string {
+	return deriveID("promotion:", targetID+"\x00"+gapColumn+"\x00"+actionRef, 0)
+}
+
+// derivePromotionHandle returns the bare 20-char handle the promotion proposal
+// vertex is keyed by (vtx.augurproposal.<handle>). Derived from the same triple
+// as the requestId but under its own namespace, so the two never collide: the
+// vertex being create-only under a deterministic handle is what makes the
+// proposal itself the durable emit-once latch, independent of any tracker entry
+// or in-memory state.
+func derivePromotionHandle(targetID, gapColumn, actionRef string) string {
+	return deriveID("promotionHandle:", targetID+"\x00"+gapColumn+"\x00"+actionRef, 0)
+}
+
 // deriveTimerRequestID returns the deterministic requestId for one fired-timer
 // conversion (Contract #10 §10.4): derived from the schedule subject + the
 // fire instant, so an at-least-once redelivery of the SAME firing reuses the
