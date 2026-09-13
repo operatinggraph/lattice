@@ -860,7 +860,7 @@ def vertex_live(key):
     node = kv.Read(key)
     return node != None and not node.isDeleted
 
-def leaseapp_unit(lease_key):
+def leaseapp_unit(lease_key, memo=None):
     # A tab's location is its lease's unit -- lease-signing's appliesToUnit link,
     # the same indirection landlordLeaseApplicationsRead anchors its building on.
     # The leaseapp VERTEX this walk transits. WithdrawLeaseApplication
@@ -868,7 +868,20 @@ def leaseapp_unit(lease_key):
     # application must not carry the walk any further. A broken chain already
     # answered None here, so this adds an input to that branch, not a new
     # answer a caller can distinguish.
+    #
+    # memo, when given, is a plain dict the caller creates fresh inside its own
+    # execute() arm and threads across the calls it makes within that single
+    # execution -- so a Charge that resolves the same tab's lease-to-unit chain
+    # from two different predicates does the walk once. It is never a
+    # module-level dict: the pinned go.starlark.net happens to leave module
+    # globals unfrozen after Init, so a module-level dict mutates today only by
+    # version accident and becomes a runtime frozen-hash-table fault on an
+    # upstream bump -- a fault Validate (Init-only) cannot see.
+    if memo != None and lease_key in memo:
+        return memo[lease_key]
     if not vertex_live(lease_key):
+        if memo != None:
+            memo[lease_key] = None
         return None
     # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
     # exactly one appliesToUnit link (required at CreateLeaseApplication), so
@@ -882,7 +895,11 @@ def leaseapp_unit(lease_key):
     # belt-and-braces here -- but the resolvers are what the next author copies,
     # and lease-signing's copy feeds require_manages, which does not.
     if not vertex_live(unit):
+        if memo != None:
+            memo[lease_key] = None
         return None
+    if memo != None:
+        memo[lease_key] = unit
     return unit
 
 def class_of(state, key):
@@ -1155,6 +1172,7 @@ def execute(state, op):
                 item_name = "Off-menu charge"
 
         existing = require_open_status(state, tab_key)
+        unit_memo = {}
 
         # Staff-standing confinement: the lease comes from the tab's OWN .status
         # aspect (never the payload), so the workplace it resolves to cannot be
@@ -1162,7 +1180,7 @@ def execute(state, op):
         # workplace-exempt: (ownership-bound) the applicationFor probe below
         # requires the target to be the applicant on this tab's own lease.
         if not op.authTargetValidated:
-            require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
+            require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"), unit_memo)],
                               "cannot charge tab " + tab_key)
 
         # Resident-self ownership: same closure as Settle above — the lease
@@ -1192,7 +1210,7 @@ def execute(state, op):
         # item, so it carries nothing to bind.
         if menu_item_key != None:
             item_location = menu_item_served_at(menu_item_key)
-            tab_location = leaseapp_unit(existing.data.get("leaseAppKey"))
+            tab_location = leaseapp_unit(existing.data.get("leaseAppKey"), unit_memo)
             if not location_covers(item_location, tab_location):
                 fail("AuthDenied: menuItemKey " + menu_item_key +
                      " is not served at tab " + tab_key + "'s building")

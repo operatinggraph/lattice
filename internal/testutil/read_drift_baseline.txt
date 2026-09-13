@@ -65,6 +65,13 @@
 #
 read	CancelBooking	lnk.identity.<id>.worksAt.building.<id>
 read	CancelRenewal	lnk.identity.<id>.manages.unit.<id>
+# Charge's own staff-standing confinement (leaseapp_unit -> require_workplace)
+# resolves the tab's own lease into a unit only the walk itself discovers, so
+# the worksAt key it checks at each containedIn ancestor cannot be named by any
+# dispatcher up front -- the same two undeclarable follow-ups OpenTab and
+# VoidCharge already carry for the same tab-confinement guard.
+read	Charge	lnk.identity.<id>.worksAt.building.<id>
+read	Charge	lnk.identity.<id>.worksAt.unit.<id>
 read	Charge	vtx.leaseapp.<id>
 read	ClinicCreditAccount	lnk.patient.<id>.identifiedBy.identity.<id>
 # CorrectAppointmentStatus reuses SetAppointmentStatus's staff-standing
@@ -222,6 +229,10 @@ walk	CancelBooking	vtx.studio.<id> locatedAt out
 walk	CancelBooking	vtx.wellnesstransaction.<id> postedTo out
 walk	CancelRenewal	vtx.leaseapp.<id> appliesToUnit out
 walk	CancelRenewal	vtx.renewal.<id> renews out
+# The link-discovered second hop of Charge's own worksAt_covers walk: reached
+# only when the tab's unit itself does not match, off the containedIn ancestor
+# that hop resolves -- the same shape VoidCharge's confinement walk carries.
+walk	Charge	vtx.building.<id> containedIn out
 walk	Charge	vtx.leaseapp.<id> appliesToUnit out
 walk	Charge	vtx.menuitem.<id> servedAt out
 walk	Charge	vtx.unit.<id> containedIn out

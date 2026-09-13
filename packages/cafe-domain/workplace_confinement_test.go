@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -575,5 +576,172 @@ func TestWorkplace_UpdateMenuItemStaffConfinedToWorkplace(t *testing.T) {
 	}
 	if got := wcSubmitUpdateMenuItem(t, ctx, conn, cp, cons, "wcumb00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
 		t.Fatalf("staff UpdateMenuItem served at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// wcCapturedReads is a per-test ScriptReadObserver that keeps the LAST
+// ScriptReadRecord seen for each request id — a retried operation re-enters
+// step 4/5 on the same request id, so the last record is the one for the
+// execution that actually committed — and wakes any waiter through a channel
+// rather than a sleep, since the pipeline drives an execution synchronously on
+// the test goroutine and the record can already be there by the time the
+// waiter looks. Mirrors clinic-domain's capturedScriptReads
+// (withprovider_listing_test.go), filtered on Charge instead of
+// SetAppointmentStatus.
+type wcCapturedReads struct {
+	mu      sync.Mutex
+	records map[string]processor.ScriptReadRecord
+	notify  chan struct{}
+}
+
+func newWCCapturedReads() *wcCapturedReads {
+	return &wcCapturedReads{
+		records: make(map[string]processor.ScriptReadRecord),
+		notify:  make(chan struct{}, 1),
+	}
+}
+
+func (c *wcCapturedReads) ObserveScriptReads(_ context.Context, env *processor.OperationEnvelope, record processor.ScriptReadRecord) {
+	if env.OperationType != "Charge" {
+		return
+	}
+	c.mu.Lock()
+	c.records[env.RequestID] = record
+	c.mu.Unlock()
+	select {
+	case c.notify <- struct{}{}:
+	default:
+	}
+}
+
+// waitFor blocks until a record for requestID has been observed, polling on
+// the notify channel rather than a fixed sleep, bounded by a ceiling that
+// only trips on a real defect.
+func (c *wcCapturedReads) waitFor(t *testing.T, requestID string) processor.ScriptReadRecord {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		c.mu.Lock()
+		rec, ok := c.records[requestID]
+		c.mu.Unlock()
+		if ok {
+			return rec
+		}
+		select {
+		case <-c.notify:
+		case <-deadline:
+			t.Fatalf("timed out waiting for a ScriptReadRecord for requestId %s", requestID)
+		}
+	}
+}
+
+// TestWorkplace_ChargeCatalogItemListsAppliesToUnitOnce proves Charge's two
+// leaseapp_unit resolutions on one tab's lease — the staff-confinement site
+// and the catalog-locality site, both fed the SAME
+// existing.data.get("leaseAppKey") — share one appliesToUnit listing per
+// execution, via the per-execution memo leaseapp_unit threads, rather than
+// issuing the identical listing twice.
+//
+// Enumerations (ScriptReadRecord.Enumerations) cannot see the difference: it
+// is a SET keyed {hub, relation, direction}, and both leaseapp_unit calls
+// enumerate the exact same lease key, so a doubled appliesToUnit listing
+// collapses to the same single set member a memoized lookup produces either
+// way — asserting len==1 on it would pass whether or not the memo exists.
+// ListCalls, the per-execution counter, is the only observable that can tell
+// one listing from two (authority-walk-wall-unit-cost-design.md §4.1).
+func TestWorkplace_ChargeCatalogItemListsAppliesToUnitOnce(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+
+	reads := newWCCapturedReads()
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable:                  "wcchargeonce",
+		Instance:                 "cd-wcchargeonce",
+		ExtraScriptReadObservers: []processor.ScriptReadObserver{reads},
+	})
+
+	tabA := openTab(t, ctx, conn, cp, cons, "wccoseedtaba00000001", leaseA)
+	tabB := openTab(t, ctx, conn, cp, cons, "wccoseedtabb00000001", leaseB)
+	itemA := createMenuItem(t, ctx, conn, cp, cons, "wccoseedmenua0000001", "Latte", 450, wcBuildingAKey)
+	itemB := createMenuItem(t, ctx, conn, cp, cons, "wccoseedmenub0000001", "Latte", 450, wcBuildingBKey)
+
+	// Positive vector: staff Charge, catalog item, at the staff member's OWN
+	// workplace. Its own leaseAppKey feeds leaseapp_unit at both sites.
+	const label = "wccochargea0000000001"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         wcStaffKey,
+		SubmittedAt:   "2026-09-13T12:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabA + `","menuItemKey":"` + itemA + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabA, tabA + ".status", itemA, itemA + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: wcStaffKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("staff Charge with menuItemKey at its OWN workplace = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative below proves nothing)", got)
+	}
+
+	rec := reads.waitFor(t, testutil.GenReqID(label))
+
+	appliesToUnitMembers := 0
+	for _, e := range rec.Enumerations {
+		if e.Relation == "appliesToUnit" {
+			appliesToUnitMembers++
+		}
+	}
+	if appliesToUnitMembers != 1 {
+		t.Fatalf("Charge enumerations = %v, want exactly ONE appliesToUnit member "+
+			"(a set keyed {hub,relation,direction} cannot see a doubled identical listing)", rec.Enumerations)
+	}
+
+	// Five listings make up this execution: the actor_holds_operator holdsRole
+	// walk (staff is not operator, one page); the FIRST leaseapp_unit's
+	// appliesToUnit listing (staff-confinement site, memo miss); the
+	// worksAt_covers containedIn listing off the tab's unit (one page, matches
+	// on the unit's own parent building); the menu_item_served_at servedAt
+	// listing; and the location_covers containedIn listing off the same unit
+	// (one page, matches on that same parent building). The SECOND
+	// leaseapp_unit call (catalog-locality site) hits the memo and issues no
+	// listing at all — without the memo this would be 6.
+	const wantListCalls = 5
+	if rec.ListCalls != wantListCalls {
+		t.Fatalf("Charge ListCalls = %d over enumerations %v, want %d: "+
+			"actor_holds_operator holdsRole + leaseapp_unit appliesToUnit (1st, memo miss) + "+
+			"worksAt_covers containedIn + menu_item_served_at servedAt + location_covers containedIn "+
+			"(leaseapp_unit's 2nd call must hit the memo and cost nothing)",
+			rec.ListCalls, rec.Enumerations, wantListCalls)
+	}
+
+	// Negative sibling: the same staff actor and shape, at building B — proves
+	// confinement still denies on the memoized path, so the Accepted result
+	// above is the workplace guard actually running rather than some
+	// unconditional pass.
+	negEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wccochargeb0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         wcStaffKey,
+		SubmittedAt:   "2026-09-13T12:05:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabB + `","menuItemKey":"` + itemB + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabB, tabB + ".status", itemB, itemB + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: wcStaffKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, negEnv)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("staff Charge with menuItemKey at ANOTHER building = %v, want Rejected", got)
 	}
 }
