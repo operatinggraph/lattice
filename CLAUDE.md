@@ -143,7 +143,9 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
     (2026-09-12, `ReassignLeaseUnit`). `make verify-package-<pkg>` against the running stack is the local gate.
   - **`packages/` content edits must bump the manifest version AND the `Version` constant mirroring it**
     — an unchanged version makes a semantic change invisible to a running stack, because a plain install
-    no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`.
+    no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`. A test that re-installs a
+    modified `Definition` over the real install derives its "one higher" version from `Package.Version`, never
+    a literal — a literal turns the upgrade into a same-version skip on the next bump (lease-signing, 2026-09-13).
 
   **`.github/workflows/ci.yml` is the authority for what must be green** — read its steps rather than
   trusting this list, which is a summary and has been incomplete before.

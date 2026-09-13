@@ -1,6 +1,6 @@
 # Background-check supersession is a convergence rule — the older completed check retires through Weaver, never through the reply op
 
-**Status: ✅ Andrew-ratified 2026-09-11 — build-ready.** Designer fire 2026-09-06 · Winston · one cold adversarial pass
+**Status: ✅ SHIPPED 2026-09-13 — Inc 1 `c3f4d19`, Inc 2 `7a01a41`, close-pass fold `54a45fa` (build note §14).** Ratification: ✅ Andrew-ratified 2026-09-11 — build-ready. Designer fire 2026-09-06 · Winston · one cold adversarial pass
 run and folded (§13) · ratification session 2026-09-11 (Andrew): decision 1 **ratified** (history is a record at rest);
 **decision 4 added at ratification — the op mints `lnk.service.<new>.supersedes.service.<old>`** ("new supersedes
 old", Contract #1 §1.1: the later-arriving vertex is the source) in the same batch as the tombstones, so the history at
@@ -150,10 +150,23 @@ RETURN entityKey AS actorKey, entityKey, subjectKey, instanceOfLink, supersededB
   refuse a same-named DDL in another package, so such a package's instances would anchor here and the op would
   refuse them `NotOwned` — loud, per row, `GapBudgetExhausted`. No such package exists; the successor side below
   is pinned by identity regardless.)
-- **Successor predicate = the op's precondition on `supersededBy`, plus one it lacks**: same class, completed,
-  later — with the tie broken on key, and **re-bound to the anchor's own meta `(m)`**, so a same-shaped instance
-  from another type authority never supersedes ours (spike §7.3 c). The op today does not prove the successor's
-  ownership (§4.3 c); on Weaver's path the lens does.
+- **Successor predicate = the op's precondition on `supersededBy`**: same class, completed, later — with the tie
+  broken on key. ~~**re-bound to the anchor's own meta `(m)`**, so a same-shaped instance from another type
+  authority never supersedes ours (spike §7.3 c). The op today does not prove the successor's ownership (§4.3 c); on
+  Weaver's path the lens does.~~ **Struck at the close pass (2026-09-13):** binding the successor to the anchor's
+  meta position makes that meta a derivation *hub* — Refractor's anchor derivation walks a completion write on B to
+  the meta and then to **every live owned instance** (`anchor_derivation.go:412-446`, bidirectional `StepsFrom`), so
+  one `.outcome` write cost N cypher executions, with the 2,000-read BFS fallback and the 10,000-anchor structural
+  refusal behind it. The lens binds the meta from the anchor only (pos 1 is reachable solely from the never-expanded
+  anchor position); the **op proves the successor's ownership itself**, on every path, with a class-(e) degree-1
+  enumeration of the successor's outbound `instanceOf` link (§4.3 c). A foreign same-class instance therefore
+  projects a row and is refused `NotOwned` per row — loud. **And the candidate set is narrowed by a zero-hop
+  conjunct on the successor's `.outcome` aspect** (its class — `leaseServiceOutcome`, which only this package's
+  `RecordLeaseServiceOutcome` may write under the aspect-type DDL's write gate — or, if the engine does not resolve an
+  aspect's class in a WHERE, `validUntil <> null`, which no other minter writes): `service-domain` in the same
+  registry can mint a `service.backgroundCheck.instance` `providedTo` the same applicant, and without the conjunct a
+  foreign instance with the greater key would win `max(newer.key)` and shadow an owned successor forever (the fold's
+  own cold review, BLOCKING). The conjunct keeps `max()` over owned candidates; the op's enumeration stays the proof.
 - **Ordering.** `completedAt` is `rfc3339_utc` from one op — fixed-width, so string order is time order — at
   **second** granularity, so equality is reachable (two replies for one applicant in one second: Weaver's
   admission paces `backgroundCheck` at 2/s, `targets.go:111`). The tie-break `(completedAt equal AND newer.key >
@@ -172,7 +185,9 @@ RETURN entityKey AS actorKey, entityKey, subjectKey, instanceOfLink, supersededB
   produce is a lens⇔op inconsistency worth a standing `GapBudgetExhausted`.
 - **Cost class, two triggers.** (i) A `service`/`identity` write reprojects the anchor and, through the 2-hop
   derivation, its siblings: one `instanceOf` hop, one `providedTo` hop, one fan of the subject's *live* instances
-  (steady state one to two — this rule keeps it there; today the seven keepers' fans of ≤2, §7.1).
+  (steady state one to two — this rule keeps it there; today the seven keepers' fans of ≤2, §7.1). *(Corrected at
+  the close pass, 2026-09-13: this priced fan holds only because the successor does not hop to the meta — see the
+  struck bullet above; with that hop the fan was every live owned instance.)*
   (ii) **Binding `meta` makes every `vtx.meta.*` aspect write a fan-out seed** (`dispatch.go:83` skips by parent
   type only): a package install/upgrade rewrites its DDL metas' aspects, and the fan from the
   `leaseServiceInstance` meta walks its **live** inbound `instanceOf` edges (adjacency returns none for a
@@ -180,7 +195,9 @@ RETURN entityKey AS actorKey, entityKey, subjectKey, instanceOfLink, supersededB
   live owned instance, once per rewritten aspect. Bounded by the live population this rule bounds; priced in
   §11.1. Every other meta vertex has no `instanceOf` inbound, so its writes cost one adjacency lookup.
   `backgroundCheckFreshness` binds only `service` and has no such trigger. Labels are exhaustive (`service`,
-  `meta`, `identity`; relations `instanceOf`, `providedTo`), so the consumer filter derives narrowed.
+  `meta`, `identity`; relations `instanceOf`, `providedTo`), so the consumer filter derives narrowed. *(Close pass:
+  this install-time fan is the ONLY route into the meta position — the anchor's own `instanceOf` hop; a service or
+  identity write never reaches it, §14.4.)*
 
 ### 4.2 Target `supersededBackgroundChecks` (`targets.go`)
 
@@ -254,11 +271,15 @@ predicate; the pinned lens test's tie vectors (§11.2) are the drift detector.
 **(c) The actor guard admits Weaver.** `scripts.go:1494-1495` becomes: refuse `op.actor == primordialActor["loom"]`
 only, with the comment rewritten (Weaver is the durable submitter through the §4.2 target; an operator or trusted
 tool stays admitted; Loom mints and never retires). `TestTombstoneSupersededLeaseServiceInstance_PlatformEngineDenied`
-splits into Loom-refused and Weaver-accepted vectors. **Shipped residual, unchanged by this design:** the op does
-not prove the *successor's* ownership (`scripts.go:1512-1600`) — an operator could name a same-class instance from
-another type authority as `supersededBy`. Weaver never can (the lens re-binds `(m)`); closing it for the operator
-path needs an eighth declared read the lens cannot project (§4.1), so it stays a documented operator-path residual
-in the descriptor text rather than a mechanism.
+splits into Loom-refused and Weaver-accepted vectors. ~~**Shipped residual, unchanged by this design:** the op does
+not prove the *successor's* ownership — an operator could name a same-class instance from another type authority as
+`supersededBy`. Weaver never can (the lens re-binds `(m)`); closing it for the operator path needs an eighth declared
+read the lens cannot project (§4.1), so it stays a documented operator-path residual.~~ **Closed at the close pass
+(2026-09-13):** the eighth proof is not a declared *read* but a Contract #2 §2.5 class-(e) **enumeration** — the op
+walks `supersededBy`'s outbound `instanceOf` relation (degree-1 by construction: `CreateLeaseServiceInstance` mints
+exactly one) and requires a live link targeting `ddl["leaseServiceInstance"].metaKey`, else `NotOwned`. Weaver
+declares it on the target (`Enumerations`, hub `row.supersededBy`); an operator declares it in
+`contextHint.enumerations`. Both paths are proven; the `supersedes` link is never sourced at an unproven vertex.
 
 **(d) The successor links to the predecessor (ratification decision 4).** One more mutation in the same batch:
 `make_link("lnk.service." + succ_handle + ".supersedes.service." + inst_handle, superseded_by, instance_key,
@@ -305,7 +326,7 @@ mints `instance_of_lnk` at `:1428-1442`) is corrected in the same touch. `manife
 | 6 | A **failed**; B completed later | none (anchor: completed only) | — | A persists as the declined record; the op would refuse it anyway |
 | 7 | A completed; B completed later but `service.payment.instance` | none (class conjunct) | — | never cross-family — the op's `WrongClass` twin. Payment is out of scope entirely: `missing_payment` closes permanently on the first completed payment, so payments never accumulate |
 | 8 | A completed but its `instanceOf` targets a foreign meta or `service.<templateId>` | none (`m.canonicalName` / label `meta`) | — | never a row the op would refuse `NotOwned` (residual: a same-*named* foreign DDL, §11.3) |
-| 8b | A completed; a later same-class instance F exists but its `instanceOf` targets a **different** meta | none (`(newer)-[:instanceOf]->(m)` re-binds the anchor's meta) | — | a foreign check never retires ours (spike §7.3 c) |
+| 8b | A completed; a later same-class instance F exists but its `instanceOf` targets a **different** meta | **none** when F carries a foreign outcome shape (service-domain's `outcome` class — the zero-hop conjunct, §4.1); a row naming F only if F forges this package's `leaseServiceOutcome` aspect class | op(A, F, S) → `NotOwned` on F (the class-(e) enumeration, §4.3 c) | a foreign check never retires ours and never shadows an owned successor in `max()`; the forged shape is refused by the aspect-type write gate in production and by the op as its belt |
 | 9 | A completed at T1; B and C both later | `supersededBy: max(B.key, C.key)` | op(A, that one) | valid either way |
 | 9b | A and B completed in the **same second** | exactly one of them projects a row: the one with the smaller key, `supersededBy` = the greater | op(smaller, greater, S) | one survivor; the op's mirrored tie-break accepts |
 | 10 | Row 3 projected; **B is tombstoned** (superseded by C) before A's dispatch commits | stale row names B | op → `UnknownInstance` (B's root hydrates as a tombstone; `vertex_alive` false) | dispatch count 1/3; B's tombstone is A's 2-hop neighbour → A reprojects with `supersededBy: C` → next dispatch succeeds → row deleted → marks and count swept (`evaluator.go:69, 109`) |
@@ -336,8 +357,8 @@ per-(target, entity, column) state with their existing lifetimes.
   stopping an **AI-authored** weaverTarget (an `ai-target-*` capability artifact with its own lens) from driving
   this op: `authored_dispatch_scope.go` bars authored targets only from ops declared by `platformProtectedPackages`,
   and lease-signing is not one. Post-flip residual: an authored target could retire a *genuinely superseded, owned*
-  check on any applicant at a time of its choosing — every conjunct is still proven by the op, so the reach is
-  timing, not content. Dormant (`BRIDGE_CAPABILITY_AUTHOR` is not `real`; the admission-model row is 🗄️ shelved).
+  check on any applicant at a time of its choosing — every conjunct, the successor's ownership included (§4.3 c, the
+  class-(e) enumeration), is proven by the op, so the reach is timing, not content. Dormant (`BRIDGE_CAPABILITY_AUTHOR` is not `real`; the admission-model row is 🗄️ shelved).
   Recorded, not mechanised: adding lease-signing to the protected list would also bar authored targets from
   `SetListingStatus`/`AttachObject`, a wider decision than this row's.
 - **Single Weaver instance today**; two would race the same row and serialise at the Processor (row 12).
@@ -386,8 +407,9 @@ outcomes as aspects; one or two meta vertices with `.canonicalName`), each run t
   T1/T2 → exactly one row, smaller key names the greater; failed / in-flight / payment → no row. PASS. It also
   **found finding 12 itself**: a same-class instance under a *different* meta superseded B because the draft's
   successor had no ownership conjunct.
-- **(c) owned successor**: `(newer)-[:instanceOf]->(m)` (re-binding the anchor's meta) and the equivalent
-  `(m2:meta) WHERE m2.key = m.key` both PASS — the foreign-meta, same-*named* successor no longer qualifies, and B
+- **(c) owned successor** *(superseded at the close pass, 2026-09-13: both shapes make the meta a derivation hub —
+  §4.1; the successor's ownership is the op's proof now)*: `(newer)-[:instanceOf]->(m)` (re-binding the anchor's
+  meta) and the equivalent `(m2:meta) WHERE m2.key = m.key` both PASS — the foreign-meta, same-*named* successor no longer qualifies, and B
   projects no row. Projecting the successor's link key as `max(sown.key)` is **refused by the engine**
   (*"relationship variable … used as a value"*, `relbinding.go:454`), which is why §4.3 (c) leaves the operator-path
   residual rather than adding an eighth read.
@@ -480,7 +502,8 @@ population this rule bounds.
   completed T2 through the real ops → Weaver retires A → A's `supersededBackgroundChecks` and
   `backgroundCheckFreshness` rows are tombstone bodies, B's freshness row stands, `leaseApplicationComplete`'s
   `freshBgComplete` is 1. **Mutation tests:** drop the `completedAt >` conjunct from the lens and row 4 must fail
-  (B would name A); drop the `-[:instanceOf]->(m)` re-bind and row 8b must fail; drop the tie-break and row 9b must
+  (B would name A); ~~drop the `-[:instanceOf]->(m)` re-bind and row 8b must fail~~ (the re-bind is gone — 8b projects and the op refuses;
+  the pinned derivation test §14.4 is the guard on the hub instead); drop the tie-break and row 9b must
   fail (neither projects).
 - **Live close (MERGED ≠ RUNNING):** rows in `weaver-targets` under `supersededBackgroundChecks.` (zero expected,
   §7.1); a hand-seeded pair on a test applicant retired within one Weaver delivery; `health.weaver` carries no
@@ -494,8 +517,26 @@ population this rule bounds.
   OPERATOR NOTE points at the requestId + Contract #4 tracker. The pinned test's rows 5–9b are the drift detectors.
 - **A same-named `leaseServiceInstance` DDL in another package** would anchor its instances here and pair them
   with each other; the op refuses each `NotOwned` → `GapBudgetExhausted` per row. No such package exists; install
-  does not refuse the name. Named, not mechanised.
+  does not refuse the name. Named, not mechanised. **A foreign `service.backgroundCheck.instance` `providedTo` an applicant** (service-domain can mint one) is
+  excluded from the successor set by the zero-hop outcome-aspect conjunct (§4.1), so it can neither be named nor
+  shadow an owned successor in `max(newer.key)`; only a minter that forges this package's own outcome-aspect shape
+  reaches the op, which refuses it `NotOwned` — and in production the aspect-type write gate refuses the forgery
+  first. **The O(N) fan is removed on the acting derivation path** (`REFRACTOR_ANCHOR_DERIVATION=act`, the shipped
+  default); the BFS fallback (`off`/`shadow`, the read cap, an error) is relation-scoped by name and still crosses
+  the meta through the anchor's own `instanceOf` scope entry to every owned instance.
 - **`max` picks a non-newest successor** (row 9): harmless for the op; the column is documented accordingly.
+- **Three reason-less `GapBudgetExhausted` causes, named in the target's OPERATOR NOTE (close pass, 2026-09-13):**
+  lens⇔op predicate drift; a successor `completedAt` that is not a 20-char Z-suffixed stamp (the op's form guard,
+  which the engine cannot mirror in cypher — a backfill or import is the only writer that could produce one); a
+  successor not owned by this DDL (`NotOwned`, the §4.1 foreign-instance case).
+- **Derivation cliffs (close pass):** Refractor's anchor derivation declines past 2,000 adjacency reads (BFS
+  fallback) and refuses a set past 10,000 anchors as a structural failure. The lens shape keeps the derived set at
+  the subject's own instances; a pinned derivation test holds that (§14.4). Any future edit that re-hops from the
+  successor to the meta re-opens the hub.
+- **Grouping key (close pass, NOTE):** the row groups on `(entityKey, instanceOfLink, subjectKey)`; an anchor with
+  two live `providedTo` identities or two owning metas would project two rows under one key — unreachable with this
+  package's ops (`CreateLeaseServiceInstance` mints exactly one of each), recorded because the pinned grouping
+  verdict reads as deliberate.
 - **The `@at` residue** (row 3): one rejected fire-and-forget `MarkExpired` per early-superseded check, ≤30 days
   after retirement. Priced acceptable; §10 row 11.
 
@@ -634,8 +675,9 @@ of a link create (design said "the gate refuses"; live "permissive default") —
   link**. The operator-path successor-ownership residual stays exactly as §4.3 (c) records it (a guard-level, documented
   residual; Weaver's path is proven by the lens's `(newer)-[:instanceOf]->(m)` conjunct). The link needs no
   `PermittedCommands` entry on any DDL. **§11.2 (viii) is struck** with it; (vii) stays and is the link's proof.
-- **§4.3 version target:** `0.32.0 → 0.32.1` (the manifest reached `0.31.29` with `6ae4006` and `0.32.0` with
-  `a87e06b`, both after this design was written).
+- **§4.3 version target:** `0.32.0 → 0.32.2` (the manifest reached `0.31.29` with `6ae4006` and `0.32.0` with
+  `a87e06b`, both after this design was written; Inc 1 bumped to `0.32.1`, the close-pass fold to `0.32.2` so the
+  fire branch's own CI diff base sees a bump beside the content change).
 - **§11.2 Inc 2 e2e home:** `internal/leaseconvergence` (the only harness that runs Weaver + Refractor against this
   package), not `lease_signing_test.go` (Processor-only).
 - **§4.3 (d)(ii) "a test proves it" — struck.** No test can reorder a script's mutation batch; the claim reduces to the
@@ -662,7 +704,19 @@ of a link create (design said "the gate refuses"; live "permissive default") —
   registered it would move the link under that DDL's `PermittedCommands`.
 - **Unpriced costs, named:** `derive_reads` is one extra Starlark pass per op on this DDL (returns `{}` for
   `CreateLeaseServiceInstance` on Loom's hot path); each retirement adds a fourth KV write and an adjacency entry on
-  a live `service` vertex.
+  a live `service` vertex (which seeds nothing: no hop names `supersedes`).
+- **The brief's version rows (§14 touch-list, gotcha h) were compiled against `0.31.29 → 0.31.30`;** a concurrent
+  verticals fire moved the package to `0.32.0` before the first code edit, so the tree ships `0.32.1`. The brief is
+  left as compiled; this line is the record.
+- **§11.2 Inc 2 e2e, two narrowings:** the e2e observes the lens row *before* retirement (or the retirement itself,
+  whichever the engines reach first) and the §7.2 tombstone body after — the convergence harness passes the
+  hard-delete adapter, but an `EmptyBehavior: delete` lens carries the projection guard, whose retraction
+  soft-tombstones regardless of delete mode (`NatsKVAdapter.deleteRow`'s guarded arm), so §7.2 holds in the harness
+  too (a close-pass finding claimed otherwise and was refuted by measurement); and `freshBgComplete` is not a
+  projected column on the application's Weaver row, so the e2e asserts the reachable form (`missing_bgcheck` stays
+  false after the retirement).
+- **§4.1 successor re-bind struck, §4.3 (c) residual closed, §6 bound restated, §11.3 cliffs and causes named** — the
+  close pass's blocking finding and its fold (§14.2).
 
 ### 14.2 Review record
 
@@ -674,7 +728,53 @@ design-gap ×3 (the lazy-read hole a derivation opens, the gate premise, the cha
 pre-pass bindings, weakest-wins merge, link key shape and direction, double-run collision, Weaver's submitter identity,
 `expectedRevision` inertness. Commit `c3f4d19`.
 
+**Close pass (cumulative, one cold opus reviewer over the whole item):** 1 BLOCKING (the meta as a derivation hub —
+design-gap: §4.1's priced fan was wrong by a factor of N), 5 SHOULD-FIX (the census comment's meaning — convention;
+the design asserting its own merge — convention; the e2e never observing the row + two vacuous absence assertions —
+implementation-bug/test, its hard-delete half **refuted** (§14.1); two missing lens negatives — brief-gap; the form
+guard as an unnamed `GapBudgetExhausted` cause — design-gap), 5 NIT, 4 NOTE. Fold (a posture-changing increment, opus
+builder): the lens drops the successor's meta hop, the op proves the successor's ownership by a class-(e) degree-1
+enumeration on both paths (closing §4.3 c's residual), the target declares it, the OPERATOR NOTE names the three
+permanent-refusal causes, a derivation test pins the hub gone (§14.4), the lens gains the payment-anchor and
+other-applicant negatives, the op gains the foreign-successor refusal and the four-field Weaver payload vector, the
+e2e observes the row and waits for its witness. Second cold review over the fold: recorded in §14.5.
+
+**Dossier routing:** the lazy-read hole (Inc 1, blocker 2) is the **second sighting** of `_packages.md`'s
+"a guard's OCC rests on whoever writes its read declaration" class — recorded there with the mandated empty-`contextHint`
+test shape now applied here. The hub finding is a first sighting of a class the refractor dossier should carry once
+seen again: *a lens that binds a type-authority vertex from two pattern positions makes it a derivation hub*. The
+hardcoded next-version literal in a package test is recorded as a house rule in `CLAUDE.md`'s version-bump bullet.
+
+### 14.5 Fold review record
+
+**Second cold review, over the fold (one cold opus reviewer):** 1 BLOCKING (design-gap — dropping the successor's meta
+hop widened `max(newer.key)` to foreign candidates; a same-registry minter with the greater key would starve a
+genuine retirement: closed by the zero-hop outcome-aspect conjunct, §4.1, with the starvation vector pinned), 4
+SHOULD-FIX (the mode-conditional hub claim — doc-truth, both comments qualified; the `epoch=none` reason — convention,
+restated as the accepted chain-case risk; the OPERATOR NOTE's cause (3) — design-gap, reduced to the two remediable
+causes; the e2e's vacuous row disjunct — test, dropped in favour of the lens-level pin), 3 NIT (the page-limit cursor
+now fails loudly; fixture aspect-class fidelity on both sides; the derivation test measures the BFS answer beside
+the derivation's), 4 NOTE (declaration coherence traced end to end and metadata-only; the eight pins unchanged by
+construction; every route into the meta position closed but the anchor's own; version bumped to `0.32.2` so the
+branch run's diff base sees a bump). Held under attack: the enumeration's field, position and budget; degree-1 of
+`instanceOf` on a service vertex across all five minting sites; `expectedRevision`'s inertness at schema and commit.
+
+### 14.4 The hub pin
+
+`internal/refractor/pipeline/supersededbgchecks_derivation_test.go` —
+`TestDeriveAnchors_SupersededBgchecks_StaysInsideTheApplicant`: over the real spec from `leasesigning.Lenses()`, a
+meta M with A, B `providedTo` S1 and X `providedTo` S2, all `instanceOf` M; an `.outcome` write on B derives exactly
+{A, B}. Restoring the successor's meta hop puts X in the set (revert-proved at build time). Derivation is
+pattern-directed and evaluates no WHERE, so the fixture carries graph shape only; the class and canonicalName
+conjuncts stay proven in the package's lens test.
+
 ### 14.3 Checkpoint
 
-🏗️ owner: `claude/relaxed-rubin-0d3ozn` · Inc 1 committed on the fire branch (`c3f4d19`) · next: Inc 2 (lens + target +
-pins + e2e), then the close pass and the merge to `main`.
+✅ Shipped: Inc 1 `c3f4d19`, Inc 2 `7a01a41`, close-pass fold `54a45fa` (`0.32.2`), merged to `main` 2026-09-13. Live
+close on the ephemeral native stack (at Inc 2's `0.32.1`; the fold is package content over the same install path):
+`verify-kernel` + `verify-package-lease-signing` (93 OK) pass, the lens installed at
+`vtx.meta.5DKn2YSUXe6zNhPe5DKn`; the Weaver retirement itself is proven by the `leaseshortwindow` e2e (a fresh stack
+holds no instance pair to retire). Census verdicts pinned: actor_onekey `walkMultiPosition`, actor_walk_scope
+`identity:providedTo|meta:instanceOf|service:instanceOf,providedTo`, anchor_hopindex `hopIndexed`,
+branch_decomposition `g0/o0 ×2 / footprint true`, grouping `key(entityKey instanceOfLink subjectKey) p`,
+label_derivation `narrow "identity meta service" modeRelation`, rel_projection `own:instanceOf[key]`.

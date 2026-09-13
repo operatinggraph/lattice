@@ -642,7 +642,12 @@ mechanizes it (name the gate, strike the entry).
   gets a live read and a last-write-wins update under concurrency. Minted: café `CreditCafeAccount`'s `.balance`
   cap (2026-09-05), caught cold; clinic-ledger carried the identical shape from the precedent it mirrored. Check:
   any key a script's correctness depends on being HYDRATED (an OCC-conditioned update, a read-before-create) is
-  returned by the script's own `derive_reads`, and one test submits with an empty `contextHint`.
+  returned by the script's own `derive_reads`, and one test submits with an empty `contextHint`. **Second sighting
+  (lease-signing `TombstoneSupersededLeaseServiceInstance`, 2026-09-13), from the other side:** moving six of seven
+  reads into `derive_reads` left the one key it cannot compute (the `ddl[…].metaKey`-shaped ownership link) as the
+  sole undeclared read, and a bare payload ran to a committed tombstone off a lazy `kv.Read` where it had failed
+  loudly before — caught cold. A key `derive_reads` cannot return is read from `state` and refused when absent,
+  never `kv.Read`; the empty-`contextHint` test is what proves it (the harness's read-drift log names the leak).
 - **An amount cap written for the self-service leg leaves the staff leg unbounded, and a bounded replay hoisted
   above the ownership proof is an amplification primitive.** The trust argument ("no rail verifies the payment")
   is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the

@@ -90,8 +90,10 @@ backlog and the suppressed sweep clear only once the accumulated instances are g
 newest per identity) is destructive on shared data and has **no sanctioned op** — `Tombstone*` commands exist for
 patient / provider / appointment / location, none for a service instance — so it is proposed to Andrew, not
 done. (D) the durable rule — a check superseded by its successor is tombstoned by the reply op, one live instance
-per subject per pattern — is filed `📐` on the Lattice lane; `SupersedeClause` (semantic-contracts) is the shape
-precedent, and whether a superseded check's history is a record is the product question the design must answer.
+per subject per pattern — shipped 2026-09-13 as a convergence rule, not a reply-op rule
+([bgcheck-supersession-convergence-rule-design.md](bgcheck-supersession-convergence-rule-design.md), `c3f4d19` +
+`7a01a41`): a lens projects the superseded pair and Weaver's `directOp` submits the §6 op; history is a record at
+rest (Andrew, 2026-09-11).
 (E) a rebuild that cannot drain suppressing the sweep indefinitely stays unfiled until F/D land and the lens is
 re-measured: with the instances gone the replay is expected to drain.
 
