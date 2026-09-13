@@ -513,6 +513,15 @@ func TestSignRenewal_GatesOnTermsAndGuarantor_ThenExtendsTenancy(t *testing.T) {
 	if got, _ := tdata["leaseStart"].(string); got != "2026-08-01T00:00:00Z" {
 		t.Fatalf("extended tenancy.leaseStart = %q, want preserved 2026-08-01T00:00:00Z", got)
 	}
+	// The renewed term is recorded on the lease: termStart is the previous
+	// leaseEnd (where the renewal's own rent clause begins) and rentAmount
+	// is the rent agreed at SetRenewalTerms (the clause's amount).
+	if got, _ := tdata["termStart"].(string); got != "2027-08-01T00:00:00Z" {
+		t.Fatalf("extended tenancy.termStart = %q, want the previous leaseEnd 2027-08-01T00:00:00Z", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 2500 {
+		t.Fatalf("extended tenancy.rentAmount = %v, want 2500 (SetRenewalTerms' rentAmount)", tdata["rentAmount"])
+	}
 
 	// A second, fresh SignRenewal attempt against the now-complete renewal is
 	// rejected (RenewalNotOpen) rather than re-reading and re-extending the

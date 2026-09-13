@@ -136,6 +136,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"+ leaseTermMonths (calendar months); renewalOpensAt = leaseEnd - the package's renewalWindow. Idempotent " +
 			"re-approves and declines never touch .tenancy once it exists, so a landlord who approved, and a tenant who " +
 			"later signs a renewal extending leaseEnd, is never silently truncated back to the original term. " +
+			"(SignRenewal also records termStart + rentAmount on .tenancy; this op never writes either — their " +
+			"absence means the original term at the application's requestedRent.) " +
 			"On the FIRST decision of EITHER value (approve or decline), it also CREATE-ONLY-stamps a .decidedProfileSnapshot " +
 			"aspect (class decidedProfileSnapshot, SENSITIVE, same underwritingRecord retention class as .profile) copying the " +
 			"then-current .profile / .underwritingParties / .applicationSignals data maps (each keyed under its own name, " +

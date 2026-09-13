@@ -16,11 +16,9 @@ import (
 // DecideLeaseApplication's .tenancy stamping at package-init time — the same
 // "the policy lives in the script" convention bgcheckFreshnessWindow uses — so
 // renewalOpensAt = leaseEnd - renewalWindow is a compile-time-selected
-// constant, never a runtime mutation. The script ALSO contains Starlark's own
-// literal '%' formatting verbs (add_months' "%04d-%02d-%02d" date format and
-// the "%" modulo operator), so this substitutes the one renewalWindow site via
-// a plain strings.Replace token rather than fmt.Sprintf — a whole-script
-// Sprintf would misinterpret every one of those unrelated '%' as its own verb.
+// constant, never a runtime mutation. The substitution is a plain
+// strings.Replace token rather than fmt.Sprintf so that no literal '%' in the
+// script (the "%" modulo operator) is ever read as a formatting verb.
 var leaseAppDDLScript = strings.Replace(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -507,60 +505,6 @@ def require_manages(unit_key, what):
         # not own.
         fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
 
-DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-
-def is_leap_year(year):
-    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
-
-def days_in_month(year, month):
-    if month == 2 and is_leap_year(year):
-        return 29
-    return DAYS_IN_MONTH[month - 1]
-
-def zero_pad(n, width):
-    # Starlark's %-format supports no field-width flag (unlike Python/Go), so a
-    # fixed-width zero-padded integer (YYYY-MM-DD's month/day, always < 100,
-    # year always < 10000) is built by hand: left-pad the decimal string with
-    # "0" to the target width. This Starlark dialect has no while loop, so the
-    # pad is a bounded for-loop over the width itself (width is always a small
-    # literal — 2 or 4 — never large enough for the bound to matter).
-    s = str(n)
-    for _ in range(width):
-        if len(s) >= width:
-            break
-        s = "0" + s
-    return s
-
-def add_months(rfc3339_instant, months):
-    # Calendar-month addition on an RFC3339 instant (semantic-contracts' "date math
-    # belongs to the op, cypher only compares" precedent): the deterministic
-    # Starlark sandbox has no calendar-aware builtin (time.rfc3339_add's Go
-    # duration form is hours-only — no months unit), and a lease term is a
-    # calendar-month count (12 months from Jan 31 is Jan 31 of next year, not a
-    # fixed hour count that would drift across leap years / month lengths), so
-    # this hand-rolls the same year/month/day carry identity-domain's DOB
-    # validator already parses (leap-year table above). The clock-time and zone
-    # suffix are preserved verbatim (a lease term shifts the calendar date, never
-    # the time of day); the day-of-month CLAMPS to the target month's length
-    # (Jan 31 + 1 month = Feb 28/29, never a rollover into March) — the
-    # conventional calendar-add rule, applied once (months is always a small
-    # positive integer here, never large enough to need iterated clamping).
-    utc = time.rfc3339_utc(rfc3339_instant)
-    year = int(utc[0:4])
-    month = int(utc[5:7])
-    day = int(utc[8:10])
-    rest = utc[10:]  # "Thh:mm:ssZ"
-
-    total = (month - 1) + int(months)
-    year = year + total // 12
-    month = (total % 12) + 1
-
-    max_day = days_in_month(year, month)
-    if day > max_day:
-        day = max_day
-
-    return zero_pad(year, 4) + "-" + zero_pad(month, 2) + "-" + zero_pad(day, 2) + rest
-
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -932,7 +876,11 @@ def execute(state, op):
                 if available_from == None or term_months == None:
                     fail("NoListing: unit " + decide_unit + "'s .listing is missing availableFrom/leaseTermMonths")
                 lease_start = time.rfc3339_utc(available_from)
-                lease_end = add_months(lease_start, term_months)
+                # A lease term is a calendar-month count (12 months from Jan
+                # 31 is Jan 31 of next year, never a fixed hour count), and
+                # the builtin clamps the day-of-month to the target month's
+                # length (Jan 31 + 1 month = Feb 28/29).
+                lease_end = time.rfc3339_add_months(lease_start, int(term_months))
                 renewal_opens_at = time.rfc3339_add(lease_end, "-__RENEWAL_WINDOW__")
                 mutations.append(make_aspect(app_key, "tenancy", "tenancy",
                     {"leaseStart": lease_start, "leaseEnd": lease_end, "renewalOpensAt": renewal_opens_at}))

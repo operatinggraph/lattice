@@ -56,6 +56,7 @@ func bcCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateClause", Scope: "any"},
 			{OperationType: "InspectPremises", Scope: "any"},
 			{OperationType: "SupersedeClause", Scope: "any"},
+			{OperationType: "BackfillClauseTerm", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -264,7 +265,7 @@ func TestCreateClause_MintsClauseGoverningLeaseChargingAccount(t *testing.T) {
 	}
 
 	leaseID := "BBLEASECLAUSEHJKMNPQ"
-	governsLnk := "lnk.clause." + clauseID + ".governs.lease." + leaseID
+	governsLnk := "lnk.clause." + clauseID + ".governs.leaseapp." + leaseID
 	if !keyExists(t, ctx, conn, governsLnk) {
 		t.Fatalf("governs link must exist: %s", governsLnk)
 	}
@@ -947,7 +948,7 @@ func TestSupersedeClause_TombstonesOldWritesAmendsLinkMintsNew(t *testing.T) {
 		t.Fatalf("new clause status.state = %q, want active", got)
 	}
 
-	newGovernsLnk := "lnk.clause." + newClauseID + ".governs.lease." + "BBLEASESUPERSDHJKMNP"
+	newGovernsLnk := "lnk.clause." + newClauseID + ".governs.leaseapp." + "BBLEASESUPERSDHJKMNP"
 	if !keyExists(t, ctx, conn, newGovernsLnk) {
 		t.Fatalf("new clause's own governs link must exist: %s", newGovernsLnk)
 	}

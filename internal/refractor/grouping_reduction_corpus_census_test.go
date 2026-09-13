@@ -70,6 +70,13 @@ type groupingVerdict struct {
 // per-anchor scalar (one marker aspect per vertex), functionally determined by
 // the anchor already in the key, so no row can cross a partition — the key is
 // wider by a value every row in a group already agreed on.
+//
+// The same argument covers the clause's term and the lease's tenancy:
+// clauseSatisfaction carries validFrom/validUntil (the clause's own .terms) and
+// periodStart (a CASE over its .status and .terms), and leaseRentSettlement
+// carries leaseStart/leaseEnd/termStart/termRent (the lease's own .tenancy and
+// .terms, two of them coalesced) — every one an anchor-own aspect read, so
+// each is determined by the anchor already in the key.
 var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"applicantRosterRead":               {"p", 0},
 	"appointmentReminders":              {"p", 0},
@@ -96,7 +103,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"capabilityRoleIndex":               {"key(operationType projectedAt)", 0},
 	"capabilityRoles":                   {"key(actorKey)", 0},
 	"capabilityServiceAccess":           {"key(actorKey)", 0},
-	"clauseSatisfaction":                {"key(accountKey amountCents chargeValidUntil condKey conditioned entityKey inspectionCompleted inspectorKey lapsedAt period) p!condKey", 0},
+	"clauseSatisfaction":                {"key(accountKey amountCents chargeValidUntil condKey conditioned entityKey inspectionCompleted inspectorKey lapsedAt period periodStart validFrom validUntil) p!condKey", 0},
 	"clinicAppointments":                {"p", 0},
 	"clinicAppointmentsRead":            {"p", 0},
 	"clinicEncountersRead":              {"p", 0},
@@ -153,7 +160,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"leaseApplicationComplete":          {"key(applicant declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision profileSubmittedAt referenceCount signedAt ssnVal termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!profileSubmittedAt", 0},
 	"leaseApplicationsRead":             {"key(applicantKey declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision profileSubmitted referenceCount signedAt ssnVal termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitRegion unitRent unitStatus) p!applicantKey", 0},
 	"leaseExpiry":                       {"key(entityKey landlordDecision lapsedAt leaseEnd renewalOpensAt signedAt unitKey) p!landlordDecision", 0},
-	"leaseRentSettlement":               {"key(accountKey decision entityKey requestedRent) p!decision", 0},
+	"leaseRentSettlement":               {"key(accountKey decision entityKey leaseEnd leaseStart requestedRent termRent termStart) p!decision", 0},
 	"ledgerHistory":                     {"p", 0},
 	"menuCatalog":                       {"p", 0},
 	"myTasks":                           {"key(actorKey)", 0},

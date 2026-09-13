@@ -19,9 +19,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     the clause's chargeValidUntil instead of completing it — into the op's
 //     payload; Reads routes the account + clause keys — and the clause's own
 //     .terms aspect (row.clauseKey.terms), so loftspace-ledger's DebitAccount
-//     can derive the authoritative amountCents from the clause instead of
-//     trusting this row-templated copy — into ContextHint.Reads so the
-//     Processor hydrates them. The `directOp`-must-be-literal guard is
+//     can derive the authoritative amountCents and the term from the clause
+//     instead of trusting this row-templated copy — into ContextHint.Reads
+//     so the Processor hydrates them; OptionalReads routes the clause's
+//     .status (row.clauseKey.status), the recorded due date DebitAccount
+//     walks the anniversary grid from — absence-tolerant because a clause
+//     never charged has no due date yet. The `directOp`-must-be-literal guard is
 //     satisfied — DebitAccount is a literal operation name, only params/reads
 //     are row-templated (the objectLiveness → TombstoneObject / appointment
 //     Reminders → RecordAppointmentReminder precedent, granted to operator,
@@ -38,7 +41,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // TestSemanticContracts_PlaybookColumnsMatchLens.
 //
 // leaseRentSettlement's own playbook (lenses.go) is the bootstrap ahead of
-// this one — three independent gaps, mirroring cafe-domain's tabSettlement
+// this one — four gaps, the first three mirroring cafe-domain's tabSettlement
 // missing_account → directOp(CreateAccount) shape:
 //
 //   - missing_terms → directOp(BackfillLeaseTerms) (lease-signing) — the
@@ -55,10 +58,23 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - missing_clause → directOp(CreateClause) (this package) — accountKey
 //     comes from THIS SAME row (the lens only opens missing_clause once
 //     missing_account has already converged, lenses.go), amountCents from
-//     requestedRentCents (the lens's own ×100 conversion — never the raw
-//     row.requestedRent dollar figure), period + prose are literals (no
-//     "row." prefix, so resolveParam passes them through verbatim,
-//     strategist.go).
+//     termRentCents (the lens's own ×100 conversion of the current term's
+//     rent — never a raw dollar column), the term from termStart/leaseEnd
+//     (the lease's current term, anchor-own .tenancy columns the gap
+//     requires non-null), period + prose are literals (no "row." prefix, so
+//     resolveParam passes them through verbatim, strategist.go).
+//   - missing_term → directOp(BackfillClauseTerm) (this package) — an
+//     untermed monthly clause governing a lease that has a .tenancy. Params
+//     route that clause (row.untermedClauseKey, the lens's max() over the
+//     governs walk — non-null whenever the gap is open, which is what the
+//     gap's own conjunct states) and the lease; Reads routes the clause, its
+//     .terms (the op adds the term to it), the lease and its .tenancy (the
+//     term's source, required — the gap only opens when it is present);
+//     OptionalReads the clause's .status, whose recorded due date the op
+//     moves onto the term's grid; Enumerations declares the op's one bounded
+//     walk, the clause's own outbound governs links (degree 1 by
+//     construction), which it re-keys when spelled with the legacy
+//     `governs.lease.` target segment.
 //
 // Cross-checked by TestSemanticContracts_LeaseRentSettlementColumnsMatchLens.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
@@ -66,8 +82,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		{
 			TargetID: ClauseSatisfactionTarget,
 			Description: "Every contract clause is honored: a clause that charges an account is billed, monthly " +
-				"clauses each period, and a clause requiring an inspection has one assigned to its named " +
-				"inspector.",
+				"clauses each calendar-month period of their term, and a clause requiring an inspection has one " +
+				"assigned to its named inspector.",
 			LensRef: ClauseSatisfactionTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_charge": {
@@ -77,9 +93,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// loftspace-ledger vertexType DDL this target dispatches to, or the
 					// Processor's operationType→class reverse index fails closed
 					// (MissingClass).
-					Class:  "transaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "clauseRef": "row.clauseKey", "period": "row.period"},
-					Reads:  []string{"row.accountKey", "row.clauseKey", "row.clauseKey.terms"},
+					Class:         "transaction",
+					Params:        map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "clauseRef": "row.clauseKey", "period": "row.period"},
+					Reads:         []string{"row.accountKey", "row.clauseKey", "row.clauseKey.terms"},
+					OptionalReads: []string{"row.clauseKey.status"},
 				},
 				"missing_inspection": {
 					Action:    "assignTask",
@@ -92,8 +109,11 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		{
 			TargetID: LeaseRentSettlementTarget,
 			Description: "An approved lease has an agreed rent, a ledger account, and a recurring monthly rent " +
-				"clause. A missing agreed rent is backfilled from the unit's listed rent; whichever of the " +
-				"account/clause is then still missing is created — so a signed lease actually bills its rent.",
+				"clause covering its current term, and every monthly clause it has carries its term. A missing " +
+				"agreed rent is backfilled from the unit's listed rent; whichever of the account/clause is then " +
+				"still missing is created; a monthly clause minted without a term has one stamped from the " +
+				"lease's tenancy — so a signed lease actually bills its rent, for exactly its term, and a signed " +
+				"renewal mints its own clause for the renewed term.",
 			LensRef: LeaseRentSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_terms": {
@@ -124,11 +144,24 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Params: map[string]string{
 						"leaseAppKey": "row.leaseAppKey",
 						"accountKey":  "row.accountKey",
-						"amountCents": "row.requestedRentCents",
+						"amountCents": "row.termRentCents",
 						"period":      "monthly",
+						"validFrom":   "row.termStart",
+						"validUntil":  "row.leaseEnd",
 						"prose":       "Monthly rent per the signed lease agreement.",
 					},
 					Reads: []string{"row.leaseAppKey", "row.accountKey"},
+				},
+				"missing_term": {
+					Action:        "directOp",
+					Operation:     "BackfillClauseTerm",
+					Class:         "clause",
+					Params:        map[string]string{"clauseKey": "row.untermedClauseKey", "leaseAppKey": "row.leaseAppKey"},
+					Reads:         []string{"row.untermedClauseKey", "row.untermedClauseKey.terms", "row.leaseAppKey", "row.leaseAppKey.tenancy"},
+					OptionalReads: []string{"row.untermedClauseKey.status"},
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.untermedClauseKey", Relation: "governs", Direction: "out"},
+					},
 				},
 			},
 		},

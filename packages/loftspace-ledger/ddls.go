@@ -112,12 +112,19 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"`period` param (Fire V3, semantic-contracts' clauseSatisfaction playbook always supplies it alongside " +
 			"clauseRef): period=\"monthly\" keeps state active (a recurring clause never completes); any other " +
 			"value (or clauseRef with no period, the Fire V1/V2 shape) marks .status completed as before. " +
-			"chargeValidUntil (~30 days out) is stamped UNCONDITIONALLY either way — this op has no read of the " +
-			"clause's own .terms.data.period to cross-check `period` against, so it is a defense-in-depth measure " +
-			"(not just the monthly branch's convergence signal): the clauseSatisfaction lens's monthly gate reads " +
-			"only chargeValidUntil, never `state`, so a genuinely-monthly clause still re-arms correctly even if a " +
-			"caller passed the wrong/no period; the reverse mismatch is harmless (a oneTime clause's gate never " +
-			"reads chargeValidUntil).",
+			"chargeValidUntil — the clause's next due date — is stamped UNCONDITIONALLY either way — this op has " +
+			"no read of the clause's own .terms.data.period to cross-check `period` against, so it is a " +
+			"defense-in-depth measure (not just the monthly branch's convergence signal): the clauseSatisfaction " +
+			"lens's monthly gate reads only chargeValidUntil, never `state`, so a genuinely-monthly clause still " +
+			"re-arms correctly even if a caller passed the wrong/no period; the reverse mismatch is harmless (a " +
+			"oneTime clause's gate never reads chargeValidUntil). WHICH instant is stamped depends on the clause's " +
+			"term: an untermed clause gets postedAt + 30 days (the legacy cadence); a clause whose .terms carry " +
+			"validFrom/validUntil bills the calendar-month period whose start is its recorded due date " +
+			"(.status.chargeValidUntil, declared as an OptionalRead by the playbook — absent or before validFrom " +
+			"means period 0) and records the NEXT anniversary, computed from validFrom each time so Jan 31 -> " +
+			"Feb 28 -> Mar 31 never drifts; when that next due reaches validUntil the clause is marked completed " +
+			"(its final period is billed), and a due at or past validUntil is refused (TermExhausted) with no " +
+			"transaction minted.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +
@@ -133,7 +140,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the ledgerHistory lens. DebitAccount with a clauseRef must match the clause's own .terms.amountCents exactly (AmountMismatch otherwise) — the clause is the authoritative amount, not the payload.",
 			"memo":        "Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee — 5 days\"). Stored on the .entry aspect when supplied; projected by the ledgerHistory lens.",
 			"clauseRef":   "DebitAccount only. Full vtx.clause.<NanoID> key of the semantic-contract clause authorizing this charge. When supplied, validates the clause is alive, derives the authoritative amountCents from the clause's own .terms (rejecting AmountMismatch on disagreement with the payload), writes the authorizedBy link (transaction→clause), and updates the clause's .status per the period param.",
-			"period":      "DebitAccount only, alongside clauseRef (Fire V3). \"monthly\" keeps the clause active (recurring); anything else marks .status completed (one-time, Fire V1/V2 default). chargeValidUntil is stamped either way, unconditionally.",
+			"period":      "DebitAccount only, alongside clauseRef (Fire V3). \"monthly\" keeps the clause active (recurring) until its term is fully billed; anything else marks .status completed (one-time, Fire V1/V2 default). chargeValidUntil is stamped either way, unconditionally — on the anniversary grid from .terms.validFrom for a termed clause, postedAt + 30 days otherwise.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -165,6 +172,15 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"{state: active}, gaining chargeValidUntil ~30 days out instead of completing. The clauseSatisfaction " +
 					"lens goes non-violating (freshUntil=chargeValidUntil arms Weaver's temporal lane) until chargeValidUntil " +
 					"lapses, at which point missing_charge re-opens and the next period's DebitAccount fires.",
+			},
+			{
+				Name:    "DebitAccount — clause-authorized rent charge on a termed clause",
+				Payload: map[string]any{"accountKey": "vtx.account.<NanoID>", "amountCents": 240000, "clauseRef": "vtx.clause.<NanoID>", "period": "monthly"},
+				ExpectedOutcome: "The clause's .terms carry validFrom 2026-01-31T00:00:00Z / validUntil 2027-01-31T00:00:00Z and " +
+					"its recorded due (.status.chargeValidUntil, read as an OptionalRead) is 2026-02-28T00:00:00Z: this charge " +
+					"bills the period starting Feb 28 and re-arms chargeValidUntil to 2026-03-31T00:00:00Z — the anniversary " +
+					"computed from validFrom, not Feb 28 + 1 month. The charge whose next due reaches validUntil marks the " +
+					"clause {state: completed}; a due already at validUntil is refused TermExhausted.",
 			},
 		},
 	}

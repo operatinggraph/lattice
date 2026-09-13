@@ -16,10 +16,8 @@ import (
 // two computations this script needs: SignRenewal's renewalOpensAt recompute
 // (the duration-string form, `__RENEWAL_WINDOW__`) and SetRenewalTerms's
 // termMonths floor (the integer form, `__RENEWAL_WINDOW_HOURS__`). Two
-// strings.Replace token sites, chained — never fmt.Sprintf (leaseAppDDLScript's
-// doc comment explains why: add_months' own literal '%' formatting verbs would
-// collide with a Sprintf verb scan; this script has the identical add_months
-// copy, so the same hazard applies here).
+// strings.Replace token sites, chained — never fmt.Sprintf, so no literal '%'
+// in the script is ever read as a formatting verb.
 var renewalDDLScript = strings.Replace(strings.Replace(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -95,55 +93,12 @@ def vertex_alive(state, key):
         return False
     return True
 
-DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-
-def is_leap_year(year):
-    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
-
-def days_in_month(year, month):
-    if month == 2 and is_leap_year(year):
-        return 29
-    return DAYS_IN_MONTH[month - 1]
-
-def zero_pad(n, width):
-    # This Starlark dialect has no while loop (leaseAppDDLScript's add_months
-    # hit the same constraint); pad via a bounded for-loop over width instead.
-    s = str(n)
-    for _ in range(width):
-        if len(s) >= width:
-            break
-        s = "0" + s
-    return s
-
-def add_months(rfc3339_instant, months):
-    # Calendar-month addition — see leaseAppDDLScript's add_months for the full
-    # rationale (no calendar-aware builtin; a lease/renewal term is a calendar-
-    # month count, clamped at the target month's length). Duplicated verbatim
-    # here rather than shared: each DDL script is its own independent Starlark
-    # module (no cross-script imports), the established per-script-helper
-    # posture every DDL in this package already follows.
-    utc = time.rfc3339_utc(rfc3339_instant)
-    year = int(utc[0:4])
-    month = int(utc[5:7])
-    day = int(utc[8:10])
-    rest = utc[10:]  # "Thh:mm:ssZ"
-
-    total = (month - 1) + int(months)
-    year = year + total // 12
-    month = (total % 12) + 1
-
-    max_day = days_in_month(year, month)
-    if day > max_day:
-        day = max_day
-
-    return zero_pad(year, 4) + "-" + zero_pad(month, 2) + "-" + zero_pad(day, 2) + rest
-
 # renewalWindow expressed in whole months (ceil), the floor SetRenewalTerms
 # enforces on termMonths (design §4.4: a term shorter than the renewal window
 # would open the NEXT cycle the instant this one signs). renewalWindow is a
 # Go duration string of whole hours (e.g. "1440h"); 730 hours/month is the
 # conventional average (365.25*24/12) used only for this floor computation —
-# add_months' own calendar-accurate carry is untouched, this is a ceiling
+# time.rfc3339_add_months' calendar-accurate carry is untouched, this is a ceiling
 # check on an integer month count, not a date computation.
 RENEWAL_WINDOW_HOURS = __RENEWAL_WINDOW_HOURS__
 HOURS_PER_MONTH = 730
@@ -478,9 +433,18 @@ def execute(state, op):
         tenancy = kv.Read(tenancy_key)
         if tenancy == None or tenancy.isDeleted:
             fail("NoTenancy: application " + app_key + " has no .tenancy aspect to extend")
-        new_lease_end = add_months(tenancy.data.get("leaseEnd"), term_months)
+        previous_lease_end = tenancy.data.get("leaseEnd")
+        new_lease_end = time.rfc3339_add_months(previous_lease_end, int(term_months))
         new_renewal_opens_at = time.rfc3339_add(new_lease_end, "-__RENEWAL_WINDOW__")
 
+        # The renewed term is a fact on the lease: termStart is where the
+        # CURRENT term begins (the previous term's end — the original term's
+        # rent clause runs to exactly here), rentAmount is the rent agreed
+        # for it (dollars, like the application's requestedRent). The
+        # semantic-contracts leaseRentSettlement lens reads both to mint the
+        # renewal's own rent clause covering [termStart, leaseEnd); an
+        # unrenewed tenancy carries neither and the lens falls back to
+        # leaseStart / requestedRent.
         mutations = [
             make_aspect(renewal_key, "renewalSignature", "renewalSignature", {"signedAt": signed_at}),
             make_vtx_update(renewal_key, "renewal",
@@ -490,10 +454,13 @@ def execute(state, op):
                 "leaseStart": tenancy.data.get("leaseStart"),
                 "leaseEnd": new_lease_end,
                 "renewalOpensAt": new_renewal_opens_at,
+                "termStart": previous_lease_end,
+                "rentAmount": terms.data.get("rentAmount"),
             }),
         ]
         events = [{"class": "renewal.signed",
-                   "data": {"renewalKey": renewal_key, "leaseAppKey": app_key, "leaseEnd": new_lease_end}}]
+                   "data": {"renewalKey": renewal_key, "leaseAppKey": app_key, "leaseEnd": new_lease_end,
+                            "termStart": previous_lease_end, "rentAmount": terms.data.get("rentAmount")}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": renewal_key}}
 

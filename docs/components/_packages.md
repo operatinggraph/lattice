@@ -60,6 +60,18 @@ Installed packages:
   (`applicantRosterRead` is a protected-Postgres Secure Lens — the identity
   name decrypts at projection time, Contract #3 §3.10). Introduces no new
   vertex type.
+- `loftspace-ledger` + `semantic-contracts` — the append-only lease ledger
+  (`account` / `transaction`, `LoftspaceCreateAccount` / `DebitAccount` /
+  `CreditAccount`, the `ledgerHistory` / `leaseAccounts` Lenses) and the
+  Executable Paper package that bills it: a `clause` vertex per provision
+  (`CreateClause` / `SupersedeClause` / `InspectPremises` / `BackfillClauseTerm`),
+  the `clauseSatisfaction` convergence target (one `DebitAccount` per period,
+  gated on a recorded lapse reaching the clause's due date and the due date
+  lying inside its `.terms.validFrom`/`validUntil` term; the due dates walk the
+  calendar-month grid from `validFrom`) and the `leaseRentSettlement` bootstrap
+  (agreed rent → account → a rent clause per tenancy term: the original term
+  from `.tenancy.leaseStart`, each signed renewal's from its recorded
+  `termStart`/`rentAmount`; a legacy untermed clause is termed from the lease).
 
 **Clinic vertical** (the 2nd reference vertical / forcing function for PHI +
 recurring schedules):

@@ -1,12 +1,26 @@
 package semanticcontracts
 
-// clauseDDLScript handles CreateClause + InspectPremises + SupersedeClause
-// (Fire V4 self-amendment). Known-key reads only (validates the lease/
-// account/inspector/conditionedOn/superseded-clause vertex by the keys the
-// caller lists in ContextHint.Reads). Root data stays {} on the clause (D5):
-// the prose/terms/status/inspection are aspects, the governed lease, charged
+import (
+	"strings"
+
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
+)
+
+// clauseDDLScript handles CreateClause + InspectPremises + SupersedeClause +
+// BackfillClauseTerm. Known-key reads only (validates the lease/account/
+// inspector/conditionedOn/superseded-clause vertex by the keys the caller
+// lists in ContextHint.Reads; BackfillClauseTerm reads the clause's .terms
+// and the lease's .tenancy the same way, and its .status as an
+// absence-tolerant OptionalRead). Root data stays {} on the clause (D5): the
+// prose/terms/status/inspection are aspects, the governed lease, charged
 // account, assigned inspector, condition, and amended predecessor are links.
-const clauseDDLScript = `
+//
+// The untermed recurring window (loftspace-ledger's RecurringChargePeriod)
+// is baked in at package-init time via strings.Replace: BackfillClauseTerm
+// recovers the last charge instant of an untermed clause from its recorded
+// due date, which DebitAccount's untermed branch always stamps as
+// postedAt + that window.
+var clauseDDLScript = strings.Replace(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -82,6 +96,30 @@ def vertex_alive(state, key):
         return False
     return True
 
+def period_index(valid_from, d):
+    # The index k of the calendar-month period of a term beginning at
+    # valid_from that contains the instant d: the LARGEST k >= 0 with
+    # rfc3339_add_months(valid_from, k) <= d. Every anniversary is computed
+    # from valid_from (never by stepping +1 month from the last one), so
+    # Jan 31 -> Feb 28 -> Mar 31 never drifts. The year/month digits of the
+    # canonical RFC3339 strings give the candidate index; day-of-month
+    # clamping can leave it one step off in either direction, which one
+    # correction settles. d must be >= valid_from.
+    k = (int(d[0:4]) - int(valid_from[0:4])) * 12 + (int(d[5:7]) - int(valid_from[5:7]))
+    if k < 0:
+        k = 0
+    if time.rfc3339_add_months(valid_from, k) > d:
+        k = k - 1
+    elif time.rfc3339_add_months(valid_from, k + 1) <= d:
+        k = k + 1
+    if k < 0:
+        k = 0
+    return k
+
+def next_anniversary_after(valid_from, d):
+    # The start of the period after the one containing d.
+    return time.rfc3339_add_months(valid_from, period_index(valid_from, d) + 1)
+
 def mint_clause(state, p):
     # Shared by CreateClause and SupersedeClause (Fire V4): builds a fresh
     # clause vertex + its aspects/links from the same payload shape. Returns
@@ -110,6 +148,23 @@ def mint_clause(state, p):
     if period == "monthly" and kind != "computational":
         fail("InvalidArgument: period: monthly recurrence is computational-only")
 
+    # The term: validFrom/validUntil, both or neither, canonical UTC, a
+    # monthly-only fact (a oneTime clause bills once and has no period grid
+    # to lay over a term). A monthly clause minted without one keeps the
+    # untermed cadence until BackfillClauseTerm stamps its term from the
+    # governed lease's .tenancy.
+    valid_from = optional_string(p, "validFrom")
+    valid_until = optional_string(p, "validUntil")
+    if (valid_from == None) != (valid_until == None):
+        fail("InvalidArgument: validFrom/validUntil: both or neither")
+    if valid_from != None:
+        if period != "monthly":
+            fail("InvalidArgument: validFrom: a term is monthly-only")
+        valid_from = time.rfc3339_utc(valid_from)
+        valid_until = time.rfc3339_utc(valid_until)
+        if valid_until <= valid_from:
+            fail("InvalidArgument: validUntil: must be after validFrom")
+
     cond_key = optional_string(p, "conditionedOnKey")
     cond_type = None
     cond_id = None
@@ -123,6 +178,9 @@ def mint_clause(state, p):
     # match resolve null exactly like "never conditioned" would, so only
     # this flag lets the lens tell the two apart (see lenses.go).
     terms_data = {"kind": kind, "period": period, "conditioned": (cond_key != None)}
+    if valid_from != None:
+        terms_data["validFrom"] = valid_from
+        terms_data["validUntil"] = valid_until
     acct_key = None
     acct_id = None
     amount_cents = None
@@ -177,7 +235,7 @@ def mint_clause(state, p):
 
     # Every link the clause writes has the clause as source: it is the
     # later-arriving vertex in each pair (Contract #1 §1.1).
-    governs_lnk = "lnk.clause." + clause_id + ".governs.lease." + lease_id
+    governs_lnk = "lnk.clause." + clause_id + ".governs.leaseapp." + lease_id
 
     mutations = [
         make_vtx(clause_key, "clause", {}),
@@ -187,6 +245,9 @@ def mint_clause(state, p):
         make_link(governs_lnk, clause_key, lease_key, "governs", "governs", {}),
     ]
     event_data = {"clauseKey": clause_key, "leaseAppKey": lease_key, "kind": kind}
+    if valid_from != None:
+        event_data["validFrom"] = valid_from
+        event_data["validUntil"] = valid_until
 
     if kind == "computational":
         charges_lnk = "lnk.clause." + clause_id + ".chargesTo.account." + acct_id
@@ -250,6 +311,150 @@ def execute(state, op):
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": new_key}}
 
+    if ot == "BackfillClauseTerm":
+        # Stamps the term a monthly clause minted without one, from the
+        # governed lease's own .tenancy: validFrom = leaseStart, validUntil =
+        # termStart when the lease has been renewed (the clause covers the
+        # ORIGINAL term only; the renewal's own clause covers the rest) else
+        # leaseEnd. Dispatched by the leaseRentSettlement playbook's
+        # missing_term gap.
+        clause_key = required_string(p, "clauseKey")
+        parts_of(clause_key, "clauseKey", "clause")
+        lease_key = required_string(p, "leaseAppKey")
+        _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+
+        if not vertex_alive(state, clause_key):
+            fail("UnknownClause: " + clause_key)
+        terms_key = clause_key + ".terms"
+        if not vertex_alive(state, terms_key):
+            fail("InvalidState: " + clause_key + " has no .terms aspect")
+        terms = state[terms_key].data
+        if terms.get("period") != "monthly":
+            fail("InvalidState: " + clause_key + " is not a monthly clause; a term is monthly-only")
+        if terms.get("kind") != "computational":
+            fail("InvalidState: " + clause_key + " is not a computational clause")
+        if terms.get("validFrom") != None:
+            fail("AlreadyTermed: " + clause_key + " already carries a term from " + terms.get("validFrom"))
+
+        tenancy_key = lease_key + ".tenancy"
+        if not vertex_alive(state, tenancy_key):
+            fail("InvalidState: " + lease_key + " has no .tenancy aspect to term the clause from")
+        tenancy = state[tenancy_key].data
+        lease_start = tenancy.get("leaseStart")
+        lease_end = tenancy.get("leaseEnd")
+        term_start = tenancy.get("termStart")
+        if lease_start == None or lease_end == None:
+            fail("InvalidState: " + lease_key + "'s .tenancy is missing leaseStart/leaseEnd")
+        valid_from = time.rfc3339_utc(lease_start)
+        if term_start != None:
+            valid_until = time.rfc3339_utc(term_start)
+        else:
+            valid_until = time.rfc3339_utc(lease_end)
+        if valid_until <= valid_from:
+            fail("InvalidState: " + lease_key + "'s term ends at " + valid_until + ", not after its start " + valid_from)
+
+        # The .terms update preserves every key the clause already carries
+        # (amountCents, conditioned, the proration audit trail) and adds the
+        # two term keys. The Processor pins it to the revision the declared
+        # read hydrated.
+        new_terms = {}
+        for k, v in terms.items():
+            new_terms[k] = v
+        new_terms["validFrom"] = valid_from
+        new_terms["validUntil"] = valid_until
+
+        # The recorded due date moves onto the term's anniversary grid so the
+        # next charge bills the period after the one the last charge covered.
+        # An untermed clause's due is always the last charge's instant plus
+        # the untermed recurring window (DebitAccount's untermed branch is
+        # the only writer of it), so that instant is recovered exactly, and
+        # the period CONTAINING it is the one already billed. Before the term
+        # starts (every prior charge was pre-term), or never charged: the
+        # term's first period is due at validFrom. Otherwise the anniversary
+        # after the containing period's start, capped at validUntil (a
+        # charge inside the final period leaves nothing to bill). Every other
+        # status key is kept. mint_clause writes .status unconditionally, so
+        # its absence here can only mean the dispatcher did not declare it —
+        # a due date read from nothing would rewind the clause to its first
+        # period, so that fails closed.
+        status_key = clause_key + ".status"
+        if not (status_key in state and vertex_alive(state, status_key)):
+            fail("InvalidState: " + clause_key + "'s .status was not hydrated; declare it in optionalReads")
+        status_data = {}
+        for k, v in state[status_key].data.items():
+            status_data[k] = v
+        prev_due = status_data.get("chargeValidUntil")
+        if prev_due == None:
+            new_due = valid_from
+        else:
+            last_charge = time.rfc3339_add(prev_due, "-__UNTERMED_WINDOW__")
+            if last_charge < valid_from:
+                new_due = valid_from
+            else:
+                new_due = next_anniversary_after(valid_from, last_charge)
+                if new_due > valid_until:
+                    new_due = valid_until
+        status_data["chargeValidUntil"] = new_due
+        # A due at the term's end means the final period is already billed:
+        # the clause is complete, the same mark DebitAccount leaves when its
+        # own charge bills the final period.
+        if new_due >= valid_until:
+            status_data["state"] = "completed"
+            status_data["completedAt"] = time.rfc3339_utc(op.submittedAt)
+
+        mutations = [
+            {"op": "update", "key": terms_key,
+             "document": {"class": "clauseTerms", "isDeleted": False,
+                          "vertexKey": clause_key, "localName": "terms", "data": new_terms}},
+            {"op": "update", "key": status_key,
+             "document": {"class": "clauseStatus", "isDeleted": False,
+                          "vertexKey": clause_key, "localName": "status", "data": status_data}},
+        ]
+
+        # The clause's governs link is re-keyed if it carries the legacy
+        # target-type segment "lease" (the vertex type is "leaseapp", and the
+        # adjacency index rebuilds a walk's far endpoint from that segment, so
+        # a legacy key can be walked from the lease side but never from the
+        # clause side): the same document is created under the Contract #1
+        # key and the legacy key is tombstoned. AlreadyTermed above makes
+        # this a once-only pass — the repair rides the one write that
+        # visits every legacy clause.
+        # read-posture: (e) relation=governs epoch=none -- a clause carries
+        # exactly one governs link, written once at mint; nothing else
+        # writes the relation, so there is no concurrent mutator to fence.
+        page, _ = kv.Links(clause_key, "governs", "out", None, 8)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            segs = lk.key.split(".")
+            if len(segs) != 6 or segs[4] != "lease":
+                continue
+            # The enumeration's endpoints are rebuilt from the key, so the
+            # legacy link's target reads as vtx.lease.<id>; the id segment is
+            # the lease's, and it must be the lease this op was told about.
+            if segs[5] != lease_id:
+                fail("InvalidState: " + clause_key + " governs " + segs[5] + ", not " + lease_key)
+            fixed_key = "lnk.clause." + segs[2] + ".governs.leaseapp." + lease_id
+            # "class" is a Starlark keyword, so the link's class is read by name.
+            link_class = getattr(lk, "class")
+            # Written as an upsert rather than a create: a legacy clause never
+            # had the Contract #1 key, and a stray tombstone under it must not
+            # block the repair.
+            mutations.append({"op": "update", "key": fixed_key,
+                              "document": {"class": link_class, "isDeleted": False,
+                                           "sourceVertex": clause_key, "targetVertex": lease_key,
+                                           "localName": "governs", "data": {}}})
+            mutations.append({"op": "update", "key": lk.key,
+                              "document": {"class": link_class, "isDeleted": True,
+                                           "sourceVertex": clause_key, "targetVertex": lease_key,
+                                           "localName": "governs", "data": {}}})
+        events = [{"class": "clause.termed",
+                   "data": {"clauseKey": clause_key, "leaseAppKey": lease_key,
+                            "validFrom": valid_from, "validUntil": valid_until,
+                            "chargeValidUntil": new_due}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": clause_key}}
+
     if ot == "InspectPremises":
         clause_key = required_string(p, "clauseKey")
         parts_of(clause_key, "clauseKey", "clause")
@@ -274,13 +479,13 @@ def execute(state, op):
                 "response": {"primaryKey": clause_key}}
 
     fail("clause DDL: unknown operationType: " + ot)
-`
+`, "__UNTERMED_WINDOW__", loftspaceledger.RecurringChargePeriod, 1)
 
 // aspectDeclarationOnlyScript is the declaration-only Starlark for
 // clauseProse / clauseTerms / clauseStatus / clauseInspection — written by
-// CreateClause's (and, for clauseStatus, DebitAccount's; for
-// clauseInspection, InspectPremises's) own op handler, never dispatched as
-// an operation in its own right.
+// CreateClause's (and, for clauseTerms and clauseStatus, BackfillClauseTerm's;
+// for clauseStatus, DebitAccount's; for clauseInspection, InspectPremises's)
+// own op handler, never dispatched as an operation in its own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)

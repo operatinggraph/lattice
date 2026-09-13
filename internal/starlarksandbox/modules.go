@@ -62,9 +62,9 @@ func CryptoBuiltins() starlarklib.StringDict {
 }
 
 // TimeBuiltins returns the pure time builtins as a StringDict: rfc3339_utc,
-// rfc3339_add, weekday, seconds_of_day. All four are pure — deterministic,
-// no wall-clock read — the output is a function of the input string(s)
-// only; the host clock is never consulted.
+// rfc3339_add, rfc3339_add_months, weekday, seconds_of_day. All five are pure
+// — deterministic, no wall-clock read — the output is a function of the input
+// string(s) only; the host clock is never consulted.
 func TimeBuiltins() starlarklib.StringDict {
 	rfc3339UTCFn := starlarklib.NewBuiltin("rfc3339_utc", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
 		if len(args) != 1 || len(kwargs) != 0 {
@@ -135,10 +135,60 @@ func TimeBuiltins() starlarklib.StringDict {
 		return starlarklib.MakeInt(u.Hour()*3600 + u.Minute()*60 + u.Second()), nil
 	})
 
+	// rfc3339_add_months is calendar-month addition: the year/month advance
+	// and the day-of-month CLAMPS to the target month's length (Jan 31 + 1 =
+	// Feb 28/29, never a rollover into March), the conventional calendar-add
+	// rule a lease term or a monthly rent period needs. Go's own
+	// time.AddDate normalizes instead of clamping (Jan 31 + 1 month = Mar 3),
+	// so it is deliberately not used. The clock time is preserved verbatim
+	// (a term shifts the calendar date, never the time of day); the result is
+	// canonical whole-second UTC like every other builtin here. A negative
+	// count subtracts.
+	rfc3339AddMonthsFn := starlarklib.NewBuiltin("rfc3339_add_months", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		if len(args) != 2 || len(kwargs) != 0 {
+			return nil, errBuiltin("time.rfc3339_add_months(s, months) takes exactly 2 positional arguments")
+		}
+		s, ok := args[0].(starlarklib.String)
+		if !ok {
+			return nil, errBuiltin("time.rfc3339_add_months: first argument must be a string, got " + args[0].Type())
+		}
+		months, err := starlarklib.AsInt32(args[1])
+		if err != nil {
+			return nil, errBuiltin("time.rfc3339_add_months: second argument must be an int, got " + args[1].Type())
+		}
+		t, err := time.Parse(time.RFC3339Nano, string(s))
+		if err != nil {
+			return nil, errBuiltin("InvalidArgument: not a valid RFC3339 timestamp: " + string(s))
+		}
+		u := t.UTC()
+		year, month, day := u.Date()
+		total := int(month) - 1 + int(months)
+		year += total / 12
+		total %= 12
+		if total < 0 {
+			total += 12
+			year--
+		}
+		month = time.Month(total + 1)
+		if last := daysInMonth(year, month); day > last {
+			day = last
+		}
+		r := time.Date(year, month, day, u.Hour(), u.Minute(), u.Second(), 0, time.UTC)
+		return starlarklib.String(r.Format(time.RFC3339)), nil
+	})
+
 	return starlarklib.StringDict{
-		"rfc3339_utc":    rfc3339UTCFn,
-		"rfc3339_add":    rfc3339AddFn,
-		"weekday":        weekdayFn,
-		"seconds_of_day": secondsOfDayFn,
+		"rfc3339_utc":        rfc3339UTCFn,
+		"rfc3339_add":        rfc3339AddFn,
+		"rfc3339_add_months": rfc3339AddMonthsFn,
+		"weekday":            weekdayFn,
+		"seconds_of_day":     secondsOfDayFn,
 	}
+}
+
+// daysInMonth is the length of the given month in the proleptic Gregorian
+// calendar (time.Date's day-0 normalization: the 0th of the next month is
+// the last day of this one).
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
