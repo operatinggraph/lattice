@@ -720,3 +720,49 @@ Loupe rendering of any new issue family. The `lens` artifact validator.
 **Scope-diff gate:** every touch above traces to the two scope sentences; the one substitution is the e2e's transport (embedded
 NATS + httptest for a docker stack), predicate unchanged. Dependencies: Inc 2 consumes Inc 1 (re-verified: the validator's plain
 read needs `parser.Parse(...).Columns`); no `seq:` on the row; §6.1-style prerequisites none.
+
+### 14.1 Close (2026-09-13) — deviations, reviews, classification, gates
+
+**Deviations from the brief, each recorded where the body stands (§3.2, §3.4, §4.2, §4.3, §5, §6 amended 2026-09-13):**
+the live preflight runs after the bucket probe, on `Upgrade` as well as `Install`/`Apply`; the companion pair runs
+in-batch too and its remedy follows the column's provenance; every undeclared column is named in one refusal; the
+bridge's resolver reads the `capabilityAuthorContext` catalog, not Core KV; the lint pin's scope and fail-closed
+posture; the contract bullet's placement; the docker-stack e2e replaced by embedded-NATS installer vectors and a
+handler-driven Loupe Check test (same predicate, REMOTE §3). Dropped: the "plain lens with no RETURN" installer row
+(indistinguishable from a parse error in this dialect; pinned in `lenscolumns`' own table).
+
+**Reviews.** Inc 1: lead review (one fix — the lint's `classify` refuses the per-entry list shape instead of reading an
+empty gap set). Inc 2 + close: three cold passes over the whole diff — Blind Hunter, Edge-Case Hunter, Acceptance
+Auditor — then one fix round with a revert-proof per refusal. What they found, classified:
+
+| Class | Finding | Fixed |
+|---|---|---|
+| design-gap (bridge) | §3.2 asserted the bridge holds Core-KV read; its NKey is denied it, so the resolver would block its whole budget and record every AI-authored target invalid | yes — catalog-backed resolver, no extra read; body amended |
+| design-gap (bridge) | a validator error, once a live read joined a pure check, was still mapped to a stored `invalid` verdict — a transient would brand a sound proposal | yes — `ErrLensCatalogUnavailable`, propagated as a transient adapter error |
+| brief-gap / census (pkgmgr) | census 10's grep named the entries it expected and missed `Upgrade`, a third mutating entry with no live preflight | yes — preflight on `Upgrade`; census corrected |
+| implementation-bug (lint-gates) | the `validator-lens-resolver` pin skipped what it could not parse: trailing-comma calls, commented arguments, typed nils, a declared-never-assigned identifier, an aliased import | yes — each denied; an unreadable call is a finding |
+| test-shape (pkgmgr) | two fail-closed resolver arms (spec absent / tombstoned) and the empty-`lensRef` pass-through survived deletion; a wrong-class validator test asserted nothing about class | yes — vectors on both entries; class-aware stub |
+| test-shape (pkgmgr) | seven §5 rows had no installer vector (eventStream, Output-less, entry-keyed, unparseable, dual-cypher, tombstoned out-of-batch, in-place upgrade) | yes |
+| implementation-bug (pkgmgr) | the companion-pair remedy told a plain lens to edit an Output list it does not have; the subset refusal named one column per attempt | yes |
+| convention (pkgmgr, lint-gates) | the undeclared-column sentence existed twice; an eighth `CypherParser` double omitted `Columns`; two test comments narrated a prior state | yes — one exported sentence; threaded; present tense |
+| design-doc truth | §4.3's ordering and step scope, §5 row 3 and the re-run row, §4.2's pin scope, §14's clause placement | amended in the body |
+| accepted, not changed | `Apply`'s fresh-install branch runs the preflight twice (≤ 2 keys per out-of-batch target, zero today); the in-batch companion pair reaches Loupe as 502 from the pure gate and 409 from the live one (the pure `validateAll` family is un-wrapped throughout — a wider change than this row); a Loupe Check verdict is caller-influenced by design (§4.2 "Verdict provenance"; approve re-derives, apply re-bounds); the two `cmd/` fixtures hand-write a lens root + spec (the on-wire shape is pinned once, in `internal/pkgmgr`, through a real `Install`) | — |
+
+Dossier: lint-gates gains one entry (a gate that skips what it cannot parse fails open); pkgmgr's nil-able-field entry
+and bridge's own-engine-fixture entry each record a further sighting (a gate absent on one of three sibling entries; a
+fixture connecting without the binary's NATS permissions). No class was mechanized this fire; the lint pin's own
+self-test now carries every shape found.
+
+**Gates (remote, native Postgres on :5433):** `go build ./...`, `make vet`, `golangci-lint run ./...` (v2.11.4 built
+with go1.26.1) 0 issues, `gofmt` clean, every `scripts/lint-*.go` STRICT clean, `lint-gap-column-declaration`
+32 / 15 / 33 / 52 / 0 exempt throughout, `lint-package-version` clean against the merge base, `go test ./... -p 4`
+green with `POSTGRES_TEST_DSN`, every build-tagged harness compiled under its tag. MERGED ≠ RUNNING: no shared stack
+in the remote container (REMOTE §3); the affected binaries are `bin/{lattice-pkg,loupe,bridge,lattice}` and every
+binary linking `internal/pkgmgr` — a live deploy cycles them in any order (no wire change; `edge-manifest` 0.17.13
+reinstalls its generated lens).
+
+**Landing:** one `--no-ff` merge to `main` carrying the contract clause with the mechanism that keeps it. **Inc 3
+stays sequenced** behind §11's trigger; the row returns to the board only when that trigger fires.
+
+**Neighbours on ship:** none blocked on this row; `lint-gap-column-declaration` keeps its UNREADABLE bucket for plain
+lenses by design (§4.1).

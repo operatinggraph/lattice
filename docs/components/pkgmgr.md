@@ -71,6 +71,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   declaration (`testutil.DeclaredEnumerations`), never restates it; and the fallback for a surface that
   genuinely has no declaration is keyed on THAT surface by name, never on "the resolve came back empty" —
   an emptiness-keyed fallback silently re-absorbs the deletion it exists to expose.
+  **Fourth sighting (weaverTarget gap-declaration holder, 2026-09-13), one level out again: the gate was wired on two of
+  THREE sibling entry points.** `Install` and `Apply` ran the live preflight; `Upgrade` — which shares `preflight` and
+  the delta path with `Apply` — did not, because the design's census grepped `(Install\|Apply)(` and so named the
+  answer it expected. Check: a census of "every entry that must carry this gate" enumerates the exported methods of the
+  type (`^func (i \*Installer) [A-Z]`), never the names already known; and every sibling entry gets the same
+  negative-with-positive vector, so a missing wiring reds a test rather than a reviewer's mutation.
 - **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
   granted" is NOT evidence the remedy works.** Two sightings. The cap refusal advised dropping the redundant
   concrete label, which clears exhaustiveness and trades the refusal for the exact silent regression the gate

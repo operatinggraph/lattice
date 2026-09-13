@@ -89,3 +89,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   fed the target's rows unchecked. Check: for every set a gate derives, grep for an existing consumer or
   sibling gate that derives the same set and diff the two definitions before writing your own; read the
   producing function to its end; and where the binding is positional, key on the position.
+- **A gate that SKIPS what it cannot parse fails OPEN — an unreadable candidate is a finding, not a pass.** The
+  `validator-lens-resolver` pin counted a call's arguments by splitting on commas and `continue`d on any count it did
+  not expect, so gofmt's own trailing comma, a `//` comment with an apostrophe inside the argument list, a typed-nil
+  conversion, an identifier declared `var x T` and never assigned, and an aliased import each slipped past a rule whose
+  whole job was to catch an unwired nil. Minted: weaverTarget gap-declaration holder, cold review (2026-09-13). Check:
+  when a rule's reader cannot parse a candidate it EMITS ("cannot read the argument list — write it in a shape the gate
+  can read"); enumerate every spelling the language allows for the hazard value (`nil`, `T(nil)`, a never-assigned
+  declaration, an alias) and give each a denied fixture beside its allowed twin.
