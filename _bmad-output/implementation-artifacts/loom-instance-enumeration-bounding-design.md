@@ -879,3 +879,35 @@ change, its reason, and the test that pins it):**
   it as a failed terminal, which indexes it.
 - **Not a defect:** Loupe's Flows tab issues one `InspectInstance` per stale-`running` history row (its ratified
   §7.1 remedy); the ids differ per row, so there is nothing to memoize — bounded by Refractor's lag.
+
+### Close (2026-09-13) — SHIPPED, merged to `main` at `83e1e14` (fire branch `claude/relaxed-rubin-q8w7ug`, `15ef319`)
+
+**Whole fire, one merge.** Inc 1–3 landed together; the contract clause rode the branch from `790b048` and reached
+`main` only with the build, as ratified. Local gate set green (build · vet · golangci · 19 lint scripts · loom /
+lattice-CLI / loupe / substrate / bootstrap suites · full `go test ./... -p 4` with `POSTGRES_TEST_DSN`);
+`verify-kernel` is CI's `stack-gates` job. Not run from the container: §5's live sizing rows (no shared stack);
+they set urgency, not scope, and the mechanism does not depend on them.
+
+**Review classification (three cold reviewers over the whole diff; 2 blocking, 9 major, ~14 minor/note):**
+- *Design-gap* (2): the backfill-vs-redrive race leaving a marker nothing removes (§4 had no row; fixed by
+  both-arm settlement); the hint-grade key listing under a verdict-bearing read (the ratified `KVListKeysFilter`
+  choice; fixed by `KVGetMultiNoSnapshot` resolution) — the substrate dossier gains the class as its second sighting.
+- *Brief-gap* (1): 5(e) traded §6's work-gate away on a cost model that did not describe the code (fixed: sentinel).
+- *Implementation-bug* (2): the benign list→read race logged as a stale index (leg-aware logging); `pinnedDomains`
+  dropping its shape re-check with a false justification (restored).
+- *Test-quality* (6): vacuous interrupted-pass and start-join tests, a constants-only page test, a CLI test pinning
+  the removed promise, hand-flipped seeds, a revert-proof that reverted to a passing shape — all rewritten against
+  the new seams (`instanceLister`, `failedIndexStore`, the `runningInstanceReader` precedent).
+- *Convention* (3): history narration in comments/docs; non-NanoID seed ids; an unused helper.
+- *Review over-reach* (1): "the contract clause is committed ahead of the build" — it was on the fire branch only.
+- *Not a defect* (1): Loupe's per-row `InspectInstance` amplification is the ratified §7.1 remedy; ids differ per row.
+
+**Dossier routing:** `docs/components/loom.md` +1 (a `prefix>` filing over sub-keys is not an index — assert the
+filter, pick the primitive); `docs/components/substrate.md` +1 (a watcher-backed listing is a hint; verdict-bearing
+reads resolve from subject state — second sighting, semantic, not lintable by shape). `docs/vendors.md` NATS row
++1 sentence (unmapped `Nats-Marker-Reason` lister/reader asymmetry).
+
+**Accounting:** every discovery above resolved to a fix in this fire; no rows filed. The two Loupe rows §2.1/§7.1
+named were already closed (`dafa7b83`); §8 alternative 9 shipped as `a5f4ef2e`. **Residual, documented:** a running
+cursor with no pin is on neither family and is absent from the listing until the engine surfaces it as a failed
+terminal (`docs/components/loom.md`, the failed index's lifetime).

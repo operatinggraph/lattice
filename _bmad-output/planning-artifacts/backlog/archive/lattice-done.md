@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-09-03 · `a5f4ef2e` · [Loom/Substrate] `loom-state` removals are TTL'd purges, 61,731 legacy tombstones swept at start, `redrive` over a removed token fixed, gate `checkLoomStateDelete`
 - 2026-09-03 · `595ea540` · [Refractor] a `WITH` no longer refuses per-anchor closure: 3 lenses gain the anchor Delete, leaseApplicationsRead licensed, 1 to 22 msg/s ([design](../../../implementation-artifacts/with-alias-anchor-closure-design.md))
 - 2026-09-03 · `e5aa6ca2` · [Refractor] `edgeInstances` ~15 s/event → 0.24 s live: gate scope, batched reads, pipelined writes, resolve-then-get ([design](../../../implementation-artifacts/personal-lens-whole-actor-cost-design.md))
 - 2026-09-03 · `c76522e` · [CI] leaseconvergence lens-activation wait root-caused (CoreKVSource's serial MaxPrefetch:1 replay) and fixed, 25s→90s — board row 137(b) resolved, full CI green (run 33816206576)
