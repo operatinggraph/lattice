@@ -550,3 +550,150 @@ licence for step 2); every remedy is qualified per caller (§4.2).
 | (g) | — | kernel targets | none; census 11 |
 
 Verified-correct citations and all eleven censuses matched the reviewer's independent runs.
+
+## 14. Inc 1 + Inc 2 fire brief (build note, 2026-09-13 — Lattice Steward, fire branch `claude/relaxed-rubin-razw23`)
+
+**1. Scope sentence (verbatim, §11).** Inc 1: *"`full.LabelFacts.Columns` + `(*CompiledRule).ReturnColumns()` sharing
+the executor's naming; `pkgmgr.SpecLabels.Columns`; the six wrappers/doubles; new `internal/lenscolumns` (whitelist of
+§2); `declaredRowBodyColumns` and the lint's `gapColumnsOf` delegate to it for the actorAggregate branch (corpus counts
+re-pinned)"*. Inc 2: *"`InstalledLensResolver` + the validator rule; five callers wired (composite in Loupe Check reading
+root class + spec, live constructor in review/CLI, composition-root closure in bridge); `Installer.preflightLive` on
+`Install` and `Apply` (existence + readability + subset + companion pair for out-of-batch lenses; runs under `DryRun`);
+`ErrLensBindingRefused` mapped in Loupe; `lint-conventions` pins (validator sixth argument; `NewInstaller` finding text);
+the §6 clause lands in `10-orchestration-weaver.md` in this commit"*. Green bar: the §9 tests for `full`, `lenscolumns`,
+the lint, the pkgmgr validator + installer, the lint pins; corpus counts unchanged (33 lenses / 52 columns); every
+`scripts/lint-*.go` STRICT clean; `go test ./... -p 4` with `POSTGRES_TEST_DSN`; CI green on `main`.
+
+**2. Verified touch-list (checked live 2026-09-13; three scouts + lead; all eleven §3.4 censuses re-run and matched:
+32/15/33/52/0 · 2 · 5 · 6 · 118 full · companion pair `:230/:454` · 0 · 1 eventStream + 0 entry-keyed · 2 entries +
+`testutil:87` · bucket names only · 0 `NewEngine` pins).** Two design-vs-code deltas: (i) the RETURN-name derivation
+already exists three times in `full` — the executor closure `itemAlias` (`executor.go:1800-1804`), the free
+`itemAliasAt` (`branchgroups.go:772-777`), and the unexported `(*CompiledRule).returnAliases()` (`ast.go:338-357`,
+first `*Return` clause, alias else `projectionAutoAlias`) — so `ReturnColumns` is the **export** of `returnAliases`,
+and "one naming" means the closure and `returnAliases` both call `itemAliasAt`; (ii) §13 #9 confirmed live —
+`buildLensCanonicalIndex` (`cmd/loupe/weaver.go:1390-1414`) probes `patternId`/`targetId` and never reads a root's
+`class`.
+- `internal/refractor/ruleengine/full/spec_labels.go:16-32` (`LabelFacts`), `:43-62` (`SpecLabels`); `ast.go:253`
+  (`CompiledRule`), `:338-357` (`returnAliases`), `:72-77` (`Return`), `:118-121` (`ProjectionItem`);
+  `executor.go:1800-1804`, `:2030-2038` (`projectionAutoAlias`); `branchgroups.go:772-777`.
+- `internal/pkgmgr/capabilitymaterializer.go:54-68` (`SpecLabels`), `:91-97` (`CypherParser`), `:118-124`
+  (`LensArtifactContent`), `:320` (`ValidateCapabilityArtifact`, five params), `:601-628`
+  (`validateWeaverTargetArtifact` — the "build-time concern" comment is rewritten), `:911-925` (`lensArtifactDefinition`,
+  `Engine: "full"`, no Output); `capabilitymaterializer_starlark.go:18-35`, `:492-520` (resolver precedent).
+- `internal/pkgmgr/installer.go:40-79` (`Installer`, `SpecParser`), `:82-88` (`NewInstaller`), `:103-112` (`Install`
+  → `i.preflight`), `:1081-1090` (`readMetaDocs` = `KVGetMulti(CoreBucket, keys)` — the live-read precedent);
+  `apply.go:144-147` (`Apply` → `preflight`), `:274-277` (`DryRun` return); `upgrade.go:205-223` (`preflight`);
+  `capabilityapply.go:159` (routes through `Apply`).
+- `internal/pkgmgr/build.go:195-201` (root class `"meta.lens"`), `:471-578` (`lensSpecBody`: keys `cypherRule`,
+  `cypherBranches` (from `SpecBranches`), `projectionKind`, `output`, `source` — stored as the aspect's `data`),
+  `:587-598` (`resolveLensRef`, unchanged); `orchestrationguard.go:24` (`gapColumnPrefix`), `:185` (key convention),
+  `:230`/`:428-471` (`validateGapCompanionPair` + the two-absence paragraph to rewrite), `:479-488`
+  (`declaredRowBodyColumns`), `:503` (`lensByCanonicalName`), `:529-533` (`Escalate` walk);
+  `definition.go:1242-1290` (`LensSpec.Spec/SpecBranches/ProjectionKind/Output/Source`), `:1484-1497`
+  (`SourceConfig.Project.Columns`), `:1567-1587` (`OutputDescriptorSpec`; tags `bodyColumns`, `staticEmptyColumns`,
+  `entryKeyColumn`).
+- `internal/substrate/envelope.go:14-33` (`DocumentEnvelope.Class/IsDeleted/Data`, `AspectEnvelope`).
+- `scripts/lint-gap-column-declaration.go:361-380` (`classify`), `:389-402` (`gapColumnsOf`), `:419-429`
+  (`escalatesUnplannable`), `:461-654` (in-script self-test); `scripts/lint-conventions.go:601-606`, `:1504-1513`
+  (`NewInstaller` pin + finding text), `:1716` (`refusal-sentinel` — binds every new refusal in `internal/pkgmgr`).
+- Census-5 wrappers: `cmd/bridge/main.go:258`, `cmd/lattice-pkg/cypherparser.go:16`,
+  `cmd/lattice/capability/cypherparser.go:15`, `cmd/loupe/review.go:448`, `internal/testutil/cypherparser.go:16`,
+  `packages/capability-author/proposal_test.go:50-64`, plus `internal/pkgmgr/capabilitymaterializer_test.go:17-19`
+  (the in-package double the design's census missed — seven, not six).
+- Census-4 callers: `cmd/loupe/weaverauthor.go:56-59` (`weaverAuthorCheckRequest{Target, Lens}`), `:124-207`
+  (`weaverAuthorCheck`; `:148-153` already builds `weaverCoreReaders` + `buildWeaverMetaIndex`), `:179`, `:192`,
+  `:333-352`, `:374-402`; `cmd/loupe/weaver.go:1282-1301` (`weaverReaders{coreGet, metaKeys}`), `:1390-1414`;
+  `cmd/loupe/ops.go:29` (`kvGetter`), `:114` (`metaData`); `cmd/loupe/corekv.go:23` (`classifyKey`);
+  `cmd/loupe/review.go:553-559` (`newLiveSensitiveAspectResolver`), `:597`; `cmd/lattice/capability/capability.go:309-317`;
+  `cmd/bridge/main.go:280-288` (the `nil, nil` comment). `cmd/loupe/pkg.go:377-392` (`packageApplyStatus`);
+  `pkg_test.go:287`, `review_test.go:1256-1378` (handler-driven status test idiom).
+- Contract: `docs/contracts/10-orchestration-weaver.md:146-156` — the §6 bullet lands after the `gaps`-key bullet
+  (`:152-154`), before the config-error bullet (`:155`).
+- Docs: `docs/components/pkgmgr.md` (installer section: the live preflight, one paragraph); `lint-gates.md` (the
+  gap-column lint now derives through `lenscolumns`).
+
+**3. Precedents to mirror.** Derivation seam: `SpecLabels` (`spec_labels.go:43-62`) — `Columns` is one more field of the
+same parse. Leaf package: `internal/appsession` (encoding/json + strings only, table tests). Resolver: `SensitiveAspectResolver`
++ `sensitiveReadErrors`'s nil arm (`:512`) — wording shape "no live … catalog was supplied to verify …"; construction per
+caller: `newLiveSensitiveAspectResolver` (`review.go:553`) and the `opMeta`-only idiom (`capability.go:309-315`). **Design
+decision (Winston, at brief):** the live resolver is ONE exported pkgmgr type, `pkgmgr.CoreKVLensResolver{Conn, Parser}`
+(pkgmgr already reads Core KV in `readMetaDocs`; the pkgmgr dossier's "duplicated mappings fold into one helper"), shared by
+the installer's `preflightLive`, review, CLI and bridge; Loupe's Check wraps it in a composite (`req.Lens` by canonicalName
+via the parser first, then installed by canonicalName through `buildLensCanonicalIndex` → id → the shared resolver, which
+reads the root's `class`). Live read: `readMetaDocs` (`installer.go:1081`); the spec body is the aspect envelope's `data`
+(`envelope.go`), decoded into `lenscolumns.Spec` by JSON tags matching `lensSpecBody`. Sentinel + wrap: `ErrDeclaredKeysOccupied`
+(`installer.go:743`) and `fmt.Errorf("%w: …")`; 409 mapping: `packageApplyStatus`. Lint pin: the `NewInstaller` pin
+(`lint-conventions.go:601,1504`). Embedded-NATS installer test: `installer_test.go:25-116` (`newInstallerHarness`);
+in-package parser double: `capabilitymaterializer_test.go:17`. Loupe handler test: `weaverauthor_test.go:123` (`callPropose`
+idiom). Lint self-test: `lint-gap-column-declaration.go:461-654`.
+
+**4. Increment order + green checks.**
+- **Inc 1 (mechanical · sonnet).** `full`: `LabelFacts.Columns`; exported `ReturnColumns() ([]string, bool)` over
+  `returnAliases`; `returnAliases` and the executor closure call `itemAliasAt`; `SpecLabels` fills `Columns`. Vectors:
+  alias / `VariableRef` / `PropertyAccess` / `_col<i>` / `WITH … RETURN` (RETURN wins) / no RETURN ⇒ `false`; **the
+  executor pin** — one query through `Execute`, row keys ⊇ `ReturnColumns`. `pkgmgr.SpecLabels.Columns` + the seven
+  wrappers copy it. New `internal/lenscolumns` per §4.1 (`Spec`, `Output`, `Source`, `Projected`, `Result`, `Gaps`,
+  `ErrUnreadable`; whitelist order eventStream → actorAggregate(Output, no EntryKeyColumn) → plain; branches-over-rule;
+  nil `returnColumns` on a plain lens ⇒ `ErrUnreadable`, never empty; table test over every §2 row incl. the three
+  unreadable shapes). `pkgmgr`: `lensColumnsSpec(l LensSpec) lenscolumns.Spec` (Output/Source marshalled through their
+  JSON tags); `declaredRowBodyColumns` → `Projected(...).Columns`; a pin that pkgmgr's `"actorAggregate"` literal equals
+  `lenscolumns`'. Lint: `gapColumnsOf` → `lenscolumns.Gaps(Projected(...))`; self-test verdicts unchanged.
+  Green: `go test ./internal/refractor/ruleengine/full/ ./internal/lenscolumns/ ./internal/pkgmgr/ -count=1` ·
+  `go run ./scripts/lint-gap-column-declaration.go` prints `32 target(s) across 15 package(s); 33 … lens(es) read, 52 gap
+  column(s)` · `go build ./... && go vet ./...`.
+- **Inc 2 (posture-changing · opus).** `pkgmgr`: `InstalledLensResolver` (§4.2 contract: `found` only for root class
+  `meta.lens`, not tombstoned); `ValidateCapabilityArtifact` sixth param; `validateWeaverTargetArtifact` rule chain (nil ⇒
+  invalid with the §4.2 wording; `found=false` ⇒ invalid, caller-neutral wording; `Projected` error ⇒ invalid naming it;
+  subset with the lint's wording; no `unplannable` exemption for artifacts); `CoreKVLensResolver` (KVGetMulti root+spec,
+  class test, `IsDeleted`, decode `data`, `Projected` with `Parser` — nil parser ⇒ plain lens unreadable);
+  `Installer.preflightLive(ctx, def)` after `preflight` on `Install` **and** `Apply`, before `DryRun` returns: §4.3 steps
+  1–5 (in-batch: subset over `Projected(that lens)`, plain read through `i.SpecParser`, nil parser ⇒ refuse — uniform
+  fail-closed, the sanctioned callers all wire it; out-of-batch NanoID: existence/class → readability → subset unless
+  `unplannable` → companion pair over the resolved lens); `ErrLensBindingRefused` (+ the `refusal-sentinel` rule binds every
+  new refusal text); `validateGapCompanionPair`'s two-absence paragraph rewritten. Callers (census 4): Loupe Check
+  composite; `review.go` + CLI construct `CoreKVLensResolver` for kind `weaverTarget`; bridge closure over its conn (rewrite
+  the `nil, nil` comment); `weaverauthor.go:192` passes `nil` (lens kind). `cmd/loupe/pkg.go`: `ErrLensBindingRefused` → 409,
+  proven from the handler (the dossier's mandated shape). `lint-conventions`: pin every `ValidateCapabilityArtifact(` outside
+  `internal/pkgmgr` to a non-nil sixth argument or a kind literal ≠ `"weaverTarget"` (+ self-test fixtures both ways);
+  `NewInstaller` finding text names the widened nil semantics. Contract §6 bullet verbatim. Docs: pkgmgr.md, lint-gates.md.
+  Tests (§9): validator — drive `ValidateCapabilityArtifact` (nil resolver exact wording · `found=false` · aggregate
+  declared/undeclared · plain declared/undeclared · `surface` satisfies · wrong-class ⇒ `found=false` · lookalike
+  `appointmentReminders`); installer (embedded NATS, seed `vtx.meta.<id>` + `.spec` as `build.go` writes them) — every §5
+  second-table row on `Install` and `Apply`, `DryRun` included, the exemption, the companion pair reaching out-of-batch, a
+  negative-with-positive pair per refusal; Loupe Check via httptest against a stubbed `kvGetter` (`targetValidation.valid`
+  false for an undeclared column against an installed lens; true once declared). **Deviation from §9 (REMOTE §3):** the
+  docker-stack e2e is replaced by these embedded-NATS installer vectors + the Check httptest — same predicate, no stack.
+  Green: `go test ./internal/pkgmgr/ ./cmd/loupe/ ./cmd/lattice/... ./cmd/bridge/ ./cmd/lattice-pkg/ -count=1` ·
+  `STRICT=1 go run ./scripts/lint-conventions.go` (its self-test exercises the new pin) · full gate set.
+- **Close** — three cold opus passes over the whole diff (posture-changing + contract-adjacent, §11), classification →
+  dossiers, gates: `go build ./... · make vet · golangci-lint run ./... · gofmt · every scripts/lint-*.go STRICT ·
+  DIFF_BASE lint-package-version · go test ./... -p 4 (POSTGRES_TEST_DSN) · build-tagged harnesses compile` → `--no-ff`
+  merge → CI.
+
+**5. In-scope gotchas.** `ValidateCapabilityArtifact` changes signature — every caller and test compiles or CI reddens
+(census 4 + tests). The lint is `//go:build ignore` and reads its scan set from git: run it after committing; `lint-package-version`
+fires on "`internal/pkgmgr` changed" — run it with `DIFF_BASE=$(git merge-base HEAD origin/main)` after committing (three
+red mains). `golangci-lint run ./...` module-wide, the way `ci.yml` runs it. `refusal-sentinel` gate binds every
+`fmt.Errorf` in `internal/pkgmgr` whose text refuses. No changelog comments. Dossier entries copied in — **pkgmgr:** an
+injected dependency in a nil-able field silently disables its gate (pin the wiring; mandated shape: drive the entry point,
+not the rule); a refusal's remedy is traced to its outcome; a new failure mode is shipped only when every renderer says the
+right thing (sentinel → every `errors.Is` mapping, proven from the handler); a gate you run locally is not CI's gate
+(scope, tracked-ness, diff-basedness). **lint-gates:** key on the hazard, not a proxy; a gate's self-test proves its positive
+vector reaches the gate; before deriving a set the runtime reads, find the sibling that derives it (this fire IS that
+collapse). **_packages:** a cross-package guard needs a positive vector per live shape. **weaver:** classify by whitelist,
+not blacklist, when the vocabulary can grow (§2 is the whitelist). **bridge:** a pass-through arm written before a refusal
+existed silently exempts a shape — re-walk every early return in `validateWeaverTargetArtifact` and `preflightLive`.
+Standing checklist #3 binds hardest: every refusal proven by reverting it; the plumbing (`Columns` threaded through seven
+wrappers) asserted equal to its source at a producer, not merely non-empty.
+
+**6. Adjacent finds.** Three copies of the RETURN naming in `full` (absorbed into Inc 1: all route through `itemAliasAt`).
+The design's census 5 said six wrappers; there are seven (the in-package test double) — corrected here, absorbed. Nothing
+filed.
+
+**7. Non-goals.** Inc 3 (Weaver `lensClass` routing, `Config.ReturnColumns`, `evaluateBinding`, the three issue codes,
+the `NewEngine` pin, Health-KV schema) — sequenced behind §11's trigger. `resolveLensRef`'s NanoID passthrough (§7 row 9).
+Loupe rendering of any new issue family. The `lens` artifact validator.
+
+**Scope-diff gate:** every touch above traces to the two scope sentences; the one substitution is the e2e's transport (embedded
+NATS + httptest for a docker stack), predicate unchanged. Dependencies: Inc 2 consumes Inc 1 (re-verified: the validator's plain
+read needs `parser.Parse(...).Columns`); no `seq:` on the row; §6.1-style prerequisites none.
