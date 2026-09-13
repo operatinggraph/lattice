@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -176,11 +177,17 @@ func (s *server) weaverAuthorCheck(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "marshal target content: "+err.Error())
 		return
 	}
-	targetReport, err := pkgmgr.ValidateCapabilityArtifact("weaverTarget", targetContent, loupeCypherParser{}, nil, nil)
+	targetReport, err := pkgmgr.ValidateCapabilityArtifact("weaverTarget", targetContent, loupeCypherParser{}, nil, nil,
+		weaverAuthorLensResolver{
+			draft:     req.Lens,
+			canonical: buildLensCanonicalIndex(readers.metaKeys, readers.coreGet),
+			installed: pkgmgr.NewCoreKVLensResolver(ctx, conn, loupeCypherParser{}),
+		})
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "target artifact: "+err.Error())
+		s.writeError(w, http.StatusBadGateway, "target artifact: "+err.Error())
 		return
 	}
+	targetReport.Errors = withCoAuthoringRemedy(targetReport.Errors)
 
 	var lensValidation *weaverAuthorValidation
 	if req.Lens != nil {
@@ -189,7 +196,9 @@ func (s *server) weaverAuthorCheck(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusInternalServerError, "marshal lens content: "+err.Error())
 			return
 		}
-		lensReport, err := pkgmgr.ValidateCapabilityArtifact("lens", lensContent, loupeCypherParser{}, nil, nil)
+		// The "lens" kind never consults an installed-lens catalog — a lens
+		// artifact declares its own spec and binds nothing.
+		lensReport, err := pkgmgr.ValidateCapabilityArtifact("lens", lensContent, loupeCypherParser{}, nil, nil, nil)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, "lens artifact: "+err.Error())
 			return
@@ -204,6 +213,78 @@ func (s *server) weaverAuthorCheck(w http.ResponseWriter, r *http.Request) {
 		TargetValidation: weaverAuthorValidation{Valid: targetReport.Valid, Errors: nonNilStrings(targetReport.Errors)},
 		LensValidation:   lensValidation,
 	})
+}
+
+// weaverAuthorLensResolver answers a draft target's lensRef for the Check
+// endpoint, in the order the authoring surface makes true:
+//
+//  1. the lens the SAME request co-authors, by canonicalName — it has no
+//     installed id yet (one is minted when its own proposal applies), and it is
+//     the very lens the operator is declaring, so the check is "your target
+//     against your lens";
+//  2. a canonicalName the installed catalog resolves to an id — the resolution
+//     resolveWeaverTargetLensRefs performs at propose, run here so a lone
+//     target naming an installed lens by name reads the same at Check as it
+//     will at apply;
+//  3. the id itself, through the shared pkgmgr resolver, which is what reads
+//     the root's CLASS: the canonical index alone admits any spec-carrying meta
+//     that is neither a target nor a pattern, and a DDL or op-meta id is not a
+//     lens.
+type weaverAuthorLensResolver struct {
+	draft     *pkgmgr.LensArtifactContent
+	canonical map[string]string
+	installed *pkgmgr.CoreKVLensResolver
+}
+
+func (r weaverAuthorLensResolver) ResolveLensColumns(lensRef string) (lenscolumns.Result, bool, error) {
+	if r.draft != nil && r.draft.CanonicalName == lensRef {
+		// A capability-artifact lens is always plain — lensArtifactDefinition
+		// materializes it with no Output descriptor — so its row columns are
+		// its RETURN items' names.
+		cols, err := lenscolumns.Projected(
+			lenscolumns.Spec{CypherRule: r.draft.Spec}, lensReturnColumns(loupeCypherParser{}))
+		return cols, true, err
+	}
+	if !substrate.IsValidNanoID(lensRef) {
+		id, ok := r.canonical[lensRef]
+		if !ok {
+			return lenscolumns.Result{}, false, nil
+		}
+		lensRef = id
+	}
+	return r.installed.ResolveLensColumns(lensRef)
+}
+
+// lensReturnColumns adapts a pkgmgr.CypherParser to the returnColumns function
+// lenscolumns.Projected reads a plain lens's row keys through — the RETURN
+// names come from the same parse as the error.
+func lensReturnColumns(p pkgmgr.CypherParser) func(string) ([]string, error) {
+	return func(rule string) ([]string, error) {
+		labels, err := p.Parse(rule)
+		if err != nil {
+			return nil, err
+		}
+		return labels.Columns, nil
+	}
+}
+
+// lensRefNotInstalled is pkgmgr's caller-neutral verdict for a lensRef that
+// names no installed lens. It is caller-neutral because most callers carry one
+// artifact per request and have no second artifact to offer.
+const lensRefNotInstalled = "names no installed lens; install the lens first"
+
+// withCoAuthoringRemedy appends the remedy THIS endpoint can honour to an
+// unresolved-lensRef verdict: the Check request carries a target and an
+// optional lens together, and propose submits both, so "propose it alongside
+// this target" is a real option here and nowhere else. Same sentence
+// resolveWeaverTargetLensRefs already prints on the propose path.
+func withCoAuthoringRemedy(errs []string) []string {
+	for i, e := range errs {
+		if strings.Contains(e, lensRefNotInstalled) {
+			errs[i] = e + " — or propose it alongside this target, as one bundle"
+		}
+	}
+	return errs
 }
 
 func containsTarget(targets []string, id string) bool {

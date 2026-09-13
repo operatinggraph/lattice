@@ -18,7 +18,7 @@ non-advisory finding.
 | `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding |
 | `lint-doc-orphan` | A doc comment names the declaration it sits above |
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
-| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map |
+| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map — derived through `internal/lenscolumns`, the one reading of "which keys does a row of this lens carry", which `internal/pkgmgr` holds the same invariant on at the two non-CI paths (the installer's live preflight refuses the install; the capability-artifact validator records the proposal invalid) |
 | `lint-board` | The backlog is an index, not a journal |
 | `lint-slog-values` | An slog attribute value's in-module struct type implements `slog.LogValuer`/`json.Marshaler`/`encoding.TextMarshaler` — a JSON handler never consults `fmt.Stringer` |
 | `lint-flag-consumer-census` | A registered process-wide flag's readers are a declared ledger (file + function), so a new reader re-reads the bound the flag's own comment prices |

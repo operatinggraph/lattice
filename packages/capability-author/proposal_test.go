@@ -281,7 +281,7 @@ func dispatchEnv(reqID, handle, vendorRef string) *processor.OperationEnvelope {
 // exactly as a real completed adapter reply would.
 func recordEnv(t *testing.T, reqID, handle, kind string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
-	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}
@@ -864,7 +864,7 @@ func TestCapAuthor_GrantExceedsRequesterScope_Invalid(t *testing.T) {
 	// requests — exactly as pkgmgr.ValidateCapabilityArtifact's caller (the
 	// bridge in the full design) would compute from a fresh Contract #6 read.
 	held := []pkgmgr.HeldPermission{{OperationType: "DeleteEverything", Scope: "self"}}
-	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}

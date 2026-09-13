@@ -374,6 +374,9 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 // transient the UI should retry on its own. So is a Definition that does not
 // describe the package it targets — it will not describe it on the retry
 // either, and the remedy the refusal names is a differently-authored proposal.
+// So is a weaver target bound to a lens that does not exist, cannot be read, or
+// projects a gap column the target never declared: nothing about that changes
+// until an author edits one of the two declarations.
 func packageApplyStatus(err error) int {
 	switch {
 	case errors.Is(err, pkgmgr.ErrNotInstalled),
@@ -385,6 +388,7 @@ func packageApplyStatus(err error) int {
 		errors.Is(err, pkgmgr.ErrMalformedDeclaredKeys),
 		errors.Is(err, pkgmgr.ErrUndeclaredSecureColumnDrop),
 		errors.Is(err, pkgmgr.ErrUndeclaredSecureLensErasure),
+		errors.Is(err, pkgmgr.ErrLensBindingRefused),
 		errors.Is(err, pkgmgr.ErrUninstallConflict):
 		return http.StatusConflict
 	default:

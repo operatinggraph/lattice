@@ -145,7 +145,7 @@ func run(logger *slog.Logger) error {
 			wire.NewClient(conn.NATS()),
 			conn,
 			capabilityauthor.CapabilityAuthorContextBucket,
-			capabilityArtifactVerdict,
+			newCapabilityArtifactVerdict(conn),
 			pkgmgr.PlatformProtectedPackage,
 		)
 		if err != nil {
@@ -270,30 +270,48 @@ func (bridgeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
 
 var _ pkgmgr.CypherParser = bridgeCypherParser{}
 
-// capabilityArtifactVerdict is the capabilityAuthor adapter's deterministic
-// validator: the same pkgmgr.ValidateCapabilityArtifact boundary Loupe re-runs
-// at approve time, so a proposal recorded valid here is one the approve path
-// would also accept. It is built at the composition root and injected, keeping
-// the installer out of internal/bridge.
+// capabilityVerdictReadBudget bounds the one live read a verdict makes — the
+// installed-lens catalog lookup behind a weaverTarget's lensRef.
+// bridge.ArtifactValidator carries no context of its own (the adapter calls it
+// from inside its own result handling), so the closure below binds one per
+// call rather than borrowing a request deadline it cannot see. Generous
+// against a single KVGetMulti of two keys, and short enough that a wedged
+// substrate fails the verdict closed instead of holding the adapter open.
+const capabilityVerdictReadBudget = 10 * time.Second
+
+// newCapabilityArtifactVerdict builds the capabilityAuthor adapter's
+// deterministic validator: the same pkgmgr.ValidateCapabilityArtifact boundary
+// Loupe re-runs at approve time, so a proposal recorded valid here is one the
+// approve path would also accept. It is built at the composition root and
+// injected, keeping the installer out of internal/bridge.
 //
-// The two optional dependencies are deliberately nil. requesterHeld is read only
-// for the "grant" kind (a conferred-authority subset check) and the
-// sensitive-aspect resolver only for "opMeta"; this adapter authors weaver
-// targets and nothing else, so neither is ever consulted — the same nil pair
-// Loupe's own weaverTarget/lens check passes.
+// Two of the three injected dependencies are nil, and the third is the reason
+// this is a closure over conn at all. requesterHeld is read only for the
+// "grant" kind (a conferred-authority subset check) and the sensitive-aspect
+// resolver only for "opMeta", neither of which this adapter authors. The
+// installed-lens catalog IS consulted, for exactly the kind it does author: a
+// weaverTarget's lensRef must name a live meta.lens whose projected missing_*
+// columns the target declares, and with no resolver every authored target
+// would record invalid.
 //
-// A validator ERROR is a malformed artifact, not an unknown verdict: the report
-// carries the reason and the state fails closed to invalid, so an
-// undecodable draft records visibly rather than being admitted for review.
-func capabilityArtifactVerdict(kind string, content []byte) (string, string) {
-	report, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), bridgeCypherParser{}, nil, nil)
-	if err != nil {
-		return bridge.ValidationStateInvalid, "artifact validation failed: " + err.Error()
+// A validator ERROR is a malformed artifact or a live read that failed, not an
+// unknown verdict: the report carries the reason and the state fails closed to
+// invalid, so an undecodable draft — or one whose lens could not be read —
+// records visibly rather than being admitted for review.
+func newCapabilityArtifactVerdict(conn *substrate.Conn) bridge.ArtifactValidator {
+	return func(kind string, content []byte) (string, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), capabilityVerdictReadBudget)
+		defer cancel()
+		report, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), bridgeCypherParser{}, nil, nil,
+			pkgmgr.NewCoreKVLensResolver(ctx, conn, bridgeCypherParser{}))
+		if err != nil {
+			return bridge.ValidationStateInvalid, "artifact validation failed: " + err.Error()
+		}
+		if report.Valid {
+			return bridge.ValidationStateValid, ""
+		}
+		return bridge.ValidationStateInvalid, strings.Join(report.Errors, "; ")
 	}
-	if report.Valid {
-		return bridge.ValidationStateValid, ""
-	}
-	return bridge.ValidationStateInvalid, strings.Join(report.Errors, "; ")
 }
 
 // defaultUploadCap bounds a single docGen artifact write (OBJECTS_MAX_UPLOAD_BYTES).

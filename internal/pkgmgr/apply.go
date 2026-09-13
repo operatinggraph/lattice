@@ -149,6 +149,11 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 	if err := i.checkCoreBucketExists(ctx); err != nil {
 		return nil, err
 	}
+	// Ahead of every branch below, DryRun included: a preview the real apply
+	// would refuse must report the refusal, not a delta.
+	if err := i.preflightLive(ctx, def); err != nil {
+		return nil, err
+	}
 
 	existing, err := i.findInstalledPackage(ctx, def.Name)
 	if err != nil {

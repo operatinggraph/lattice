@@ -74,12 +74,24 @@
 //     owner).
 //   - A package-qualified pkgmgr.NewInstaller call outside its sanctioned
 //     callers. Installer.SpecParser stays nil unless the caller wires it by
-//     hand, and a nil SpecParser silently disables the install-time lens
-//     label-cap gate (internal/pkgmgr/lenslabelcap.go) — a fixture or entry
-//     point that constructs the installer directly proves nothing about that
-//     gate. testutil.NewInstaller (internal/testutil) wires SpecParser once;
-//     internal/pkgmgr itself, cmd/lattice-pkg, and cmd/loupe are the other
-//     sanctioned callers.
+//     hand, and a nil SpecParser both silently disables the install-time lens
+//     label-cap gate (internal/pkgmgr/lenslabelcap.go) and makes every
+//     plain-lens weaver-target binding unreadable — which the live preflight
+//     refuses, so such an installer cannot install a target bound to a plain
+//     lens at all. A fixture or entry point that constructs the installer
+//     directly proves nothing about either. testutil.NewInstaller
+//     (internal/testutil) wires SpecParser once; internal/pkgmgr itself,
+//     cmd/lattice-pkg, and cmd/loupe are the other sanctioned callers.
+//   - A pkgmgr.ValidateCapabilityArtifact call outside internal/pkgmgr that
+//     passes a nil installed-lens resolver (the sixth argument) for a kind
+//     that may be "weaverTarget". The resolver is what the weaverTarget
+//     kind's lensRef check resolves against, and it fails CLOSED: with none
+//     supplied, every weaverTarget artifact that caller validates records
+//     invalid — every AI-authored and every Studio-authored target — which
+//     reads as a corpus of bad proposals rather than as an unwired caller. A
+//     kind spelled as a literal other than "weaverTarget" is exempt (that
+//     call can never reach the check); a non-literal kind is not, because a
+//     nil there is the same silent fail-closed.
 //   - Read-posture classification (Contract #2 §2.5; BLOCKING — fails
 //     --strict, per the script-read-posture design §13's flip once the
 //     platform + verticals sweeps closed the debt list). Every script
@@ -1475,6 +1487,15 @@ func scanSource(path string, data []byte) []finding {
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
+	// validator-lens-resolver scope: every non-test file outside
+	// internal/pkgmgr, which owns the validator and calls it unqualified.
+	// scripts/lint-* are excluded on the same idiom as the rules below: this
+	// file's own self-test fixtures are string literals carrying the banned
+	// shape. Tests are out — a fixture wiring nil for the weaverTarget kind
+	// fails its own assertions loudly, which is the report a test is for.
+	if !isTest && !strings.HasPrefix(slash, pkgmgrPkg) && !strings.HasPrefix(slash, "scripts/lint-") {
+		out = append(out, checkValidatorLensResolver(path, string(data))...)
+	}
 	// Weaver-target prose is a packages/ authoring rule: the literals live only
 	// there, and internal/pkgmgr's own fixtures deliberately exercise the
 	// description-less shape the installer still supports.
@@ -1706,7 +1727,7 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natsfixture.Server(t) / natsfixture.StartServer(t) (internal/natsfixture)"})
 		}
 		if pkgmgrInstallerScoped && pkgmgrNewInstallerCall.MatchString(line) {
-			out = append(out, finding{file: path, line: ln, msg: "pkgmgr.NewInstaller call outside its sanctioned callers — SpecParser stays nil unless the caller wires it by hand, and a nil SpecParser silently disables the install-time lens label-cap gate (internal/pkgmgr/lenslabelcap.go); use testutil.NewInstaller(conn, adminActor) (internal/testutil), which wires it"})
+			out = append(out, finding{file: path, line: ln, msg: "pkgmgr.NewInstaller call outside its sanctioned callers — SpecParser stays nil unless the caller wires it by hand, and a nil SpecParser silently disables the install-time lens label-cap gate (internal/pkgmgr/lenslabelcap.go) AND makes every plain-lens weaver-target binding unreadable, which the installer's live preflight refuses (so this installer cannot install a target bound to a plain lens); use testutil.NewInstaller(conn, adminActor) (internal/testutil), which wires it"})
 		}
 		if materializedDefinitionScoped && capabilityPlanConverge.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "capability-apply: a capability plan's Definition passed to Installer.Apply/Upgrade — a capability Definition describes one artifact, and both verbs converge the package onto whatever they are given, so this retires or undeclares every declared key the proposal never mentioned; apply a plan with inst.ApplyCapabilityPlan(ctx, plan), which sets RefuseRemovals (both modes) and RequireInstalled (upgradeExisting). MaterializedDefinition() is for inspection"})
@@ -2155,6 +2176,115 @@ func checkLensProtectedByDefault(path, src string) []finding {
 		}
 	}
 	return out
+}
+
+// validateArtifactCall anchors a package-qualified
+// pkgmgr.ValidateCapabilityArtifact call. internal/pkgmgr's own tests call the
+// unqualified form and so never match — the qualified form only appears
+// outside the package, which is exactly where the installed-lens resolver is
+// left nil unless the caller wires it by hand.
+var validateArtifactCall = regexp.MustCompile(`\bpkgmgr\.ValidateCapabilityArtifact\(`)
+
+// The argument positions (0-based) this rule reads, and the total a call
+// carries. A call with a different count is skipped: it does not compile
+// against today's signature, so it is either a shape the compiler is already
+// refusing or a signature change that must revisit this rule — in neither case
+// is guessing at which slot holds the resolver an improvement.
+const (
+	validateArtifactArgCount    = 6
+	validateArtifactResolverArg = 5
+	validateArtifactKindArg     = 0
+)
+
+// checkValidatorLensResolver flags a pkgmgr.ValidateCapabilityArtifact call
+// that passes a nil installed-lens resolver for a kind that can be
+// "weaverTarget".
+//
+// The resolver fails CLOSED by design: a weaverTarget artifact validated
+// against no catalog binds a lens nothing verified, which is invalid. That is
+// the right answer for a caller who cannot read the kernel and the WRONG one
+// for a caller who simply never wired the dependency — and the two are
+// indistinguishable downstream, because the second produces a steady stream of
+// proposals recorded invalid with a reason that reads like the author's fault.
+// Nothing else catches it: the parameter is an interface, so nil compiles, and
+// no test of the unwired caller fails unless someone thought to write one.
+//
+// A kind spelled as a string literal other than "weaverTarget" is exempt —
+// that call site can never reach the check. A kind that is a variable is not
+// exempt: whatever it holds at runtime may be "weaverTarget", and a nil there
+// is the same silent fail-closed.
+//
+// The call's arguments are split by a balanced walk from the opening paren
+// rather than by a line regex, so a call wrapped across lines (every
+// production caller but one) is read, not skipped.
+func checkValidatorLensResolver(path, src string) []finding {
+	var out []finding
+	for _, m := range validateArtifactCall.FindAllStringIndex(src, -1) {
+		args, ok := callArgs(src, m[1]-1)
+		if !ok || len(args) != validateArtifactArgCount {
+			continue
+		}
+		kind := strings.TrimSpace(args[validateArtifactKindArg])
+		if strings.HasPrefix(kind, `"`) && kind != `"weaverTarget"` {
+			continue
+		}
+		if strings.TrimSpace(args[validateArtifactResolverArg]) != "nil" {
+			continue
+		}
+		line := strings.Count(src[:m[0]], "\n") + 1
+		out = append(out, finding{file: path, line: line, msg: "validator-lens-resolver: pkgmgr.ValidateCapabilityArtifact called with a nil installed-lens resolver for a kind that may be \"weaverTarget\" — the resolver fails closed, so this caller records EVERY weaverTarget artifact it validates invalid (\"no installed-lens catalog was supplied\"), which reads as a corpus of bad proposals rather than as an unwired caller. Build one with pkgmgr.NewCoreKVLensResolver(ctx, conn, parser) for that kind, or pass the kind as a literal other than \"weaverTarget\" if this call site cannot carry one"})
+	}
+	return out
+}
+
+// callArgs splits a Go call's arguments, given the index of its opening paren.
+// The walk balances (), [] and {} and skips string, rune and raw-string
+// literals, so a composite literal, a nested call or a comma inside a string
+// never splits an argument. It answers false for an unterminated call.
+func callArgs(src string, open int) ([]string, bool) {
+	depth := 0
+	start := open + 1
+	var args []string
+	for i := open; i < len(src); i++ {
+		switch c := src[i]; c {
+		case '"', '\'', '`':
+			end, ok := skipGoLiteral(src, i)
+			if !ok {
+				return nil, false
+			}
+			i = end
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+			if depth == 0 {
+				return append(args, src[start:i]), true
+			}
+		case ',':
+			if depth == 1 {
+				args = append(args, src[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return nil, false
+}
+
+// skipGoLiteral returns the index of the closing quote of the string, rune or
+// raw-string literal opening at i, honouring backslash escapes outside raw
+// strings.
+func skipGoLiteral(src string, i int) (int, bool) {
+	quote := src[i]
+	for j := i + 1; j < len(src); j++ {
+		if src[j] == '\\' && quote != '`' {
+			j++
+			continue
+		}
+		if src[j] == quote {
+			return j, true
+		}
+	}
+	return 0, false
 }
 
 // weaverTargetScanWindow bounds how far checkWeaverTargetDescribed walks
@@ -4209,6 +4339,18 @@ func selfTest() []string {
 			"\tres, err := inst.ApplyCapabilityPlan(ctx, plan)\n", ""},
 		{"the gate does not bind internal/pkgmgr, which owns both sides of the seam", "internal/pkgmgr/capabilityapply.go",
 			"\tres, err := i.Apply(ctx, plan.MaterializedDefinition(), opts)\n", ""},
+		{"a nil lens resolver with a variable kind is denied", "cmd/bridge/main.go",
+			"\treport, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), bridgeCypherParser{}, nil, nil, nil)\n",
+			"validator-lens-resolver:"},
+		{"a nil lens resolver for the weaverTarget kind is denied", "cmd/loupe/weaverauthor.go",
+			"\ttargetReport, err := pkgmgr.ValidateCapabilityArtifact(\"weaverTarget\", targetContent,\n" +
+				"\t\tloupeCypherParser{}, nil, nil, nil)\n",
+			"validator-lens-resolver:"},
+		{"a nil lens resolver for a kind that is not weaverTarget passes", "cmd/loupe/weaverauthor.go",
+			"\tlensReport, err := pkgmgr.ValidateCapabilityArtifact(\"lens\", lensContent, loupeCypherParser{}, nil, nil, nil)\n", ""},
+		{"a wired lens resolver passes", "cmd/lattice/capability/capability.go",
+			"\treport, err := pkgmgr.ValidateCapabilityArtifact(row.Kind, json.RawMessage(row.Content),\n" +
+				"\t\tfullCypherParser{}, held, sensitiveAspects, installedLenses)\n", ""},
 		{"a refusal with no wrapped sentinel is denied", "internal/pkgmgr/upgrade.go",
 			"\treturn fmt.Errorf(\"pkgmgr: upgrade refused — it drops column %q\", col)\n",
 			"a refusal built with fmt.Errorf and no wrapped sentinel"},
@@ -4583,6 +4725,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "primordial-actor:") &&
 				!strings.HasPrefix(fd.msg, "actor-guard:") &&
 				!strings.HasPrefix(fd.msg, "capability-apply:") &&
+				!strings.HasPrefix(fd.msg, "validator-lens-resolver:") &&
 				!strings.HasPrefix(fd.msg, "refusal-sentinel:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") &&
 				!strings.HasPrefix(fd.msg, "op-name:") &&

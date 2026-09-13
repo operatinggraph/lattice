@@ -154,6 +154,13 @@ meta.weaverTarget {
   scanning the row's keys with the `missing_` prefix whose value is `true`.
 - **A row column `missing_*: true` with no `gaps[col]` entry is a config error → alert**, never
   silently skipped (FR29 "never silently drop" discipline). Weaver surfaces it to Health KV.
+- **A `lensRef` MUST name a Lens that exists, and the target MUST be fully declared against it.** A `lensRef` names a
+  Lens declared in the same package or an already-installed `meta.lens` by id; install refuses a binding to anything
+  else. Every `missing_*` column the named Lens projects MUST be a `gaps` key — a `surface` entry for a column
+  deliberately left unremediated — unless the target's `augur.escalate` includes `unplannable`; install refuses a
+  target that leaves one undeclared, whichever package or authoring path produced the Lens or the target. The
+  row-level rule above is unchanged: a column that still arrives undeclared (a Lens edited after install, a second
+  Lens rendering the same `<targetId>.` prefix) is the config error → alert it has always been.
 
 ### Action contracts
 

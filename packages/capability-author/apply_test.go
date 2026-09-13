@@ -99,9 +99,13 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string, reads []st
 // newVersion) rather than the mode/packageName pair; the kind is one because an
 // EDIT proposal carries a weaverTarget where every other case here carries a
 // lens.
-func recordEnvForApplyTarget(t *testing.T, reqID, handle, kind string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
+func recordEnvForApplyTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID, handle, kind string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
-	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil)
+	// The installed-lens catalog is read live, exactly as every production
+	// caller reads it: a weaverTarget's lensRef must name a lens this kernel
+	// actually holds, and these fixtures install that lens first.
+	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil,
+		pkgmgr.NewCoreKVLensResolver(ctx, conn, fullCypherParser{}))
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}
@@ -141,7 +145,7 @@ func recordEnvForApplyTarget(t *testing.T, reqID, handle, kind string, target ma
 // runs the scope check exactly as production will.
 func recordEnvForGrant(t *testing.T, reqID, handle, packageName string, content json.RawMessage, held []pkgmgr.HeldPermission, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
-	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}
@@ -299,7 +303,7 @@ func drivePendingProposalForApplyTarget(t *testing.T, ctx context.Context, conn 
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	rec := recordEnvForApplyTarget(t, testutil.GenReqID("CARec"+tag), handle, kind, target, content, 0.86)
+	rec := recordEnvForApplyTarget(t, ctx, conn, testutil.GenReqID("CARec"+tag), handle, kind, target, content, 0.86)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 

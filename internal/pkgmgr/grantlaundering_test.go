@@ -115,7 +115,7 @@ func TestValidateCapabilityArtifact_GrantOfReservedOpFromRuntimeOrigin_Rejected(
 	// validates. Without this the rejection below could pass on a fixture that
 	// rejects every grant of this op for some unrelated reason.
 	pkgHeld := []HeldPermission{{OperationType: laundryReservedOp, Scope: "any", Origin: "package"}}
-	report, err := ValidateCapabilityArtifact("grant", content, fullCypherParser{}, pkgHeld, nil)
+	report, err := ValidateCapabilityArtifact("grant", content, fullCypherParser{}, pkgHeld, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestValidateCapabilityArtifact_GrantOfReservedOpFromRuntimeOrigin_Rejected(
 	// The attack: the identical proposal, backed only by a self-minted holding
 	// the Processor refuses.
 	runtimeHeld := []HeldPermission{{OperationType: laundryReservedOp, Scope: "any", Origin: "runtime"}}
-	report, err = ValidateCapabilityArtifact("grant", content, fullCypherParser{}, runtimeHeld, nil)
+	report, err = ValidateCapabilityArtifact("grant", content, fullCypherParser{}, runtimeHeld, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestValidateCapabilityArtifact_GrantOfUpdatePermissionFromRuntimeOrigin_Rej
 	})
 	held := []HeldPermission{{OperationType: "UpdatePermission", Scope: "any", Origin: "runtime"}}
 
-	report, err := ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil)
+	report, err := ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
