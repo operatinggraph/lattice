@@ -1124,8 +1124,11 @@ the two runs found:
   of the 15 is Dr. Maya Patel's, who holds TWO live `practicesAt` links, one to Riverside Clinic and one to
   a building tombstoned 2026-08-23 (`vtx.building.kJoNH76sGkpPszmchL6w`, `TombstoneLocation` cascades onto
   no link). `BackfillAppointmentSite` counts links, sees two, and no-ops as "ambiguous"; the `providerSites`
-  read model (and the booking UI's auto-fill on it) joins live buildings and shows one. Fix: the op counts
-  live sites only — clinic-domain 0.34.26, then the replay again. Tracked on the verticals lane.
+  read model (and the booking UI's auto-fill on it) joins live buildings and shows one. Fixed at `fc2c1f68`
+  (the op counts live sites only, clinic-domain 0.34.26, refreshed in place). The second replay dispatched
+  nothing — the 15 in-flight marks from the first still held their 30-min lease, which is the mark doing its
+  job; the sweep reclaimed them at expiry (`mark reclaimed … reason=leaseExpired`) and re-dispatched all 15,
+  every one committed `mutations=1`. Live: 0 violating, `clinic-appointments` projects Riverside Clinic.
 
 ### The build record (was: checkpoint)
 

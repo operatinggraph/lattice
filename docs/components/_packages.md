@@ -617,6 +617,17 @@ mechanizes it (name the gate, strike the entry).
   on the SUCCESS path, so a denial is visible instead of swallowed.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
 
+- **A soft-delete cascades onto no link, so a list of link TARGETS holds dead vertices — harmless where the
+  consumer re-proves each one (`worksAt_covers`), wrong wherever the list's LENGTH is the decision.** An
+  exactly-one / ambiguity / uniqueness count over `lk.targetVertex` reads a decommissioned building as a live
+  candidate, and the op no-ops (or picks the dead one) forever while the read model, which joins live vertices,
+  shows the right count. Minted: clinic-reminders `BackfillVisitSeriesSite` (2026-08, screened at build and
+  the divergence from clinic-domain's sibling recorded); **second sighting** clinic-domain
+  `BackfillAppointmentSite` (2026-09-13, live — 15 appointments stuck, provider at one live + one tombstoned
+  site). Check: any `len(<targets>)` comparison filters the list through `vertex_live` first, and the package
+  pins it with a one-live-one-dead fixture (`TestVisitSeries_SiteOps_SkipDecommissionedBuilding`,
+  `TestClinic_BackfillAppointmentSite_DeadSiteNotCounted`). A third sighting mechanizes the `len(` check as a
+  `lint-conventions` gate.
 - **A lens MATCH edit is a corpus edit — the refractor census pins move even when every package test is green.**
   `internal/refractor`'s corpus tests pin, per lens, the branch decomposition, the sibling-group population and the
   label set / filter mode; an added OPTIONAL MATCH hop changes all three and nothing in the package's own suite,
