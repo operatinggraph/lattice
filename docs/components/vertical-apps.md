@@ -10,6 +10,15 @@ rendered from their package descriptors (`internal/descriptorform`, fetched thro
 rather than hand-built forms wherever a descriptor exists; `scripts/lint-app-op-descriptors.go` refuses an
 op literal no package describes and only ever shrinks its hand-built baseline.
 
+Two FE gates run per app under `go test`: each HTML-string escaper (café `escapeHtml`, wellness `esc`) is the
+five-character map over `& < > " '` — a text-node helper (`div.textContent` → `innerHTML`) leaves both quotes alone
+and is an attribute breakout — pinned by `web_escape_test.go` against the real embedded declaration (clinic and
+LoftSpace build DOM nodes and carry no HTML-string escaper; an app that gains one copies the pin). And where an app
+narrows its `?types=` fetch to a `KNOWN_CATALOG_OPS` literal (café, clinic, wellness; LoftSpace fetches the whole
+catalog), `TestKnownCatalogOpsCoversEveryCacheRead` classifies every reference to the cache, the loaders and the
+promise in the embedded `app.js` as a known non-read or a read whose op must be in the literal — an op read off
+the catalog with no entry is never fetched and the form reports itself unavailable with every test green.
+
 Build + launch: `make cycle-<vertical>` rebuilds `bin/<vertical>-app` and relaunches it against the running
 stack (the Makefile is the authority; `make run-<vertical>-app` is foreground, human-only). A changed lens or
 DDL lands live with `make reinstall-package PKG=packages/<pkg>` — no restart.
@@ -23,20 +32,6 @@ The recurring review-finding classes for the vertical FEs — fire briefs copy t
 part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md`
 §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it.
 
-- **An HTML escaper built on a text node leaves both quote characters alone, so the first free-text value
-  interpolated into a quoted attribute is an attribute breakout** — `div.textContent = s; div.innerHTML`
-  escapes `& < >` only; every prior `data-*="' + esc(...)` site carried server-minted keys, so the defect
-  was latent until a memo reached one. Minted: café refund (2026-09-05) — a `data-memo` built from the
-  settled tab's memo, which is staff-typed off-menu text. Check: the escaper must be a map over `& < > " '`
-  (café's `escapeHtml` is, pinned by a goja test over the embedded source); wellness's `esc()` is still the
-  text-node shape and safe only because nothing free-text reaches its attributes — mechanize on the second
-  sighting.
-- **A descriptor-driven form's known-catalog list is hand-maintained, and an op missing from it fails as
-  "unavailable" with every test green** — the list is what `?types=` point-reads, so a new
-  `opCatalogCache.<Op>` read with no list entry never finds its row. Minted: café `RefundCafeCharge`
-  (2026-09-05), caught in lead review. Check: a test that derives the list from every `opCatalogCache`
-  read in the embedded app.js (`cmd/cafe-app/op_catalog_test.go`); clinic and wellness still keep theirs
-  by hand — promote to a `scripts/lint-*.go` gate on the second sighting.
 - **A staff-leg descriptor context that passes no `me` silently drops every `{actor}` enumeration the
   descriptor declares** — `substituteEnumerations` discards an entry whose hub substitutes to empty, so
   the envelope reaches the Processor with the walk undeclared while the test harness (which declares it)
@@ -47,7 +42,8 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   hides at zero balance and carries `max`; the front-desk form beside it rendered whenever an account existed, so
   the new cap turned a mis-key into a raw `AuthDenied` toast where the sibling form never lets one be typed.
   Minted: café house-tab payment cap (2026-09-05). Check: when an op gains a server refusal, walk every form that
-  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).- **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
+  dispatches it and give each the courtesy its sibling already has (hide / `max` / prefill).
+- **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
   roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
   only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N
   and the op remove N−1, with the confirm dialog repeating the wrong number. Minted: wellness series call-off
@@ -79,3 +75,9 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   trying to serve. Minted: wellness `forfeited` booking (2026-09-13) — two sites, one caught cold. Check: when a script
   drops a tombstone, grep the FE for every collection keyed on the guard's pair and decide per site whether the kept
   status is skipped or ranked.
+- **A source-scanning test that samples its consumers by regex is an open set — the first read shape the regexes
+  don't name passes as "not a read"** — café's catalog-coverage test matched `cache.X` and `cache["X"]`, so
+  `cache?.X`, `const { X } = cache`, `cache[kind]` and `loadOpCatalog().then(c => c.X)` all passed with X missing
+  from the literal. Minted: wellness/clinic catalog mirror (2026-09-13), caught cold. Check: a scan over embedded
+  source classifies EVERY occurrence of the identifier (and the loaders/promise that alias it) as a known non-read
+  or a read, and fails at the line on anything else; prove it with a mutation battery, not a green run.
