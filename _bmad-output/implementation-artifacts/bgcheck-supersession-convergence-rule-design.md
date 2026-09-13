@@ -545,3 +545,99 @@ findings, all verified against code by this fire before folding:**
 cannot reach `ddl`; weakest-wins merge; a link key in `directOp` `Reads` passes both gates; `expectedRevision`
 is inert; the stale-successor path rejects `UnknownInstance`, not `HydrationMiss`; the foreign-meta exclusion by
 label binds on the key type segment.
+
+---
+
+## 14. Fire brief (build note, 2026-09-13) — one fire, Inc 1 → Inc 2
+
+**Scope, verbatim (board row + ratification decision 4):** *A completed check with a strictly-later completed
+sibling on the same applicant retires itself: a lens projects the pair, Weaver's `directOp` submits the shipped
+`TombstoneSupersededLeaseServiceInstance`; the op derives six of its seven reads and admits Weaver. History stays at
+rest as a body-preserving tombstone* — and *the op mints `lnk.service.<new>.supersedes.service.<old>` in the same
+batch as the tombstones.* Green bar: §12's two rows.
+
+**Verified touch-list (live 2026-09-13; every §2/§4 citation re-read — the file grew 133 lines since design time):**
+
+| Site | Now |
+|---|---|
+| `leaseServiceInstanceDDLScript` | `packages/lease-signing/scripts.go:1430-1754`; `make_link(key, source, target, cls, local_name, data)` `:1441`; `required_string` `:1447`; `parts_of` `:1464`; `make_tombstone` `:1498` |
+| The tombstone arm | `scripts.go:1607-1751`; actor guard `:1617-1628`; ownership read `:1664-1667`; class `:1682-1687`; outcomes `:1689-1697`; recency `:1699-1708`; providedTo reads `:1710-1729`; mutations `:1743-1747`; event `:1748` |
+| `# read-posture: (a) declared reads at …` | `:1664, :1689, :1694, :1711, :1724` (five annotations; the ownership link at `:1664` keeps the dispatcher wording) |
+| Stale "Template-less (no instanceOf)" comment | `scripts.go:1414` (the design's `:1281`) |
+| Descriptor | `ddls.go:628-756`; `Description` `:651-693`; `Examples` `:729-753`; `PermittedCommands` `:650` (unchanged — the link create resolves no vertex root) |
+| Grant `Note` | `permissions.go:87-91` |
+| Version | `manifest.yaml:2` + `package.go:92` are **already `0.31.29`** (`6ae4006`, ReassignLeaseUnit, 2026-09-12) → this fire ships **`0.31.30`** |
+| Target precedent / insertion point | `targets.go:168-180` (`staleUserTasks` directOp) · append the new target after `:200`, before `}}` |
+| Lens precedent / insertion point | `lenses.go:99-136` (`staleUserTasks` descriptor), `:137-165` (`backgroundCheckFreshness`); specs at `lenses.go:853` (`backgroundCheckFreshnessSpec`), `:1093` (`staleUserTasksSpec`) |
+| Lens declaration pin | `package_test.go:233-243` `wantLenses` (ordered; add the new name where `Lenses()` places it) |
+| Op tests | `tombstone_superseded_instance_test.go` — helpers `seedServiceInstance :29`, `resolveLeaseServiceInstanceMetaID :174`, `submitTombstoneSuperseded :212` (declares all seven; the Inc 1 (i) vector needs a variant declaring only the ownership link); `_PlatformEngineDenied :664` (split into Loom-refused / Weaver-accepted); `lsActorKey` is the operator actor |
+| Lens tests | `lens_cypher_test.go:41-150` fixture (`vtxWithClass`, `aspect`, `edge`, `lenstest.KVs`); `bgcheck_freshness_lens_test.go:27-53` (`projectBgFreshness`, `completedBgcheck`); `stale_user_tasks_test.go:23-38` (`projectStaleAt` — the per-lens project helper shape) |
+| Corpus census pins (add `supersededBackgroundChecks`; read each verdict off the failure) | `internal/refractor/actor_onekey_corpus_census_test.go:94` · `actor_walk_scope_corpus_census_test.go:115` · `anchor_hopindex_corpus_census_test.go:83` · `branch_decomposition_corpus_census_pins_test.go:13, :246` · `grouping_reduction_corpus_census_test.go:79` · `label_derivation_corpus_census_test.go:138` (`forEachCorpusCypher :615` enumerates `leasesigning.Lenses()` live, so a missing pin fails by name) |
+| Engine pin for `own.key` | `internal/refractor/ruleengine/full/rel_projection_test.go:94` `TestRelProjection_KeyIsTheContractOneLinkKey` |
+| e2e harness (Weaver + Refractor + Loom + bridge, embedded) | `internal/leaseconvergence/` (tag `leaseshortwindow`; `make test-lease-convergence`, CI `ci.yml:525`); precedent `convergence_test.go:443` `TestLeaseConvergence_BgcheckFreshness_EagerReopen` (`newHarness(t, withExtraLenses(…))`, `seedApplicant :651`, `bgcheckHandles :1074`); `harness_test.go:423` installs only the named extra lenses — the new lens must be named |
+| `derive_reads` seam | `internal/processor/derive_reads.go:113-139` (invoked at the head of step 4), `:172-180` (`state`/`ddl`/`nanoid`/`kv` FAILING, `primordialActor` bound), `:418-445` (a derived key the envelope also declares keeps the envelope's disposition), `:131-137` (malformed return → `DeriveReadsInvalid`; `{}` is a no-op) |
+| Write gate for the link | `internal/processor/step6_resolve_ddl.go:366-370` + `:684-698` — a **link** mutation has no instanceOf-governed root: **permissive default**, always |
+| Weaver `directOp` seams | `internal/weaver/strategist.go:274-380` (`resolveParam`, `resolveReadKey`; `expectedRevision` injected `:297`); `registry.go:107-132`; `internal/pkgmgr/orchestrationguard.go` (row-template presence) — none tests the resolved value's prefix, so `row.instanceOfLink` (a `lnk.` key) passes |
+| Verify gate | `scripts/verify-package-lease-signing.go:130` (ops list unchanged — no `ddlCheck` edit) |
+
+**Precedents to mirror.** `derive_reads` + local `optional_string`: `packages/clinic-domain/ddls.go:3074-3110` (the
+`optional_string`-never-`required_string` rule and the "derived server-side by this script's own derive_reads(op)"
+annotation wording `:3015`). Same-type link between two vertices of one type: `identity-domain/ddls.go` `duplicateOf`.
+directOp target: `targets.go:168-180`. Violating-rows-only actorAggregate with `EmptyBehavior: delete`:
+`lenses.go:122-135`. Per-lens engine proof: `stale_user_tasks_test.go`. Full-stack e2e: `convergence_test.go:443`.
+
+**Increment order + green checks.**
+
+1. **Inc 1 (op; posture-changing → opus builder, full 3-layer review):** `scripts.go` — `optional_string` +
+   `derive_reads` (§4.3 a), tie-break (§4.3 b), actor guard Loom-only (§4.3 c), the `supersedes` link (§4.3 d) as a
+   fourth mutation, five annotations reworded, `:1414` comment corrected; `ddls.go` Description/Examples; `permissions.go`
+   Note; `0.31.30`; tests §11.2 (i)–(vii) (viii is struck — see amendments). Green:
+   `go test ./packages/lease-signing/ -run 'TombstoneSuperseded|Package' -count=1`; `STRICT=1 go run ./scripts/lint-conventions.go`;
+   `DIFF_BASE=origin/main go run ./scripts/lint-package-version.go`; `go build ./... && make vet && golangci-lint run ./...`.
+2. **Inc 2 (lens + target; package content → sonnet builder, lead review):** `lenses.go` lens + descriptor (§4.1);
+   `targets.go` target (§4.2); `package_test.go` pin; the six census pins + `TestRelProjection` re-read; pinned lens test
+   over rows 1–9b incl. 8b with the three mutation proofs; the e2e in `internal/leaseconvergence` (A completed T1, B
+   completed T2 → Weaver retires A → A's `supersededBackgroundChecks` and `backgroundCheckFreshness` rows are tombstone
+   bodies, B's freshness row stands, `leaseApplicationComplete.freshBgComplete` = 1, the `supersedes` link live). Green:
+   `go test ./packages/lease-signing/ ./internal/refractor/ -run 'Census|Lens|Cypher|Superseded|RelProjection|Package' -count=1`;
+   `make test-lease-convergence`; `STRICT=1 go run ./scripts/lint-gap-column-declaration.go`; `STRICT=1 go run ./scripts/lint-lens-anchors.go`.
+3. **Close:** cumulative cold adversarial pass over the whole diff; `verify-package-lease-signing` against the
+   ephemeral native stack; the §11.2 live close where the stack allows; dossier classification.
+
+**In-scope gotchas.** (a) `derive_reads` runs with `ddl` FAILING — never touch `ddl[…]` there; the ownership link stays
+dispatcher-declared. (b) The lens and the op must carry the textually-identical tie predicate; the pinned rows 9b/5 are
+the drift detectors. (c) A `Params` value must name a column the anchor row itself projects — every column here is
+projected on the anchor's own row (dossier, `_packages.md`). (d) A new per-lens analysis pins its corpus census in the
+same fire; the census population asserts by name, so a lens added without its six pins fails CI, not silently
+(refractor dossier's standing rule). (e) A gap class is decided by the dispatch's SHAPE — a `directOp` with no external
+call is the internal class (weaver dossier). (f) Standing checklist #2: the design's §4.3 (d)(i) gate claim was a
+*negative citation* that did not survive re-reading — amended below. (g) Standing checklist #3: every guard flip is
+revert-proved (drop the tie-break → 9b's accept vector fails; restore the Weaver refusal → (iv) fails); builders prove
+in a `/tmp` copy, never the shared tree. (h) `packages/` content bump: `0.31.30` in both places.
+
+**Adjacent finds.** None new: the `@at` residue (§5 row 3), the operator-path successor-ownership residual (§4.3 c), and
+the 30-day re-check cost (§11.4) are all already priced in this design and unchanged by the build.
+
+**Non-goals.** No Weaver/Refractor/Processor code; no `replyOpReads` entry; no change to `backgroundCheckFreshness`; no
+`platformProtectedPackages` edit; no Contract text (§8).
+
+**Scope-diff gate:** every touch above traces to the scope sentence or decision 4; the brief narrows only where
+amended below. Dependencies re-verified: Inc 2's one-key `Reads` needs Inc 1's derivation (both ways: nothing in Inc 1
+depends on Inc 2). Censuses re-run: `manifest.yaml` version (design said `0.31.28→0.31.29`; live `0.31.29`); the seven
+read-posture sites (design said six; live five `(a)` annotations plus the ownership read); the write gate's treatment
+of a link create (design said "the gate refuses"; live "permissive default") — each resolved in the amendments.
+
+### 14.1 Body amendments (build-time, 2026-09-13)
+
+- **§4.3 (d)(i) — struck.** `step6_resolve_ddl.go:684-698`: a link mutation has no instanceOf-governed root and takes the
+  permissive default unconditionally, so **no gate refuses a foreign-owned successor from sourcing the `supersedes`
+  link**. The operator-path successor-ownership residual stays exactly as §4.3 (c) records it (a guard-level, documented
+  residual; Weaver's path is proven by the lens's `(newer)-[:instanceOf]->(m)` conjunct). The link needs no
+  `PermittedCommands` entry on any DDL. **§11.2 (viii) is struck** with it; (vii) stays and is the link's proof.
+- **§4.3 version target:** `0.31.29 → 0.31.30` (the manifest reached `0.31.29` with `6ae4006`).
+- **§11.2 Inc 2 e2e home:** `internal/leaseconvergence` (the only harness that runs Weaver + Refractor against this
+  package), not `lease_signing_test.go` (Processor-only).
+
+### 14.2 Checkpoint
+
+🏗️ owner: `claude/relaxed-rubin-0d3ozn` · brief committed · next: Inc 1.
