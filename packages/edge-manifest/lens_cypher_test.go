@@ -504,6 +504,34 @@ func TestEdgeEntityBookings_ProjectsItsSessionsInstructorKey(t *testing.T) {
 	require.Equal(t, f.key("instr"), row["instructorKey"])
 }
 
+// TestEdgeEntityBookings_ForfeitedBookingIsNotABrowseTarget — a late cancel
+// on a priced class keeps the booking live as `forfeited` (wellness-domain's
+// CancelBooking) so the studio can still reach the guest who owes; that
+// booking holds no seat and accepts neither CancelBooking nor
+// SetBookingAttendance, so the Facet must not list it beside a booked seat
+// as something to act on. A `booked` sibling on the same walk still projects,
+// and so does emResidentWorld's own booking, which carries no status aspect at
+// all — the filter drops the forfeited value, never the absence of one.
+func TestEdgeEntityBookings_ForfeitedBookingIsNotABrowseTarget(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "seatBooking", "booking")
+	f.aspect(t, "seatBooking", "status", "bookingStatus", map[string]any{"value": "booked", "seat": 1})
+	f.edge(t, "bookedBy", "seatBooking", "resident")
+	f.edge(t, "forSession", "seatBooking", "sess")
+	f.vtx(t, "forfeitBooking", "booking")
+	f.aspect(t, "forfeitBooking", "status", "bookingStatus", map[string]any{"value": "forfeited"})
+	f.edge(t, "bookedBy", "forfeitBooking", "resident")
+	f.edge(t, "forSession", "forfeitBooking", "sess")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityBookings"), f.key("resident")))
+	_, ok := rows[f.ids["seatBooking"]]
+	require.True(t, ok, "a booked seat is a browse target")
+	_, ok = rows[f.ids["booking"]]
+	require.True(t, ok, "a booking with no status aspect is kept — the filter is on the value, not on presence")
+	_, ok = rows[f.ids["forfeitBooking"]]
+	require.False(t, ok, "a forfeited booking holds no seat and accepts no op; it must not be offered as a target")
+}
+
 // ---- opCatalog: the staff-plane op-descriptor read model ----
 //
 // opCatalog is this package's one PLAIN lens (staff-descriptor-rendering-

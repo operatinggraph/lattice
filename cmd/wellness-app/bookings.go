@@ -44,9 +44,9 @@ type bookingProjection struct {
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
-// booked | waitlisted | attended | noShow so the roster can show who the
-// instructor has already marked, and My Classes can show a waitlisted
-// booker's place in line. WaitlistSlot is only set when Status is
+// booked | waitlisted | attended | noShow | forfeited so the roster can show
+// who the instructor has already marked, and My Classes can show a
+// waitlisted booker's place in line. WaitlistSlot is only set when Status is
 // "waitlisted".
 type bookingRow struct {
 	BookingKey    string   `json:"bookingKey"`

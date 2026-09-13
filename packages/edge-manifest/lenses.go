@@ -960,9 +960,19 @@ RETURN
 //
 // `sessionKey` rides along because CancelBooking needs the booking's session
 // in its payload (the seat-cell key it tombstones is rebuilt from it) and the
-// renderer fills that from the viewed row via `{entity.<column>}`. A
-// cancelled booking tombstones its own vertex, so the row self-clears with no
-// status filter. `instructorKey` (the booking's own session's `ledBy`
+// renderer fills that from the viewed row via `{entity.<column>}`. An early
+// cancel tombstones the booking's own vertex, so that row self-clears; the one
+// status the tail filters is `forfeited` — a late cancel on a priced class
+// keeps the booking live so the studio's desk can still reach the guest who
+// owes the standing charge (wellness-domain's CancelBooking), but that booking
+// holds no seat and accepts neither CancelBooking nor SetBookingAttendance, so
+// it is not a browse target: listed here it would sit beside a booked seat on
+// an upcoming class, indistinguishable, offering a Cancel the op refuses. The
+// wellness app, not the Facet, is where a member reads their forfeit. The
+// filter is the `NOT (… = 'forfeited')` shape rather than `<>` so a booking
+// carrying no status aspect at all is kept (compareAny answers false on nil
+// either way; only the negated form turns that into "keep"). `instructorKey`
+// (the booking's own session's `ledBy`
 // instructor, one hop further) rides along for the same reason
 // edgeSessionsTail's does: SetBookingAttendance's `{me.instructor}`
 // param is not by itself proof the viewer leads THIS booking's class, and
@@ -972,7 +982,7 @@ OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
 OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
 WITH bk, sess, studio, instr
-WHERE bk.key <> null
+WHERE bk.key <> null AND NOT (bk.status.data.value = 'forfeited')
 RETURN
   bk.key AS anchor,
   "manifest.ent" AS ns,

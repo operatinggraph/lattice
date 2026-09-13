@@ -845,11 +845,18 @@ async function renderSchedule() {
   // until CancelBooking releases it, and a tombstoned booking drops out of
   // this same GET (computeBookings skips it), so "appears here" and "guard
   // is alive" agree. The status (not just presence) is what lets the card
-  // tell "already booked" from "already waitlisted".
+  // tell "already booked" from "already waitlisted". A forfeited booking is
+  // the one live row whose guard is already released (CancelBooking's late
+  // branch keeps the vertex, frees the guard), so the member may hold it AND
+  // a fresh booked row on the same session — it is skipped so it can never
+  // shadow the row that actually holds the seat.
   let myStatusBySession = new Map();
   try {
     const r = await appGet("/api/bookings");
-    (r.bookings || []).forEach((b) => myStatusBySession.set(b.sessionKey, b.status));
+    (r.bookings || []).forEach((b) => {
+      if (b.status === "forfeited") return;
+      myStatusBySession.set(b.sessionKey, b.status);
+    });
   } catch (_) {
     // Affordance only — worst case the button offers a class CreateBooking /
     // JoinWaitlist will still correctly refuse.
@@ -1058,10 +1065,13 @@ const LATE_CANCEL_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 // isLateCancel answers whether cancelling THIS booking right now would
 // forfeit its class price. Waitlisted bookings and free classes are excluded
-// for the same reason the script's own forfeiture never reaches them: neither
-// carries a posted class-price charge to lose.
+// for the same reason a late cancel never reaches them: neither carries a
+// posted class-price charge to lose. An already-forfeited booking cannot be
+// cancelled again (CancelBooking refuses it, and cancelDisabled never offers
+// the button once ATTENDANCE_MARKS carries its status) — excluded here too
+// so the predicate is honest on its own terms.
 function isLateCancel(b) {
-  if (b.status === "waitlisted" || !(b.priceCents > 0) || !b.startsAt) return false;
+  if (b.status === "waitlisted" || b.status === "forfeited" || !(b.priceCents > 0) || !b.startsAt) return false;
   const startsAtMs = new Date(b.startsAt).getTime();
   if (!isFinite(startsAtMs)) return false;
   return startsAtMs - Date.now() <= LATE_CANCEL_WINDOW_MS;
@@ -1246,16 +1256,23 @@ async function renderMyClasses() {
 
 // A null sessionName means the class was called off (TombstoneSession kills
 // the session vertex; wellnessOrphanedBookingSettlement/ReleaseOrphanedBooking
-// (wellness-domain) then drains the booking itself, so this only ever renders
-// in the brief window before that convergence catches up — the Cancel button
-// still works meanwhile, it just has nothing useful left to release.
+// (wellness-domain) then drains the booking itself, so this usually only
+// renders in the brief window before that convergence catches up — except a
+// forfeited booking, which the orphan release deliberately never drains (the
+// debt it records must stay collectable), so this card is the one shape of
+// "called off AND forfeited" that renders indefinitely, not just in transit.
+// The Cancel button still works meanwhile, it just has nothing useful left
+// to release.
 //
-// Cancel is disabled once the class has begun or attendance is recorded —
+// Cancel is disabled once the class has begun, attendance is recorded, or the
+// booking is already forfeited (mark covers all three — ATTENDANCE_MARKS
+// carries a forfeited entry precisely so this reuses the same disable path) —
 // CancelBooking (wellness-domain ddls.go) rejects both server-side
-// (SessionStarted / AttendanceRecorded) for a booked OR a waitlisted booking
-// alike (the SessionStarted check runs before the booked/waitlisted branch),
-// so a member no longer sees an offer the op will refuse — including "leave
-// the waitlist" once the class they never got promoted into has begun.
+// (SessionStarted / AttendanceRecorded, plus its own already-forfeited check)
+// for a booked OR a waitlisted booking alike (the SessionStarted check runs
+// before the booked/waitlisted branch), so a member no longer sees an offer
+// the op will refuse — including "leave the waitlist" once the class they
+// never got promoted into has begun.
 
 // reminderBadge shows the wellness-reminders package's own SendReminder
 // marker (wellnessBookings' reminderSentAt column) — before this, a 24h
@@ -1288,6 +1305,7 @@ function myClassCard(b) {
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(priceLabel(b.priceCents)) + "</div>") +
+    (!cancelled && b.status === "forfeited" ? '<div class="meta">Cancelled inside the late window — class price forfeited.</div>' : "") +
     '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">" + (waitlisted ? "Leave waitlist" : "Cancel") + "</button></div>" +
     "</div>"
   );
@@ -1453,13 +1471,17 @@ async function renderRoster() {
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
   const canMark = (isLeader || isStaff()) && started;
 
-  // bookings.length counts every live row on this session, booked and
-  // waitlisted alike — split them so the summary and staff seat gate below
-  // don't read a waitlist entry as an occupied seat (waitlisted holds no
-  // seat cell, wellness-domain ddls.go).
-  const bookedCount = bookings.filter((b) => b.status !== "waitlisted").length;
-  const waitlistedCount = bookings.length - bookedCount;
-  summary.textContent = bookedCount + " booked" + (waitlistedCount ? " · " + waitlistedCount + " waitlisted" : "");
+  // bookings.length counts every live row on this session — booked,
+  // waitlisted, and forfeited alike — so split all three out for the summary
+  // and the staff seat gate below: neither a waitlisted nor a forfeited
+  // booking holds a seat cell (wellness-domain ddls.go), so neither should
+  // read as an occupied seat.
+  const forfeitedCount = bookings.filter((b) => b.status === "forfeited").length;
+  const bookedCount = bookings.filter((b) => b.status !== "waitlisted" && b.status !== "forfeited").length;
+  const waitlistedCount = bookings.length - bookedCount - forfeitedCount;
+  summary.textContent = bookedCount + " booked" +
+    (waitlistedCount ? " · " + waitlistedCount + " waitlisted" : "") +
+    (forfeitedCount ? " · " + forfeitedCount + " forfeited" : "");
   // Release seat mirrors CancelBooking's own SessionStarted guard
   // (wellness-domain ddls.go) — once the class has begun, attendance is the
   // record of what happened and a seat is no longer front-desk-releasable.
@@ -1480,11 +1502,16 @@ async function renderRoster() {
 // book-a-guest control beside it) for the selected class, and hides both for
 // everyone else. The picker offers the members this staffer's workplace
 // covers — the server decides that, not this code — minus whoever already
-// holds a seat, since CreateBooking rejects a second live booking by the same
-// booker on the same session (DoubleBooked, ddls.go). The guest control has
-// no such directory to scope against — a walk-in has no lease at all, which
-// is exactly why the picker can't offer them — so it takes a typed key
-// instead and leaves the seated-twice guard to the same in-script check.
+// holds a live seat or waitlist slot, since CreateBooking rejects a second
+// live booking by the same booker on the same session (DoubleBooked,
+// ddls.go). A forfeited row is deliberately NOT part of that exclusion: its
+// booker-slot claim was released at cancel time, so CreateBooking would
+// accept the re-book — the guest who late-cancelled and walks in asking for
+// the seat back is exactly who this picker needs to be able to offer again.
+// The guest control has no such directory to scope against — a walk-in has
+// no lease at all, which is exactly why the picker can't offer them — so it
+// takes a typed key instead and leaves the seated-twice guard to the same
+// in-script check.
 //
 // It offers nothing at all for a class that has already begun or is full:
 // CreateBooking answers SessionInPast and SessionFull respectively (ddls.go),
@@ -1525,7 +1552,7 @@ async function renderBookMember(se, bookings, generation) {
     return;
   }
   if (generation !== rosterGeneration) return;
-  const seated = new Set(bookings.map((b) => b.bookerKey));
+  const seated = new Set(bookings.filter((b) => b.status !== "forfeited").map((b) => b.bookerKey));
   const free = members.filter((m) => !seated.has(m.bookerKey));
   select.innerHTML = "";
   if (!free.length) {
@@ -2394,17 +2421,21 @@ async function reassignSession(se) {
   );
 }
 
-// ATTENDANCE_MARKS maps a booking's committed status to how the roster shows
-// it. `booked` carries no badge — not-yet-marked is the resting state, and a
+// ATTENDANCE_MARKS maps a booking's committed status to how the roster and
+// My Classes show it, covering every status that is a settled record —
+// attended, no-show, or forfeited (a late cancel, ddls.go CancelBooking).
+// `booked` carries no badge — not-yet-marked is the resting state, and a
 // badge on every card would drown the ones that say something.
 const ATTENDANCE_MARKS = {
   attended: { badge: "posted", label: "attended" },
   noShow: { badge: "settled", label: "no-show" },
+  forfeited: { badge: "settled", label: "forfeited" },
 };
 
 function rosterCard(b, markable, cancellable) {
   const mark = ATTENDANCE_MARKS[b.status];
   const waitlisted = b.status === "waitlisted";
+  const forfeited = b.status === "forfeited";
   const waitlistBadge = waitlisted && b.waitlistSlot != null
     ? '<span class="badge open">Waitlisted — #' + Math.trunc(b.waitlistSlot) + "</span>"
     : "";
@@ -2415,8 +2446,11 @@ function rosterCard(b, markable, cancellable) {
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
-    (markable ? attendanceActions(b) : "") +
-    (cancellable ? seatCancelAction(b) : "") +
+    // A forfeited booking gets neither action: SetBookingAttendance refuses
+    // it (nothing to attend or miss — the seat is already gone), and there is
+    // no seat left to release. The badge above is the whole story.
+    (markable && !forfeited ? attendanceActions(b) : "") +
+    (cancellable && !forfeited ? seatCancelAction(b) : "") +
     "</div>"
   );
 }

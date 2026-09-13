@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.25.1
+version: 0.26.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -82,9 +82,14 @@ description: |
   wellnessRefundSettlement lens walks to converge the refund into a
   WellnessCreditAccount. A cancellation submitted within two hours of the
   session's startsAt forfeits the class price instead: the cancellation
-  itself still succeeds, but no refund marker mints, so the charge stands
-  unreversed exactly as a no-show's does (a wellness.lateCancelForfeited
-  event is emitted in place of wellness.classPriceRefundQueued). The
+  itself still succeeds and still frees the seat, but no refund marker
+  mints, so the charge stands unreversed exactly as a no-show's does (a
+  wellness.lateCancelForfeited event is emitted in place of
+  wellness.classPriceRefundQueued) — and, because a booking that still
+  owes stays, the booking is not tombstoned but kept live under the
+  terminal status forfeited, carrying no seat, so the desk can still
+  reach the guest who owes the standing charge (wellnessBookers covers a
+  booker through any live booking). The
   window turns on timing alone — member and front-desk callers alike —
   and forfeits the class price only, adding no separate no-show fee.
 depends:

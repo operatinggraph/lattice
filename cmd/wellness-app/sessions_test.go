@@ -80,3 +80,22 @@ func TestComputeSessions_ProjectsSeriesKey(t *testing.T) {
 	require.Equal(t, "vtx.sessionseries.SER1234567890123456", rows[0].SeriesKey)
 	require.Empty(t, rows[1].SeriesKey, "a one-off class carries no series key")
 }
+
+// TestCountBookingsBySession_WaitlistedAndForfeitedHoldNoSeat proves the
+// schedule grid's seat count treats a waitlisted and a forfeited booking
+// alike — neither carries a seat cell, so neither should ever make a
+// session read fuller than the seats actually occupied — while a booked,
+// attended, or no-show row (all seat-occupying) each still counts.
+func TestCountBookingsBySession_WaitlistedAndForfeitedHoldNoSeat(t *testing.T) {
+	get := mapGetter(map[string]any{
+		"vtx.booking.b1": map[string]any{"bookingKey": "vtx.booking.b1", "sessionKey": "vtx.session.s1", "status": "booked"},
+		"vtx.booking.b2": map[string]any{"bookingKey": "vtx.booking.b2", "sessionKey": "vtx.session.s1", "status": "attended"},
+		"vtx.booking.b3": map[string]any{"bookingKey": "vtx.booking.b3", "sessionKey": "vtx.session.s1", "status": "noShow"},
+		"vtx.booking.b4": map[string]any{"bookingKey": "vtx.booking.b4", "sessionKey": "vtx.session.s1", "status": "waitlisted"},
+		"vtx.booking.b5": map[string]any{"bookingKey": "vtx.booking.b5", "sessionKey": "vtx.session.s1", "status": "forfeited"},
+	})
+	counts := countBookingsBySession([]string{
+		"vtx.booking.b1", "vtx.booking.b2", "vtx.booking.b3", "vtx.booking.b4", "vtx.booking.b5",
+	}, get)
+	require.Equal(t, 3, counts["vtx.session.s1"])
+}

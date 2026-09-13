@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -175,6 +176,34 @@ func submitCancelBookingAt(t *testing.T, ctx context.Context, conn *substrate.Co
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
 
+// createSessionResidentPriced is createSessionPriced plus a residentPriceCents
+// — the shape a resident-rate booking's effective price is read from. Both
+// prices are sent verbatim (0 is a stored zero, not an omission).
+func createSessionResidentPriced(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, studioKey, name, startsAt, endsAt string, capacity int, priceCents, residentPriceCents int) (string, processor.MessageOutcome) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload, _ := json.Marshal(map[string]any{
+		"studio": studioKey, "name": name, "startsAt": startsAt, "endsAt": endsAt, "capacity": capacity,
+		"priceCents": priceCents, "residentPriceCents": residentPriceCents,
+	})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "session",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSession", domainActorKey, wellnessdomain.OpMetas()),
+			Reads:         []string{studioKey},
+			OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	return "vtx.session." + nanoIDFromRequestID(reqID), outcome
+}
+
 // TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged proves the core
 // refund-marker mechanism: cancelling a booking whose class-price charge
 // already posted mints a wellnessrefund marker (root {} + .detail aspect)
@@ -270,7 +299,11 @@ func TestCancelBooking_NoRefundMarkerWhenNeverCharged(t *testing.T) {
 // the way out the door, minutes before the class. The cancellation still
 // succeeds and still frees the seat — but no wellnessrefund marker mints, so
 // the class-price charge stands unreversed exactly as a no-show's does, and
-// wellness.lateCancelForfeited is emitted in place of the refund event.
+// wellness.lateCancelForfeited is emitted in place of the refund event. And
+// because a booking that still owes stays, the booking is NOT tombstoned: it
+// stays live under the terminal status 'forfeited', carrying the no-show
+// twin's bookkeeping fields but no seat — the liveness that keeps the guest
+// reachable for the desk that has to collect the standing charge.
 func TestCancelBooking_LateCancelForfeitsClassPrice(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "latecancelforfeit")
@@ -294,11 +327,40 @@ func TestCancelBooking_LateCancelForfeitsClassPrice(t *testing.T) {
 	cancelReqID := testutil.GenReqID("wdlatecancel000001")
 	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
 
-	if keyExists(t, ctx, conn, bookingKey) {
-		t.Fatalf("a late cancellation still cancels — the booking must be tombstoned")
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a booking that still owes stays — the late-cancelled booking must remain live, not tombstoned")
+	}
+	forfeited := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := forfeited["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q after a late cancel, want forfeited", got)
+	}
+	if _, hasSeat := forfeited["seat"]; hasSeat {
+		t.Fatalf("status.seat = %v after a late cancel, want absent (the seat is released, the booking holds none)", forfeited["seat"])
+	}
+	if _, hasSlot := forfeited["waitlistSlot"]; hasSlot {
+		t.Fatalf("status.waitlistSlot = %v after a late cancel, want absent", forfeited["waitlistSlot"])
+	}
+	if got, _ := forfeited["booker"].(string); got != bookerKey {
+		t.Fatalf("status.booker = %q after a late cancel, want %s carried forward (the desk collects from a named booker)", got, bookerKey)
+	}
+	if got, _ := forfeited["session"].(string); got != sessionKey {
+		t.Fatalf("status.session = %q after a late cancel, want %s carried forward", got, sessionKey)
+	}
+	if got, _ := forfeited["rate"].(string); got != "standard" {
+		t.Fatalf("status.rate = %q after a late cancel, want standard carried forward", got)
+	}
+	if got, _ := forfeited["className"].(string); got != "Late Flow" {
+		t.Fatalf("status.className = %q after a late cancel, want Late Flow carried forward", got)
+	}
+	if got, _ := forfeited["classStartsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Fatalf("status.classStartsAt = %q after a late cancel, want 2026-07-08T09:00:00Z carried forward", got)
 	}
 	if keyExists(t, ctx, conn, sessionKey+".seat1") {
 		t.Fatalf("a late cancellation still frees the seat — seat1 must be released")
+	}
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	if keyExists(t, ctx, conn, sessionKey+".bkr"+bookerID) {
+		t.Fatalf("a late cancellation still releases the per-(session, booker) guard — the booker may book this class again")
 	}
 	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
 	if keyExists(t, ctx, conn, refundKey) {
@@ -365,10 +427,19 @@ func TestCancelBooking_RefundWindowBoundary(t *testing.T) {
 			if got := keyExists(t, ctx, conn, refundKey); got != tc.wantRefund {
 				t.Fatalf("wellnessrefund marker exists = %v, want %v (submitted %s against a 09:00 start)", got, tc.wantRefund, tc.submittedAt)
 			}
+			// The vertex's fate follows the same boundary: a refunded booking
+			// owes nothing and is tombstoned; a forfeiting one still owes and
+			// stays live as 'forfeited'.
+			if got := keyExists(t, ctx, conn, bookingKey); got == tc.wantRefund {
+				t.Fatalf("booking exists = %v after cancel, want %v (submitted %s against a 09:00 start)", got, !tc.wantRefund, tc.submittedAt)
+			}
 			if tc.wantRefund {
 				assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
 				assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
 			} else {
+				if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "forfeited" {
+					t.Fatalf("status.value = %q after a cancel on the two-hour mark, want forfeited", got)
+				}
 				assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
 				assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
 			}
@@ -870,4 +941,317 @@ func TestSetBookingAttendance_NoDoubleRefundOnRepeatedNoShowAttendedCycle(t *tes
 	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+refundID+".reverses.wellnesstransaction."+noShowTxID) {
 		t.Fatalf("the first correction's reverses link must still be the only one")
 	}
+}
+
+// TestCancelBooking_LateCancelPromotesWaitlisterAndKeepsForfeitedBooking is
+// the late-window branch with someone waiting: the freed seat is handed to
+// the earliest waitlisted booking exactly as an early cancel hands it — seat
+// cell stays claimed, wl1 released, wellness.waitlistPromoted emitted — while
+// the cancelling booking itself stays live as 'forfeited' carrying no seat.
+// Two live bookings, one seat cell, one seat-holder: the shape
+// wellnessWaitlistPromotion's seat <> null count reads as full.
+func TestCancelBooking_LateCancelPromotesWaitlisterAndKeepsForfeitedBooking(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "latecancelpromote")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdlatepromostudio001", "Late Promo Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdlatepromosession01", studioKey, "Late Promo Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	seatedBookerKey := seedIdentity(t, ctx, conn, "BBWELLLATEPRMSEATHJK")
+	seatedBookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdlatepromobooking01", sessionKey, seatedBookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+
+	waitingBookerKey := seedIdentity(t, ctx, conn, "BBWELLLATEPRMWTNGHJK")
+	waitingBookingKey, outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdlatepromojoin00001", sessionKey, waitingBookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("joinWaitlist outcome = %v, want Accepted", outcome)
+	}
+
+	_, txKey := seedPostedClassPriceCharge(t, ctx, conn, seatedBookingKey,
+		"BBWELLLATEPRMACCTHJK", "BBWELLLATEPRMTXNHJKM", 1500.0)
+
+	cancelReqID := testutil.GenReqID("wdlatepromocancel001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, seatedBookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+	// The cancelling booking: live, forfeited, seatless.
+	if !keyExists(t, ctx, conn, seatedBookingKey) {
+		t.Fatalf("the late-cancelled booking must remain live — it still owes the class price")
+	}
+	forfeited := attendanceStatus(t, ctx, conn, seatedBookingKey)
+	if got, _ := forfeited["value"].(string); got != "forfeited" {
+		t.Fatalf("cancelled booking status.value = %q, want forfeited", got)
+	}
+	if _, hasSeat := forfeited["seat"]; hasSeat {
+		t.Fatalf("cancelled booking status.seat = %v, want absent — the seat went to the promoted waitlister", forfeited["seat"])
+	}
+	if !keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("the forfeited class-price charge must stand: %s", txKey)
+	}
+
+	// The promoted booking: booked, holding seat1, wl1 released.
+	promoted := attendanceStatus(t, ctx, conn, waitingBookingKey)
+	if got, _ := promoted["value"].(string); got != "booked" {
+		t.Fatalf("waitlisted booking status.value = %q, want booked (promoted)", got)
+	}
+	if got, _ := promoted["seat"].(float64); got != 1 {
+		t.Fatalf("promoted booking status.seat = %v, want 1 (the seat the forfeiting booking gave up)", promoted["seat"])
+	}
+	if _, hasSlot := promoted["waitlistSlot"]; hasSlot {
+		t.Fatalf("promoted booking status.waitlistSlot = %v, want absent", promoted["waitlistSlot"])
+	}
+	if keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("wl1 must be released once the waitlisted booking is promoted")
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 must remain claimed — handed to the promoted booking, never released back open")
+	}
+
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.waitlistPromoted")
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+	if keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("no wellnessrefund marker may mint for a late cancellation: %s", refundKey)
+	}
+}
+
+// TestCancelBooking_RefusesAForfeitedBooking pins forfeited as terminal on
+// the cancel side: a second CancelBooking on a booking that already
+// forfeited its class price is refused AttendanceRecorded — the same
+// refusal an attended/noShow booking gets — and nothing about the booking
+// moves. Without the guard a re-cancel would trip InvalidState on the
+// missing seat instead, a less useful reason for the same fact.
+func TestCancelBooking_RefusesAForfeitedBooking(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "recancelforfeited")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdrecancelstudio0001", "Recancel Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdrecancelsession001", studioKey, "Recancel Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLRECANCELBKRHJK")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdrecancelbooking001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	seedPostedClassPriceCharge(t, ctx, conn, bookingKey, "BBWELLRECANCELACTHJK", "BBWELLRECANCELTXNHJK", 1500.0)
+
+	submitCancelBookingAt(t, ctx, conn, cp, cons, testutil.GenReqID("wdrecancelfirst00001"), bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q after the late cancel, want forfeited", got)
+	}
+
+	recancel := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdrecancelsecond0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T08:59:30Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
+			forSessionLnkKey(t, bookingKey, sessionKey),
+		}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, recancel)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("CancelBooking on a forfeited booking outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AttendanceRecorded") {
+		t.Fatalf("rejection should be AttendanceRecorded, got %+v", reply.Error)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "forfeited") {
+		t.Fatalf("the rejection must name the booking's actual status, got %+v", reply.Error)
+	}
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a rejected re-cancel must leave the forfeited booking live")
+	}
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q after the rejected re-cancel, want forfeited (unchanged)", got)
+	}
+}
+
+// TestSetBookingAttendance_RejectsAForfeitedBooking is
+// TestSetBookingAttendance_RejectsAWaitlistedBooking's sibling for the other
+// seatless live status: a booking that forfeited its class price inside the
+// late window released its seat at cancellation, so there is nothing to
+// attend or miss — and the carry-forward loop would otherwise write a
+// status with neither .seat nor .waitlistSlot. Refused InvalidState, status
+// unchanged.
+func TestSetBookingAttendance_RejectsAForfeitedBooking(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendforfeited")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendfstudio00001", "Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdattendfsession0001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDFRFHJKMNP")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdattendfbooking0001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	seedPostedClassPriceCharge(t, ctx, conn, bookingKey, "BBWELLATTNDFRFACTHJK", "BBWELLATTNDFRFTXNHJK", 1500.0)
+
+	submitCancelBookingAt(t, ctx, conn, cp, cons, testutil.GenReqID("wdattendfcancel00001"), bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+	before := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := before["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q after the late cancel, want forfeited", got)
+	}
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		attendanceEnv(t, "wdattendfnoshow00001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("marking a forfeited booking = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidState") {
+		t.Fatalf("rejection should be InvalidState, got %+v", reply.Error)
+	}
+	after := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := after["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q, want forfeited (unchanged)", got)
+	}
+	if _, hasFee := after["noShowFeeCents"]; hasFee {
+		t.Fatalf("status.noShowFeeCents = %v, want absent — a rejected mark writes nothing", after["noShowFeeCents"])
+	}
+}
+
+// TestCancelBooking_LateCancelOnAFreeClassStillTombstones pins the other
+// half of "a booking that still owes stays": the late window alone does not
+// keep a vertex. A class that charges this booker nothing has no class price
+// to forfeit, so a late cancel of its seat is an ordinary cancel — booking
+// tombstoned, seat freed, no forfeiture event — and no member ever reads a
+// "class price forfeited" card for a class that was free. Two shapes of
+// free: a class with no price at all, and a resident-rate booking on a class
+// whose residentPriceCents is 0 while its standard priceCents is not — the
+// effective price is the one wellness-ledger's settlement lens would charge,
+// resident price first when the booking's rate is resident and the schedule
+// declares one.
+func TestCancelBooking_LateCancelOnAFreeClassStillTombstones(t *testing.T) {
+	cases := []struct {
+		name     string
+		suffix   string
+		bookerID string
+		leaseID  string
+		session  func(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, studioKey string) string
+		wantRate string
+	}{
+		{
+			name: "no price at all", suffix: "A",
+			bookerID: "BBWELLFREELATEABKRHJ",
+			session: func(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, studioKey string) string {
+				key, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdfreelatesessionA", studioKey, "Free Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, nil)
+				if outcome != processor.OutcomeAccepted {
+					t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+				}
+				return key
+			},
+			wantRate: "standard",
+		},
+		{
+			name: "resident rate on a class whose resident price is zero", suffix: "B",
+			bookerID: "BBWELLFREELATEBBKRHJ", leaseID: "BBWELLFREELATEBLSEHJ",
+			session: func(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, studioKey string) string {
+				key, outcome := createSessionResidentPriced(t, ctx, conn, cp, cons, "wdfreelatesessionB", studioKey, "Residents Free Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500, 0)
+				if outcome != processor.OutcomeAccepted {
+					t.Fatalf("createSessionResidentPriced outcome = %v, want Accepted", outcome)
+				}
+				return key
+			},
+			wantRate: "resident",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupDomainEnv(t)
+			cp, cons := newDomainPipeline(t, ctx, conn, "freelatecancel"+tc.suffix)
+
+			studioKey := createStudio(t, ctx, conn, cp, cons, "wdfreelatestudio"+tc.suffix, "Free Studio")
+			sessionKey := tc.session(t, ctx, conn, cp, cons, studioKey)
+
+			bookerKey := seedIdentity(t, ctx, conn, tc.bookerID)
+			leaseKey := ""
+			if tc.leaseID != "" {
+				leaseKey = seedLease(t, ctx, conn, tc.leaseID, tc.bookerID, true)
+			}
+			bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdfreelatebooking"+tc.suffix, sessionKey, bookerKey, leaseKey)
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+			}
+			if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["rate"].(string); got != tc.wantRate {
+				t.Fatalf("status.rate = %q, want %s (the case must exercise the rate it names)", got, tc.wantRate)
+			}
+
+			cancelReqID := testutil.GenReqID("wdfreelatecancel" + tc.suffix)
+			submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+			if keyExists(t, ctx, conn, bookingKey) {
+				t.Fatalf("a late cancel on a class that charges this booker nothing owes nothing — the booking must be tombstoned, not kept as forfeited")
+			}
+			if keyExists(t, ctx, conn, sessionKey+".seat1") {
+				t.Fatalf("seat1 must be released")
+			}
+			assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+			assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+			assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.bookingCancelled")
+		})
+	}
+}
+
+// TestCancelBooking_LateCancelKeepsAChargedBookingOnAClassSinceRepricedFree
+// pins the other half of "still owes": a class-price charge that already
+// posted is owed whatever the schedule's CURRENT price says. The class is
+// re-priced to free after the charge lands (the shape ReassignSession leaves),
+// and the late cancel still keeps the booking live as forfeited — the debit
+// stands, and the desk can still reach the guest who owes it.
+func TestCancelBooking_LateCancelKeepsAChargedBookingOnAClassSinceRepricedFree(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "latecancelrepriced")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdrepricedstudio0001", "Repriced Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdrepricedsession001", studioKey, "Repriced Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLREPRCEDBKRHJKM")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdrepricedbooking001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	_, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey,
+		"BBWELLREPRCEDACCTHJK", "BBWELLREPRCEDTXNHJKM", 1500.0)
+
+	// The class goes free after the charge posted: rewrite the schedule with
+	// priceCents 0, every other fact unchanged.
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	data, _ := sched["data"].(map[string]any)
+	data["priceCents"] = 0.0
+	seedAspect(t, ctx, conn, sessionKey, "schedule", sched["class"].(string), data)
+
+	cancelReqID := testutil.GenReqID("wdrepricedcancel0001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a posted charge is owed whatever the class costs now — the booking must stay live as forfeited")
+	}
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q, want forfeited", got)
+	}
+	if keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 must be released")
+	}
+	if !keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("the forfeited class-price charge must stand: %s", txKey)
+	}
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
 }

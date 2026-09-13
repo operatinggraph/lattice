@@ -618,9 +618,12 @@ RETURN
 // seat count is an aggregate over the session's whole forSession-in booking
 // set, so this is the package's one lens that needs an AGGREGATING WITH
 // (lease-signing's leaseApplicationCompleteSpec
-// `count(DISTINCT CASE WHEN … END)` shape). Tombstoned bookings never reach
-// the aggregate: Contract #1 isDeleted read-filtering drops them from the
-// walk, so a cancelled seat frees capacity the moment its booking dies.
+// `count(DISTINCT CASE WHEN … END)` shape). The seated count is of bookings
+// whose .status carries a seat, so a released seat frees capacity the moment
+// its holder's status drops the field: a tombstoned booking never reaches the
+// aggregate at all (Contract #1 isDeleted read-filtering drops it from the
+// walk), and a late-cancelled booking kept live as 'forfeited' reaches it
+// without a seat and counts for nothing.
 //
 // THE CAPACITY COMPARISON IS THE GAP. seatedCount < capacity is the same
 // question claim_free_seats asks by enumeration (ddls.go), asked in

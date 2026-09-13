@@ -903,6 +903,39 @@ func TestWellnessBookers_JoinsBookerAndCoveringLocations(t *testing.T) {
 		"the class's own room at depth 0 and its containedIn ancestor both cover the booker")
 }
 
+// TestWellnessBookers_ForfeitedBookingStillCovers is the payoff of keeping a
+// forfeiting late cancel alive: the lens carries no status filter, so a live
+// 'forfeited' booking — no seat, a standing class-price charge — still
+// projects its booker with the class's covering locations, and the desk of
+// the building the class was in can still reach the guest who owes it.
+func TestWellnessBookers_ForfeitedBookingStillCovers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	bookingKey := f.vtx(t, "forfeitbooking", "booking")
+	guestKey := f.vtx(t, "guest", "identity")
+	f.vtx(t, "flow", "session")
+	roomKey := f.vtx(t, "room3", "location")
+	buildingKey := f.vtx(t, "building", "location")
+	f.aspect(t, "forfeitbooking", "status", "bookingStatus", map[string]any{
+		"value": "forfeited", "rate": "standard", "booker": guestKey,
+	})
+	f.edge(t, "bookedBy", "forfeitbooking", "guest")
+	f.edge(t, "forSession", "forfeitbooking", "flow")
+	f.edge(t, "atLocation", "flow", "room3")
+	f.edge(t, "containedIn", "room3", "building")
+
+	rows := f.project(t, wellnessBookersSpec)
+	require.Len(t, rows, 1, "a forfeited booking is a live booking; it projects one row like any other")
+	row := wdRowByKey(rows, bookingKey)
+	require.Equal(t, bookingKey, row["bookingKey"])
+	require.Equal(t, guestKey, row["bookerKey"], "the desk collects from a named person")
+	require.Equal(t, "forfeited", row["status"], "the status word rides along so a reader can tell a forfeit from a seat")
+	require.ElementsMatch(t, []any{roomKey, buildingKey}, row["coveringLocations"],
+		"the class's room and its building still cover the booker who owes for it")
+}
+
 // TestWellnessBookers_TombstonedSessionEmptyCovering proves a booking whose
 // class was called off projects an EMPTY covering set rather than dropping the
 // row: TombstoneSession leaves the booking alive, the walk finds no live
@@ -1359,9 +1392,10 @@ func (f *wdFixture) mkPromotionSession(t *testing.T, name string, capacity int) 
 // edge to its session — the booking-side shape CreateBooking / JoinWaitlist
 // write, which is what the lens aggregates over. cell is the index the booking
 // holds on the session hub: it lands on .status.seat for every seat-holding
-// status (booked, attended, noShow — attendance releases no cell) and on
-// .status.waitlistSlot for a waitlisted one, which is exactly the distinction
-// the lens's two counts read.
+// status (booked, attended, noShow — attendance releases no cell), on
+// .status.waitlistSlot for a waitlisted one, and on neither field for a
+// forfeited one (CancelBooking's late-window upsert drops seat as it releases
+// the cell) — exactly the distinction the lens's two counts read.
 func (f *wdFixture) mkPromotionBooking(t *testing.T, name, status, sessionName string, cell int) {
 	t.Helper()
 	f.vtx(t, name, "booking")
@@ -1369,9 +1403,11 @@ func (f *wdFixture) mkPromotionBooking(t *testing.T, name, status, sessionName s
 		"value":   status,
 		"session": "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName],
 	}
-	if status == "waitlisted" {
+	switch status {
+	case "waitlisted":
 		data["waitlistSlot"] = cell
-	} else {
+	case "forfeited":
+	default:
 		data["seat"] = cell
 	}
 	f.aspect(t, name, "status", "bookingStatus", data)
@@ -1498,6 +1534,29 @@ func TestWellnessWaitlistPromotion_TombstonedBookingNotCounted(t *testing.T) {
 	requireIntColumn(t, v, "seatedCount", 1)
 	requireIntColumn(t, v, "waitlistedCount", 1)
 	require.Equal(t, true, v["missing_promotion"], "the tombstoned booking holds no seat")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessWaitlistPromotion_ForfeitedBookingNotSeated proves the other
+// way a seat comes free: a late-cancelled booking stays LIVE as 'forfeited'
+// (it still owes its class price) but carries no seat, so it reaches the
+// aggregate and counts for nothing — the count is of seat-holders, not of
+// live bookings. The gap opens for the waiting member exactly as it does
+// when the cancelled sibling is tombstoned.
+func TestWellnessWaitlistPromotion_ForfeitedBookingNotSeated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkPromotionSession(t, "forfeitsess", 2)
+	f.mkPromotionBooking(t, "seated", "booked", "forfeitsess", 1)
+	f.mkPromotionBooking(t, "forfeited", "forfeited", "forfeitsess", 2)
+	f.mkPromotionBooking(t, "waiting", "waitlisted", "forfeitsess", 1)
+
+	v := f.projectWaitlistPromotionAt(t, "forfeitsess")[0].Values
+	requireIntColumn(t, v, "seatedCount", 1)
+	requireIntColumn(t, v, "waitlistedCount", 1)
+	require.Equal(t, true, v["missing_promotion"], "the forfeited booking is live but holds no seat")
 	require.Equal(t, true, v["violating"])
 }
 

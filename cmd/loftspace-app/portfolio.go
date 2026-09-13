@@ -157,9 +157,12 @@ const weaverTargetsBucket = "weaver-targets"
 
 // serviceBookingRow is the front-desk-booking-history lens row
 // (packages/front-desk), narrowed to the fields the attach-rate joins/windows
-// on. Status is any of booked/waitlisted/attended/noShow — Waitlisted is
-// excluded at the call site below since the resident never actually got a
-// seat, so it isn't service usage.
+// on. Status is any of booked/waitlisted/attended/noShow/forfeited — a
+// forfeited booking (a late cancel inside the 2-hour window, the class price
+// kept) counts as service usage exactly as a noShow does, the resident having
+// already committed to the seat. Waitlisted is excluded at the call site
+// below since the resident never actually got a seat, so it isn't service
+// usage.
 type serviceBookingRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
 	Status      string `json:"status"`

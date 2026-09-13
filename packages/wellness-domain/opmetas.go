@@ -275,7 +275,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "CancelBooking",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel booking",
-				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded.",
+				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded; inside the two-hour late window of a priced class the seat is released but the class price is forfeited and the booking stays on your record as forfeited.",
 				Icon:        "cancel",
 				Tone:        "destructive",
 				SubmitLabel: "Cancel booking",

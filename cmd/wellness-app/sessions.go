@@ -50,7 +50,9 @@ type sessionProjection struct {
 // is deliberately NOT part of the wellnessSessions lens (the lens engine has
 // no aggregate COUNT, per wellness-vertical-design.md) — this handler derives
 // it here from the wellnessBookings lens, the same client-of-the-lens
-// aggregation idiom cmd/cafe-app's computeTabs uses for its posted-total.
+// aggregation idiom cmd/cafe-app's computeTabs uses for its posted-total. A
+// waitlisted or a forfeited booking holds no seat, so neither counts —
+// see countBookingsBySession.
 type sessionRow struct {
 	SessionKey string `json:"sessionKey"`
 	Name       string `json:"name"`
@@ -75,8 +77,8 @@ type sessionRow struct {
 }
 
 // computeSessions decodes every wellnessSessions row, joins each to its
-// booked seat count (from bookedCounts, which already excludes waitlisted
-// rows — see countBookingsBySession), and sorts by startsAt for a
+// booked seat count (from bookedCounts, which already excludes rows that
+// hold no seat — see countBookingsBySession), and sorts by startsAt for a
 // chronological schedule grid. A row that fails to decode or carries no
 // sessionKey (a tombstoned projection entry) is skipped.
 func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) []sessionRow {
@@ -134,8 +136,11 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 // claim on a waitlist slot, a disjoint dimension entirely (wellness-domain
 // ddls.go) — so it is deliberately excluded here; counting it would make the
 // schedule grid report a session as fuller than its seats actually are the
-// moment anyone joins the waitlist. A row that fails to decode or carries no
-// bookingKey (a tombstoned projection entry) is skipped.
+// moment anyone joins the waitlist. A forfeited booking holds no seat either
+// — the late-cancelled seat was released or handed to a waitlister in the
+// same op that set the status, so the booking row survives with no `seat`
+// field at all. A row that fails to decode or carries no bookingKey (a
+// tombstoned projection entry) is skipped.
 func countBookingsBySession(keys []string, get kvGetter) map[string]int {
 	counts := make(map[string]int)
 	for _, k := range keys {
@@ -147,7 +152,7 @@ func countBookingsBySession(keys []string, get kvGetter) map[string]int {
 		if json.Unmarshal(raw, &p) != nil || p.BookingKey == "" {
 			continue
 		}
-		if p.Status == "waitlisted" {
+		if p.Status == "waitlisted" || p.Status == "forfeited" {
 			continue
 		}
 		counts[p.SessionKey]++
