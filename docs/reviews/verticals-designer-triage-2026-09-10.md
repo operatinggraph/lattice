@@ -280,6 +280,27 @@ none to amend; no lens `Spec` changes, so the refractor corpus pins do not move.
 no no-show-fee parity for a forfeit, no `cancelled` status, no change to the waitlisted or early branches, no
 new op, no lens edit, no front-desk package change.
 
+**Close (2026-09-13).** Shipped `ae197820` (wellness-domain 0.26.0 + edge-manifest 0.17.14 + the wellness
+FE), CI green. Live on the dev stack: a minted guest booked into a $15 class 70 min out, charge posted, late-cancelled
+by the front desk → the booking stays `forfeited` with no seat, the seat cell tombstoned, the schedule reads 1/3 seats,
+the roster shows the FORFEITED badge with no release action, the arrears grid still lists the guest by name at $15, and
+`wellness-bookers` still covers them through the building. Deviations from the verdict, decided at review: (1) **"still
+owes" is priced, not merely late** — a late cancel on a class whose effective price for this booking is 0 (wellness-ledger's
+own rule: `residentPriceCents` for a resident booking when declared, else `priceCents`) or a class-price charge already
+posted (a class re-priced free after charging) keeps the vertex; a free seat tombstones like an early cancel, matching
+the FE's `isLateCancel` conjunct-for-conjunct; (2) the Facet's `edgeEntityBookingsTail` filters `forfeited` — a consumer
+this doc's census missed because it was scoped to `packages/wellness-*`, and the vertex type is anchored by another
+package's lens; (3) the FE's two "one live row per (session, booker)" sets (the schedule's own-status map, the desk's
+book-a-member picker) skip forfeited rows, since the double-book guard is released and the member may hold a fresh booked
+row beside the forfeit. Findings classified: design-gap ×2 (the free-class and the re-priced-charge halves of "owes" —
+the verdict's one-line rule was right and its predicate under-derived); brief-gap ×2 (the Facet tail — a census glob
+shaped by the owning package; the picker set — a released guard invalidates every reader that assumed the guard);
+convention ×2 (a duplicated doc comment; the attendance-refusal pin landed in `refund_marker_test.go`, not beside
+`integration_test.go:611` as the brief said). One vertical-apps dossier entry appended (the released-guard class).
+**Found, not this fire's:** the seed's "$15 guest" `gk12KR…sb5c` is the primordial admin identity (`data.protected`),
+so `CancelBooking` on any of its five bookings is refused at commit (`ProtectedKey` — the booker slot-cell tombstone
+targets a protected root) while `CreateBooking` had accepted it; filed as its own row in `verticals.md`.
+
 ## 4. LoftSpace — "A just-minted applicant with no application is on no staffer's roster"
 
 **Filed (1a8f3c62, the roster-reach designer row):** `applicantRosterRead` anchors an identity on its own key

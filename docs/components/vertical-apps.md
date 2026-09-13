@@ -72,3 +72,10 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   says "could not" may be wrong and the only copy of a minted secret is gone. Minted: LoftSpace RotateClaimKey
   (2026-09-06), caught cold. Check: the throw path of a ceremony or irreversible op says the write may have landed
   and what to do next, in the `withheld` vocabulary.
+- **A released uniqueness guard invalidates every FE set that assumed it — "one live row per (a, b)" is a claim about
+  the guard, not the data.** When an op stops tombstoning a row but still releases the guard that made the pair unique,
+  the member can hold the kept row AND a fresh one; every `Map`/`Set` keyed on the pair (an own-status-by-session map,
+  a "these bookers are seated" picker exclusion) then either shadows the live row or hides the person the desk is
+  trying to serve. Minted: wellness `forfeited` booking (2026-09-13) — two sites, one caught cold. Check: when a script
+  drops a tombstone, grep the FE for every collection keyed on the guard's pair and decide per site whether the kept
+  status is skipped or ranked.
