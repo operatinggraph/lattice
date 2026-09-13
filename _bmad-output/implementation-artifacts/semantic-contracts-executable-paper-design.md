@@ -644,3 +644,145 @@ engine); optionally accept the light §10.8 clarification (staged uncommitted).
 
 **Ratification state: 📐 awaiting-Andrew → ✅ Andrew-ratified** (then the Lattice Steward builds Fire L1, and
 the Verticals lane builds V1–V4 behind the ledger).
+
+---
+
+## 13. Fire V5 — the rent clause carries its term (design + fire brief, 2026-09-13)
+
+**Status: ✅ Winston-ratified — build-ready.** Package-level work on a ratified pattern (no contract, no fork):
+the clause records its own term, the lens compares stored facts, the op does the calendar math. Filed by the
+Vertical PO 2026-09-13 as two `verticals.md` rows that share one mechanism and ship as one fire:
+*"Rent is billed from the day of approval to forever, never from leaseStart to leaseEnd"* (★★★ M) and
+*"A signed renewal's new rent never reaches the bill"* (★★★ S).
+
+### 13.1 Scope sentence (verbatim from the rows)
+
+Row 1 — *the rent clause is minted at approval and charges on a null `chargeValidUntil`, then every lapse —
+nothing reads `.tenancy`* → **clause carries the term; timer-recorded start/end facts.** Row 2 — *`SignRenewal`
+extends `.tenancy.leaseEnd` only; the clause keeps its original `amountCents`* → **re-price / supersede the rent
+clause at signature.** Green bar: a monthly rent clause posts exactly one charge per calendar-month period of
+`[validFrom, validUntil)`, none before `validFrom`, none at or after `validUntil`; a signed renewal yields a
+second clause covering `[old leaseEnd, new leaseEnd)` at the renewal rent, the original clause stopping at the
+old end; the six live clauses converge to this rule without a restart and the four pre-term / post-term live
+charges are reversed.
+
+### 13.2 The shape
+
+- **The term is a fact on the clause.** `clauseTerms` gains `validFrom` / `validUntil` (canonical RFC3339,
+  both-or-neither, `validUntil > validFrom`). `CreateClause` / `SupersedeClause` take them as optional payload
+  strings (`mint_clause`). A clause without a term keeps today's behaviour exactly (bills forever on the 720h
+  cadence) — that arm stays only for the legacy / non-lease population and is closed for rent by 13.2.4.
+- **The gate compares stored facts; the timer records the start.** `clauseSatisfaction`'s monthly arm becomes:
+  `periodStart := CASE chargeValidUntil = null THEN validFrom ELSE chargeValidUntil` (the due date whose lapse
+  bills the period `[periodStart, periodStart + 1 month)`); the charge is due when a recorded lapse reaches
+  `periodStart` (`lapsedAt >= periodStart`, or `chargeValidUntil = null AND validFrom = null` — the untermed
+  arm) **and** `periodStart < validUntil` (or `validUntil = null`). `freshUntil` projects `periodStart` while
+  no recorded lapse reaches it and it is inside the term, else null — so a not-yet-started clause arms an `@at`
+  at `validFrom` (§5.4 of the expiry design: a past deadline fires at once), and a fully-billed clause arms
+  nothing. `MarkExpired` records the scheduled instant (`temporal.go` `expiredAt: p.FireAt`), so
+  `lapsedAt >= validFrom` holds with equality on the start lapse.
+- **`DebitAccount` computes the next due on the anniversary grid, never `postedAt + 720h`, for a termed
+  clause.** With `k` = the period index of the recorded due (`chargeValidUntil`, read via a new
+  `row.clauseKey.status` OptionalRead; absent or before `validFrom` ⇒ `k = 0`), the next due is
+  `validFrom + (k+1) months` — computed from `validFrom` each time, so Jan 31 → Feb 28 → Mar 31 never drifts
+  — and the clause is marked `completed` when that next due reaches `validUntil`. A lapse that would bill a
+  period starting at or after `validUntil` fails `TermExhausted` (defense; unreachable once 13.2.4 has run).
+  Calendar-month addition becomes a sandbox builtin, `time.rfc3339_add_months(s, n)` (day-of-month clamps,
+  the semantics lease-signing's hand-rolled `add_months` already has) — a fourth pure `TimeBuiltins` member
+  beside `rfc3339_add`; the two lease-signing copies switch to it, and no package keeps a hand-kept copy.
+- **Legacy clauses are termed by a gap, not a migration.** `clauseSatisfaction` walks
+  `OPTIONAL MATCH (c)-[:governs]->(l:leaseapp)` and projects `leaseStart`/`termStart`/`leaseEnd` from
+  `l.tenancy`; the new gap `missing_term` (monthly, `validFrom = null`, tenancy present) dispatches
+  `BackfillClauseTerm{clauseKey, leaseAppKey}` — Reads the clause + `.terms` + the lease + `.tenancy`,
+  OptionalReads `.status`. The op stamps `validFrom = leaseStart`, `validUntil = tenancy.termStart` if the
+  lease was renewed (the legacy clause covers the ORIGINAL term only) else `leaseEnd`, and **normalizes the due
+  date** to the anniversary grid: `chargeValidUntil := clamp(periodStart_containing(chargeValidUntil), validFrom,
+  validUntil)`. The monthly charge arm is suppressed while `missing_term` is open (`validFrom <> null OR
+  leaseStart = null`), so a legacy clause never posts one more 720h charge in the seconds before its term lands.
+  Live consequence, per clause (the design's own census, §13.5): Priya's `vigBJ…` and the two May-31 leases
+  re-arm at a past anniversary and bill their current period at once; Jordan's `kaZpA…` normalizes to
+  `validUntil` and stops.
+- **A renewal mints its own clause through the lens, not through `SignRenewal`.** `SignRenewal` records the
+  renewed term on the lease — `.tenancy` gains `termStart` (= the previous `leaseEnd`) and `rentAmount` (the
+  renewal's `.terms.rentAmount`, dollars like `requestedRent`). `leaseRentSettlement` projects
+  `termStart := coalesce(tenancy.termStart, leaseStart)`, `termRentCents := coalesce(tenancy.rentAmount,
+  requestedRent) * 100`, and `missing_clause` becomes *"no live unconditioned monthly clause whose `validFrom`
+  equals `termStart`, and no untermed one"* (the untermed count keeps the gap shut until `BackfillClauseTerm`
+  has run, so a renewal can never double-cover a period). Its `CreateClause` dispatch templates
+  `validFrom: row.termStart`, `validUntil: row.leaseEnd`, `amountCents: row.termRentCents` — all anchor-own
+  aspect columns, never walk-reached (the `_packages` OPTIONAL-hop-Params dossier class); the gap requires
+  `leaseStart <> null`, so no dispatch ever carries a null template. `SupersedeClause` is NOT the mechanism: the
+  original clause still owes its remaining periods at signature, so it stays live and expires by its own
+  `validUntil`; two clauses govern one lease, each converging alone.
+- **The four live over-charges are reversed by operator `CreditAccount` with a memo** (the ledger is
+  append-only; the operator path has no balance ceiling): Priya `PjL5…` ×2 ($2,400 each, billed 08-03 and
+  09-02 before the 09-08 start), `HSir…` ×1 ($2,100, 08-03 before the 08-28 start), Jordan `mcZN…` ×1
+  ($2,050, 09-05 — the Aug-6 period was already billed 08-06; the term ended 09-06). Under-billed past periods
+  (three clauses minted late) are not caught up — not filed, not a harm.
+
+### 13.3 Verified touch-list (checked live 2026-09-13)
+
+- `internal/starlarksandbox` `TimeBuiltins()` — add `rfc3339_add_months`; test beside the existing four.
+- `packages/semantic-contracts/scripts.go:87` (`mint_clause` — validFrom/validUntil), new `BackfillClauseTerm`
+  branch in `execute`; `ddls.go:217-274` (`clauseTerms` schema + PermittedCommands), `:304-357`
+  (`clauseStatus` PermittedCommands + `BackfillClauseTerm`), the clause vertexType DDL's PermittedCommands +
+  examples; `lenses.go:150-287` (`clauseSatisfactionSpec` + BodyColumns `:43`), `:74-147`
+  (`leaseRentSettlementSpec` + BodyColumns `:59`); `targets.go` (`missing_term` gap, `missing_clause` params +
+  reads, `missing_charge` OptionalReads); `package.go:80` + `manifest.yaml:2` (0.4.8 → 0.5.0);
+  `permissions.go` (operator grant for `BackfillClauseTerm`).
+- `packages/loftspace-ledger/scripts.go:571-604` (`DebitAccount` due-date rule), `ddls.go:115-136`
+  (description), `package.go:57` + `manifest.yaml:2` (0.5.1 → 0.6.0).
+- `packages/lease-signing/renewal_scripts.go:478-489` (`SignRenewal` `.tenancy` upsert), `scripts.go:515-560`
+  + `renewal_scripts.go:103-140` (replace `days_in_month`/`add_months` copies with the builtin),
+  `ddls.go:132-138` (tenancy description), `package.go:92` + `manifest.yaml:2` (0.32.2 → 0.33.0).
+- Corpus pins that read the two lenses' shape (update to the real analysis output, never hand-derived):
+  `internal/refractor/branch_decomposition_corpus_census_pins_test.go:33,90`,
+  `actor_walk_scope_corpus_census_test.go:125,177`, `label_derivation_corpus_census_test.go:196,263`,
+  `grouping_reduction_corpus_census_test.go:99,156`, `actor_onekey_corpus_census_test.go:103,139`,
+  `anchor_hopindex_corpus_census_test.go:97,162`; `packages/semantic-contracts/lens_cypher_test.go:87,478-497`.
+- `docs/components/_packages.md` (packages section for semantic-contracts / loftspace-ledger / lease-signing
+  — the term rule), `packages/semantic-contracts/README` if present.
+
+### 13.4 Precedents · increments · gotchas
+
+Precedents: `lapsedAt >= chargeValidUntil` + `freshUntil` (this lens, Fire V3); `BackfillLeaseTerms` (a gap
+that backfills a missing fact, `targets.go`); `amountCents` derived from the clause's own `.terms`
+(`loftspace-ledger/scripts.go` "amountCents provenance") — `validFrom` is read the same way; `add_months`
+clamping (`lease-signing/scripts.go:534`); `count(DISTINCT CASE …)` (`leaseRentSettlementSpec`);
+`.tenancy` `make_aspect_upsert` (`SignRenewal`).
+
+Increments, each with its green check: **(1)** builtin + test (`go test ./internal/starlarksandbox/ ./internal/processor/`);
+**(2)** semantic-contracts: terms + gate + `missing_term` + `BackfillClauseTerm` + coverage gap, unit + lens +
+integration tests (`go test ./packages/semantic-contracts/`), corpus pins (`go test ./internal/refractor/...`);
+**(3)** loftspace-ledger due-date rule (`go test ./packages/loftspace-ledger/`); **(4)** lease-signing
+`SignRenewal` term record + builtin switch (`go test ./packages/lease-signing/ ./internal/leaseconvergence/...`
+incl. the build-tagged `make test-*-convergence` harnesses that reach lease-signing); **(5)** full gates
+(`go build ./...`, `make vet`, `golangci-lint run ./...`, every `scripts/lint-*.go`, `go test ./...`);
+**(6)** live: `make reinstall-package` ×3, observe the six `clauseSatisfaction` rows converge, submit the four
+credits, read the ledger.
+
+Gotchas: three manifest + `Version` bumps in lockstep (`lint-package-version`); the corpus pins are the
+record of the real analysis — read each failing pin's actual output; `row.<col>` Params refuse a null column
+(dossier); a declared read's absence is a correctness error, so `.status` is an OptionalRead everywhere;
+`equalsAny` makes `null = null` TRUE (an untermed clause on a tenancy-less lease counts as "the term clause")
+while `compareAny` fails closed on nil — every new predicate is written against that table; the `count(t.key)`
+in `clauseSatisfaction` is a non-DISTINCT product (`branch_decomposition_equivalence_test.go:1368`) — the added
+`governs` hop is 1:1, so the product is unchanged, and the pin says so; **`make up*` never from the worktree**.
+Dossier entries copied: `_packages` *OPTIONAL-hop Params* (above), *cross-package guard survives the migration
+window both ways* (the untermed arm stays live for the legacy population until `BackfillClauseTerm` lands —
+positive vector for both shapes), *shared-vertex repoint needs a content-and-revision gate* (`.status` is a
+declared read, so the normalization's update is revision-pinned by the Processor); `weaver` *shared fixture
+always supplying an OPTIONAL input* (one lens vector per absent field: no tenancy, no term, no lapse, no
+status). Standing checklist walked: the new state (the term) has a lifetime — written once at mint or backfill,
+never reset, carried through supersede by re-mint; each negative test's positive vector lands first.
+
+Non-goals: under-billing catch-up; proration at a mid-month move-in; the FE (the ledger already shows every
+charge and its clause prose); `DecideLeaseApplication` (it stamps `.tenancy` unchanged — `termStart` is only
+ever written by a renewal, and its absence means "the original term").
+
+### 13.5 Census (the design's premise, run 2026-09-13 against the live stack)
+
+6 live monthly clauses, all untermed, all governing an approved leaseapp with `.tenancy`; 9 `authorizedBy`
+transactions; 1 renewal vertex, `status: open` (no renewal has ever been signed, so no lease carries a
+`termStart`). Approved leaseapps without `.tenancy`: 0 (`fuW7…` is tombstoned). Over-charges by the term rule:
+4 (listed in 13.2). Re-run: `nats … kv ls core-kv | grep -E '^vtx\.clause\.[^.]+$' | wc -l` → 6.
