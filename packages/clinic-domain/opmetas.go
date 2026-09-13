@@ -155,7 +155,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"reason":{"type":"string","title":"Reason","description":"Optional visit reason; omitted clears the existing one."}},` +
 				`"required":["appointmentKey","provider","patient","startsAt","endsAt"]}`,
 			FieldDescriptions: map[string]string{
-				"appointmentKey": "The appointment being rescheduled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
+				"appointmentKey": "The appointment being rescheduled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered. A cancelled / completed / no-show appointment cannot be moved (TerminalStatus).",
 				"provider":       "The provider the appointment is with — a rescheduled appointment keeps its provider, so a different one is rejected.",
 				"patient":        "The appointment's own patient — you can only reschedule your own appointment.",
 				"startsAt":       "The new start time. Must land in the future and align to the 15-minute grid.",
@@ -183,9 +183,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.appointment.{payload.appointmentKey:id}.withProvider.provider.{payload.provider:id}",
 					"lnk.appointment.{payload.appointmentKey:id}.forPatient.patient.{payload.patient:id}",
 				},
-				// The self-scope ownership probe, same shape and rationale as
-				// CreateAppointment's above.
-				OptionalReads: []string{"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}"},
+				// The current .status is OPTIONAL — absence is the never-set
+				// (scheduled) case; a terminal value refuses the move
+				// (TerminalStatus). The self-scope ownership probe is the same
+				// shape and rationale as CreateAppointment's above.
+				OptionalReads: []string{
+					"{payload.appointmentKey}.status",
+					"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}",
+				},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
 				// for the operator role (actor_holds_operator).
@@ -226,14 +231,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// reason.
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
-				`"status":{"type":"string","title":"Status","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"default":"cancelled","description":"The appointment's new status. Self-service patients may only cancel; front-desk/provider staff may set any status."},` +
+				`"status":{"type":"string","title":"Status","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"default":"cancelled","description":"The appointment's new status. Self-service patients may only cancel; front-desk/provider staff may set any status. completed / noShow only once the visit has started."},` +
 				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
 				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
 				`"note":{"type":"string","title":"Note","description":"Optional status note (e.g. cancellation or no-show reason)."}},` +
 				`"required":["appointmentKey","status","provider","patient"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being updated — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status.",
+				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status. completed / noShow are accepted only once the visit's start time has passed (NotYetStarted before then); cancel has no such clock.",
 				"provider":       "The appointment's own provider — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual provider.",
 				"patient":        "The appointment's own patient — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual patient.",
 				"note":           "Optional status note, kept with the appointment.",
@@ -298,7 +303,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"required":["appointmentKey","status","note"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being corrected — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "The outcome that actually happened: completed, cancelled or noShow. The appointment must already be in one of those three states.",
+				"status":         "The outcome that actually happened: completed, cancelled or noShow. The appointment must already be in one of those three states; completed / noShow only once the visit's start time has passed (NotYetStarted before then).",
 				"note":           "Required reason for the correction, kept on the appointment alongside the status it replaced.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -310,7 +315,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
-				Reads:       []string{"{payload.appointmentKey}"},
+				// The appointment's own .schedule is REQUIRED: a completed /
+				// noShow correction reads the visit's startsAt (NotYetStarted
+				// before it, enforce_started) and faults on its absence.
+				Reads: []string{"{payload.appointmentKey}", "{payload.appointmentKey}.schedule"},
 				// The current .status is OPTIONAL for the same reason
 				// SetAppointmentStatus declares it so — absence is a legitimate
 				// state of the appointment, answered here by this op's own

@@ -156,9 +156,14 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   deterministic link keys) so the move is conflict-checked against the right books — without them a move
   could silently land in an occupied slot, bypassing the double-book defense. Releases the grid cells the
   appointment no longer needs and claims the newly-covered ones in the same atomic batch — a rejected
-  claim leaves the original booking's cells fully intact.
+  claim leaves the original booking's cells fully intact. A terminal appointment (`cancelled` /
+  `completed` / `noShow`) is never moved (`TerminalStatus`) — its cells were released at the terminal
+  transition, so a move would re-claim them for a visit nobody holds.
 - **`SetAppointmentStatus`** — `{appointmentKey, status, note?, noShowFeeCents?}`. Upserts `.status`.
-  `status` ∈ `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `note` is an optional audit
+  `status` ∈ `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `completed` and `noShow` are
+  accepted only once the visit has started — `op.submittedAt` at or after `.schedule.startsAt`, the same
+  soft caller-supplied clock the past-time guard reads — and refused `NotYetStarted` before it (a
+  no-show bills its fee the moment it is recorded); `cancelled` carries no clock. `note` is an optional audit
   reason (cancel / no-show, for billing + records), distinct from the `.schedule` visit `reason`; an
   omitted note clears any prior one (the note belongs to the transition it was recorded with).
   Transitioning to `noShow` also stores a `noShowFeeCents` amount on `.status` — caller-supplied
@@ -166,7 +171,9 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   lens reads to post a `DebitAccount` charge. The **terminal** statuses `{cancelled, completed, noShow}`
   are **final**: re-setting the same terminal value is idempotent, but changing a terminal status to a
   *different* one is rejected (`TerminalStatus`) so a finished / cancelled visit can never silently
-  revert; non-terminal statuses move freely.
+  revert; non-terminal statuses move freely. `CorrectAppointmentStatus` (terminal→terminal) reads the
+  same clock for a `completed` / `noShow` target, so a cancelled future visit cannot reach either by
+  correction.
 - **`RecordEncounter`** — `{appointmentKey, summary, assessment?, plan?, followUpRequested?, followUpDate?}`.
   Upserts the post-visit record as two sibling aspects, split along the sensitivity boundary because step 6.5
   encrypts a whole aspect's `data` map. `.encounter` holds `summary`/`assessment`/`plan` — RAW PHI, **SENSITIVE**,

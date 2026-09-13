@@ -643,10 +643,14 @@ async function submitCatalogOp(envelope) {
 // patient double-book across providers (PatientDoubleBook), an
 // out-of-availability-window booking (OutsideHours), a date-specific time-off
 // overlap (ProviderUnavailable), a past-dated booking (ScheduleInPast), a
-// misaligned 15-minute-grid time (SlotGridViolation), and an over-long appointment
-// (AppointmentTooLong) are the domain rejections CreateAppointment /
-// RescheduleAppointment raise. Anything else passes through.
+// misaligned 15-minute-grid time (SlotGridViolation), an over-long appointment
+// (AppointmentTooLong), and a move of an already-final appointment (TerminalStatus)
+// are the domain rejections CreateAppointment / RescheduleAppointment raise.
+// Anything else passes through.
 function friendlyBookingRejection(msg) {
+  if (msg.indexOf("TerminalStatus") !== -1) {
+    return "This appointment is already cancelled, completed or marked no-show and can no longer be moved. Refresh to see its current status.";
+  }
   if (msg.indexOf("SlotConflict") !== -1) {
     return "That time overlaps another appointment for this provider. Pick another slot.";
   }
@@ -4922,11 +4926,14 @@ function statusClass(status) {
 
 // ---- Appointment lifecycle (the day-of-visit transitions) ----
 //
-// SetAppointmentStatus is unconditioned (re-runnable), so the transitions below are
-// UI affordances, not server gates: a scheduled appointment can be confirmed /
-// completed / no-showed; a confirmed one completed / no-showed; completed · cancelled
-// · noShow are terminal. Cancel and the no-show transition prompt for confirmation;
-// forward progress (confirm / complete) proceeds directly.
+// SetAppointmentStatus is unconditioned (re-runnable), so most transitions below
+// are UI affordances, not server gates: a scheduled appointment can be confirmed /
+// checked in; completed · cancelled · noShow are terminal. Complete and no-show ARE
+// server-gated on the clock — the op refuses them NotYetStarted while the visit is
+// still ahead (packages/clinic-domain/ddls.go) — so the buttons appear only once
+// startsAt has passed; the mirror of that guard is what lifecycleTransitions'
+// `started` argument carries. Cancel and the no-show transition prompt for
+// confirmation; forward progress (confirm / complete) proceeds directly.
 
 const TERMINAL_STATUSES = ["completed", "cancelled", "noshow"];
 const STATUS_LABEL = { confirmed: "Confirm", checkedIn: "Check in", completed: "Complete", noShow: "No-show", cancelled: "Cancel" };
@@ -4935,13 +4942,19 @@ const STATUS_PAST = { confirmed: "confirmed", checkedIn: "checked in", completed
 // lifecycleTransitions returns the SetAppointmentStatus targets reachable from the
 // current status (excluding Cancel, which renders as its own button alongside).
 // The day-of-visit flow is scheduled → confirmed → checkedIn → completed; check-in
-// and complete/no-show stay reachable from the earlier active states too.
-function lifecycleTransitions(status) {
+// and complete/no-show stay reachable from the earlier active states too. `started`
+// is whether the visit's startsAt has passed: until it has, completed / noShow are
+// withheld (the op refuses them NotYetStarted), so an early arrival can be confirmed
+// or checked in but a visit is never completed or missed ahead of itself.
+function lifecycleTransitions(status, started) {
   const s = (status || "").toLowerCase();
-  if (s === "scheduled") return ["confirmed", "checkedIn", "completed", "noShow"];
-  if (s === "confirmed") return ["checkedIn", "completed", "noShow"];
-  if (s === "checkedin") return ["completed", "noShow"];
-  return []; // completed / cancelled / noShow are terminal
+  let next = [];
+  if (s === "scheduled") next = ["confirmed", "checkedIn", "completed", "noShow"];
+  else if (s === "confirmed") next = ["checkedIn", "completed", "noShow"];
+  else if (s === "checkedin") next = ["completed", "noShow"];
+  // completed / cancelled / noShow are terminal: nothing reachable.
+  if (started === false) next = next.filter((st) => st !== "completed" && st !== "noShow");
+  return next;
 }
 
 // setStatus drives SetAppointmentStatus to the given status and reloads via onDone.
@@ -4988,7 +5001,11 @@ async function setStatus(a, status, onDone, opts) {
     );
     const msg = rejectionMessage(reply);
     if (msg) {
-      toast("Could not update status — " + msg, "err");
+      // NotYetStarted: the card was drawn before startsAt passed (the buttons
+      // appear only once it has) or the desk's clock runs ahead of the server's.
+      toast("Could not update status — " + (msg.indexOf("NotYetStarted") !== -1
+        ? "this visit has not started yet; complete or no-show it once its start time has passed."
+        : msg), "err");
       return;
     }
     toast("Appointment " + (STATUS_PAST[status] || status) + ".", "ok");
@@ -5002,7 +5019,7 @@ async function setStatus(a, status, onDone, opts) {
 // reload via onDone. Returns a fragment (empty for a terminal appointment).
 function lifecycleButtons(a, onDone) {
   const frag = document.createDocumentFragment();
-  for (const st of lifecycleTransitions(a.status)) {
+  for (const st of lifecycleTransitions(a.status, isPast(a.startsAt))) {
     const b = document.createElement("button");
     b.className = st === "noShow" ? "ghost danger" : "ghost";
     b.textContent = STATUS_LABEL[st];
@@ -5200,9 +5217,11 @@ async function submitReschedule(ev) {
     // read-posture (a): the appointment's current .schedule (required to compute
     // released/claimed cells) + the withProvider/forPatient endpoint-validation
     // links (require_matching_provider/patient, ddls.go) — script-read-posture-
-    // design.md §13. The new interval's slot-claim keys are no longer declared
-    // here: the DDL's own derive_reads(op) (packages/clinic-domain/ddls.go)
-    // computes them server-side from this same payload (Contract #2 §2.5 class (g)).
+    // design.md §13. (d): its .status, absence-tolerant (never set = scheduled;
+    // a terminal value refuses the move, TerminalStatus). The new interval's
+    // slot-claim keys are no longer declared here: the DDL's own derive_reads(op)
+    // (packages/clinic-domain/ddls.go) computes them server-side from this same
+    // payload (Contract #2 §2.5 class (g)).
     const reply = await submitOp(
       "RescheduleAppointment",
       "appointment",
@@ -5213,7 +5232,7 @@ async function submitReschedule(ev) {
         "lnk.appointment." + bareId(a.appointmentKey) + ".withProvider.provider." + bareId(a.providerKey),
         "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
       ],
-      { asSelf },
+      { optionalReads: [a.appointmentKey + ".status"], asSelf },
     );
     const msg = rejectionMessage(reply);
     if (msg) {

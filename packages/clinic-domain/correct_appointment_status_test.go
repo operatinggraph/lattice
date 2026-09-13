@@ -32,27 +32,36 @@ import (
 )
 
 // clCorrectReads returns the Reads/OptionalReads pair
-// CorrectAppointmentStatus's dispatcher declares (app.js openCorrectStatus):
-// the appointment is required, .status is an optionalRead — its absence is a
-// legitimate state of the appointment, answered by the op's own NotTerminal
-// rejection rather than a correctness error. No .schedule or
-// withProvider/forPatient links: a terminal→terminal move releases no cells,
-// so there is no provider/patient to validate.
+// CorrectAppointmentStatus's dispatcher declares (the descriptor's
+// Dispatch.Reads, app.js openCorrectStatus): the appointment and its .schedule
+// are required (a completed / noShow correction reads the visit's startsAt),
+// .status is an optionalRead — its absence is a legitimate state of the
+// appointment, answered by the op's own NotTerminal rejection rather than a
+// correctness error. No withProvider/forPatient links: a terminal→terminal
+// move releases no cells, so there is no provider/patient to validate.
 func clCorrectReads(apptKey string) (reads, optionalReads []string) {
-	return []string{apptKey}, []string{apptKey + ".status"}
+	return []string{apptKey, apptKey + ".schedule"}, []string{apptKey + ".status"}
 }
 
 // clCompleteFirstTerminal drives an appointment to its FIRST terminal status
 // via SetAppointmentStatus — the precondition every correction test needs, and
-// the boundary this op sits behind.
+// the boundary this op sits behind. Submitted after every appointment this
+// file books (2026-07-2x): completed / noShow are accepted only once the
+// visit has started (NotYetStarted before, integration_test.go's
+// TestClinic_NotYetStartedGuard).
 func clCompleteFirstTerminal(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, status, providerKey, patientKey string) {
 	t.Helper()
 	reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
-	clSubmitOpt(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", "appointment",
+	clSubmitAt(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", "appointment",
 		`{"appointmentKey":"`+apptKey+`","status":"`+status+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		reads, optionalReads, processor.OutcomeAccepted)
+		clCorrectedAfterVisits, reads, optionalReads, processor.OutcomeAccepted)
 }
+
+// clCorrectedAfterVisits is the op.submittedAt every correction in this file
+// carries: after each appointment it books (2026-07-2x), since a completed /
+// noShow correction is accepted only once the visit has started.
+const clCorrectedAfterVisits = "2026-07-31T00:00:00Z"
 
 // submitCorrectStatusAs submits CorrectAppointmentStatus as an arbitrary actor
 // on the standing path (no authContext) — mirrors submitSetAppointmentSiteAs
@@ -60,13 +69,19 @@ func clCompleteFirstTerminal(t *testing.T, ctx context.Context, conn *substrate.
 func submitCorrectStatusAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, status, note, actorKey string, want processor.MessageOutcome) {
 	t.Helper()
+	submitCorrectStatusAt(t, ctx, conn, cp, cons, label, apptKey, status, note, actorKey, clCorrectedAfterVisits, want)
+}
+
+func submitCorrectStatusAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, status, note, actorKey, submittedAt string, want processor.MessageOutcome) {
+	t.Helper()
 	reads, optionalReads := clCorrectReads(apptKey)
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
 		OperationType: "CorrectAppointmentStatus",
 		Actor:         actorKey,
-		SubmittedAt:   clSubmittedAnchor,
+		SubmittedAt:   submittedAt,
 		Class:         "appointment",
 		Payload: json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"` + status +
 			`","note":"` + note + `"}`),

@@ -1315,12 +1315,13 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 	// noShowSettlement target never converging (0 ledger transactions) — the
 	// whole post-visit half of the app is dark on a fresh world. CreateAppointment
 	// requires a future startsAt (enforce_future), so both are minted on the
-	// day+1/day+2 grid like the two above, then immediately walked to a terminal
-	// status — SetAppointmentStatus has no time gate (it's a soft creation-time-only
-	// guard), so a same-fire completed/noShow transition is exactly what the
-	// day-of-visit staff flow (cmd/clinic-app's setStatus) already does. Distinct
-	// hours off the two live bookings above keep all four appointments' 15-minute
-	// slot claims from colliding on the same provider/patient hub.
+	// day+1/day+2 grid like the two above, then walked to a terminal status.
+	// SetAppointmentStatus accepts completed / noShow only once the visit has
+	// started (NotYetStarted before — the same soft, caller-supplied submittedAt
+	// clock enforce_future reads), so the seed states when each visit happened:
+	// submittedAt = the visit's endsAt, the moment the desk would have recorded it.
+	// Distinct hours off the two live bookings above keep all four appointments'
+	// 15-minute slot claims from colliding on the same provider/patient hub.
 	completedStart := futureDayAt(1, 9)
 	completedEnd := completedStart.Add(30 * time.Minute)
 	completedApptID := substrate.DeriveNanoID("showcase-appointment-osei-completed", "")
@@ -1339,7 +1340,7 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 						slotClaimKeys(rileyPatientKey, completedStart, completedEnd)...),
 					buildingKey, linkKey(oseiProviderKey, "practicesAt", buildingKey)),
 			})
-		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
+		submitOpAt(ctx, conn, adminKey, "SetAppointmentStatus", "appointment", completedEnd,
 			map[string]any{
 				"appointmentKey": completedApptKey, "status": "completed",
 				"provider": oseiProviderKey, "patient": rileyPatientKey,
@@ -1379,7 +1380,7 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 						slotClaimKeys(rileyPatientKey, noShowStart, noShowEnd)...),
 					buildingKey, linkKey(providerKey, "practicesAt", buildingKey)),
 			})
-		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
+		submitOpAt(ctx, conn, adminKey, "SetAppointmentStatus", "appointment", noShowEnd,
 			map[string]any{
 				"appointmentKey": noShowApptKey, "status": "noShow",
 				"provider": providerKey, "patient": rileyPatientKey,
@@ -2202,6 +2203,13 @@ const (
 )
 
 func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, payload map[string]any, hint *processor.ContextHint) *processor.OperationReply {
+	return submitOpAt(ctx, conn, actorKey, operationType, class, time.Now(), payload, hint)
+}
+
+// submitOpAt is submitOp with an explicit op.submittedAt — for the seed's
+// recorded history, where an op's clock guard reads submittedAt against a
+// scheduled time (a visit completed at its end, not at seed time).
+func submitOpAt(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, submittedAt time.Time, payload map[string]any, hint *processor.ContextHint) *processor.OperationReply {
 	deadline := time.Now().Add(projectionLagWindow)
 	for {
 		// A denied op commits nothing (no tracker), so every attempt is a
@@ -2216,7 +2224,7 @@ func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType
 			OperationType: operationType,
 			Actor:         actorKey,
 			Class:         class,
-			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			SubmittedAt:   submittedAt.UTC().Format(time.RFC3339),
 			Payload:       payloadBytes,
 			ContextHint:   withDeclaredEnumerations(operationType, actorKey, hint),
 		}

@@ -531,10 +531,13 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"link (appointment→provider). Both links follow Contract #1 §1.1 (the later-arriving appointment is the " +
 			"source). RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt (re-deriving " +
 			"remindAt = startsAt − 24h so the clinic-reminders @at re-arms for a not-yet-sent reminder), leaving the " +
-			"links + status untouched; an omitted reason clears it (the caller carries the existing reason). " +
+			"links + status untouched; an omitted reason clears it (the caller carries the existing reason); a " +
+			"terminal appointment is never moved (TerminalStatus). " +
 			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, checkedIn, completed, " +
 			"cancelled, noShow}, with an optional audit note (a cancel / no-show reason, stored on .status distinct " +
-			"from the .schedule visit reason). Transitioning to noShow also stores a noShowFeeCents amount on .status " +
+			"from the .schedule visit reason). completed / noShow are accepted only once the visit has started " +
+			"(op.submittedAt at or after .schedule.startsAt; NotYetStarted before) — cancelled carries no clock. " +
+			"Transitioning to noShow also stores a noShowFeeCents amount on .status " +
 			"(caller-supplied positive number, or a 2500 default when omitted) — the billing consequence a no-show " +
 			"otherwise lacked; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge. " +
 			"The terminal statuses {cancelled, completed, noShow} are FINAL: " +
@@ -543,7 +546,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"move freely. CorrectAppointmentStatus{appointmentKey, status, note} is the explicit repair for a WRONG " +
 			"terminal call — the move SetAppointmentStatus refuses (an auto no-show on a patient who was actually " +
 			"seen). It transitions ONLY between the terminal values (NotTerminal if the appointment never reached one; " +
-			"InvalidArgument for a non-terminal target), touches no slot-claim cells (the first terminal transition " +
+			"InvalidArgument for a non-terminal target; NotYetStarted for a completed / noShow target ahead of the " +
+			"visit's startsAt), touches no slot-claim cells (the first terminal transition " +
 			"already released them, so it takes no provider/patient), and REQUIRES an audit note. It records the " +
 			"overwritten value as .status.correctedFrom and emits clinic.appointmentStatusCorrected. Staff-only " +
 			"(operator / front-of-house / the appointment's own bound provider, workplace-confined exactly as " +
@@ -716,7 +720,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 				Name: "SetAppointmentStatus — mark a no-show",
 				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "status": "noShow",
 					"provider": "vtx.provider.<providerNanoID>", "patient": "vtx.patient.<patientNanoID>"},
-				ExpectedOutcome: "Validates the appointment is alive + provider/patient match its withProvider/forPatient links, " +
+				ExpectedOutcome: "Validates the appointment is alive + provider/patient match its withProvider/forPatient links " +
+					"and that the visit has started (op.submittedAt at or after .schedule.startsAt; NotYetStarted otherwise), " +
 					"then upserts the .status aspect {value: noShow, noShowFeeCents: 2500} (the default, since noShowFeeCents " +
 					"was omitted) and releases the appointment's held slot-claim cells. Emits clinic.appointmentStatusSet. " +
 					"clinic-ledger's clinicNoShowSettlement lens picks up the fee and posts a DebitAccount charge once the " +
@@ -2936,6 +2941,25 @@ def enforce_future(starts_at, submitted_at):
     if not (submitted < starts_at):
         fail("ScheduleInPast: startsAt " + starts_at + " is not in the future (submitted " + submitted + ")")
 
+def enforce_started(appt_key, status, sched, submitted_at):
+    # A visit is completed or missed only once it has started: both outcomes are
+    # facts about the scheduled time having passed (a noShow bills its fee at once
+    # via clinic-ledger's noShowSettlement), so a future visit is refused
+    # NotYetStarted — on the first terminal transition (SetAppointmentStatus) and
+    # on a terminal→terminal correction alike, or a cancel-then-correct would
+    # reach the same outcome by the side door. Cancel carries no clock — it is the
+    # legitimate before-the-visit terminal. The boundary is inclusive (submitted
+    # AT startsAt has started). Same soft submittedAt guard as enforce_future
+    # (caller-supplied, normalized to canonical UTC; the stored startsAt is
+    # canonical UTC, so the compare is lexical == chronological).
+    if status not in ("completed", "noShow"):
+        return
+    if sched == None or sched.isDeleted or sched.data.get("startsAt") == None:
+        fail("InvalidState: " + appt_key + ".schedule is missing startsAt; cannot mark " + status)
+    submitted = time.rfc3339_utc(submitted_at)
+    if submitted < sched.data.get("startsAt"):
+        fail("NotYetStarted: appointment " + appt_key + " starts at " + sched.data.get("startsAt") + " (submitted " + submitted + "); cannot mark " + status + " before the visit starts")
+
 def optional_bool(p, name):
     # Default False (absent / null / non-bool → False).
     if not hasattr(p, name):
@@ -3420,6 +3444,21 @@ def execute(state, op):
         # overlaps a blackout range) — the move must also avoid the provider's time-off.
         enforce_time_off(provider, starts_at, ends_at)
 
+        # A terminal appointment (cancelled / completed / noShow) is never moved:
+        # its cells were released at the terminal transition, so a move would
+        # re-claim provider + patient cells for a visit nobody holds. Absence of
+        # .status is the never-set (scheduled) case, so the read is absence-tolerant.
+        # A concurrent cancel racing this read is the same unconditioned-upsert
+        # posture SetAppointmentStatus's own TerminalStatus guard carries.
+        # read-posture: (d) declared in contextHint.optionalReads by
+        # RescheduleAppointment's dispatcher (cmd/clinic-app/web/app.js
+        # submitReschedule)
+        cur_status = kv.Read(appt_key + ".status")
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+            if cur_val in TERMINAL_STATUSES:
+                fail("TerminalStatus: appointment " + appt_key + " is " + str(cur_val) + " (terminal); cannot reschedule — cancelled/completed/noShow are final")
+
         # Release-old / claim-new, in the SAME atomic batch: read the appointment's
         # CURRENT .schedule to know which cells it holds today, discretize both the
         # old and new intervals, and diff. Cells held by BOTH sets need no mutation —
@@ -3586,7 +3625,9 @@ def execute(state, op):
             require_matching_patient(appt_id, patient)
             # read-posture: (a) declared in contextHint.reads by SetAppointmentStatus's
             # dispatcher (cmd/clinic-app/web/app.js setStatus), only on the terminal branch
-            mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
+            sched = kv.Read(appt_key + ".schedule")
+            enforce_started(appt_key, status, sched, op.submittedAt)
+            mutations = mutations + release_cells_mutations(provider, patient, sched)
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
         return {"mutations": mutations, "events": events,
@@ -3643,6 +3684,11 @@ def execute(state, op):
         note = optional_string(p, "note")
         if note == None:
             fail("InvalidArgument: note: required for a status correction")
+
+        # read-posture: (a) declared in contextHint.reads by CorrectAppointmentStatus's
+        # dispatcher (the descriptor's Dispatch.Reads, cmd/clinic-app's catalog form)
+        # — the visit's clock for a completed / noShow correction (enforce_started).
+        enforce_started(appt_key, status, kv.Read(appt_key + ".schedule"), op.submittedAt)
 
         # correctedFrom keeps the overwritten value on the aspect itself — the
         # only trace of the wrong call once the upsert lands. A same-value
