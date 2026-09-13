@@ -44,9 +44,12 @@ for op-only single-actor plans** — unbuilt, no consumer. The §2/§3.2/§3.3/�
 struck in place below. The renewal build itself (R1 dispatch wiring → R2 package → R3 FE) is
 **lane-consolidated into this lane** (Andrew, anti-ping-pong; the verticals row was removed).
 
-**Next:** Fires 1–5 shipped (op-DDL `effects`; `__effect` confidence window; the pure `planner` library;
-`mode`/`candidates`/`goal` parsing + shadow compare; `mode:"planned"` candidate-selection dispatch). The
-Lattice Steward builds **Fire 6** (goal-regression synthesis dispatch) next from §8.
+**Next:** Fires 1–8 shipped. **Fire 9 (the Augur floor) is 🏗️ building** — its brief is the last build note
+in this doc (2026-09-13). Of Fire 9's three deliverables, (a) `unplannable`(extended)/`exhausted` → Augur
+shipped inside the two escalation-episode fires (`weaver-escalation-episode-three-doors-design.md`,
+`weaver-exhausted-gap-leg-boundary-design.md`; `augur.model` is threaded end to end — `strategist.go`
+`augurEscalation` → `.gap.model` → `external.augur` params → the adapter, `FakeAugur` honouring it); the fire
+builds (b) plan-shaped proposals dispatched per leg and (c) the playbook-promotion proposal.
 
 **🏗️ Fire 6 CHECKPOINT (2026-07-04, Increment 1 of 2):** Increment 1 shipped — the runtime op-effects
 catalog Fire 4/5's own comments flagged as missing (Fire 1 validated `Effects` at install time but never
@@ -407,3 +410,127 @@ E2E (ephemeral stack): the per-fire fixtures above, plus the standing invariant 
 byte-identical to pre-change dispatch" asserted across the suite. Migration: none — every surface is
 additive + opt-in; no data migration; `__effect` keys appear lazily; a rollback is `mode` removal (the
 next episode uses the table; in-flight episodes are mark-pinned and drain unchanged).
+
+### Fire 9 brief (build note, 2026-09-13 — Steward, remote fire `claude/relaxed-rubin-e79fru`)
+
+**1. Scope sentence (verbatim, §8 row 9).** *`unplannable`(extended)/`exhausted` → Augur; plan-shaped
+proposals via Fire-6 path; promotion proposals. Acceptance: no-plan fixture → proposal; approved plan dispatches
+once; promotion at threshold.* Narrowed by what shipped since ratification: deliverable (a) is built and pinned
+(`escalation_doors_internal_test.go`, `augur_escalation_internal_test.go` — `TestAugurEscalation_ExhaustedTriggerSymmetric`,
+`goal_dispatch_internal_test.go`'s no-derivable-plan escalation), and `augur.model` reaches the adapter
+(`strategist.go` `augurEscalation` `params["model"]` → `ddls.go` `.gap.model` + `external.augur` `params.model` →
+`fake_augur.go` `proposalFor`). This fire builds **(b)** and **(c)**. "Via the Fire-6 path" is read under the
+2026-07-05 amendment (per-leg execution through the frozen action vocabulary; no plan vertices), so a plan-shaped
+proposal executes **leg by leg on the `augurDispatch` target**, each leg an ordinary `proposedOp` episode.
+
+**2. Verified touch-list (checked live at `0775e9a`).** `internal/bridge/augur_proposal.go:25-48` (`AugurProposal`;
+gains `Steps []AugurStep{Action, Params}`, additive), `:54-76` codec unchanged; `internal/bridge/fake_augur.go:60-79`
+trigger subjects (+ a plan subject), `:158-211` `proposalFor` (+ the two-step benign plan; `SetProposal` override
+already admits any shape). `packages/augur/ddls.go`: DDL doc `:60-68` + description `:86-115` + `InputSchema`/
+`FieldDescription`/`Examples` `:117-228`; `RecordProposal` `:539-654` (decode `:589-606`, §5 boundary `:607-622`,
+aspect writes `:630-641`); `revalidate_for_approval` `:408-444`; `RecordProposalDispatch` `:732-784` (guard `:761`,
+flip `:772-778`); `CreateAugurReasoningClaim` actor guard `:463` (the shape the new op's guard mirrors).
+`packages/augur/lenses.go`: `augurDispatchPending` `:47-62` (`BodyColumns` `:58`) + spec `:95-107`; `augurProposals`
+spec `:134-151`. `packages/augur/permissions.go` (one grant per op — +1). `packages/augur/package.go:106` +
+`manifest.yaml:2` (0.5.1 → 0.6.0; `PermittedCommands` `ddls.go:85` +1). `scripts/verify-package-augur.go:51`
+`augOps` (+1; its permission-vertex count follows). `internal/weaver/augur_dispatch.go:42-115`
+(`buildProposedOpPlan`; `:112-113` requestId + followUp), `:175-190` `recordDispatchOutcomePlan`.
+`internal/weaver/actuator.go:201-212` (`deriveProposalDispatchRequestID` / `…FlipRequestID`; `deriveID` `:225` folds a
+`uint64` — leg 0 must stay byte-identical to today). `internal/weaver/state.go:118-129` (`mark`; +`ProposalLeg int
+json:"proposalLeg,omitempty"`), `create :168-181`, `replace :250-261`, `deleteRevision :304`; `recordEffectClose
+:873-920`, `effectWindowSize :780`, `effectStats :782-793`. `internal/weaver/evaluator.go`: `dispatchGap :380`,
+mark read `:506-514`, leg release `:536-545` (the seam the proposal-leg release sits beside), `fireEpisode :1085`
+(`replace :1148`, `create :1175`), gap-close credit `:1508`, `releaseCompletedLeg :1723` (credit `:1796`),
+`advanceReleasedLeg :1950`. `internal/weaver/reconciler.go`: reclaim leg release `:1166-1198`, `replace :1490`.
+`internal/weaver/strategist.go:669-706` (`augurEscalation` — the target meta key + actor the promotion op mirrors).
+`internal/weaver/planner_shadow.go:178` (`rankCandidates` — the only `__effect` window reader; the threshold reads the
+same store). `cmd/loupe/review.go:287-304` (`augurProposalCols` +`proposedSteps`/`dispatchLeg`). Docs:
+`docs/contracts/10-orchestration-augur.md:44-67` (additive clause), `docs/components/augur.md:97-118,161-177`,
+`docs/components/weaver.md:1328` (Actions row) + `:1334` (status row). Tests to extend: `augur_dispatch_internal_test.go`,
+`packages/augur/proposal_test.go`, `packages/augur/lens_cypher_test.go`, `internal/bridge/fake_augur_test.go`,
+`internal/augurconvergence/augurconvergence_test.go` (a plan-shaped episode: proposal lands `pending` with N steps).
+
+**3. Precedents to mirror.** Per-leg release: `releaseCompletedLeg`'s **marked** branch (`deleteRevision` at
+`markRev`, conflict → leave it) then fall through as a fresh episode, at BOTH seams (lane 1 `:536`; reclaim `:1166`).
+Leg-scoped ids: `deriveID(ns, handle, uint64(leg))` (the `revision` argument), namespaces unchanged. Mark field:
+`EscalatedFrom`/`Escalation` at all three writers (`state.go:168/:250`, `evaluator.go:1148/:1175`,
+`reconciler.go:1490`). New op's actor guard: `CreateAugurReasoningClaim`'s `op.actor != primordialActor["weaver"]`.
+Promotion emission: the temporal lane's markless deterministic-requestId submit (`MarkExpired`,
+`docs/components/weaver.md` §"Lane 3") — `act.submit`, no mark, no booking. Lens booleans with `AND`/`<>`:
+`packages/cafe-domain/lenses.go:347-348`. Legacy-tolerant DDL reads: `RecordProposalDispatch`'s
+`rd["reviewedAt"] if … in rd else ""` (`ddls.go:764`).
+
+**4. Increment order + green checks.** **Inc A — plan-shaped proposals** (builder tier **opus**: a new mark field, a
+new release seam, a DDL state machine). Shape (Winston, decided): the structured output gains an ordered `steps`
+list; `RecordProposal` normalises every proposal to `.proposed {action, params, steps}` where `steps` has ≥1 entry
+(≤8) and `action/params` mirror `steps[0]`; the §5 boundary runs per step (vocab + default-deny scope; a failing
+step names its index) and `revalidate_for_approval` re-runs it per step; `.review` gains `leg` (legs dispatched so
+far, 0 at record); `augurDispatchPending` projects `proposedSteps` + `dispatchLeg` and `augurProposals` the same;
+`buildProposedOpPlan` dispatches `steps[dispatchLeg]` (null `steps` → the legacy `proposedAction/proposedParams`,
+leg 0) under `deriveProposalDispatchRequestID(handle, leg)` with the flip carrying `leg`; `RecordProposalDispatch`
+refuses a `leg` ≠ `review.leg` (`InvalidDispatchTransition`), advances `leg` and stays `approved` while legs remain,
+flips `dispatched` + stamps `dispatchedAt` on the last, and an `invalid` outcome on any leg invalidates the whole
+proposal (no half-plan continues); the mark carries `proposalLeg`, and a `proposedOp` mark whose `proposalLeg` <
+the row's `dispatchLeg` is released (revision-conditioned) and the next leg dispatched fresh — at lane 1 and at the
+reclaim. Ordering: Weaver publishes every op to ONE `ops.<lane>` (`actuator.go:113`) and the Processor drains a
+lane serially, so leg N+1 (published after leg N's flip re-projected the row) is processed after leg N; a leg's
+success is not verified (fire-and-forget, as today's single-step dispatch) — a rejected leg leaves the origin gap
+violating, which re-escalates and a fresh proposal supersedes. Green: `go test ./internal/weaver/ ./internal/bridge/
+./packages/augur/ -count=1`; revert-proofs: the third mark writer's threading, the leg guard in the DDL, the lane-1
+release, the reclaim release, the per-step scope check (a foreign key in step 2 alone → invalid); a legacy-shape
+vector (no `steps`, no `leg`) dispatches exactly as before. **Inc B — promotion** (**opus**: a new emission seam +
+latch): after a close credit lands for a `mode:"planned"` gap (`:1508` gap-close, `:1796` leg release), read that
+ref's `__effect` window; when it holds `effectWindowSize` entries and every one is closed, submit
+`RecordPromotionProposal` (new augur op, Weaver directOp, actor-guarded) under `deriveID("promotion:",
+targetId+"\x00"+gap+"\x00"+ref, 0)` with no mark — the op mints `vtx.augurproposal.<handle>` (handle deterministic
+from the same triple, CreateOnly = the durable latch) with `.gap {targetId, entityId: <the target's meta key>,
+gapColumn, trigger: "promotion"}`, `.proposed {action: "promotePlaybook", params: {targetId, gapColumn, actionRef,
+window, closed}, steps: []}`, `.rationale`, `.confidence {score: 1.0}`, `.provenance {model: "weaver"}`, `.review
+{state: pending, leg: 0}`, `forCandidate`/`forTarget` links to the target meta; an in-memory once-latch per triple
+keeps repeats off the wire (a repeat collapses on the tracker anyway). `augurDispatchPending`'s `violating` becomes
+`(review.state = "approved") AND (gap.trigger <> "promotion")` — an approved promotion is a recorded, human-ratified
+recommendation for the package author, never a dispatch. Green: a fixture that closes one goal leg K times emits
+exactly one proposal (K−1 closes emit none; a 21st close emits none; `resetConfidence` then K more emits none — the
+handle collapses); the lens vector pins `violating=false` for an approved promotion. **Then:** `go build ./...`,
+`make vet`, `golangci-lint run ./...`, every `scripts/lint-*.go` STRICT (`lint-weaver-classify-by-shape`,
+`lint-conventions`, `lint-package-standard`, `lint-package-version` with `DIFF_BASE`), `internal/refractor` corpus
+census pins (`go test ./internal/refractor/ -run Census -count=1` under `POSTGRES_TEST_DSN` — the lens edits move
+column counts), `make test-augur-convergence`, `make test-control-plane-authz`, full `go test ./... -p 4` with
+`POSTGRES_TEST_DSN`. Docs + the contract clause land with Inc B. One cold **opus** adversarial pass over the whole
+diff at close.
+
+**5. In-scope gotchas.** Package edit ⇒ manifest + `Version` bump in lockstep, `verify-package-augur` `augOps` +
+permission count, `PermittedCommands` +1. The contract clause is additive and lands with the build (CLAUDE.md's
+2026-09-01 exception: an observable promise the runtime now keeps) — `📐` banners are not used for it. No
+history-narrating comments. A weaver fixture `targetId` ≤ 20 chars. Read-posture: every `kv.Read` the new op adds
+is `(a)` with the key in Weaver's `contextHint.reads`. Dossier entries that bind (`docs/components/weaver.md`
+§"Review keeps catching", verbatim leads + checks): (1) *A gap class is decided by the dispatch's SHAPE, never by
+its action name … for every new seam that fires an episode, name the classifier it calls and the pacing rule it
+inherits* — the proposal-leg release fires nothing itself; the fresh leg goes through `planGap`/`fireEpisode`
+(CAS-create, `proposedOp`'s collapse-only reclaim class). (3) *A shared test fixture that always supplies an
+OPTIONAL input pins only the supplied case … require one vector that omits each* — `steps`, `leg`, `proposalLeg`
+are all optional on legacy documents: one vector omits each. (5) *A value grammar extended at a shared resolver
+reaches EVERY field that resolver serves* — a step's params pass the same raw-string refusals as a single proposal's
+(`validateProposedDispatch`), per step. (6) *A Health issue key is a LATCH …* — no new issue key here. (12) *A new
+field on a record is a claim about every WRITER of it … grep every writer, list them, name which pin covers each*
+— `mark.ProposalLeg`: three writers, three pins. Standing checklist items 1–6 walked; #1 (the once-latch: created
+on first emission, reset on restart — harmless, the vertex is the durable latch; the `leg` counter: created at
+record, carried through review, advanced by the flip, terminal at `len(steps)`), #3 (every plumbing increment
+revert-proved — the `steps` threading, the `leg` threading, the mark field), #5 (one deterministic handle, one
+writer — the promotion vertex is CreateOnly under a single Weaver submitter).
+
+**6. Adjacent finds.** No `packages/*/targets.go` declares `Goal:` or `Mode:` (census, 2026-09-13): the promotion
+producer has no production goal-mode gap to fire on today — engine-complete and fixture-exercised, the posture
+Fires 4–5 shipped under; not a defect, recorded here. Loupe's review view renders `proposedParams`; the plan's
+`steps` column reaches its wire shape in this fire, its rendering is the Loupe lane's (`cmd/loupe/web`) — a
+column, not a defect.
+
+**7. Non-goals.** `augur.autoApply` (Andrew-gated); a real model-backed adapter; effects-hold leg release for a
+proposal (no row predicate exists for the origin candidate on the `augurDispatch` row — recorded above as the
+ordering rule instead); `candidates` pkgmgr authoring; the reserved `plan-<hash>` shape; any change to the two
+escalation doors or their pacing.
+
+**Scope-diff gate:** parts 2–4 trace to §8 row 9's three deliverables — (a) verified shipped and narrowed out, (b)
+and (c) built; "via Fire-6 path" resolved by the ratified amendment to per-leg execution, no plan vertices; nothing
+substituted. Dependencies both ways: the two escalation-episode designs' seams are live at head (part 2); nothing
+in Fires 1–8 is edited.
