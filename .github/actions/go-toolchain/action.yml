@@ -1,0 +1,64 @@
+name: Go toolchain
+description: >-
+  Installs the pinned Go toolchain and restores the two Go caches under
+  SEPARATE keys, because they are determined by different things: the module
+  cache is a pure function of go.sum and is therefore identical in every job,
+  while the build cache holds compiled packages and test binaries and is
+  therefore specific to the set of packages ONE job compiles.
+
+inputs:
+  build-cache-key:
+    description: >-
+      Job-unique name for this job's Go build cache. Leave empty to install the
+      toolchain and the module cache with no build cache at all — the right
+      setting for a job whose verdict must not depend on what a previous run
+      happened to compile, or one that compiles nothing worth keeping.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version: "1.26"
+        check-latest: true
+        # setup-go's built-in cache keys GOMODCACHE *and* GOCACHE together on
+        # go.sum alone, so all of this workflow's jobs share one key — and
+        # actions/cache never rewrites a key it hit. The entry is therefore
+        # written once, by whichever job first reaches its post step on a fresh
+        # go.sum, and never refreshed: the cheapest job wins that race (a `go
+        # list` job needs seconds), so what every other job restores is a
+        # module cache plus a build cache holding almost nothing it can reuse,
+        # and each recompiles the whole dependency tree from source. The two
+        # caches are split below instead, each keyed on what actually
+        # determines its contents.
+        cache: false
+
+    - name: Restore the Go module cache (one entry, shared by every job)
+      # Content is exactly what go.sum names, so one entry serves the whole
+      # workflow; the prefix fallback keeps a go.sum edit from re-downloading
+      # every unchanged module. Module contents are hash-verified by the
+      # toolchain, so a partial restore cannot be wrong, only incomplete.
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          gomod-${{ runner.os }}-
+
+    - name: Restore this job's Go build cache
+      # The run id makes every run's primary key a miss, so this job always
+      # saves what it just compiled and the entry tracks the tree instead of
+      # freezing at whatever the first run held. The fallbacks then hand this
+      # job — and only this job — its own most recent build cache: first from
+      # the same go.sum, then from any earlier one, since the Go build cache is
+      # content-addressed and a stale entry is ignored rather than trusted.
+      if: inputs.build-cache-key != ''
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/go-build
+        key: gobuild-${{ runner.os }}-${{ inputs.build-cache-key }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+        restore-keys: |
+          gobuild-${{ runner.os }}-${{ inputs.build-cache-key }}-${{ hashFiles('go.sum') }}-
+          gobuild-${{ runner.os }}-${{ inputs.build-cache-key }}-

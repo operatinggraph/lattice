@@ -81,6 +81,16 @@ on:
 #                         EXACTLY `go list ./...`, so a newly added package
 #                         that isn't sorted into any shard fails CI loudly
 #                         instead of silently skipping                (no Docker)
+#
+# Every job installs Go through ./.github/actions/go-toolchain, which pins the
+# toolchain version in one place and keys the Go MODULE cache (a function of
+# go.sum, so one shared entry) apart from each job's BUILD cache (a function of
+# the packages that job compiles, so one entry per job, rolled every run). A
+# job's compile cost is therefore paid once and reused by that same job's next
+# run; see the action for why the toolchain's own bundled cache cannot do this.
+# Two jobs deliberately take no build cache — lint-static, whose verdict must
+# not depend on what an earlier run compiled, and unit-shard-coverage, which
+# compiles nothing.
 jobs:
   lint-build:
     runs-on: ubuntu-latest
@@ -88,10 +98,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: lint-build
 
       - name: Build
         run: make build
@@ -160,10 +169,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-          check-latest: true
+      # No build-cache-key: golangci-lint's verdict must not depend on what a
+      # previous run compiled (see the Lint step's skip-cache note below), so
+      # this job installs the toolchain and the module cache only and compiles
+      # everything it analyses in this run.
+      - uses: ./.github/actions/go-toolchain
 
       - name: Lint
         # skip-cache: a restored analysis cache makes the verdict depend on
@@ -512,10 +522,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: stack-gates
 
       - name: Bring up Docker stack + run primordial bootstrap
         run: make up
@@ -608,10 +617,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: convergence
 
       - name: Run lease-convergence suite (Story 14.5 — external-I/O idempotency + convergence)
         # Boots Processor + Refractor + Loom + Weaver + the live bridge in-process
@@ -692,10 +700,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-1
 
       - name: Run shard-1 tests (unit + integration)
         # -p 4: up to four test packages run concurrently. Every embedded
@@ -737,10 +744,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-refractor
 
       - name: Run internal/refractor tests (the package that made unit-1 the pole)
         # Split off unit-1 (see the jobs comment above): this package alone
@@ -786,10 +792,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-2
 
       - name: Run shard-2 tests (unit + integration)
         env:
@@ -825,10 +830,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-3
 
       - name: Run shard-3 tests (unit + integration)
         env:
@@ -864,10 +868,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-4
 
       - name: Run shard-4 tests (unit + integration)
         env:
@@ -901,10 +904,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: unit-natsperm
 
       - name: Run the NATS permission-matrix suite (own -parallel budget)
         # This package gets its own invocation for one reason: -parallel.
@@ -939,10 +941,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: edge-browser-store
 
       - name: Allow Chrome's sandbox to start
         # The runner image ships Chrome but, being Ubuntu 23.10+, restricts
@@ -965,10 +966,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-          check-latest: true
+      # No build-cache-key: this job only runs `go list`, which compiles
+      # nothing worth carrying between runs.
+      - uses: ./.github/actions/go-toolchain
 
       - name: Assert the unit jobs' package globs union to exactly `go list ./...`
         # A fast (no Docker) guard against silent coverage loss: a package
@@ -1037,10 +1037,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-toolchain
         with:
-          go-version: "1.26"
-          check-latest: true
+          build-cache-key: edge-consumer-parity
 
       - uses: actions/setup-node@v4
         with:
