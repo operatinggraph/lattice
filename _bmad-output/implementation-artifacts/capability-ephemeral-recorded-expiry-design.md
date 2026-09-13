@@ -595,3 +595,119 @@ surface — §6.11 (`06-capability-kv.md:385-388`) says the cypher *"evaluates s
 rejection on temporal grounds belongs to the operation's own logic"*, which is this design's placement
 argument in the contract's own words; and no lint or text pin keys on the spec (`lint-lens-anchors.go:36-48`
 fires only on a ranged hop inside a negation; the cypher carries no literal `%`).
+
+---
+
+## 15. Fire brief (build note, 2026-09-13) — one fire, Inc 0 → 1 → 2 → 3
+
+**Base:** `971e836` (main). Fire branch `claude/relaxed-rubin-kj4qv4` (remote container; `agents/steward/REMOTE.md`).
+Landing shape: **hold the branch, merge once when the whole fire is reviewed and green** — main never partial.
+
+**1. Scope sentence (verbatim, §0 + board row).** *The one lens still reading the clock — the auth-plane
+`capabilityEphemeral` — replaces `task.data.expiresAt > $now` with a read of the `freshnessExpiry` marker the
+two task-anchored Weaver targets already write on every task at its deadline; the café stale-tab lens converts
+the same way, and a corpus-wide census pin then refuses any lens that references `$now`, blocking, with zero
+debt.* Green bar: §12's per-increment acceptance.
+
+**2. Verified touch-list (checked live at base).**
+- `packages/orchestration-base/lenses.go:446-497` — `const capabilityEphemeralSpec`; `$now` at `:451,:459,:472`;
+  doc paragraph `:432-440`; `fmt.Sprintf` idiom `:232-245` / `:264-277`; lens literal `:39-55`.
+- `packages/orchestration-base/mark_expired.go:13` (`freshnessExpiryAspectDDL`), `:20-43` (doc, `expiredAt` at
+  `:40-43`), `:138` (`PermittedCommands: MarkExpired`).
+- `packages/orchestration-base/lens_cypher_test.go:3-13` (header rule — its "myTasks and capabilityEphemeral still
+  read the clock" sentence is already half-stale: `myTasksSpec` references no `$now`, only capabilityEphemeral
+  does), `:44` `unrNow`, `:97-118` `recordLapse`, `:234-251` `projectIdentitySpec(…, now)`, `:288` / `:308` the two
+  existing ephemeral vectors, `:599-624` `TestTaskDeadlineLenses_ReferenceNoClockParameter`.
+- `packages/orchestration-base/manifest.yaml:2` + `package.go:48` — `0.7.18` → **0.7.19**.
+- `packages/cafe-domain/lenses.go:16` (`StaleTabSettlementTarget`), `:69` (`BodyColumns` incl. `freshUntil`),
+  `:389-405` (`var staleTabSettlementSpec = fmt.Sprintf(…, maxSettleRetries)`; `$now` at `:397,:398,:401`).
+- `packages/cafe-domain/lens_cypher_test.go:100-108` (`projectAt`, tab spec), `:351-360` (`projectStaleAt(…, now)`),
+  `:376+` the stale-tab vectors. `manifest.yaml:2` + `package.go:94` — **`0.12.2` → `0.12.3`** (the body's
+  `0.11.31 → 0.11.32` rotted; the version moved under it).
+- `internal/refractor/ruleengine/full/params.go:32-61` `ReferencesParam(name) (referenced, exhaustive bool)`.
+- `internal/refractor/label_derivation_corpus_census_test.go:616-681` `forEachCorpusCypher(t, visit(name, spec,
+  rule, aggregate, personal))`; floor + by-name failure precedent `auth_plane_narrowing_census_test.go:414-440`.
+- `internal/refractor/ruleengine/full/aspect_expression_shapes_test.go` — walked-node aspect reads exist inside a
+  `collect` (`:91-126`) and `byTarget` 4-deep reads on the anchor (`:151-343`); **no case reads a walked node's
+  aspect inside an inline `OPTIONAL MATCH … WHERE NOT (a.asp.data.x >= a.data.y)`** — Inc 0's sibling.
+- C14 files supplying `now` for this lens (live lines): `full/bootstrap_e2e_test.go:78,:184-190,:210`;
+  `full/hopindex_test.go:99-121` (hand-copied replica, three `> $now`); `full/capability_ephemeral_queued_role_contract_test.go:56,:120,:183`;
+  `full/capability_lens_contract_test.go:238,:424`; `full/branch_decomposition_equivalence_test.go:1139,:1316,:1381`;
+  `pipeline/anchor_derivation_differential_test.go:168,:172`; `projection/footprint_classifier_test.go:244,:256`;
+  `refractor_capability_multi_e2e_test.go:313` (comment names the old predicate).
+- `internal/refractor/pipeline/sweep_verdict_recorded_expiry_test.go:117` — `TestSweepVerdict_StraddlingADeadlineIsNotADivergence`
+  (reads the shipped spec from `pkgregistry`, projects at `sweepBefore`/`sweepAfter`, asserts `divergenceNone`).
+- `internal/refractor/refractor_claim_batch_real_op_with_ephemeral_e2e_test.go:63` — real-op + live
+  `capabilityEphemeral` pipeline precedent for the `MarkExpired` retraction e2e.
+- `internal/refractor/pipeline/evaluate.go:851-862` — production params (`now`, `projectedAt`, `actorKey`).
+- `internal/processor/step3_auth_capability.go:357-359` — the lookup-time `expiresAt` gate (unchanged; the widened
+  member is denied here); `step3_auth_capability_test.go:459`.
+- Docs: `docs/components/weaver.md:225-232` (recorded-fact paragraph — gains the observer sentence);
+  `docs/components/refractor.md` dossier §"Review keeps catching" (standing rule names the census shape);
+  `packages/orchestration-base/lenses.go:432-440` + `mark_expired.go:20-43` doc rewrites.
+- Corpus pins that name `capabilityEphemeral` and must hold unchanged: `label_derivation_corpus_census_test.go:254`,
+  `branch_decomposition_corpus_census_pins_test.go`, `grouping_reduction_corpus_census_test.go`,
+  `actor_walk_scope_corpus_census_test.go`, `actor_onekey_corpus_census_test.go`, `anchor_hopindex_corpus_census_test.go`
+  (+ `auth_plane_narrowing_census_test.go` enumerates it as an auth-plane aggregate).
+
+**3. Precedents to mirror.** Predicate + `fmt.Sprintf` splice: `unroutedTasksSpec` (`lenses.go:232-245`). Marker
+fixture: `recordLapse` (`lens_cypher_test.go:97-118`). Clock-free projection helper: `projectStaleAssigned`
+(`:329-345`). Structural no-clock pin: `TestTaskDeadlineLenses_ReferenceNoClockParameter` (`:605-624`). Corpus
+census: `forEachCorpusCypher` + the floor/by-name shape of `auth_plane_narrowing_census_test.go:414-440`.
+Sweep-verdict regression: `sweep_verdict_recorded_expiry_test.go:117`. Real-op e2e:
+`refractor_claim_batch_real_op_with_ephemeral_e2e_test.go:63`. Café conversion: the parent's Inc 3 shape on
+`unroutedTasksSpec`. Greenfield: none.
+
+**4. Increment order + runnable green checks.**
+- **Inc 0** (sonnet): premises C1/C2 re-run at base — **held** (6 lines / 2 lenses; `$projectedAt` only
+  `rbac-domain/lenses.go:114`); C7/C8 are live-stack censuses, not reproducible in the container (recorded as
+  such — the engine + sweep pins carry the acceptance). Add the walked-node inline-WHERE `NOT (…>=…)` case
+  (present marker → excluded; absent marker → kept) to `aspect_expression_shapes_test.go`.
+  `go test ./internal/refractor/ruleengine/full/ -run 'TestAspectExpr' -count=1`.
+- **Inc 1** (opus — posture-changing, auth-plane lens): §3.1 predicate via `fmt.Sprintf` splicing
+  `freshnessExpiryAspectDDL`; doc rewrites (`lenses.go:432-440`, `mark_expired.go:28-33` observer sentence,
+  `lens_cypher_test.go:3-13`); `projectIdentitySpec` stops taking `now` for the ephemeral spec (myTasks keeps its
+  injected-`now` helper only if its spec references it — it does not; drop the param there too and pin
+  `myTasks` no-clock alongside, or leave `myTasks` on a separate helper: builder's call, recorded); §10 vectors
+  (nine rows × three arms for lapsed/unlapsed); population-coverage pin; `capabilityEphemeral` into
+  `TestTaskDeadlineLenses_ReferenceNoClockParameter`; C14 vectors (bootstrap_e2e split `taskexpired` +
+  `taskexpiredUnmarked`, hopindex replica + comment, remove inert `now` where passed for this lens alone,
+  rewrite the `:313` comment); sweep-verdict sibling on `capabilityEphemeral`; `MarkExpired` retraction e2e;
+  0.7.19. Checks: `go test ./packages/orchestration-base/ -count=1`; `go test ./internal/refractor/... -count=1`
+  (with `POSTGRES_TEST_DSN`); `go test ./internal/processor/ -run Capability -count=1`;
+  `DIFF_BASE=971e836 go run ./scripts/lint-package-version.go`; the six corpus pins above green unchanged.
+- **Inc 2** (sonnet): §3.4's three edits on `staleTabSettlementSpec` (`%[1]s` = `StaleTabSettlementTarget`,
+  `%[2]d` = `maxSettleRetries`); `projectStaleAt` loses `now`; vectors (not lapsed / lapsed / moved later /
+  legacy `staleAt` absent — the THEN-branch null pin / lapsed-and-marked all three occurrences agree);
+  0.12.3. `go test ./packages/cafe-domain/ -count=1`.
+- **Inc 3** (sonnet): `internal/refractor/lens_clock_reference_corpus_census_test.go` — `now` `(false,true)`
+  everywhere, `projectedAt` referenced exactly by `{capabilityRoleIndex}`, floor ≥ 60; `weaver.md` observer
+  sentence; `refractor.md` census mention. `go test ./internal/refractor/ -run 'Census|Corpus' -count=1`.
+- Fire gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+  `go run ./scripts/lint-lens-anchors.go`, `go test ./... -p 4` with Postgres up; build-tagged harnesses reached:
+  `make test-lease-convergence` (the marker's monotone-max pins), `make test-unrouted-convergence`.
+
+**5. In-scope gotchas + dossier entries.**
+- Package edits bump manifest AND `Version` (CLAUDE.md); no history comments; a lens MATCH/WHERE edit is a
+  corpus edit — run the refractor census pins, not just the package suite (`_packages.md` dossier).
+- `_packages.md`: *A lens that reads a RECORDED fact depends on whoever arms the timer that records it — couple
+  the two populations in one fragment* → the population-coverage pin (§10) is that coupling, executable.
+- Refractor dossier, standing rule: *a new per-lens analysis ships its corpus census in the same fire, reusing
+  `forEachCorpusCypher` … through the real analysis (never a grep of cypher text)*; *a fail-closed posture
+  proved on the DELIVERY axis is not proved on the PROJECTION axis* (§5: listed-but-denied is the projection
+  axis; name it in the test); *an absence gate over a resolved-set field asserts both vectors* (no-marker AND
+  empty-`byTarget` rows pinned).
+- Weaver dossier: *A shared test fixture that always supplies an OPTIONAL input pins only the supplied case* →
+  `now` is REMOVED from the ephemeral helper, never defaulted.
+- Standing checklist #3 (every fix proven by reverting it — the builder plants the old predicate in a scratch
+  copy, never the shared tree), #2 (every census a premise — C1/C2 re-run; C7/C8 not reproducible here, stated),
+  #4 (the marker write is the retraction transport — the e2e crosses it), #6 (the hopindex replica is a
+  precedent carrying debt: a copy the census cannot see; say so in its comment).
+
+**6. Adjacent finds.** None filed at scoping. `lens_cypher_test.go:11-13`'s stale claim about `myTasks` reading
+the clock is absorbed into Inc 1's header rewrite.
+
+**7. Non-goals.** `myTasks` semantics (expiry-inclusive stays); `$projectedAt AS projectedAt` in
+`capabilityRoleIndex` (pinned, not converted); `MarkExpired`; the Processor gate; any contract; hoisting the
+predicate into a `WITH` stage (§3.1.1 — measured, not hoisted); the live-stack p95 measurement (§3.1.1) and
+C7/C8 re-census, which need the Mac dev stack and are recorded below as pending observation, not deferred work.
