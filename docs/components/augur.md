@@ -124,7 +124,8 @@ episode under a leg-scoped requestId, the `RecordProposalDispatch` flip advances
 proposal flips `dispatched` on the last leg; legs are ordered, each fires at most once, and a leg's
 success is not verified by the dispatch (a rejected leg leaves the origin gap violating, which
 re-escalates). A **promotion** proposal is Weaver-authored (no model call): a `mode:"planned"` gap
-whose `__effect` window for one actionRef is complete with every episode closed makes Weaver submit
+whose `__effect` window for one of its derived legs (a catalog ref or a candidate, never a declared
+action) is complete with every episode closed makes Weaver submit
 `RecordPromotionProposal` once per (target, gap, actionRef); its candidate is the target's own meta
 vertex, its action `promotePlaybook`, and it is never dispatched — an approval is a human-ratified
 recommendation to promote the chain to a static playbook entry.
