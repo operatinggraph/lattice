@@ -824,7 +824,11 @@ exists in the remote container (`REMOTE.md` §3); the rolling order for a live d
 `lint-package-version`, because `main` had meanwhile taken commits the local gate's merge-base predated, and the
 gate holds that a change under `internal/pkgmgr` may alter edge-manifest's generated read-grant lens; every other
 job, the convergence suite with the new e2e included, was green. `0abb51c` bumps edge-manifest to 0.17.10 and
-un-reddens `main`. The `--no-ff` merge is so `main` never carries the widened contract clause without the
+un-reddens `main`: run 1751 went red on two jobs in packages this fire's code does not reach
+(`TestAsyncConvergence_NoDoubleDispatch_AcrossSweepTick`, run alone by the make target's second command with the
+identity envelope lens lagging past four unwrap attempts while the Weaver sweep re-dispatched; and
+`TestStructuralPauseRecovery` over `widget_read`), both green on the one permitted re-run and three times each
+locally — the Whetstone's open "suite reddens under parallel load" row, shape (c). Run 1751 attempt 2 is green. The `--no-ff` merge is so `main` never carries the widened contract clause without the
 mechanism that makes it true (the fire branch's first commit is the contract text, which the exception says lands
 *with* the build; on the branch it precedes the build by two commits, which the merge collapses).
 
