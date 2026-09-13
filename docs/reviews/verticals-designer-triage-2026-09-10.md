@@ -250,6 +250,36 @@ proof: late-cancel a guest's booked seat on the dev stack → the guest stays in
 the standing charge, and the seat is bookable.
 **Size S (pkg) + S (FE) · `📋 ready` · Winston-adjudicated.**
 
+### `forfeited` booking status fire brief (build note, 2026-09-13)
+
+Compressed S+S brief; scope = the verdict above, verbatim (*a booking that still owes stays*: the `booked` +
+`is_late_cancel` branch of `CancelBooking` upserts `status=forfeited` without `seat` instead of tombstoning;
+every other branch keeps tombstoning). Census re-run live at selection by a read-only scout plus a lead
+re-grep: every §3 anchor holds unmoved ([ddls.go:4193, 4219, 4237, 4254, 4323, 4474, 1147](../../packages/wellness-domain/ddls.go);
+[lenses.go:336, 622, 672, 730](../../packages/wellness-domain/lenses.go); [sessions.go:150](../../cmd/wellness-app/sessions.go);
+[app.js:1064, 1273-1291, 1460, 2400, 2428](../../cmd/wellness-app/web/app.js)); `forfeited` has zero live uses,
+`cancelled` is never a status value. **One consumer the §3 census missed, outside `wellness-*`:**
+`cmd/loftspace-app`'s attach-rate reads `front-desk-booking-history` and counts every non-`waitlisted` row as
+service usage ([portfolio.go:160, 322](../../cmd/loftspace-app/portfolio.go)) — a `forfeited` row counts
+exactly as a `noShow` one does today (the resident engaged and paid), so the code is right and only its
+status-list comment is amended. `frontDeskBookings` filters `= 'booked'` — inert. Touch-list (verified):
+`ddls.go` the late/booked mutation + the re-cancel refusal wording + the `bookingStatus` enum/FieldDescription
++ the refund-branch comment that says the booking is "still alive, or never"; `SetBookingAttendance`'s
+current-value guard gains `forfeited`; `lenses.go:622-623` comment ("the moment its booking dies" → the moment
+its seat is released); `package.go:147` + `manifest.yaml` 0.25.1 → 0.26.0 (a new status value a running stack
+must learn); tests in `refund_marker_test.go:274` (assert a live vertex, `forfeited`, no `seat`, seat cell freed)
++ a late-cancel-with-waitlister variant (promoted booking takes the seat, forfeited carries none) +
+`integration_test.go:611`'s sibling for `forfeited` + a re-cancel refusal + `lens_cypher_test.go` pins
+(`wellnessBookers` still covers, `waitlistPromotion` does not seat it); `sessions.go:150` + `sessions_test.go`
+(not counted); `app.js` `bookedCount`, `ATTENDANCE_MARKS`, `myClassCard`, `rosterCard` (no attendance marks, no
+release action on a forfeited row). Precedents: the `noShow` upsert at `ddls.go:4478-4511` (carry-forward
+without `seat`), the promotion upsert at `:4241`. Gotchas: `lint-package-version` on the bump; `lint-web` +
+`lint-app-op-descriptors` on the app edit (an op name in a Go comment is a UI reference — name ops by role);
+a descriptor is a second declaration of the rule — `SetBookingAttendance`'s OpMeta names no status guard, so
+none to amend; no lens `Spec` changes, so the refractor corpus pins do not move. Deviations: none. Non-goals:
+no no-show-fee parity for a forfeit, no `cancelled` status, no change to the waitlisted or early branches, no
+new op, no lens edit, no front-desk package change.
+
 ## 4. LoftSpace — "A just-minted applicant with no application is on no staffer's roster"
 
 **Filed (1a8f3c62, the roster-reach designer row):** `applicantRosterRead` anchors an identity on its own key
