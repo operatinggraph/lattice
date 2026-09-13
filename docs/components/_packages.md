@@ -526,6 +526,12 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
 (`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
 mechanizes it (name the gate, strike the entry).
 
+- **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
+  returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
+  refused for every erased subject even though the shredded envelope stays PRESENT with `data.shredded=true`.
+  Minted: lease-signing `SignLease`'s tenant-name snapshot (2026-09-13), caught cold — the package's own deleted
+  precedent had documented the probe. Check: before any (e)-follow-up `kv.Read` of a sensitive aspect, read the
+  holder's `.piiKey` and skip on `shredded`; the test shreds BEFORE the op and asserts acceptance.
 - **A cross-package type guard must survive the migration window in BOTH directions** — when a type's class
   or key shape changes, the old and new populations are live simultaneously and nothing rewrites the old
   documents, so a guard admitting only one is a silent outage on the other. Minted: dynamic-type-taxonomy B1

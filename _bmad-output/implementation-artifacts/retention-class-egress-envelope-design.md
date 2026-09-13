@@ -59,6 +59,8 @@ the post-fold shape.
 - **Blast radius, measured live (§5):** 118 identity envelope rows; the new lens projects **2** rows (the
   sibling status lens over the same anchors projects exactly 2 today); **0** retained aspects are
   egressed by any shipped pattern, so nothing changes behaviour until a package templates one.
+  *(Amended at Inc 2, 2026-09-13: lease-signing's `leaseDocument` pattern templates `.tenantName` under
+  `executedLeaseRecord` — the first consumer; the lens projects 3 rows live.)*
 
 ---
 
@@ -115,7 +117,7 @@ refuted brief built and tested it; the review found its emitted **shape** must c
 | 25 | For a direct submitter, `env.Actor` is whatever the publisher stamped: the Gateway stamps a verified actor for external callers, and internal engines "keep their sanctioned direct-submit path"; the ratified admission predicate admits `env.Actor ∈ {Loom, Weaver}` | `internal/gateway/gateway.go:1-13`; `cmd/processor/main.go:159-162`; `egress-read-declaration-authority-design.md` §3.1 |
 | 26 | The runtime actor check on an external-emitting op is the script's own `if op.actor != primordialActor["loom"]: fail(...)`; the lint proves the guard's shape | `packages/lease-signing/leasedoc_scripts.go:164-165`; `scripts/lint-conventions.go:1730-1870` |
 | 27 | Retention classes declared today: `underwritingRecord` (3 aspects, lease-signing), `clinicalRecord` (1 aspect, clinic-domain) | §5 C2 |
-| 28 | Both class holders carry a `.piiKey` live; 0 shipped patterns template a class-custodied aspect | §5 C5, C1 |
+| 28 | Both class holders carry a `.piiKey` live; 0 shipped patterns template a class-custodied aspect *(true at Inc 1; from Inc 2, 2026-09-13, `leaseDocument` templates `.tenantName` under `executedLeaseRecord`, a third class holder)* | §5 C5, C1 |
 | 29 | `underwritingParties` retains `guarantorName`, `coApplicantName`, `coApplicantContact` under the class — third-party direct identifiers, by design | `packages/lease-signing/ddls.go:405-440` |
 | 30 | The refuted brief built the snapshot half and it passed; the egress half failed at mint with the exact refusal in #4 | `lease-tenant-name-fire-brief.md` header |
 | 31 | A retention-class holder is never *submitted* for tombstone by uninstall; Contract #8 still names an "already-stranded (found already tombstoned)" holder as a recognized state; a lens's `delete_mode` defaults to `hard`, so an anchor tombstone retracts the row | `docs/contracts/08-package-install.md:115-125`; `internal/refractor/lens/schema.go:252-259` |
@@ -317,6 +319,8 @@ ledger #14, which is correct — its rows are envelopes, not decrypted columns).
 
 **C1 — egress-ref producers and templated egress params.** Expected: one Loom producer; one shipped
 pattern templates sensitive aspects (identity-custodied, top-level); zero template a class-custodied one.
+*(Amended at Inc 2, 2026-09-13: `leaseDocument` now templates the class-custodied `subject.tenantName.data.value`
+at the top level — the census below is Inc 1's record.)*
 
 ```
 $ grep -rln 'egressReads' packages/ | grep -v _test
@@ -926,3 +930,45 @@ cycle-processor`, cycle the bridge (`pkill -x bridge` + `make orchestration`), t
 
 **7. Non-goals.** No bridge / adapter / Loom / Processor change (Inc 1 shipped them). No backfill op (above). No
 regeneration of legacy documents. No change to the landlord party (`d46ab947`).
+
+### 15.1 Close (2026-09-13) — deviations, reviews, classification, gates, live proof
+
+**Deviations from §15, recorded where the body stands:** the leaseconvergence harness activates
+`retentionClassKeyEnvelope` by default (every docGen dispatch for a named applicant now resolves a class-held ref;
+the opt-in the class-egress fixture carried is gone); SignLease's descriptor declares both walks its script runs
+(`appliesToUnit`, `applicationFor`), retiring the read-drift baseline row; the shredded-applicant arm (below).
+
+**Reviews.** Lead review on the diff; close: two cold opus passes over the whole diff — Blind Hunter, and a combined
+Edge-Case Hunter + Acceptance Auditor. What they found, classified:
+
+| Class | Finding | Fixed |
+|---|---|---|
+| implementation-bug (package) | a crypto-shredded applicant made SignLease FAIL (a live `kv.Read` of a shredded sensitive aspect raises, it does not degrade) where the op must sign nameless — the package's own deleted precedent documents the `.piiKey.shredded` probe | yes — probe first; `TestSignLease_ShreddedApplicant_SignsWithoutTenantName`, proven by reverting the guard |
+| comment-as-evidence (package) | "absent or tombstoned" asserted a tolerance the floor does not have — a tombstoned egress key is refused at step 4 before the script runs | yes — dead conjunct dropped, comment states the refusal |
+| brief-gap | the floor mutation test (Dispatch removed ⇒ `HydrationMiss`) was observed by hand, not pinned | yes — `…FloorMutation_RejectsHydrationMiss` installs a modified copy of the package |
+| convention | history narration in five files; a stale DDL Description clause claiming a plaintext `.name` read; a template-vs-literal predicate on the drop | yes |
+| design-gap | body claims (For-Andrew blast radius, ledger #28, §5 C1) stated zero class-custodied egress; a class shred after signing now turns a not-yet-rendered lease into a terminal `declined_docGen` (observable in `weaver-targets`; recovery is the operator's `StartLoomPattern` after the class is re-keyed) | body amended; the shred consequence is accepted under the class's declared obligation and recorded here |
+| review-over-reach | "the 7 legacy documents still render the bare key" — by decision (§15.2): nothing regenerates them; the fix applies to leases signed from 0.32.0 on | not taken; revive = a regeneration verb |
+
+Dossier: `_packages.md` gains one entry — *a live read of a sensitive aspect fails, it does not degrade, when the
+holder is shredded* (second sighting after the deleted `3a9d1401` precedent's own comment; the check is the
+`.piiKey.shredded` probe before any `kv.Read` of a sibling sensitive aspect). No class was seen a second time
+across items this fire.
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...` 0 issues, `gofmt` clean, `go test
+./packages/lease-signing/... ./internal/processor/ ./internal/loom/ ./internal/bridge/` ok, `make
+test-lease-convergence` green twice (one interim run reddened `TestRenewalConvergence_ExternalLegReclaimsAfterAFailedCheck`
+under full-suite load — green alone and in the next full run; the Whetstone's parallel-load shape), every
+`scripts/lint-*.go` STRICT clean, `lint-package-version` clean, `make verify-package-lease-signing` **93 OK** against
+the running stack.
+
+**MERGED ≠ RUNNING, and the §10 rolling order, done this fire:** Inc 1 had shipped from a remote container, so the local
+stack still ran `privacy-base` 0.15.8, a Sep-10 Processor and a Sep-5 bridge. Installed `privacy-base` 0.16.0 (the
+envelope bucket appeared with 2 rows), `make cycle-processor`, cycled the orchestration tier, then
+`make refresh-loftspace` (lease-signing 0.31.29 → 0.32.0, 15 created / 14 updated).
+
+**Live proof:** the one signable application on the stack (`vtx.leaseapp.KJZLLJBbfYBMHhpmSnDK`) signed through the
+Gateway as its applicant: the commit wrote `.signature`, `.tenantName`, and minted the `executedLeaseRecord` class key
+(`vtx.retentionclass.aMRugCyd5saqU2buaMRu.piiKey`) on first use; the envelope lens projected it (3 rows); Loom
+dispatched docGen and the bridge posted `RecordLeaseDocOutcome` 400 ms after the sign; the rendered bytes read
+`Tenant:         Priya Raman` / `Tenant ID:      vtx.identity.LQ28Dp37vajbdTerZvij`. Landing: `a87e06b3`.
