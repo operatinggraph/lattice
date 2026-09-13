@@ -97,7 +97,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **[natsperm] Server-originated publishes defeat the deny plane — server-published bytes + unscoped `STREAM.CREATE`** | Merged pair, one doc, one root: a message the SERVER publishes for a client carries no permissions (reply subjects, PubAcks, `RePublish` dests), and an unregistered-name stream's mirror + `RePublish` lands chosen bytes on any subject. | ★★★ | L | 🗄️ shelved · revive: active exploitation by a trusted binary, or the STREAM.CREATE runtime census · [why](../../implementation-artifacts/protected-consumer-ack-plane-denies-design.md) §8/§8.4 |
 | **[bootstrap] A package-plane actor can forge a package-origin permission and grant it to itself** | `origin:"package"` is client-supplied and buys the Contract #6 reserved-set exemption; nothing ties a created `vtx.permission.*` to authority the submitter may confer. Reachable from `UpgradePackage`'s create arm and from any package-authored DDL script. Owns the `grantedBy`-revival gap. | ★★★ | M | 🗄️ shelved (revive: consoleOperator delegated below root) · [design](../../implementation-artifacts/package-authority-minting-provenance-design.md) |
 | **[natsperm] The app tier's read side is unrestricted — both planes** | `subscribe: [">"]` makes every app a live tap on `ops.>`, which carries sensitive mutations in PLAINTEXT (encryption is at commit step 6.5, after the lane). And a KV read is a *publish*, so the blanket `$JS.API.>` reads every bucket incl. all of Core KV. Subsumes the `capability-author-context` instance. | ★★★ | M | 🗄️ shelved (revive: app-tier NKey stops being trusted infra) · [why](../../implementation-artifacts/app-tier-transport-read-scope-design.md) |
-| **[bridge] Egress-unwrap serves identity-custodied sensitive aspects only — a retention-class holder's `$sensitiveRef` permanently fails** | `resolveSensitiveRef` hard-rejects any non-identity holder; `piiKeyEnvelope` is `MATCH (i:identity)` only. A retention-class-custodied snapshot declares fine Processor-side but never reaches a vendor. Blocks verticals.md's lease-tenant-name row. | ★★ | S–M | 🏗️ building · owner: claude/relaxed-rubin-lwk60f · [design §14](../../implementation-artifacts/retention-class-egress-envelope-design.md) · next: Inc A privacy-base lens |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -148,6 +147,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-13 · `bd293c45` · [bridge/privacy-base] egress serves every key-holder kind — class envelope lens, one kind set at both gates, nested marker refused ([design](../../implementation-artifacts/retention-class-egress-envelope-design.md))
 - 2026-09-10 · `e81914be` · [Vault/Loupe] the Reveal rule enforced — a non-identity holder is refused at the decrypt RPC, its unwrap sibling and Loupe's Reveal ([design](../../implementation-artifacts/retention-class-egress-envelope-design.md))
 - 2026-09-07 · `5a1de6b` · [Weaver] a gap's external class comes from the leg it RESOLVES to ([design](../../implementation-artifacts/weaver-goal-leg-external-class-design.md))
 - 2026-09-07 · `6d9846a` · [Bootstrap] a converged bucket is no longer rewritten — every boot had reopened the `AllowAtomicPublish` window on core-kv + loom-state
@@ -172,9 +172,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 - 2026-09-04 · `1982952e` · [Loom] deadline probe keys on the `MaxAge` marker + key presence + a conditioned fail, never an empty body; `disarmDeadline` deleted ([design](../../implementation-artifacts/loom-deadline-marker-provenance-design.md))
 - 2026-09-03 · `a5f4ef2e` · [Loom/Substrate] `loom-state` removals are TTL'd purges, 61,731 legacy tombstones swept at start, `redrive` over a removed token fixed, gate `checkLoomStateDelete`
 - 2026-09-03 · `595ea540` · [Refractor] a `WITH` no longer refuses per-anchor closure: 3 lenses gain the anchor Delete, leaseApplicationsRead licensed, 1 to 22 msg/s ([design](../../implementation-artifacts/with-alias-anchor-closure-design.md))
-- 2026-09-03 · `e5aa6ca2` · [Refractor] `edgeInstances` ~15 s/event → 0.24 s live: gate scope, batched reads, pipelined writes, resolve-then-get ([design](../../implementation-artifacts/personal-lens-whole-actor-cost-design.md))
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `7e2ef6b2`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `e5aa6ca2`)*

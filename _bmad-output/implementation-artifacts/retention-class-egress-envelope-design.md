@@ -820,7 +820,11 @@ new arms included), every other build-tagged harness compiled under its tag. MER
 exists in the remote container (`REMOTE.md` §3); the rolling order for a live deploy is §10's — install
 `privacy-base` 0.16.0 before cycling the Processor, then the bridge.
 
-**Landing:** one `--no-ff` merge to `main`, so `main` never carries the widened contract clause without the
+**Landing:** merged to `main` as `bd293c45` (`--no-ff`). CI run 1750 on it was red on one job only —
+`lint-package-version`, because `main` had meanwhile taken commits the local gate's merge-base predated, and the
+gate holds that a change under `internal/pkgmgr` may alter edge-manifest's generated read-grant lens; every other
+job, the convergence suite with the new e2e included, was green. `e968e44` bumps edge-manifest to 0.17.10 and
+un-reddens `main`. The `--no-ff` merge is so `main` never carries the widened contract clause without the
 mechanism that makes it true (the fire branch's first commit is the contract text, which the exception says lands
 *with* the build; on the branch it precedes the build by two commits, which the merge collapses).
 
