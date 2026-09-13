@@ -26,14 +26,23 @@ var augurAllowedActions = map[string]bool{
 // proposal's bare NanoID handle (§10.2: the augurDispatchPending lens's
 // Output.KeyColumn puts the anchor's bare id there, same as every other
 // weaver-target). row carries the augurDispatchPending lens's columns:
-// proposedAction, proposedParams, candidateKey, targetMetaKey.
+// proposedAction, proposedParams, proposedSteps, dispatchLeg, candidateKey,
+// targetMetaKey.
+//
+// A proposal is dispatched ONE LEG PER EPISODE. proposedSteps is the recorded
+// ordered plan and dispatchLeg how many of its legs have already fired, so this
+// call materialises steps[dispatchLeg] and nothing else; the flip advances the
+// counter, the row re-projects still-approved while legs remain, and the next
+// leg arrives as an ordinary delivery. A row carrying no steps at all is a
+// proposal recorded before the plan shape: its single leg is
+// proposedAction/proposedParams at leg 0, dispatched exactly as before.
 //
 // A dispatch-time-INVALID proposal (bad action, scope escape, a stale
 // operation/pattern reference) fires ONLY the RecordProposalDispatch{outcome:
 // invalid} flip — no remediation, so an unresolvable proposal can never
-// half-dispatch. A valid proposal's plan carries a proposal-scoped deterministic
-// requestId (collapse-only under a sweep reclaim) and a followUp that flips
-// approved → dispatched once the remediation is fired.
+// half-dispatch, and the whole proposal (not just the leg) goes invalid. A valid
+// leg's plan carries a proposal-and-leg-scoped deterministic requestId
+// (collapse-only under a sweep reclaim) and a followUp that records that leg.
 //
 // An errTransient from the inner buildPlan (a pattern/op reference not yet
 // replayed) defers via NakWithDelay with NO flip — nothing was dispatched, so
@@ -41,16 +50,19 @@ var augurAllowedActions = map[string]bool{
 // resolution.
 func buildProposedOpPlan(source *targetSource, entityID string, row map[string]any, expectedRevision uint64) (*plan, *planError) {
 	handle := entityID
+	leg := rowLeg(row, "dispatchLeg")
 	candidateKey, _ := row["candidateKey"].(string)
 	if candidateKey == "" {
 		return recordDispatchOutcomePlan(handle, "invalid",
-			"augurDispatch row carries no candidateKey (the proposal's trusted .gap context)"), nil
+			"augurDispatch row carries no candidateKey (the proposal's trusted .gap context)", leg), nil
 	}
-	action, _ := row["proposedAction"].(string)
-	params, _ := row["proposedParams"].(map[string]any)
+	action, params, reason := proposedLeg(row, leg)
+	if reason != "" {
+		return recordDispatchOutcomePlan(handle, "invalid", reason, leg), nil
+	}
 
 	if reason := validateProposedDispatch(action, params, candidateKey); reason != "" {
-		return recordDispatchOutcomePlan(handle, "invalid", reason), nil
+		return recordDispatchOutcomePlan(handle, "invalid", reason, leg), nil
 	}
 
 	var innerPlan *plan
@@ -66,13 +78,13 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 		// nothing.
 		pl, err := buildProposedDirectOpPlan(params, expectedRevision)
 		if err != nil {
-			return recordDispatchOutcomePlan(handle, "invalid", err.Error()), nil
+			return recordDispatchOutcomePlan(handle, "invalid", err.Error(), leg), nil
 		}
 		innerPlan = pl
 	} else {
 		innerGA, err := materializeGapAction(action, params)
 		if err != nil {
-			return recordDispatchOutcomePlan(handle, "invalid", err.Error()), nil
+			return recordDispatchOutcomePlan(handle, "invalid", err.Error(), leg), nil
 		}
 
 		// candidateKey is TRUSTED (echoed from the proposal's .gap aspect via the
@@ -83,7 +95,7 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 		_, candidateID, ok := substrate.ParseVertexKey(candidateKey)
 		if !ok {
 			return recordDispatchOutcomePlan(handle, "invalid",
-				"candidateKey "+candidateKey+" is not a well-formed vtx.<type>.<id> vertex key"), nil
+				"candidateKey "+candidateKey+" is not a well-formed vtx.<type>.<id> vertex key", leg), nil
 		}
 
 		// expectedRevision here is the augurDispatch ROW's own revision (the
@@ -104,14 +116,65 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 				return nil, perr
 			}
 			return recordDispatchOutcomePlan(handle, "invalid",
-				"dispatch-time resolution failed: "+perr.msg), nil
+				"dispatch-time resolution failed: "+perr.msg, leg), nil
 		}
 		innerPlan = pl
 	}
 
-	innerPlan.requestID = func(string) string { return deriveProposalDispatchRequestID(handle) }
-	innerPlan.followUp = recordDispatchOutcomePlan(handle, "dispatched", "")
+	innerPlan.requestID = func(string) string { return deriveProposalDispatchRequestID(handle, leg) }
+	innerPlan.followUp = recordDispatchOutcomePlan(handle, "dispatched", "", leg)
+	innerPlan.proposalLeg = leg
 	return innerPlan, nil
+}
+
+// rowLeg reads a §10.2 integer column off a row. JSON numbers decode as
+// float64, but a row assembled in Go (a test fixture, a re-marshalled row)
+// carries the int itself, so both are read; anything else — including the null
+// a proposal recorded before the leg counter projects — is 0, the leg such a
+// proposal is on.
+func rowLeg(row map[string]any, column string) int {
+	switch v := row[column].(type) {
+	case float64:
+		if v < 0 {
+			return 0
+		}
+		return int(v)
+	case int:
+		if v < 0 {
+			return 0
+		}
+		return v
+	default:
+		return 0
+	}
+}
+
+// proposedLeg picks the leg of the recorded plan this dispatch fires: the
+// row's proposedSteps[leg], or — for a proposal recorded before .proposed
+// carried steps — the row's single proposedAction/proposedParams pair at leg 0.
+// A leg past the end of the plan is a row and a counter that disagree (the
+// proposal would have flipped `dispatched` at its last leg), so it returns a
+// reason rather than indexing: the caller records the whole proposal invalid.
+func proposedLeg(row map[string]any, leg int) (action string, params map[string]any, reason string) {
+	steps, _ := row["proposedSteps"].([]any)
+	if len(steps) == 0 {
+		if leg != 0 {
+			return "", nil, fmt.Sprintf("dispatch leg %d has no step: the proposal carries a single unplanned remediation", leg)
+		}
+		action, _ = row["proposedAction"].(string)
+		params, _ = row["proposedParams"].(map[string]any)
+		return action, params, ""
+	}
+	if leg < 0 || leg >= len(steps) {
+		return "", nil, fmt.Sprintf("dispatch leg %d is past the end of the %d-step plan", leg, len(steps))
+	}
+	step, ok := steps[leg].(map[string]any)
+	if !ok {
+		return "", nil, fmt.Sprintf("plan step %d is not an object", leg+1)
+	}
+	action, _ = step["action"].(string)
+	params, _ = step["params"].(map[string]any)
+	return action, params, ""
 }
 
 // buildProposedDirectOpPlan materialises a proposed directOp {operation,
@@ -165,27 +228,31 @@ func buildProposedDirectOpPlan(params map[string]any, expectedRevision uint64) (
 }
 
 // recordDispatchOutcomePlan builds the RecordProposalDispatch flip plan
-// (design §3.3). Its requestId is proposal-scoped + outcome-scoped so a
-// redelivery collapses it too (the DDL's approved-only guard is the second,
-// independent backstop). ContextHint.Reads carries the proposal's .review
-// aspect (the required key the DDL's kv.Read fails closed on — read-posture
-// class (a), script-read-posture-design §13); the bare proposalKey rides
-// alongside it for authTarget's belt-and-suspenders alive check, mirroring
-// CreateAugurReasoningClaim's convention.
-func recordDispatchOutcomePlan(handle, outcome, reason string) *plan {
+// (design §3.3) for ONE leg. Its requestId is proposal-, outcome- and
+// leg-scoped so a redelivery collapses it while the next leg's flip is its own
+// op (the DDL's approved-only + matching-leg guards are the second, independent
+// backstop). The payload carries the leg it records, which the DDL refuses
+// unless it is the leg the proposal currently stands at. ContextHint.Reads
+// carries the proposal's .review and .proposed aspects (the required keys the
+// DDL's kv.Reads fail closed on — the verdict it guards on, and the plan it
+// counts legs against; read-posture class (a), script-read-posture-design §13);
+// the bare proposalKey rides alongside them for authTarget's
+// belt-and-suspenders alive check, mirroring CreateAugurReasoningClaim's
+// convention.
+func recordDispatchOutcomePlan(handle, outcome, reason string, leg int) *plan {
 	proposalKey := "vtx.augurproposal." + handle
 	return &plan{
 		operationType: opRecordProposalDispatch,
 		authTarget:    proposalKey,
-		requestID:     func(string) string { return deriveProposalDispatchFlipRequestID(handle, outcome) },
+		requestID:     func(string) string { return deriveProposalDispatchFlipRequestID(handle, outcome, leg) },
 		payload: func(string) map[string]any {
-			p := map[string]any{"externalRef": handle, "outcome": outcome}
+			p := map[string]any{"externalRef": handle, "outcome": outcome, "leg": leg}
 			if reason != "" {
 				p["reason"] = reason
 			}
 			return p
 		},
-		reads: []string{proposalKey, proposalKey + ".review"},
+		reads: []string{proposalKey, proposalKey + ".review", proposalKey + ".proposed"},
 	}
 }
 

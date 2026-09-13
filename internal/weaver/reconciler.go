@@ -1160,6 +1160,20 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// is nevertheless safe is the suppressed one just below, which has a
 	// guaranteed row write of its own.
 	//
+	// The same boundary for an Augur PLAN, and here for the same reason the goal
+	// release is here: the sweep enumerates marks, so an expired mark standing
+	// over a leg the proposal has already recorded is the ONLY thing that will
+	// ever look at this gap again. Released and advanced in the same pass, the
+	// plan reaches its next leg; released and returned, it would wait on a row
+	// write that the flip has already made.
+	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev) {
+		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
+			e.logger.Warn("weaver sweep: proposal leg-advance dispatch did not complete cleanly; will retry",
+				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		}
+		return
+	}
+
 	// legOf, not the mark's action alone: a gap handed to the reasoning tier
 	// carries its displaced leg on the escalation's own mark, so its boundary
 	// stays testable from this leg too.
@@ -1483,12 +1497,17 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// instead: a different action, a different episode, and a pair that would
 	// otherwise leave it declaring an escalation that no longer exists — which
 	// the class routes would then act on if the policy were re-added.
+	//
+	// The Augur plan leg travels unconditionally: the reclaim re-fires the SAME
+	// leg the mark stands over — the release above has already taken any mark the
+	// plan has advanced past — so the re-armed mark must keep saying which leg
+	// that is, or the next pass would read it as leg 0 and release it forever.
 	escalatedFrom, escalation := "", ""
 	if resolvedAction == rec.Action {
 		escalatedFrom, escalation = rec.EscalatedFrom, rec.Escalation
 	}
 	newRev, conflict, err := e.marks.replace(ctx, targetID, entityID, gapColumn, entityKey, resolvedAction,
-		escalatedFrom, escalation, claimID, markRev, markTTL)
+		escalatedFrom, escalation, claimID, rec.ProposalLeg, markRev, markTTL)
 	if err != nil {
 		e.logger.Warn("weaver sweep: reclaim re-arm failed; leaving expired mark for the next sweep",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)

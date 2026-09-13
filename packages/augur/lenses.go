@@ -55,7 +55,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "augurproposal",
 				OutputKeyPattern: "augurDispatch.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_dispatch", "entityKey", "proposedAction", "proposedParams", "candidateKey", "targetMetaKey", "originGap"},
+				BodyColumns:      []string{"violating", "missing_dispatch", "entityKey", "proposedAction", "proposedParams", "proposedSteps", "dispatchLeg", "candidateKey", "targetMetaKey", "originGap"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -92,6 +92,14 @@ func Lenses() []pkgmgr.LensSpec {
 // augurProposals lens already uses for non-scalar columns). '=' is the full
 // engine's equality test (not '=='); a null reviewState compares false, never
 // erroring (equalsAny's nil-safe rule).
+//
+// proposedSteps + dispatchLeg are what make a PLAN dispatchable leg by leg:
+// steps is the ordered remediation and dispatchLeg the count already dispatched,
+// so buildProposedOpPlan materialises steps[dispatchLeg]. A proposal recorded
+// before the plan shape projects them null, which that path reads as the single
+// legacy leg proposedAction/proposedParams name. The row stays violating between
+// legs — the RecordProposalDispatch flip leaves the state approved while legs
+// remain — so the next leg arrives as an ordinary re-projection of this row.
 const augurDispatchPendingSpec = `
 MATCH (pr:augurproposal {key: $actorKey})
 RETURN
@@ -99,6 +107,8 @@ RETURN
   pr.key AS entityKey,
   pr.proposed.data.action AS proposedAction,
   pr.proposed.data.params AS proposedParams,
+  pr.proposed.data.steps AS proposedSteps,
+  pr.review.data.leg AS dispatchLeg,
   pr.gap.data.entityId AS candidateKey,
   pr.gap.data.targetId AS targetMetaKey,
   pr.gap.data.gapColumn AS originGap,
@@ -115,18 +125,21 @@ RETURN
 //     context the CreateAugurReasoningClaim instanceOp minted write-ahead. entityId
 //     / targetId are full keys (vtx.leaseapp.<id> / vtx.meta.<id>), so a reader
 //     derives the candidate type + target from them without a link walk.
-//   - .proposed {action, params} — the model's remediation. proposedParams is a
-//     non-scalar (map) projected verbatim, stored as JSON (the same shape
-//     clinicProviders uses for the timeOff / hours arrays); the reviewer reads it
-//     to see exactly what would be dispatched on approval.
+//   - .proposed {action, params, steps} — the model's remediation. proposedParams
+//     and proposedSteps are non-scalars (a map and a list) projected verbatim,
+//     stored as JSON (the same shape clinicProviders uses for the timeOff / hours
+//     arrays); the reviewer reads them to see exactly what would be dispatched on
+//     approval — action/params are the first leg, steps the whole ordered plan.
 //   - .rationale.text / .confidence.score / .provenance.{model, reasonedAt} — the
 //     reasoning audit: why the model proposed this, its self-reported 0..1
 //     confidence, and the provenance the operator weighs the proposal against.
-//   - .review {state, invalidReason, reviewedAt, dispatchedAt} — the verdict.
+//   - .review {state, invalidReason, reviewedAt, dispatchedAt, leg} — the verdict.
 //     reviewState is null while the claim's reasoning is in flight, then
 //     pending|invalid once RecordProposal records the §5-validated verdict
 //     (invalidReason carries the auditable reason on an invalid). reviewedAt /
 //     dispatchedAt are the Fire-2 approve / dispatch stamps (null until then).
+//     dispatchLeg is how many of the plan's legs have been dispatched, so a
+//     reviewer watching a multi-leg plan sees how far it has run.
 //
 // All aspect reads are null-safe by key-shape: a not-yet-written aspect projects
 // null (the same null-safe discipline clinicAppointments applies to .reminder /
@@ -141,6 +154,8 @@ RETURN
   pr.gap.data.trigger AS trigger,
   pr.proposed.data.action AS proposedAction,
   pr.proposed.data.params AS proposedParams,
+  pr.proposed.data.steps AS proposedSteps,
+  pr.review.data.leg AS dispatchLeg,
   pr.rationale.data.text AS rationale,
   pr.confidence.data.score AS confidence,
   pr.provenance.data.model AS model,

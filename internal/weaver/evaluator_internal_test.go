@@ -1189,7 +1189,7 @@ func TestHandleRow_LiveEscalationMarkNotTornDownAndRefired(t *testing.T) {
 	}
 	// Simulate an escalation episode this function already fired: a LIVE
 	// mark (fresh lease) at the exact key the escalation dispatches under.
-	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted)
+	liveRev, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted, 0)
 	if err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
@@ -1238,7 +1238,7 @@ func TestHandleRow_ExhaustedEscalationRetiresThisEntitysIssue(t *testing.T) {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
 	}
-	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted); err != nil {
+	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp, "", escalateExhausted, 0); err != nil {
 		t.Fatalf("seed live escalation mark: %v", err)
 	}
 	// Raised on an earlier pass, before the package added the augur policy.

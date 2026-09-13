@@ -162,6 +162,13 @@ type plan struct {
 	// (nested one level deep is all Fire 2b needs); its reads/authTarget are used
 	// as normal.
 	followUp *plan
+	// proposalLeg is the plan leg a proposedOp dispatch fires (buildProposedOpPlan
+	// sets it from the row's dispatchLeg column), carried onto the episode's mark
+	// so the leg an in-flight episode stands over is readable from the mark alone
+	// — which is what lets a later delivery tell an episode still running its leg
+	// from one the plan has since advanced past. Zero for every other dispatch and
+	// for a single-step proposal.
+	proposalLeg int
 }
 
 // buildPlan resolves one open gap against its playbook entry: templated params

@@ -22,6 +22,14 @@ import (
 // the proposed action's free-form params object (validated for scope-escape at
 // record time). Provenance fields record exactly what was reasoned over for the
 // audit trail + stale-proposal detection.
+//
+// A proposal is either single-step or PLAN-SHAPED. A single-step proposal names
+// its remediation in Action/Params and leaves Steps empty. A plan-shaped
+// proposal lists its ordered remediation in Steps, and the record op mirrors
+// steps[0] into the stored action/params — so when Steps is non-empty the
+// top-level Action/Params carry no meaning for the recorded proposal and are
+// ignored. Each step is validated against the §5 boundary independently, and
+// Weaver dispatches the plan one leg per episode.
 type AugurProposal struct {
 	// Action is the proposed remediation action. The RecordProposal §5 validator
 	// rejects (stores invalid) any action outside {triggerLoom, assignTask,
@@ -31,6 +39,13 @@ type AugurProposal struct {
 	// Params is the proposed action's params. A param naming an entity other than
 	// the escalated candidate is a scope escape → the proposal is stored invalid.
 	Params map[string]any `json:"params,omitempty"`
+	// Steps is the ordered plan of a plan-shaped proposal. Empty for a
+	// single-step proposal, in which case Action/Params carry the remediation.
+	// When it is non-empty the record op mirrors steps[0] into the stored
+	// action/params and IGNORES the top-level Action/Params; every step is
+	// validated against the same §5 boundary as a single-step proposal, and a
+	// step that fails it invalidates the whole proposal.
+	Steps []AugurStep `json:"steps,omitempty"`
 	// Rationale is the model's free-form reasoning, stored for the audit trail.
 	Rationale string `json:"rationale,omitempty"`
 	// Confidence is the model's 0..1 self-reported confidence. Out of range →
@@ -45,6 +60,18 @@ type AugurProposal struct {
 	CatalogHash string `json:"catalogHash,omitempty"`
 	// ReasonedAt is the RFC3339 timestamp of the reasoning call.
 	ReasonedAt string `json:"reasonedAt,omitempty"`
+}
+
+// AugurStep is one leg of a plan-shaped proposal: the same {action, params}
+// pair a single-step proposal carries at the top level, validated against the
+// same §5 boundary and dispatched as its own Weaver episode.
+type AugurStep struct {
+	// Action is this leg's proposed remediation action, from the same allowed
+	// escalation vocabulary {triggerLoom, assignTask, directOp}.
+	Action string `json:"action"`
+	// Params is this leg's params. A param naming an entity other than the
+	// escalated candidate is a scope escape → the whole proposal is invalid.
+	Params map[string]any `json:"params,omitempty"`
 }
 
 // Encode marshals the proposal to the JSON string the bridge carries in
