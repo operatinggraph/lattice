@@ -104,6 +104,15 @@ func emWriteAspect(t *testing.T, ctx context.Context, coreKV *substrate.KV, vtxK
 // convention across every e2e in this package.
 func emWriteLink(t *testing.T, ctx context.Context, coreKV *substrate.KV, srcType, srcID, name, dstType, dstID string) {
 	t.Helper()
+	emWriteLinkRev(t, ctx, coreKV, srcType, srcID, name, dstType, dstID)
+}
+
+// emWriteLinkRev is emWriteLink returning the write's KV revision — the Core
+// KV stream sequence of the link's CDC event, which a caller hands to
+// waitGateConsumerSettled as the fence a rule consumer must drain through
+// before the caller measures anything that follows.
+func emWriteLinkRev(t *testing.T, ctx context.Context, coreKV *substrate.KV, srcType, srcID, name, dstType, dstID string) uint64 {
+	t.Helper()
 	linkKey := substrate.LinkKey(srcType, srcID, name, dstType, dstID)
 	body := map[string]any{
 		"key": linkKey, "class": name, "isDeleted": false,
@@ -113,8 +122,9 @@ func emWriteLink(t *testing.T, ctx context.Context, coreKV *substrate.KV, srcTyp
 	}
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
-	_, err = coreKV.Put(ctx, linkKey, b)
+	rev, err := coreKV.Put(ctx, linkKey, b)
 	require.NoError(t, err)
+	return rev
 }
 
 // activateEdgeManifestLenses activates all five REAL edge-manifest Personal

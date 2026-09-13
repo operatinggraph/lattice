@@ -283,9 +283,14 @@ func TestEdgeManifestStaff_AnchorDerivation_ContainedInCreate_ReprojectsOnlyTheA
 	// — sampled at 1-in-1 so the one event below is guaranteed to be measured,
 	// and observed the same way TestObjectAttachments_DerivationActsOnANeighbourEvent_E2E
 	// observes the act-mode tally: a before/after delta across one event.
-	p.SetAnchorDerivationSampling(1)
-	p.SetAnchorDerivationMode(pipeline.DerivationModeShadow)
-
+	//
+	// The fixture's own seed writes are fenced OUT of the measurement: the
+	// pipeline consumes them asynchronously, and a seed vertex event measured
+	// while its links are still landing in adjacency compares a BFS that sees
+	// no edge yet against a derivation that does — a divergence charged to the
+	// fixture, not to the event under test. So the seeds land, the rule
+	// consumer drains through the last of them, and only then does the shadow
+	// comparison switch on, immediately before the one event it measures.
 	techCID := pl2NanoID("staffderiv-techC")
 	bldgCID := pl2NanoID("staffderiv-bldgC")
 	unitC1ID := pl2NanoID("staffderiv-unitC1")
@@ -297,8 +302,11 @@ func TestEdgeManifestStaff_AnchorDerivation_ContainedInCreate_ReprojectsOnlyTheA
 	emWriteVertex(t, ctx, coreKV, substrate.VertexKey("unit", unitC1ID), "unit", map[string]any{})
 	emWriteVertex(t, ctx, coreKV, substrate.VertexKey("workorder", woUnitCID), "workorder", map[string]any{})
 	emWriteLink(t, ctx, coreKV, "identity", techCID, "worksAt", "building", bldgCID)
-	emWriteLink(t, ctx, coreKV, "workorder", woUnitCID, "locatedAt", "unit", unitC1ID)
+	seedFence := emWriteLinkRev(t, ctx, coreKV, "workorder", woUnitCID, "locatedAt", "unit", unitC1ID)
+	waitGateConsumerSettled(t, conn, "refractor-"+producerRule.ID, seedFence)
 
+	p.SetAnchorDerivationSampling(1)
+	p.SetAnchorDerivationMode(pipeline.DerivationModeShadow)
 	shadowBefore := p.AnchorDerivationShadow()
 
 	emWriteLink(t, ctx, coreKV, "unit", unitC1ID, "containedIn", "building", bldgCID)
