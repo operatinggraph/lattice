@@ -453,3 +453,82 @@ Net: three verdicts unchanged in kind and sharpened in content; the Weaver verdi
 reasoning replaced (two false premises struck, two constructible mechanisms recorded, the operator cure
 documented). A design that had shipped on my first draft would have carried a `SetBookingAttendance` hole and
 told operators no cure existed.
+
+## 8. Wellness — "A protected identity can be booked but never cancelled" (2026-09-13)
+
+**Filed (§3 close, `ae197820`):** the seed's "$15 guest" `gk12KR…sb5c` is the primordial admin identity
+(`data.protected`); `CreateBooking` accepts it, `CancelBooking` is refused at commit (`ProtectedKey` on its
+slot-cell tombstone). `no-pattern:` *a package-side refusal of a `data.protected` root as an op's subject, or a
+kernel rule letting a package release the cells it wrote.* Re-run to falsify, per the 2026-09-10 method.
+
+**Grounding.**
+
+- The kernel guard is asymmetric by design: `rejectProtectedMutations` refuses `update`/`tombstone` under a root
+  carrying `data.protected == true` and **exempts `create`** ("create-only already conflicts on overwrite" —
+  [step8_commit.go:57, 1020-1036](../../internal/processor/step8_commit.go)). It is the bricking backstop for
+  kernel roots, not a hygiene rule about who may hang aspects on them. So a package that *creates* a cell on a
+  protected hub succeeds and can never release it.
+- Live: the admin identity carries `data.protected: true` and `note: "Primordial admin identity … No state
+  aspect."`; its hub holds **6 `slot<cellcode>` cells + 1 `wellnessLedgerAccount`**; `wellness-bookings` shows
+  2 rows for it, both already `noShow` (`Evening Flow with Sam` 09-09, `Forfeit Proof Flow` 09-13 — the §3
+  close's own live proof booked the admin, because the dev-auth operator session *is* the admin), $30 of
+  class-price debits on `vtx.wellnessaccount.6uJRKYyA…`. The "5 live bookings" have aged out; the cells are
+  permanent.
+- **Not the seed.** `scripts/seed-classic-demo.go:1417` and `seed-showcase.go:1485` book tenanted residents,
+  never the actor. The booker is the admin whenever the desk hat books *itself* (`consumer scope=self` — the
+  dev session's identity) or picks it from the member list.
+- **Census — every package op that creates an aspect on a caller-named `vtx.identity` root, and whether a later
+  op mutates it** (the trap needs both halves):
+
+  | Aspect on the identity hub | Created by | Later update/tombstone | Reachable for a protected identity? |
+  |---|---|---|---|
+  | wellness `slot<cell>` (`bookerSlotClaim`) | `CreateBooking`/`JoinWaitlist` via `prepare_booking_common` ([ddls.go:4442](../../packages/wellness-domain/ddls.go)) | `CancelBooking` [:4853](../../packages/wellness-domain/ddls.go), `ReleaseOrphanedBooking` | **yes — the row** |
+  | wellness `wellnessLedgerAccount` | `WellnessCreateAccount` (create-once pointer) | none | inert |
+  | clinic `patientClaim` | `CreatePatient`/`BindPatientIdentity` | `UnbindPatientIdentity` | **no** — `require_unclaimed_identity` reads `.state == unclaimed` and the admin has no `.state` ([clinic-domain/ddls.go:1435-1458](../../packages/clinic-domain/ddls.go)) |
+  | clinic `providerClaim`, wellness `instructorClaim`, service `serviceProviderClaim` | the `Bind*Identity` ops | none (CreateOnly, never released) | a permanent claim, nothing later fails |
+  | privacy-base `piiKey` | the Processor's step-6.5 hook | shred (kernel path) | not a package write |
+
+  Clinic's `patientSlotClaim`/`providerSlotClaim` are on `vtx.patient`/`vtx.provider` roots the package mints —
+  never protected. The trap is **one op family, one package**: the wellness booker is the only place a vertical
+  takes an arbitrary identity as its *subject* and later mutates cells on its hub.
+- `state[booker]` is the declared root doc; scripts already branch on its fields (`class_of` reads
+  `doc.class`, `sched.data.get("startsAt")`) — reading `data.get("protected")` is the same access, not a new
+  primitive. No script in `packages/` reads it today (grep: zero), which is the whole of the "no pattern".
+
+**Verdict — `prepare_booking_common` refuses a protected booker (`ProtectedBooker`).** After
+`require_live_typed(state, booker, "booker", "identity")`, if `state[booker].data.get("protected") == True`,
+`fail("ProtectedBooker: " + booker + " is a kernel identity, not a member; its slot cells could never be
+released")`. One guard covers both entry points that mint the cells; nothing downstream changes. Rule, in one
+line: *a kernel root is not a member.* The `no-pattern:` dissolves — the refusal is a field test on a root the op
+already declares and proves alive, the shape of `WrongClass` beside it. The "kernel rule" half is not needed
+for this need and is not this lane's: making the root arm refuse creates, or letting a package release cells by
+provenance, is a change to the kernel-protection posture (Lattice), and it would have to admit the
+`wellnessLedgerAccount` pointer and step 6.5's `piiKey` — which is why the guard belongs where the *domain*
+knows an identity is being used as a member.
+
+**Alternatives.**
+
+| Option | Why not |
+|---|---|
+| **Do not have this thing** — the admin's bookings age out to `noShow`; six dead cells and a $30 account on the admin hurt nothing | Recurs on every dev-mode session: the operator hat *is* the admin, so each PO drive that books "itself" strands more cells and posts a charge nothing can reverse, and the cancel fails with a kernel error the desk cannot read. The fix is one `fail` |
+| The row's kernel rule (release-by-provenance, or refuse creates on the root arm) | A posture change on the kernel backstop, Lattice-lane, with legitimate creates to carve out; wider than one op family's need |
+| `CancelBooking` skips the identity cells for a protected booker | Ships garbage by design and leaves the `BookerConflict` guard permanently armed on the hub — a paper-over |
+| Hide the admin from the FE's member picker | The self-scope path (My Classes) bypasses the picker; the refusal has to live in the op. A lens column for `protected` is scope the ★ does not buy |
+
+**Residual (no drain):** the 6 stranded `slot*` cells, the 2 `noShow` rows and the $30 account on the admin
+identity stay — no op can tombstone under a protected root, and after this fire the admin can hold no new
+booking, so they are inert. **Contract surface:** none. **Size XS (pkg) · Winston-adjudicated.**
+
+### `ProtectedBooker` fire brief (build note, 2026-09-13)
+
+Compressed XS brief; scope = the verdict above, verbatim. Touch-list (verified live): `ddls.go` the guard after
+`require_live_typed(state, booker, …)` in `prepare_booking_common` ([:4370](../../packages/wellness-domain/ddls.go))
++ the `bookerSlotClaim` DDL description naming the refusal; `package.go:149` + `manifest.yaml` 0.27.0 → 0.27.1
+(a semantic change a running stack must learn; `lint-package-version`); `opmetas.go` CreateBooking/JoinWaitlist
+descriptions name the refusal (a descriptor is the rule's second declaration); tests in `integration_test.go`
+beside `TestCreateBooking_RejectsDoubleBook` (:1341): a `seedVertex(…, "identity", {"protected": true})` booker is
+Rejected on CreateBooking AND JoinWaitlist with the reply's failure text naming `ProtectedBooker`, no `slot*` cell
+written, and the unprotected positive vector in the same test. Precedent: `WrongClass` in `require_live_typed`
+(:3894). Gotchas: `data` may be absent on a fixture doc — guard with `hasattr`; the FE shows `code: message`
+verbatim (`app.js:159`), so the message is the user's text. Non-goals: no kernel change, no FE change, no drain of
+the stranded cells, no lens column.
