@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,18 +95,16 @@ func (f *cdFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
-// projectAt runs the anchored cafeTabSettlement spec for one tab.
+// projectAt runs the anchored cafeTabSettlement spec for one tab. NO clock
+// parameter is supplied — the cypher references none.
 func (f *cdFixture) projectAt(t *testing.T, tabName string) []ruleengine.ProjectionResult {
 	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339)
 	eng := full.New()
 	cr, err := eng.Parse(tabSettlementSpec)
 	require.NoError(t, err, "cafeTabSettlement cypher must parse on the full engine")
 	tabKey := "vtx.tab." + f.ids[tabName]
 	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
-		"actorKey":    tabKey,
-		"now":         now,
-		"projectedAt": now,
+		"actorKey": tabKey,
 	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
@@ -344,35 +343,56 @@ func TestCafeTabSettlement_OpenTabWithoutChargedToStillAnchors(t *testing.T) {
 	require.Equal(t, false, v["violating"])
 }
 
-// projectStaleAt runs the anchored cafeStaleTabSettlement spec for one tab at
-// an explicit `now` — unlike projectAt (wall-clock time.Now()), the tests
-// below need to pin deterministic points on either side of a tab's own
-// staleAt deadline.
-func (f *cdFixture) projectStaleAt(t *testing.T, tabName, now string) []ruleengine.ProjectionResult {
+// recordLapse writes the freshnessExpiry marker MarkExpired commits when a
+// target's @at fires: the instant the timer fired for, recorded under that
+// target's own key in byTarget, with expiredAt carrying the entity-wide
+// maximum — orchestration-base/lens_cypher_test.go's own recordLapse,
+// applied to a tab instead of a task. byTarget takes several entries because
+// a tab shares this one marker slot with cafeTabSettlement's own target.
+func (f *cdFixture) recordLapse(t *testing.T, tabName string, byTarget map[string]string) {
+	t.Helper()
+	entries := map[string]any{}
+	maxAt := ""
+	for target, at := range byTarget {
+		entries[target] = at
+		if at > maxAt {
+			maxAt = at
+		}
+	}
+	f.aspect(t, tabName, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": maxAt,
+		"byTarget":  entries,
+	})
+}
+
+// projectStaleAt runs the anchored cafeStaleTabSettlement spec for one tab.
+// NO clock parameter is supplied — the cypher references none; the tests
+// below pin the outcome against a recorded freshnessExpiry marker instead of
+// an injected instant.
+func (f *cdFixture) projectStaleAt(t *testing.T, tabName string) []ruleengine.ProjectionResult {
 	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(staleTabSettlementSpec)
 	require.NoError(t, err, "cafeStaleTabSettlement cypher must parse on the full engine")
 	tabKey := "vtx.tab." + f.ids[tabName]
 	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
-		"actorKey":    tabKey,
-		"now":         now,
-		"projectedAt": now,
+		"actorKey": tabKey,
 	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
 }
 
-func (f *cdFixture) valuesAtStale(t *testing.T, tabName, now string) map[string]any {
+func (f *cdFixture) valuesAtStale(t *testing.T, tabName string) map[string]any {
 	t.Helper()
-	rows := f.projectStaleAt(t, tabName, now)
+	rows := f.projectStaleAt(t, tabName)
 	require.Len(t, rows, 1, "cafeStaleTabSettlement must project exactly one row per tab")
 	return rows[0].Values
 }
 
 // TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating proves
-// the one-shot @at arms at staleAt while the deadline is still ahead — the
-// pastDueAppointments idiom (clinic-reminders), never violating this early.
+// the one-shot @at arms at staleAt while no lapse of this target's deadline
+// has been recorded yet — the pastDueAppointments idiom (clinic-reminders),
+// never violating this early.
 func TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -383,19 +403,23 @@ func TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating(t *testi
 		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
 	})
 
-	v := f.valuesAtStale(t, "freshtab", "2026-07-08T00:00:00Z")
+	v := f.valuesAtStale(t, "freshtab")
 	require.Equal(t, "open", v["status"])
 	require.Equal(t, "2026-07-08T12:00:00Z", v["staleAt"])
-	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "still ahead of now — arms the one-shot @at")
+	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "no recorded lapse — arms the one-shot @at, even when staleAt is already past")
 	require.Equal(t, false, v["missing_settle"])
 	require.Equal(t, false, v["missing_staleat"], "staleAt is present — nothing to backfill")
 	require.Equal(t, false, v["violating"])
 }
 
-// TestCafeStaleTabSettlement_OpenAndPastDue_Violating proves the gate opens
-// once staleAt passes with the tab still open — the violating row itself
-// drives dispatch from there, not a repeated timer wake-up.
-func TestCafeStaleTabSettlement_OpenAndPastDue_Violating(t *testing.T) {
+// TestCafeStaleTabSettlement_RecordedLapseAtStaleAt_AllThreeOccurrencesAgree
+// proves the gate opens once this target's own @at has fired at or after
+// staleAt — the violating row itself drives dispatch from there, not a
+// repeated timer wake-up — and that all three converted occurrences
+// (freshUntil, missing_settle, violating's first disjunct) read the marker
+// identically, since violating's disjunct repeats the comparison rather than
+// naming missing_settle's alias.
+func TestCafeStaleTabSettlement_RecordedLapseAtStaleAt_AllThreeOccurrencesAgree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -404,19 +428,65 @@ func TestCafeStaleTabSettlement_OpenAndPastDue_Violating(t *testing.T) {
 	f.aspect(t, "pastduetab", "status", "tabStatus", map[string]any{
 		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
 	})
+	f.recordLapse(t, "pastduetab", map[string]string{StaleTabSettlementTarget: "2026-07-08T12:00:00Z"})
 
-	v := f.valuesAtStale(t, "pastduetab", "2026-07-08T13:00:00Z")
-	require.Nil(t, v["freshUntil"], "past the deadline — freshUntil goes null, the gap-dispatch path owns it now")
+	v := f.valuesAtStale(t, "pastduetab")
+	require.Nil(t, v["freshUntil"], "the lapse is recorded — freshUntil goes null, the gap-dispatch path owns it now")
 	require.Equal(t, true, v["missing_settle"])
 	require.Equal(t, false, v["missing_staleat"], "staleAt is present — this is missing_settle's gap, not missing_staleat's")
 	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_ExtendedPastTheRecordedLapse is the RE-ARM
+// vector: nothing clears the marker, so a tab whose staleAt was recomputed
+// later than an earlier fire (a re-issued deadline, or a marker predating
+// this feature) must arm again off the stored comparison alone — the
+// orchestration-base precedent, TestUnroutedTasks_ExtendedPastTheRecordedLapse.
+func TestCafeStaleTabSettlement_ExtendedPastTheRecordedLapse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "extendedtab", "tab")
+	f.aspect(t, "extendedtab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-09T12:00:00Z",
+	})
+	f.recordLapse(t, "extendedtab", map[string]string{StaleTabSettlementTarget: "2026-07-08T12:00:00Z"})
+
+	v := f.valuesAtStale(t, "extendedtab")
+	require.Equal(t, false, v["missing_settle"], "a lapse the current staleAt has outrun is not a lapse of THIS deadline")
+	require.Equal(t, "2026-07-09T12:00:00Z", v["freshUntil"], "and the @at re-arms with no clearing write")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_SiblingTargetLapseDoesNotOpenThisGap is the
+// isolation vector: a tab is also the anchor of cafeTabSettlement, sharing
+// this one marker slot, so reading any entry but this target's own would let
+// the sibling's fire surface this gate — orchestration-base's
+// TestUnroutedTasks_SiblingTargetLapseDoesNotOpenThisGap.
+func TestCafeStaleTabSettlement_SiblingTargetLapseDoesNotOpenThisGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "siblingtab", "tab")
+	f.aspect(t, "siblingtab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
+	})
+	f.recordLapse(t, "siblingtab", map[string]string{TabSettlementTarget: "2099-01-01T00:00:00Z"})
+
+	v := f.valuesAtStale(t, "siblingtab")
+	require.Equal(t, false, v["missing_settle"], "another target's recorded fire is not this target's lapse")
+	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "and it does not disarm this target's timer either")
+	require.Equal(t, false, v["violating"])
 }
 
 // TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt proves
 // a legitimate staff Settle at any point permanently converges the gate:
 // Settle's status_data rewrite drops staleAt entirely (ddls.go), and
 // status='open' is the only terminal-state check this spec needs (unlike an
-// appointment's three-way status, a tab is only ever open or settled).
+// appointment's three-way status, a tab is only ever open or settled) — even
+// with a recorded lapse standing on the tab, the status gate excludes it.
 func TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -426,8 +496,9 @@ func TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt(t *test
 	f.aspect(t, "settledstaletab", "status", "tabStatus", map[string]any{
 		"value": "settled", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "settledAt": "2026-07-07T13:00:00Z",
 	})
+	f.recordLapse(t, "settledstaletab", map[string]string{StaleTabSettlementTarget: "2026-09-01T00:00:00Z"})
 
-	v := f.valuesAtStale(t, "settledstaletab", "2026-09-01T00:00:00Z")
+	v := f.valuesAtStale(t, "settledstaletab")
 	require.Nil(t, v["staleAt"], "Settle drops staleAt from the rewritten aspect")
 	require.Nil(t, v["freshUntil"])
 	require.Equal(t, false, v["missing_settle"])
@@ -435,27 +506,75 @@ func TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt(t *test
 	require.Equal(t, false, v["violating"])
 }
 
-// TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_ViolatesViaMissingStaleat
-// covers a tab seeded without staleAt (a tab opened before this field
-// shipped, af451062, or any residual showcase data predating it): compareAny
-// (full engine) treats a null operand as incomparable, so both '>' and '<='
-// against $now resolve false for missing_settle — such a tab would be
-// invisible to that gap alone, forever. missing_staleat is the dedicated
-// gap that catches it instead, dispatching BackfillTabStaleAt (ddls.go) to
-// compute the missing value so the NEXT cycle's missing_settle can see it.
-func TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_ViolatesViaMissingStaleat(t *testing.T) {
+// TestCafeStaleTabSettlement_NoStaleAt_FreshUntilNullByTheThenBranch covers a
+// tab seeded without staleAt (a tab opened before this field shipped,
+// af451062, or any residual showcase data predating it): the marker
+// comparison and every ordering test against staleAt resolve false or null,
+// so missing_settle alone can never see it — such a tab would be invisible
+// to that gap alone, forever. missing_staleat is the dedicated gap that
+// catches it instead, dispatching BackfillTabStaleAt (ddls.go) to compute the
+// missing value so the NEXT cycle's missing_settle can see it. freshUntil's
+// CASE takes its THEN branch for this row — NOT (marker >= null) is
+// NOT false — but the column still comes out null, because THEN
+// t.status.data.staleAt is itself null: the accident the doc comment names.
+func TestCafeStaleTabSettlement_NoStaleAt_FreshUntilNullByTheThenBranch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newCdFixture(t)
 	f.mkTab(t, "legacytab", "open", 500)
 
-	v := f.valuesAtStale(t, "legacytab", "2026-12-01T00:00:00Z")
+	v := f.valuesAtStale(t, "legacytab")
 	require.Nil(t, v["staleAt"])
-	require.Nil(t, v["freshUntil"])
+	require.Nil(t, v["freshUntil"], "the THEN branch is taken, but its own value (staleAt) is null too")
 	require.Equal(t, false, v["missing_settle"], "null staleAt compares false both ways — missing_settle alone never catches it")
 	require.Equal(t, true, v["missing_staleat"], "an open tab with no staleAt at all is what this gap exists to catch")
 	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_ReferencesNoClockParameter is the structural
+// half of the conversion, asserted on the compiled cypher rather than on any
+// one row: a lens that returns $now or $projectedAt projects a clock reading
+// the sweep's deep verify cannot compare — orchestration-base's
+// TestTaskDeadlineLenses_ReferenceNoClockParameter.
+func TestCafeStaleTabSettlement_ReferencesNoClockParameter(t *testing.T) {
+	eng := full.New()
+	cr, err := eng.Parse(staleTabSettlementSpec)
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull, "must compile to the full engine")
+	for _, param := range []string{"now", "projectedAt"} {
+		referenced, exhaustive := fullCR.ReferencesParam(param)
+		require.Truef(t, exhaustive, "the query shape must be provably free of $%s", param)
+		require.Falsef(t, referenced,
+			"cafeStaleTabSettlement must reference no $%s — staleness is a recorded fact, not a clock reading", param)
+	}
+}
+
+// TestCafeStaleTabSettlement_ReadsItsOwnTargetsMarkerEntry binds the two
+// halves that can silently drift apart: the §10.8 TargetID Weaver fires a
+// timer under, and the byTarget key the lens compares against its deadline —
+// orchestration-base's TestTaskDeadlineLenses_ReadTheirOwnTargetsMarkerEntry,
+// applied to this package's own target/lens pair.
+func TestCafeStaleTabSettlement_ReadsItsOwnTargetsMarkerEntry(t *testing.T) {
+	specs := map[string]string{}
+	for _, l := range Lenses() {
+		specs[l.CanonicalName] = l.Spec
+	}
+	var checked int
+	for _, tgt := range WeaverTargets() {
+		spec, ok := specs[tgt.LensRef]
+		require.Truef(t, ok, "target %s names lens %s, which this package must declare", tgt.TargetID, tgt.LensRef)
+		if !strings.Contains(spec, "freshnessExpiry") {
+			continue
+		}
+		require.Containsf(t, spec, "byTarget."+tgt.TargetID,
+			"lens %s reads a freshness marker but not under its own target id %q — the timer that fires writes an entry this cypher never reads",
+			tgt.LensRef, tgt.TargetID)
+		checked++
+	}
+	require.Equal(t, 1, checked,
+		"cafeStaleTabSettlement reads a recorded lapse; a drop here is a lens that went back to a clock")
 }
 
 // project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,
