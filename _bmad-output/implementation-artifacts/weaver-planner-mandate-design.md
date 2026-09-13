@@ -1,8 +1,8 @@
 # Weaver planner mandate — dispatcher → solver — design
 
-**Status:** ✅ **Andrew-ratified 2026-07-04 — both forks accepted.** Surface frozen in Contract #10
-§10.3/§10.8 (merged to `main`); the engine is **build-pending** across the 9 fires in §8. The Lattice
-Steward builds from Fire 1.
+**Status:** ✅ **Andrew-ratified 2026-07-04 — both forks accepted; ✅ BUILT, all 9 fires (Fire 9 shipped
+2026-09-13).** Surface frozen in Contract #10 §10.3/§10.8 (merged to `main`); the engine's per-fire record is
+`docs/components/weaver.md` "Planner mandate" status row and the build notes below.
 **Component:** Weaver (`internal/weaver`) · **Stream:** Lattice (Stream 2) · **Size:** XL (9 build fires)
 **Designer fire:** Winston, 2026-07-04 (commissioned directly by Andrew — exploration session, not a
 Surveyor-filed row) · **Builds on:** Contract #10 §10.2/§10.3/§10.8, the §10.3 mark/lease/budget machinery
@@ -44,8 +44,8 @@ for op-only single-actor plans** — unbuilt, no consumer. The §2/§3.2/§3.3/�
 struck in place below. The renewal build itself (R1 dispatch wiring → R2 package → R3 FE) is
 **lane-consolidated into this lane** (Andrew, anti-ping-pong; the verticals row was removed).
 
-**Next:** Fires 1–8 shipped. **Fire 9 (the Augur floor) is 🏗️ building** — its brief is the last build note
-in this doc (2026-09-13). Of Fire 9's three deliverables, (a) `unplannable`(extended)/`exhausted` → Augur
+**Next:** nothing — Fires 1–9 shipped. **Fire 9 (the Augur floor) shipped 2026-09-13** — its brief and close
+note are the last build notes in this doc. Of Fire 9's three deliverables, (a) `unplannable`(extended)/`exhausted` → Augur
 shipped inside the two escalation-episode fires (`weaver-escalation-episode-three-doors-design.md`,
 `weaver-exhausted-gap-leg-boundary-design.md`; `augur.model` is threaded end to end — `strategist.go`
 `augurEscalation` → `.gap.model` → `external.augur` params → the adapter, `FakeAugur` honouring it); the fire
@@ -534,3 +534,78 @@ escalation doors or their pacing.
 and (c) built; "via Fire-6 path" resolved by the ratified amendment to per-leg execution, no plan vertices; nothing
 substituted. Dependencies both ways: the two escalation-episode designs' seams are live at head (part 2); nothing
 in Fires 1–8 is edited.
+
+### Fire 9 close note (2026-09-13 — Steward, remote fire `claude/relaxed-rubin-e79fru`)
+
+**Shipped whole, one fire, both increments + the review fold + docs; landing shape: merged once when complete**
+(main never partial). Units on the fire branch: Inc A `42ee734` (plan-shaped proposals, per-leg dispatch), Inc B
+`c792301` (promotion proposal, per-leg budget reset, plan e2e, Loupe plan rendering), contract amendments
+`61ea524`, review fold `05c6a56`. Gates on the combined tree: `go build ./...` · `make vet` · `golangci-lint run
+./...` · every `scripts/lint-*.go` STRICT · `internal/refractor` corpus census pins (no pin moved: both augur lenses
+are `nats-kv`) · `make test-augur-convergence` (+ the plan-shaped episode) · `make test-control-plane-authz` ·
+`test-lease-convergence` · `test-unrouted-convergence` · `test-object-gc` · `test-crypto-shred` ·
+`test-system-actor-capability` · full `go test ./... -p 4` under `POSTGRES_TEST_DSN`. One suite run had
+`TestWeaverE2E_EnableAfterFreezeRedeliversNakdRows` time out under `-p 4` (a Nak'd row's own redelivery
+against a 30 s wait; the path gains only a no-op guard from this fire); five isolated runs pass — the board's
+wall-clock-deadline class (Whetstone's row), recorded, nothing loosened. `make verify-kernel` /
+`verify-package-augur` not run remotely (compose stack); CI's `stack-gates` job carries them — the augur
+verify script's op and grant pins moved with the package.
+
+**Body amendments made at build.** §3.5's "plan-shaped sequences, dispatched via the Fire-6 plan-vertex path"
+reads under the 2026-07-05 amendment: per-leg execution on the `augurDispatch` target, no plan vertices, the
+row's `dispatchLeg` as the program counter and the flip as the leg boundary (a proposal has no row predicate
+for the origin candidate, so effects-hold cannot be its release — the ordering rule in the Augur shard is the
+promise instead). §3.5's "threading `augur.model` — closes the arch-review finding" was already closed by the
+escalation-episode fires (verified end to end, part 1 of the brief). **Deviations accepted:** the promotion
+keys on one derived leg's window, not a whole chain (the window is per actionRef; a chain's legs each earn
+their own); a promotion's candidate is the target's own meta vertex (the proposal shape requires one; the
+recommendation is about the target's playbook); the promotion is `promotePlaybook`, deliberately outside the
+escalation vocabulary and excluded at the pickup lens, so an approval is a ratified recommendation the package
+author acts on — there is no dispatchable "promote" primitive, and inventing one would be a package-data
+mutation outside Weaver's action table. **Known bounds, recorded:** a promotion leaves one permanent
+non-violating `augurDispatch.<handle>` row in `weaver-targets`; the promotion producer has no production
+trigger (no `packages/*/targets.go` declares `Goal:`/`Mode:` — engine-complete, fixture-exercised, the posture
+Fires 4–5 shipped under); Loupe's plan rendering and promotion wording are syntax- and lint-checked only
+(`cmd/loupe/web/js` has no behaviour harness — Loupe lane); the plan e2e writes the `augurDispatch` rows by
+hand, as its Fire-2b sibling does, so the lens projection of `dispatchLeg` is proven in `lens_cypher_test.go`
+and the two legs' distinct commits end to end.
+
+**Review record.** Lead review per increment + one cold adversarial pass (opus) over the whole diff at close:
+0 BLOCKING, 5 SHOULD-FIX, 5 NIT, 4 NOTE — every code finding folded and revert-proved in `05c6a56`, the
+three contract-text findings in `61ea524`. Findings by class, per component:
+- *design-gap ×2 (Weaver)* — (1) the promotion gate checked the target's mode while the two gap-close credit
+  sites hand it the mark's action, so a planned target's plain playbook gap (or an escalation's `directOp`)
+  would have minted a "promote what you already declare" recommendation and latched the triple —
+  `derivedLeg` admits only a catalog ref or a candidate and refuses a gap that declares an action; (2) the
+  per-leg budget reset was revision-conditioned on a read taken before the mark delete that is the mutex, so a
+  stale revision would have skipped the reset the contract promises — blind, as the goal release's marked
+  branch.
+- *brief-gap ×2 (Weaver)* — (3) the brief named two of the three `__effect` credit seams; the sweep's
+  gap-closed delete, the only observer of a quiet row, was wired by the builder's own find and is now pinned by
+  `promotion_hook_census_internal_test.go`; (4) the sweep's proposal-leg advance lacked the suppression gate its
+  goal-leg sibling six lines below takes (unreachable with the shipped lens, which projects no `inflight_`
+  column; gated anyway).
+- *implementation-bug ×1 (augur package)* — (5) the review op read `.gap` above the verdict split while Loupe's
+  reject declares only `.review` — a production-only read-drift refusal every approve-shaped fixture would have
+  missed; the read moved into the approve arm and the reject-with-one-read vector is the mandated shape
+  (`_packages.md` "a guard's OCC rests on whoever writes its read declaration", third sighting).
+- *convention ×3* — a history-narrating comment; the stale "no production dispatcher yet" annotations (Loupe is
+  the dispatcher); the FakeAugur plan fixture's comment overstating a dispatchable shape.
+- *doc-truth ×3 (contracts)* — the Augur shard's literal `violating` formula and single-action dispatch sentences
+  contradicted the section that amended them; the Weaver shard's `proposedOp` row still promised a
+  proposal-scoped id; "at most once" overstated the tracker's 24 h horizon.
+- *hardening ×2* — the escalation claim's `trigger` was payload-supplied and unvalidated while one value of it is
+  authority-bearing on approve (refused now, the shard carries it); the once-latch paid a KV read before
+  consulting itself.
+- *review-over-reach ×0.*
+
+**Dossier routing.** Weaver entry 10 ("a fact ends by more routes") gains the credit-leg sighting and its
+mechanized pin. The read-placement bug is the `_packages.md` read-declaration class's third sighting, already
+mechanized as a mandated test shape — applied here, no new entry. The augur DDL literal's raw-string hazard (a
+backtick in Starlark prose ends the Go literal; tripped twice in this fire) cannot be linted — the file does
+not compile, so no `scripts/lint-*.go` ever sees it — and is documented at the literal instead.
+
+**Neighbours reconciled.** No lane row was `blocked-on` or `seq:` this fire. `docs/components/augur.md` and
+`weaver.md`'s "Planner mandate" status row record Fire 9 as built; this doc's status banner records the
+mandate as built in full. The Augur design's own "Next: Fire 2b+" build-status line is that design's record,
+untouched.
